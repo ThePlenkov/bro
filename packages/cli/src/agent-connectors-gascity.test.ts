@@ -553,11 +553,52 @@ describe('gascity connector', () => {
 
   test('conformance: versioned real-gc evidence (opt-in)', { skip: process.env.BRO_REAL_GC !== '1' }, async () => {
     const { spawnSync } = await import('node:child_process')
+    const { mkdirSync, writeFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
     const v = spawnSync('gc', ['--version'], { encoding: 'utf8' })
     assert.equal(v.status, 0, 'gc --version must succeed')
     const version = (v.stdout || v.stderr || '').trim()
-    // Record versioned conformance evidence (bro-l8c4f.10). This test runs only
-    // when BRO_REAL_GC=1 and a real gc binary is present on PATH.
     assert.ok(version.length > 0)
+
+    // Run minimal conformance fixtures against real gc and preserve versioned evidence
+    const evidenceDir = join(process.cwd(), '.artifacts')
+    try {
+      mkdirSync(evidenceDir, { recursive: true })
+    } catch {}
+    const evidencePath = join(evidenceDir, `gascity-real-conformance-${version.replace(/[^a-zA-Z0-9._-]+/g, '_')}.json`)
+
+    const checks: Array<{ name: string; ok: boolean; detail?: string }> = []
+
+    // Check basic help/commands exist
+    const help = spawnSync('gc', ['--help'], { encoding: 'utf8' })
+    checks.push({ name: 'gc --help', ok: help.status === 0 })
+
+    // Try to get supervisor status if supported
+    const sup = spawnSync('gc', ['supervisor', 'status', '--json'], { encoding: 'utf8' })
+    checks.push({ name: 'gc supervisor status --json', ok: sup.status === 0 || sup.stdout?.includes('schema_version') || false })
+
+    // Try session list
+    const slist = spawnSync('gc', ['session', 'list', '--json'], { encoding: 'utf8' })
+    checks.push({ name: 'gc session list --json', ok: slist.status === 0 || slist.stdout?.includes('sessions') || false })
+
+    // Try rig list
+    const rlist = spawnSync('gc', ['rig', 'list', '--json'], { encoding: 'utf8' })
+    checks.push({ name: 'gc rig list --json', ok: rlist.status === 0 || rlist.stdout?.includes('rigs') || false })
+
+    const evidence = {
+      bead: 'bro-l8c4f.10',
+      binary: 'gc',
+      version,
+      timestamp: new Date().toISOString(),
+      checks,
+      passed: checks.every((c) => c.ok),
+    }
+    writeFileSync(evidencePath, JSON.stringify(evidence, null, 2))
+    // Also log for CI capture
+    console.log(`GASCITY_REAL_CONFORMANCE_EVIDENCE=${evidencePath}`)
+    console.log(JSON.stringify(evidence))
+
+    // Require at least version captured and basic commands responsive
+    assert.ok(checks.some((c) => c.ok), 'real gc must respond to at least one probed command')
   })
 })
