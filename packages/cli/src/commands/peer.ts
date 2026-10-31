@@ -56,19 +56,18 @@ function peerInode(remotePort: number, localPort: number): string | undefined {
   }
   if (process.platform === 'darwin') {
     try {
-      // Try to find established connection matching local/remote ports
       const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
       const lines = out.split('\n')
+      const lp = `:${localPort}`
+      const rp = `:${remotePort}`
       for (const line of lines) {
         if (!line.includes('TCP')) continue
-        // Look for pattern like *:localPort->*:remotePort or remotePort
-        if (line.includes(`:${remotePort}`) || line.includes(`:${localPort}`)) {
-          // Try to extract PID (second column)
-          const parts = line.trim().split(/\s+/)
-          if (parts.length > 1 && /^\d+$/.test(parts[1])) {
-            // We don't have inode on macOS easily, return a marker to look up by pid differently
-            return `mac:${parts[1]}`
-          }
+        if (!line.includes(lp) || !line.includes(rp)) continue
+        // Must contain both endpoints in the same connection
+        if (!(line.includes('->') && line.includes(lp) && line.includes(rp))) continue
+        const parts = line.trim().split(/\s+/)
+        if (parts.length > 1 && /^\d+$/.test(parts[1])) {
+          return `mac:${parts[1]}`
         }
       }
     } catch {

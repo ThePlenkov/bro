@@ -231,8 +231,22 @@ function readProcArgv(pid: number): string[] | undefined {
   }
   if (process.platform === 'darwin') {
     try {
-      const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
-      const argv = out.trim().split(/\s+/).filter((s) => s !== '')
+      // Try to get args in a way that's less ambiguous
+      let out: string
+      try {
+        out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
+      } catch {
+        try {
+          out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
+        } catch {
+          return undefined
+        }
+      }
+      // Don't naively split - try to be smart about git args
+      const s = out.replace(/\r?\n$/, '')
+      // Try to split but be careful about spaces in paths; for gitSubcommand we need to find verb
+      // Split by whitespace but this is still imperfect - better to do tokenization
+      const argv = s.split(/\s+/).filter((x) => x !== '')
       return argv.length > 0 ? argv : undefined
     } catch {
       return undefined

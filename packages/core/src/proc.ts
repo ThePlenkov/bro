@@ -29,21 +29,20 @@ export function procStat(
       const lines = out.trim().split('\n').filter(Boolean)
       if (lines.length === 0) return null
       const line = lines[0]
-      // state is first char(s), rest is lstart
-      const state = line.trim()[0] ?? ''
-      // Use lstart as start identifier (full date string is reasonably unique per start)
-      const start = line.replace(/^[A-Z?]+\s+/, '').trim()
-      if (start === '') {
-        // Fallback to just state
-        try {
-          const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
-          const st = out2.trim()[0] ?? ''
-          return { state: st, start: '' }
-        } catch {
-          return { state, start: '' }
-        }
+      const trimmed = line.trim()
+      // state is first token(s)
+      const m = trimmed.match(/^([A-Z?]+)\s+(.+)$/s)
+      if (m) {
+        return { state: m[1][0] ?? m[1] ?? '', start: m[2].trim() }
       }
-      return { state, start }
+      // Fallback to just state
+      try {
+        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
+        const st = out2.trim()[0] ?? ''
+        return { state: st, start: '' }
+      } catch {
+        return { state: trimmed[0] ?? '', start: '' }
+      }
     } catch {
       return null
     }
@@ -94,13 +93,18 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
  *  so callers stay fail-open the way pidAlive documents. Null when no
  *  positive integer pid is there at all. */
 export function handleOwner(text: string): { pid: number; start?: string } | null {
-  const parts = text.trim().split(/\s+/)
+  const s = text.trim()
+  const parts = s.split(/\s+/)
   const pid = Number(parts[0])
   if (!Number.isInteger(pid) || pid <= 0) {
     return null
   }
-  const start = parts[1]
-  return start === undefined || start === '' ? { pid } : { pid, start }
+  if (parts.length < 2) {
+    return { pid }
+  }
+  // start may contain spaces (e.g. BSD/macOS lstart)
+  const start = s.slice(s.indexOf(parts[1])).trim()
+  return start === '' ? { pid } : { pid, start }
 }
 
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
@@ -111,12 +115,14 @@ export function handleOwner(text: string): { pid: number; start?: string } | nul
 export function markerOwner(
   firstLine: string | undefined
 ): { pid: number; start: string } | null {
-  const parts = (firstLine ?? '').trim().split(' ')
+  const s = (firstLine ?? '').trim()
+  const parts = s.split(/\s+/)
   const pid = Number(parts[1])
-  const start = parts[2] ?? ''
-  return Number.isInteger(pid) && pid > 0 && start !== ''
-    ? { pid, start }
-    : null
+  if (!Number.isInteger(pid) || pid <= 0 || parts.length < 3) {
+    return null
+  }
+  const start = s.slice(s.indexOf(parts[2])).trim()
+  return start !== '' ? { pid, start } : null
 }
 
 /** Is this marker's owning session alive? A recorded owner decides by

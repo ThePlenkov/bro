@@ -126,7 +126,7 @@ export interface ProcRow {
 
 /** Parents an orphaned process lands on: pid 1, the WSL /init
  *  subreaper, or a systemd instance — never a live supervisor. */
-const ORPHAN_PARENT_COMMS = new Set(['init', 'systemd']);
+const ORPHAN_PARENT_COMMS = new Set(['init', 'systemd', 'launchd']);
 
 /** A legit bd call lasts seconds; a minute-old orphan holds the
  *  embedded noms LOCK past every caller's timeout — debris. */
@@ -204,18 +204,21 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
   }
   if (process.platform === 'darwin') {
     try {
-      // Get all processes: pid, ppid, comm, start time
-      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,comm=,lstart='], { encoding: 'utf8', timeout: 2000 })
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000 })
       const lines = out.split('\n').filter(Boolean)
       const rows: ProcRow[] = []
       for (const line of lines) {
-        // This is a bit fragile parsing lstart, but try best effort
-        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/)
-        if (!m) continue
-        const pid = Number(m[1])
-        const ppid = Number(m[2])
-        const comm = m[3]
-        const lstart = m[4]
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        // lstart is typically: DDD MMM DD HH:MM:SS YYYY (5 tokens) starting at index 2
+        // comm is the token after lstart
+        const lstartTokens = 5
+        if (parts.length < 2 + lstartTokens + 1) continue
+        const lstart = parts.slice(2, 2 + lstartTokens).join(' ')
+        const comm = parts[2 + lstartTokens]
         let startMs = Date.now()
         try {
           startMs = Date.parse(lstart)
@@ -236,7 +239,6 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         }
         let cwd: string | null = null
         try {
-          // Try lsof to get cwd
           const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 })
           const cline = lout.split('\n').find(l => l.startsWith('n'))
           if (cline) {

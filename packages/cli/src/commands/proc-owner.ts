@@ -67,24 +67,38 @@ function readProcText(dir: string, file: string): string {
       return '';
     }
   }
-  // On non-Linux, dir is expected to be /proc/<pid> style or we need to adapt
-  // Try to extract pid from dir
   const pid = basename(dir);
   if (!/^\d+$/.test(pid)) return '';
   if (process.platform === 'darwin') {
     try {
       if (file === 'cmdline') {
-        const out = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
-        // cmdline is NUL-separated in /proc; convert spaces to NUL-ish approximation not critical
-        return out.replace(/\n/g, '\0') + '\0';
+        try {
+          const out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+          // Split command into argv tokens (best effort) - keep as space-split but for our checks it's okay
+          // For agent detection we need to be able to test individual tokens
+          const tokens = out.replace(/\r?\n$/, '').split(/\s+/).filter(Boolean);
+          if (tokens.length === 0) return '';
+          return tokens.join('\0') + '\0';
+        } catch {
+          const out = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+          const tokens = out.replace(/\r?\n$/, '').split(/\s+/).filter(Boolean);
+          if (tokens.length === 0) return '';
+          return tokens.join('\0') + '\0';
+        }
       }
       if (file === 'environ') {
         try {
           const out = execFileSync('ps', ['eww', '-p', pid], { encoding: 'utf8', timeout: 500 });
-          // Try to extract env vars; format is complex, best effort
-          return out + '\0';
+          // ps eww may not show env in parseable form; also try to get from launchd/env
+          // Best effort: return as-is with NUL separation approximation
+          return out.replace(/\n/g, '\0') + '\0';
         } catch {
-          return '';
+          try {
+            const out = execFileSync('ps', ['e', '-p', pid], { encoding: 'utf8', timeout: 500 });
+            return out.replace(/\n/g, '\0') + '\0';
+          } catch {
+            return '';
+          }
         }
       }
       if (file === 'status') {
@@ -227,6 +241,35 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
   const hits: ProcHit[] = [];
   const root = resolve(worktree);
   const inside = (p: string): boolean => p === root || p.startsWith(root + sep);
+  // Allow procDir override to be used for testing on non-Linux if it looks like /proc
+  if (process.platform !== 'linux' && procDir !== '/proc') {
+    try {
+      const names = readdirSync(procDir);
+      for (const name of names) {
+        if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+        const dir = join(procDir, name);
+        try {
+          const cmdline = readProcText(dir, 'cmdline');
+          let cwd: string;
+          try {
+            cwd = readlinkSync(join(dir, 'cwd'));
+          } catch {
+            continue;
+          }
+          let rooted =
+            inside(cwd) || cmdline.split('\0').some(tok => tok !== '' && inside(resolve(cwd, tok)));
+          if (rooted) {
+            hits.push({ pid: Number(name), cmd: cmdline.replaceAll('\0', ' ').trim() });
+          }
+        } catch {
+          continue;
+        }
+      }
+      return hits;
+    } catch {
+      // fall through to platform-specific behavior
+    }
+  }
   if (process.platform === 'linux') {
     let names: string[];
     try {
@@ -267,14 +310,26 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
           const cline = lout.split('\n').find(l => l.startsWith('n'));
           let cwd = '';
           if (cline) cwd = cline.slice(1);
-          const cout = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
-          const cmdline = cout.replace(/\n/g, '\0') + '\0';
+          let cout: string;
+          try {
+            cout = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+          } catch {
+            cout = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+          }
+          const cmdline = cout.replace(/\r?\n$/, '').split(/\s+/).join('\0') + '\0';
           let rooted = cwd !== '' && inside(cwd);
           if (!rooted) {
-            rooted = cmdline.split('\0').some(tok => tok !== '' && inside(resolve(cwd || process.cwd(), tok)));
+            const tokens = cmdline.split('\0').filter(Boolean);
+            rooted = tokens.some(tok => {
+              try {
+                return inside(resolve(cwd || process.cwd(), tok));
+              } catch {
+                return false;
+              }
+            });
           }
           if (rooted) {
-            hits.push({ pid, cmd: cmdline.replaceAll('\0', ' ').trim() });
+            hits.push({ pid, cmd: cout.replace(/\r?\n$/, '').trim() });
           }
         } catch {
           continue;
@@ -294,6 +349,34 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
 export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[] {
   const hits: ProcHit[] = [];
   const root = resolve(worktree);
+  if (process.platform !== 'linux' && procDir !== '/proc') {
+    try {
+      const names = readdirSync(procDir);
+      for (const name of names) {
+        if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+        const dir = join(procDir, name);
+        try {
+          let cwd: string;
+          try {
+            cwd = readlinkSync(join(dir, 'cwd'));
+          } catch {
+            continue;
+          }
+          if (cwd !== root && !cwd.startsWith(root + sep)) continue;
+          if (procIsMonitor(dir)) continue;
+          if (procIsAgent(dir)) {
+            const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim();
+            hits.push({ pid: Number(name), cmd });
+          }
+        } catch {
+          continue;
+        }
+      }
+      return hits;
+    } catch {
+      // fall through
+    }
+  }
   if (process.platform === 'linux') {
     let names: string[];
     try {
@@ -347,8 +430,13 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
             continue;
           }
           if (procIsAgent(dir)) {
-            const cout = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
-            const cmd = cout.replace(/\n/g, ' ').trim();
+            let cout: string;
+            try {
+              cout = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+            } catch {
+              cout = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+            }
+            const cmd = cout.replace(/\r?\n$/, '').trim();
             hits.push({ pid, cmd });
           }
         } catch {
@@ -379,7 +467,12 @@ let cachedOwner: { pid: number; start: string } | null | undefined;
  *  markers on every tool call and the owner never changes. */
 export function agentOwner(): { pid: number; start: string } | null {
   if (cachedOwner === undefined) {
-    const pid = existsSyncProc() ? procAgentRoot(`/proc/${process.ppid}`) : null;
+    let pid: number | null = null;
+    if (existsSyncProc()) {
+      pid = procAgentRoot(`/proc/${process.ppid}`);
+    } else if (process.platform === 'darwin') {
+      pid = procAgentRoot(join('/proc', String(process.ppid)));
+    }
     const start = pid === null ? '' : (procStat(pid)?.start ?? '');
     cachedOwner = pid === null || start === '' ? null : { pid, start };
   }
