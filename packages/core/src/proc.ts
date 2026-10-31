@@ -24,24 +24,31 @@ export function procStat(
   }
   if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
     try {
-      // Get state and start time on BSD/macOS
-      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], { encoding: 'utf8', timeout: 1000 })
+      // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
+      const out = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], { encoding: 'utf8', timeout: 1000 })
       const lines = out.trim().split('\n').filter(Boolean)
       if (lines.length === 0) return null
       const line = lines[0]
       const trimmed = line.trim()
-      // state is first token(s)
-      const m = trimmed.match(/^([A-Z?]+)\s+(.+)$/s)
+      // Extract pid, state, and lstart (may have spaces) - state can include modifiers like +, L, s
+      const m = trimmed.match(/^(\d+)\s+(\S+)\s+(.+)$/s)
       if (m) {
-        return { state: m[1][0] ?? m[1] ?? '', start: m[2].trim() }
+        const st = m[2]
+        return { state: st[0] ?? st ?? '', start: `${m[1]} ${m[3].trim()}` }
+      }
+      // Try without pid in output format
+      const m2 = trimmed.match(/^(\S+)\s+(.+)$/s)
+      if (m2) {
+        const st = m2[1]
+        return { state: st[0] ?? st ?? '', start: `${pid} ${m2[2].trim()}` }
       }
       // Fallback to just state
       try {
         const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
         const st = out2.trim()[0] ?? ''
-        return { state: st, start: '' }
+        return { state: st, start: `${pid}` }
       } catch {
-        return { state: trimmed[0] ?? '', start: '' }
+        return { state: trimmed[0] ?? '', start: `${pid}` }
       }
     } catch {
       return null

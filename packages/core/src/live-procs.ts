@@ -207,18 +207,80 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
       const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000 })
       const lines = out.split('\n').filter(Boolean)
       const rows: ProcRow[] = []
+      const pids: number[] = []
       for (const line of lines) {
         const trimmed = line.replace(/^\s+/, '')
         const parts = trimmed.split(/\s+/)
         if (parts.length < 3) continue
         const pid = Number(parts[0])
         const ppid = Number(parts[1])
-        // lstart is typically: DDD MMM DD HH:MM:SS YYYY (5 tokens) starting at index 2
-        // comm is the token after lstart
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        pids.push(pid)
+      }
+      // Batch cwd lookup for all pids where possible
+      const cwdMap = new Map<number, string | null>()
+      try {
+        if (pids.length > 0) {
+          const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', pids.join(',')], { encoding: 'utf8', timeout: 2000 })
+          let currentPid: number | null = null
+          for (const l of lout.split('\n')) {
+            if (l.startsWith('p')) {
+              const v = Number(l.slice(1))
+              currentPid = Number.isInteger(v) ? v : null
+              continue
+            }
+            if (l.startsWith('n') && currentPid !== null) {
+              cwdMap.set(currentPid, l.slice(1))
+              continue
+            }
+          }
+        }
+      } catch {
+        // fall back to per-pid lookups below
+      }
+      // Batch parent comms for unique pids
+      const parentComms = new Map<number, string | null>()
+      const uniquePpids = new Set<number>()
+      for (const line of lines) {
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        if (ppid > 0 && ppid !== 1 && !cwdMap.has(pid) /* just to iterate */) {
+          // collect
+        }
+        if (ppid > 0 && ppid !== 1) uniquePpids.add(ppid)
+      }
+      try {
+        if (uniquePpids.size > 0) {
+          const pout = execFileSync('ps', ['-p', Array.from(uniquePpids).join(','), '-o', 'pid=,comm='], { encoding: 'utf8', timeout: 1000 })
+          for (const l of pout.split('\n').filter(Boolean)) {
+            const t = l.trim().split(/\s+/)
+            if (t.length >= 2) {
+              parentComms.set(Number(t[0]), t.slice(1).join(' ') || null)
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+      for (const line of lines) {
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!Number.isInteger(pid) || pid <= 0) continue
         const lstartTokens = 5
         if (parts.length < 2 + lstartTokens + 1) continue
         const lstart = parts.slice(2, 2 + lstartTokens).join(' ')
-        const comm = parts[2 + lstartTokens]
+        const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+        let comm = trimmed.slice(commStartIdx).trim()
+        if (comm === '') {
+          comm = parts[2 + lstartTokens] ?? ''
+        }
         let startMs = Date.now()
         try {
           startMs = Date.parse(lstart)
@@ -228,24 +290,29 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         }
         let parentComm: string | null = null
         if (ppid > 0 && ppid !== 1) {
-          try {
-            const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 })
-            parentComm = pout.trim() || null
-          } catch {
-            parentComm = null
+          parentComm = parentComms.get(ppid) ?? null
+          if (parentComm === null) {
+            try {
+              const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 })
+              parentComm = pout.trim() || null
+            } catch {
+              parentComm = null
+            }
           }
         } else if (ppid === 1) {
           parentComm = 'launchd'
         }
-        let cwd: string | null = null
-        try {
-          const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 })
-          const cline = lout.split('\n').find(l => l.startsWith('n'))
-          if (cline) {
-            cwd = cline.slice(1)
+        let cwd: string | null = cwdMap.get(pid) ?? null
+        if (cwd === null) {
+          try {
+            const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 })
+            const cline = lout.split('\n').find(l => l.startsWith('n'))
+            if (cline) {
+              cwd = cline.slice(1)
+            }
+          } catch {
+            cwd = null
           }
-        } catch {
-          cwd = null
         }
         rows.push({ pid, comm, ppid, parentComm, cwd, startMs })
       }

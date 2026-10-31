@@ -30,50 +30,71 @@ export interface PeerInfo {
 
 const hex = (n: number): string => n.toString(16).toUpperCase().padStart(4, '0')
 
+function readTcpTableLinux(table: string, remotePort: number, localPort: number): string | undefined {
+  let rows: string
+  try {
+    rows = readFileSync(table, 'utf8')
+  } catch {
+    return undefined
+  }
+  for (const line of rows.split('\n')) {
+    const f = line.trim().split(/\s+/)
+    if (f.length < 10 || f[1] === 'local_address') continue
+    const [, lport] = (f[1] ?? '').split(':')
+    const [, rport] = (f[2] ?? '').split(':')
+    if (lport === hex(remotePort) && rport === hex(localPort) && f[3] === '01') {
+      return f[9]
+    }
+  }
+  return undefined
+}
+
+function peerInodeDarwin(remotePort: number, localPort: number): string | undefined {
+  try {
+    const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
+    const lp = `:${localPort}`
+    const rp = `:${remotePort}`
+    for (const line of out.split('\n')) {
+      if (!line.includes('TCP') || !line.includes('->')) continue
+      // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
+      // lsof shows NAME as "local->remote" or similar
+      const nameIdx = line.indexOf('TCP')
+      // Find the part after TCP
+      const afterTcp = line.slice(nameIdx)
+      // Look for pattern like host:lp->host:rp or [::]:lp->[::]:rp
+      const arrowIdx = afterTcp.indexOf('->')
+      if (arrowIdx === -1) continue
+      const left = afterTcp.slice(0, arrowIdx)
+      const right = afterTcp.slice(arrowIdx + 2)
+      if (!left.includes(rp) || !right.includes(lp)) continue
+      // Also ensure they match as the specific ports (avoid substring false matches)
+      const leftEndsWithRp = left.includes(rp)
+      const rightEndsWithLp = right.includes(lp)
+      if (!leftEndsWithRp || !rightEndsWithLp) continue
+      const parts = line.trim().split(/\s+/)
+      if (parts.length > 1 && /^\d+$/.test(parts[1])) {
+        return `mac:${parts[1]}`
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return undefined
+}
+
 /** (remotePort on our socket, localPort listener) → inode of the peer's
  *  socket. /proc/net/tcp lists every row from the OWNING process's view:
  *  the peer's row has local_address = :remotePort, rem = :localPort. */
 function peerInode(remotePort: number, localPort: number): string | undefined {
   if (process.platform === 'linux') {
     for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
-      let rows: string
-      try {
-        rows = readFileSync(table, 'utf8')
-      } catch {
-        continue
-      }
-      for (const line of rows.split('\n')) {
-        const f = line.trim().split(/\s+/)
-        if (f.length < 10 || f[1] === 'local_address') continue
-        const [, lport] = (f[1] ?? '').split(':')
-        const [, rport] = (f[2] ?? '').split(':')
-        if (lport === hex(remotePort) && rport === hex(localPort) && f[3] === '01') {
-          return f[9]
-        }
-      }
+      const found = readTcpTableLinux(table, remotePort, localPort)
+      if (found) return found
     }
     return undefined
   }
   if (process.platform === 'darwin') {
-    try {
-      const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
-      const lines = out.split('\n')
-      const lp = `:${localPort}`
-      const rp = `:${remotePort}`
-      for (const line of lines) {
-        if (!line.includes('TCP')) continue
-        if (!line.includes(lp) || !line.includes(rp)) continue
-        // Must contain both endpoints in the same connection
-        if (!(line.includes('->') && line.includes(lp) && line.includes(rp))) continue
-        const parts = line.trim().split(/\s+/)
-        if (parts.length > 1 && /^\d+$/.test(parts[1])) {
-          return `mac:${parts[1]}`
-        }
-      }
-    } catch {
-      // fall through
-    }
-    return undefined
+    return peerInodeDarwin(remotePort, localPort)
   }
   return undefined
 }
@@ -132,7 +153,7 @@ function procRow(pid: number): ProcRow | undefined {
       const out = execFileSync('ps', ['-o', 'pid=,ppid=,comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
       const m = out.trim().match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
       if (!m) return undefined
-      return { pid: Number(m[1]), ppid: Number(m[2]), comm: m[3].trim() }
+      return { pid: Number(m[1]), ppid: Number(m[2]), comm: basename(m[3].trim()) }
     } catch {
       return undefined
     }
