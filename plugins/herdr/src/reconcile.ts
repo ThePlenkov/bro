@@ -647,6 +647,10 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
       log(`keep ${basename(w.path)} — armed/claimed`);
       continue;
     }
+    if (armedSet(pPre).has(w.path)) {
+      log(`keep ${basename(w.path)} — armed/claimed`);
+      continue;
+    }
     if (hasLiveRunOrBoundAgent(pPre, w.path)) {
       log(`keep ${basename(w.path)} — live run/bound agent`);
       continue;
@@ -690,9 +694,8 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
     const pFresh1 = readPlanes(repoDir(ctxJson()));
     if (
       isArmedOrClaimed(pFresh1, w.path) ||
-      hasLiveRunOrBoundAgent(pFresh1, w.path) ||
-      isArmedOrClaimed(p, w.path) ||
-      hasLiveRunOrBoundAgent(p, w.path)
+      armedSet(pFresh1).has(w.path) ||
+      hasLiveRunOrBoundAgent(pFresh1, w.path)
     ) {
       log(`keep ${basename(w.path)} — occupied at close time`);
       continue;
@@ -701,11 +704,18 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
     const pFresh2 = readPlanes(repoDir(ctxJson()));
     if (
       isArmedOrClaimed(pFresh2, w.path) ||
-      hasLiveRunOrBoundAgent(pFresh2, w.path) ||
-      isArmedOrClaimed(pFresh1, w.path) ||
-      hasLiveRunOrBoundAgent(pFresh1, w.path) ||
-      isArmedOrClaimed(p, w.path) ||
-      hasLiveRunOrBoundAgent(p, w.path)
+      armedSet(pFresh2).has(w.path) ||
+      hasLiveRunOrBoundAgent(pFresh2, w.path)
+    ) {
+      log(`keep ${basename(w.path)} — occupied at close time`);
+      continue;
+    }
+    // final recheck immediately before closing
+    const pFinal = readPlanes(repoDir(ctxJson()));
+    if (
+      isArmedOrClaimed(pFinal, w.path) ||
+      armedSet(pFinal).has(w.path) ||
+      hasLiveRunOrBoundAgent(pFinal, w.path)
     ) {
       log(`keep ${basename(w.path)} — occupied at close time`);
       continue;
