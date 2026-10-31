@@ -19,6 +19,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { parseArchiveRows } from '../../../../packages/cli/src/commands/session-feed.ts';
+import { chunkText } from '../../../../packages/providers/src/acp-render.ts';
 import { pickImpl } from '../impl.ts';
 import type { Item } from '../model.ts';
 
@@ -28,6 +29,38 @@ if (path === undefined) {
   process.exit(2);
 }
 const rows = parseArchiveRows(readFileSync(path, 'utf8'));
+
+// --- the audit the addendum asks for: archive agent_message_chunks,
+// and the tail AFTER the last tool row (user-reported missing output)
+let msgChunks = 0;
+let postToolChunks = 0;
+let postToolChars = 0;
+let lastTool = -1;
+rows.forEach((row, i) => {
+  const u = row.update;
+  if (u?.sessionUpdate === 'tool_call' || u?.sessionUpdate === 'tool_call_update') {
+    lastTool = i;
+  }
+  if (u?.sessionUpdate === 'agent_message_chunk') {
+    msgChunks++;
+  }
+});
+rows.forEach((row, i) => {
+  const u = row.update;
+  if (u?.sessionUpdate === 'agent_message_chunk' && i > lastTool) {
+    postToolChunks++;
+    postToolChars += chunkText(u).length;
+  }
+});
+
+/** The sibling prompt — fed to every impl like the live pump does. */
+const prompt = (() => {
+  try {
+    return readFileSync(path.replace(/\.events\.jsonl$/, '.prompt.md'), 'utf8');
+  } catch {
+    return undefined;
+  }
+})();
 
 interface Stats {
   impl: string;
@@ -41,6 +74,7 @@ interface Stats {
   turns: number;
   permissions: number;
   notes: number;
+  prompts: number;
   updates: number;
   diffKeys: Set<string>;
   messageChars: number;
@@ -49,6 +83,9 @@ interface Stats {
 
 const run = async (name: string): Promise<Stats> => {
   const impl = await pickImpl(name, {});
+  // the .prompt.md fallback — same posture as the live feed: only
+  // when the archive itself journals no prompt rows
+  if (!rows.some(r => r.kind === 'prompt')) impl.feed({ kind: 'prompt', text: prompt });
   for (const row of rows) impl.feed(row);
   impl.beginLive();
   const s: Stats = {
@@ -63,6 +100,7 @@ const run = async (name: string): Promise<Stats> => {
     turns: 0,
     permissions: 0,
     notes: 0,
+    prompts: 0,
     updates: 0,
     diffKeys: new Set(),
     messageChars: 0,
@@ -88,6 +126,9 @@ const run = async (name: string): Promise<Stats> => {
         break;
       case 'turn':
         s.turns++;
+        break;
+      case 'prompt':
+        s.prompts++;
         break;
       case 'permission':
         s.permissions++;
@@ -128,6 +169,10 @@ const fmt = (s: Stats): string =>
   `perm=${s.permissions} note=${s.notes} updates=${s.updates} verdict=${s.verdict}`;
 console.log(fmt(legacy));
 console.log(fmt(acp));
+console.log(
+  `audit: msgChunks=${msgChunks} postToolChunks=${postToolChunks} ` +
+    `postToolChars=${postToolChars} prompts=${legacy.prompts}/${acp.prompts}`
+);
 
 const problems: string[] = [];
 const eq = (label: string, a: number, b: number): void => {
@@ -158,6 +203,20 @@ ge('permissions', legacy.permissions, acp.permissions);
 // notes: acp SHOULD carry fewer (usage/commands/mode are session
 // state, not items) — flag only if it carries more
 if (acp.notes > legacy.notes) problems.push(`notes: acp=${acp.notes} > legacy=${legacy.notes}`);
+// the audit's point: agent text AFTER the last tool row must land —
+// neither impl may drop the trailing message
+if (legacy.messageChars < postToolChars) {
+  problems.push(
+    `post-tool agent text dropped by legacy: chars=${legacy.messageChars} < ${postToolChars}`
+  );
+}
+if (acp.messageChars < postToolChars) {
+  problems.push(
+    `post-tool agent text dropped by acp: chars=${acp.messageChars} < ${postToolChars}`
+  );
+}
+// both impls get the same prompt row — same first item
+eq('prompts', legacy.prompts, acp.prompts);
 
 if (problems.length > 0) {
   console.log(`FAIL: ${problems.join('; ')}`);

@@ -70,7 +70,11 @@ export interface AgentTurnPlaneOpts {
  *  start()/stop() bookends, drain() to settle queued publishes. */
 export interface AgentTurnPlane {
   update(u: SessionUpdate): void;
-  start(): void;
+  /** `prompt` — the flattened request text — journals a `kind:'prompt'`
+   *  row right after turn start: the archive otherwise carries ZERO
+   *  user-side records (session/prompt is RPC, never journaled) and a
+   *  pane replaying the file can't say what was asked (spec bro-q2edc). */
+  start(prompt?: string): void;
   stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
   drain(): Promise<void>;
 }
@@ -323,9 +327,15 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   };
 
   return {
-    start() {
+    start(prompt?: string) {
       record({ ...stamp(), kind: 'turn', phase: 'start' });
       emit('turn', { phase: 'start', sessionId: opts.sessionId });
+      if (prompt !== undefined && prompt !== '') {
+        record({ ...stamp(), kind: 'prompt', text: prompt });
+        // the bus gets the compact form — the archive holds the full
+        // body; a reader needing the whole prompt reads the file
+        emit('prompt', { sessionId: opts.sessionId, text: prompt.slice(0, 200) });
+      }
     },
 
     update(u) {

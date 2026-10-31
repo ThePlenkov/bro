@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
@@ -30,6 +30,12 @@ import {
   parseFleetState,
 } from '../../../packages/cli/src/commands/fleet-state.ts';
 import {
+  resolveTarget,
+  type SessionTarget,
+  targetKey,
+} from '../../../packages/cli/src/commands/herdr-session-view.ts';
+import {
+  type ArchiveRow,
   eventsVerdict,
   parseArchiveRows,
   readTailSlice,
@@ -39,13 +45,8 @@ import {
   sizeOf,
   TAIL_BYTES,
 } from '../../../packages/cli/src/commands/session-feed.ts';
-import {
-  resolveTarget,
-  targetKey,
-  type SessionTarget,
-} from '../../../packages/cli/src/commands/herdr-session-view.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
-import { implArg, pickImpl } from './impl.ts';
+import { implArg, type PaneImpl, pickImpl } from './impl.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -78,6 +79,29 @@ const providers = (worktree: string): Record<string, ProviderEntry> => {
   }
 };
 
+/** The sibling `<agentId>.prompt.md` bro writes at spawn — the archive
+ *  journals no user-side rows, so it seeds the first item. Absent file
+ *  (hand-made rows, foreign archives) → undefined → the `▸ prompt
+ *  unavailable` marker; never fabricate. */
+function readPrompt(eventsPath: string): string | undefined {
+  try {
+    return readFileSync(eventsPath.replace(/\.events\.jsonl$/, '.prompt.md'), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Replay rows into the impl — the `.prompt.md` injection fires only
+ *  when the archive carries no journaled `kind:'prompt'` rows (addendum
+ *  3: bro journals them since `plane.start(prompt)`; the file is the
+ *  fallback for older archives, never a duplicate). */
+function feedArchive(impl: PaneImpl, eventsPath: string, rows: ArchiveRow[]): void {
+  if (!rows.some(r => r.kind === 'prompt')) {
+    impl.feed({ kind: 'prompt', text: readPrompt(eventsPath) });
+  }
+  for (const row of rows) impl.feed(row);
+}
+
 // --- dump mode -------------------------------------------------------------
 
 /** `main.ts <worktree> --dump` — the headless readout. Prints the
@@ -92,7 +116,7 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
     const slice = readTailSlice(target.events, from);
     if (slice !== undefined) {
       const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      for (const row of parseArchiveRows(slice.text.slice(start))) impl.feed(row);
+      feedArchive(impl, target.events, parseArchiveRows(slice.text.slice(start)));
     }
     impl.beginLive();
   }
@@ -138,12 +162,10 @@ export async function runTui(argv: string[]): Promise<void> {
     foldAll: impl.fold === 'folded',
   });
 
-  // --- keys: j/k walk the tool cards, Enter/c folds one, q quits.
+  // --- keys: j/k walk the tool cards, Enter/c folds one. No quit
+  // binding — herdr owns the pane's lifecycle; the pane exits on
+  // its close (signal → process.exit → 'exit' releases the session).
   renderer.keyInput.on('keypress', key => {
-    if (key.name === 'q' || key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-      quit(0);
-      return;
-    }
     if (key.name === 'j') pane.writer.select(1);
     else if (key.name === 'k') pane.writer.select(-1);
     else if (key.name === 'return' || key.name === 'enter' || key.name === 'c')
@@ -180,7 +202,7 @@ export async function runTui(argv: string[]): Promise<void> {
     if (slice !== undefined) {
       cur.offset = slice.size;
       const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      for (const row of parseArchiveRows(slice.text.slice(start))) impl.feed(row);
+      feedArchive(impl, path, parseArchiveRows(slice.text.slice(start)));
     }
     // the tail window is replayed history; appends after this are the
     // live tail — the impl's replay/live boundary
@@ -223,11 +245,6 @@ export async function runTui(argv: string[]): Promise<void> {
     report();
   };
 
-  const quit = (code: number): void => {
-    releaseSession(paneId);
-    renderer.destroy();
-    process.exit(code);
-  };
   process.on('exit', () => releaseSession(paneId));
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(sig, () => process.exit(0));

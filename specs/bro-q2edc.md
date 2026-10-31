@@ -490,6 +490,76 @@ pane (or `BRO_TUI_IMPL=acp` for a whole attach). `default stays
 legacy` is load-bearing — flipping the default is a one-line
 `pickImpl` change after live review.
 
+## Phase 3 — own control kit, the prompt, and the audit
+
+**Vendoring** (addendum 6): the git dependency is gone — the
+`vendor/acp-tui` submodule was removed; only `packages/acp-model`'s
+source is vendored at `tui/vendor/acp-model/src/` (Apache-2.0
+LICENSE + NOTICE preserved, `ATTRIBUTION.md` pins upstream
+`70b8a6d`). The acp impl imports `vendor/acp-model/src/index.ts`
+directly — no submodule, no `file:` workspace indirection.
+`vendor-env.d.ts` died with the submodule (acp-model's src is pure
+TS, only `import type` on the sdk).
+
+**Own control kit**: `tui/acp/lines.ts` is now OUR implementation of
+the row language we studied — the `conversation/` layer stays a
+reference, never an import. `acpLine` renders their one-liners
+(`$ ✓ execute  Bash …  #N` with the right-aligned index tail, `∴`
+thoughts, `◈ plan n/m`, `⚠ permission ‹t› — outcome`) resolved
+through OUR theme tokens (`Segment.token` → `theme.*`, diff fills as
+dark-tint washes), and the turn boundary is the compact confirmed
+form `end turn · Ns · stopReason` (0.0s on replay — archive rows
+carry no live duration). `acpCardRows` is our card language
+(numbered diff hunks with `diff.add.bg`/`diff.del.bg` row fills,
+terminal notice, blank-row block separators, `▸ JSON` for pure-JSON
+results), `itemGroup`/`spacingBefore` our `list.ts`-rhythm grouping
+(user/agent/activity/plan/marker, blank row on group change).
+`Item.vi` remains the seam's escape hatch — geometry is shared,
+vocabulary is per-impl.
+
+**Prompt journaling** (addendum 3, supersedes the sidecar-injection
+note below): bro JOURNALS the prompt — `AgentTurnPlane.start(prompt?)`
+records `{ kind:'prompt', text }` in `.events.jsonl` right after the
+turn-start row (fail-open like all archive telemetry), `pumpTurn`
+passes the flattened prompt through. Both impls consume journaled
+rows INLINE (per-turn chronological position — the acp impl emits a
+prompt item as the row arrives, `dump()` interleaves by recorded
+position). `main.ts` reads `.prompt.md` ONLY as a legacy fallback
+when the archive carries no journaled prompt row.
+
+**Judge verdicts** (addendum 4): `tui/verdict.ts` — a data-driven
+shape table over the typed-answer wire (`noul`/`choice`/`score`,
+provider-judge's contract). A turn is judge-labelled when its
+journaled prompt carries the `TYPED_PREAMBLE` marker or `by` names a
+judge; its structured reply renders as `⛨ jev` — badge, one-line
+summary, field table — never the JSON wall. Unknown/malformed bodies
+fall back to `▸ JSON`.
+
+**Timeline** (addendum 5): every item carries the archive `ts` on
+`Item.at`; the pane renders a dim `HH:MM` gutter. Unknown/absorbed
+update kinds tally into a single `▸ N hidden` row — the noise floor
+is counted, never silently dropped.
+
+**Prompt fallback** (pre-journaling archives): `main.ts` reads the
+sibling `<agentId>.prompt.md` and feeds `{ kind: 'prompt', text }`
+only when the archive has no journaled prompt row.
+`TextItem.kind: 'prompt'` renders as a distinct surface — accent `▸`
+gutter, markdown body; absent everywhere degrades to
+`▸ prompt unavailable` (empty text, never fabricated).
+
+**The audit** (addendum): `conform.ts` counts archive
+`agent_message_chunk` rows and the tail AFTER the last tool row —
+`audit: msgChunks=… postToolChunks=… postToolChars=… prompts=…/…` —
+and fails if either impl's message text covers fewer chars than the
+post-tool tail. On the rich `native-84dfbac4` (xiq2m) archive:
+tools 5248=5248, messages 2120=2120, prompts 1/1 — covered by both.
+
+**Quit removed** (addendum 2): the `q`/`escape`/`Ctrl-C` self-quit
+binding and the `q quit` footer hint are gone — herdr owns pane
+lifecycle. The process exits on herdr's pane close (signal →
+`process.exit` → `'exit'` releases the session lock); `quit()` was
+deleted with its last caller.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

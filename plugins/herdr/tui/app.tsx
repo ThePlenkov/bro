@@ -20,7 +20,15 @@ import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { acpLine, type Segment, segStyle } from './acp/lines.ts';
+import {
+  acpCardRows,
+  acpLine,
+  fillColor,
+  itemGroup,
+  type Segment,
+  segStyle,
+  spacingBefore,
+} from './acp/lines.ts';
 import type { Item, Op, ToolContent, ToolItem } from './model.ts';
 import {
   applyOps,
@@ -31,6 +39,7 @@ import {
   withMeta,
 } from './state.ts';
 import { ledColor, theme } from './theme.ts';
+import { type VerdictView, verdictOf } from './verdict.ts';
 import {
   argBody,
   argHead,
@@ -231,6 +240,23 @@ function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolea
   );
 }
 
+/** One painted segment — `segStyle` resolves their TokenName through
+ *  DEFAULT_THEME into `<text>` props. */
+function SegText(props: { seg: Segment }) {
+  const st = () => segStyle(props.seg);
+  return (
+    <text
+      fg={st().fg}
+      attributes={
+        (st().bold ? TextAttributes.BOLD : 0) |
+        (st().italic ? TextAttributes.ITALIC : 0) |
+        (st().dim ? TextAttributes.DIM : 0)
+      }
+      content={props.seg.text}
+    />
+  );
+}
+
 /** A vendored `format.ts` row — the acp impl's own line language.
  *  Each segment paints through `segStyle` (their DEFAULT_THEME);
  *  selection reads as a surface wash, no box chrome. */
@@ -244,40 +270,66 @@ function AcpSegRow(props: { segs: readonly Segment[]; selected: boolean }) {
       backgroundColor={props.selected ? theme.surface : undefined}
     >
       <For each={props.segs}>
-        {seg => {
-          const st = () => segStyle(seg);
-          return (
-            <box backgroundColor={st().bg} height={1} flexShrink={0}>
-              <text
-                fg={st().fg}
-                attributes={
-                  (st().bold ? TextAttributes.BOLD : 0) |
-                  (st().italic ? TextAttributes.ITALIC : 0) |
-                  (st().dim ? TextAttributes.DIM : 0)
-                }
-                content={seg.text}
-              />
-            </box>
-          );
-        }}
+        {seg => (
+          <box backgroundColor={segStyle(seg).bg} height={1} flexShrink={0}>
+            <SegText seg={seg} />
+          </box>
+        )}
       </For>
     </box>
   );
 }
 
-/** The expanded tool body in their gutter language — a dim `│`
- *  margin over our content renderables (Option B: their layout,
- *  our markdown/code/diff blocks). */
-function AcpToolBody(props: { item: ToolItem; syntax: SyntaxStyle }) {
+/** The expanded card body — their `cardLines` verbatim: numbered
+ *  diffs with added/removed row fills, terminal notice, `▸ JSON`
+ *  for pure-JSON results, a blank row between blocks. The `│` margin
+ *  hangs it under the line; row fills wash the full width. */
+function AcpToolBody(props: { item: ToolItem; syntax: SyntaxStyle; width: () => number }) {
+  const rows = createMemo(() => acpCardRows(props.item.vi, props.width() - 2));
   return (
-    <box flexDirection="row" flexShrink={0}>
-      <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
-      <box flexDirection="column" flexGrow={1} flexShrink={0}>
-        <Show when={argBody(props.item)}>
-          {arg => <code content={arg()} filetype="bash" syntaxStyle={props.syntax} />}
-        </Show>
-        <ToolBody item={props.item} syntax={props.syntax} />
-      </box>
+    <box flexDirection="column" flexShrink={0}>
+      <For each={rows()}>
+        {row => (
+          <box
+            flexDirection="row"
+            flexShrink={0}
+            width="100%"
+            backgroundColor={row.fill !== undefined ? fillColor(row.fill) : undefined}
+          >
+            <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
+            <box flexDirection="row" flexGrow={1}>
+              <For each={row.segments}>{seg => <SegText seg={seg} />}</For>
+            </box>
+          </box>
+        )}
+      </For>
+    </box>
+  );
+}
+
+/** The injected prompt — "what was asked" at the top, visually
+ *  distinct: accent `▸` gutter over the session surface, markdown
+ *  body. Empty text (no `.prompt.md` sibling) is the marker. */
+function PromptRow(props: { item: Item; syntax: SyntaxStyle }) {
+  const text = () => ('text' in props.item ? props.item.text : '');
+  return (
+    <box flexDirection="row" width="100%" flexShrink={0} backgroundColor={theme.surface}>
+      <text fg={theme.accent} attributes={TextAttributes.BOLD} content={'▸ '} />
+      <Show
+        when={text() !== ''}
+        fallback={
+          <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
+        }
+      >
+        <box flexGrow={1} flexShrink={0}>
+          <markdown
+            content={text()}
+            syntaxStyle={props.syntax}
+            internalBlockMode="top-level"
+            flexShrink={0}
+          />
+        </box>
+      </Show>
     </box>
   );
 }
@@ -298,9 +350,22 @@ function ItemRow(props: {
   const segs = createMemo(() => {
     const vi = props.item.vi;
     if (vi === undefined) return null;
-    const line = acpLine(vi, props.width(), props.frame(), props.findTool);
+    const line = acpLine(
+      vi,
+      props.width(),
+      props.frame(),
+      props.findTool,
+      'arg' in props.item ? props.item.arg : undefined
+    );
     return line.length > 0 ? line : null;
   });
+  // a judge-labelled message whose reply parses a known shape shows
+  // the verdict control — badge + fields, never the JSON wall
+  const verdict = createMemo(() =>
+    'judge' in props.item && props.item.judge === true && 'text' in props.item
+      ? verdictOf(props.item.text)
+      : undefined
+  );
   const thought = createMemo(() => props.item.kind === 'thought');
   const tone = createMemo(() => {
     const it = props.item;
@@ -309,47 +374,115 @@ function ItemRow(props: {
       : undefined;
   });
   return (
-    <Show
-      when={segs() === null}
-      fallback={
-        <box flexDirection="column" flexShrink={0}>
-          <AcpSegRow segs={segs() ?? []} selected={props.selected} />
-          <Show when={tool() !== undefined && !tool()?.collapsed}>
-            <AcpToolBody item={tool() as ToolItem} syntax={props.syntax} />
-          </Show>
-        </box>
-      }
-    >
-      <Show
-        when={tool()}
-        keyed
-        fallback={
+    // the end-user timeline gutter: every row carries its archive `ts`
+    // as a dim HH:MM — one glance tells WHEN the step happened
+    <box flexDirection="row" flexShrink={0} width="100%">
+      <Show when={props.item.at !== undefined}>
+        <text
+          fg={theme.muted}
+          attributes={TextAttributes.DIM}
+          content={`${hhmm(props.item.at)} `}
+        />
+      </Show>
+      <box flexDirection="column" flexGrow={1} flexShrink={0}>
+        <Show
+          when={verdict() === undefined}
+          fallback={<VerdictRow view={verdict() as VerdictView} selected={props.selected} />}
+        >
           <Show
-            when={props.item.kind === 'message'}
+            when={segs() === null}
             fallback={
-              <text
-                fg={thought() ? theme.muted : sideColor(tone())}
-                attributes={
-                  thought() ? TextAttributes.DIM | TextAttributes.ITALIC : TextAttributes.DIM
-                }
-                flexShrink={0}
-                content={props.item.kind === 'tool' ? '' : props.item.text}
-              />
+              <box flexDirection="column" flexShrink={0}>
+                <AcpSegRow segs={segs() ?? []} selected={props.selected} />
+                <Show when={tool() !== undefined && !tool()?.collapsed}>
+                  <AcpToolBody
+                    item={tool() as ToolItem}
+                    syntax={props.syntax}
+                    width={props.width}
+                  />
+                </Show>
+              </box>
             }
           >
-            <markdown
-              content={props.item.kind === 'tool' ? '' : props.item.text}
-              syntaxStyle={props.syntax}
-              streaming
-              internalBlockMode="top-level"
-              flexShrink={0}
-            />
+            <Show
+              when={tool()}
+              keyed
+              fallback={
+                <Show
+                  when={props.item.kind === 'prompt'}
+                  fallback={
+                    <Show
+                      when={props.item.kind === 'message'}
+                      fallback={
+                        <text
+                          fg={thought() ? theme.muted : sideColor(tone())}
+                          attributes={
+                            thought()
+                              ? TextAttributes.DIM | TextAttributes.ITALIC
+                              : TextAttributes.DIM
+                          }
+                          flexShrink={0}
+                          content={props.item.kind === 'tool' ? '' : props.item.text}
+                        />
+                      }
+                    >
+                      <markdown
+                        content={props.item.kind === 'tool' ? '' : props.item.text}
+                        syntaxStyle={props.syntax}
+                        streaming
+                        internalBlockMode="top-level"
+                        flexShrink={0}
+                      />
+                    </Show>
+                  }
+                >
+                  <PromptRow item={props.item} syntax={props.syntax} />
+                </Show>
+              }
+            >
+              {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+            </Show>
           </Show>
-        }
-      >
-        {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
-      </Show>
-    </Show>
+        </Show>
+      </box>
+    </box>
+  );
+}
+
+/** `at` → the gutter's `HH:MM` (local time — the reader's clock, not
+ *  the journal's UTC). Missing/unparseable stamps render nothing. */
+const hhmm = (at: string | undefined): string => {
+  if (at === undefined) return '';
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+/** The verdict control — `⛨ jev · <summary>` badge line plus the
+ *  fields table (short — shape-checked answers only, the ▸ JSON row
+ *  stays the fallback for anything else). */
+function VerdictRow(props: { view: VerdictView; selected: boolean }) {
+  return (
+    <box
+      flexDirection="column"
+      flexShrink={0}
+      backgroundColor={props.selected ? theme.surface : undefined}
+    >
+      <box flexDirection="row" flexShrink={0}>
+        <text fg={theme.accent} attributes={TextAttributes.BOLD} content="⛨ " />
+        <text fg={theme.accent} attributes={TextAttributes.BOLD} content={`${props.view.badge} `} />
+        <text fg={theme.text} content={props.view.summary} />
+      </box>
+      <For each={props.view.fields}>
+        {f => (
+          <box flexDirection="row" flexShrink={0}>
+            <text fg={theme.muted} attributes={TextAttributes.DIM} content="   " />
+            <text fg={theme.muted} content={`${f[0]} `} />
+            <text fg={theme.text} attributes={TextAttributes.DIM} content={f[1]} />
+          </box>
+        )}
+      </For>
+    </box>
   );
 }
 
@@ -383,7 +516,7 @@ function FooterBar() {
     <box width="100%" height={1} flexShrink={0}>
       <text
         fg={theme.muted}
-        content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll · q quit"
+        content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll"
       />
     </box>
   );
@@ -408,18 +541,33 @@ function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
       <HeaderBar meta={props.store.state.meta} />
       <scrollbox stickyScroll stickyStart="bottom" viewportCulling flexGrow={1} width="100%">
         <For each={props.store.state.order}>
-          {id => (
+          {(id, index) => (
             <Show when={props.store.state.byId[id]} keyed>
-              {item => (
-                <ItemRow
-                  item={item}
-                  syntax={props.syntax}
-                  selected={props.store.state.selected === id}
-                  width={() => renderer.width}
-                  frame={frame}
-                  findTool={findTool}
-                />
-              )}
+              {item => {
+                // their list.ts rhythm — a blank row on every group
+                // change and before user/agent text; activity stays tight
+                const margin = () => {
+                  if (index() === 0) return 0;
+                  const prevId = props.store.state.order[index() - 1];
+                  const prev = prevId === undefined ? undefined : props.store.state.byId[prevId];
+                  return prev === undefined ? 0 : spacingBefore(itemGroup(prev), itemGroup(item));
+                };
+                return (
+                  <>
+                    <Show when={margin() > 0}>
+                      <box height={margin()} width="100%" flexShrink={0} />
+                    </Show>
+                    <ItemRow
+                      item={item}
+                      syntax={props.syntax}
+                      selected={props.store.state.selected === id}
+                      width={() => renderer.width}
+                      frame={frame}
+                      findTool={findTool}
+                    />
+                  </>
+                );
+              }}
             </Show>
           )}
         </For>

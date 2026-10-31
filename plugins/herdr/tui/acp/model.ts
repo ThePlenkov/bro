@@ -21,14 +21,6 @@
  */
 
 import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
-import type {
-  MarkerItem,
-  PermissionRecordItem,
-  PlanItem,
-  Item as TheirItem,
-  ToolCallItem,
-} from 'acp-model';
-import { createSession, type ModelEvent, reduce, type Session } from 'acp-model';
 import type { PaneLed } from '../../../../packages/cli/src/commands/fleet-state.ts';
 import type { ArchiveRow } from '../../../../packages/cli/src/commands/session-feed.ts';
 import {
@@ -44,13 +36,44 @@ import {
   MAX_ITEMS,
   type Op,
   type SideItem,
+  type TextItem,
   type ToolItem,
   type ToolStatus,
 } from '../model.ts';
+import {
+  createSession,
+  type MarkerItem,
+  type ModelEvent,
+  type PermissionRecordItem,
+  type PlanItem,
+  reduce,
+  type Session,
+  type Item as TheirItem,
+  type ToolCallItem,
+} from '../vendor/acp-model/src/index.ts';
+import { isJudgeTurn } from '../verdict.ts';
 import { acpLine, lineText } from './lines.ts';
 
+/** sessionUpdate kinds their reducer handles (items or absorbed
+ *  session state — usage/mode/config/commands/info). Anything else
+ *  hits their `default` arm and vanishes — those count into the
+ *  `▸ N hidden` row the end-user filter owes the reader. */
+const ITEM_UPDATES = new Set([
+  'user_message_chunk',
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'usage_update',
+  'session_info_update',
+  'config_option_update',
+  'current_mode_update',
+  'available_commands_update',
+]);
+
 const at = (row: ArchiveRow): number => {
-  const ts = (row as { ts?: string }).ts;
+  const ts = row.ts;
   const ms = ts !== undefined ? Date.parse(ts) : NaN;
   return Number.isNaN(ms) ? 0 : ms;
 };
@@ -110,7 +133,8 @@ const toolItem = (
   item: ToolCallItem,
   id: number,
   args: ReadonlyMap<string, string>,
-  folded: boolean
+  folded: boolean,
+  stamp?: string
 ): ToolItem => {
   const content: ToolItem['content'] = [];
   for (const c of item.content) {
@@ -148,6 +172,7 @@ const toolItem = (
     bodyLanded: content.length > 0,
     collapsed: folded && content.length > 0,
     content,
+    at: stamp,
     vi: item,
   };
 };
@@ -203,30 +228,39 @@ const markerItem = (item: MarkerItem, id: number): SideItem => {
 };
 
 /** Their item → ours (numeric id assigned by the diff). `folded`
- *  carries the pane's fold policy — the dump path projects open. */
+ *  carries the pane's fold policy — the dump path projects open.
+ *  `stamp`/`judge` come from the feed's birth-row records. */
 const project = (
   item: TheirItem,
   id: number,
   args: ReadonlyMap<string, string>,
-  folded = true
+  folded = true,
+  stamp?: string,
+  judge?: boolean
 ): Item => {
   switch (item.kind) {
     case 'agent_message':
-      return { id, kind: 'message', text: item.text };
+      return {
+        id,
+        kind: 'message',
+        text: item.text,
+        at: stamp,
+        ...(judge === true ? { judge: true } : {}),
+      };
     case 'user_message':
       // our model dims user_message chunks like thoughts — parity;
       // no `vi` — their line language has no user-bubble row here
-      return { id, kind: 'thought', text: item.text };
+      return { id, kind: 'thought', text: item.text, at: stamp };
     case 'thought':
-      return { id, kind: 'thought', text: item.text, vi: item };
+      return { id, kind: 'thought', text: item.text, at: stamp, vi: item };
     case 'tool_call':
-      return toolItem(item, id, args, folded);
+      return toolItem(item, id, args, folded, stamp);
     case 'plan':
-      return planItem(item, id);
+      return { ...planItem(item, id), at: stamp };
     case 'permission_record':
-      return permissionItem(item, id);
+      return { ...permissionItem(item, id), at: stamp };
     case 'marker':
-      return markerItem(item, id);
+      return { ...markerItem(item, id), at: stamp };
   }
 };
 
@@ -251,12 +285,43 @@ export class AcpImpl implements PaneImpl {
   private readonly emitted: number[] = [];
   /** toolCallId → rawInput arg text, stashed at feed time. */
   private readonly args = new Map<string, string>();
+  /** Their sid → the row's `ts` at item birth — the gutter stamp. */
+  private readonly tsMap = new Map<string, string>();
+  /** Their sids born under a judge-labelled turn — the reply text
+   *  classifies as a verdict control at render. */
+  private readonly judgeSids = new Set<string>();
+  private judgeNow = false;
+  /** Unknown sessionUpdates dropped by their reducer — the `▸ N
+   *  hidden` row's count (hiddenId pins the one growing item). */
+  private hidden = 0;
+  private hiddenShown = 0;
+  private hiddenId: number | undefined;
+  /** Prompt items by feed position — drain() emits them inline; the
+   *  dump interleaves them at `pos` (the session-order length when
+   *  the row landed) so per-turn prompts stay chronological. */
+  private readonly prompts: { pos: number; item: TextItem }[] = [];
   private ops: Op[] = [];
 
   feed(row: ArchiveRow): void {
+    if (row.kind === 'prompt') {
+      // the prompt row marks its turn — a typed-preamble body (or a
+      // judge `by`) labels the reply for the verdict classifier
+      this.judgeNow = isJudgeTurn(row.text, row.by);
+      const id = this.nextId++;
+      const item: TextItem = { id, kind: 'prompt', text: row.text ?? '', at: row.ts };
+      this.emitted.push(id);
+      this.ops.push({ op: 'append', item });
+      this.prompts.push({ pos: this.session.order.length, item });
+      return;
+    }
+    if (row.kind === 'turn') {
+      if (row.phase === 'start') this.judgeNow = isJudgeTurn(undefined, row.by);
+      else if (row.phase === 'stop') this.judgeNow = false;
+    }
     // the arg stash — their items drop rawInput, our header wants it
     if (row.kind === 'update' && row.update !== undefined) {
       const u = row.update as SessionUpdateLike & { toolCallId?: string };
+      if (!ITEM_UPDATES.has(u.sessionUpdate)) this.hidden++;
       if (
         (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') &&
         typeof u.toolCallId === 'string'
@@ -269,8 +334,18 @@ export class AcpImpl implements PaneImpl {
         if (arg !== undefined) this.args.set(u.toolCallId, arg);
       }
     }
+    const orderLen = this.session.order.length;
     for (const ev of eventsOf(row)) {
       this.session = reduce(this.session, ev);
+    }
+    // birth stamps ride the row that produced the item — order is
+    // append-only, so born sids are the tail slice
+    const ord = this.session.order;
+    for (let i = orderLen; i < ord.length; i++) {
+      const sid = ord[i];
+      if (sid === undefined) continue;
+      if (row.ts !== undefined) this.tsMap.set(sid, row.ts);
+      if (this.judgeNow) this.judgeSids.add(sid);
     }
   }
 
@@ -322,11 +397,14 @@ export class AcpImpl implements PaneImpl {
         id = this.nextId++;
         this.ids.set(sid, id);
         this.emitted.push(id);
-        ops.push({ op: 'append', item: project(item, id, this.args) });
+        ops.push({
+          op: 'append',
+          item: project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid)),
+        });
         continue;
       }
       if (id === undefined) continue;
-      const next = project(item, id, this.args);
+      const next = project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid));
       if (next.kind === 'tool') {
         // a bare tool op — `collapsed` omitted so the fold keeps the
         // user's toggle across updates
@@ -337,6 +415,19 @@ export class AcpImpl implements PaneImpl {
       }
     }
     this.prev = items;
+    // the end-user filter's account of what the model dropped —
+    // one growing tally row, not per-kind noise
+    if (this.hidden > this.hiddenShown) {
+      const text = `▸ ${this.hidden} hidden`;
+      if (this.hiddenId === undefined) {
+        this.hiddenId = this.nextId++;
+        this.emitted.push(this.hiddenId);
+        ops.push({ op: 'append', item: { id: this.hiddenId, kind: 'note', text } });
+      } else {
+        ops.push({ op: 'text', id: this.hiddenId, text });
+      }
+      this.hiddenShown = this.hidden;
+    }
     const over = this.emitted.length - MAX_ITEMS;
     if (over > 0) {
       ops.push({ op: 'evict', ids: this.emitted.splice(0, over) });
@@ -355,7 +446,23 @@ export class AcpImpl implements PaneImpl {
       if (item?.kind === 'tool_call') toolsByCall.set(item.toolCallId, item);
     }
     const find = (toolCallId: string): unknown => toolsByCall.get(toolCallId);
-    for (const sid of this.session.order) {
+    // prompt items interleave at the order position they landed —
+    // per-turn prompts stay chronological through the readout
+    let pi = 0;
+    const emitPrompts = (pos: number): void => {
+      while (pi < this.prompts.length && (this.prompts[pi]?.pos ?? 0) <= pos) {
+        const p = this.prompts[pi];
+        pi++;
+        if (p === undefined) continue;
+        if (p.item.text === '') out.push('▸ prompt unavailable');
+        else for (const l of p.item.text.split('\n')) out.push(`▸ ${l}`);
+      }
+    };
+    const ord = this.session.order;
+    for (let i = 0; i < ord.length; i++) {
+      emitPrompts(i);
+      const sid = ord[i];
+      if (sid === undefined) continue;
       const item = this.session.items.get(sid);
       if (item === undefined) continue;
       let id = this.ids.get(sid);
@@ -363,18 +470,34 @@ export class AcpImpl implements PaneImpl {
         id = this.nextId++;
         this.ids.set(sid, id);
       }
-      const line = lineText(acpLine(item, 120, 0, find));
+      const line = lineText(
+        acpLine(
+          item,
+          120,
+          0,
+          find,
+          item.kind === 'tool_call' ? this.args.get(item.toolCallId) : undefined
+        )
+      );
       if (line !== '') {
         out.push(line);
         if (item.kind === 'tool_call') {
-          for (const l of dumpContent(toolItem(item, id, this.args, false).content)) {
+          for (const l of dumpContent(
+            toolItem(item, id, this.args, false, this.tsMap.get(sid)).content
+          )) {
             out.push(`│  ${l}`);
           }
         }
         continue;
       }
-      out.push(...dumpItems([project(item, id, this.args, false)]));
+      out.push(
+        ...dumpItems([
+          project(item, id, this.args, false, this.tsMap.get(sid), this.judgeSids.has(sid)),
+        ])
+      );
     }
+    emitPrompts(Number.MAX_SAFE_INTEGER);
+    if (this.hidden > 0) out.push(`▸ ${this.hidden} hidden`);
     return out;
   }
 }

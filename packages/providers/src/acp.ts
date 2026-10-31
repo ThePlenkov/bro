@@ -673,6 +673,28 @@ function tracedUpdates(
  *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
  *  so the plane observer is attached once, not per transport. `cwd`
  *  anchors the bus socket + the per-agent .events.jsonl archive. */
+/** `string | ContentBlock[]` → the journaled prompt text. Text blocks
+ *  carry their text, links and embedded resources their URI, media a
+ *  `[type]` marker — the archive row says what was asked, it is not a
+ *  byte-exact request echo. */
+export const promptText = (prompt: string | ContentBlock[]): string => {
+  if (typeof prompt === 'string') return prompt;
+  return prompt
+    .map(b => {
+      switch (b.type) {
+        case 'text':
+          return b.text;
+        case 'resource_link':
+          return b.uri;
+        case 'resource':
+          return b.resource.uri;
+        default:
+          return `[${b.type}]`;
+      }
+    })
+    .join('\n');
+};
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -686,7 +708,7 @@ export async function pumpTurn(
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
-  plane.start();
+  plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's

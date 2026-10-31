@@ -16,13 +16,18 @@
  * with a minimal synthesized request.
  */
 import { readFileSync } from 'node:fs';
-import { createSession, reduce, type ModelEvent, type Session } from 'acp-model';
 import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
 import {
-  parseArchiveRows,
   type ArchiveRow,
+  parseArchiveRows,
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { SessionModel } from './model.ts';
+import {
+  createSession,
+  type ModelEvent,
+  reduce,
+  type Session,
+} from './vendor/acp-model/src/index.ts';
 
 const at = (row: ArchiveRow): number => {
   const ts = (row as { ts?: string }).ts;

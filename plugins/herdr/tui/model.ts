@@ -24,6 +24,7 @@ import {
   toolArg,
   toolContent,
 } from '../../../packages/providers/src/acp-render.ts';
+import { isJudgeTurn } from './verdict.ts';
 
 export type { ToolContent };
 
@@ -38,8 +39,16 @@ export type ToolStatus = 'live' | 'completed' | 'failed';
  *  grows in place as same-kind chunks arrive. */
 export interface TextItem {
   id: number;
-  kind: 'message' | 'thought';
+  /** `prompt` rows are journaled by `AgentTurnPlane.start` (or the
+   *  `.prompt.md` fallback on old archives) — the user-side surface
+   *  (empty text = the `▸ prompt unavailable` marker). */
+  kind: 'message' | 'thought' | 'prompt';
   text: string;
+  /** The row's ISO stamp — the pane's HH:MM gutter. */
+  at?: string;
+  /** Judge-labelled turn — the reply text may classify as a verdict
+   *  control instead of a message (verdict.ts's shape table). */
+  judge?: boolean;
   /** The impl's source item (acp impl: their Item). The view renders
    *  the impl's row language when present — opaque to this seam. */
   vi?: unknown;
@@ -60,6 +69,7 @@ export interface ToolItem {
   bodyLanded: boolean;
   collapsed: boolean;
   content: ToolContent[];
+  at?: string;
   vi?: unknown;
 }
 
@@ -71,6 +81,7 @@ export interface SideItem {
   kind: 'turn' | 'permission' | 'note';
   text: string;
   tone?: 'warn' | 'error';
+  at?: string;
   vi?: unknown;
 }
 
@@ -105,6 +116,10 @@ export class SessionModel {
   private readonly tools = new Map<string, ToolRec>();
   private nextId = 1;
   private ops: Op[] = [];
+  /** The current row's stamp — items born under it inherit the
+   *  gutter time; judge-turn flag set by `prompt`/`turn` rows. */
+  private curTs: string | undefined;
+  private judgeNow = false;
 
   /** Every op produced since the last drain — the shell's queue. */
   drain(): Op[] {
@@ -117,12 +132,16 @@ export class SessionModel {
    *  and permission rows land as side items; the row's LED verdict
    *  rides `this.verdict`. */
   feed(row: ArchiveRow): void {
+    this.curTs = row.ts;
     switch (row.kind) {
       case 'update':
         if (row.update !== undefined) this.update(row.update);
         break;
       case 'turn':
-        if (row.phase === 'stop') {
+        if (row.phase === 'start') {
+          this.judgeNow = isJudgeTurn(undefined, row.by);
+        } else if (row.phase === 'stop') {
+          this.judgeNow = false;
           const failed = row.error !== undefined && row.error !== '';
           this.side(
             'turn',
@@ -132,6 +151,12 @@ export class SessionModel {
             failed ? 'error' : undefined
           );
         }
+        break;
+      case 'prompt':
+        // the prompt row marks its turn — judge prompts carry the
+        // typed preamble; the reply then classifies as a verdict
+        this.judgeNow = isJudgeTurn(row.text, row.by);
+        this.push<TextItem>({ kind: 'prompt', text: row.text ?? '' });
         break;
       case 'permission': {
         const what = row.title ?? 'permission request';
@@ -174,9 +199,17 @@ export class SessionModel {
     }
   }
 
-  /** Append + record — every item birth goes through here. */
+  /** Append + record — every item birth goes through here, stamped
+   *  with the row's `ts` (the pane's gutter) and, for messages, the
+   *  judge-turn flag. */
   private push<T extends Item>(item: Omit<T, 'id'>): T {
-    const it = { ...item, id: this.nextId++ } as T;
+    const judge = 'kind' in item && item.kind === 'message' && this.judgeNow;
+    const it = {
+      ...item,
+      id: this.nextId++,
+      at: this.curTs,
+      ...(judge ? { judge: true } : {}),
+    } as T;
     this.items.push(it);
     this.ops.push({ op: 'append', item: it });
     return it;
@@ -340,6 +373,13 @@ export function dumpItems(items: readonly Item[]): string[] {
       case 'message':
       case 'thought':
         for (const l of it.text.split('\n')) lines.push(clip(l));
+        break;
+      case 'prompt':
+        if (it.text === '') {
+          lines.push('▸ prompt unavailable');
+          break;
+        }
+        for (const l of it.text.split('\n')) lines.push(`▸ ${clip(l)}`);
         break;
       case 'tool': {
         const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';

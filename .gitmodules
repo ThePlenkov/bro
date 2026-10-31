@@ -1,3 +1,0 @@
-[submodule "plugins/herdr/tui/vendor/acp-tui"]
-	path = plugins/herdr/tui/vendor/acp-tui
-	url = https://github.com/FasterPHP/acp-tui
