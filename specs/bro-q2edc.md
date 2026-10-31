@@ -736,6 +736,42 @@ field rows. Oddity found: without `streaming` the renderable
 paints nothing under this version — both call sites set it; for a
 static prompt it merely leaves the trailing token unfinalized.
 
+**Plugin-owned view lifecycle** (addendum 17 + field bugs A/B):
+`src/live-views.ts` converges live bro agents to view panes every
+tick — discovery reads state bro already owns: `agents.json` first,
+then `<id>.<run>.go` handle files without a sibling `.exit` (the
+janitor reaps registry entries; attempt pins outlive them — field
+bug B: hand-written fleet-status entries were reaped the same way,
+which is why the viewer never touches a foreign fleet doc at all).
+Each live agent gets a FRESH `workspace create`d `🤖 view:<id>`
+workspace — never `worktree open`, which resolves to an existing
+workspace and would hijack someone's pane (caught in the field:
+two records briefly pointed `pane run` at the user's main ws). The
+record carries `owned:true`; retire closes only owned workspaces,
+a flagless or foreign record just drops. Pane state lives in the
+plugin's own `state.liveViews` map — the fleet-status ownership
+answer is therefore "neither": no daemon writer call, no foreign
+file, the viewer resolves the archive DIRECTLY via `--events`/
+`--agent` (main.ts arg additions) and tail-police the events file
+itself; a missing/empty archive just keeps polling inside the same
+pane. Live-tail retry: `armFeed` widens the replay window 64KB →
+4MB → whole file when the slice is ALL `update` rows (a tool-call
+update storm can fill the tail and drain zero items — measured on
+native-656ebe78: 64KB → 113 updates → 0 items; 4MB → 6927 rows →
+32 items). Fixes found by the field exercise: the positional argv
+scan treated a flag's VALUE as the worktree arg (`--events <path>`
+without a worktree made the archive path `ctxDir` → ENOTDIR on
+fleetStatusPath); `loadState` reconstructed `PluginState`
+field-by-field and DROPPED `liveViews`, so records never survived
+a tick (every converge would have re-opened duplicate workspaces).
+**Known-open**: under a real herdr pane the chrome pins and the
+report lands (`● working · streaming`) but the feed region paints
+blank even though `impl.drain()` delivers ~7.3k ops into
+`writer.apply` and `applyOps` yields items in isolation — the
+render leg under real geometry is still being chased; `pane run`
+also does NOT replace a busy pane, so code changes need a fresh
+workspace to be seen.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

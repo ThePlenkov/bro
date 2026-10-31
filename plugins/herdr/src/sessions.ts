@@ -45,7 +45,7 @@ const TUI_MAIN = join(PLUGIN_ROOT, 'tui', 'main.ts');
  *  --version` once and cache. Without bun the session pane degrades
  *  to the line-mode session-view, never breaks. */
 let probedBun: string | null | undefined;
-function bun(): string | undefined {
+export function bun(): string | undefined {
   const env = process.env.BUN_BIN_PATH;
   if (env !== undefined) return env === '' ? undefined : env;
   if (probedBun === undefined) {

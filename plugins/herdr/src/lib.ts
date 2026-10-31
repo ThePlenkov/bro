@@ -430,6 +430,7 @@ export function boundPaneIds(state: PluginState): Set<string> {
   for (const r of Object.values(state.statuses)) ids.add(r.pane_id);
   for (const r of Object.values(state.sessions)) ids.add(r.pane_id);
   for (const r of Object.values(state.mirrors)) ids.add(r.pane_id);
+  for (const r of Object.values(state.liveViews ?? {})) ids.add(r.pane_id);
   return ids;
 }
 
@@ -511,6 +512,9 @@ export interface PluginState {
   /** worktree path → the session-pane record (one per managed ws —
    *  spec bro-nwl5g's `bro herdr session-view` renderer). */
   sessions: Record<string, StatusPaneRec>;
+  /** agentId → the plugin-owned live view (addendum 17) — an agent
+   *  outside armed worktrees gets its own `🤖 view:<id>` workspace. */
+  liveViews?: Record<string, { workspace: string; pane_id: string; owned?: boolean }>;
   /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
   gone: Record<string, number>;
 }
@@ -538,6 +542,7 @@ export function loadState(scope: string): PluginState {
       renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
       statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
       sessions: typeof v.sessions === 'object' && v.sessions !== null ? v.sessions : {},
+      liveViews: typeof v.liveViews === 'object' && v.liveViews !== null ? v.liveViews : {},
       gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
     };
   } catch {
@@ -547,6 +552,7 @@ export function loadState(scope: string): PluginState {
       renderers: {},
       statuses: {},
       sessions: {},
+      liveViews: {},
       gone: {},
     };
   }

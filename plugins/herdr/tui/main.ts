@@ -126,22 +126,93 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
 
 // --- the TUI ---------------------------------------------------------------
 
+const opt = (argv: string[], flag: string): string | undefined => {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
+
+/** Liveness floor for a direct `--agent` target — the archive's own
+ *  verdict rides on top (eventsVerdict); pid probing replaces the
+ *  fleet doc's workerLed so the viewer never needs a daemon file. */
+const pidAlive = (pid: number | undefined): boolean => {
+  if (pid === undefined) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** One agents.json entry — the registry the plugin resolves `--agent`
+ *  through: worktree for context, pid for the liveness floor. */
+function agentEntry(
+  base: string,
+  id: string | undefined
+): { worktree?: string; pid?: number; provider?: string } | undefined {
+  if (id === undefined) return undefined;
+  try {
+    const reg = JSON.parse(readFileSync(`${base}/bro/agents.json`, 'utf8')) as Record<
+      string,
+      { worktree?: string; pid?: number; provider?: string }
+    >;
+    return reg[id];
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runTui(argv: string[]): Promise<void> {
-  const worktree = argv.find(a => !a.startsWith('-'));
-  if (worktree === undefined) {
-    console.error('usage: main.ts <worktree> [--dump] [--impl legacy|acp]');
+  // a flag's VALUE is not a positional — `--events <path>` alone must
+  // not turn the archive path into the worktree arg
+  const VALUE_FLAGS = new Set(['--events', '--agent', '--impl']);
+  const worktree = argv.find((a, i) => !a.startsWith('-') && !VALUE_FLAGS.has(argv[i - 1] ?? ''));
+  const eventsArg = opt(argv, '--events');
+  const agentArg = opt(argv, '--agent');
+  if (worktree === undefined && eventsArg === undefined && agentArg === undefined) {
+    console.error(
+      'usage: main.ts <worktree> [--dump] [--impl legacy|acp] [--events <path>] [--agent <id>]'
+    );
     process.exit(2);
   }
   if (argv.includes('--dump')) {
-    await dump(worktree, argv);
+    await dump(worktree ?? process.cwd(), argv);
     return;
   }
   if (process.env.HERDR_ENV !== '1') return;
   const paneId = process.env.HERDR_PANE_ID;
   if (paneId === undefined || paneId === '') return;
 
-  const base = gitCommonDir(worktree) ?? worktree;
-  const statePath = fleetStatusPath(base, worktree);
+  // Direct resolution (addendum 17): `--events`/`--agent` point the
+  // viewer at the archive itself — no fleet-status doc involved
+  // (janitor-reaped files were the "waiting for projector" bug).
+  const ctxDir = worktree ?? process.cwd();
+  const base0 = gitCommonDir(ctxDir) ?? ctxDir;
+  const entry = agentEntry(base0, agentArg);
+  const direct: SessionTarget | undefined =
+    eventsArg === undefined && agentArg === undefined
+      ? undefined
+      : {
+          worktree: entry?.worktree ?? ctxDir,
+          status: 'live',
+          events:
+            eventsArg ??
+            (agentArg !== undefined ? `${base0}/bro/agents/${agentArg}.events.jsonl` : undefined),
+          agent: agentArg,
+          slug: agentArg,
+          workerLed: { state: pidAlive(entry?.pid) ? 'working' : 'idle' },
+        };
+
+  // clean start: inline mode draws below whatever scrollback the
+  // pane already held (the launch command line, prior output) —
+  // clear screen AND scrollback once so the feed begins at the top.
+  // The write MUST land before createCliRenderer: afterwards stdout
+  // rides the renderer's own writer and the ESC bytes surface as
+  // literal text (field bug). Startup-only; never mid-run.
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+
+  const base = base0;
+  const statePath = fleetStatusPath(base, ctxDir);
   mkdirSync(dirname(statePath), { recursive: true });
 
   // The Solid JSX transform is a Bun plugin, and it must be
@@ -169,17 +240,12 @@ export async function runTui(argv: string[]): Promise<void> {
     screenMode: 'split-footer',
     footerHeight: 2,
   });
-  // clean start: inline mode draws below whatever scrollback the
-  // pane already held (the launch command line, prior output) —
-  // clear screen AND scrollback once so the feed begins at the top.
-  // Startup-only; never mid-run (addendum 15).
-  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 
   const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree });
+  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: agentArg });
   const pane = await mountPane({
     renderer,
-    meta: { worktree },
+    meta: { worktree: entry?.worktree ?? ctxDir },
     foldAll: impl.fold === 'folded',
     copyItem: it => impl.copyText?.(it) ?? ('text' in it ? it.text : ''),
   });
@@ -213,7 +279,15 @@ export async function runTui(argv: string[]): Promise<void> {
 
   // --- the feed: fleet doc → target → archive tail → model → tree
 
-  let cur: { key: string; eventsPath?: string; offset: number; watcher?: FSWatcher } | undefined;
+  let cur:
+    | {
+        key: string;
+        eventsPath?: string;
+        offset: number;
+        watcher?: FSWatcher;
+        seeded?: boolean;
+      }
+    | undefined;
   const detachFeed = (): void => {
     cur?.watcher?.close();
     cur = undefined;
@@ -227,7 +301,15 @@ export async function runTui(argv: string[]): Promise<void> {
     const more = readTailSlice(cur.eventsPath, cur.offset);
     if (more === undefined) return;
     cur.offset = more.size;
-    for (const row of parseArchiveRows(more.text)) impl.feed(row);
+    const rows = parseArchiveRows(more.text);
+    // a session born after the pane: the first landed slice carries
+    // the same prompt-sidecar fallback the arm-time replay does
+    if (cur.seeded !== true) {
+      cur.seeded = true;
+      feedArchive(impl, cur.eventsPath, rows);
+      return;
+    }
+    for (const row of rows) impl.feed(row);
   };
 
   /** Arm the archive tail on a resolved target — replay the window,
@@ -236,12 +318,25 @@ export async function runTui(argv: string[]): Promise<void> {
     if (t.events === undefined) return;
     const path = t.events;
     cur = { key: targetKey(t), eventsPath: path, offset: 0 };
-    const from = Math.max(0, sizeOf(path) - TAIL_BYTES);
-    const slice = readTailSlice(path, from);
-    if (slice !== undefined) {
+    const size = sizeOf(path);
+    // A window of pure `update` rows attaches to items born outside
+    // it — an update storm for one tool call can fill the whole tail
+    // and drain zero items. Widen 64KB → 4MB → whole file until a
+    // creating row enters the slice. Parse per candidate but feed ONCE
+    // — update rows are not idempotent under a re-feed.
+    let rows: ArchiveRow[] | undefined;
+    for (const win of [TAIL_BYTES, 4 * 1024 * 1024, 0]) {
+      const from = win === 0 ? 0 : Math.max(0, size - win);
+      const slice = readTailSlice(path, from);
+      if (slice === undefined) break;
       cur.offset = slice.size;
       const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      feedArchive(impl, path, parseArchiveRows(slice.text.slice(start)));
+      rows = parseArchiveRows(slice.text.slice(start));
+      if (from === 0 || rows.some(r => r.kind !== 'update')) break;
+    }
+    if (rows !== undefined) {
+      cur.seeded = true;
+      feedArchive(impl, path, rows);
     }
     // the tail window is replayed history; appends after this are the
     // live tail — the impl's replay/live boundary
@@ -276,7 +371,7 @@ export async function runTui(argv: string[]): Promise<void> {
   /** The resolution poll — read the doc, re-arm the feed when the
    *  attach identity moves, report the verdict. */
   const refresh = (): void => {
-    target = resolveTarget(readState(statePath), worktree, providers(worktree));
+    target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
     const key = targetKey(target);
     if (key !== cur?.key) {
       detachFeed();

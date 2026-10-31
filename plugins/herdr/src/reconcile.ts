@@ -21,8 +21,10 @@
  */
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
+import { type Lane, laneOf } from './lanes.ts';
 import {
   ctxJson,
+  gitCommonDir,
   type HerdrWorkspace,
   herdrTry,
   loadState,
@@ -32,11 +34,11 @@ import {
   type StatusWorktree,
   saveState,
   stateScope,
+  type WorkspaceRec,
   withStateLock,
   worktreeGone,
-  type WorkspaceRec,
 } from './lib.ts';
-import { type Lane, laneOf } from './lanes.ts';
+import { convergeLiveViews } from './live-views.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
@@ -378,6 +380,9 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   convergeRenderers(p, wsForPath, ctx);
   convergeStatuses(p, wsForPath, ctx);
   convergeSessions(p, wsForPath, ctx);
+  // live agents with no armed worktree get a plugin-owned view
+  // workspace+pane; armed trees are covered by their own panes
+  convergeLiveViews(gitCommonDir(p.main) ?? p.main, p.main, ctx.state, new Set(armed.keys()));
   const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
   return {

@@ -847,7 +847,6 @@ function Pane(props: {
         }}
         stickyScroll
         stickyStart="bottom"
-        viewportCulling
         flexGrow={1}
         width="100%"
         backgroundColor={theme.base}
