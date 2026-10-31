@@ -71,6 +71,10 @@ export interface ToolItem {
   content: ToolContent[];
   at?: string;
   vi?: unknown;
+  /** An activity-run group (the acp impl's `▸ N tool calls · …`
+   *  line): the collapsed members, in order, for the expanded body.
+   *  `arg` carries the tally text. */
+  runs?: readonly unknown[];
 }
 
 /** A one-shot line — turn boundary, permission ask, plan block, or a

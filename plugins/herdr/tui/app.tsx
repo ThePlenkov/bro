@@ -307,6 +307,53 @@ function AcpToolBody(props: { item: ToolItem; syntax: SyntaxStyle; width: () => 
   );
 }
 
+/** The collapsed activity run — the confirmed `▸ N tool calls · N
+ *  thought · Ns` line; expanded (the card toggle still applies) it
+ *  shows each member's own one-liner under the `│` gutter. */
+function AcpRunRow(props: {
+  item: ToolItem;
+  selected: boolean;
+  width: () => number;
+  frame: () => number;
+  findTool: (toolCallId: string) => unknown;
+}) {
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <box
+        flexDirection="row"
+        width="100%"
+        height={1}
+        flexShrink={0}
+        backgroundColor={props.selected ? theme.surface : undefined}
+      >
+        <text
+          fg={theme.accent}
+          attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
+          content="▸ "
+        />
+        <text
+          fg={props.item.status === 'live' ? theme.text : theme.muted}
+          attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
+          content={props.item.arg ?? ''}
+        />
+      </box>
+      <Show when={!props.item.collapsed}>
+        <For each={props.item.runs ?? []}>
+          {m => (
+            <box flexDirection="row" flexShrink={0} width="100%">
+              <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
+              <AcpSegRow
+                segs={acpLine(m, props.width() - 2, props.frame(), props.findTool)}
+                selected={false}
+              />
+            </box>
+          )}
+        </For>
+      </Show>
+    </box>
+  );
+}
+
 /** The injected prompt — "what was asked" at the top, visually
  *  distinct: accent `▸` gutter over the session surface, markdown
  *  body. Empty text (no `.prompt.md` sibling) is the marker. */
@@ -346,7 +393,14 @@ function ItemRow(props: {
   frame: () => number;
   findTool: (toolCallId: string) => unknown;
 }) {
-  const tool = createMemo(() => (props.item.kind === 'tool' ? props.item : undefined));
+  // an activity-run group — the confirmed `▸ N tool calls · …` line;
+  // it is a tool-kind item but renders its own collapsed/expanded row
+  const run = createMemo(() =>
+    props.item.kind === 'tool' && props.item.runs !== undefined ? props.item : undefined
+  );
+  const tool = createMemo(() =>
+    props.item.kind === 'tool' && props.item.runs === undefined ? props.item : undefined
+  );
   const segs = createMemo(() => {
     const vi = props.item.vi;
     if (vi === undefined) return null;
@@ -359,13 +413,10 @@ function ItemRow(props: {
     );
     return line.length > 0 ? line : null;
   });
-  // a judge-labelled message whose reply parses a known shape shows
-  // the verdict control — badge + fields, never the JSON wall
-  const verdict = createMemo(() =>
-    'judge' in props.item && props.item.judge === true && 'text' in props.item
-      ? verdictOf(props.item.text)
-      : undefined
-  );
+  // a judge reply classifies on its own shape — every answer must
+  // match the typed table, so a prose message never trips it; the
+  // `judge` flag narrows it further on journaled turns
+  const verdict = createMemo(() => ('text' in props.item ? verdictOf(props.item.text) : undefined));
   const thought = createMemo(() => props.item.kind === 'thought');
   const tone = createMemo(() => {
     const it = props.item;
@@ -405,42 +456,55 @@ function ItemRow(props: {
             }
           >
             <Show
-              when={tool()}
-              keyed
+              when={run() === undefined}
               fallback={
-                <Show
-                  when={props.item.kind === 'prompt'}
-                  fallback={
-                    <Show
-                      when={props.item.kind === 'message'}
-                      fallback={
-                        <text
-                          fg={thought() ? theme.muted : sideColor(tone())}
-                          attributes={
-                            thought()
-                              ? TextAttributes.DIM | TextAttributes.ITALIC
-                              : TextAttributes.DIM
-                          }
-                          flexShrink={0}
-                          content={props.item.kind === 'tool' ? '' : props.item.text}
-                        />
-                      }
-                    >
-                      <markdown
-                        content={props.item.kind === 'tool' ? '' : props.item.text}
-                        syntaxStyle={props.syntax}
-                        streaming
-                        internalBlockMode="top-level"
-                        flexShrink={0}
-                      />
-                    </Show>
-                  }
-                >
-                  <PromptRow item={props.item} syntax={props.syntax} />
-                </Show>
+                <AcpRunRow
+                  item={run() as ToolItem}
+                  selected={props.selected}
+                  width={props.width}
+                  frame={props.frame}
+                  findTool={props.findTool}
+                />
               }
             >
-              {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+              <Show
+                when={tool()}
+                keyed
+                fallback={
+                  <Show
+                    when={props.item.kind === 'prompt'}
+                    fallback={
+                      <Show
+                        when={props.item.kind === 'message'}
+                        fallback={
+                          <text
+                            fg={thought() ? theme.muted : sideColor(tone())}
+                            attributes={
+                              thought()
+                                ? TextAttributes.DIM | TextAttributes.ITALIC
+                                : TextAttributes.DIM
+                            }
+                            flexShrink={0}
+                            content={props.item.kind === 'tool' ? '' : props.item.text}
+                          />
+                        }
+                      >
+                        <markdown
+                          content={props.item.kind === 'tool' ? '' : props.item.text}
+                          syntaxStyle={props.syntax}
+                          streaming
+                          internalBlockMode="top-level"
+                          flexShrink={0}
+                        />
+                      </Show>
+                    }
+                  >
+                    <PromptRow item={props.item} syntax={props.syntax} />
+                  </Show>
+                }
+              >
+                {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+              </Show>
             </Show>
           </Show>
         </Show>

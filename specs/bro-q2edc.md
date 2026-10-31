@@ -527,13 +527,29 @@ prompt item as the row arrives, `dump()` interleaves by recorded
 position). `main.ts` reads `.prompt.md` ONLY as a legacy fallback
 when the archive carries no journaled prompt row.
 
+**Activity collapse** (addendum 6's confirmed baseline): runs of
+≥2 consecutive activity items (tool_call/thought/plan/
+permission_record) collapse into ONE `▸ N tool calls · N thought ·
+Ns` item — their live TUI's per-turn density, now ours. The run's
+leader keeps its slot and morphs in place via a `tool` op when the
+second member lands (no order churn); members hang under the `│`
+gutter when the row expands (`ToolItem.runs` carries them). A lone
+tool stays its own card — the collapse is run-shaped, not
+kind-shaped. On the grep-storm archive the item stream drops to
+less than half (appended 9583→4479) with tool coverage unchanged
+(5248 member-counted, conform compares members not group rows).
+
 **Judge verdicts** (addendum 4): `tui/verdict.ts` — a data-driven
 shape table over the typed-answer wire (`noul`/`choice`/`score`,
-provider-judge's contract). A turn is judge-labelled when its
-journaled prompt carries the `TYPED_PREAMBLE` marker or `by` names a
-judge; its structured reply renders as `⛨ jev` — badge, one-line
-summary, field table — never the JSON wall. Unknown/malformed bodies
-fall back to `▸ JSON`.
+provider-judge's contract). Classification is shape-based — every
+answer must match the table, so prose never trips it — because the
+real archive proves `by` carries provider labels
+(`acp provider 'devin-acp'`, `provider:kilo`), never a judge label;
+the journaled prompt preamble or a `judge`/`jev` `by` narrows it
+further on post-journaling archives. A structured reply renders as
+`⛨ jev` — badge, one-line summary, field table — never the JSON
+wall, in the pane and in `--dump`. Unknown/malformed bodies fall
+back to `▸ JSON`.
 
 **Timeline** (addendum 5): every item carries the archive `ts` on
 `Item.at`; the pane renders a dim `HH:MM` gutter. Unknown/absorbed

@@ -51,7 +51,7 @@ import {
   type Item as TheirItem,
   type ToolCallItem,
 } from '../vendor/acp-model/src/index.ts';
-import { isJudgeTurn } from '../verdict.ts';
+import { isJudgeTurn, verdictOf } from '../verdict.ts';
 import { acpLine, lineText } from './lines.ts';
 
 /** sessionUpdate kinds their reducer handles (items or absorbed
@@ -264,6 +264,115 @@ const project = (
   }
 };
 
+/** Activity kinds — the members a `▸ N …` run line collapses.
+ *  agent/user text, markers and prompts stay their own rows. */
+const ACTIVITY: ReadonlySet<TheirItem['kind']> = new Set([
+  'tool_call',
+  'thought',
+  'plan',
+  'permission_record',
+]);
+
+/** Runs of ≥2 consecutive activity sids in session order →
+ *  member sid → its run's leader (first sid). */
+const buildRuns = (
+  order: readonly string[],
+  items: ReadonlyMap<string, TheirItem>
+): Map<string, string> => {
+  const out = new Map<string, string>();
+  let run: string[] = [];
+  const flush = (): void => {
+    const lead = run[0];
+    if (run.length >= 2 && lead !== undefined) {
+      for (const sid of run) out.set(sid, lead);
+    }
+    run = [];
+  };
+  for (const sid of order) {
+    const item = items.get(sid);
+    if (item !== undefined && ACTIVITY.has(item.kind)) run.push(sid);
+    else flush();
+  }
+  flush();
+  return out;
+};
+
+/** The leader's member items in order — the tally's parts and the
+ *  expanded row's lines. */
+const runMembers = (
+  order: readonly string[],
+  items: ReadonlyMap<string, TheirItem>,
+  leader: string
+): TheirItem[] => {
+  const start = order.indexOf(leader);
+  if (start < 0) return [];
+  const out: TheirItem[] = [];
+  for (let i = start; i < order.length; i++) {
+    const item = items.get(order[i] ?? '');
+    if (item === undefined || !ACTIVITY.has(item.kind)) break;
+    out.push(item);
+  }
+  return out;
+};
+
+/** `N tool calls` plural-safe part labels, in first-seen order. */
+const tally = (members: readonly TheirItem[]): string => {
+  const names: Record<string, [string, string]> = {
+    tool_call: ['tool call', 'tool calls'],
+    thought: ['thought', 'thoughts'],
+    plan: ['plan', 'plans'],
+    permission_record: ['permission', 'permissions'],
+  };
+  const parts: string[] = [];
+  for (const kind of Object.keys(names) as (keyof typeof names)[]) {
+    const n = members.filter(m => m.kind === kind).length;
+    if (n === 0) continue;
+    const [one, many] = names[kind] ?? [kind, `${kind}s`];
+    parts.push(`${n} ${n === 1 ? one : many}`);
+  }
+  return parts.join(' · ');
+};
+
+/** The collapsed run as a ToolItem — `arg` carries the confirmed
+ *  `N tool calls · N thought · Ns` tally, `runs` the members for the
+ *  expanded body; it morphs in place when the run grows. */
+const runItem = (
+  members: readonly TheirItem[],
+  id: number,
+  folded: boolean,
+  stamp: string | undefined
+): ToolItem => {
+  let started: number | undefined;
+  let ended: number | undefined;
+  let live = false;
+  let failed = false;
+  for (const m of members) {
+    if (m.kind === 'tool_call') {
+      if (m.startedAt !== null) started = Math.min(started ?? m.startedAt, m.startedAt);
+      if (m.endedAt !== null) ended = Math.max(ended ?? m.endedAt, m.endedAt);
+      if (m.toolStatus === 'in_progress' || m.toolStatus === 'pending') live = true;
+      if (m.toolStatus === 'failed') failed = true;
+    }
+  }
+  const secs =
+    !live && started !== undefined && ended !== undefined && ended > started
+      ? ` · ${((ended - started) / 1000).toFixed(1)}s`
+      : '';
+  return {
+    id,
+    kind: 'tool',
+    toolCallId: `run:${id}`,
+    title: 'activity',
+    arg: `${tally(members)}${secs}`,
+    status: live ? 'live' : failed ? 'failed' : 'completed',
+    bodyLanded: true,
+    collapsed: folded,
+    content: [],
+    at: stamp,
+    runs: members,
+  };
+};
+
 /** The vendored session behind the seam — fold-by-default, per the
  *  vendored view-model's baseline (`expanded(item)` starts false). */
 export class AcpImpl implements PaneImpl {
@@ -291,6 +400,9 @@ export class AcpImpl implements PaneImpl {
    *  classifies as a verdict control at render. */
   private readonly judgeSids = new Set<string>();
   private judgeNow = false;
+  /** Their sid → currently a run's leader — solo→group morphs are
+   *  re-projections, not silent card swaps. */
+  private readonly grouped = new Map<string, boolean>();
   /** Unknown sessionUpdates dropped by their reducer — the `▸ N
    *  hidden` row's count (hiddenId pins the one growing item). */
   private hidden = 0;
@@ -381,17 +493,44 @@ export class AcpImpl implements PaneImpl {
   }
 
   /** Diff the session against the last drain — every changed item
-   *  re-projects whole; order is append-only per their reducer. */
+   *  re-projects whole; order is append-only per their reducer.
+   *  Runs of ≥2 consecutive activity items collapse into ONE
+   *  `▸ N tool calls · …` group item (the confirmed live density) —
+   *  the run's leader keeps its slot and morphs in place when the
+   *  second member lands. */
   drain(): Op[] {
     if (this.session.items === this.prev && this.ops.length === 0) return this.ops;
     const ops = this.ops;
     this.ops = [];
     const items = this.session.items;
+    const memberGroup = buildRuns(this.session.order, items);
+    // a changed member dirties its leader's tally — the group
+    // re-projects even when the leader's own item is identical
+    const dirty = new Set<string>();
+    for (const sid of this.session.order) {
+      const leader = memberGroup.get(sid);
+      if (leader !== undefined && leader !== sid && this.prev.get(sid) !== items.get(sid)) {
+        dirty.add(leader);
+      }
+    }
     for (const sid of this.session.order) {
       const item = items.get(sid);
       if (item === undefined) continue;
+      const leader = memberGroup.get(sid);
+      if (leader !== undefined && leader !== sid) {
+        // a member never owns a row — route its id at the group so
+        // a stray update resolves to the tally item
+        const gid = this.ids.get(leader);
+        if (gid !== undefined) this.ids.set(sid, gid);
+        continue;
+      }
       const was = this.prev.get(sid);
-      if (was === item) continue;
+      const nowGrouped = memberGroup.has(sid);
+      const members = nowGrouped ? runMembers(this.session.order, items, sid) : undefined;
+      const changed =
+        was !== item || nowGrouped !== (this.grouped.get(sid) ?? false) || dirty.delete(sid);
+      this.grouped.set(sid, nowGrouped);
+      if (was === item && !changed) continue;
       let id = this.ids.get(sid);
       if (was === undefined) {
         id = this.nextId++;
@@ -399,12 +538,18 @@ export class AcpImpl implements PaneImpl {
         this.emitted.push(id);
         ops.push({
           op: 'append',
-          item: project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid)),
+          item:
+            members !== undefined
+              ? runItem(members, id, true, this.tsMap.get(sid))
+              : project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid)),
         });
         continue;
       }
       if (id === undefined) continue;
-      const next = project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid));
+      const next =
+        members !== undefined
+          ? runItem(members, id, true, this.tsMap.get(sid))
+          : project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid));
       if (next.kind === 'tool') {
         // a bare tool op — `collapsed` omitted so the fold keeps the
         // user's toggle across updates
@@ -459,16 +604,37 @@ export class AcpImpl implements PaneImpl {
       }
     };
     const ord = this.session.order;
+    const memberGroup = buildRuns(ord, this.session.items);
     for (let i = 0; i < ord.length; i++) {
       emitPrompts(i);
       const sid = ord[i];
       if (sid === undefined) continue;
       const item = this.session.items.get(sid);
       if (item === undefined) continue;
+      const leader = memberGroup.get(sid);
+      if (leader !== undefined && leader !== sid) continue;
       let id = this.ids.get(sid);
       if (id === undefined) {
         id = this.nextId++;
         this.ids.set(sid, id);
+      }
+      if (leader === sid) {
+        // the ▸-tally line; members hang under it in the │ gutter
+        const members = runMembers(ord, this.session.items, sid);
+        out.push(`▸ ${runItem(members, id, false, undefined).arg}`);
+        for (const m of members) {
+          const ml = lineText(
+            acpLine(
+              m,
+              116,
+              0,
+              find,
+              m.kind === 'tool_call' ? this.args.get(m.toolCallId) : undefined
+            )
+          );
+          out.push(`│  ${ml === '' ? m.kind : ml.trimEnd()}`);
+        }
+        continue;
       }
       const line = lineText(
         acpLine(
@@ -490,11 +656,18 @@ export class AcpImpl implements PaneImpl {
         }
         continue;
       }
-      out.push(
-        ...dumpItems([
-          project(item, id, this.args, false, this.tsMap.get(sid), this.judgeSids.has(sid)),
-        ])
-      );
+      const p = project(item, id, this.args, false, this.tsMap.get(sid), this.judgeSids.has(sid));
+      // judge replies print the verdict control, not the JSON wall —
+      // the same shape classification the pane's VerdictRow uses
+      if ('text' in p) {
+        const v = verdictOf(p.text);
+        if (v !== undefined) {
+          out.push(`⛨ jev · ${v.summary}`);
+          for (const [q, f] of v.fields) out.push(`   ${q} ${f}`);
+          continue;
+        }
+      }
+      out.push(...dumpItems([p]));
     }
     emitPrompts(Number.MAX_SAFE_INTEGER);
     if (this.hidden > 0) out.push(`▸ ${this.hidden} hidden`);

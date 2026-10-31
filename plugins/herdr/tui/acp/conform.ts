@@ -67,7 +67,7 @@ interface Stats {
   appended: number;
   tools: number;
   toolIds: Set<string>;
-  toolsWithContent: Set<number>;
+  toolsWithContent: Set<string>;
   diffs: number;
   messages: number;
   thoughts: number;
@@ -106,12 +106,38 @@ const run = async (name: string): Promise<Stats> => {
     messageChars: 0,
     verdict: impl.verdict?.led.state ?? '?',
   };
+  // an activity-run group covers its members — the tally line IS
+  // the tools, counted individually
+  const countRun = (item: ToolItem): void => {
+    for (const m of (item.runs ?? []) as {
+      kind: string;
+      toolCallId?: string;
+      content?: readonly { type: string; path?: string }[];
+    }[]) {
+      if (m.kind !== 'tool_call') continue;
+      s.tools++;
+      s.toolIds.add(m.toolCallId ?? `run:${item.id}`);
+      if ((m.content?.length ?? 0) > 0) {
+        s.toolsWithContent.add(m.toolCallId ?? `${item.id}`);
+      }
+      for (const c of m.content ?? []) {
+        if (c.type === 'diff' && c.path !== undefined) {
+          s.diffs++;
+          s.diffKeys.add(`${m.toolCallId ?? `id:${item.id}`}|${c.path}`);
+        }
+      }
+    }
+  };
   const countItem = (item: Item): void => {
     switch (item.kind) {
       case 'tool':
+        if (item.runs !== undefined) {
+          countRun(item);
+          break;
+        }
         s.tools++;
         s.toolIds.add(item.toolCallId);
-        if (item.content.length > 0) s.toolsWithContent.add(item.id);
+        if (item.content.length > 0) s.toolsWithContent.add(item.toolCallId);
         s.diffs += item.content.filter(c => c.kind === 'diff').length;
         for (const c of item.content) {
           if (c.kind === 'diff') s.diffKeys.add(`${item.toolCallId}|${c.path}`);
@@ -143,8 +169,14 @@ const run = async (name: string): Promise<Stats> => {
       countItem(op.item);
     } else if (op.op === 'tool') {
       const t = op.item;
+      if (t.runs !== undefined) {
+        // a group morph re-projects — recount member coverage
+        countRun(t as ToolItem);
+        s.updates++;
+        continue;
+      }
       if (t.content !== undefined && t.content.length > 0) {
-        s.toolsWithContent.add(t.id);
+        s.toolsWithContent.add(t.toolCallId ?? `${t.id}`);
         s.diffs += t.content.filter(c => c.kind === 'diff').length;
         for (const c of t.content) {
           if (c.kind === 'diff') {
