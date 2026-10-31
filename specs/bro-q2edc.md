@@ -227,6 +227,124 @@ the banner, the archive's rows, and a row appended _while the pane
 runs_ all reach the screen. The last one is the property the whole
 migration is for — a live session streaming into the pane.
 
+## Vendored spike — `FasterPHP/acp-tui`
+
+The user's verdict on the Solid tree above: better, but still not
+it — too verbose, and the ask became "a control you feed events
+into that renders well out of the box". The candidate is
+`FasterPHP/acp-tui` (Apache-2.0, Bun + OpenTUI + Solid): a monorepo
+whose `packages/acp-model` is a framework-free ACP-update reducer
+and whose `packages/acp-tui/src/conversation/` is the card/list
+rendering it feeds. Not on npm — the packages are `private: true`.
+This section records the spike: what vendoring costs, what a real
+archive produces through their reducer, which modules are
+self-contained, and what to adopt.
+
+### The vendor
+
+`plugins/herdr/tui/vendor/acp-tui` is a **git submodule** pinned at
+upstream `70b8a6d` (v0.2.0) — upstream tracking stays cheap
+(`git submodule update --remote`), `.gitmodules` records the source.
+`tui/package.json` resolves the model as a `file:` dependency:
+
+```json
+"acp-model": "file:vendor/acp-tui/packages/acp-model"
+```
+
+`bun install` copies the package into `tui/node_modules` and pulls
+its declared dep — `@agentclientprotocol/sdk@1.5.0`, their exact
+pin, isolated inside tui scope (repo root carries `^1.7.0`, no
+conflict). `marked@17.0.1` and `zod` also resolve — bun walked the
+vendored workspace root's dependency set. **Two caveats:**
+`file:` deps are COPIES, not links — editing the vendored tree
+needs a reinstall; and a checkout without `--recurse-submodules`
+leaves the dir empty, breaking `bun install`. The tui package is
+outside the npm workspace so repo CI never builds it, but the
+operator step (`bun install`) documents the need.
+
+### The real-archive feed
+
+`spike-feed.ts` replays
+`native-af580313.events.jsonl` (25,562 rows, ~23 MB, a live loop
+archive) through `createSession()`/`reduce()`. The adapter maps
+rows to `ModelEvent`s: `session_opening` (mode `load` — the
+archive IS a replay, so every item gets `origin: "replay"`), each
+`update` row as `session_update` with the row's `ts`, each
+`turn stop` as `prompt_response` (the `turn_end` marker lands;
+duration is 0 since the archive never carries a `prompt_sent`),
+`turn start` as nothing (a `prompt_sent` would fabricate a
+`user_message`), permission rows as `permission_opened` with a
+minimal request, and a closing `session_opened` that finalises
+everything.
+
+Result, verbatim from the probe:
+
+```
+rows=25562 feedMs=11451
+items=6088 — tool_call=4643, agent_message=786, thought=199, marker=460
+byOrigin={"replay":6088}  byStatus={"final":6088}
+contentTypes={"text":4593,"diff":72,"terminal_unavailable":1}
+toolCalls=4643 withContent=4601 withRawOutput=0
+debug-dropped: unknown_mode=4  (no session_created → no modes list)
+state=idle stopReason=end_turn
+```
+
+Versus our `SessionModel` on the same rows: 266 ms, 500 items
+(the `MAX_ITEMS` bound evicts the rest). Every shape survives —
+tool calls with content, **72 diffs**, the terminal-unavailable
+note, all 460 turn boundaries — with zero fabricated user items.
+Post-`session_opened` rows land `origin: "other"` (verified): a
+live tail is observed-client activity, exactly the pane's posture.
+The 43× feed cost is the price of their immutable fold
+(`new Map(items)` + `[...order]` per event); it only matters on
+bulk replay — keep the `TAIL_BYTES` window and per-row live cost
+is the same as ours.
+
+### What imports standalone
+
+Probed by importing each module directly under bun from `tui/`:
+
+| module                                                                                                                | verdict                  | what it takes                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `acp-model` (whole)                                                                                                   | **take**                 | reducer + typed `Item` union (permission, plan, turn_end with usage, tool index, `rawOutputText`), `ItemOrigin` incl. `replay`, pure, sdk types only. Replaces `model.ts` wholesale behind a row→`ModelEvent` adapter.                                                                                                                                                      |
+| `conversation/view-model.ts`                                                                                          | **take**                 | `solid-js` + `import type Item` — nothing else. The collapse/snippet/cursor/anchor state machine; default is COLLAPSED with 10-row output snippets — the "not verbose" behaviour is their baseline.                                                                                                                                                                         |
+| `conversation/card.ts`                                                                                                | **adapt**                | pure row layout — rows of styled spans, no OpenTUI/Solid — but drags `marked`, `command-result`, `content`, `format`, `live-glyphs`→`glyphs`→`config/problems` (light), and `markdown/{code,context,emoji,layout,project,wrap}`. Imports as-is today; adoption means shimming their `theme/index` tokens to ours.                                                           |
+| `conversation/format.ts`                                                                                              | **adapt**                | collapsed-line formatting (`tool …`, `plan 3/5`, thought one-liner); drags `layout/modules`→`keys/hints`+`keys/keymap` for statusbar helpers — lift the item formatters, skip the key parts.                                                                                                                                                                                |
+| `conversation/content.ts`, `command-result.ts`, `glyphs.ts`, `live-glyphs.ts`, `list.ts`                              | **adapt**                | content-block→card-lines, envelope detection (exit code/output), glyph tables, solid glyph signals — each small; glyphs needs `config/problems` (itself light: `node:path` + `sanitise`).                                                                                                                                                                                   |
+| `conversation/markdown/*` (19 files)                                                                                  | **adapt — biggest lift** | their real renderer: lex/wrap/layout/draw/highlight/table/emoji/footnotes. Pulls `marked`, `grammars.ts` (23 MB bundled tree-sitter), `renderer/capabilities` (terminal probe), `theme/code`, `render/emoji`, `@opentui/core` drawables. Option A: take the subtree + grammar assets + shims. Option B (cheaper): keep `<markdown>`/`<code>` inside their row-layout frame. |
+| `conversation/window/heights.ts`, `entries/geometry/range`                                                            | **adapt**                | measured-height windowing over card layouts — needs the card subtree. Their answer to big sessions; our `MAX_ITEMS` cap answers it differently.                                                                                                                                                                                                                             |
+| `conversation/scroll.ts`                                                                                              | **adapt**                | anchor+following scroll controller; `renderer/wheel`→`capabilities` is terminal-specific — take the anchor logic, keep our scrollbox.                                                                                                                                                                                                                                       |
+| `conversation/scrollbar.ts`                                                                                           | **skip**                 | drags `selection/cells`→projection+rows — their selection machinery; `ScrollBoxRenderable` covers us.                                                                                                                                                                                                                                                                       |
+| `conversation/items.tsx`, `window/WindowedConversation.tsx`                                                           | **skip**                 | drag `app/context`, `keys/keymap`, `keys/register`, `renderer/mouse` — their app shell, key system and mouse layer are not ours.                                                                                                                                                                                                                                            |
+| `session/`, `config/`, `keys/`, `app/`, `agent/`, `platform/`, `render/`, `selection/`, `overlay/`, `find/`, `cli.ts` | **skip**                 | application machinery — sessions store, config schema, key bindings, screens.                                                                                                                                                                                                                                                                                               |
+| `fake-agent`                                                                                                          | **skip (useful)**        | scriptable ACP agent for tests — reference for our own fixtures, not a dependency.                                                                                                                                                                                                                                                                                          |
+
+API skew to price in: they pin `@opentui/*@0.6.6`; we run `0.8.0`.
+Every module that touches renderables (`draw`, `scroll`, `scrollbar`,
+`items.tsx`, `WindowedConversation`) needs an API pass — another
+reason the renderable-free modules are the take/adapt set.
+
+### Recommendation
+
+Adopt `acp-model` as the pane's model behind a thin
+`ArchiveRow`→`ModelEvent` adapter (`session_opening` once,
+`session_update` per row, `prompt_response` per `turn stop`,
+`session_opened` on attach-end — the live tail then flows in as
+`"other"` items with no extra seam). Adopt `view-model.ts` as the
+collapse/cursor/snippet machine. Adapt `card.ts` + `content` +
+`format` + `command-result` + `glyphs` as the card engine on
+Option B first — their row layout, our `<markdown>`/`<code>`
+drawables, our theme tokens — and keep our scrollbox, j/k and LED
+shell. That is the "control you feed events into" shape without
+their app: collapse-by-default cards, 10-row snippets, `⣿`-class
+glyph language, a model that has already eaten a 23 MB real
+archive. Re-evaluate the markdown subtree (Option A) only if the
+look still misses after the card engine lands.
+
+Spike artifacts: `vendor/acp-tui` (submodule @ `70b8a6d`),
+`tui/spike-feed.ts` (the replay probe + adapter), this section.
+`main.ts`/`app.tsx` untouched — adoption is a follow-on decision.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

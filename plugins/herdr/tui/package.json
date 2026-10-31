@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@opentui/core": "0.8.0",
+    "acp-model": "file:vendor/acp-tui/packages/acp-model",
     "@opentui/solid": "0.8.0",
     "solid-js": "^1.9.12",
     "web-tree-sitter": "^0.25.10"
