@@ -21,6 +21,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -1553,10 +1554,37 @@ function prepareSpawn(
  *  NEW file, so a pre-existing 0644 artifact is chmod'd FIRST — no byte
  *  of this write ever lands in a file that is still wide. `append`
  *  never truncates: it is for paths a shell `>>`/`tee -a` opens right
- *  after, creating them empty at 0600 when they are not there yet. */
+ *  after, creating them empty at 0600 when they are not there yet.
+ *
+ *  Never follow symlinks when repairing permissions or writing: a
+ *  planted symlink must not be able to redirect a chmod/write to an
+ *  arbitrary target (security). */
 function writePrivate(path: string, data: string, append = false): void {
+  // Never follow symlinks: refuse if the path (or an existing file) is a symlink
+  try {
+    const lst = lstatSync(path)
+    if (lst.isSymbolicLink()) {
+      throw new Error(`refusing to write through symlink ${path}`)
+    }
+  } catch (err: any) {
+    if (err?.message?.startsWith('refusing to write through symlink')) {
+      throw err
+    }
+    // ENOENT is fine
+  }
   if (existsSync(path)) {
     chmodSync(path, 0o600)
+  }
+  // Re-check immediately before write to reduce TOCTOU window
+  try {
+    const lst2 = lstatSync(path)
+    if (lst2.isSymbolicLink()) {
+      throw new Error(`refusing to write through symlink ${path}`)
+    }
+  } catch (err: any) {
+    if (err?.message?.startsWith('refusing to write through symlink')) {
+      throw err
+    }
   }
   writeFileSync(path, data, { mode: 0o600, flag: append ? 'a' : 'w' })
 }
