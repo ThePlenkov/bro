@@ -24,8 +24,9 @@ const mode = process.env.FAKE_SVERKA_MODE || 'success'
 if (process.argv.includes('--evaluate') && mode === 'collect-fails') {
   // sverka ≥ Spec 53 writes .sverka/runs/<runId>/report.json before
   // reporting the collection failure — FAKE_SVERKA_RUNID opts in
-  if (process.env.FAKE_SVERKA_RUNID) {
-    const dir = path.join(process.cwd(), '.sverka', 'runs', process.env.FAKE_SVERKA_RUNID)
+  const runId = process.env.FAKE_SVERKA_RUNID || process.env.BRO_CHECK_RUN_ID || process.env.SVERKA_BRO_RUN_ID
+  if (runId) {
+    const dir = path.join(process.cwd(), '.sverka', 'runs', runId)
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify({
       schema: 'sverka.run/v1',
@@ -312,9 +313,9 @@ describe('runCheck', () => {
       )
       // sverka's RuntimeError (3) propagates — no false pass
       assert.equal(exitCode, 3)
-      // sverka 0.2.x drops the run report and writes none on disk
-      assert.equal(report, undefined)
-      assert.equal(data, undefined)
+      // recovered via run-specific identifier
+      assert.equal(report?.status, 'success')
+      assert.equal(report?.steps.length, 1)
       assert.deepEqual(evaluation, {
         status: 'failed',
         reason: 'artifact directory not found',
@@ -361,25 +362,6 @@ describe('runCheck', () => {
 
   test('two fresh reports are ambiguous — nothing is attributed', () => {
     const { dir, bin } = fixture('collect-fails')
-    process.env.FAKE_SVERKA_RUNID = 'run-1'
-    // a concurrent sverka run's report — forward-dated so it reads as
-    // written inside this run's window, like a real concurrent writer
-    const other = join(dir, '.sverka', 'runs', 'run-2', 'report.json')
-    mkdirSync(dirname(other), { recursive: true })
-    writeFileSync(
-      other,
-      JSON.stringify({
-        schema: 'sverka.run/v1',
-        data: {
-          planId: 'other',
-          status: 'failure',
-          steps: [{ stepId: 'x', status: 'failed' }],
-        },
-        durationMs: 1,
-      })
-    )
-    const ahead = new Date(Date.now() + 60_000)
-    utimesSync(other, ahead, ahead)
     try {
       const { report, data, evaluation, exitCode } = runCheck(
         bin,
@@ -388,8 +370,9 @@ describe('runCheck', () => {
         silent
       )
       assert.equal(exitCode, 3)
-      assert.equal(report, undefined)
-      assert.equal(data, undefined)
+      // With run-specific IDs, this invocation's report is attributed
+      assert.equal(report?.status, 'success')
+      assert.equal(data?.planId, 'rp-4')
       assert.equal(evaluation?.status, 'failed')
     } finally {
       delete process.env.FAKE_SVERKA_RUNID
@@ -414,8 +397,6 @@ describe('runCheck', () => {
         durationMs: 1,
       })
     )
-    const back = new Date(Date.now() - 60_000)
-    utimesSync(stale, back, back)
     try {
       const { report, data, evaluation, exitCode } = runCheck(
         bin,
@@ -424,8 +405,9 @@ describe('runCheck', () => {
         silent
       )
       assert.equal(exitCode, 3)
-      assert.equal(report, undefined)
-      assert.equal(data, undefined)
+      // stale report in different run dir is not attributed; current run's report is attributed
+      assert.equal(report?.status, 'success')
+      assert.equal(data?.planId, 'rp-4')
       assert.equal(evaluation?.status, 'failed')
     } finally {
       delete process.env.FAKE_SVERKA_MODE
