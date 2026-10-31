@@ -42,13 +42,15 @@ function Home() {
         <section className="hero">
           <p className="kicker">prompt engineering peaked at "bro, wtf"</p>
           <h1>
-            Your agent opened a PR.
+            Deterministic lifecycle closure.
             <br />
-            Who merges it?
+            <span style={{ fontSize: '0.8em' }}>task → agent → PR → gate → debt</span>
           </h1>
           <p className="lede">
-            Not you. bro drives it — watches the review gate, answers the threads, fixes the findings, merges on
-            green, and sweeps the debt after. <em>Done is a verdict, not a vibe.</em>
+            <strong>ICP:</strong> maintainers and small teams with existing agents, a task store, and PR/CI.{' '}
+            <strong>JTBD:</strong> close work without gaps — bro drives the review gate to merge and sweeps
+            the debt after. Start with gate and debt — no fleet, no model gateway required.{' '}
+            <em>Done is a verdict, not a vibe.</em>
           </p>
           <Install />
         </section>
@@ -59,12 +61,13 @@ function Home() {
         </section>
 
         <section className="self">
-          <h2>The gate is the product</h2>
+          <h2>The wedge: gate + debt</h2>
           <p>
             One read, one verdict: <code>threads=0 ci=0 reviewers=0 sast=0</code> — that's what "ready to merge"
             means when bro says it. And merged still isn't done: reviewers' leftovers land in a public ledger
             instead of rotting in closed tabs. bro sweeps its own merged PRs —{' '}
-            <a href={`${BASE_URL}debt`}>the debt ledger is live</a>.
+            <a href={`${BASE_URL}debt`}>the debt ledger is live</a>. Start here with existing agents, a task store,
+            and PR/CI — no fleet, no model-gateway configuration required.
           </p>
         </section>
 
