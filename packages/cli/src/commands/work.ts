@@ -610,6 +610,54 @@ export interface WorktreeCreateResult {
   stacked: boolean
 }
 
+function worktreeCreateFail(
+  opts: EnterWorktreeOpts,
+  msg: string
+): never {
+  if (opts.throws === true) {
+    throw new Error(msg)
+  }
+  console.error(`error: ${msg}`)
+  process.exit(1)
+}
+
+function maybeReuseExistingWorktree(
+  path: string,
+  branch: string,
+  main: WorktreeInfo,
+  reusePath: boolean
+): WorktreeCreateResult | undefined {
+  if (!existsSync(path)) {
+    return undefined
+  }
+  const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
+  const commonOf = (dir: string) =>
+    gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
+  const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
+  if (reusePath && onBranch === branch && sameRepo) {
+    return { path, branch, branchExists: true, reused: true, stacked: false }
+  }
+  return undefined
+}
+
+function recordStackEdgeIfNeeded(
+  branch: string,
+  base: string | undefined,
+  main: WorktreeInfo,
+  defaultRef: string | undefined,
+  branchExists: boolean
+): boolean {
+  const stacked =
+    base !== undefined &&
+    base !== (main.branch ?? main.head) &&
+    base !== defaultRef &&
+    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
+  if (stacked && !branchExists) {
+    recordStackEdge(branch, base)
+  }
+  return stacked
+}
+
 /** The create half of `enterWorktree` — split out so `stack push` holds
  *  its push lock across exactly the plan→create window and runs the
  *  slower post-add steps outside it. Adds the sibling worktree (or
@@ -621,30 +669,17 @@ export interface WorktreeCreateResult {
  *  the same branch name is not this stack's member). */
 export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts
-  const fail = (msg: string): never => {
-    if (opts.throws === true) {
-      throw new Error(msg)
-    }
-    console.error(`error: ${msg}`)
-    process.exit(1)
-  }
   const path = worktreePathFor(main.path, slug)
-  if (existsSync(path)) {
-    const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
-    const commonOf = (dir: string) =>
-      gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
-    const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
-    if (reusePath && onBranch === branch && sameRepo) {
-      return { path, branch, branchExists: true, reused: true, stacked: false }
-    }
-    fail(`${path} already exists`)
+  const reused = maybeReuseExistingWorktree(path, branch, main, reusePath)
+  if (reused !== undefined) {
+    return reused
   }
-  // an existing branch under the target name means the slug names an
-  // in-flight task — check it out rather than failing on -b. The
-  // resolved default base is irrelevant here.
+  if (existsSync(path)) {
+    worktreeCreateFail(opts, `${path} already exists`)
+  }
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
   if (branchExists && !allowExisting) {
-    fail(`${branch} already exists`)
+    worktreeCreateFail(opts, `${branch} already exists`)
   }
   const args = ['worktree', 'add', path]
   if (branchExists) {
@@ -657,21 +692,9 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   }
   const res = gitTry(args)
   if (res.code !== 0) {
-    fail(`git worktree add failed — ${res.err}`)
+    worktreeCreateFail(opts, `git worktree add failed — ${res.err}`)
   }
-  // a stack edge is only a real edge when the base is a local branch —
-  // a raw commit-ish (--base abc123 / origin/main) yields no merge order.
-  // The edge records HERE, right after the add: it is part of the
-  // plan→create window — a re-push of the same slug holds the push lock
-  // until it lands, and must observe the member as stacked.
-  const stacked =
-    base !== undefined &&
-    base !== (main.branch ?? main.head) &&
-    base !== defaultRef &&
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
-  if (stacked && !branchExists) {
-    recordStackEdge(branch, base)
-  }
+  const stacked = recordStackEdgeIfNeeded(branch, base, main, defaultRef, branchExists)
   return { path, branch, branchExists, reused: false, stacked }
 }
 
