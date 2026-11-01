@@ -589,6 +589,16 @@ function PromptRow(props: {
   );
 }
 
+/** Renders as a `┃` card — prompt, permission ask, or a text row
+ *  whose body parses as a verdict. Mirrors the ItemRow dispatch so
+ *  the margin rule gives cards air without duplicating branches. */
+const cardRow = (item: Item): boolean => {
+  if (item.kind === 'prompt' || item.kind === 'permission') return true;
+  const vi = item.vi as { kind?: string } | undefined;
+  if (vi?.kind === 'permission_record') return true;
+  return 'text' in item && verdictOf(item.text) !== undefined;
+};
+
 /** One session item — agent speech, a dim thought, a side line, or
  *  a tool card. Items carrying `vi` render the impl's own row
  *  language (acp impl: the vendored `format.ts` one-liners);
@@ -1073,12 +1083,18 @@ function Pane(props: {
             <Show when={props.store.state.byId[id]} keyed>
               {item => {
                 // their list.ts rhythm — a blank row on every group
-                // change and before user/agent text; activity stays tight
+                // change and before user/agent text; activity stays tight.
+                // A `┃` card (prompt / verdict / permission) is an
+                // OBJECT: one blank row before and after, whatever the
+                // group rhythm says — the time-head hug never eats a
+                // card's air (addendum 26)
                 const margin = () => {
                   if (index() === 0) return 0;
                   const prevId = props.store.state.order[index() - 1];
                   const prev = prevId === undefined ? undefined : props.store.state.byId[prevId];
-                  return prev === undefined ? 0 : spacingBefore(itemGroup(prev), itemGroup(item));
+                  if (prev === undefined) return 0;
+                  const base = spacingBefore(itemGroup(prev), itemGroup(item));
+                  return Math.max(base, cardRow(prev) || cardRow(item) ? 1 : 0);
                 };
                 return (
                   // the row's own box — its `id` is the scrollbox's
