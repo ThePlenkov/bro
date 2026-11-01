@@ -23,8 +23,8 @@ export interface WlResult {
   err: string
 }
 
-function wl(args: string[]): WlResult {
-  const p = spawnSync('wl', args, { // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
+function wl(call: { args: string[] }): WlResult {
+  const p = spawnSync('wl', call.args, { // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 120_000,
@@ -104,7 +104,20 @@ export interface WantedRow {
  *  is addressed to the reader (selfRig, the claimable-work surface);
  *  anything past open is addressed back to the poster, who owes the
  *  verdict. */
-export function projectWanted(row: WantedRow, selfRig: string | undefined): { envelopes: MeshEnvelope[]; errors: string[] } {
+export function projectWanted(
+  row: WantedRow,
+  selfRig?: string,
+): { envelopes: MeshEnvelope[]; errors: string[] }
+export function projectWanted(input: { row: WantedRow; selfRig?: string }): {
+  envelopes: MeshEnvelope[]
+  errors: string[]
+}
+export function projectWanted(
+  rowOrInput: WantedRow | { row: WantedRow; selfRig?: string },
+  selfRig?: string,
+): { envelopes: MeshEnvelope[]; errors: string[] } {
+  const row = 'row' in rowOrInput ? rowOrInput.row : rowOrInput
+  const self = 'row' in rowOrInput ? rowOrInput.selfRig : selfRig
   const poster = handleToRig(row.posted_by)
   if (poster === null) {
     return { envelopes: [], errors: [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`] }
@@ -128,9 +141,9 @@ export function projectWanted(row: WantedRow, selfRig: string | undefined): { en
   }
   return {
     envelopes: [
-      projectRequest(row, ctx, selfRig),
-      ...projectClaim(row, ctx),
-      ...projectCompletion(row, ctx),
+      projectRequest({ row, ctx, selfRig: self }),
+      ...projectClaim({ row, ctx }),
+      ...projectCompletion({ row, ctx }),
     ],
     errors,
   }
@@ -147,7 +160,8 @@ interface BoardCtx {
 /** The open-row request — `to` is the projection's only judgement:
  *  an open row is addressed to the reader (selfRig, the claimable-work
  *  surface); anything past open is addressed back to the poster. */
-function projectRequest(row: WantedRow, ctx: BoardCtx, selfRig: string | undefined): MeshEnvelope {
+function projectRequest(input: { row: WantedRow; ctx: BoardCtx; selfRig?: string }): MeshEnvelope {
+  const { row, ctx, selfRig } = input
   const priority = termPriority(row.priority)
   const open = row.status === undefined || row.status === 'open'
   return {
@@ -160,7 +174,8 @@ function projectRequest(row: WantedRow, ctx: BoardCtx, selfRig: string | undefin
   }
 }
 
-function projectClaim(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
+function projectClaim(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
+  const { row, ctx } = input
   return ctx.claimer === null
     ? []
     : [{ ...ctx.base, id: `${row.id}#claim`, kind: 'claim' as const, from: ctx.claimer, to: ctx.poster, terms: {} }]
@@ -169,7 +184,8 @@ function projectClaim(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
 /** The post-claim rows: a completion carrying evidence is the result
  *  record; an accepted/rejected completion row is the verdict; a
  *  completed board status with no verdict row reads as the accept. */
-function projectCompletion(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
+function projectCompletion(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
+  const { row, ctx } = input
   const evidence = (row.completions ?? [])
     .flatMap((c) => (typeof c.evidence === 'string' && c.evidence !== '' ? [c.evidence] : []))
     .at(0)
@@ -185,12 +201,13 @@ function projectCompletion(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
           evidence: [{ kind: 'url' as const, ref: evidence }],
         }]
       : []
-  return [...result, ...projectVerdict(row, ctx)]
+  return [...result, ...projectVerdict({ row, ctx })]
 }
 
 /** The verdict row: an accepted/rejected completion is it; a
  *  `completed` status with none still reads as the accept. */
-function projectVerdict(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
+function projectVerdict(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
+  const { row, ctx } = input
   const verdict = (row.completions ?? []).find((c) => c.state === 'accepted' || c.state === 'rejected')
   if (verdict !== undefined) {
     const kind = verdict.state === 'accepted' ? 'accept' : 'reject'
@@ -201,8 +218,8 @@ function projectVerdict(row: WantedRow, ctx: BoardCtx): MeshEnvelope[] {
     : []
 }
 
-function wlJson<T>(args: string[]): { data?: T; error?: string } {
-  const r = wl(args)
+function wlJson<T>(call: { args: string[] }): { data?: T; error?: string } {
+  const r = wl(call)
   if (r.code !== 0) {
     return { error: r.err || r.out }
   }
@@ -236,7 +253,7 @@ export function postWanted(
       : ['--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority))))]),
     '--json',
   ]
-  const r = wlJson<{ id?: string }>(args)
+  const r = wlJson<{ id?: string }>({ args })
   if (r.error !== undefined) {
     return { error: `wl post failed — ${r.error}` }
   }
@@ -245,7 +262,7 @@ export function postWanted(
 }
 
 export function claimWanted(t: WlTarget): { error?: string } {
-  const r = wl([...remoteArgs(t.remote), 'claim', t.id])
+  const r = wl({ args: [...remoteArgs(t.remote), 'claim', t.id] })
   return r.code === 0 ? {} : { error: `wl claim ${t.id} failed — ${r.err || r.out}` }
 }
 
@@ -255,12 +272,12 @@ export function completeWanted(t: WlTarget & { evidence?: MeshRef[] }): { error?
   if (ev !== undefined) {
     args.push('--evidence', ev)
   }
-  const r = wl(args)
+  const r = wl({ args })
   return r.code === 0 ? {} : { error: `wl done ${t.id} failed — ${r.err || r.out}` }
 }
 
 export function acceptWanted(t: WlTarget): { error?: string } {
-  const r = wl([...remoteArgs(t.remote), 'accept', t.id])
+  const r = wl({ args: [...remoteArgs(t.remote), 'accept', t.id] })
   return r.code === 0 ? {} : { error: `wl accept ${t.id} failed — ${r.err || r.out}` }
 }
 
@@ -269,7 +286,7 @@ export function rejectWanted(t: WlTarget & { body?: string }): { error?: string 
   if (t.body !== undefined && t.body !== '') {
     args.push('--reason', t.body)
   }
-  const r = wl(args)
+  const r = wl({ args })
   return r.code === 0 ? {} : { error: `wl reject ${t.id} failed — ${r.err || r.out}` }
 }
 
@@ -277,7 +294,9 @@ export function rejectWanted(t: WlTarget & { body?: string }): { error?: string 
  *  fork. Rows are returned raw; `projectWanted` turns them into the
  *  records the thread reduction reads. */
 export function browseWanted(remote: string): { rows: WantedRow[]; error?: string } {
-  const r = wlJson<WantedRow[] | { rows?: WantedRow[] }>([...remoteArgs(remote), 'browse', '--json', '--limit', '500'])
+  const r = wlJson<WantedRow[] | { rows?: WantedRow[] }>({
+    args: [...remoteArgs(remote), 'browse', '--json', '--limit', '500'],
+  })
   if (r.error !== undefined) {
     return { rows: [], error: `wl browse failed — ${r.error}` }
   }
@@ -287,7 +306,7 @@ export function browseWanted(remote: string): { rows: WantedRow[]; error?: strin
 
 /** One thread's board row — `wl status <id> --json` over the commons. */
 export function wantedStatus(t: WlTarget): { row?: WantedRow; error?: string } {
-  const r = wlJson<WantedRow>([...remoteArgs(t.remote), 'status', t.id, '--json'])
+  const r = wlJson<WantedRow>({ args: [...remoteArgs(t.remote), 'status', t.id, '--json'] })
   if (r.error !== undefined) {
     return { error: `wl status ${t.id} failed — ${r.error}` }
   }
