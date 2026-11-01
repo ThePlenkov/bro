@@ -244,16 +244,14 @@ const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/
 
 /** Worker classification for one locked pid — a spawned (never
  *  interactive) devin session. Probes:
+ *  BRO_HOOKS=0 marks a machine backend (acp provider/conductor service
+ *  child) as not a worker (never counted against
+ *  agents.devin.maxWorkers) and takes precedence over the worker badge;
  *  the BRO_AGENT_ID env badge every bro backend pins into the worker's
- *  env (inherited by the devin child a wrapper spawns) — checked first and
- *  takes precedence; and a non-terminal stdin (`fd/0` outside the tty
- *  devices — headless pipes, null, sockets; interactive devin reads a
- *  terminal).
- *
- *  BRO_HOOKS=0 is an exclusion that overrides the stdin probe: it marks
- *  a machine backend (acp provider/conductor service child) as not a
- *  worker (never counted against agents.devin.maxWorkers), but only when
- *  BRO_AGENT_ID is not present (the worker badge takes precedence).
+ *  env (inherited by the devin child a wrapper spawns) classifies a
+ *  worker; and a non-terminal stdin (`fd/0` outside the tty devices —
+ *  headless pipes, null, sockets; interactive devin reads a terminal)
+ *  classifies a worker.
  *
  *  A pid neither probe verifies is NOT a worker: unreadable state only
  *  undercounts the worker lane — while phantom workers would refuse
@@ -266,17 +264,18 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   let environ: string | undefined
   try {
     environ = readFileSync(join(dir, 'environ'), 'utf8')
+    // BRO_HOOKS=0 marks a machine backend (acp provider/conductor
+    // service child) — not an agent worker; never count against
+    // agents.devin.maxWorkers. Takes precedence over BRO_AGENT_ID because
+    // a worker may spawn an ACP backend that inherits the worker badge.
+    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
+      return false
+    }
     // NUL-anchored: environ entries are NUL-separated and an
     // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
     // AGENT_ENV_RE convention)
     if (/(?:^|\0)BRO_AGENT_ID=/.test(environ)) {
       return true
-    }
-    // BRO_HOOKS=0 marks a machine backend (acp provider/conductor
-    // service child) — not an agent worker; never count against
-    // agents.devin.maxWorkers
-    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
-      return false
     }
   } catch {
     // unreadable environ — the stdin probe still applies

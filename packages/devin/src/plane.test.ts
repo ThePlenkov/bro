@@ -217,8 +217,9 @@ describe('devinPidIsWorker', () => {
     withProc((procDir, mk) => {
       mk(601, 'PATH=/bin\0BRO_HOOKS=0\0', 'pipe:[1]')
       assert.equal(devinPidIsWorker(601, procDir), false)
+      // BRO_HOOKS=0 takes precedence (an ACP backend spawned from a worker inherits BRO_AGENT_ID)
       mk(602, 'PATH=/bin\0BRO_HOOKS=0\0BRO_AGENT_ID=abc\0', 'pipe:[1]')
-      assert.equal(devinPidIsWorker(602, procDir), true)
+      assert.equal(devinPidIsWorker(602, procDir), false)
       // lookalikes must not trigger the exclusion (NUL-anchored like BRO_AGENT_ID)
       mk(603, 'PATH=/bin\0XBRO_HOOKS=0\0', 'pipe:[1]')
       assert.equal(devinPidIsWorker(603, procDir), true)
