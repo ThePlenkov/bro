@@ -14,7 +14,7 @@
  * closes with its panes; state lives only in the plugin's own
  * `state.liveViews` map.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   agentsJson,
@@ -27,6 +27,7 @@ import {
   paneIdle,
   paneList,
   pidAlive,
+  STATE_DIR,
   shq,
 } from './lib.ts';
 import { bun } from './sessions.ts';
@@ -106,12 +107,21 @@ function viewCommand(a: LiveAgent): string {
  *  already-open workspace and its first pane is someone's shell —
  *  the view must never hijack it. A fresh pane also has no
  *  scrollback: THE clean-start the terminal-side \e[3J cannot
- *  promise under herdr. */
-function openViewWorkspace(a: LiveAgent, main: string): string | undefined {
+ *  promise under herdr.
+ *
+ *  The cwd is a per-agent scratch dir, NEVER the agent's worktree
+ *  or the repo root: `workspace create` dedupes by cwd — a real
+ *  path that already carries a user workspace gets ADOPTED and
+ *  relabeled (field-found: w0 'bro' became a view label). A scratch
+ *  path collides with nothing, so create always yields a workspace
+ *  the plugin owns. */
+function openViewWorkspace(a: LiveAgent): string | undefined {
+  const cwd = join(STATE_DIR, 'view-cwd', a.id);
+  mkdirSync(cwd, { recursive: true });
   const res = herdrTry<{
     workspace_id?: string;
     workspace?: { workspace_id?: string };
-  }>(['workspace', 'create', '--cwd', a.worktree ?? main, '--label', `${VIEW_PREFIX} ${a.id}`]);
+  }>(['workspace', 'create', '--cwd', cwd, '--label', `${VIEW_PREFIX} ${a.id}`]);
   return res?.workspace_id ?? res?.workspace?.workspace_id;
 }
 
@@ -120,7 +130,7 @@ function openViewWorkspace(a: LiveAgent, main: string): string | undefined {
  *  managed session pane are skipped — one view per agent, never two. */
 export function convergeLiveViews(
   base: string,
-  main: string,
+  _main: string,
   state: PluginState,
   coveredWorktrees: Set<string>
 ): void {
@@ -158,7 +168,7 @@ export function convergeLiveViews(
       if (rec.owned === true) herdrTry(['workspace', 'close', rec.workspace]);
       delete state.liveViews[a.id];
     }
-    const ws = openViewWorkspace(a, main);
+    const ws = openViewWorkspace(a);
     if (ws === undefined) {
       log(`view ${a.id}: workspace open failed`);
       continue;

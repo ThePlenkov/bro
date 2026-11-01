@@ -764,25 +764,29 @@ without a worktree made the archive path `ctxDir` → ENOTDIR on
 fleetStatusPath); `loadState` reconstructed `PluginState`
 field-by-field and DROPPED `liveViews`, so records never survived
 a tick (every converge would have re-opened duplicate workspaces).
-**Render-mode regression found in the field, reverted**: under a
+**Render-mode regression found in the field, resolved**: under a
 real herdr pane the feed painted blank even though `impl.drain()`
 delivered ~7.3k ops into `writer.apply` and `applyOps` yielded
 items in isolation. Root cause: `split-footer`'s render geometry
 gives the renderable tree ONLY the footer strip
 (`renderHeight = footerHeight`, `renderOffset = terminalHeight - N`)
 — the scroll region is fed by _captured stdout_, never by
-renderables, so a renderable feed can never reach it, and a
-scrollbox collapses to ~1 row. Addendum 16's split-footer was
-reverted to `main-screen`: the tree gets the full screen and a
-plain column of rows overflows into native scrollback; the
-scrollbox is gone for the same reason (key-scrolling is now
-herdr's — copy-mode/wheel; `pane.scroll*` no-ops). Identity+keys
-ride the frame's last rows rather than pinning — the addendum-16
-complaint (chrome scrolls off during replay) is the accepted
-trade until a captured-stdout feed redesign. Verified live:
-`🤖 view:*` panes render prompt `┃` blocks, `⏺`/`▸` rows, tool
-cards, and the pinned-pair chrome. `pane run` does NOT replace a
-busy pane — code changes need a fresh workspace to be seen.
+renderables. The first attempt reverted to `main-screen`, which
+restored visible paint but silently CLIPPED every row past the
+viewport (a 72-row replay yielded exactly 48 lines, 50 of 70 tool
+rows lost — nothing ever reaches herdr scrollback). The final
+shape is the designed mechanism: `screenMode: 'split-footer'` +
+`footerHeight: TAIL_BUDGET + 3` keeps a bounded live tail plus the
+identity/keys chrome as renderables, while `createPane` retires
+oldest items once the tail exceeds `TAIL_BUDGET` rows and
+`main.ts` `process.stdout.write`s their `printLines()` form —
+OpenTUI captures stdout into the scroll region and herdr's native
+scrollback owns wheel/copy/select. Verified live: a 70-tool
+replay yields 148 scrollback lines (`max_offset_from_bottom`
+> 100), the mktj6 pane shows 573; prompt `┃` blocks, compact
+> `⏺ ✓` rows, and the pinned chrome all present. `pane run` does
+> NOT replace a busy pane — code changes need a fresh workspace to
+> be seen.
 
 ## Risks
 

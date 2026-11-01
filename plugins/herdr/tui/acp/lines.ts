@@ -94,20 +94,23 @@ const firstLine = (s: string): string => {
   return i < 0 ? s : s.slice(0, i);
 };
 
-/** `$ ⣿ execute  Bash  arg …           #1` — status glyph, wire kind,
- *  title, clipped arg, right-aligned tail. Their one-liner language. */
+/** `⏺ ✓ Bash arg …           #1` — the mass row: their `⏺` bullet,
+ *  the status glyph inline, title + clipped arg dim, right-aligned
+ *  tail. One compact row per call; output lives under it only when
+ *  the card is open — never a box, never a rule (opencode grammar). */
 const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string): Segment[] => {
   const live = item.toolStatus === 'in_progress' || item.toolStatus === 'pending';
   const g = live
     ? { text: LIVE[frame % LIVE.length] ?? '⠋', token: 'glyph.live' }
     : (TOOL_GLYPH[item.toolStatus] ?? { text: '○', token: 'marker' });
   const segs: Segment[] = [
-    { text: '$ ', token: 'marker' },
+    { text: '⏺ ', token: 'marker' },
     { text: `${g.text} `, token: g.token },
-    { text: item.toolKind ?? 'tool', token: 'kind' },
-    { text: '  ', token: 'marker' },
-    { text: item.title === '' ? (item.toolName ?? 'tool') : item.title, token: 'title' },
+    { text: item.title === '' ? (item.toolName ?? 'tool') : item.title, token: 'arg' },
   ];
+  if (item.toolKind !== undefined && item.toolKind !== null) {
+    segs.push({ text: ` [${item.toolKind}]`, token: 'arg' });
+  }
   const head1 = arg === undefined ? '' : firstLine(arg).trim();
   if (head1 !== '') segs.push({ text: `  ${head1}`, token: 'arg' });
   const tail = ` #${item.index}`;
@@ -230,9 +233,15 @@ const isJsonDocument = (text: string): boolean => {
   }
 };
 
+/** Output that carries nothing — an agent reporting `(no output)` or
+ *  whitespace is a silent row, and silent rows never paint. */
+const EMPTY_OUTPUT = /^\s*(?:\(no output\))?\s*$/;
+
 /** The expanded tool body — our card language: numbered diff hunks
  *  with added/removed row fills, the terminal notice, a blank row
- *  between blocks, `▸ JSON` for pure-JSON results. */
+ *  between blocks, `▸ JSON` for pure-JSON results. Text output is
+ *  capped at 3 lines then `+N more`, and `(no output)` results are
+ *  dropped before any row exists. */
 export const acpCardRows = (vi: unknown, width: number): CardLine[] => {
   const item = vi as TheirItem;
   if (item.kind !== 'tool_call') return [];
@@ -246,6 +255,8 @@ export const acpCardRows = (vi: unknown, width: number): CardLine[] => {
   const blank = (): void => {
     if ((rows.at(-1)?.segments.length ?? 0) > 0) rows.push({ segments: [] });
   };
+  let textShown = 0;
+  let textHidden = 0;
   for (const c of item.content) {
     if (c.type === 'diff') {
       blank();
@@ -276,11 +287,21 @@ export const acpCardRows = (vi: unknown, width: number): CardLine[] => {
         segments: [{ text: '▸ terminal output unavailable', token: 'arg' }],
       });
     } else if (c.type === 'text') {
+      if (EMPTY_OUTPUT.test(c.text)) continue;
       blank();
       for (const l of c.text.split('\n')) {
-        rows.push({ segments: [{ text: clipTo(l, w), token: 'title' }] });
+        if (l === '') continue;
+        if (textShown >= 3) {
+          textHidden++;
+          continue;
+        }
+        textShown++;
+        rows.push({ segments: [{ text: clipTo(l, w), token: 'arg' }] });
       }
     }
+  }
+  if (textHidden > 0) {
+    rows.push({ segments: [{ text: `+${textHidden} more`, token: 'arg' }] });
   }
   return rows;
 };

@@ -121,6 +121,48 @@ describe('the Solid session pane', () => {
     }
   });
 
+  test('retiring the tail prints rows and keeps the strip bounded', async () => {
+    const { mountPane } = await loadPane();
+    const setup = await createTestRenderer({ width: 60, height: 20 });
+    const printed: string[] = [];
+    const pane = await mountPane({
+      renderer: setup.renderer,
+      meta: { worktree: '/tmp/wt' },
+      onRetire: items => {
+        for (const it of items) printed.push(`RETIRED:${it.id}`);
+      },
+    });
+    try {
+      for (let i = 0; i < 25; i++) {
+        pane.writer.apply([
+          {
+            op: 'append',
+            item: {
+              id: i,
+              kind: 'tool',
+              toolCallId: `t${i}`,
+              title: `grep p${i}`,
+              status: 'completed',
+              bodyLanded: true,
+              collapsed: false,
+              foldTouched: false,
+              content: [{ kind: 'text', text: `out-${i}` }],
+            },
+          },
+        ]);
+      }
+      await setup.flush();
+      const frame = await setup.captureCharFrame();
+      // the strip holds only the tail — the front rows retired and
+      // were handed to the printer, never clipped away silently
+      assert.ok(printed.length >= 15, `expected ≥15 retired, got ${printed.length}`);
+      assert.match(frame, /grep p24/);
+      assert.doesNotMatch(frame, /grep p0\b/);
+    } finally {
+      await setup.dispose();
+    }
+  });
+
   test('folding the selected card hides its body', async () => {
     const p = await mount();
     try {

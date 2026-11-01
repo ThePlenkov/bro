@@ -29,7 +29,7 @@ import {
   segStyle,
   spacingBefore,
 } from './acp/lines.ts';
-import type { Item, Op, ToolContent, ToolItem } from './model.ts';
+import type { Item, Op, ToolItem } from './model.ts';
 import {
   applyOps,
   emptyState,
@@ -41,13 +41,13 @@ import {
 import { ledColor, theme } from './theme.ts';
 import { type VerdictView, verdictOf } from './verdict.ts';
 import {
-  argBody,
   argHead,
-  cardBorderColor,
   cardGlyphColor,
-  contentLineCount,
-  diffText,
+  hhmm,
+  rowHeight,
   sideColor,
+  TAIL_BUDGET,
+  toolBodyLines,
 } from './view.ts';
 
 /** The store the tree renders from. */
@@ -102,7 +102,8 @@ export interface Pane {
 export function createPane(
   meta?: Partial<PaneMeta>,
   foldAll?: boolean,
-  copyItem?: (item: Item) => string
+  copyItem?: (item: Item) => string,
+  onRetire?: (items: Item[]) => void
 ): Pane {
   const [state, setState] = createStore<PaneState>(emptyState(meta, foldAll));
   let plain: PaneState = emptyState(meta, foldAll);
@@ -112,12 +113,32 @@ export function createPane(
     setState(reconcile(plain, { key: null }));
   };
 
+  /** The live tail's row budget is the footer strip minus chrome;
+   *  anything pushed past it retires — the caller prints its lines
+   *  to captured stdout (scroll region → real scrollback) and the
+   *  tree evicts it. Retired rows are immutable history; the tail's
+   *  recent items keep repainting live. */
+  const retire = (next: PaneState): PaneState => {
+    if (onRetire === undefined) return next;
+    let total = 0;
+    for (const id of next.order) total += rowHeight(next.byId[id] as Item);
+    if (total <= TAIL_BUDGET) return next;
+    const retired: number[] = [];
+    for (const id of next.order) {
+      if (total <= TAIL_BUDGET || retired.length >= next.order.length - 1) break;
+      retired.push(id);
+      total -= rowHeight(next.byId[id] as Item);
+    }
+    onRetire(retired.map(id => next.byId[id] as Item));
+    return applyOps(next, [{ op: 'evict', ids: retired }]);
+  };
+
   return {
     store: { state },
     writer: {
       apply(ops) {
         if (ops.length === 0) return;
-        publish(applyOps(plain, ops));
+        publish(retire(applyOps(plain, ops)));
       },
       select(delta) {
         publish({ ...plain, selected: moveSelection(plain, delta) });
@@ -217,37 +238,12 @@ function Spinner(props: { fg: string }) {
   return <text fg={props.fg} content={SPINNER[tick() % SPINNER.length]} />;
 }
 
-/** A tool card's content entry that the pane cannot render — say
- *  what it was, the way the line renderer does. */
-function describeContent(entry: ToolContent): string {
-  if (entry.kind === 'terminal') return `terminal output is not archived (terminal ${entry.id})`;
-  if (entry.kind === 'unknown') return `[${entry.type}]`;
-  return '';
-}
-
-/** One content entry → the block that renders it. */
-function ToolBody(props: { item: ToolItem; syntax: SyntaxStyle }) {
-  return (
-    <For each={props.item.content}>
-      {entry => {
-        if (entry.kind === 'text') {
-          return <code content={entry.text} filetype="text" syntaxStyle={props.syntax} />;
-        }
-        if (entry.kind === 'diff') {
-          return <diff diff={diffText(entry)} view="unified" filetype="diff" />;
-        }
-        return <text attributes={TextAttributes.DIM} content={describeContent(entry)} />;
-      }}
-    </For>
-  );
-}
-
-/** The tool card — a rounded box whose header names the call and
- *  whose body holds the arg block (a heredoc renders across lines)
- *  and the finished output. Selected reads at a glance: accent
- *  border over a subtle surface. */
-function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolean }) {
-  const argBlock = createMemo(() => argBody(props.item));
+/** The tool call — the feed's mass row, never a box: `⏺` + status
+ *  glyph + the call's name and short arg, all dim. Non-empty output
+ *  renders dim+indented under it, capped at 3 lines then `+N more`;
+ *  `(no output)` results paint nothing — one compact row per call
+ *  (opencode grammar — the first demo's shape restored). */
+function ToolCard(props: { item: ToolItem; selected: boolean }) {
   const kind = () =>
     props.item.toolKind !== undefined && props.item.toolKind !== ''
       ? ` [${props.item.toolKind}]`
@@ -256,18 +252,16 @@ function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolea
     const a = argHead(props.item);
     return a !== '' ? ` ${a}` : '';
   };
-  const bodyLines = () => contentLineCount(props.item);
+  const body = createMemo(() => toolBodyLines(props.item));
   return (
     <box
-      border
-      borderStyle="rounded"
-      borderColor={cardBorderColor(props.item.status, props.selected)}
-      backgroundColor={props.selected ? theme.surface : undefined}
-      paddingLeft={1}
-      paddingRight={1}
+      flexDirection="column"
       flexShrink={0}
+      width="100%"
+      backgroundColor={props.selected ? theme.surface : undefined}
     >
       <box flexDirection="row" height={1} flexShrink={0}>
+        <text fg={theme.muted} attributes={TextAttributes.DIM} content="⏺ " />
         <Show
           when={props.item.status === 'live'}
           fallback={
@@ -279,32 +273,33 @@ function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolea
         >
           <Spinner fg={theme.warning} />
         </Show>
+        <text fg={theme.muted} attributes={TextAttributes.DIM} content={` ${props.item.title}`} />
         <text
-          attributes={props.item.status === 'live' ? 0 : TextAttributes.BOLD}
-          content={` ${props.item.title}`}
+          fg={theme.muted}
+          attributes={TextAttributes.DIM}
+          content={`${kind()}${argHeadSeg()}`}
         />
-        <text fg={theme.muted} content={`${kind()}${argHeadSeg()}`} />
       </box>
       <Show
         when={
-          props.item.collapsed &&
-          (!props.selected || props.item.foldTouched === true) &&
-          bodyLines() > 0
-        }
-      >
-        <text fg={theme.muted} content={`… ${bodyLines()} more`} flexShrink={0} />
-      </Show>
-      <Show
-        when={
           (!props.item.collapsed || (props.selected && props.item.foldTouched !== true)) &&
-          (props.item.content.length > 0 || argBlock() !== undefined)
+          body().lines.length > 0
         }
       >
-        <box paddingLeft={1} flexShrink={0}>
-          <Show when={argBlock()}>
-            {arg => <code content={arg()} filetype="bash" syntaxStyle={props.syntax} />}
+        <box flexDirection="column" paddingLeft={2} flexShrink={0}>
+          <For each={body().lines}>
+            {l => (
+              <text fg={theme.muted} attributes={TextAttributes.DIM} content={l} flexShrink={0} />
+            )}
+          </For>
+          <Show when={body().more > 0}>
+            <text
+              fg={theme.muted}
+              attributes={TextAttributes.DIM}
+              content={`+${body().more} more`}
+              flexShrink={0}
+            />
           </Show>
-          <ToolBody item={props.item} syntax={props.syntax} />
         </box>
       </Show>
     </box>
@@ -573,11 +568,16 @@ function ItemRow(props: {
     // as a dim HH:MM — one glance tells WHEN the step happened
     <box flexDirection="row" flexShrink={0} width="100%">
       <Show when={props.item.at !== undefined}>
-        <text
-          fg={theme.muted}
-          attributes={TextAttributes.DIM}
-          content={`${hhmm(props.item.at)} `}
-        />
+        {/* the stamp needs an explicit width — an auto-width <text>
+         *  in a flex row shrinks to one column and its digits wrap
+         *  vertically (field-found: `:`/`4`/`4` down the gutter) */}
+        <box width={6} flexShrink={0}>
+          <text
+            fg={theme.muted}
+            attributes={TextAttributes.DIM}
+            content={`${hhmm(props.item.at)} `}
+          />
+        </box>
       </Show>
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <Show
@@ -690,7 +690,7 @@ function ItemRow(props: {
                     </Show>
                   }
                 >
-                  {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+                  {item => <ToolCard item={item} selected={props.selected} />}
                 </Show>
               </Show>
             </Show>
@@ -700,15 +700,6 @@ function ItemRow(props: {
     </box>
   );
 }
-
-/** `at` → the gutter's `HH:MM` (local time — the reader's clock, not
- *  the journal's UTC). Missing/unparseable stamps render nothing. */
-const hhmm = (at: string | undefined): string => {
-  if (at === undefined) return '';
-  const d = new Date(at);
-  if (Number.isNaN(d.getTime())) return '';
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-};
 
 /** The verdict control as their `┃` card — a dim title, the badge
  *  line in emphasis (their "recommended option" reads), the answer
@@ -923,12 +914,16 @@ export async function mountPane(opts: {
   foldAll?: boolean;
   /** The impl's copy text for an item — Ctrl+C's payload. */
   copyItem?: (item: Item) => string;
+  /** Called with the items the tail budget just retired — the shell
+   *  prints their lines to captured stdout (scroll region → native
+   *  scrollback). Unset keeps every item retained (tests, dumps). */
+  onRetire?: (items: Item[]) => void;
 }): Promise<Pane> {
   // mouse capture OFF — the pane uses no mouse features, and holding
   // reporting steals native selection (addendum 7: copy must work
   // without Shift; herdr's own selection rides the same release)
   opts.renderer.useMouse = false;
-  const pane = createPane(opts.meta, opts.foldAll, opts.copyItem);
+  const pane = createPane(opts.meta, opts.foldAll, opts.copyItem, opts.onRetire);
   const syntax = syntaxStyle(opts.renderer.nativeScene);
   const [toast, setToast] = createSignal('');
   let scroller: ScrollBoxRenderable | undefined;

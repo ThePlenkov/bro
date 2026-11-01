@@ -6,7 +6,7 @@
  * terminal: the tree is Bun-only (native FFI), the formatting is not.
  */
 import { clip, firstLine } from '../../../packages/providers/src/acp-render.ts';
-import type { ToolContent, ToolItem, ToolStatus } from './model.ts';
+import type { Item, ToolContent, ToolItem, ToolStatus } from './model.ts';
 import { theme } from './theme.ts';
 
 /** The arg's header segment — its first meaningful line clipped to
@@ -63,6 +63,93 @@ export function contentLineCount(item: ToolItem): number {
   const arg = argBody(item);
   if (arg !== undefined) n += arg.split('\n').length;
   return n;
+}
+
+/** `at` → the `HH:MM` gutter stamp (local time — the reader's
+ *  clock, not the journal's UTC). Missing stamps render nothing. */
+export const hhmm = (at: string | undefined): string => {
+  if (at === undefined) return '';
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+/** Rows the live tail keeps in the footer strip — older items are
+ *  retired: printed to captured stdout (the terminal's scroll
+ *  region → real scrollback) and evicted from the tree (addendum
+ *  19: the retained tree in ANY screen mode can only show a
+ *  viewport's worth; scrollback is where history must live). */
+export const TAIL_BUDGET = 15;
+
+/** The line form a row prints to the scroll region as — the same
+ *  grammar the tree paints: `┃` prompt block, `⏺` tool/message,
+ *  `+ Thought`, `──` markers, `▸` header, and a ≤3-line + `+N more`
+ *  body under an open call. Plain text — the scroll region is a
+ *  captured-stdout feed, not a renderable surface. */
+export function printLines(item: Item): string[] {
+  const stamp = item.at !== undefined ? `${hhmm(item.at)} ` : '      ';
+  const rows = (lines: string[]): string[] =>
+    lines.map((l, i) => `${i === 0 ? stamp : '      '}${l}`);
+  switch (item.kind) {
+    case 'header':
+      return rows([` ▸ ${item.text}`]);
+    case 'prompt':
+      return rows(['┃', '┃  Prompt', '┃', ...item.text.split('\n').map(l => `┃  ${l}`), '┃']);
+    case 'message':
+      return rows(item.text.split('\n').map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
+    case 'thought':
+      return rows([`+ Thought · ${firstLine(item.text)}`]);
+    case 'tool': {
+      const g = item.status === 'completed' ? '✓' : item.status === 'live' ? '…' : '✗';
+      const kind = item.toolKind !== undefined && item.toolKind !== '' ? ` [${item.toolKind}]` : '';
+      const arg = argHead(item, 120);
+      const head = `⏺ ${g} ${item.title}${kind}${arg !== '' ? ` ${arg}` : ''}`;
+      const out = [head];
+      if (!item.collapsed) {
+        const body = toolBodyLines(item);
+        for (const l of body.lines) out.push(`  ${l}`);
+        if (body.more > 0) out.push(`  +${body.more} more`);
+      }
+      return rows(out);
+    }
+    default:
+      return rows(item.text.split('\n'));
+  }
+}
+
+/** The tail height an item occupies — its printed line count
+ *  approximates its rendered rows (compact rows are exact; wrapped
+ *  prose can drift a row, and the tail budget carries slack). */
+export const rowHeight = (item: Item): number => printLines(item).length;
+
+/** Output that carries nothing — an agent reporting `(no output)` or
+ *  whitespace is a silent row, and silent rows never paint. */
+const EMPTY_OUTPUT = /^\s*(?:\(no output\))?\s*$/;
+
+/** The card body as plain lines — arg block (a heredoc command)
+ *  then every content entry flattened like dumpContent, minus the
+ *  noise: `(no output)` results and blank lines are dropped, never
+ *  a row. Capped for the under-call preview — `more` counts what
+ *  the cap hid (the `+N more` row). */
+export function toolBodyLines(item: ToolItem, max = 3): { lines: string[]; more: number } {
+  const all: string[] = [];
+  const arg = argBody(item);
+  if (arg !== undefined) all.push(...arg.split('\n'));
+  for (const c of item.content) {
+    if (c.kind === 'text') {
+      if (EMPTY_OUTPUT.test(c.text)) continue;
+      for (const l of c.text.split('\n')) if (l !== '') all.push(l);
+    } else if (c.kind === 'diff') {
+      all.push(`─ ${c.path}`);
+      for (const l of (c.old ?? '').split('\n')) if (l !== '') all.push(`- ${l}`);
+      for (const l of (c.cur ?? '').split('\n')) if (l !== '') all.push(`+ ${l}`);
+    } else if (c.kind === 'terminal') {
+      all.push(`terminal output is not archived (terminal ${c.id})`);
+    } else {
+      all.push(`[${c.type}]`);
+    }
+  }
+  return { lines: all.slice(0, max), more: Math.max(0, all.length - max) };
 }
 
 /** The unified diff text a patch renders as — the two sides
