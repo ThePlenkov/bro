@@ -2045,21 +2045,34 @@ function meshPeerChecks(
     if (
       p.transport === 'github' &&
       (typeof raw.transport !== 'string' || raw.transport === '') &&
-      (p.login === undefined || p.login === '')
+      (p.login === undefined ||
+        p.login === '' ||
+        (typeof p.login === 'string' && p.login.trim() === ''))
     ) {
       missingLogin++;
     }
   }
-  if (bad > 0) {
-    const row = check(
-      'mesh-peers',
-      'warn',
-      `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
-      missingLogin > 0
-        ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
-        : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
-    );
-    return { row, remotes };
+  if (bad > 0 || missingLogin > 0) {
+    if (bad > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
+        missingLogin > 0
+          ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
+          : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
+      );
+      return { row, remotes };
+    }
+    if (missingLogin > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
+        'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+      );
+      return { row, remotes };
+    }
   }
   if (missingLogin > 0) {
     const row = check(
@@ -2277,7 +2290,10 @@ function debtCodesceneCheck(debt: {
 
 function meshChecks(
   dir: string,
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> }
+  mesh: {
+    rig?: string;
+    peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+  }
 ): DoctorCheck[] {
   const aliases = Object.keys(mesh.peers);
   if (mesh.rig === undefined && aliases.length === 0) {
