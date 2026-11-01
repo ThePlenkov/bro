@@ -72,6 +72,27 @@ async function mount(): Promise<{
 }
 
 describe('the Solid session pane', () => {
+  test('a click on the scrollbar track jumps there (mock mouse)', async () => {
+    const p = await mount();
+    try {
+      p.model.feed(
+        chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
+      );
+      await p.flush();
+      const before = await p.frame();
+      const mouse = createMockMouse(p.renderer);
+      // a press on the track — clicks are the class herdr DOES
+      // forward (same event family as the wheel): no motion needed
+      await mouse.click(59, 5, 0);
+      await p.flush();
+      const after = await p.frame();
+      assert.match(after, /Jump to latest/);
+      assert.notEqual(before, after);
+    } finally {
+      await p.dispose();
+    }
+  });
+
   test('a drag on the scrollbar track moves the thumb (mock mouse)', async () => {
     const p = await mount();
     try {
