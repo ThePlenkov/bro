@@ -11,23 +11,8 @@
  *               blocked (open blocker/label) | open
  *   claim     — assignee + `bro:claimed` label (label lands last)
  */
-import {
-  bodyMeta,
-  nativeTaskRel,
-  resolveRepo as coreResolveRepo,
-  stripMeta,
-  withMeta,
-} from '@broject/core'
-import type {
-  ClaimCapability,
-  DepOpts,
-  TaskDepEdge,
-  TaskFilter,
-  TaskInput,
-  TaskRow,
-  TaskStore,
-  TaskStoreAsync,
-} from '@broject/core'
+import { bodyMeta, stripMeta, withMeta } from '@broject/core'
+import type { ClaimCapability, TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
 import { gitTry } from '@broject/core'
 import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } from './glab.ts'
 import type { GlabOpts } from './glab.ts'
@@ -97,28 +82,32 @@ const actorCache = new Map<string, string>()
 
 function glabActor(dir: string): string {
   let a = actorCache.get(dir)
-  if (a === undefined) {
+  if (a === undefined || a === '') {
     try {
       const u = glabJson<{ username?: string }>(['api', 'user'], gopts(dir))
       a = u.username ?? ''
+      if (a !== '') {
+        actorCache.set(dir, a)
+      }
     } catch {
       a = ''
     }
-    actorCache.set(dir, a)
   }
   return a
 }
 
 async function glabActorAsync(dir: string): Promise<string> {
   let a = actorCache.get(dir)
-  if (a === undefined) {
+  if (a === undefined || a === '') {
     try {
       const u = await glabJsonAsync<{ username?: string }>(['api', 'user'], gopts(dir))
       a = u.username ?? ''
+      if (a !== '') {
+        actorCache.set(dir, a)
+      }
     } catch {
       a = ''
     }
-    actorCache.set(dir, a)
   }
   return a
 }
@@ -196,6 +185,17 @@ function toRow(i: GitLabIssue, projectPath: string): TaskRow {
 }
 
 const pub = (r: TaskRow): TaskRow => r
+
+function assertNoNewline(v: string, name: string): void {
+  if (v.includes('\n') || v.includes('\r')) {
+    throw new Error(`gitlab tasks: invalid ${name} (newlines not allowed)`)
+  }
+}
+
+function sanitizeField(v: string, name: string): string {
+  assertNoNewline(v, name)
+  return v
+}
 
 // --- id resolution -------------------------------------------------------------
 
@@ -385,12 +385,15 @@ function createSync(dir: string, input: TaskInput): GitLabIssue {
   const projectPath = resolveProjectPath(dir)
   const meta = createMeta(input)
   const desc = withMeta(input.description, meta)
+  assertNoNewline(input.title, 'title')
   const args: string[] = ['api', '-X', 'POST', api(projectPath, 'issues'), '-f', `title=${input.title}`]
   if (desc) {
+    assertNoNewline(desc, 'description')
     args.push('-f', `description=${desc}`)
   }
   if (input.labels?.length) {
     for (const l of input.labels) {
+      assertNoNewline(l, 'label')
       args.push('-f', `labels[]=${l}`)
     }
   }
@@ -407,13 +410,16 @@ function updateSync(dir: string, id: string, patch: Record<string, string | numb
   const args: string[] = ['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`)]
   for (const [k, v] of Object.entries(patch)) {
     if (k === 'title') {
+      assertNoNewline(String(v), 'title')
       args.push('-f', `title=${v}`)
     } else if (k === 'description' || k === 'body') {
+      assertNoNewline(String(v), 'description')
       args.push('-f', `description=${v}`)
     } else if (k === 'status') {
       // status changes go through reopen/close; but support best effort
       continue
     } else if (k === 'labels' || k === 'label') {
+      assertNoNewline(String(v), 'labels')
       args.push('-f', `labels=${v}`)
     } else if (k === 'assignee') {
       // could set assignee_id - but need user lookup; skip for now or try
@@ -421,7 +427,7 @@ function updateSync(dir: string, id: string, patch: Record<string, string | numb
       // try to pass through
     }
   }
-  if (args.length > 3) { // has some params
+  if (args.length > 4) { // has some params beyond the base 4
     glab(args, gopts(dir))
   }
 }
@@ -458,13 +464,13 @@ function claimSync(dir: string, id: string): void {
     if (users.length > 0 && users[0]?.id) {
       glab(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `assignee_id=${users[0].id}`], gopts(dir))
     } else {
-      glab(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `assignee_ids[]=${users[0]?.id ?? me}`], gopts(dir))
+      throw new Error(`gitlab tasks: could not resolve user ID for ${me} — cannot claim`)
     }
-  } catch {
-    // try alternative
-    try {
-      glab(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`)], gopts(dir)) // best effort
-    } catch {}
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('could not resolve user ID')) {
+      throw err
+    }
+    throw new Error(`gitlab tasks: failed to assign ${me} to ${id} — cannot claim`)
   }
   const check = getIssueSync(dir, ref)
   const checkAssignees = check ? assigneesOf(check) : assignees
@@ -484,24 +490,21 @@ function claimSync(dir: string, id: string): void {
 function reopenSync(dir: string, id: string): void {
   const ref = parseIssueRef(dir, id)
   const cur = getIssueSync(dir, ref)
-  if (cur?.state !== 'opened') {
+  if (cur === undefined) {
+    throw new Error(`gitlab tasks: issue ${id} not found`)
+  }
+  if (cur.state !== 'opened') {
     glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'state_event=reopen'], gopts(dir))
   }
-  if (cur) {
-    for (const a of assigneesOf(cur)) {
-      // try to unassign
-    }
-    glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'], gopts(dir))
-  } else {
-    glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'], gopts(dir))
-  }
-  const labels = cur ? labelsOf(cur).filter((l) => l !== CLAIMED_LABEL && l !== BLOCKED_LABEL) : []
+  glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'], gopts(dir))
+  const labels = labelsOf(cur).filter((l) => l !== CLAIMED_LABEL && l !== BLOCKED_LABEL)
   glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `labels=${labels.join(',')}`], gopts(dir))
 }
 
 function closeSync(dir: string, id: string, reason?: string): void {
   const ref = parseIssueRef(dir, id)
   if (reason) {
+    assertNoNewline(reason, 'note')
     glabTry(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${reason}`], gopts(dir))
   }
   glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'state_event=close'], gopts(dir))
@@ -560,8 +563,6 @@ export function gitlabTasks(dir: string): TaskStore {
     ready: (f = {}) => {
       const issues = queryIssuesSync(dir, ['opened'], QUERY_CAP)
       const rows = issues.map((i) => toRow(i, resolveProjectPath(dir))).map(pub)
-      const filtered = applyFilter({ ...f, status: 'open', limit: undefined } as TaskFilter, rows)
-      // more precisely filter
       let q = rows.filter((r) => r.status !== 'closed')
       if ((f.labels?.length ?? 0) > 0) {
         for (const l of f.labels!) q = q.filter((r) => r.labels?.includes(l))
@@ -588,6 +589,7 @@ export function gitlabTasks(dir: string): TaskStore {
     remove: (id) => removeSync(dir, id),
     note: (id, text) => {
       const ref = parseIssueRef(dir, id)
+      assertNoNewline(text, 'note')
       glab(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${text}`], gopts(dir))
     },
     children: (_id) => {
