@@ -383,6 +383,9 @@ function createMeta(i: TaskInput): Record<string, unknown> {
 
 function createSync(dir: string, input: TaskInput): GitLabIssue {
   const projectPath = resolveProjectPath(dir)
+  if ((input as any).parent !== undefined || ((input as any).deps && (input as any).deps.length > 0)) {
+    throw new Error('gitlab tasks: create does not support parent/deps')
+  }
   const meta = createMeta(input)
   const desc = withMeta(input.description, meta)
   assertNoNewline(input.title, 'title')
@@ -416,19 +419,21 @@ function updateSync(dir: string, id: string, patch: Record<string, string | numb
       assertNoNewline(String(v), 'description')
       args.push('-f', `description=${v}`)
     } else if (k === 'status') {
-      // status changes go through reopen/close; but support best effort
-      continue
+      throw new Error('gitlab tasks: status updates not supported via update; use reopen/close')
     } else if (k === 'labels' || k === 'label') {
       assertNoNewline(String(v), 'labels')
       args.push('-f', `labels=${v}`)
     } else if (k === 'assignee') {
-      // could set assignee_id - but need user lookup; skip for now or try
+      throw new Error('gitlab tasks: assignee updates not supported via update')
     } else {
-      // try to pass through
+      throw new Error(`gitlab tasks: unsupported update field '${k}'`)
     }
   }
   if (args.length > 4) { // has some params beyond the base 4
-    glab(args, gopts(dir))
+    const r = glab(args, gopts(dir))
+    if (r.code !== 0) {
+      throw new Error(`gitlab tasks: failed to update ${id}`)
+    }
   }
 }
 
@@ -476,7 +481,9 @@ function claimSync(dir: string, id: string): void {
   const checkAssignees = check ? assigneesOf(check) : assignees
   const others = checkAssignees.filter((a) => a !== me)
   if (others.length === 0) {
-    glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `labels=${[...labels, CLAIMED_LABEL].join(',')}`], gopts(dir))
+    const cur2 = getIssueSync(dir, ref)
+    const curLabels = cur2 ? labelsOf(cur2) : labels
+    glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `labels=${[...curLabels, CLAIMED_LABEL].join(',')}`], gopts(dir))
     return
   }
   const winner = [...others, me].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0]!
@@ -484,7 +491,9 @@ function claimSync(dir: string, id: string): void {
     glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'assignee_id=0'], gopts(dir))
     throw new Error(`gitlab tasks: ${id} claim contested — ${winner} holds it`)
   }
-  glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `labels=${[...labels, CLAIMED_LABEL].join(',')}`], gopts(dir))
+  const cur2 = getIssueSync(dir, ref)
+  const curLabels = cur2 ? labelsOf(cur2) : labels
+  glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', `labels=${[...curLabels, CLAIMED_LABEL].join(',')}`], gopts(dir))
 }
 
 function reopenSync(dir: string, id: string): void {
@@ -505,9 +514,15 @@ function closeSync(dir: string, id: string, reason?: string): void {
   const ref = parseIssueRef(dir, id)
   if (reason) {
     assertNoNewline(reason, 'note')
-    glabTry(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${reason}`], gopts(dir))
+    const r = glabTry(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${reason}`], gopts(dir))
+    if (r.code !== 0) {
+      throw new Error(`gitlab tasks: failed to add close note to ${id}`)
+    }
   }
-  glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'state_event=close'], gopts(dir))
+  const rc = glabTry(['api', '-X', 'PUT', api(ref.projectPath, `issues/${ref.iid}`), '-f', 'state_event=close'], gopts(dir))
+  if (rc.code !== 0) {
+    throw new Error(`gitlab tasks: failed to close ${id}`)
+  }
 }
 
 function removeSync(dir: string, id: string): void {
@@ -527,11 +542,12 @@ function linkSync(dir: string, from: string, to: string, rel: string = 'related'
     throw new Error(`gitlab tasks: unsupported dependency operations explicitly rejected (rel '${rel}')`)
   }
   if (rel === 'blocked' || rel === 'blocks' || rel === 'blocked-by') {
+    // "blocked" means source is blocked by target -> source.blocks target
     try {
       glab(['api', '-X', 'POST', api(f.projectPath, `issues/${f.iid}/links`), '-f', `target_issue_iid=${t.iid}`, '-f', `link_type=blocks`], gopts(dir))
     } catch {
       try {
-        glab(['api', '-X', 'POST', api(f.projectPath, `issues/${f.iid}/links`), '-f', `target_project_id=${encodeURIComponent(t.projectPath)}`, '-f', `target_issue_iid=${t.iid}`], gopts(dir))
+        glab(['api', '-X', 'POST', api(f.projectPath, `issues/${f.iid}/links`), '-f', `target_project_id=${encodeURIComponent(t.projectPath)}`, '-f', `target_issue_iid=${t.iid}`, '-f', `link_type=blocks`], gopts(dir))
       } catch (err) {
         throw err
       }
