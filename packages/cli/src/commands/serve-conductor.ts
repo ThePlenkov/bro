@@ -2058,7 +2058,7 @@ function functionCallToMessages(it: RespItem): ClientMessage[] {
   let input: unknown
   try {
     input = JSON.parse(it.arguments ?? '{}')
-  } catch (err) {
+  } catch {
     throw new Error(
       `function_call arguments are not valid JSON (call_id=${it.call_id ?? it.id ?? 'unknown'}, name=${it.name ?? 'unknown'}): ${it.arguments}`
     )
@@ -3031,7 +3031,7 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
     let input: unknown
     try {
       input = JSON.parse(tc.function?.arguments ?? '{}')
-    } catch (err) {
+    } catch {
       throw new Error(
         `tool_calls[].function.arguments are not valid JSON (id=${tc.id ?? 'unknown'}, name=${tc.function?.name ?? 'unknown'}): ${tc.function?.arguments}`
       )
