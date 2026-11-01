@@ -39,7 +39,7 @@ export {
   selfLogin,
   toGitHubRepo,
 } from './github.ts'
-export type { GhRecord, GithubRepo } from './github.ts'
+export type { GhRecord, GitHubRepo as GithubRepo } from './github.ts'
 export {
   acceptWanted,
   boardPriority,

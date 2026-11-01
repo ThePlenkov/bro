@@ -41,7 +41,7 @@ export class GitHubRepo {
   }
 }
 
-export type GithubRepo = GitHubRepo
+export { GitHubRepo as GithubRepo }
 export type GithubRepoShape = GitHubRepo
 
 /** A github issue thread — the issue URL is the thread anchor. */
@@ -54,7 +54,10 @@ export class GitHubIssueThread {
   }
 
   static parse(input: string): GitHubIssueThread {
-    const t = input.trim()
+    let t = input.trim()
+    while (t.endsWith('/')) {
+      t = t.slice(0, -1)
+    }
     const m = /\/issues\/(\d+)$/.exec(t)
     if (m === null) {
       const repo = parseGithubRemote({ remote: t })
