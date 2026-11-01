@@ -550,13 +550,10 @@ export function acpTransport(
     }
   }
 
-  /** One agent app per accepted downstream connection — `st` is that
-   *  connection's state for its whole life (the SDK gives handlers a
-   *  fresh AgentContext wrapper per request, so the app closure is the
-   *  only stable conn-scope). */
-  const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
-    const app = agent({ name: 'bro-acp' })
+  const attachDisconnectHandler = (
+    app: ReturnType<typeof agent>,
+    st: ConnState
+  ): void => {
     // AcpServer runs onConnect after initialize answers — the
     // disconnect cleanup attaches there. Settle-either-way: a rejected
     // `closed` still means the connection is gone — no session leaks.
@@ -570,6 +567,12 @@ export function acpTransport(
         }
       )
     })
+  }
+
+  const registerAgentRequests = (
+    app: ReturnType<typeof agent>,
+    st: ConnState
+  ): void => {
     const req = (
       method: string,
       handler: (ctx: AgentRequestContext<Record<string, unknown>>) => unknown
@@ -585,6 +588,12 @@ export function acpTransport(
     )
     req('session/set_mode', (ctx) => forwardSession('session/set_mode', ctx.params, st))
     req('authenticate', (ctx) => onAuthenticate(ctx.params))
+  }
+
+  const registerAgentNotifications = (
+    app: ReturnType<typeof agent>,
+    st: ConnState
+  ): void => {
     app.onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
       const sess = sessionOf(ctx.params, st)
       sess?.peer.ctx
@@ -594,6 +603,18 @@ export function acpTransport(
     // session/load · resume · fork · list · delete · providers_* ·
     // logout · nes_* · document_* stay unregistered — the SDK answers
     // method-not-found and advertised capabilities never offer them
+  }
+
+  /** One agent app per accepted downstream connection — `st` is that
+   *  connection's state for its whole life (the SDK gives handlers a
+   *  fresh AgentContext wrapper per request, so the app closure is the
+   *  only stable conn-scope). */
+  const buildAgent = () => {
+    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
+    const app = agent({ name: 'bro-acp' })
+    attachDisconnectHandler(app, st)
+    registerAgentRequests(app, st)
+    registerAgentNotifications(app, st)
     return app
   }
 
