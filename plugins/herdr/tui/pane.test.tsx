@@ -15,7 +15,8 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { createTestRenderer } from '@opentui/core/testing';
+import type { CliRenderer } from '@opentui/core';
+import { createMockMouse, createTestRenderer } from '@opentui/core/testing';
 import type { PaneWriter } from './app.tsx';
 import { SessionModel } from './model.ts';
 
@@ -45,6 +46,7 @@ async function mount(): Promise<{
   frame: () => Promise<string>;
   model: SessionModel;
   writer: PaneWriter;
+  renderer: CliRenderer;
   flush: () => Promise<void>;
   dispose: () => Promise<void>;
 }> {
@@ -63,12 +65,36 @@ async function mount(): Promise<{
     frame: async () => setup.captureCharFrame(),
     model,
     writer: pane.writer,
+    renderer: setup.renderer,
     flush,
     dispose: async () => setup.dispose(),
   };
 }
 
 describe('the Solid session pane', () => {
+  test('a drag on the scrollbar track moves the thumb (mock mouse)', async () => {
+    const p = await mount();
+    try {
+      // one text item >20 rows: the feed overflows the viewport so
+      // the scrollbar exists and has room to move
+      p.model.feed(
+        chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
+      );
+      await p.flush();
+      const before = await p.frame();
+      const mouse = createMockMouse(p.renderer);
+      // the bar lives on the scrollbox's rightmost column (x=59 at
+      // width 60); dragging its track up must scroll the feed
+      await mouse.drag(59, 15, 59, 3, 0);
+      await p.flush();
+      const after = await p.frame();
+      assert.match(after, /Jump to latest/);
+      assert.notEqual(before, after);
+    } finally {
+      await p.dispose();
+    }
+  });
+
   test('renders the banner and the agent speech as markdown', async () => {
     const p = await mount();
     try {

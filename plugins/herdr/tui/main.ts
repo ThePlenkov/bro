@@ -229,6 +229,10 @@ export async function runTui(argv: string[]): Promise<void> {
     // handler (momentum scroll), the scrollbar thumb drags, and
     // renderer-native drag-select feeds copy-on-select via OSC52.
     useMouse: true,
+    // "drag" mode (?1002) not "motion" (?1003): we have no hover UI,
+    // and herdr forwards button-held motion — the class lazygit/btop
+    // use — while any-event tracking can fall back to local select.
+    enableMouseMovement: false,
     // alternate-screen owns the whole buffer — frames repaint in place
     // and NOTHING lands in herdr's scrollback, killing the double
     // scroll (main-screen pushed every repaint into the scroll region:

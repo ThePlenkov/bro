@@ -871,6 +871,17 @@ unchanged. Escape hatch for terminal-native selection stays the
 universal one — Shift+drag bypasses app reporting. Verified on w58:
 feed scrolls with `Jump to latest ↓` + live scrollbar, chrome pinned,
 host scrollback still `max_offset_from_bottom: 0`.
+`enableMouseMovement: false` keeps the request at `?1002`
+("drag": motion only while a button is held) instead of the default
+`?1003` ("motion": any-event hover) — the pane has no hover UI, and
+`?1002` is the class herdr's passthrough promises ("pane apps like
+lazygit and btop"). Mock-mouse coverage: a drag on the scrollbar
+track moves the thumb (`Jump to latest` appears) — the app side is
+proven; if a real drag still selects text, the events never reach
+the pty and the suspect is the host's forwarding, not the tree.
+Herdr's own `ui.pane_scrollbars` (its scrollback bar beside the
+pane) is orthogonal noise for an alt-screen app — worth `false`
+in the operator config.
 
 ## Risks
 
