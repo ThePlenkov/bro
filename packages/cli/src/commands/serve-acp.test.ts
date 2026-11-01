@@ -182,7 +182,7 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       await until(() => c.updates.length === 2, 'session/update fan-out')
       assertFanout(c)
       gate.resolve()
-      const r = await p as { stopReason: string }
+      const r = (await p) as { stopReason: string }
       assert.equal(r.stopReason, 'end_turn')
       assert.deepEqual(fake.prompts, ['say hi'])
     } finally {
