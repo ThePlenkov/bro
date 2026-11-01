@@ -154,3 +154,9 @@ a failed provider warns and never stops the rest.
   entries, not kinds.
 - Diagnose with `bro doctor` before touching provider config — a warn
   row there is the failure a spawn/decide would hit, said early.
+
+
+## Presets and add/test
+
+- `bro providers add <preset> [--name <name>] [--global] [--force]` writes an `acp` provider entry for a verified preset (kilo, gemini-cli, goose, opencode, devin). Defaults to project `bro.config.json`; `--global` writes to global `$XDG_CONFIG_HOME/bro/config.json`. Without `--global`, refuses if `bro.config.ts` shadows. With `--global`, refuses if `config.ts` shadows. Refuses to overwrite existing entries without `--force`.
+- `bro providers test <name>` smoke-tests an ACP provider connection by initializing over ACP.
