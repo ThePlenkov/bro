@@ -264,18 +264,18 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   let environ: string | undefined
   try {
     environ = readFileSync(join(dir, 'environ'), 'utf8')
-    // BRO_HOOKS=0 marks a machine backend (acp provider/conductor
-    // service child) — not an agent worker; never count against
-    // agents.devin.maxWorkers. Takes precedence over BRO_AGENT_ID because
-    // a worker may spawn an ACP backend that inherits the worker badge.
-    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
-      return false
-    }
     // NUL-anchored: environ entries are NUL-separated and an
     // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
     // AGENT_ENV_RE convention)
     if (/(?:^|\0)BRO_AGENT_ID=/.test(environ)) {
       return true
+    }
+    // BRO_HOOKS=0 marks a machine backend (acp provider/conductor
+    // service child) — not an agent worker; never count against
+    // agents.devin.maxWorkers. A real bro worker carries BRO_AGENT_ID and
+    // must be counted even if it inherits BRO_HOOKS=0 from a parent tree.
+    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
+      return false
     }
   } catch {
     // unreadable environ — the stdin probe still applies
