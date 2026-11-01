@@ -341,7 +341,10 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     },
 
     async drain(timeoutMs?: number) {
-      const cap = timeoutMs ?? DRAIN_CAP_MS;
+      const cap =
+        timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? Math.min(timeoutMs, 2_147_483_647)
+          : DRAIN_CAP_MS;
       await Promise.race([
         queue.then(() => undefined),
         new Promise<void>(resolve => {
