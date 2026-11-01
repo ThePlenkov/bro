@@ -262,7 +262,12 @@ function Spinner(props: { fg: string }) {
  *  renders dim+indented under it, capped at 3 lines then `+N more`;
  *  `(no output)` results paint nothing — one compact row per call
  *  (opencode grammar — the first demo's shape restored). */
-function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyle }) {
+function ToolCard(props: {
+  item: ToolItem;
+  selected: boolean;
+  syntax: SyntaxStyle;
+  width: () => number;
+}) {
   const tail = createMemo(() => toolTail(props.item));
   const body = createMemo(() => toolBodyLines(props.item));
   const md = createMemo(() => toolBodyMd(props.item));
@@ -325,6 +330,10 @@ function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyl
         }
       >
         <box flexDirection="column" paddingLeft={2} flexShrink={0}>
+          {/* maxWidth is the only constraint a <markdown> honours —
+           *  flex/percent parents never reach it inside a scrollbox;
+           *  without it a paragraph holds its unwrapped width and
+           *  clips at the viewport edge */}
           <markdown
             content={md()}
             syntaxStyle={props.syntax}
@@ -332,6 +341,7 @@ function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyl
             streaming
             internalBlockMode="top-level"
             flexShrink={0}
+            maxWidth={props.width() - 8}
           />
         </box>
       </Show>
@@ -500,7 +510,12 @@ function BarPad() {
  *  tree-sitter client is the shared default <code> already uses.
  *  Empty text (no journaled prompt, no `.prompt.md` sibling) is
  *  the marker. */
-function PromptRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }) {
+function PromptRow(props: {
+  item: Item;
+  syntax: SyntaxStyle;
+  selected: boolean;
+  width: () => number;
+}) {
   const text = createMemo(() => ('text' in props.item ? mdSource(props.item.text) : ''));
   // the selection peek opens an untouched fold while it holds the
   // row; Enter/c pins it (the tool cards' own grammar)
@@ -535,6 +550,7 @@ function PromptRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }
             streaming
             internalBlockMode="top-level"
             flexShrink={0}
+            maxWidth={props.width() - 11}
           />
         </Show>
       </Show>
@@ -637,7 +653,7 @@ function ItemRow(props: {
           />
         </box>
       </Show>
-      <box flexDirection="column" flexGrow={1} flexShrink={0}>
+      <box flexDirection="column" flexGrow={1} flexShrink={0} minWidth={0}>
         <Show
           when={verdict() === undefined}
           fallback={<VerdictRow view={verdict() as VerdictView} selected={props.selected} />}
@@ -714,6 +730,7 @@ function ItemRow(props: {
                                         streaming
                                         internalBlockMode="top-level"
                                         flexShrink={0}
+                                        maxWidth={props.width() - 6}
                                       />
                                     </Show>
                                   }
@@ -740,6 +757,7 @@ function ItemRow(props: {
                                           streaming
                                           internalBlockMode="top-level"
                                           flexShrink={0}
+                                          maxWidth={props.width() - 8}
                                         />
                                       </box>
                                     </Show>
@@ -752,7 +770,11 @@ function ItemRow(props: {
                                *  folds to a one-line summary. */}
                               <box flexDirection="row" flexShrink={0} width="100%">
                                 <text fg={theme.peach} content="⏺ " />
-                                <box flexGrow={1} flexShrink={0}>
+                                {/* minWidth:0 — a flex item's floor is
+                                 *  its content width; without it long
+                                 *  paragraphs hold their unwrapped
+                                 *  width and clip under the scrollbar */}
+                                <box flexGrow={1} flexShrink={0} minWidth={0}>
                                   <Show
                                     when={textOpen() || !isFoldable(props.item)}
                                     fallback={
@@ -771,6 +793,7 @@ function ItemRow(props: {
                                       streaming
                                       internalBlockMode="top-level"
                                       flexShrink={0}
+                                      maxWidth={props.width() - 8}
                                     />
                                   </Show>
                                 </box>
@@ -782,6 +805,7 @@ function ItemRow(props: {
                             item={props.item}
                             syntax={props.syntax}
                             selected={props.selected}
+                            width={props.width}
                           />
                         </Show>
                       }
@@ -797,7 +821,14 @@ function ItemRow(props: {
                     </Show>
                   }
                 >
-                  {item => <ToolCard item={item} selected={props.selected} syntax={props.syntax} />}
+                  {item => (
+                    <ToolCard
+                      item={item}
+                      selected={props.selected}
+                      syntax={props.syntax}
+                      width={props.width}
+                    />
+                  )}
                 </Show>
               </Show>
             </Show>
@@ -973,7 +1004,7 @@ function Pane(props: {
           const sb = el as ScrollBoxRenderable;
           // a light bar: the dim thumb on a base-colored track reads
           // as a notch, not a rail; the viewport's right padding keeps
-          // a breathing column between the text and the bar's gutter
+          // two breathing columns between the text and the bar's gutter
           sb.verticalScrollBar.trackOptions = {
             foregroundColor: theme.scrollbar,
             backgroundColor: theme.base,
@@ -982,7 +1013,7 @@ function Pane(props: {
           // so the Jump-to-latest chip) follows a scroll the same frame
           // instead of waiting up to 10 animation ticks
           sb.verticalScrollBar.onChange = () => setFrame(f => f + 1);
-          sb.viewport.paddingRight = 1;
+          sb.viewport.paddingRight = 2;
           setScroller(sb);
           props.onScroller?.(sb);
         }}
@@ -1015,7 +1046,7 @@ function Pane(props: {
                       item={item}
                       syntax={props.syntax}
                       selected={props.store.state.selected === id}
-                      width={() => Math.max(20, (scroller()?.viewport.width || renderer.width) - 1)}
+                      width={() => Math.max(20, (scroller()?.viewport.width || renderer.width) - 2)}
                       frame={frame}
                       findTool={findTool}
                     />

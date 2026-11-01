@@ -891,14 +891,32 @@ but then bar clicks land on the content node and never reach
 `theme.base` track, so the rail vanishes and only a dim notch
 floats. Text no longer reaches under the bar — the row wrap width
 was `renderer.width` while the gutter owns the last column; rows
-now wrap at `scroller.viewport.width - 1`, and the viewport's
-`paddingRight: 1` leaves a breathing column between text and bar.
-Also wired in the same ref: `verticalScrollBar.onChange` bumps the
-frame signal, so `atBottom`/`Jump to latest` follow a scroll in
-the same frame — before, the chip lagged up to 10 animation ticks
-(the intermittent mock-mouse test failures were this lag, not the
-bar). `pane.scroller` is exposed on the returned Pane so tests can
-wait on `verticalScrollBar.visible` before aiming clicks at it.
+now wrap at `scroller.viewport.width - 2`, and the viewport's
+`paddingRight: 2` leaves two breathing columns between text and
+bar. Also wired in the same ref: `verticalScrollBar.onChange`
+bumps the frame signal, so `atBottom`/`Jump to latest` follow a
+scroll in the same frame — before, the chip lagged up to 10
+animation ticks (the intermittent mock-mouse test failures were
+this lag, not the bar). `pane.scroller` is exposed on the
+returned Pane so tests can wait on `verticalScrollBar.visible`
+before aiming clicks at it.
+
+**Markdown wrap needs a number** (same addendum): inside a
+scrollbox, flex chains and `width="100%"` never constrain a
+`<markdown>` — its intrinsic paragraph width wins and long
+paragraphs rendered as single clipped lines (the "huge gaps"
+report: clipped paragraphs + `\n\n` paragraph blanks). acp-tui
+hits the same wall and answers with its own `MessageLayout`
+layout pass at a numeric `width()`. Our lighter variant of that
+contract: every `<markdown>` gets `maxWidth` from the row's
+numeric width feed (`props.width` — now threaded into ToolCard
+and PromptRow too), budget = row width minus that surface's
+gutter+indent cells (`-6` stamp, `-8` stamp+`⏺`/pad, `-11`
+stamp+`┃` card margin/border/pad). Known vendored quirk found
+while bisecting: `<markdown>` drops blockquote children under
+every prop combo tried (the `│` gutter paints, the quote text
+never mounts) — pre-existing, not caused by the clamp; fix is a
+`renderNode` override or an upstream bump, deferred.
 
 ## Risks
 
