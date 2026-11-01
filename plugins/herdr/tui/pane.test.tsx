@@ -350,7 +350,7 @@ describe('the Solid session pane', () => {
       // rest folds to a `+M more` summary — never the raw block, and
       // no 'Prompt' title (the peach bar is the label)
       assert.match(frame, /row 0/);
-      assert.match(frame, /\+\d+ more lines — Enter expands/);
+      assert.match(frame, /\+\d+ more lines — Space expands/);
       assert.doesNotMatch(frame, /row 15/);
       assert.doesNotMatch(frame, /Prompt/);
 

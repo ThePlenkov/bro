@@ -585,7 +585,7 @@ function PromptRow(props: {
               <text
                 fg={theme.muted}
                 attributes={TextAttributes.DIM}
-                content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Enter expands`}
+                content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Space expands`}
                 flexShrink={0}
               />
             </>
@@ -1051,7 +1051,7 @@ function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
       >
         <text
           fg={theme.muted}
-          content="j/k select+peek · Enter/c pin fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
+          content="j/k select+peek · Enter/Space/c pin fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
         />
       </Show>
       <box flexGrow={1} />

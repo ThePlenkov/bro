@@ -292,7 +292,13 @@ export async function runTui(argv: string[]): Promise<void> {
     else if (key.name === 'pagedown') pane.scrollPage?.(1);
     else if (key.name === 'home') pane.scrollEdge?.(0);
     else if (key.name === 'end') pane.scrollEdge?.(1);
-    else if (key.name === 'return' || key.name === 'enter' || key.name === 'c')
+    else if (
+      key.name === 'return' ||
+      key.name === 'enter' ||
+      key.name === 'c' ||
+      key.name === 'space' ||
+      key.name === ' '
+    )
       pane.writer.toggle();
   });
 
