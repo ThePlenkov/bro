@@ -29,7 +29,7 @@ gh api -X POST repos/<owner>/<repo>/rulesets --input '{
 
 Notes:
 - `push_allowed_actor_ids` requires **numeric GitHub database IDs**, not login names (e.g., not `"dependabot[bot]"`). Look them up with `gh api users/<login> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
-- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in the allow-list (by their numeric IDs) or you will break normal updates and release workflows.
+- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in the allow-list. `push_allowed_actor_ids` takes numeric database IDs — look them up with `gh api users/<actor> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`, `gh api user --jq .id`), or you will break normal updates and release workflows.
 - A wrong allow-list can lock you out; recovery is possible only through the ruleset UI.
 - This is the blunt instrument — it disables the bots' auto-fix everywhere the ruleset applies.
 
