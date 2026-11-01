@@ -10,6 +10,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import type { ExecFileSyncOptions, SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process'
 import { devNull } from 'node:os'
+import { tmpDir } from './testtmp.ts'
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -92,7 +93,9 @@ export function testGitSpawn(
  *  test spawns git or resolves the store in-process inherits pins that
  *  redirect those lookups into the OUTER repo — same leak testGit
  *  closes for the test's own spawns. The null-config pins are set too
- *  so in-process git children can't read host hooks/config either. */
+ *  so in-process git children can't read host hooks/config either.
+ *  Sets `XDG_CONFIG_HOME` to an empty temp dir so host `~/.config/bro`
+ *  can't leak in, and sets `BRO_TEST=1` and `BRO_NO_GLOBAL_CONFIG=1`. */
 export function scrubEnv(extra: string[] = []): () => void {
   const ambient = /^(BEADS_DIR|BRO_)/
   const scrubbed = (k: string) =>
@@ -113,13 +116,8 @@ export function scrubEnv(extra: string[] = []): () => void {
   process.env.GIT_CONFIG_NOSYSTEM = '1'
   process.env.GIT_CONFIG_GLOBAL = devNull
   // Point global config to an empty temp dir so host ~/.config/bro can't leak in
-  try {
-    const { tmpDir } = require('./testtmp.ts')
-    const dir = tmpDir('bro-xdg-')
-    process.env.XDG_CONFIG_HOME = dir
-  } catch {
-    // best effort
-  }
+  const dir = tmpDir('bro-xdg-')
+  process.env.XDG_CONFIG_HOME = dir
   process.env.BRO_TEST = '1'
   process.env.BRO_NO_GLOBAL_CONFIG = '1'
   if (!('XDG_CONFIG_HOME' in saved)) {
