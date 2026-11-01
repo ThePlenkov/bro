@@ -115,6 +115,28 @@ export const shortBy = (by: string | undefined): string | undefined => {
   return m?.[1] ?? by;
 };
 
+/** `68587` → `69k`, `262144` → `262k`, `1_500_000` → `1.5M`,
+ *  `512` → `512` — the usage line's compact count (SI thousands,
+ *  matching the acp ctx fold's /1000 convention). */
+const fmtK = (n: number): string =>
+  n >= 1_000_000
+    ? `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+    : n >= 1_000
+      ? `${Math.round(n / 1_000)}k`
+      : String(n);
+
+/** `68587/262144` → `69k/262k · 26%` — the context fill as a
+ *  readable count plus its percentage of the window. The pct
+ *  floors: `999/1k` is `99%`, not `100%` (not full); a nonzero
+ *  fill under one percent is `<1%`, not `0%` (not empty). A
+ *  zero/unknown size drops the percentage rather than printing
+ *  `∞%`/lying. */
+export const fmtUsage = (used: number, size: number): string => {
+  if (size <= 0) return `${fmtK(used)}/${fmtK(size)}`;
+  const pct = Math.floor((used / size) * 100);
+  return `${fmtK(used)}/${fmtK(size)} · ${pct === 0 && used > 0 ? '<1' : pct}%`;
+};
+
 /** The separator layer — time as ROWS, not a column (addendum 25).
  *  `start()` records the turn's origin; `tick(ts)` runs before every
  *  item birth and returns the separator lines to emit first. Heads

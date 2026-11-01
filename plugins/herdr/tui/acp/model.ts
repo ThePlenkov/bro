@@ -52,7 +52,7 @@ import {
   type ToolCallItem,
 } from '../vendor/acp-model/src/index.ts';
 import { isJudgeTurn, verdictOf } from '../verdict.ts';
-import { headBy, isInternalBy, TimeGutter } from '../view.ts';
+import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../view.ts';
 import { acpLine, lineText } from './lines.ts';
 
 /** sessionUpdate kinds their reducer handles (items or absorbed
@@ -764,9 +764,7 @@ export class AcpImpl implements PaneImpl {
     const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
     const u = item.usage;
     const ctx =
-      u !== null && u !== undefined && u.size > 0
-        ? ` · ctx ${Math.round(u.used / 1000)}k/${Math.round(u.size / 1000)}k`
-        : '';
+      u !== null && u !== undefined && u.size > 0 ? ` · ctx ${fmtUsage(u.used, u.size)}` : '';
     const arg = `${last.arg}${dur}${ctx}`;
     last.arg = arg;
     ops.push({ op: 'tool', item: { id: last.id, arg } });
@@ -1040,9 +1038,7 @@ export class AcpImpl implements PaneImpl {
           const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
           const u = item.usage;
           const ctx =
-            u !== null && u !== undefined && u.size > 0
-              ? ` · ctx ${Math.round(u.used / 1000)}k/${Math.round(u.size / 1000)}k`
-              : '';
+            u !== null && u !== undefined && u.size > 0 ? ` · ctx ${fmtUsage(u.used, u.size)}` : '';
           out[lastRun] = `${out[lastRun]}${dur}${ctx}`;
         }
         continue;

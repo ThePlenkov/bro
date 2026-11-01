@@ -26,7 +26,7 @@ import {
   toolContent,
 } from '../../../packages/providers/src/acp-render.ts';
 import { isJudgeTurn } from './verdict.ts';
-import { isInternalBy, shortBy, TimeGutter } from './view.ts';
+import { fmtUsage, isInternalBy, shortBy, TimeGutter } from './view.ts';
 
 export type { ToolContent };
 
@@ -603,7 +603,9 @@ export class SessionModel {
     switch (u.sessionUpdate) {
       case 'usage_update': {
         const t = u as { used?: unknown; size?: unknown };
-        return `◌ usage ${scalar(t.used)}/${scalar(t.size)}`;
+        const used = Number(t.used);
+        const size = Number(t.size);
+        return `◌ usage ${Number.isFinite(used) && Number.isFinite(size) ? fmtUsage(used, size) : `${scalar(t.used)}/${scalar(t.size)}`}`;
       }
       case 'config_option_update': {
         const opts =
