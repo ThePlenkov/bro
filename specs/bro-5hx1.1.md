@@ -232,9 +232,10 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
    ContentBlock (baseline-required content — no capability negotiation
    needed).
 6. **`session/update` notifications → the `.log`.** One rendered line
-   per update — the log stays the observability plane *and* the exit-
-   cause classifier's input: provider walls (rate-limit/quota text the
-   agent prints) must reach it or `classifyExitCause` reads 'crash'.
+   per update — the log stays the observability plane; provider walls
+   (rate-limit/quota text the agent prints) must reach the classifier
+   input (both `.log` and `.stderr` tails, per bro-e2ec0), or
+   `classifyExitCause` reads 'crash'.
 7. **`session/request_permission` → a defined policy field.** The
    `acp` entry union gains `autoApprove?: boolean` (this spec amends
    bro-ribc.1's union — the kind file owns the wire detail); a spawn
