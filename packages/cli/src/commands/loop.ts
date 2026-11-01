@@ -65,6 +65,7 @@ import {
   mkdirPrivateSync,
   openPrivateAppendSync,
   procStat,
+  releaseSessionSlot,
   reviewHost,
   routeStepClass,
   SpawnError,
@@ -84,6 +85,7 @@ import {
   type SpawnWorker,
   type TaskStore,
   BATCH_MARKER_ENV,
+  admitSessionSlot,
   hasHelpFlag,
   issueLink,
   printUsage,
@@ -128,7 +130,9 @@ import {
   profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
+  sessionQuotaOf,
   type AgentConnectorEnv,
+  type SessionQuotaLane,
   type SpawnProviderPick,
 } from '../agent-connectors.ts';
 import { flag, positionals } from './args.ts';
@@ -1294,14 +1298,57 @@ async function runFixRound(
     await spawnWorker(ctx, m, prompt, lane);
     return;
   }
-  const code = await spawnAgent(
-    ctx,
-    lane,
-    m.beads.map(b => b.id),
-    clumpTitle(m.beads),
-    m.item.promptFile,
-    m.item.worktreeDir
-  );
+  let templateReservation: string | undefined;
+  const templateCommand = laneCommand(ctx, lane);
+  const leadFix = m.beads[0]!;
+  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
+    beadsDir: ctx.beadsDir,
+    molStep: leadFix.id,
+    prompt,
+    repoRoot: m.item.worktreeDir,
+    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+    worker: lane.worker,
+    provider: lane.provider,
+    model: lane.model,
+    class: lane.class,
+  } as any, templateCommand);
+  if (templateQuota !== undefined) {
+    try {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: `loop-fix-${leadFix.id}`,
+        molStep: leadFix.id,
+        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      });
+    } catch (err) {
+      console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+      if (templateReservation !== undefined) {
+        releaseSessionSlot(templateReservation);
+      }
+      // don't block on quota failures, but still don't spawn blindly?
+      // best-effort like before but don't leak slot; fall through to error handling below
+      if (err instanceof SpawnError && err.kind === 'cap') {
+        // hold fix round - skip spawning this round
+        return;
+      }
+      // other errors: proceed without reservation? better to skip
+      templateReservation = undefined;
+    }
+  }
+  let code: number | null = null;
+  try {
+    code = await spawnAgent(
+      ctx,
+      lane,
+      m.beads.map(b => b.id),
+      clumpTitle(m.beads),
+      m.item.promptFile,
+      m.item.worktreeDir
+    );
+  } finally {
+    if (templateReservation !== undefined) {
+      releaseSessionSlot(templateReservation);
+    }
+  }
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
   }
@@ -1745,17 +1792,67 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     // armed watch marker takes custody at the settle.
     return { kind: 'member', member };
   }
+  // raw-template arm: route through the same session-quota admission as
+  // the registry spawn so the fleet/session planes agree on live workers
+  // (spec bro-9h86l / bro-0fbdp)
+  let templateReservation: string | undefined;
+  const templateCommand = laneCommand(ctx, lane);
+  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
+    beadsDir: ctx.beadsDir,
+    molStep: lead.id,
+    prompt,
+    repoRoot: item.worktreeDir,
+    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+    worker: lane.worker,
+    provider: lane.provider,
+    model: lane.model,
+    class: lane.class,
+  } as any, templateCommand);
+  if (templateQuota !== undefined) {
+    try {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: `loop-${lead.id}`,
+        molStep: lead.id,
+        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      });
+    } catch (err) {
+      // hand the claim back like a spawn refusal — the bead must not stay
+      // claimed with no worker
+      for (const b of openBeads(ctx, ours)) {
+        noteBead(ctx.tasks, b.id, `loop: session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+        reopenBead(ctx, b.id);
+      }
+      endLoopRun(ctx.root, loopSlug(lead.id));
+      if (err instanceof SpawnError && err.kind === 'cap') {
+        say(ctx, `loop: fleet full — ${err.message}; pushes hold for the next pass`);
+        return { kind: 'hold', why: err.message };
+      }
+      say(ctx, `loop: ${lead.id} spawn refused — ${err instanceof Error ? err.message : String(err)}`);
+      return { kind: 'done', result: 'parked' };
+    }
+  }
   // no shared store to pin a claim/exit record against — the awaited
   // spawn keeps the serial semantics (documented fallback)
   const spawnAt = Date.now();
-  const code = await spawnAgent(
-    ctx,
-    lane,
-    beads.map(b => b.id),
-    clumpTitle(beads),
-    item.promptFile,
-    item.worktreeDir
-  );
+  let code: number | null = null;
+  try {
+    code = await spawnAgent(
+      ctx,
+      lane,
+      beads.map(b => b.id),
+      clumpTitle(beads),
+      item.promptFile,
+      item.worktreeDir
+    );
+  } catch (err) {
+    if (templateReservation !== undefined) {
+      releaseSessionSlot(templateReservation);
+    }
+    throw err;
+  }
+  if (templateReservation !== undefined) {
+    releaseSessionSlot(templateReservation);
+  }
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt;
@@ -2289,14 +2386,50 @@ async function runRebaseRound(
     await spawnWorker(ctx, m, prompt, lane);
     return;
   }
-  const code = await spawnAgent(
-    ctx,
-    lane,
-    m.beads.map(b => b.id),
-    clumpTitle(m.beads),
-    m.item.promptFile,
-    m.item.worktreeDir
-  );
+  let templateReservation: string | undefined;
+  const templateCommand = laneCommand(ctx, lane);
+  const leadRb = m.beads[0]!;
+  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
+    beadsDir: ctx.beadsDir,
+    molStep: leadRb.id,
+    prompt,
+    repoRoot: m.item.worktreeDir,
+    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+    worker: lane.worker,
+    provider: lane.provider,
+    model: lane.model,
+    class: lane.class,
+  } as any, templateCommand);
+  if (templateQuota !== undefined) {
+    try {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: `loop-rebase-${leadRb.id}`,
+        molStep: leadRb.id,
+        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      });
+    } catch (err) {
+      console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+      if (err instanceof SpawnError && err.kind === 'cap') {
+        return;
+      }
+      templateReservation = undefined;
+    }
+  }
+  let code: number | null = null;
+  try {
+    code = await spawnAgent(
+      ctx,
+      lane,
+      m.beads.map(b => b.id),
+      clumpTitle(m.beads),
+      m.item.promptFile,
+      m.item.worktreeDir
+    );
+  } finally {
+    if (templateReservation !== undefined) {
+      releaseSessionSlot(templateReservation);
+    }
+  }
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
   }
