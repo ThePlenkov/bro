@@ -20,7 +20,7 @@
  * between-turn point check stays `bro mesh wait`. stdout carries one
  * line or one JSON object; progress goes to stderr.
  */
-import { gitCommonDir, hasHelpFlag, printUsage } from '@broject/core'
+import { gitCommonDir, hasHelpFlag, printUsage } from '@broject/core';
 import {
   meshThread,
   parseExternalRef,
@@ -30,9 +30,9 @@ import {
   type ExternalRef,
   type MeshPeer,
   type WaitPlane,
-} from '@broject/mesh'
-import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
-import { meshPeers } from './mesh.ts'
+} from '@broject/mesh';
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { meshPeers } from './mesh.ts';
 
 const USAGE = `Usage: bro wait external:<rig>:<id>… [--every SEC] [--timeout SEC] [--json]
 
@@ -42,61 +42,61 @@ point checks stay \`bro mesh wait <thread>\`.
 
 Exit verdicts: 0 free · 1 unreadable · 2 unresolved · 3 actionable · 4 timeout.
 --timeout defaults to 2700s (45m); 0 waits unbounded.
-`
+`;
 
-const DEFAULT_TIMEOUT_SEC = 45 * 60
-const DEFAULT_EVERY_SEC = 30
-const MAX_FETCH_ERRORS = 3
+const DEFAULT_TIMEOUT_SEC = 45 * 60;
+const DEFAULT_EVERY_SEC = 30;
+const MAX_FETCH_ERRORS = 3;
 /** close→ship is the normal completion order (`bd ship` needs the
  *  bead closed first), so closed-without-provides is a transient for
  *  one poll — the verdict requires it to persist */
-const CLOSED_UNSHIPPED_GRACE = 3
+const CLOSED_UNSHIPPED_GRACE = 3;
 
-type VerdictKind = 'free' | 'actionable' | 'unresolved' | 'unreadable'
+type VerdictKind = 'free' | 'actionable' | 'unresolved' | 'unreadable';
 
 interface Verdict {
-  verdict: VerdictKind
-  reason?: string
-  stage?: string
-  turn?: string
-  source: 'live' | 'replica'
-  replicaAgeMs?: number
+  verdict: VerdictKind;
+  reason?: string;
+  stage?: string;
+  turn?: string;
+  source: 'live' | 'replica';
+  replicaAgeMs?: number;
 }
 
 interface Watch {
   /** the arg verbatim — verdicts and re-arm summaries carry it */
-  arg: string
-  ref: ExternalRef
-  plane: WaitPlane
-  errors: number
+  arg: string;
+  ref: ExternalRef;
+  plane: WaitPlane;
+  errors: number;
   /** consecutive closed-without-provides sightings — the grace
    *  counter the close→ship transient has to outlast */
-  closedUnshipped: number
-  settled?: Verdict
+  closedUnshipped: number;
+  settled?: Verdict;
 }
 
 /** poll-time context — the requester's own repo the thread read
  *  and the posting-store split both key off */
 interface WaitCtx {
-  dir: string
-  peers: MeshPeer[]
-  common: string
+  dir: string;
+  peers: MeshPeer[];
+  common: string;
 }
 
 function fail(message: string): never {
-  console.error(`error: ${message}`)
-  process.exit(2)
+  console.error(`error: ${message}`);
+  process.exit(2);
 }
 
 function fmtAge(ms: number): string {
-  const m = Math.round(ms / 60_000)
+  const m = Math.round(ms / 60_000);
   if (m < 1) {
-    return 'just now'
+    return 'just now';
   }
   if (m < 60) {
-    return `${m}m`
+    return `${m}m`;
   }
-  return `${Math.round(m / 60)}h`
+  return `${Math.round(m / 60)}h`;
 }
 
 /** `--every SEC` / `--timeout SEC` — a missing or non-numeric value is
@@ -104,57 +104,57 @@ function fmtAge(ms: number): string {
  *  on bounds the operator never set) */
 function secondsArg(flag: string, raw: string | undefined): number {
   if (raw === undefined || raw.startsWith('--')) {
-    fail(`${flag} needs a seconds value`)
+    fail(`${flag} needs a seconds value`);
   }
-  const n = Number(raw)
+  const n = Number(raw);
   if (!Number.isFinite(n)) {
-    fail(`${flag} needs a numeric seconds value, got "${raw}"`)
+    fail(`${flag} needs a numeric seconds value, got "${raw}"`);
   }
-  return n
+  return n;
 }
 
 interface WaitArgs {
-  refs: string[]
-  every: number
-  timeout: number
-  json: boolean
+  refs: string[];
+  every: number;
+  timeout: number;
+  json: boolean;
 }
 
 /** one argv word: a flag (consuming `next` when it takes a value) or
  *  a ref — returns true when `next` was eaten as the flag's value */
 function applyArg(out: WaitArgs, a: string, next: string | undefined): boolean {
   if (a === '--json') {
-    out.json = true
-    return false
+    out.json = true;
+    return false;
   }
   if (a === '--every') {
-    out.every = secondsArg(a, next)
-    return true
+    out.every = secondsArg(a, next);
+    return true;
   }
   if (a === '--timeout') {
-    out.timeout = secondsArg(a, next)
-    return true
+    out.timeout = secondsArg(a, next);
+    return true;
   }
   if (a.startsWith('--')) {
-    console.error(`error: unknown flag "${a}"`)
-    console.error(USAGE)
-    process.exit(2)
+    console.error(`error: unknown flag "${a}"`);
+    console.error(USAGE);
+    process.exit(2);
   }
-  out.refs.push(a)
-  return false
+  out.refs.push(a);
+  return false;
 }
 
 function validateBounds(out: WaitArgs): void {
   if (out.refs.length === 0) {
-    console.error(USAGE)
-    process.exit(2)
+    console.error(USAGE);
+    process.exit(2);
   }
   // a sub-floor --every spins the timer at ~0ms — a busy loop, not a poll
   if (out.every < MIN_INTERVAL_SEC || out.every > MAX_INTERVAL_SEC) {
-    fail(`--every needs ${MIN_INTERVAL_SEC}..${MAX_INTERVAL_SEC}s, got ${out.every}`)
+    fail(`--every needs ${MIN_INTERVAL_SEC}..${MAX_INTERVAL_SEC}s, got ${out.every}`);
   }
   if (out.timeout < 0 || !Number.isFinite(out.timeout * 1000)) {
-    fail(`--timeout needs a finite non-negative seconds value, got ${out.timeout}`)
+    fail(`--timeout needs a finite non-negative seconds value, got ${out.timeout}`);
   }
 }
 
@@ -164,17 +164,17 @@ function parseArgs(args: string[]): WaitArgs {
     every: DEFAULT_EVERY_SEC,
     timeout: DEFAULT_TIMEOUT_SEC,
     json: false,
-  }
-  let skip = false
+  };
+  let skip = false;
   for (const [i, a] of args.entries()) {
     if (skip) {
-      skip = false
-      continue
+      skip = false;
+      continue;
     }
-    skip = applyArg(out, a, args.at(i + 1))
+    skip = applyArg(out, a, args.at(i + 1));
   }
-  validateBounds(out)
-  return out
+  validateBounds(out);
+  return out;
 }
 
 /** the per-ref JSON shape — settled verdicts carry reason and stage
@@ -183,24 +183,24 @@ function refEntry(w: Watch): Record<string, unknown> {
   const out: Record<string, unknown> = {
     verdict: w.settled?.verdict ?? 'waiting',
     source: w.plane.replica ? 'replica' : 'live',
-  }
-  const v = w.settled
+  };
+  const v = w.settled;
   if (v === undefined) {
-    return out
+    return out;
   }
   if (v.reason !== undefined) {
-    out.reason = v.reason
+    out.reason = v.reason;
   }
   if (v.stage !== undefined) {
-    out.stage = v.stage
+    out.stage = v.stage;
   }
   if (v.turn !== undefined) {
-    out.turn = v.turn
+    out.turn = v.turn;
   }
   if (v.replicaAgeMs !== undefined) {
-    out.replicaAgeMs = v.replicaAgeMs
+    out.replicaAgeMs = v.replicaAgeMs;
   }
-  return out
+  return out;
 }
 
 /** `arg: verdict (reason) — replica <alias>, synced <age> ago` — the
@@ -210,85 +210,85 @@ function detailLine(w: Watch, v: Verdict): string {
     v.source === 'replica'
       ? ` — replica ${w.plane.peer.alias}` +
         (v.replicaAgeMs !== undefined ? `, synced ${fmtAge(v.replicaAgeMs)} ago` : ', never synced')
-      : ''
-  return `${w.arg}: ${v.verdict}${v.reason !== undefined ? ` (${v.reason})` : ''}${src}`
+      : '';
+  return `${w.arg}: ${v.verdict}${v.reason !== undefined ? ` (${v.reason})` : ''}${src}`;
 }
 
 interface EmitOpts {
-  code: number
-  verdict: string
-  json: boolean
-  extra?: Record<string, unknown>
+  code: number;
+  verdict: string;
+  json: boolean;
+  extra?: Record<string, unknown>;
 }
 
 /** A verdict line/object — terminal verdicts outrank the deadline,
  *  so emit happens mid-loop, never only at the end. */
 function emit(watches: Watch[], o: EmitOpts): void {
   if (o.json) {
-    const refs = Object.fromEntries(watches.map((w) => [w.arg, refEntry(w)]))
-    console.log(JSON.stringify({ verdict: o.verdict, refs, ...o.extra }))
+    const refs = Object.fromEntries(watches.map(w => [w.arg, refEntry(w)]));
+    console.log(JSON.stringify({ verdict: o.verdict, refs, ...o.extra }));
   } else {
     const detail = watches
-      .flatMap((w) => (w.settled === undefined ? [] : [detailLine(w, w.settled)]))
-      .join('; ')
-    const unsettled = watches.filter((w) => w.settled === undefined).map((w) => w.arg)
+      .flatMap(w => (w.settled === undefined ? [] : [detailLine(w, w.settled)]))
+      .join('; ');
+    const unsettled = watches.filter(w => w.settled === undefined).map(w => w.arg);
     console.log(
       `wait: ${o.verdict}` +
         (detail !== '' ? ` — ${detail}` : '') +
-        (unsettled.length > 0 ? ` (unsettled: ${unsettled.join(' ')})` : ''),
-    )
+        (unsettled.length > 0 ? ` (unsettled: ${unsettled.join(' ')})` : '')
+    );
   }
-  process.exitCode = o.code
+  process.exitCode = o.code;
 }
 
 /** refs + planes resolve once, before the loop — a bad ref or an
  *  unbound rig is a config verdict, not something a poll can outwait */
 function resolveWatches(refs: string[], ctx: WaitCtx): Watch[] {
-  return refs.map((arg) => {
-    const ref = parseExternalRef(arg)
+  return refs.map(arg => {
+    const ref = parseExternalRef(arg);
     if (ref === null) {
       fail(
         `"${arg}" is not an external:rig:id dep ref — ` +
-          'the thread-plane read is `bro mesh wait THREAD`',
-      )
+          'the thread-plane read is `bro mesh wait THREAD`'
+      );
     }
-    const plane = resolveWaitPlane(ctx.dir, ctx.peers, ref.rig, ctx.common)
+    const plane = resolveWaitPlane(ctx.dir, ctx.peers, ref.rig, ctx.common);
     if (plane === undefined) {
-      fail(`no peer binding for ${ref.rig} — ` + '`bro mesh peers add ALIAS RIG REMOTE` binds one')
+      fail(`no peer binding for ${ref.rig} — ` + '`bro mesh peers add ALIAS RIG REMOTE` binds one');
     }
-    return { arg, ref, plane, errors: 0, closedUnshipped: 0 }
-  })
+    return { arg, ref, plane, errors: 0, closedUnshipped: 0 };
+  });
 }
 
 function srcOf(w: Watch): 'live' | 'replica' {
-  return w.plane.replica ? 'replica' : 'live'
+  return w.plane.replica ? 'replica' : 'live';
 }
 
 /** a failed read is a different answer from a read that found
  *  nothing — tolerate blips, settle `unreadable` on a streak */
 function noteReadErrors(w: Watch, errors: string[]): void {
   for (const e of errors) {
-    console.error(`! wait ${w.arg}: ${e}`)
+    console.error(`! wait ${w.arg}: ${e}`);
   }
   if (++w.errors >= MAX_FETCH_ERRORS) {
     w.settled = {
       verdict: 'unreadable',
       reason: `${w.plane.peer.alias} unreadable ${MAX_FETCH_ERRORS} polls running`,
       source: srcOf(w),
-    }
+    };
   }
 }
 
 /** absent on the posting store is a bad ref, not a transient —
  *  the transport says where the bead must land, and it is not there */
 function settleAbsent(w: Watch, read: DepRead): void {
-  console.error(`error: ${w.arg} — ${w.ref.id} is absent on its posting store`)
+  console.error(`error: ${w.arg} — ${w.ref.id} is absent on its posting store`);
   w.settled = {
     verdict: 'unresolved',
     reason: 'absent on its posting store',
     source: srcOf(w),
     replicaAgeMs: read.replicaAgeMs,
-  }
+  };
 }
 
 /** the thread read annotates progress and carries the one actionable
@@ -296,16 +296,16 @@ function settleAbsent(w: Watch, read: DepRead): void {
  *  the envelope SET, not the reduced stage — a ship followed by a
  *  reject is contradictory lifecycle history, not a free dep. */
 function threadOf(w: Watch, ctx: WaitCtx): ReturnType<typeof meshThread> {
-  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, { gitCommon: ctx.common, pull: false })
+  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, { gitCommon: ctx.common, pull: false });
   for (const e of thread.errors) {
-    console.error(`! wait ${w.arg}: ${e}`)
+    console.error(`! wait ${w.arg}: ${e}`);
   }
-  return thread
+  return thread;
 }
 
 function rejected(w: Watch, read: DepRead, thread: ReturnType<typeof meshThread>): boolean {
-  if (!thread.envelopes.some((e) => e.kind === 'reject')) {
-    return false
+  if (!thread.envelopes.some(e => e.kind === 'reject')) {
+    return false;
   }
   w.settled = {
     verdict: 'actionable',
@@ -313,8 +313,8 @@ function rejected(w: Watch, read: DepRead, thread: ReturnType<typeof meshThread>
     stage: thread.stage,
     source: srcOf(w),
     replicaAgeMs: read.replicaAgeMs,
-  }
-  return true
+  };
+  return true;
 }
 
 /** could the peer plane have observed a ship that already landed?
@@ -324,14 +324,14 @@ function rejected(w: Watch, read: DepRead, thread: ReturnType<typeof meshThread>
  *  falls back to the poll grace). */
 function shipCouldBeVisible(w: Watch, read: DepRead): boolean {
   if (!w.plane.replica || read.replicaAgeMs === undefined) {
-    return true
+    return true;
   }
-  const stamp = read.request?.closed_at ?? read.request?.updated_at
-  const closeMs = stamp === undefined || stamp === null ? Number.NaN : Date.parse(stamp)
+  const stamp = read.request?.closed_at ?? read.request?.updated_at;
+  const closeMs = stamp === undefined || stamp === null ? Number.NaN : Date.parse(stamp);
   if (Number.isNaN(closeMs)) {
-    return true
+    return true;
   }
-  return Date.now() - read.replicaAgeMs > closeMs
+  return Date.now() - read.replicaAgeMs > closeMs;
 }
 
 /** closed-without-provides — the dep's own release rule failed. Not a
@@ -341,16 +341,16 @@ function closedUnshipped(w: Watch, read: DepRead): boolean {
   if (!shipCouldBeVisible(w, read)) {
     console.error(
       `wait ${w.arg}: closed — replica predates the close, ` +
-        'a landed ship would be invisible; `bro mesh pull` refreshes',
-    )
-    return false
+        'a landed ship would be invisible; `bro mesh pull` refreshes'
+    );
+    return false;
   }
-  w.closedUnshipped += 1
+  w.closedUnshipped += 1;
   if (w.closedUnshipped < CLOSED_UNSHIPPED_GRACE) {
     console.error(
-      `wait ${w.arg}: closed — ship pending (${w.closedUnshipped}/${CLOSED_UNSHIPPED_GRACE})`,
-    )
-    return false
+      `wait ${w.arg}: closed — ship pending (${w.closedUnshipped}/${CLOSED_UNSHIPPED_GRACE})`
+    );
+    return false;
   }
   w.settled = {
     verdict: 'actionable',
@@ -359,18 +359,18 @@ function closedUnshipped(w: Watch, read: DepRead): boolean {
       'the dep will not release on its own',
     source: srcOf(w),
     replicaAgeMs: read.replicaAgeMs,
-  }
-  return true
+  };
+  return true;
 }
 
 /** closed provides:<id> on the peer plane — the dep's own release
  *  rule fired, the wait is over */
 function shipped(w: Watch, read: DepRead): boolean {
   if (read.shipped !== true) {
-    return false
+    return false;
   }
-  w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs }
-  return true
+  w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs };
+  return true;
 }
 
 /** posting store read clean — thread verdicts outrank ship ones
@@ -379,44 +379,44 @@ function settleFromPlanes(
   w: Watch,
   ctx: WaitCtx,
   read: DepRead,
-  req: NonNullable<DepRead['request']>,
+  req: NonNullable<DepRead['request']>
 ): void {
-  const thread = threadOf(w, ctx)
+  const thread = threadOf(w, ctx);
   if (rejected(w, read, thread) || shipped(w, read)) {
-    return
+    return;
   }
   if (req.status === 'closed') {
-    closedUnshipped(w, read)
-    return
+    closedUnshipped(w, read);
+    return;
   }
   // a reopen drains the grace — a store that flickered closed→open
   // starts the ship-pending count over, not where it left off
-  w.closedUnshipped = 0
+  w.closedUnshipped = 0;
   console.error(
     `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
-      (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
-  )
+      (thread.turn !== undefined ? ` — ${thread.turn}'s move` : '')
+  );
 }
 
 /** one poll of one unsettled watch — records a verdict or bumps the
  *  blip counter; the watch carries the state */
-function pollWatch(w: Watch, ctx: WaitCtx): void {
-  const read = readDepState(w.plane, w.ref.id)
+function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
+  const read = readDepState(w.plane, w.ref.id, timeoutMs);
   if (read.errors.length > 0) {
-    noteReadErrors(w, read.errors)
-    return
+    noteReadErrors(w, read.errors);
+    return;
   }
-  w.errors = 0
-  const req = read.request
+  w.errors = 0;
+  const req = read.request;
   if (req === null || req === undefined) {
     // null is a bad ref; undefined means the posting store threw —
     // that failure already spent against the error budget above
     if (req === null) {
-      settleAbsent(w, read)
+      settleAbsent(w, read);
     }
-    return
+    return;
   }
-  settleFromPlanes(w, ctx, read, req)
+  settleFromPlanes(w, ctx, read, req);
 }
 
 /** terminal verdicts by precedence — a bad ref (2) outranks a dead
@@ -428,29 +428,29 @@ function aggregate(watches: Watch[]): { code: number; verdict: string } | undefi
     ['unresolved', 2],
     ['unreadable', 1],
     ['actionable', 3],
-  ]
+  ];
   for (const [kind, code] of precedence) {
-    if (watches.some((w) => w.settled?.verdict === kind)) {
-      return { code, verdict: kind }
+    if (watches.some(w => w.settled?.verdict === kind)) {
+      return { code, verdict: kind };
     }
   }
-  return watches.every((w) => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined
+  return watches.every(w => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined;
 }
 
 /** one turn of the loop — poll every unsettled watch. A throw is a
  *  read failure, not a crash — a long-lived watcher spends it against
  *  the same blip budget */
-function pollUnsettled(watches: Watch[], ctx: WaitCtx): void {
+function pollUnsettled(watches: Watch[], ctx: WaitCtx, timeoutMs?: number): void {
   for (const w of watches) {
     if (w.settled !== undefined) {
-      continue
+      continue;
     }
     try {
-      pollWatch(w, ctx)
+      pollWatch(w, ctx, timeoutMs);
     } catch (err) {
       noteReadErrors(w, [
         `unexpected poll failure — ${err instanceof Error ? err.message : String(err)}`,
-      ])
+      ]);
     }
   }
 }
@@ -460,23 +460,30 @@ function pollUnsettled(watches: Watch[], ctx: WaitCtx): void {
 async function watchLoop(
   watches: Watch[],
   ctx: WaitCtx,
-  o: { every: number; timeout: number; json: boolean },
+  o: { every: number; timeout: number; json: boolean }
 ): Promise<void> {
   // monotonic clock for the bound — a wall-clock step must not stretch
   // a --timeout past its elapsed budget
-  const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY
-  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+  const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY;
+  const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
   while (performance.now() < deadline) {
-    pollUnsettled(watches, ctx)
-    const out = aggregate(watches)
+    const remainingMs = o.timeout > 0 ? Math.max(0, deadline - performance.now()) : undefined;
+    // plumb remaining budget into dolt subprocesses so a hung replica read
+    // cannot overshoot the --timeout by the full dolt timeout
+    const doltTimeoutMs =
+      remainingMs === undefined
+        ? undefined
+        : Math.min(120_000, Math.max(1, Math.floor(remainingMs)));
+    pollUnsettled(watches, ctx, doltTimeoutMs);
+    const out = aggregate(watches);
     if (out !== undefined) {
-      emit(watches, { ...out, json: o.json })
-      return
+      emit(watches, { ...out, json: o.json });
+      return;
     }
     // cap the poll sleep at the remaining budget — a short --timeout
     // exits on its boundary, not one full interval late
     try {
-      await sleep(Math.min(o.every * 1000, deadline - performance.now()))
+      await sleep(Math.min(o.every * 1000, deadline - performance.now()));
     } catch {
       // a rejected timer is not a verdict — the next turn re-reads
       // the stores and the deadline either way
@@ -487,20 +494,20 @@ async function watchLoop(
     code: 4,
     verdict: 'timeout',
     json: o.json,
-    extra: { unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg) },
-  })
+    extra: { unsettled: watches.filter(w => w.settled === undefined).map(w => w.arg) },
+  });
 }
 
 export async function runWaitCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
-    printUsage(USAGE, 0)
+    printUsage(USAGE, 0);
   }
-  const dir = process.cwd()
-  const args = parseArgs(argv)
-  const common = gitCommonDir(dir)
+  const dir = process.cwd();
+  const args = parseArgs(argv);
+  const common = gitCommonDir(dir);
   if (common === null) {
-    fail('bro wait: not inside a git repository')
+    fail('bro wait: not inside a git repository');
   }
-  const ctx: WaitCtx = { dir, peers: meshPeers(dir), common }
-  await watchLoop(resolveWatches(args.refs, ctx), ctx, args)
+  const ctx: WaitCtx = { dir, peers: meshPeers(dir), common };
+  await watchLoop(resolveWatches(args.refs, ctx), ctx, args);
 }

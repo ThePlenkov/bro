@@ -6,77 +6,80 @@
  * and never writes back — sovereignty is structural: the transport
  * has no write verb.
  */
-import { spawnSync } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawnSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 export interface DoltResult {
-  code: number
-  out: string
-  err: string
+  code: number;
+  out: string;
+  err: string;
 }
 
-function dolt(args: string[], cwd?: string): DoltResult {
-  const p = spawnSync('dolt', args, {  // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+function dolt(args: string[], cwd?: string, timeoutMs = 120_000): DoltResult {
+  const p = spawnSync('dolt', args, {
+    // NOSONAR — PATH lookup is the contract (same as core/git.ts)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: timeoutMs,
     maxBuffer: 32 * 1024 * 1024,
-  })
+  });
   return {
     code: p.status ?? 1,
     out: p.stdout ?? '',
     err: (p.stderr ?? p.error?.message ?? '').trim(),
-  }
+  };
 }
 
 export function replicaDir(gitCommon: string, alias: string): string {
-  return join(gitCommon, 'bro', 'mesh', 'peers', alias)
+  return join(gitCommon, 'bro', 'mesh', 'peers', alias);
 }
 
 /** Clone when absent, pull when present. Returns the replica path on
  *  success, or an error string — a peer that can't be fetched is an
  *  empty inbox, not a crash (fail-open, same policy as the bus). */
-export function syncReplica(gitCommon: string, alias: string, remote: string): { path?: string; error?: string } {
-  const dir = replicaDir(gitCommon, alias)
+export function syncReplica(
+  gitCommon: string,
+  alias: string,
+  remote: string
+): { path?: string; error?: string } {
+  const dir = replicaDir(gitCommon, alias);
   if (remote.startsWith('-')) {
-    return { error: `${alias}: invalid remote '${remote}' — must not start with '-'` }
+    return { error: `${alias}: invalid remote '${remote}' — must not start with '-'` };
   }
-  const r = existsSync(join(dir, '.dolt'))
-    ? dolt(['pull'], dir)
-    : dolt(['clone', remote, dir])
+  const r = existsSync(join(dir, '.dolt')) ? dolt(['pull'], dir) : dolt(['clone', remote, dir]);
   if (r.code !== 0 || !existsSync(join(dir, '.dolt'))) {
-    return { error: `${alias}: replica sync failed — ${r.err || r.out}`.trim() }
+    return { error: `${alias}: replica sync failed — ${r.err || r.out}`.trim() };
   }
-  return { path: dir }
+  return { path: dir };
 }
 
 export interface IssueRow {
-  id: string
-  title: string
-  description?: string
-  notes?: string
-  status?: string
-  priority?: number
-  external_ref?: string | null
+  id: string;
+  title: string;
+  description?: string;
+  notes?: string;
+  status?: string;
+  priority?: number;
+  external_ref?: string | null;
 }
 
-const MESH_SQL = `select id, title, description, status, priority, external_ref from issues where id in (select issue_id from labels where label = 'mesh:v:1')`
+const MESH_SQL = `select id, title, description, status, priority, external_ref from issues where id in (select issue_id from labels where label = 'mesh:v:1')`;
 
 /** All mesh-labelled issues in a replica — labels are fetched per row
  *  (the fan-out is small by definition: mesh traffic is requests, not
  *  bulk). JSON rows come from `dolt sql -r json`. */
-export function meshIssues(dir: string): { rows: IssueRow[]; error?: string } {
-  const r = dolt(['sql', '-q', MESH_SQL, '-r', 'json'], dir)
+export function meshIssues(dir: string, timeoutMs?: number): { rows: IssueRow[]; error?: string } {
+  const r = dolt(['sql', '-q', MESH_SQL, '-r', 'json'], dir, timeoutMs);
   if (r.code !== 0) {
-    return { rows: [], error: r.err || r.out }
+    return { rows: [], error: r.err || r.out };
   }
   try {
-    const parsed = JSON.parse(r.out) as { rows?: IssueRow[] }
-    return { rows: parsed.rows ?? [] }
+    const parsed = JSON.parse(r.out) as { rows?: IssueRow[] };
+    return { rows: parsed.rows ?? [] };
   } catch {
-    return { rows: [], error: `replica query returned unparseable json` }
+    return { rows: [], error: `replica query returned unparseable json` };
   }
 }
 
@@ -87,14 +90,18 @@ export function meshIssues(dir: string): { rows: IssueRow[]; error?: string } {
  *  `bd` cannot address it. */
 /** a provides:<capability> id is a bead-id token — the charset is the
  *  allowlist the SQL interpolation boundary checks against */
-export const CAPABILITY_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/
+export const CAPABILITY_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 
-export function shippedIssues(dir: string, capability: string): { shipped?: boolean; error?: string } {
+export function shippedIssues(
+  dir: string,
+  capability: string,
+  timeoutMs?: number
+): { shipped?: boolean; error?: string } {
   // allowlist at the SQL boundary — the value is interpolated raw,
   // so anything outside the bead-id token charset refuses to query
   // rather than leaning on quote-escaping alone
   if (!CAPABILITY_RE.test(capability)) {
-    return { error: `unsafe capability "${capability}" — refusing the query` }
+    return { error: `unsafe capability "${capability}" — refusing the query` };
   }
   const r = dolt(
     [
@@ -106,15 +113,16 @@ export function shippedIssues(dir: string, capability: string): { shipped?: bool
       'json',
     ],
     dir,
-  )
+    timeoutMs
+  );
   if (r.code !== 0) {
-    return { error: r.err || r.out }
+    return { error: r.err || r.out };
   }
   try {
-    const parsed = JSON.parse(r.out) as { rows?: { id?: string }[] }
-    return { shipped: (parsed.rows ?? []).length > 0 }
+    const parsed = JSON.parse(r.out) as { rows?: { id?: string }[] };
+    return { shipped: (parsed.rows ?? []).length > 0 };
   } catch {
-    return { error: `replica query returned unparseable json` }
+    return { error: `replica query returned unparseable json` };
   }
 }
 
@@ -125,26 +133,37 @@ export function shippedIssues(dir: string, capability: string): { shipped?: bool
 export function replicaAgeMs(dir: string, now: number = Date.now()): number | undefined {
   for (const p of [join(dir, '.dolt', 'noms', 'manifest'), join(dir, '.dolt'), dir]) {
     try {
-      return Math.max(0, now - statSync(p).mtimeMs)
+      return Math.max(0, now - statSync(p).mtimeMs);
     } catch {
       // absent — try the shallower stamp
     }
   }
-  return undefined
+  return undefined;
 }
 
-export function issueLabels(dir: string, id: string): { labels: string[]; error?: string } {
+export function issueLabels(
+  dir: string,
+  id: string,
+  timeoutMs?: number
+): { labels: string[]; error?: string } {
   const r = dolt(
-    ['sql', '-q', `select label from labels where issue_id = '${id.replaceAll("'", "''")}'`, '-r', 'json'],
+    [
+      'sql',
+      '-q',
+      `select label from labels where issue_id = '${id.replaceAll("'", "''")}'`,
+      '-r',
+      'json',
+    ],
     dir,
-  )
+    timeoutMs
+  );
   if (r.code !== 0) {
-    return { labels: [], error: r.err || r.out }
+    return { labels: [], error: r.err || r.out };
   }
   try {
-    const parsed = JSON.parse(r.out) as { rows?: { label: string }[] }
-    return { labels: (parsed.rows ?? []).map((row) => row.label) }
+    const parsed = JSON.parse(r.out) as { rows?: { label: string }[] };
+    return { labels: (parsed.rows ?? []).map(row => row.label) };
   } catch {
-    return { labels: [], error: `label query returned unparseable json` }
+    return { labels: [], error: `label query returned unparseable json` };
   }
 }
