@@ -81,8 +81,15 @@ type LoadError =
   | { kind: 'summary_failed'; message: string }
   | { kind: 'unknown'; message: string }
 
-function isRateLimitedStatus(status: number) {
-  return status === 403 || status === 429
+function isRateLimitedStatus(status: number, res?: Response, body?: string) {
+  if (status === 429) return true
+  if (status === 403) {
+    const remaining = res?.headers?.get('x-ratelimit-remaining')
+    if (remaining === '0') return true
+    if (body && /rate limit/i.test(body)) return true
+    return false
+  }
+  return false
 }
 
 function getRateLimitHeaders(res: Response) {
@@ -97,7 +104,20 @@ function readSnapshot(): CachedSnapshot | null {
   try {
     const raw = window.localStorage.getItem(SNAPSHOT_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as CachedSnapshot
+    const parsed = JSON.parse(raw)
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      typeof parsed.fetched_at !== 'string' ||
+      typeof parsed.sha !== 'string' ||
+      !parsed.summary ||
+      typeof parsed.summary !== 'object' ||
+      !Array.isArray(parsed.rows) ||
+      !Array.isArray(parsed.findings)
+    ) {
+      return null
+    }
+    return parsed as CachedSnapshot
   } catch {
     return null
   }
@@ -189,7 +209,9 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
     throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
   }
 
-  if (isRateLimitedStatus(refRes.status)) {
+  const refBodyPromise = refRes.clone().text().catch(() => '')
+  const refBody = await refBodyPromise
+  if (isRateLimitedStatus(refRes.status, refRes, refBody)) {
     const cached = readSnapshot()
     if (cached) {
       return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
@@ -277,8 +299,10 @@ function DebtDashboard() {
   const [sha, setSha] = useState<string | undefined>(undefined)
 
   useEffect(() => {
+    let active = true
     load().then(
       (res) => {
+        if (!active) return
         setData(res.data)
         setSource(res.source)
         setFetchedAt(res.fetchedAt)
@@ -288,6 +312,7 @@ function DebtDashboard() {
         setRetryAfter(null)
       },
       (err: unknown) => {
+        if (!active) return
         console.error('debt dashboard:', err)
         if (err && typeof err === 'object' && 'kind' in err) {
           const e = err as LoadError
@@ -302,15 +327,23 @@ function DebtDashboard() {
           } else {
             setError('could not load the ledger — check the console for details')
           }
+          if (e.kind === 'summary_failed') {
+            setData(null)
+          }
         } else if (err instanceof Error) {
           setErrorKind('unknown')
           setError(err.message === 'data ref not found' ? 'data ref not found — the review-debt snapshot may not be published yet.' : 'could not load the ledger — check the console for details')
+          setData(null)
         } else {
           setErrorKind('unknown')
           setError('could not load the ledger — check the console for details')
+          setData(null)
         }
       }
     )
+    return () => {
+      active = false
+    }
   }, [])
 
   const { counts, total, recent } = useMemo(() => {
