@@ -57,6 +57,7 @@ packages/
     src/commands/{hooks,work,drill,loop,next}.ts           → sessions
     src/commands/{agents,fleet,serve}.ts, agent-connectors.ts → sessions
   pack/       @broject/bro-pack — client skill packs       → distro
+  rig/        lifecycle engine: `rigNext` verdicts, ready-set read → sessions
   loop/, convoy/, retro/, drill/                           → sessions/retro
 site/         broject.dev                                  → distro
 hooks.json, hooks/run.sh                                   → sessions

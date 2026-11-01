@@ -15,7 +15,7 @@ import {
   taskStore,
   taskStoreAsync,
 } from '@broject/core'
-import type { TaskDepEdge } from '@broject/core'
+import type { TaskDepEdge, TaskStore } from '@broject/core'
 import { writeReport } from './report.ts'
 import type { DrillReportInput } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
@@ -39,8 +39,13 @@ function isOpen(row: DrillRow): boolean {
   return row.status !== 'closed' && row.status !== 'done'
 }
 
-export function listDrills(): DrillRow[] {
-  const persistent = taskStore().list<DrillRow>({
+/** `dir` anchors the read at another checkout; `opts.store` pins the
+ *  tasks backend outright — a caller that already resolved one probes
+ *  the same rows it will judge. Wisps stay dir-anchored regardless:
+ *  ephemeral frames live in the checkout's bd plane, a pinned tasks
+ *  store does not relocate them. */
+export function listDrills(dir?: string, opts?: { store?: TaskStore }): DrillRow[] {
+  const persistent = (opts?.store ?? taskStore(dir)).list<DrillRow>({
     labels: [DRILL_LABEL],
     all: true,
     limit: 0,
@@ -48,7 +53,7 @@ export function listDrills(): DrillRow[] {
   // ephemeral frames live in the wisp namespace, outside `bd list`
   let wisps: DrillRow[] = []
   try {
-    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'])
+    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir)
     wisps = (out.wisps ?? []).filter(isDrill)
   } catch (err) {
     // tolerate only an explicitly unsupported command (older bd) — a
@@ -117,7 +122,11 @@ type DepEdge = TaskDepEdge
  * (was N+1 `bd children`). kids holds DRILL children only — every
  * consumer filters on isDrill anyway; drillUp's any-child close check
  * still uses childrenOf directly. */
-function drillRelations(rows: DrillRow[]): {
+function drillRelations(
+  rows: DrillRow[],
+  dir?: string,
+  opts?: { store?: TaskStore }
+): {
   kids: Map<string, DrillRow[]>
   parents: Map<string, string>
 } {
@@ -127,7 +136,7 @@ function drillRelations(rows: DrillRow[]): {
     return { kids, parents }
   }
   const byId = new Map(rows.map((r) => [r.id, r]))
-  const edges = taskStore().deps<DepEdge>(
+  const edges = (opts?.store ?? taskStore(dir)).deps<DepEdge>(
     rows.map((r) => r.id),
     { rel: 'parent' }
   )
@@ -173,12 +182,12 @@ async function drillRelationsAsync(
  * deepest path. Ties break on most-recently-updated — the frame the agent
  * touched last is almost always the live one.
  */
-export function currentFrame(): DrillFrame | undefined {
-  const rows = listDrills().filter(isOpen)
+export function currentFrame(dir?: string, opts?: { store?: TaskStore }): DrillFrame | undefined {
+  const rows = listDrills(dir, opts).filter(isOpen)
   if (rows.length === 0) {
     return undefined
   }
-  const { kids, parents } = drillRelations(rows)
+  const { kids, parents } = drillRelations(rows, dir, opts)
   return pickLeaf(rows, kids, parents)
 }
 

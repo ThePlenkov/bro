@@ -1,164 +1,43 @@
-/**
- * `bro loop` — the autonomous backlog runner as a command, not a prompt
- * convention. bro owns the loop: claim the top ready bead (same rules as
- * `bro next`) → fresh sibling worktree → spawn the configured agent →
- * drive the act gate (merge on green, respawn the agent on review
- * threads up to loop.fixRounds) → bd close → repeat until the queue is
- * idle or gated.
- *
- *   bro loop                    run until idle/gated
- *   bro loop --max 3            at most 3 beads
- *   (one loop supervisor per repo — a second `bro loop` stands by
- *   behind the incumbent's `bro/loop.lock` hold and resumes when it
- *   exits; never two concurrent loops, spec bro-2duu9)
- *   bro loop --batch 8          clump up to 8 same-affinity beads per
- *                               work item — one worker, one PR
- *   bro loop --dry-run          print the first item's plan, change nothing
- *   bro loop --agent 'claude -p "$(cat {promptFile})"'
- *   bro loop --agent kilo-cli   spawn through providers.kilo-cli (acp/cli)
- *
- * The agent contract: a `--agent` value that exactly names a configured
- * `providers.<name>` (or `--provider`/`--profile`/`loop.provider`)
- * resolves through the spawn facade — acp providers run `bro acp-worker`
- * headless, cli providers substitute their command for the template.
- * Any other `--agent` value is the raw shell template (the escape
- * hatch): `{promptFile}` in `loop.agent` (bro.config) is replaced with
- * the work-order file path; without the placeholder the path is appended
- * as the last arg. Spawned in the worktree with BRO_BEAD_ID /
- * BRO_BEAD_TITLE / BRO_PROMPT_FILE in env. The agent's job ends at an
- * open PR — merging stays with the gate here.
- *
- * Human gates, epics, and molecule steps are never claimed (next's
- * rules). With `loop.batch`/`--batch` a claim is a CLUMP: the top bead
- * pulls same-affinity neighbors (spec/epic/area/path key) into one
- * worktree + one PR, per-bead commits as checkpoints, uncovered
- * members re-queue on merge (spec bro-nspj7). A bead whose agent fails
- * without a PR is reopened with a
- * note — unless the spawn died inside loop.crashExitMs (default 10s):
- * gone that fast it crashed on the environment, not the bead, and
- * reopening is a respawn-burn, so it parks loud instead (bro-sovl3). A
- * park releases the claim into a deferred snooze —
- * `loop.parkedWakeMin` (default 2h) later the next ready read wakes it
- * to open; the worktree stays as the resume cache the woken claim
- * reuses (bro-hl22w).
- */
-import { spawnSync, spawn } from 'node:child_process';
-import { closeSync, existsSync, readFileSync, statfsSync, statSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
 import {
-  AgentNotFound,
-  agentExitFileName,
-  agentRegistryPath,
-  awaitFileLock,
-  CLASS_LABEL_PREFIX,
-  commandCliName,
-  emitLifecycle,
-  ensureTasksBackend,
-  facade,
-  facadeName,
-  getTasks,
-  gitBranchLog,
+  bd,
+  bdJson,
+  claimBeadStep,
+  findClaimedBeadForBranch,
+  findClaimedBeadForPath,
+  findWorktreeClaims,
+  getConfig,
+  getConnector,
+  git,
   gitCommonDir,
-  gitTry,
-  LockTimeout,
-  mkdirPrivateSync,
-  openPrivateAppendSync,
-  procStat,
-  reviewHost,
-  routeStepClass,
-  SpawnError,
-  specStore,
-  stampPrOwnership,
-  stepClassInfo,
-  stepParent,
-  withFileLock,
-  writePrivateFileSync,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentState,
-  type ClaimCapability,
-  type MirrorPolicy,
-  type ResolvedClass,
-  type ReviewFacade,
-  type SpawnWorker,
-  type TaskStore,
-  BATCH_MARKER_ENV,
-  hasHelpFlag,
-  issueLink,
-  printUsage,
-} from '@broject/core';
-import type { ExitCode } from '@broject/core';
-import {
-  ACT_STATE_TTL_MS,
-  checkHistory,
-  evaluateExitGate,
-  fetchPrActState,
-  resolveLedger,
-  gatePending,
-  prStateCache,
-  watchBegin,
-  watchEnd,
-  watchRefresh,
-  type PrStateCache,
-} from '@broject/act';
-import {
-  buildFixPrompt,
-  buildRebasePrompt,
-  buildWorkPrompt,
-  clumpMembers,
-  coveredBeadIds,
-  diskFloorBreach,
-  diskFloorBytes,
-  expandAgentCmd,
-  MB,
-  memberAction,
-  planItem,
-  projectBeads,
-  type DiskProbe,
-  type GateSnapshot,
-  type LoopConfig,
-  type LoopItem,
-} from '@broject/loop';
-import { loadBroConfig } from '../plugins.ts';
-import {
-  applyFleetRouter,
-  fleetProfileOf,
-  loadAgentEnv,
-  profileModelFor,
-  resolveAgentConnector,
-  resolveSpawnProvider,
-  type AgentConnectorEnv,
-  type SpawnProviderPick,
-} from '../agent-connectors.ts';
-import { flag, positionals } from './args.ts';
-import { runActCommand } from './act.ts';
-import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts';
-import { runSyncCommand } from './sync.ts';
-import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
-import { isStackName } from '@broject/stack';
-import { loopSlug } from '@broject/loop';
-import {
-  defaultBranchName,
-  parseWorktreePorcelain,
-  reapLoopLitter,
-  readStackEdges,
-  recordStackEdge,
-  stackPushLockPath,
+  gitTryAsync,
+  mainWorktreeRoot,
+  resolveRepo,
   worktreePathFor,
-  type LitterReap,
-} from './work.ts';
+  type Bead,
+  type BeadStore,
+  type BroContext,
+  type DrillsConnector,
+  type RigContext,
+  type RigNext,
+  type TasksConnector,
+} from '@broject/core'
+import { rigNext } from '@broject/rig'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import pc from 'picocolors'
+import { loadPlanFromFile, parsePlan } from '../plan.ts'
 import {
-  claimUpTo,
-  classify,
-  epicParentIds,
-  nextScope,
-  readyBeads,
-  type ReadyBead,
-} from './next.ts';
+import { rigNext } from '@broject/rig'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import pc from 'picocolors'
+import { loadPlanFromFile, parsePlan } from '../plan.ts'
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
-import { rigNext } from './rig-next.ts';
 import { MIN_INTERVAL_SEC } from './drive-config.ts';
 
 interface Ctx {
@@ -487,12 +366,11 @@ function lanePicks(
     (cfg.provider !== '' ? cfg.provider : undefined);
   const model =
     sel.model ??
-    // a profile's model rides only on its own provider's lane
-    profileModelFor(flagProfile, provider) ??
+    flagProfile?.model ??
     // the chain head's model pin pairs with ITS provider only — an
     // override provider never inherits chain[0]'s model
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
-    profileModelFor(cfgProfile, provider) ??
+    cfgProfile?.model ??
     (cfg.model !== '' ? cfg.model : undefined);
   return {
     provider,
@@ -3666,3 +3544,21 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     process.removeListener('SIGTERM', onSigterm);
   }
 }
+=======
+  branchForBead,
+  branchNameFor,
+  claimMarkerPath,
+  clearClaimMarker,
+  listWorktreeEntries,
+  loadClaimMarker,
+  loadSessions,
+  saveClaimMarker,
+  saveSessions,
+  touchLease,
+  withWorktreeLock,
+  worktreeClaim,
+  writeWorktreeClaim,
+  type ClaimMarker,
+  type Lease,
+  type SessionInfo,
+} from './work.ts'

@@ -14,7 +14,7 @@ export {
   wakeFrame,
   WAITING_LABEL,
 } from './frames.ts'
-export type { PreventionPlan } from './frames.ts'
+export type { DrillScope, PreventionPlan } from './frames.ts'
 export {
   listReports,
   renderReport,
