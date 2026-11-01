@@ -86,7 +86,7 @@ carries the policy it enforces.
 The same delta analysis, before you push:
 
 ```bash
-npm run check:codescene                    # delta vs origin/main
+npm run check:codescene                    # delta vs the merge-base with origin/main
 node scripts/codescene-gate.ts <report>    # evaluate a saved report
 node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing findings
 ```
