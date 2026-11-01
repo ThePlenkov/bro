@@ -1436,6 +1436,71 @@ describe('bro doctor', () => {
         assert.equal(byName(runDoctorChecks(dir), 'mesh-peers').status, 'warn');
       }
     );
+    // github-derived peer without login warns
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              badlogin: { rig: 'mesh://acme/other', remote: 'https://github.com/acme/other.git' },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
+      }
+    );
+    // github-derived peer with login set is ok
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              goodlogin: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: 'bot',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'ok');
+        assert.match(c.detail ?? '', /1 peer\(s\)/);
+      }
+    );
+    // whitespace-only login is treated as missing
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              ws: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: '   ',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
+      }
+    );
   });
 
   test('debt-sonarcloud: absent when the source is unconfigured', () =>
