@@ -378,26 +378,25 @@ export class AcpTerminals {
     // cancel the pending grace flush — the entry leaves the map now, so
     // a late timer would resolve waiters with a synthetic null status
     clearTimeout(entry.closeTimer)
-    if (entry.exitStatus === null) {
-      // still running: SIGKILL the whole process group so orphaned
-      // grandchildren (e.g. backgrounded jobs under sh -c) don't outlive
-      const pid = entry.child.pid
-      if (pid && process.platform !== 'win32') {
-        try {
-          process.kill(-pid, 'SIGKILL')
-        } catch {
-          try {
-            entry.child.kill('SIGKILL')
-          } catch {}
-        }
-      } else {
+    // Always SIGKILL the whole process group if possible so orphaned
+    // grandchildren (e.g. backgrounded jobs under sh -c) don't outlive
+    // release — even if the shell already exited, descendants may remain.
+    const pid = entry.child.pid
+    if (pid && process.platform !== 'win32') {
+      try {
+        process.kill(-pid, 'SIGKILL')
+      } catch {
         try {
           entry.child.kill('SIGKILL')
         } catch {}
       }
     } else {
-      // exited but 'close' may never come — the timer just cleared was
-      // the last guaranteed flush; resolve waiters now, on the real status
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
+    }
+    if (entry.exitStatus !== null) {
+      // exited but 'close' may never come — resolve waiters now, on the real status
       this.flushEntry(entry)
     }
     this.entries.delete(ctx.params.terminalId)
@@ -415,26 +414,24 @@ export class AcpTerminals {
   dispose(): void {
     for (const entry of this.entries.values()) {
       // same discipline as release: cancel a pending grace flush so no
-      // timer fires post-dispose, and resolve waiters deterministically —
-      // live children settle through their own SIGKILL'd 'exit'
+      // timer fires post-dispose, and resolve waiters deterministically
       entry.stopped = true
       clearTimeout(entry.closeTimer)
-      if (entry.exitStatus === null) {
-        const pid = entry.child.pid
-        if (pid && process.platform !== 'win32') {
-          try {
-            process.kill(-pid, 'SIGKILL')
-          } catch {
-            try {
-              entry.child.kill('SIGKILL')
-            } catch {}
-          }
-        } else {
+      const pid = entry.child.pid
+      if (pid && process.platform !== 'win32') {
+        try {
+          process.kill(-pid, 'SIGKILL')
+        } catch {
           try {
             entry.child.kill('SIGKILL')
           } catch {}
         }
       } else {
+        try {
+          entry.child.kill('SIGKILL')
+        } catch {}
+      }
+      if (entry.exitStatus !== null) {
         this.flushEntry(entry)
       }
     }
