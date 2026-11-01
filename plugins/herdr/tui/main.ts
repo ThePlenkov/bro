@@ -276,8 +276,11 @@ export async function runTui(argv: string[]): Promise<void> {
       toastTimer = setTimeout(() => pane.toast?.(''), 1500);
     } else if (key.name === 'j') pane.writer.select(1);
     else if (key.name === 'k') pane.writer.select(-1);
-    else if (key.name === 'up') pane.scroll?.(-1);
-    else if (key.name === 'down') pane.scroll?.(1);
+    // ±3 — the opencode wheel step (CustomSpeedScroll(3)); ?1007
+    // delivers the wheel as these same arrow keys, so one detent
+    // feels like a real scroll, not a crawl
+    else if (key.name === 'up') pane.scroll?.(-3);
+    else if (key.name === 'down') pane.scroll?.(3);
     else if (key.name === 'pageup') pane.scrollPage?.(-1);
     else if (key.name === 'pagedown') pane.scrollPage?.(1);
     else if (key.name === 'home') pane.scrollEdge?.(0);
