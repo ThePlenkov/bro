@@ -22,6 +22,7 @@ import type {
   WaitForTerminalExitRequest,
   WaitForTerminalExitResponse,
 } from '@agentclientprotocol/sdk'
+import { procStat } from '@broject/core'
 
 interface TerminalEntry {
   child: ChildProcess
@@ -49,6 +50,10 @@ interface TerminalEntry {
    *  chunks so a live `data` never surfaces a U+FFFD boundary. */
   listeners: Set<TerminalFollower>
   decoder: StringDecoder
+  /** Pinned identity of the process group leader at spawn — prevents
+   *  killing a recycled PID after reuse (bro-oovnz). */
+  pgid?: number
+  pidStart?: string
 }
 
 /** A follower's taps — `data` per appended chunk (utf8), `exit` once
@@ -138,6 +143,7 @@ export class AcpTerminals {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     }
     /** argv verbatim, always the first attempt — bare names resolve via
      *  PATH and spaced paths exec literally. Agents like devin instead put
@@ -175,6 +181,8 @@ export class AcpTerminals {
       limit: ctx.params.outputByteLimit ?? this.defaultLimit,
       listeners: new Set(),
       decoder: new StringDecoder('utf8'),
+      pgid: typeof child.pid === 'number' ? child.pid : undefined,
+      pidStart: typeof child.pid === 'number' ? procStat(child.pid)?.start ?? undefined : undefined,
     }
     const settle = (exitCode: number | null, signal: string | null): void => {
       entry.exitStatus ??= { exitCode, signal }
@@ -229,6 +237,9 @@ export class AcpTerminals {
           if (!entry.stopped) {
             const [file, argv] = shellOf()
             entry.child = spawn(file, argv, opts)
+            entry.pgid = typeof entry.child.pid === 'number' ? entry.child.pid : undefined
+            entry.pidStart =
+              typeof entry.child.pid === 'number' ? procStat(entry.child.pid)?.start ?? undefined : undefined
             wire(entry.child)
             return
           }
@@ -326,8 +337,79 @@ export class AcpTerminals {
       )
     })
 
+  private isValidPgid(pgid: unknown): pgid is number {
+    return typeof pgid === 'number' && pgid > 0
+  }
+
+  private isGroupAlive(pgid: number, pidStart: string): boolean {
+    const st = procStat(pgid)
+    if (st === null || st.state === 'Z') {
+      return false
+    }
+    if (st.start !== pidStart) {
+      return false
+    }
+    return true
+  }
+
+  private canSignalGroup(pgid: number): boolean {
+    try {
+      process.kill(-pgid, 0)
+      return true
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EPERM') {
+        return true
+      }
+      return false
+    }
+  }
+
+  private ownershipPgid(entry: TerminalEntry): number | null {
+    if (!this.isValidPgid(entry.pgid)) {
+      return null
+    }
+    // Pin the process identity at spawn and verify the group still belongs
+    // to this terminal before signaling; skip the group kill when ownership
+    // cannot be proven.
+    if (entry.pidStart === undefined) {
+      return null
+    }
+    if (!this.isGroupAlive(entry.pgid, entry.pidStart)) {
+      return null
+    }
+    return entry.pgid
+  }
+
+  private canKillProcessGroup(entry: TerminalEntry): number | null {
+    if (process.platform === 'win32') {
+      return null
+    }
+    const pgid = this.ownershipPgid(entry)
+    if (pgid === null) {
+      return null
+    }
+    if (!this.canSignalGroup(pgid)) {
+      return null
+    }
+    return pgid
+  }
+
   readonly kill: ClientRequestHandler<KillTerminalRequest, void> = (ctx) => {
-    this.get(ctx.params.terminalId).child.kill('SIGTERM')
+    const entry = this.get(ctx.params.terminalId)
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
+      try {
+        process.kill(-pgid, 'SIGTERM')
+        return
+      } catch {}
+    }
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGTERM')
+      } catch {}
+      return
+    }
+    // Cannot prove ownership - skip killing recycled pids
   }
 
   /** Drain the waiters with the best-known status and mark the entry
@@ -367,13 +449,35 @@ export class AcpTerminals {
     // cancel the pending grace flush — the entry leaves the map now, so
     // a late timer would resolve waiters with a synthetic null status
     clearTimeout(entry.closeTimer)
-    if (entry.exitStatus === null) {
-      // still running: SIGKILL's own 'exit' settles the real status and
-      // resolves pending wait_for_exit through the normal path
-      entry.child.kill('SIGKILL')
-    } else {
-      // exited but 'close' may never come — the timer just cleared was
-      // the last guaranteed flush; resolve waiters now, on the real status
+    // Always SIGKILL the whole process group if possible so orphaned
+    // grandchildren (e.g. backgrounded jobs under sh -c) don't outlive
+    // release — even if the shell already exited, descendants may remain.
+    // But only if we can prove ownership (pin identity at spawn).
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
+      try {
+        process.kill(-pgid, 'SIGKILL')
+        this.entries.delete(ctx.params.terminalId)
+        return
+      } catch {
+        // If group kill fails, only kill the direct child on win32
+      }
+    }
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
+      if (entry.exitStatus !== null) {
+        // exited but 'close' may never come — resolve waiters now, on the real status
+        this.flushEntry(entry)
+      }
+      this.entries.delete(ctx.params.terminalId)
+      return
+    }
+    // Cannot prove ownership - skip group kill to avoid killing recycled pids
+    // Do not kill the direct child either if we cannot prove ownership
+    if (entry.exitStatus !== null) {
+      // exited but 'close' may never come — resolve waiters now, on the real status
       this.flushEntry(entry)
     }
     this.entries.delete(ctx.params.terminalId)
@@ -388,18 +492,41 @@ export class AcpTerminals {
       .onRequest('terminal/wait_for_exit', this.waitForExit)
   }
 
+  private killEntryOnDispose(entry: TerminalEntry): void {
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
+      try {
+        process.kill(-pgid, 'SIGKILL')
+      } catch {
+        // fall through to platform-specific handling
+      }
+      if (entry.exitStatus !== null) {
+        this.flushEntry(entry)
+      }
+      return
+    }
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
+      if (entry.exitStatus !== null) {
+        this.flushEntry(entry)
+      }
+      return
+    }
+    // Cannot prove ownership - skip all kills to avoid killing recycled pids
+    if (entry.exitStatus !== null) {
+      this.flushEntry(entry)
+    }
+  }
+
   dispose(): void {
     for (const entry of this.entries.values()) {
       // same discipline as release: cancel a pending grace flush so no
-      // timer fires post-dispose, and resolve waiters deterministically —
-      // live children settle through their own SIGKILL'd 'exit'
+      // timer fires post-dispose, and resolve waiters deterministically
       entry.stopped = true
       clearTimeout(entry.closeTimer)
-      if (entry.exitStatus === null) {
-        entry.child.kill('SIGKILL')
-      } else {
-        this.flushEntry(entry)
-      }
+      this.killEntryOnDispose(entry)
     }
     this.entries.clear()
   }
