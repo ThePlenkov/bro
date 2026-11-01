@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
@@ -203,13 +203,19 @@ export async function runTui(argv: string[]): Promise<void> {
           workerLed: { state: pidAlive(entry?.pid) ? 'working' : 'idle' },
         };
 
-  // clean start: inline mode draws below whatever scrollback the
-  // pane already held (the launch command line, prior output) —
-  // clear screen AND scrollback once so the feed begins at the top.
-  // The write MUST land before createCliRenderer: afterwards stdout
-  // rides the renderer's own writer and the ESC bytes surface as
-  // literal text (field bug). Startup-only; never mid-run.
-  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+  // clean start + mode setup BEFORE createCliRenderer: afterwards
+  // stdout rides the renderer's own writer and ESC bytes surface as
+  // literal text (field bug). `?1007h` = alternate-scroll — with
+  // mouse reporting off the terminal translates the wheel into arrow
+  // keys, so the wheel reaches the scrollbox without button tracking.
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H\x1b[?1007h');
+  process.on('exit', () => {
+    try {
+      writeSync(1, '\x1b[?1007l');
+    } catch {
+      // stdout already gone — the terminal's own teardown resets 1007
+    }
+  });
 
   const base = base0;
   const statePath = fleetStatusPath(base, ctxDir);
@@ -232,12 +238,13 @@ export async function runTui(argv: string[]): Promise<void> {
     // scrolls inside its scrollbox — the wheel reaches it as arrow
     // keys through alternate-scroll (CSI ? 1007), not mouse reports.
     useMouse: false,
-    // main-screen + a scrollbox feed: the tree gets the FULL viewport,
-    // every row is a renderable (real markdown, colors, expandable
-    // cards), and scrolling is the scrollbox's own scrollTop — the
-    // opencode/acp-tui shape. The status bar lives OUTSIDE the
-    // scrollbox, pinned at the bottom — it never scrolls away.
-    screenMode: 'main-screen',
+    // alternate-screen owns the whole buffer — frames repaint in place
+    // and NOTHING lands in herdr's scrollback, killing the double
+    // scroll (main-screen pushed every repaint into the scroll region:
+    // wheel scrolled stale frames while the scrollbox scrolled the
+    // feed). One scroll: the scrollbox's scrollTop. Chrome stays
+    // outside the scrollbox, pinned at the bottom of the buffer.
+    screenMode: 'alternate-screen',
   });
 
   const impl = await pickImpl(implArg(argv));

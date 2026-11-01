@@ -808,25 +808,37 @@ prints only its summary. Field-verified on w4W: mktj6's 458-line
 review-thread prompt paints as `┃ Prompt / +458 lines`, zero raw
 `**`/`<details>`/`<review-threads>` literals in the buffer.
 
-**Addendum 21 — the scrollbox feed (supersedes the addendum-16
-split-footer split)**: split-footer's trade turned out wrong for a
-read-first pane — every scrolled-past row degenerated to plain text
-(`printLines`), markdown/conceal/colors survived only inside the
-18-row strip, and captured stdout escaped the ESC byte so styling
-could never reach the scroll region anyway. Final shape:
-`screenMode: 'main-screen'` + ONE `<scrollbox>` holding the whole
-feed — `flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom"
+**Addendum 21 — the scrollbox feed on `alternate-screen` (supersedes
+addendum-16 split-footer AND the addendum-10/main-screen choice)**:
+split-footer's trade turned out wrong for a read-first pane — every
+scrolled-past row degenerated to plain text (`printLines`),
+markdown/conceal/colors survived only inside the 18-row strip, and
+captured stdout escaped the ESC byte so styling could never reach
+the scroll region anyway. And main-screen had a deeper defect the
+addendum-10 note didn't foresee: OpenTUI's main-screen renderer
+appends EVERY frame repaint to the terminal's scroll region, so
+herdr's native scrollback fills with stale frame copies — the wheel
+then scrolled herdr's garbage frames while the scrollbox scrolled
+the feed (the double-scroll the field reported). Final shape:
+`screenMode: 'alternate-screen'` — `?1049` gives the app its own
+buffer, frame repaints stay inside it, herdr scrollback stays at
+`max_offset_from_bottom: 0` (verified live vs 15+ leaked rows under
+main-screen). ONE `<scrollbox>` holds the whole feed —
+`flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom"
 scrollY` — every row a retained renderable, scrolling is the
 scrollbox's own `scrollTop` (the opencode/acp-tui `ConversationScrollBox`
 model). `HeaderBar`+`FooterBar` sit OUTSIDE the scrollbox with
 `flexShrink={0}`, so the ` bro: session` + keys chrome is pinned at
-the bottom edge structurally — no scroll-margin tricks, no clipping
-race; it stays put while the feed scrolls AND while rows append
-(stickyScroll only follows when already at bottom — scrolled up,
-`Jump to latest ↓` appears). Keyboard scroll:
+the bottom edge structurally — it stays put while the feed scrolls
+AND while rows append (stickyScroll only follows when already at
+bottom — scrolled up, `Jump to latest ↓` appears). Keyboard scroll:
 arrows/PgUp/PgDn/Home/End → `scrollBy`/`scrollTo`; the wheel rides
-herdr's alternate-scroll (`?1007`) into the same arrow keys since
-`useMouse` stays off (native selection + herdr copy preserved).
+xterm alternate-scroll — `\x1b[?1007h` is emitted in the same
+pre-renderer write as the clean-start clear (post-renderer stdout
+writes would surface as literal text through the captured writer;
+`\x1b[?1007l` goes to fd 1 on exit) — terminals translate the wheel
+into arrow keys when the app holds no mouse mode, so `useMouse`
+stays off and drag-select/herdr copy keep working.
 `mountPane` drops `onRetire` — the eviction seam survives as an
 optional test path. Companion fixes: **tool bodies fold on landing,
 always** (`applyOps` append/tool branches — a completed call is one
