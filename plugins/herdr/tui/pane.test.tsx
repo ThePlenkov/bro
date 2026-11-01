@@ -98,7 +98,7 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a tool call renders as a bordered card with its output', async () => {
+  test('a tool call renders collapsed; toggle expands its output', async () => {
     const p = await mount();
     try {
       p.model.feed(
@@ -114,9 +114,15 @@ describe('the Solid session pane', () => {
       await p.flush();
       const frame = await p.frame();
       assert.match(frame, /Bash/);
-      assert.match(frame, /PASS 2330\/2330/);
+      // the body lands folded — a completed call is one compact row
+      assert.doesNotMatch(frame, /PASS 2330\/2330/);
       // opencode grammar — an execute call carries no kind badge
       assert.doesNotMatch(frame, /\[execute\]/);
+
+      p.writer.select(1);
+      p.writer.toggle();
+      await p.flush();
+      assert.match(await p.frame(), /PASS 2330\/2330/);
     } finally {
       await p.dispose();
     }
@@ -194,16 +200,17 @@ describe('the Solid session pane', () => {
         })
       );
       await p.flush();
-      assert.match(await p.frame(), /SECRET-OUTPUT/);
+      // bodies land folded — no output until the user expands
+      assert.doesNotMatch(await p.frame(), /SECRET-OUTPUT/);
 
       p.writer.select(1);
       p.writer.toggle();
       await p.flush();
-      assert.doesNotMatch(await p.frame(), /SECRET-OUTPUT/);
+      assert.match(await p.frame(), /SECRET-OUTPUT/);
 
       p.writer.toggle();
       await p.flush();
-      assert.match(await p.frame(), /SECRET-OUTPUT/);
+      assert.doesNotMatch(await p.frame(), /SECRET-OUTPUT/);
     } finally {
       await p.dispose();
     }
@@ -317,13 +324,15 @@ describe('the Solid session pane', () => {
       text,
       collapsed: true,
     });
-    const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const ESC = String.fromCharCode(27);
+    const strip = (s: string): string => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
     assert.match(folded.map(strip).join('\n'), /\+\d+ lines/);
     const open = printLines({ id: 1, kind: 'prompt', text });
     const joined = open.map(strip).join('\n');
     assert.match(joined, /bold and x \(https:\/\/u\)/);
     assert.doesNotMatch(joined, /\*\*|<details>/);
-    // and the scroll region gets real styling — SGR sequences paint
-    assert.match(open.join('\n'), /\x1b\[38;2;/);
+    // the scroll region is plain text — captured stdout escapes the
+    // ESC byte, so no SGR may reach it (field-found garbage)
+    assert.ok(!open.join('\n').includes(`${ESC}[38;2;`));
   });
 });

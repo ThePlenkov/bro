@@ -9,17 +9,16 @@
  * The seam's currency is the `Op` stream the pane's state fold
  * already consumes (`state.ts`), so `app.tsx`, the writer, and the
  * key bindings are impl-agnostic by construction. What differs per
- * impl is the item tree's SHAPE and the fold policy (`fold`) —
- * `legacy` keeps the COLLAPSE_AT heuristic, `acp` folds every
- * collapsible card (the vendored view-model's baseline).
+ * impl is the item tree's SHAPE. Tool bodies fold on landing for
+ * every impl — a completed call is one compact `⏺ ✓` row; its
+ * output (file dumps, JSON) never owns the feed unpinned.
  */
 import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
 import type { ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
 import { copyItem, type Item, type Op, SessionModel } from './model.ts';
 
-/** How the fold treats a freshly landed card body: `legacy` folds
- *  past COLLAPSE_AT lines, `folded` folds every body (vendored
- *  baseline — "too verbose" is the bug). */
+/** Historical fold-policy names — retained for the impl seam; tool
+ *  bodies fold on landing under either. */
 export type FoldPolicy = 'legacy' | 'folded';
 
 /** One renderer pipeline behind the seam: feed → model → items. */

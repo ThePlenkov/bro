@@ -155,80 +155,39 @@ export function mdPlain(text: string): string[] {
   return out;
 }
 
-/* ── Scrollback styling ───────────────────────────────────────────
- * Captured stdout is the ONLY path into herdr scrollback — and it
- * carries real ANSI, so retired rows keep the pane's formatting:
- * truecolor foregrounds from the same theme tokens, SGR bold/dim/
- * underline. `mdStyled` is the stdout equivalent of the
- * renderable's `<markdown conceal>` — markers never survive. */
-
-const ESC = '\x1b[';
-const RESET = `${ESC}0m`;
-const BOLD = `${ESC}1m`;
-const DIM = `${ESC}2m`;
-const UNDER = `${ESC}4m`;
-
-/** `#rrggbb` → a truecolor SGR foreground. */
-const fg = (hex: string): string => {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `${ESC}38;2;${r};${g};${b}m`;
-};
-
-const C = {
-  muted: fg(theme.muted),
-  emph: fg(theme.emph),
-  peach: fg(theme.peach),
-  amber: fg(theme.amber),
-  cyan: fg(theme.cyan),
-  success: fg(theme.success),
-  error: fg(theme.error),
-  warning: fg(theme.warning),
-} as const;
-
-/** Markdown → ANSI-styled lines for the scroll region — headings
- *  go bold-emph, bold goes bold, links go cyan-underline `t (u)`,
- *  inline code goes cyan, fences keep their body as muted indented
- *  code, HTML tags vanish. Same transforms as mdPlain + SGR. */
-export function mdStyled(text: string): string[] {
+/** Markdown source for the `<markdown>` renderable — the renderable
+ *  prints raw HTML tags literally, so review-tool furniture
+ *  (`<sub>`, `</review-threads>`, `<details>` wrappers, comments)
+ *  strips here the same way `mdPlain` strips it for text. Fenced
+ *  code keeps its tags — `</div>` in a snippet is real code. */
+export function mdSource(text: string): string {
   const out: string[] = [];
   let fence = false;
   for (const raw of text.split('\n')) {
     if (/^\s*(`{3,}|~{3,})/.test(raw)) {
       fence = !fence;
+      out.push(raw);
       continue;
     }
-    if (fence) {
-      out.push(`${C.muted}    ${raw}${RESET}`);
-      continue;
-    }
-    const heading = /^\s{0,3}#{1,6}\s+/.test(raw);
-    const quote = /^\s*>\s?/.test(raw);
-    const l = raw
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]*)\]\(([^)]*)\)/g, `${C.cyan}${UNDER}$1${RESET}${C.muted} ($2)${RESET}`)
-      .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
-      .replace(/\*\*([^*]+)\*\*/g, `${BOLD}$1${RESET}`)
-      .replace(/__([^_]+)__/g, `${BOLD}$1${RESET}`)
-      .replace(/\*([^*\n]+)\*/g, '$1')
-      .replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, '$1$2')
-      .replace(/~~([^~]+)~~/g, '$1')
-      .replace(/`([^`]+)`/g, `${C.cyan}$1${RESET}`)
-      .replace(/<[^>]+>/g, '')
-      .replace(/^\s{0,3}#{1,6}\s+/, '')
-      .replace(/^\s*>\s?/, `${C.muted}┃ ${RESET}`);
-    void quote;
-    out.push(heading ? `${BOLD}${C.emph}${l}${RESET}` : l);
+    out.push(
+      fence
+        ? raw
+        : raw
+            .replace(/<!--[\s\S]*?-->/g, '')
+            .replace(/<\/?(?:sub|details|summary|review-threads?)\b[^>]*>/g, '')
+    );
   }
-  return out;
+  return out.join('\n');
 }
 
-/** The line form a row prints to the scroll region as — the same
- *  grammar the tree paints: `┃` prompt block, `⏺` tool/message,
- *  `+ Thought`, `──` markers, `▸` header, and a ≤3-line + `+N more`
- *  body under an open call. Plain text — the scroll region is a
- *  captured-stdout feed, not a renderable surface. */
+/* ── Scroll region is PLAIN TEXT ──────────────────────────────────
+ * Captured stdout is the ONLY path into herdr scrollback, and the
+ * capture path escapes the ESC byte — so emitted ANSI surfaces as
+ * literal `[38;2;…` garbage (field-found). The scroll region can
+ * therefore only ever carry clean plain text; real markdown, colors
+ * and fences live in the renderable footer strip. `printLines` is the
+ * stdout equivalent of the tree's grammar — compact rows, no styling. */
+
 /** The tool row's meaningful tail — ` [kind]` only where the kind
  *  adds signal (a `command`/`grep` title already says `execute`),
  *  then the arg's first line unless it merely repeats the title or
@@ -262,76 +221,45 @@ export function toolTail(item: ToolItem): { kind: string; arg: string; tally: st
 }
 
 export function printLines(item: Item): string[] {
-  const stamp = `${C.muted}${item.at !== undefined ? `${hhmm(item.at)} ` : '     '}${RESET}`;
+  const stamp = item.at !== undefined ? `${hhmm(item.at)} ` : '      ';
   const rows = (lines: string[]): string[] =>
     lines.map((l, i) => `${i === 0 ? stamp : '      '}${l}`);
   const folded = item.collapsed === true;
   const more = 'text' in item ? item.text.split('\n').length : 0;
   switch (item.kind) {
     case 'header':
-      return rows([`${C.emph} ▸ ${item.text}${RESET}`]);
+      return rows([` ▸ ${item.text}`]);
     case 'prompt':
       return folded
-        ? rows([
-            `${C.peach}┃${RESET}`,
-            `${C.peach}┃${RESET}  Prompt`,
-            `${C.peach}┃${RESET}  ${C.muted}+${more} lines${RESET}`,
-            `${C.peach}┃${RESET}`,
-          ])
-        : rows([
-            `${C.peach}┃${RESET}`,
-            `${C.peach}┃${RESET}  ${C.muted}Prompt${RESET}`,
-            `${C.peach}┃${RESET}`,
-            ...mdStyled(item.text).map(l => `${C.peach}┃${RESET}  ${l}`),
-            `${C.peach}┃${RESET}`,
-          ]);
+        ? rows(['┃', '┃  Prompt', `┃  +${more} lines`, '┃'])
+        : rows(['┃', '┃  Prompt', '┃', ...mdPlain(item.text).map(l => `┃  ${l}`), '┃']);
     case 'message':
       return folded
-        ? rows([
-            `${C.peach}⏺${RESET} ${C.muted}${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`,
-          ])
-        : rows(
-            mdStyled(item.text).map((l, i) => (i === 0 ? `${C.peach}⏺${RESET} ${l}` : `  ${l}`))
-          );
+        ? rows([`⏺ ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
     case 'thought':
       return folded
-        ? rows([
-            `${C.amber}+ Thought${RESET}${C.muted} · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`,
-          ])
-        : rows([
-            `${C.amber}+ Thought${RESET}`,
-            ...mdStyled(item.text).map(l => `  ${C.muted}${l}${RESET}`),
-          ]);
+        ? rows([`+ Thought · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows([`+ Thought`, ...mdPlain(item.text).map(l => `  ${l}`)]);
     case 'tool': {
-      const g =
-        item.status === 'completed'
-          ? `${C.success}✓${RESET}`
-          : item.status === 'live'
-            ? `${C.warning}…${RESET}`
-            : `${C.error}✗${RESET}`;
+      const g = item.status === 'completed' ? '✓' : item.status === 'live' ? '…' : '✗';
       const tail = toolTail(item);
-      const head = `${C.muted}⏺${RESET} ${g} ${C.muted}${item.title}${tail.kind}${tail.arg}${RESET}${tail.tally !== '' ? `${C.muted}${tail.tally}${RESET}` : ''}`;
+      const head = `⏺ ${g} ${item.title}${tail.kind}${tail.arg}${tail.tally}`;
       const out = [head];
-      // collapsed = the row only — file dumps never print (the user
-      // asked for opencode's quiet mass row); open shows the body
+      // a collapsed row is just the head — generated file/output bodies
+      // never dump into the feed. An open row prints a capped preview
+      // (≤3 lines + `+N more`) — enough signal, never a file dump.
       if (!folded) {
-        const body = toolBodyLines(item, Number.POSITIVE_INFINITY);
-        for (const l of body.lines) {
-          out.push(
-            l.startsWith('+ ')
-              ? `  ${C.success}${l}${RESET}`
-              : l.startsWith('- ')
-                ? `  ${C.error}${l}${RESET}`
-                : `  ${C.muted}${l}${RESET}`
-          );
-        }
+        const body = toolBodyLines(item, 3);
+        for (const l of body.lines) out.push(`  ${l}`);
+        if (body.more > 0) out.push(`  +${body.more} more`);
       }
       return rows(out);
     }
     default:
       return folded
-        ? rows([`${C.muted}${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`])
-        : rows(mdStyled(item.text));
+        ? rows([`${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text));
   }
 }
 

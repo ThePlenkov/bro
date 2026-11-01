@@ -47,6 +47,7 @@ import {
   isFoldable,
   isSettled,
   mdPlain,
+  mdSource,
   rowHeight,
   sideColor,
   TAIL_BUDGET,
@@ -118,13 +119,13 @@ export function createPane(
     setState(reconcile(plain, { key: null }));
   };
 
-  /** Retirement feeds the scroll region: settled items (terminal
-   *  tools, closed text blocks — isSettled) flush to captured
-   *  stdout the moment they settle, and any prefix past the live
-   *  strip's row budget follows. Only a PREFIX ever retires, so
-   *  scrollback order matches the feed's order; the selected item
-   *  and the tail item always stay live. The strip itself is just
-   *  in-flight rows plus the pinned chrome. */
+  /** Optional eviction seam: when a shell passes `onRetire`, settled
+   *  items (terminal tools, closed text blocks — isSettled) flush to
+   *  the callback the moment they settle, and any prefix past the
+   *  row budget follows. Only a PREFIX ever retires, so print order
+   *  matches the feed's order; the selected item and the tail item
+   *  always stay live. The production shell passes no onRetire —
+   *  every row stays a scrollbox renderable. */
   const retire = (next: PaneState): PaneState => {
     if (onRetire === undefined) return next;
     const lastId = next.order[next.order.length - 1];
@@ -492,7 +493,7 @@ function BarPad() {
  *  Empty text (no journaled prompt, no `.prompt.md` sibling) is
  *  the marker. */
 function PromptRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }) {
-  const text = createMemo(() => ('text' in props.item ? props.item.text : ''));
+  const text = createMemo(() => ('text' in props.item ? mdSource(props.item.text) : ''));
   // the selection peek opens an untouched fold while it holds the
   // row; Enter/c pins it (the tool cards' own grammar)
   const open = () =>
@@ -587,7 +588,7 @@ function ItemRow(props: {
   // Enter/c pins it; folded rows read `first line · +N lines`
   const textOpen = () =>
     props.item.collapsed !== true || (props.selected && props.item.foldTouched !== true);
-  const textOf = () => ('text' in props.item ? props.item.text : '');
+  const textOf = () => ('text' in props.item ? mdSource(props.item.text) : '');
   const foldSummary = () => {
     const n = textOf().split('\n').length;
     return `${firstLine(mdPlain(textOf()).join('\n'))}${n > 1 ? ` · +${n} lines` : ''}`;
@@ -941,15 +942,12 @@ function Pane(props: {
     }
     return undefined;
   };
-  // split-footer: the renderable tree IS the `footerHeight` band at
-  // the bottom of the screen — its height never grows past the band,
-  // and OpenTUI anchors the band's TOP, so anything past it clips off
-  // the BOTTOM. The identity/keys chrome must therefore always be the
-  // strip's last rows. The feed sits in a bottom-anchored
-  // (justifyContent='flex-end'), top-clipping (overflow='hidden')
-  // column that flex-fills the space above the chrome: when the live
-  // tail overruns the band the OLDEST rows clip off the top and the
-  // status bar can never be pushed off-screen (the user ask).
+  // the opencode/acp-tui shape: the WHOLE feed is renderables inside a
+  // scrollbox (stickyScroll keeps the bottom while rows stream), and
+  // the scroll is the scrollbox's own scrollTop — every row keeps its
+  // markdown/colors/expand chrome and scrolls in place. The identity +
+  // keys chrome sits OUTSIDE the scrollbox, flexShrink=0 at the bottom
+  // of the column — pinned there always, never scrolled or clipped.
   return (
     <box
       flexDirection="column"
@@ -958,17 +956,18 @@ function Pane(props: {
       overflow="hidden"
       backgroundColor={theme.base}
     >
-      <box
+      <scrollbox
         ref={el => {
-          setScroller(el as unknown as ScrollBoxRenderable);
-          props.onScroller?.(el as unknown as ScrollBoxRenderable);
+          const sb = el as ScrollBoxRenderable;
+          setScroller(sb);
+          props.onScroller?.(sb);
         }}
-        flexDirection="column"
-        width="100%"
         flexGrow={1}
         minHeight={0}
-        overflow="hidden"
-        justifyContent="flex-end"
+        width="100%"
+        stickyScroll={true}
+        stickyStart="bottom"
+        scrollY={true}
         backgroundColor={theme.base}
       >
         <For each={props.store.state.order}>
@@ -1002,7 +1001,7 @@ function Pane(props: {
             </Show>
           )}
         </For>
-      </box>
+      </scrollbox>
       <Show when={!atBottom()}>
         <box
           flexDirection="row"
@@ -1015,9 +1014,8 @@ function Pane(props: {
           <text fg={theme.muted} content="Jump to latest ↓ " />
         </box>
       </Show>
-      {/* identity + keys are the strip's LAST rows — pinned at the
-       *  bottom of the footer band, flexShrink=0 so an overrun feed
-       *  clips off the top instead of pushing them off-screen */}
+      {/* identity + keys — pinned at the bottom, OUTSIDE the scrollbox,
+       *  so they never move while the feed scrolls */}
       <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
@@ -1034,14 +1032,13 @@ function Pane(props: {
 export async function mountPane(opts: {
   renderer: CliRenderer;
   meta?: Partial<PaneMeta>;
-  /** The impl's fold policy — 'folded' collapses every card body
-   *  (the vendored baseline); unset keeps COLLAPSE_AT. */
+  /** Retained wiring — tool bodies fold on landing regardless. */
   foldAll?: boolean;
   /** The impl's copy text for an item — Ctrl+C's payload. */
   copyItem?: (item: Item) => string;
-  /** Called with the items the tail budget just retired — the shell
-   *  prints their lines to captured stdout (scroll region → native
-   *  scrollback). Unset keeps every item retained (tests, dumps). */
+  /** Optional eviction hook — settled items the pane retires to the
+   *  shell (e.g. for a captured-stdout print). Unset keeps every row
+   *  a scrollbox renderable — the production shape. */
   onRetire?: (items: Item[]) => void;
 }): Promise<Pane> {
   // mouse capture OFF — the pane uses no mouse features, and holding

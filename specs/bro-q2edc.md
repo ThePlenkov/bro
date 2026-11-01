@@ -808,6 +808,39 @@ prints only its summary. Field-verified on w4W: mktj6's 458-line
 review-thread prompt paints as `┃ Prompt / +458 lines`, zero raw
 `**`/`<details>`/`<review-threads>` literals in the buffer.
 
+**Addendum 21 — the scrollbox feed (supersedes the addendum-16
+split-footer split)**: split-footer's trade turned out wrong for a
+read-first pane — every scrolled-past row degenerated to plain text
+(`printLines`), markdown/conceal/colors survived only inside the
+18-row strip, and captured stdout escaped the ESC byte so styling
+could never reach the scroll region anyway. Final shape:
+`screenMode: 'main-screen'` + ONE `<scrollbox>` holding the whole
+feed — `flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom"
+scrollY` — every row a retained renderable, scrolling is the
+scrollbox's own `scrollTop` (the opencode/acp-tui `ConversationScrollBox`
+model). `HeaderBar`+`FooterBar` sit OUTSIDE the scrollbox with
+`flexShrink={0}`, so the ` bro: session` + keys chrome is pinned at
+the bottom edge structurally — no scroll-margin tricks, no clipping
+race; it stays put while the feed scrolls AND while rows append
+(stickyScroll only follows when already at bottom — scrolled up,
+`Jump to latest ↓` appears). Keyboard scroll:
+arrows/PgUp/PgDn/Home/End → `scrollBy`/`scrollTo`; the wheel rides
+herdr's alternate-scroll (`?1007`) into the same arrow keys since
+`useMouse` stays off (native selection + herdr copy preserved).
+`mountPane` drops `onRetire` — the eviction seam survives as an
+optional test path. Companion fixes: **tool bodies fold on landing,
+always** (`applyOps` append/tool branches — a completed call is one
+compact `⏺ ✓` row; file/JSON dumps never own the feed); routine tool
+ops strip `collapsed`/`foldTouched` (`SessionModel.pushTool`, the acp
+convention) so status churn can't clobber pane-owned fold state — the
+spread bug that kept unfolded bodies open on replay; `mdSource()`
+strips HTML furniture (`<sub>`, `</review-threads>`, `<!-- -->`,
+details/summary) before `<markdown>` since the renderable prints raw
+tags literally — fences keep real code tags. Verified on w56/w57:
+expanded 458-line review prompt renders clean markdown (rules lists,
+placeholders like `<millis>` survive the narrowed strip), scroll +
+`Jump to latest ↓` + scrollbar gutter live, chrome pinned.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

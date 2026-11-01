@@ -13,7 +13,7 @@
  * after the first eviction.
  */
 import type { Item, Op, ToolItem } from './model.ts';
-import { contentLineCount, isFoldable } from './view.ts';
+import { isFoldable } from './view.ts';
 
 /** The header bar's live fields — what the shell knows that the
  *  items do not: whose worktree, whose session, and the LED verdict
@@ -35,14 +35,13 @@ export interface PaneState {
   /** The selected tool card's id, or -1 when none is selected. */
   selected: number;
   meta: PaneMeta;
-  /** The impl's fold policy (impl.ts `PaneImpl.fold`): set — every
-   *  card body lands collapsed (the vendored baseline); unset — the
-   *  legacy COLLAPSE_AT heuristic. */
+  /** The impl's fold policy (impl.ts `PaneImpl.fold`) — retained
+   *  wiring; tool bodies now fold unconditionally on landing. */
   foldAll?: boolean;
 }
 
-/** A body past this many lines lands collapsed — a card stays a
- *  card, and the `… N more` hint says what it hides. */
+/** Line-count marker for a large body — tests use it to fabricate
+ *  oversized cards. */
 export const COLLAPSE_AT = 12;
 
 /** A fresh, empty pane state. */
@@ -86,15 +85,11 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
     switch (op.op) {
       case 'append': {
         const item = { ...op.item };
-        // A card born carrying a body lands folded too — under the
-        // 'folded' policy always, else past COLLAPSE_AT lines — a
-        // replay of a finished session should not dump every full
-        // output.
-        if (
-          item.kind === 'tool' &&
-          item.bodyLanded &&
-          (state.foldAll === true || contentLineCount(item) > COLLAPSE_AT)
-        ) {
+        // A card born carrying a body lands folded — every completed
+        // call is a compact `⏺ ✓` row; the body (file dumps, JSON
+        // output) never takes the feed unpinned. Enter/c or the j/k
+        // peek reveals it.
+        if (item.kind === 'tool' && item.bodyLanded) {
           item.collapsed = true;
         }
         // Long text blocks fold by default too — a 300-line review
@@ -126,15 +121,16 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
         const item = byId[op.item.id];
         if (item === undefined || item.kind !== 'tool') break;
         const next: ToolItem = { ...item, ...op.item };
-        // A body lands folded — under 'folded' always, else past
-        // COLLAPSE_AT lines — the card stays scannable and the hint
-        // counts what it hides. Only on the body's first landing: a
-        // later op never re-folds a card the user opened.
-        if (
-          next.bodyLanded === true &&
-          item.bodyLanded !== true &&
-          (state.foldAll === true || contentLineCount(next) > COLLAPSE_AT)
-        ) {
+        // Fold fields are pane-owned: a routine op omits them (the acp
+        // convention) and the pane's fold survives; an op that carries
+        // them (a deliberate toggle) is authoritative.
+        if (op.item.collapsed === undefined) next.collapsed = item.collapsed;
+        if (op.item.foldTouched === undefined) next.foldTouched = item.foldTouched;
+        // A body lands folded — every completed call collapses to its
+        // compact row; file/output dumps never own the feed. Only on
+        // the body's first landing: a later op never re-folds a card
+        // the user opened.
+        if (next.bodyLanded === true && item.bodyLanded !== true) {
           next.collapsed = true;
         }
         byId[op.item.id] = next;

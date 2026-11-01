@@ -47,8 +47,6 @@ import {
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import { implArg, type PaneImpl, pickImpl } from './impl.ts';
-import type { Item } from './model.ts';
-import { printLines, TAIL_BUDGET } from './view.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -230,17 +228,16 @@ export async function runTui(argv: string[]): Promise<void> {
     // herdr owns lifecycle — no exit path lives here (addendum 2)
     exitOnCtrlC: false,
     // no mouse features — reporting would steal native/herdr
-    // selection; copy must work without Shift (addendum 7)
+    // selection; copy must work without Shift (addendum 7). The feed
+    // scrolls inside its scrollbox — the wheel reaches it as arrow
+    // keys through alternate-scroll (CSI ? 1007), not mouse reports.
     useMouse: false,
-    // split-footer + capture-stdout: the renderable tree IS the
-    // footer strip (the live tail + pinned chrome), and the scroll
-    // region takes captured stdout — retired rows are PRINTED to
-    // stdout, land in the scroll region, and scroll into herdr's
-    // native scrollback (addendum 19 — the wheel's real mechanism;
-    // a retained tree in ANY mode clips at the viewport and nothing
-    // reaches scrollback — field-found: 50 of 70 rows lost).
-    screenMode: 'split-footer',
-    footerHeight: TAIL_BUDGET + 3,
+    // main-screen + a scrollbox feed: the tree gets the FULL viewport,
+    // every row is a renderable (real markdown, colors, expandable
+    // cards), and scrolling is the scrollbox's own scrollTop — the
+    // opencode/acp-tui shape. The status bar lives OUTSIDE the
+    // scrollbox, pinned at the bottom — it never scrolls away.
+    screenMode: 'main-screen',
   });
 
   const impl = await pickImpl(implArg(argv));
@@ -250,15 +247,9 @@ export async function runTui(argv: string[]): Promise<void> {
     meta: { worktree: entry?.worktree ?? ctxDir },
     foldAll: impl.fold === 'folded',
     copyItem: it => impl.copyText?.(it) ?? ('text' in it ? it.text : ''),
-    // retired rows print to stdout — captured by the renderer into
-    // the scroll region → native scrollback (the wheel's payload).
-    onRetire: items => {
-      const text = items
-        .flatMap((it: Item) => printLines(it))
-        .map(l => `${l}\n`)
-        .join('');
-      process.stdout.write(text);
-    },
+    // no onRetire — the feed lives ENTIRELY in the scrollbox as
+    // renderables: every row keeps markdown/color/expand chrome, and
+    // scrolling is the scrollbox's scrollTop, not captured stdout.
   });
 
   // --- keys: j/k walk the tool cards, Enter/c folds one, arrows and

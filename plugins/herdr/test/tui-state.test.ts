@@ -143,23 +143,23 @@ describe('the pane header meta', () => {
 });
 
 describe('the auto-fold on a landed body', () => {
-  test('a born-finished card past the threshold lands folded', () => {
+  test('a born-finished card lands folded', () => {
     const next = applyOps(emptyState(), [{ op: 'append', item: toolDone(1, COLLAPSE_AT + 5) }]);
     const item = next.byId[1];
     assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
   });
 
-  test('a body landing via tool op folds past the threshold', () => {
+  test('a body landing via tool op folds', () => {
     const live = applyOps(emptyState(), [{ op: 'append', item: tool(1, 'Bash') }]);
     const next = applyOps(live, [{ op: 'tool', item: toolDone(1, COLLAPSE_AT + 3) }]);
     const item = next.byId[1];
     assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
   });
 
-  test('a small body stays open', () => {
+  test('a small body lands folded too', () => {
     const next = applyOps(emptyState(), [{ op: 'append', item: toolDone(1, 3) }]);
     const item = next.byId[1];
-    assert.ok(item !== undefined && item.kind === 'tool' && !item.collapsed);
+    assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
   });
 
   test('a later op never re-folds a card the user opened', () => {

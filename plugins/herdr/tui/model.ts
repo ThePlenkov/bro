@@ -309,7 +309,7 @@ export class SessionModel {
       if (done && !item.bodyLanded && content.length > 0) {
         item.bodyLanded = true;
         item.content = content.map(toolContent);
-        this.ops.push({ op: 'tool', item });
+        this.pushTool(item);
       }
       return;
     }
@@ -322,7 +322,15 @@ export class SessionModel {
     }
     // a just-born item's append op already carries the populated card —
     // a second tool op would paint it twice
-    if (!born) this.ops.push({ op: 'tool', item });
+    if (!born) this.pushTool(item);
+  }
+
+  /** A routine tool update op — pane-owned fold fields stay out so a
+   *  status churn never re-opens the pane's fold (the acp impl's
+   *  convention). The deliberate `toggle` carries `collapsed`. */
+  private pushTool(item: ToolItem): void {
+    const { collapsed: _c, foldTouched: _f, ...rest } = item;
+    this.ops.push({ op: 'tool', item: rest });
   }
 
   private onPlan(u: SessionUpdateLike): void {
