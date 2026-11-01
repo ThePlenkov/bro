@@ -682,7 +682,8 @@ export async function pumpTurn(
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx,
-  cwd?: string
+  cwd?: string,
+  drainTimeoutMs?: number
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
@@ -729,7 +730,7 @@ export async function pumpTurn(
   } finally {
     // the acp-worker driver exits right after the turn — settle the
     // queued publishes first or the turn's last events die with it
-    await plane.drain();
+    await plane.drain(drainTimeoutMs);
   }
 }
 
