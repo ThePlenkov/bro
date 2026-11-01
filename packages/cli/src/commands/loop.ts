@@ -704,7 +704,8 @@ function spawnAgent(
   beadIds: string[],
   title: string,
   promptFile: string,
-  dir: string
+  dir: string,
+  agentId?: string
 ): Promise<number | null> {
   return new Promise(resolve => {
     const leadId = beadIds[0]!;
@@ -715,6 +716,7 @@ function spawnAgent(
       BRO_BEAD_IDS: beadIds.join(','),
       BRO_BEAD_TITLE: title,
       BRO_PROMPT_FILE: promptFile,
+      ...(agentId !== undefined ? { BRO_AGENT_ID: agentId } : {}),
       ...provenancePins(ctx, leadId, lane),
       ...(lane.class === undefined ? {} : { BRO_AGENT_CLASS: lane.class }),
     });
@@ -1300,41 +1302,37 @@ async function runFixRound(
   let templateReservation: string | undefined;
   const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
-  const templateQuota = sessionQuotaOf(
-    ctx.env,
-    'native',
-    {
-      beadsDir: ctx.beadsDir!,
-      molStep: leadFix.id,
-      prompt,
-      repoRoot: m.item.worktreeDir,
-      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-      worker: lane.worker,
-      provider: lane.provider,
-      model: lane.model,
-      class: lane.class,
-    },
-    templateCommand
-  );
-  if (templateQuota !== undefined) {
-    try {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: `loop-fix-${leadFix.id}`,
+  const fixKey = `loop-fix-${leadFix.id}`;
+  try {
+    const templateQuota = sessionQuotaOf(
+      ctx.env,
+      'native',
+      {
+        beadsDir: ctx.beadsDir!,
         molStep: leadFix.id,
-        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+        prompt,
+        repoRoot: m.item.worktreeDir,
+        env: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
+        worker: lane.worker,
+        provider: lane.provider,
+        model: lane.model,
+        class: lane.class,
+      },
+      templateCommand
+    );
+    if (templateQuota !== undefined) {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: fixKey,
+        molStep: leadFix.id,
+        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
       });
-    } catch (err) {
-      console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
-      // admitSessionSlot threw before the assignment completed —
-      // templateReservation is still undefined, nothing to release
-      if (err instanceof SpawnError && err.kind === 'cap') {
-        // hold fix round - skip spawning this round
-        return;
-      }
-      // other errors: skip this fix round rather than spawning without a reservation
-      console.error(`loop: fix round skipped — quota admission error: ${err instanceof Error ? err.message : String(err)}`);
-      return;
     }
+  } catch (err) {
+    console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    // admitSessionSlot/sessionQuotaOf threw before assignment completed —
+    // templateReservation is still undefined, nothing to release
+    // Let respawnRound handle cap (decrements rounds) and other failures
+    throw err;
   }
   let code: number | null = null;
   try {
@@ -1344,7 +1342,8 @@ async function runFixRound(
       m.beads.map(b => b.id),
       clumpTitle(m.beads),
       m.item.promptFile,
-      m.item.worktreeDir
+      m.item.worktreeDir,
+      fixKey
     );
   } finally {
     if (templateReservation !== undefined) {
@@ -1798,45 +1797,46 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // the registry spawn so the fleet/session planes agree on live workers
   // (spec bro-9h86l / bro-0fbdp)
   let templateReservation: string | undefined;
+  const templateReservationKey = `loop-${lead.id}`;
   const templateCommand = laneCommand(ctx, lane);
-  const templateQuota = sessionQuotaOf(
-    ctx.env,
-    'native',
-    {
-      beadsDir: ctx.beadsDir!,
-      molStep: lead.id,
-      prompt,
-      repoRoot: item.worktreeDir,
-      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-      worker: lane.worker,
-      provider: lane.provider,
-      model: lane.model,
-      class: lane.class,
-    },
-    templateCommand
-  );
-  if (templateQuota !== undefined) {
-    try {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: `loop-${lead.id}`,
+  try {
+    const templateQuota = sessionQuotaOf(
+      ctx.env,
+      'native',
+      {
+        beadsDir: ctx.beadsDir!,
         molStep: lead.id,
-        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+        prompt,
+        repoRoot: item.worktreeDir,
+        env: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
+        worker: lane.worker,
+        provider: lane.provider,
+        model: lane.model,
+        class: lane.class,
+      },
+      templateCommand
+    );
+    if (templateQuota !== undefined) {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: templateReservationKey,
+        molStep: lead.id,
+        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
       });
-    } catch (err) {
-      // hand the claim back like a spawn refusal — the bead must not stay
-      // claimed with no worker
+    }
+  } catch (err) {
+    endLoopRun(ctx.root, loopSlug(lead.id));
+    const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof SpawnError && err.kind === 'cap') {
       for (const b of openBeads(ctx, ours)) {
-        noteBead(ctx.tasks, b.id, `loop: session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+        noteBead(ctx.tasks, b.id, `loop: session quota admission failed — ${msg}`);
         reopenBead(ctx, b.id);
       }
-      endLoopRun(ctx.root, loopSlug(lead.id));
-      if (err instanceof SpawnError && err.kind === 'cap') {
-        say(ctx, `loop: fleet full — ${err.message}; pushes hold for the next pass`);
-        return { kind: 'hold', why: err.message };
-      }
-      say(ctx, `loop: ${lead.id} spawn refused — ${err instanceof Error ? err.message : String(err)}`);
-      return { kind: 'done', result: 'parked' };
+      say(ctx, `loop: fleet full — ${err.message}; pushes hold for the next pass`);
+      return { kind: 'hold', why: err.message };
     }
+    parkBeads(ctx, ours, `loop: session quota admission failed — ${msg}`);
+    say(ctx, `loop: ${lead.id} spawn refused — ${msg}`);
+    return { kind: 'done', result: 'parked' };
   }
   // no shared store to pin a claim/exit record against — the awaited
   // spawn keeps the serial semantics (documented fallback)
@@ -1849,7 +1849,8 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       beads.map(b => b.id),
       clumpTitle(beads),
       item.promptFile,
-      item.worktreeDir
+      item.worktreeDir,
+      templateReservationKey
     );
   } catch (err) {
     if (templateReservation !== undefined) {
@@ -2353,6 +2354,8 @@ async function respawnRound(
     // repeated refusals must not burn fixRounds into a park
     if (err instanceof SpawnError && err.kind === 'cap') {
       m.rounds -= 1;
+    } else if (err instanceof SpawnError && (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input')) {
+      m.rounds -= 1;
     }
     console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`);
     return 'kept';
@@ -2396,38 +2399,34 @@ async function runRebaseRound(
   let templateReservation: string | undefined;
   const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
-  const templateQuota = sessionQuotaOf(
-    ctx.env,
-    'native',
-    {
-      beadsDir: ctx.beadsDir!,
-      molStep: leadRb.id,
-      prompt,
-      repoRoot: m.item.worktreeDir,
-      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-      worker: lane.worker,
-      provider: lane.provider,
-      model: lane.model,
-      class: lane.class,
-    },
-    templateCommand
-  );
-  if (templateQuota !== undefined) {
-    try {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: `loop-rebase-${leadRb.id}`,
+  const rebaseKey = `loop-rebase-${leadRb.id}`;
+  try {
+    const templateQuota = sessionQuotaOf(
+      ctx.env,
+      'native',
+      {
+        beadsDir: ctx.beadsDir!,
         molStep: leadRb.id,
-        workerEnv: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+        prompt,
+        repoRoot: m.item.worktreeDir,
+        env: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
+        worker: lane.worker,
+        provider: lane.provider,
+        model: lane.model,
+        class: lane.class,
+      },
+      templateCommand
+    );
+    if (templateQuota !== undefined) {
+      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+        key: rebaseKey,
+        molStep: leadRb.id,
+        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
       });
-    } catch (err) {
-      console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
-      if (err instanceof SpawnError && err.kind === 'cap') {
-        return;
-      }
-      // other errors: skip this rebase round rather than spawning without a reservation
-      console.error(`loop: rebase round skipped — quota admission error: ${err instanceof Error ? err.message : String(err)}`);
-      return;
     }
+  } catch (err) {
+    console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
   }
   let code: number | null = null;
   try {
@@ -2437,7 +2436,8 @@ async function runRebaseRound(
       m.beads.map(b => b.id),
       clumpTitle(m.beads),
       m.item.promptFile,
-      m.item.worktreeDir
+      m.item.worktreeDir,
+      rebaseKey
     );
   } finally {
     if (templateReservation !== undefined) {
