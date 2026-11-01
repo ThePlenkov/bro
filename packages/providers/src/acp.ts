@@ -729,7 +729,7 @@ export async function pumpTurn(
   } finally {
     // the acp-worker driver exits right after the turn — settle the
     // queued publishes first or the turn's last events die with it
-    await plane.drain();
+    await plane.drain(drainTimeoutMs);
   }
 }
 

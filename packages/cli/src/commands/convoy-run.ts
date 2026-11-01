@@ -492,8 +492,8 @@ export async function publishGate(dir: string, molId: string, detail: string): P
   try {
     await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
       topic: 'convoy',
-      kind: 'gate',
-      key: `convoy-gate-${molId}`,
+      kind,
+      key: `${PUBLISH_KEY_PREFIX[kind]}${molId}`,
       source: 'convoy',
       payload:
         `convoy ${molId}: HUMAN GATE ready` +

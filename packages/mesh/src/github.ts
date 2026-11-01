@@ -229,29 +229,19 @@ function* fencedJsonBodies(comment: { body: string }): Generator<string> {
     const fence = findNextFence(body, i)
     if (fence === null) {
       // findNextFence returns null if no ```json exists OR if the fence is
-      // malformed (no newline / junk on the opening line). Distinguish:
-      // if there is no ```json at all we are done; if there is a ```json
-      // with no newline after it, the fence is unterminated - return
-      // immediately (preserve original early-exit behavior).
+      // malformed (no newline / junk on the opening line).  Re-search to
+      // distinguish: if there is no ```json at all we are done; otherwise
+      // advance past the malformed opener and keep scanning.
       const open = body.indexOf('```json', i)
       if (open === -1) {
         return
       }
       const eolCheck = body.indexOf('\n', open + '```json'.length)
       if (eolCheck === -1) {
-        // No newline after this opener — unterminated fence, nothing further can be valid.
+        // No newline after this opener — nothing further can be valid.
         return
       }
-      // Malformed opener with junk on the opening line but a newline exists.
-      // Check if there are other ```json markers on the same line - if so,
-      // continue scanning from after this opener to avoid skipping valid fences.
-      // If not, skip to end of line to avoid quadratic rescanning.
-      const restOfLine = body.slice(open + '```json'.length, eolCheck)
-      if (restOfLine.includes('```json')) {
-        i = open + '```json'.length
-        continue
-      }
-      i = eolCheck + 1
+      i = open + '```json'.length
       continue
     }
     const close = findClosingFence(body, fence.eol + 1)

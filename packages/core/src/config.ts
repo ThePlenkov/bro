@@ -1028,7 +1028,7 @@ export const meshSection: ConfigSection<{
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
-      if (alias === '__proto__' || alias === 'constructor' || alias === 'prototype') {
+      if (alias === '__proto__') {
         continue;
       }
       const p = meshPeerEntry(entry);

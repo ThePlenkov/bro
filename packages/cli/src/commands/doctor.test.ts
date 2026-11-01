@@ -1654,87 +1654,39 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'conductor');
       assert.equal(c.status, 'ok', JSON.stringify(c));
     }));
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        mkdirSync(join(dir, '.claude'), { recursive: true });
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({
-            env: {
-              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'devin/swe-2-max',
-            },
-          })
-        );
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /ANTHROPIC_DEFAULT_HAIKU_MODEL=devin\/swe-2-max/);
-        assert.match(c.detail, /providers\.devin-acp/);
-      }
-    ));
 
   test('conductor: a live acp-backed endpoint + client base url warns with no pin at all', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://127.0.0.1:44927');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
-        assert.match(c.detail, /classifier rides it too/);
-      }
-    ));
+    withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
+      liveServeClient(dir, 'http://127.0.0.1:44927');
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      assert.match(c.detail, /classifier rides it too/);
+    }));
 
   test('conductor: a live serve with no acp backend stays ok — the byte proxy forwards classifiers fine', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        const url = 'http://127.0.0.1:44927';
-        liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' });
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
+    withEnv(CONDUCTOR_ACP, dir => {
+      const url = 'http://127.0.0.1:44927';
+      liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' });
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+    }));
 
   test('conductor: a clean dedicated classifier lane wins — the main-model pin is not evaluated', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        mkdirSync(join(dir, '.claude'), { recursive: true });
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({
-            env: {
-              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-              ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
-            },
-          })
-        );
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
+    withEnv(CONDUCTOR_ACP, dir => {
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(
+        join(dir, '.claude', 'settings.local.json'),
+        JSON.stringify({
+          env: {
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
+          },
+        })
+      );
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+    }));
   test('conductor: process-env pins count — <acp-name>/<id> is conductor vocabulary', () =>
     withEnv(
       {

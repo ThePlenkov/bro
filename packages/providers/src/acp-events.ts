@@ -46,8 +46,8 @@ export const AGENT_USAGE_THROTTLE_MS = 2_000;
 
 /** Upper bound on drain() — publishes self-bound at the bus timeout
  *  each, but a wedged half-open socket could still serialize N events
- *  into N×timeout; the drain cap keeps a worker's exit prompt. */
-const DRAIN_CAP_MS = 3_000;
+ *  latency compounds across sequential publishes. */
+const DRAIN_CAP_MS = 10_000;
 
 export interface AgentTurnPlaneOpts {
   /** The session's cwd — resolves the repo's bus socket and the agent

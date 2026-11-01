@@ -68,7 +68,7 @@ function readArchive(dir: string, agentId: string): Array<Record<string, unknown
 async function probeAgent(dir: string) {
   const res = await busProbe(busSocketPath(dir)!, {
     filter: { topics: ['agent'] },
-    windowMs: 50,
+    windowMs: 250,
   });
   return res.events;
 }

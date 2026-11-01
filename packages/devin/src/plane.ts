@@ -259,10 +259,14 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   const dir = join(procDir, String(pid))
   try {
     // NUL-anchored: environ entries are NUL-separated and an
+    const environ = readFileSync(join(dir, 'environ'), 'utf8')
     // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
     // AGENT_ENV_RE convention)
-    if (/(?:^|\0)BRO_AGENT_ID=/.test(readFileSync(join(dir, 'environ'), 'utf8'))) {
+    if (/(?:^|\0)BRO_AGENT_ID=/.test(environ)) {
       return true
+    }
+    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
+      return false
     }
   } catch {
     // unreadable environ — the stdin probe still applies
