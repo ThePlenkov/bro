@@ -263,8 +263,13 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
         return r.json() as Promise<Summary>
       }),
       // the status overlay is optional — a fresh ledger may not exist yet;
-      // a 404 means "no rows", not a broken dashboard
-      fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => (r.ok ? r.text() : '')),
+      // a 404 means "no rows", not a broken dashboard. Transient failures
+      // must fall back to cache rather than overwriting it with empty rows.
+      fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => {
+        if (r.ok) return r.text()
+        if (r.status === 404) return ''
+        throw { kind: 'unknown', message: `ledger fetch failed (HTTP ${r.status})` } satisfies LoadError
+      }),
       fetchHarvests(sha).catch(() => []), // harvests missing ≠ broken dashboard
     ])
     const data: Data = { summary, rows: parseJsonl<Row>(ledgerRes), findings }
