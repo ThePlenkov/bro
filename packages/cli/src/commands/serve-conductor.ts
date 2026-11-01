@@ -2055,11 +2055,13 @@ function effortModel(model: string | undefined, effort: string | undefined): str
  *  verbatim. */
 /** A function_call item replays as an assistant tool_use block. */
 function functionCallToMessages(it: RespItem): ClientMessage[] {
-  let input: unknown = {}
+  let input: unknown
   try {
     input = JSON.parse(it.arguments ?? '{}')
   } catch {
-    input = {}
+    throw new Error(
+      `function_call arguments are not valid JSON (call_id=${it.call_id ?? it.id ?? 'unknown'}, name=${it.name ?? 'unknown'}): ${it.arguments}`
+    )
   }
   return [
     {
@@ -3026,11 +3028,13 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
   }
   const content = chatContent(m.content)
   for (const tc of m.tool_calls ?? []) {
-    let input: unknown = {}
+    let input: unknown
     try {
       input = JSON.parse(tc.function?.arguments ?? '{}')
     } catch {
-      input = {}
+      throw new Error(
+        `tool_calls[].function.arguments are not valid JSON (id=${tc.id ?? 'unknown'}, name=${tc.function?.name ?? 'unknown'}): ${tc.function?.arguments}`
+      )
     }
     content.push({
       type: 'tool_use',
