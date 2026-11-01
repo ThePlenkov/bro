@@ -180,17 +180,22 @@ export function acpTransport(
     conn?: ConnState
   ): BrokeredSession | undefined => {
     const sid = idOf(params)
-    const sess = sid === undefined ? undefined : sessions.get(sid)
+    if (sid === undefined) {
+      return undefined
+    }
+    const sess = sessions.get(sid)
     if (sess === undefined) {
       return undefined
     }
-    if (conn !== undefined && sess.conn !== conn) {
-      return undefined
+    if (conn !== undefined) {
+      if (sess.conn !== conn) {
+        return undefined
+      }
     }
     // hits re-insert — insertion order IS the sweep's LRU order
     sess.lastSeen = Date.now()
-    sessions.delete(sid as string)
-    sessions.set(sid as string, sess)
+    sessions.delete(sid)
+    sessions.set(sid, sess)
     return sess
   }
 
