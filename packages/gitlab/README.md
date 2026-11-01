@@ -20,6 +20,8 @@ Requires Node ≥ 22.18 and an authenticated `glab`. ESM only.
 ## Surface
 
 - `gitlabReview` — threads, checks, review state, merge ops over `glab`
+- `gitlabTasks` — sync TaskStore over GitLab Issues
+- `gitlabTasksAsync` — async TaskStore over GitLab Issues
 - `gitlabConnector` — the `Connector` impl registered into bro
 - gitlab.com auto-detects from the origin remote; self-hosted instances
   resolve via `connectors.reviews` config
