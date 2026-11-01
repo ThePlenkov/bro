@@ -58,8 +58,9 @@ evidence record even when the beads projection is disabled.
 - **Capabilities:** issues as `TaskStore`/`TaskStoreAsync`, `bro query`
   integration (`provider = "linear"`), mapping to bro states/deps/children
   with `<!-- bro: {...} -->` trailer metadata.
-- **Honest absences:** some beads-specific projections (e.g. certain
-  publish/import flows) may not map 1:1 to Linear; see the
+- **Honest absences:** **`publish` is not implemented** (no bead→issue
+  projection mapping in this milestone); some beads-specific projections
+  (e.g. certain import flows) may not map 1:1 to Linear; see the
   [package README](https://github.com/ThePlenkov/bro/blob/main/packages/linear/README.md)
   for mapping details.
 
@@ -75,8 +76,8 @@ with separate connectors for Cloud and Data Center/Server.
 - **Auth/prerequisites:** the `atlassian` CLI must be installed and
   authenticated (`atlassian auth login` or `ATLASSIAN_TOKEN`). For Data
   Center, `ATLASSIAN_TOKEN` must be a personal access token (Bearer). Pin the
-  site via `JIRA_BASE_URL`/`ATLASSIAN_BASE_URL` (required for `jira-dc` to
-  avoid defaulting to api.atlassian.com), and `JIRA_PROJECT`/`ATLASSIAN_PROJECT`
+  site via `JIRA_BASE_URL`/`ATLASSIAN_BASE_URL` for Cloud. `jira-dc` requires a site base via `JIRA_DC_BASE_URL`
+  (or the CLI config `baseUrl`) so it never defaults to api.atlassian.com; do not share `JIRA_BASE_URL` with it. Set `JIRA_PROJECT`/`ATLASSIAN_PROJECT`
   if the site has multiple visible projects.
 - **Version availability:** Jira support is available in the current `bro`
   package line (shipped with `@broject/jira`).
@@ -104,8 +105,8 @@ explicitly.
 
 | Facade | Connectors | Selection | Notes |
 | --- | --- | --- | --- |
-| `reviews` | `github` (`gh`), `gitlab` (`glab`) | Detected from origin remote (GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations. |
-| `tasks` | `beads` (`bd`, default), `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default. | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
+| `reviews` | `github` (`gh`), `gitlab` (`glab`) | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations. |
+| `tasks` | `beads` (`bd`, default), `github`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default. | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
 | `queries` | `github`, `gitlab`, `atlassian`, `linear` | Configured via `connectors.queries` or per `bro query` step | Plan-driven fan-out across providers. |
 | `agents` | Native/tmux/Gas City backends | Configured via `connectors.agents` | Detached agents/workers. |
 | `specs` | Native + tool-layout matchers | Detected or explicitly configured | Spec-driven workflows. |
