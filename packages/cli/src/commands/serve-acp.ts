@@ -171,16 +171,18 @@ export function acpTransport(
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>()
-  /** `conn` scopes the hit to the owning connection — the map is
-   *  transport-wide, so an unscoped lookup would let one connection
-   *  drive or close a FOREIGN session by id (codeant #581). The bridge
-   *  calls it unscoped: routing BY sessionId is its job. */
+  /** Touch a session for LRU — insertion order IS the sweep's LRU
+   *  order (delete + reinsert moves it to the end). */
   const touchSession = (sid: string, sess: BrokeredSession): void => {
     sess.lastSeen = Date.now()
     sessions.delete(sid)
     sessions.set(sid, sess)
   }
 
+  /** `conn` scopes the hit to the owning connection — the map is
+   *  transport-wide, so an unscoped lookup would let one connection
+   *  drive or close a FOREIGN session by id (codeant #581). The bridge
+   *  calls it unscoped: routing BY sessionId is its job. */
   const sessionOf = (
     params: Record<string, unknown>,
     conn?: ConnState
@@ -382,10 +384,8 @@ export function acpTransport(
     }
   }
 
-  /** session/new → retain one upstream session per brokered id. The
-   *  client's params pass verbatim (cwd, mcpServers, _meta) — the model
-   *  pin lives inside acpSessionRetain; the map grows only here so the
-   *  TTL + cap sweep rides along. */
+  /** Displace a previous brokered session that collided on the same id
+   *  (e.g. upstream reissues ids across a link death+respawn). */
   const displacePrevious = (sid: string): void => {
     const prev = sessions.get(sid)
     if (prev === undefined) return
@@ -393,16 +393,66 @@ export function acpTransport(
     disposeQuiet(prev.retained)
   }
 
-  const extractBead = (params: Record<string, unknown>): string | undefined => {
-    const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
-    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
-  }
-
+  /** session/new → retain one upstream session per brokered id. The
+   *  client's params pass verbatim (cwd, mcpServers, _meta) — the model
+   *  pin lives inside acpSessionRetain; the map grows only here so the
+   *  TTL + cap sweep rides along. */
   const onSessionNew = async (
     st: ConnState,
     params: Record<string, unknown>,
     client: AgentContext
   ): Promise<unknown> => {
+    try {
+      sweep()
+      const peer = await pool.link()
+      const retained = await acpSessionRetain(
+        peer,
+        cfg.entry,
+        wireOpts,
+        Date.now() + cfg.timeoutMs,
+        { by, sessionRequest: params as NewSessionRequest }
+      )
+      // upstream reissues ids across a link death+respawn — a
+      // colliding set must not leak the displaced handle (and the
+      // old owner must not later close the NEW session under the
+      // reused id)
+      displacePrevious(retained.sessionId)
+      const brokered: BrokeredSession = {
+        retained,
+        peer,
+        client,
+        conn: st,
+        busy: false,
+        lastSeen: Date.now(),
+      }
+      sessions.set(retained.sessionId, brokered)
+      st.sessions.add(retained.sessionId)
+      // conn.closed may have settled mid-retain — dropConn already
+      // ran and can never see this session: close it upstream +
+      // drop the handle now or it orphans on a dead connection
+      if (st.dropped) {
+        closeUpstream(brokered, retained.sessionId)
+      }
+      // a bro--<bead-id>-shaped session cwd attributes the
+      // session (dirs are named <repo>--<beadId>, the bead id
+      // itself is <prefix>-<slug>)
+      const bead = extractBead(params)
+      otelEvent('acp.transport.session', {
+        backend: cfg.backend,
+        'acp.client': st.clientName,
+        'acp.session_id': retained.sessionId,
+        ...(bead !== undefined ? { bead } : {}),
+      })
+      return retained.newSessionResponse
+    } catch (err) {
+      asWireError(err)
+    }
+  }
+
+  const extractBead = (params: Record<string, unknown>): string | undefined => {
+    const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
+    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
+  }
     try {
       sweep()
       const peer = await pool.link()
@@ -460,9 +510,9 @@ export function acpTransport(
     }
   }
 
-  /** session/prompt → the turn on the session's own retained handle —
-   *  updates fan out as they arrive. A second concurrent prompt is an
-   *  error, never a queue: the update stream is single-reader. */
+  /** Forward updates from the upstream turn to the owning downstream
+   *  client — backpressure lives on the peer's per-request streams; this
+   *  fan-out must not block the pump. */
   const forwardUpdate = (sess: BrokeredSession, sid: string | undefined) => (update: unknown) => {
     if (sid === undefined) return
     sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
@@ -471,6 +521,9 @@ export function acpTransport(
     })
   }
 
+  /** session/prompt → the turn on the session's own retained handle —
+   *  updates fan out as they arrive. A second concurrent prompt is an
+   *  error, never a queue: the update stream is single-reader. */
   const onPrompt = async (
     st: ConnState,
     params: Record<string, unknown>,
