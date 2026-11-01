@@ -104,20 +104,12 @@ export interface WantedRow {
  *  is addressed to the reader (selfRig, the claimable-work surface);
  *  anything past open is addressed back to the poster, who owes the
  *  verdict. */
-export function projectWanted(
-  row: WantedRow,
-  selfRig?: string,
-): { envelopes: MeshEnvelope[]; errors: string[] }
 export function projectWanted(input: { row: WantedRow; selfRig?: string }): {
   envelopes: MeshEnvelope[]
   errors: string[]
-}
-export function projectWanted(
-  rowOrInput: WantedRow | { row: WantedRow; selfRig?: string },
-  selfRig?: string,
-): { envelopes: MeshEnvelope[]; errors: string[] } {
-  const row = 'row' in rowOrInput ? rowOrInput.row : rowOrInput
-  const self = 'row' in rowOrInput ? rowOrInput.selfRig : selfRig
+} {
+  const row = input.row
+  const self = input.selfRig
   const poster = handleToRig(row.posted_by)
   if (poster === null) {
     return { envelopes: [], errors: [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`] }
