@@ -440,11 +440,21 @@ function aggregate(watches: Watch[]): { code: number; verdict: string } | undefi
 /** one turn of the loop — poll every unsettled watch. A throw is a
  *  read failure, not a crash — a long-lived watcher spends it against
  *  the same blip budget */
-function pollUnsettled(watches: Watch[], ctx: WaitCtx, timeoutMs?: number): void {
+function pollUnsettled(
+  watches: Watch[],
+  ctx: WaitCtx,
+  o: { deadline: number; timeout: number }
+): void {
   for (const w of watches) {
     if (w.settled !== undefined) {
       continue;
     }
+    const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
+    const unsettledCount = watches.filter(x => x.settled === undefined).length;
+    const timeoutMs =
+      remainingMs === undefined || unsettledCount === 0
+        ? undefined
+        : Math.min(120_000, Math.max(1, Math.floor(remainingMs / unsettledCount)));
     try {
       pollWatch(w, ctx, timeoutMs);
     } catch (err) {
@@ -467,16 +477,10 @@ async function watchLoop(
   const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY;
   const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
   while (performance.now() < deadline) {
-    const remainingMs = o.timeout > 0 ? Math.max(0, deadline - performance.now()) : undefined;
     // plumb remaining budget into dolt subprocesses so a hung replica read
-    // cannot overshoot the --timeout by the full dolt timeout; divide by
-    // unsettled watches so sequential polls don't multiply the budget
-    const unsettledCount = watches.filter(w => w.settled === undefined).length;
-    const doltTimeoutMs =
-      remainingMs === undefined || unsettledCount === 0
-        ? undefined
-        : Math.min(120_000, Math.max(1, Math.floor(remainingMs / unsettledCount)));
-    pollUnsettled(watches, ctx, doltTimeoutMs);
+    // cannot overshoot the --timeout by the full dolt timeout; recompute
+    // per watch so sequential polls and elapsed time don't multiply the budget
+    pollUnsettled(watches, ctx, { deadline, timeout: o.timeout });
     const out = aggregate(watches);
     if (out !== undefined) {
       emit(watches, { ...out, json: o.json });
