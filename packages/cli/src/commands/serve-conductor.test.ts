@@ -115,11 +115,11 @@ describe('conductorConfig', () => {
   process.env.XDG_CONFIG_HOME = xdg
   process.env.BRO_TEST = '1'
   process.env.BRO_NO_GLOBAL_CONFIG = '1'
-  after(scrubEnv())
   after(() => {
     if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
     else process.env.XDG_CONFIG_HOME = prevXdg
   })
+  after(scrubEnv())
   const providers = {
     'dv-acp': { type: 'acp' as const, command: 'dv acp', model: 'swe-y' },
     cli1: { type: 'cli' as const, command: 'x run' },

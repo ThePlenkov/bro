@@ -122,7 +122,7 @@ export function scrubEnv(extra: string[] = []): () => void {
   }
   process.env.BRO_TEST = '1'
   process.env.BRO_NO_GLOBAL_CONFIG = '1'
-  if (!(process.env.XDG_CONFIG_HOME in saved)) {
+  if (!('XDG_CONFIG_HOME' in saved)) {
     saved['XDG_CONFIG_HOME'] = undefined
   }
   return () => {
