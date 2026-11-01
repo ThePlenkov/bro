@@ -343,7 +343,11 @@ function applyDebtDedupe(
   return { records, existing, dupedIds, coveredBy }
 }
 
-function maybeResolveGoneRecords(source: DebtSource, records: DebtRecord[], dupedIds: Set<string>): void {
+function maybeResolveGoneRecords(
+  source: DebtSource,
+  records: DebtRecord[],
+  dupedIds: Set<string>
+): void {
   const gone = resolvedThreadIds(readDebtRecords(), source, records).filter((id) => !dupedIds.has(id))
   if (gone.length === 0) {
     return
