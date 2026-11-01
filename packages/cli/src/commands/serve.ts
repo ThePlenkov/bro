@@ -1423,6 +1423,10 @@ async function routeAgentEvents(
  *  buffered output without bound. The reconnect lands on a fresh
  *  snapshot, so a dropped follower loses nothing but a retry. */
 const SSE_FOLLOW_BACKLOG = 2_097_152;
+/** Hard cap on total bytes queued for a follow connection (initial burst
+ *  included). Prevents an unbounded snapshot from pinning memory when a
+ *  reader stalls before any drain. */
+const SSE_FOLLOW_TOTAL_BACKLOG = 8_388_608;
 
 /** Output slices this size pace a big snapshot through the drain loop —
  *  one JSON frame can never single-handedly blow the backlog cap. */
@@ -1521,14 +1525,38 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
   let endAfterQueue = false;
   // The initial burst (meta + snapshot + exit for an already-final
   // terminal) travels synchronously through enqueue() with no drain
-  // opportunity — count only live frames against the backlog cap.
+  // opportunity — track live backlog separately from the initial queue.
   let initial = true;
+  const dropLive = (): void => {
+    // Drop only live frames, preserve initial/snapshot frames in the queue
+    let i = 0;
+    while (i < queue.length) {
+      const item = queue[i]!;
+      if (item.live) {
+        const len = Buffer.byteLength(item.frame);
+        queued -= len;
+        liveQueued -= len;
+        queue.splice(i, 1);
+      } else {
+        i++;
+      }
+    }
+    handle?.stop();
+    // If only initial frames remain and nothing is coming, don't end the stream here;
+    // pump will handle it. But per the issue, drop() clears - better to be aggressive
+    // about stopping the live stream. For now, just stop the handle and let remaining
+    // initial frames flush.
+  };
   const drop = (): void => {
     queue.length = 0;
     queued = 0;
     liveQueued = 0;
     handle?.stop();
     res.end();
+  };
+  const onDrain = (): void => {
+    waitingDrain = false;
+    pump();
   };
   const pump = (): void => {
     if (waitingDrain) {
@@ -1541,19 +1569,16 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       const item = queue.shift()!;
       const len = Buffer.byteLength(item.frame);
       queued -= len;
-      if (item.live) {
-        liveQueued -= len;
+      liveQueued -= item.live ? len : 0;
+      if (res.write(item.frame)) {
+        continue;
       }
-      if (!res.write(item.frame)) {
-        if (!waitingDrain) {
-          waitingDrain = true;
-          res.once('drain', () => {
-            waitingDrain = false;
-            pump();
-          });
-        }
+      if (waitingDrain) {
         return;
       }
+      waitingDrain = true;
+      res.once('drain', onDrain);
+      return;
     }
     if (queue.length === 0 && endAfterQueue && !gone()) {
       res.end();
@@ -1564,14 +1589,20 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       return;
     }
     const len = Buffer.byteLength(frame);
-    queued += len;
     const isLive = !initial;
+    if (queued + len > SSE_FOLLOW_TOTAL_BACKLOG) {
+      drop();
+      return;
+    }
     if (isLive) {
-      liveQueued += len;
-      if (liveQueued > SSE_FOLLOW_BACKLOG) {
-        drop();
+      if (liveQueued + len > SSE_FOLLOW_BACKLOG) {
+        dropLive();
         return;
       }
+    }
+    queued += len;
+    if (isLive) {
+      liveQueued += len;
     }
     queue.push({ frame, live: isLive });
     pump();
