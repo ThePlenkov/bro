@@ -375,7 +375,7 @@ export interface GhRecord {
  *  the unsanitized-HTML scanners, and `api.github.com` urls are not
  *  thread anchors anyway. */
 function issueUrl(key: { repo: GithubRepo | GitHubRepo; n: number }): string {
-  const repo = key.repo instanceof GitHubRepo ? key.repo : key.repo
+  const repo = key.repo instanceof GitHubRepo ? key.repo : GitHubRepo.from(key.repo)
   return `https://github.com/${repo.owner}/${repo.repo}/issues/${key.n}`
 }
 
