@@ -22,6 +22,7 @@
     "check:codescene": "node scripts/codescene-check.ts",
     "gen:plugins": "node scripts/gen-plugins.ts",
     "check:plugins": "node scripts/gen-plugins.ts --check",
+    "check:pack": "node scripts/check-pack.ts",
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
     "lint": "biome lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
