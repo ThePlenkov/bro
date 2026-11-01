@@ -367,7 +367,7 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a double-click toggles a foldable row; a single press stays inert', async () => {
+  test('mouse presses on a foldable row are inert — copy owns the gesture', async () => {
     const p = await mount();
     try {
       p.model.feed(
@@ -382,14 +382,14 @@ describe('the Solid session pane', () => {
       const y = folded.split('\n').findIndex(l => /\+\d+ lines/.test(l));
       assert.ok(y >= 0, 'folded row not in frame');
       const mouse = createMockMouse(p.renderer);
-      // a single press is deliberately inert — drag-select/copy's slot
+      // presses — single OR double — must never touch the fold:
+      // the renderer's drag-select owns every mouse gesture
       await mouse.click(5, y, 0);
       await p.flush();
       assert.doesNotMatch(await p.frame(), /line 40/);
-      // the second press inside the window = the double-click toggle
       await mouse.click(5, y, 0);
       await p.flush();
-      assert.match(await p.frame(), /line 40/);
+      assert.doesNotMatch(await p.frame(), /line 40/);
     } finally {
       await p.dispose();
     }

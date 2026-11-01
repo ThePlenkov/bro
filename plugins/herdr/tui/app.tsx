@@ -102,11 +102,6 @@ export interface Pane {
    *  the scrollbox's scrollChildIntoView; select/toggle call it so a
    *  peek or fold never happens off-screen. */
   scrollToRow?: (id: number) => void;
-  /** A mouse press on a row — a double-click (same foldable row
-   *  inside 400ms) selects and toggles the pin. Single presses are
-   *  deliberately inert so drag-select/copy never fights the fold
-   *  chrome; non-foldable rows ignore presses as before. */
-  clickRow?: (id: number) => void;
   /** The feed's scrollbox — tests poll its bar's visibility before
    *  sending mouse events at it. */
   scroller?: ScrollBoxRenderable;
@@ -219,24 +214,10 @@ export function createPane(
       },
     },
   };
-  // DOUBLE-click a foldable row toggles it — one gesture selects
-  // and pins (or closes). A single click is left alone entirely so
-  // drag-select/copy never fights the fold chrome: the row only
-  // responds when a second press lands on the same row inside the
-  // window. Non-foldable rows ignore the click as before.
-  let lastClick: { id: number; t: number } | undefined;
-  pane.clickRow = id => {
-    const item = plain.byId[id];
-    if (item === undefined || !isFoldable(item)) return;
-    const now = Date.now();
-    const dbl = lastClick?.id === id && now - lastClick.t < 400;
-    lastClick = { id, t: now };
-    if (!dbl) return;
-    lastClick = undefined;
-    if (plain.selected !== id) publish({ ...plain, selected: id });
-    pane.writer.toggle();
-    pane.scrollToRow?.(id);
-  };
+  // NO row-level mouse handling by design: every press belongs to
+  // the renderer's native drag-select → OSC52 copy, so nothing on a
+  // row may eat or reshape the gesture (folds are keyboard-driven:
+  // j/k peek, Enter/Space/c pin, a/z sweeps — addendum 27).
   return pane;
 }
 
@@ -1090,9 +1071,6 @@ function Pane(props: {
   /** mouse-up after a drag-select → OSC52 copy (opencode's
    *  copy-on-select on the renderer's own selection) */
   onCopySelect?: (event: MouseEvent) => void;
-  /** mouse-down on a row → double-click detection → pin toggle —
-   *  a single click stays free for drag-select/copy (addendum 27) */
-  onRowClick?: (id: number) => void;
 }) {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
@@ -1176,13 +1154,7 @@ function Pane(props: {
                 return (
                   // the row's own box — its `id` is the scrollbox's
                   // scrollChildIntoView handle (j/k follows the walk)
-                  <box
-                    id={`row-${id}`}
-                    flexDirection="column"
-                    flexShrink={0}
-                    width="100%"
-                    onMouseDown={() => props.onRowClick?.(id)}
-                  >
+                  <box id={`row-${id}`} flexDirection="column" flexShrink={0} width="100%">
                     <Show when={margin() > 0}>
                       <box height={margin()} width="100%" flexShrink={0} />
                     </Show>
@@ -1259,7 +1231,6 @@ export async function mountPane(opts: {
           scroller = el;
           pane.scroller = el;
         }}
-        onRowClick={id => pane.clickRow?.(id)}
         onCopySelect={() => {
           // opencode's copy-on-select: drag → renderer Selection →
           // OSC52 onto the clipboard, then clear the highlight
