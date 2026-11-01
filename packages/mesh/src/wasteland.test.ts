@@ -57,7 +57,7 @@ describe('projectWanted', () => {
   })
 
   test('an open row projects one request addressed to the reader', () => {
-    const p = projectWanted(row(), 'mesh://acme/mine')
+    const p = projectWanted({ row: row(), selfRig: 'mesh://acme/mine' })
     assert.deepEqual(p.errors, [])
     assert.equal(p.envelopes.length, 1)
     const req = p.envelopes[0]!
@@ -71,12 +71,12 @@ describe('projectWanted', () => {
   })
 
   test('without selfRig an open row is addressed back to the poster', () => {
-    const p = projectWanted(row(), undefined)
+    const p = projectWanted({ row: row() })
     assert.equal(p.envelopes[0]?.to, 'mesh://acme/poster')
   })
 
   test('a claimed row adds the claim record addressed to the poster', () => {
-    const p = projectWanted(row({ status: 'claimed', claimed_by: 'acme/worker' }), 'mesh://acme/mine')
+    const p = projectWanted({ row: row({ status: 'claimed', claimed_by: 'acme/worker' }), selfRig: 'mesh://acme/mine' })
     assert.deepEqual(
       p.envelopes.map((e) => e.kind),
       ['request', 'claim'],
@@ -90,14 +90,13 @@ describe('projectWanted', () => {
   })
 
   test('a completion with evidence projects result; a verdict projects accept/reject', () => {
-    const done = projectWanted(
-      row({
+    const done = projectWanted({
+      row: row({
         status: 'done',
         claimed_by: 'acme/worker',
         completions: [{ evidence: 'https://github.com/acme/rig/pull/7' }],
       }),
-      undefined,
-    )
+    })
     assert.deepEqual(
       done.envelopes.map((e) => e.kind),
       ['request', 'claim', 'result'],
@@ -110,14 +109,13 @@ describe('projectWanted', () => {
       ['accepted', 'accept'],
       ['rejected', 'reject'],
     ] as const) {
-      const p = projectWanted(
-        row({
+      const p = projectWanted({
+        row: row({
           status: 'done',
           claimed_by: 'acme/worker',
           completions: [{ evidence: 'https://x', state }],
         }),
-        undefined,
-      )
+      })
       assert.equal(p.envelopes.at(-1)?.kind, kind)
       assert.equal(p.envelopes.at(-1)?.id, `w-deadbeef#${kind}`)
       assert.equal(p.envelopes.at(-1)?.from, 'mesh://acme/poster')
@@ -125,24 +123,24 @@ describe('projectWanted', () => {
     }
 
     // board marks it completed without a stored verdict → accept
-    const closed = projectWanted(row({ status: 'completed', claimed_by: 'acme/worker' }), undefined)
+    const closed = projectWanted({ row: row({ status: 'completed', claimed_by: 'acme/worker' }) })
     assert.equal(closed.envelopes.at(-1)?.kind, 'accept')
   })
 
   test('board-local vocabulary is carried, never projected into terms', () => {
-    const p = projectWanted(row({ project: 'x', type: 'bug', effort_level: 's', tags: ['a'] }), undefined)
+    const p = projectWanted({ row: row({ project: 'x', type: 'bug', effort_level: 's', tags: ['a'] }) })
     assert.equal(p.envelopes[0]?.kind, 'request')
     assert.deepEqual(p.envelopes[0]?.refs, [])
   })
 
   test('an unprojectable poster is an error line, not an invented rig', () => {
-    const p = projectWanted(row({ posted_by: 'not a handle!' }), undefined)
+    const p = projectWanted({ row: row({ posted_by: 'not a handle!' }) })
     assert.equal(p.envelopes.length, 0)
     assert.match(p.errors[0] ?? '', /posted_by.*not a rig handle/)
   })
 
   test('an unprojectable claimer keeps the request, flags the claim', () => {
-    const p = projectWanted(row({ status: 'claimed', claimed_by: 'not a handle!' }), undefined)
+    const p = projectWanted({ row: row({ status: 'claimed', claimed_by: 'not a handle!' }) })
     assert.deepEqual(
       p.envelopes.map((e) => e.kind),
       ['request'],
