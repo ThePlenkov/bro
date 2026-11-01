@@ -292,6 +292,8 @@ export async function runTui(argv: string[]): Promise<void> {
     else if (key.name === 'pagedown') pane.scrollPage?.(1);
     else if (key.name === 'home') pane.scrollEdge?.(0);
     else if (key.name === 'end') pane.scrollEdge?.(1);
+    else if (key.name === 'a') pane.writer.toggleAll(true);
+    else if (key.name === 'z') pane.writer.toggleAll(false);
     else if (
       key.name === 'return' ||
       key.name === 'enter' ||

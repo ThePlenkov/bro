@@ -74,6 +74,10 @@ export interface PaneWriter {
   select(delta: number): void;
   /** Fold the selected card open or closed. */
   toggle(): void;
+  /** Fold EVERY foldable row at once — `a` opens them all, `z`
+   *  shuts them all (addendum 27). Marks foldTouched so neither the
+   *  auto-fold nor the selection peek overrides the sweep. */
+  toggleAll(open: boolean): void;
   /** The selected card's (else the latest row's) full raw text —
    *  Ctrl+C's payload, via the impl's `copyItem` resolver. */
   copy(): string | undefined;
@@ -190,6 +194,18 @@ export function createPane(
         });
         // an open card can outgrow the viewport — keep its head in view
         pane.scrollToRow?.(item.id);
+      },
+      toggleAll(open) {
+        const byId = { ...plain.byId };
+        let any = false;
+        for (const id of plain.order) {
+          const item = byId[id];
+          if (item !== undefined && isFoldable(item) && item.collapsed !== !open) {
+            byId[id] = { ...item, collapsed: !open, foldTouched: true };
+            any = true;
+          }
+        }
+        if (any) publish({ ...plain, byId });
       },
       copy() {
         const sel = plain.byId[plain.selected];
@@ -1051,7 +1067,7 @@ function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
       >
         <text
           fg={theme.muted}
-          content="j/k select+peek · Enter/Space/c pin fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
+          content="j/k select+peek · Enter/Space/c fold · a expand-all · z collapse-all · Ctrl+C copy row"
         />
       </Show>
       <box flexGrow={1} />
