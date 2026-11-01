@@ -149,6 +149,14 @@ knobs below.
   deferred snooze for `loop.parkedWakeMin` (default 2h — then it wakes
   to `open` on the next ready read; `0` ices it until `bd undefer`),
   and the worktree stays as the resume cache.
+- **A provider wall is waited on the provider's clock, never churned** —
+  a `rate_limited` worker death carrying a `resetAt` snoozes the claim
+  until the reset (then it wakes and a fresh worker respawns — no
+  attempt burned waiting), and a `rate_limited`/`quota` wall derived at
+  spawn admission either holds pushes until the reset or parks the
+  clump when no reset was reported. The shared exit-cause taxonomy —
+  the same contract convoy supervision runs — decides; the flat
+  cooldown only covers walls with no advertised end.
 - **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
   many gates sit on the stack; a full stack services gates only until a
   merge frees a slot. Independent branches drift against shared files
