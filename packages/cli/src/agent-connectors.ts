@@ -3576,7 +3576,22 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** The gascity backend — `gc` as code. Spec: specs/sessions/bro-f4ot/
  *  spec.md + spike-gascity.md (bro-4bkv verdict: viable connector, the
- *  model mismatch is absorbed here, not in the facade).
+ *  model mismatch is absorbed here, not in the facade). Ownership/runbook:
+ *  docs/gascity-ownership.md (bro-l8c4f.10). Gas City is a complement, not
+ *  Gas Town — no second scheduler.
+ *
+ *  Ownership (single owner):
+ *   - Claims/assignment: BRO (shared beads store; rig adopted via
+ *     `gc rig add --adopt`, rig DB IS repo store). `gc sling --force` never used.
+ *   - Spawn/bootstrap: BRO orchestrates (policy/dedup/serialization), GC
+ *     executes (provider command from `city.toml`).
+ *   - Retry/respawn: BRO (registry reuse, reset vs new, rebind).
+ *   - Reconciliation/liveness: BRO + GC cooperative (BRO interprets states;
+ *     lost only if supervisor verifiably running, else degraded/unknown).
+ *   - Shutdown/stop: BRO requests (`gc session close`), GC terminates;
+ *     never `gc supervisor stop` (machine-wide).
+ *   - Gate/admission: BRO enforces (dedup/serialization/indeterminate
+ *     liveness blocks spawn).
  *
  *  Contract mapping (spike-probed on gc 1.4.2):
  *   - spawn   = lazy city bootstrap → author a per-step agent
@@ -4131,7 +4146,19 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
               );
             }
             const s = gcSessionFor(e, spec.molStep, sessions);
-            const st = s === undefined ? 'lost' : gcState(s);
+            if (s === undefined) {
+              // session listing omitted the worker but supervisor liveness is
+              // indeterminate — cannot conclude lost/rebindable without
+              // verifiably running supervisor (admission guarantee)
+              if (gcSupervisorRunning() !== true) {
+                throw new SpawnError(
+                  'gc supervisor not running — agent liveness unknown',
+                  'unavailable'
+                );
+              }
+              return false;
+            }
+            const st = gcState(s);
             return st === 'running' || st === 'spawned';
           },
           liveDetail: e =>
