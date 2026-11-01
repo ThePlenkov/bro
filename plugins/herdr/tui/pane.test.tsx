@@ -48,6 +48,10 @@ async function mount(): Promise<{
   writer: PaneWriter;
   renderer: CliRenderer;
   flush: () => Promise<void>;
+  /** Wait until the scrollbox's bar is visible — its native geometry
+   *  settles a frame or two after the feed first overflows, and a
+   *  mouse event aimed at a not-yet-live bar falls through. */
+  waitBar: () => Promise<void>;
   dispose: () => Promise<void>;
 }> {
   const { mountPane } = await loadPane();
@@ -67,6 +71,10 @@ async function mount(): Promise<{
     writer: pane.writer,
     renderer: setup.renderer,
     flush,
+    waitBar: async () => {
+      for (let i = 0; i < 20 && !pane.scroller?.verticalScrollBar.visible; i++) await setup.flush();
+      assert.ok(pane.scroller?.verticalScrollBar.visible, 'scrollbar never became visible');
+    },
     dispose: async () => setup.dispose(),
   };
 }
@@ -79,6 +87,7 @@ describe('the Solid session pane', () => {
         chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
       );
       await p.flush();
+      await p.waitBar();
       const before = await p.frame();
       const mouse = createMockMouse(p.renderer);
       // a press on the track — clicks are the class herdr DOES
@@ -102,6 +111,7 @@ describe('the Solid session pane', () => {
         chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
       );
       await p.flush();
+      await p.waitBar();
       const before = await p.frame();
       const mouse = createMockMouse(p.renderer);
       // the bar lives on the scrollbox's rightmost column (x=59 at

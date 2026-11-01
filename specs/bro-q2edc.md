@@ -883,6 +883,23 @@ Herdr's own `ui.pane_scrollbars` (its scrollback bar beside the
 pane) is orthogonal noise for an alt-screen app — worth `false`
 in the operator config.
 
+**Bar styling + padding** (addendum 23): the bar keeps its real
+gutter (`position:'relative'` — `'absolute'` paints over content
+but then bar clicks land on the content node and never reach
+`handleBarMouse`). The light look comes from colors, not geometry:
+`trackOptions` sets the thumb to `theme.scrollbar` (#4a4a4d) on a
+`theme.base` track, so the rail vanishes and only a dim notch
+floats. Text no longer reaches under the bar — the row wrap width
+was `renderer.width` while the gutter owns the last column; rows
+now wrap at `scroller.viewport.width - 1`, and the viewport's
+`paddingRight: 1` leaves a breathing column between text and bar.
+Also wired in the same ref: `verticalScrollBar.onChange` bumps the
+frame signal, so `atBottom`/`Jump to latest` follow a scroll in
+the same frame — before, the chip lagged up to 10 animation ticks
+(the intermittent mock-mouse test failures were this lag, not the
+bar). `pane.scroller` is exposed on the returned Pane so tests can
+wait on `verticalScrollBar.visible` before aiming clicks at it.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

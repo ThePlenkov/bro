@@ -94,6 +94,9 @@ export interface Pane {
   scrollPage?: (dir: -1 | 1) => void;
   /** Jump to the top (0) or the bottom (1). */
   scrollEdge?: (edge: 0 | 1) => void;
+  /** The feed's scrollbox — tests poll its bar's visibility before
+   *  sending mouse events at it. */
+  scroller?: ScrollBoxRenderable;
 }
 
 /**
@@ -968,6 +971,18 @@ function Pane(props: {
       <scrollbox
         ref={el => {
           const sb = el as ScrollBoxRenderable;
+          // a light bar: the dim thumb on a base-colored track reads
+          // as a notch, not a rail; the viewport's right padding keeps
+          // a breathing column between the text and the bar's gutter
+          sb.verticalScrollBar.trackOptions = {
+            foregroundColor: theme.scrollbar,
+            backgroundColor: theme.base,
+          };
+          // every offset change bumps the frame signal — atBottom (and
+          // so the Jump-to-latest chip) follows a scroll the same frame
+          // instead of waiting up to 10 animation ticks
+          sb.verticalScrollBar.onChange = () => setFrame(f => f + 1);
+          sb.viewport.paddingRight = 1;
           setScroller(sb);
           props.onScroller?.(sb);
         }}
@@ -1000,7 +1015,7 @@ function Pane(props: {
                       item={item}
                       syntax={props.syntax}
                       selected={props.store.state.selected === id}
-                      width={() => renderer.width}
+                      width={() => Math.max(20, (scroller()?.viewport.width || renderer.width) - 1)}
                       frame={frame}
                       findTool={findTool}
                     />
@@ -1067,6 +1082,7 @@ export async function mountPane(opts: {
         toast={toast}
         onScroller={el => {
           scroller = el;
+          pane.scroller = el;
         }}
         onCopySelect={() => {
           // opencode's copy-on-select: drag → renderer Selection →

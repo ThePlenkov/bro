@@ -41,6 +41,9 @@ export const theme = {
   accent: '#5c9cf5',
   /** Card border at rest (unselected) — barely-there on the base. */
   border: '#1f1f1f',
+  /** The scroll thumb — a dim notch floating on the base, not a
+   *  bright rail. */
+  scrollbar: '#4a4a4d',
 } as const;
 
 export type Theme = typeof theme;
