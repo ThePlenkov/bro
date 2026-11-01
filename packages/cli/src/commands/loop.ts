@@ -132,7 +132,6 @@ import {
   resolveSpawnProvider,
   sessionQuotaOf,
   type AgentConnectorEnv,
-  type SessionQuotaLane,
   type SpawnProviderPick,
 } from '../agent-connectors.ts';
 import { flag, positionals } from './args.ts';
@@ -1301,17 +1300,22 @@ async function runFixRound(
   let templateReservation: string | undefined;
   const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
-  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
-    beadsDir: ctx.beadsDir,
-    molStep: leadFix.id,
-    prompt,
-    repoRoot: m.item.worktreeDir,
-    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-    worker: lane.worker,
-    provider: lane.provider,
-    model: lane.model,
-    class: lane.class,
-  } as any, templateCommand);
+  const templateQuota = sessionQuotaOf(
+    ctx.env,
+    'native',
+    {
+      beadsDir: ctx.beadsDir!,
+      molStep: leadFix.id,
+      prompt,
+      repoRoot: m.item.worktreeDir,
+      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      worker: lane.worker,
+      provider: lane.provider,
+      model: lane.model,
+      class: lane.class,
+    },
+    templateCommand
+  );
   if (templateQuota !== undefined) {
     try {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
@@ -1321,17 +1325,15 @@ async function runFixRound(
       });
     } catch (err) {
       console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
-      if (templateReservation !== undefined) {
-        releaseSessionSlot(templateReservation);
-      }
-      // don't block on quota failures, but still don't spawn blindly?
-      // best-effort like before but don't leak slot; fall through to error handling below
+      // admitSessionSlot threw before the assignment completed —
+      // templateReservation is still undefined, nothing to release
       if (err instanceof SpawnError && err.kind === 'cap') {
         // hold fix round - skip spawning this round
         return;
       }
-      // other errors: proceed without reservation? better to skip
-      templateReservation = undefined;
+      // other errors: skip this fix round rather than spawning without a reservation
+      console.error(`loop: fix round skipped — quota admission error: ${err instanceof Error ? err.message : String(err)}`);
+      return;
     }
   }
   let code: number | null = null;
@@ -1797,17 +1799,22 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // (spec bro-9h86l / bro-0fbdp)
   let templateReservation: string | undefined;
   const templateCommand = laneCommand(ctx, lane);
-  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
-    beadsDir: ctx.beadsDir,
-    molStep: lead.id,
-    prompt,
-    repoRoot: item.worktreeDir,
-    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-    worker: lane.worker,
-    provider: lane.provider,
-    model: lane.model,
-    class: lane.class,
-  } as any, templateCommand);
+  const templateQuota = sessionQuotaOf(
+    ctx.env,
+    'native',
+    {
+      beadsDir: ctx.beadsDir!,
+      molStep: lead.id,
+      prompt,
+      repoRoot: item.worktreeDir,
+      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      worker: lane.worker,
+      provider: lane.provider,
+      model: lane.model,
+      class: lane.class,
+    },
+    templateCommand
+  );
   if (templateQuota !== undefined) {
     try {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
@@ -2389,17 +2396,22 @@ async function runRebaseRound(
   let templateReservation: string | undefined;
   const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
-  const templateQuota = sessionQuotaOf(ctx.env, 'native', {
-    beadsDir: ctx.beadsDir,
-    molStep: leadRb.id,
-    prompt,
-    repoRoot: m.item.worktreeDir,
-    env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
-    worker: lane.worker,
-    provider: lane.provider,
-    model: lane.model,
-    class: lane.class,
-  } as any, templateCommand);
+  const templateQuota = sessionQuotaOf(
+    ctx.env,
+    'native',
+    {
+      beadsDir: ctx.beadsDir!,
+      molStep: leadRb.id,
+      prompt,
+      repoRoot: m.item.worktreeDir,
+      env: { ...agentEnv(ctx, {}), [BATCH_MARKER_ENV]: '1' },
+      worker: lane.worker,
+      provider: lane.provider,
+      model: lane.model,
+      class: lane.class,
+    },
+    templateCommand
+  );
   if (templateQuota !== undefined) {
     try {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
@@ -2412,7 +2424,9 @@ async function runRebaseRound(
       if (err instanceof SpawnError && err.kind === 'cap') {
         return;
       }
-      templateReservation = undefined;
+      // other errors: skip this rebase round rather than spawning without a reservation
+      console.error(`loop: rebase round skipped — quota admission error: ${err instanceof Error ? err.message : String(err)}`);
+      return;
     }
   }
   let code: number | null = null;
