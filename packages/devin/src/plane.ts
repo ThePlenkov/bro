@@ -265,6 +265,11 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   let environ: string | undefined
   try {
     environ = readFileSync(join(dir, 'environ'), 'utf8')
+    // Service processes (conductor/serve-owned acp children) mark
+    // BRO_HOOKS=0 and must not ride the agent-worker lane.
+    if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
+      return false
+    }
     // NUL-anchored: environ entries are NUL-separated and an
     // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
     // AGENT_ENV_RE convention)
@@ -278,6 +283,10 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
     if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
       return false
     }
+    // NUL-anchored: environ entries are NUL-separated and an
+    // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
+    // AGENT_ENV_RE convention)
+    if (/(?:^|\0)BRO_AGENT_ID=/.test(environ)) {
   } catch {
     // unreadable environ — the stdin probe still applies
   }
