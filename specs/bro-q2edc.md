@@ -978,6 +978,40 @@ its selection by the bar turning `accent` — it already carries
 `itemGroup`/`spacingBefore` as their own group: air before a head
 (closes the previous group), none after (hugs its own).
 
+**Internal storms collapse** (addendum 27): the archive holds two
+turn populations — a handful of managed-agent `acp provider 'X'`
+turns and a flood of `conductor:*`/`provider:*`/`acp-transport:*`
+micro-calls (judge sweeps, bookkeeping — ~98% of a busy archive,
+many under a second, many one-token replies). Both impls now treat
+every non-agent provenance as internal (`isInternalBy`: only `acp`
+and `acp provider 'X'` are the session's own agent) and collapse a
+run of internal turns into one foldable `▸ N internal calls · K
+failed · kilo, fake +4` row whose expanded body is the per-call
+detail list (`- kilo « question → `reply` ✗ err`, capped at 30
+lines + `+M more`). Failures never hide in the fold: each distinct
+(origin, error) still emits its own red row at once —
+`✗ kilo · Internal error` in the legacy impl, `── turn failed —
+kilo · Internal error ──` in the acp impl (managed-agent failures
+keep the bare banner; their head names the origin). Two display
+artifacts died with it: `chunk()` seals at every turn boundary so
+consecutive one-token replies no longer merge into fake sentences
+(`okok`, `ok{}{}sum` were five/four separate turns), and
+`eventsOf` now forwards `row.error` as a `prompt_error` event so
+the vendored reducer emits real error markers (previously every
+failure rendered as a silent `end_turn`). acp impl bookkeeping:
+sids born inside an internal turn inherit the turn's provenance
+(`byMap` falls back to `curShortBy` — update rows carry no `by`);
+`calls` counts `turn_end` markers only (a failed turn journals
+both an end and an error marker — counting markers double-counts)
+plus one for a trailing in-flight turn; a storm led by a silent
+`end_turn` escapes the quiet-stop early-return or its tally never
+emits. Side rows (`──` banners, `✗`, `◌`, plan lines) render as
+tone-coloured plain text rather than markdown — the open-markdown
+path painted no `fg`, so `── turn failed ──` was never actually
+red. Text inside and outside `┃` cards now shares one content edge
+(the opencode rule): `BarBlock` moved its bar to column 0 with a
+single-cell gap, and bare prose pads to the same column.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

@@ -52,7 +52,7 @@ import {
   type ToolCallItem,
 } from '../vendor/acp-model/src/index.ts';
 import { isJudgeTurn, verdictOf } from '../verdict.ts';
-import { headBy, TimeGutter } from '../view.ts';
+import { headBy, isInternalBy, TimeGutter } from '../view.ts';
 import { acpLine, lineText } from './lines.ts';
 
 /** sessionUpdate kinds their reducer handles (items or absorbed
@@ -88,13 +88,20 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
     return [{ type: 'session_update', update: row.update as SessionUpdate, at: t }];
   }
   if (row.kind === 'turn' && row.phase === 'stop') {
-    return [
+    const events: ModelEvent[] = [
       {
         type: 'prompt_response',
         stopReason: (row.stopReason ?? 'end_turn') as StopReason,
         at: t,
       },
     ];
+    // a failed turn's error is NOT on prompt_response — the vendored
+    // reducer only makes `turn_end` markers from it. `prompt_error`
+    // yields the error marker that prints `── turn failed ──`.
+    if (row.error !== undefined && row.error !== '') {
+      events.push({ type: 'prompt_error', message: row.error, at: t });
+    }
+    return events;
   }
   if (row.kind === 'permission') {
     const toolCallId = ((row as { toolCallId?: string }).toolCallId ?? 'unknown') as never;
@@ -274,10 +281,13 @@ const ACTIVITY: ReadonlySet<TheirItem['kind']> = new Set([
 ]);
 
 /** Runs of ≥2 consecutive activity sids in session order →
- *  member sid → its run's leader (first sid). */
+ *  member sid → its run's leader (first sid). Internal-provenance
+ *  sids never join — they collapse under the storm group instead
+ *  (a conductor's tool call must not pad the agent's ▸ tally). */
 const buildRuns = (
   order: readonly string[],
-  items: ReadonlyMap<string, TheirItem>
+  items: ReadonlyMap<string, TheirItem>,
+  internal?: ReadonlySet<string>
 ): Map<string, string> => {
   const out = new Map<string, string>();
   let run: string[] = [];
@@ -290,10 +300,51 @@ const buildRuns = (
   };
   for (const sid of order) {
     const item = items.get(sid);
-    if (item !== undefined && ACTIVITY.has(item.kind)) run.push(sid);
+    if (item !== undefined && ACTIVITY.has(item.kind) && internal?.has(sid) !== true) run.push(sid);
     else flush();
   }
   flush();
+  return out;
+};
+
+/** Runs of consecutive internal sids in session order → member sid →
+ *  its storm's leader (first sid). Unlike activity runs even ONE sid
+ *  forms a storm — a lone judge probe still reads `▸ 1 internal
+ *  call`, never a bare one-token reply (addendum 27). */
+const buildStorms = (
+  order: readonly string[],
+  internal: ReadonlySet<string>
+): Map<string, string> => {
+  const out = new Map<string, string>();
+  let run: string[] = [];
+  const flush = (): void => {
+    const lead = run[0];
+    if (lead !== undefined) for (const sid of run) out.set(sid, lead);
+    run = [];
+  };
+  for (const sid of order) {
+    if (internal.has(sid)) run.push(sid);
+    else flush();
+  }
+  flush();
+  return out;
+};
+
+/** The leader's consecutive internal members — the storm item's
+ *  tally and expanded `runs` body. */
+const stormMembers = (
+  order: readonly string[],
+  internal: ReadonlySet<string>,
+  leader: string
+): string[] => {
+  const start = order.indexOf(leader);
+  if (start < 0) return [];
+  const out: string[] = [];
+  for (let i = start; i < order.length; i++) {
+    const sid = order[i];
+    if (sid === undefined || !internal.has(sid)) break;
+    out.push(sid);
+  }
   return out;
 };
 
@@ -385,6 +436,72 @@ const runItem = (
   };
 };
 
+/** An internal error marker's row text — `── turn failed — by ·
+ *  err ──`: inside a storm the origin isn't obvious from a lone
+ *  banner, so it rides inline (the legacy impl's `✗ by · err`
+ *  grammar). Real-agent failures keep the bare banner — their head
+ *  already names the origin. */
+const stormErrText = (item: { text: string }, by: string | undefined): string =>
+  `── turn failed — ${by !== undefined && by !== '' ? `${by} · ` : ''}${item.text} ──`;
+
+/** The collapsed internal storm — a ToolItem on the run grammar so
+ *  the ▸/▾ row and its `│` member list ride the existing chrome.
+ *  `calls` counts the members' turn markers (one per turn end —
+ *  error markers included) plus one for a live in-flight turn; the
+ *  origins list keeps the provenance visible at a glance. Error
+ *  markers stay members AND still print their own `── turn failed ──`
+ *  row — the tally counts them, the red row shows them (addendum 27). */
+const stormItem = (
+  memberSids: readonly string[],
+  items: ReadonlyMap<string, TheirItem>,
+  byMap: ReadonlyMap<string, string>,
+  id: number,
+  folded: boolean,
+  stamp: string | undefined,
+  by: string | undefined
+): ToolItem => {
+  const members: TheirItem[] = [];
+  let calls = 0;
+  let fails = 0;
+  let live = false;
+  const origins: string[] = [];
+  for (const sid of memberSids) {
+    const m = items.get(sid);
+    const o = byMap.get(sid);
+    if (o !== undefined && o !== '' && !origins.includes(o)) origins.push(o);
+    if (m === undefined) continue;
+    members.push(m);
+    if (m.kind === 'marker') {
+      // a finished turn journals TWO markers — the end_turn plus,
+      // on failure, the error — so calls counts ends, not markers
+      if (m.markerKind === 'turn_end') calls++;
+      if (m.markerKind === 'error') fails++;
+    }
+  }
+  // a trailing non-marker member = a turn still in flight
+  const last = members[members.length - 1];
+  live = last !== undefined && last.kind !== 'marker';
+  if (live) calls++;
+  const org =
+    origins.length <= 3
+      ? origins.join(', ')
+      : `${origins.slice(0, 2).join(', ')} +${origins.length - 2}`;
+  return {
+    id,
+    kind: 'tool',
+    toolCallId: `storm:${id}`,
+    title: 'internal',
+    arg: `${calls} internal ${calls === 1 ? 'call' : 'calls'}${fails > 0 ? ` · ${fails} failed` : ''}${org !== '' ? ` · ${org}` : ''}`,
+    status: fails > 0 ? 'failed' : 'completed',
+    bodyLanded: true,
+    collapsed: folded,
+    content: [],
+    at: stamp,
+    ...(by !== undefined ? { by } : {}),
+    runs: members,
+  };
+};
+
 /** The vendored session behind the seam — fold-by-default, per the
  *  vendored view-model's baseline (`expanded(item)` starts false). */
 export class AcpImpl implements PaneImpl {
@@ -444,6 +561,23 @@ export class AcpImpl implements PaneImpl {
   private readonly gutter = new TimeGutter();
   /** The open turn's origin — sids born under it head their group. */
   private curBy: string | undefined;
+  /** The current turn's `shortBy` — update rows carry no `by`, so
+   *  their sids inherit the turn's provenance for the storm tally
+   *  and the `· origin` error prefixes. */
+  private curShortBy: string | undefined;
+  /** Inside an internal-provenance turn (conductor/provider/transport)
+   *  — update rows carrying no `by` inherit it (addendum 27). */
+  private curInternal = false;
+  /** Sids born from internal rows — consecutive runs collapse into
+   *  `▸ N internal calls` storm items at drain. */
+  private readonly internalSids = new Set<string>();
+  /** sid → is the storm's leader — leadership flips re-project like
+   *  run grouping does. */
+  private readonly stormLeads = new Map<string, boolean>();
+  /** leader sid → the `origin|error` keys its storm already rowed —
+   *  N identical failures print ONE `── turn failed ──` and stay
+   *  members (the tally still counts every one). */
+  private readonly stormErrSeen = new Map<string, Set<string>>();
   /** Their sid → the turn origin at item birth (update rows carry no
    *  `by`; the turn's `by` is on the start row). */
   private readonly sidBy = new Map<string, string>();
@@ -462,10 +596,18 @@ export class AcpImpl implements PaneImpl {
       this.provider ??= shortBy(row.by);
     }
     if (row.kind === 'prompt') {
+      // an internal probe's question never paints the user card —
+      // the storm batch owns its turn's rows end to end
+      if (isInternalBy(row.by)) {
+        this.curInternal = true;
+        return;
+      }
+      this.curInternal = false;
       // the prompt row marks its turn — a typed-preamble body (or a
       // judge `by`) labels the reply for the verdict classifier
       this.judgeNow = isJudgeTurn(row.text, row.by);
       this.curBy = headBy(row.by);
+      this.curShortBy = shortBy(row.by);
       const id = this.nextId++;
       const item: TextItem = {
         id,
@@ -485,6 +627,8 @@ export class AcpImpl implements PaneImpl {
       if (row.phase === 'start') {
         this.judgeNow = isJudgeTurn(undefined, row.by);
         this.curBy = headBy(row.by);
+        this.curShortBy = shortBy(row.by);
+        this.curInternal = isInternalBy(row.by);
       } else if (row.phase === 'stop') this.judgeNow = false;
     }
     // the arg stash — their items drop rawInput, our header wants it
@@ -509,15 +653,24 @@ export class AcpImpl implements PaneImpl {
     }
     // birth stamps ride the row that produced the item — order is
     // append-only, so born sids are the tail slice
+    const internal =
+      row.by !== undefined && row.by !== '' ? isInternalBy(row.by) : this.curInternal;
     const ord = this.session.order;
     for (let i = orderLen; i < ord.length; i++) {
       const sid = ord[i];
       if (sid === undefined) continue;
+      if (internal) this.internalSids.add(sid);
       if (row.ts !== undefined) this.tsMap.set(sid, row.ts);
-      if (row.by !== undefined) this.byMap.set(sid, shortBy(row.by) ?? row.by);
+      // a by-less row inherits its turn's provenance — the storm
+      // tally and error prefixes need it on every member sid
+      const by = row.by !== undefined ? (shortBy(row.by) ?? row.by) : this.curShortBy;
+      if (by !== undefined) this.byMap.set(sid, by);
       if (this.curBy !== undefined) this.sidBy.set(sid, this.curBy);
       if (this.judgeNow) this.judgeSids.add(sid);
     }
+    // the stop's marker sid was born internal — the flag clears only
+    // after the birth loop ran (addendum 27)
+    if (row.kind === 'turn' && row.phase === 'stop') this.curInternal = false;
   }
 
   beginLive(): void {
@@ -625,12 +778,13 @@ export class AcpImpl implements PaneImpl {
     this.ops = [];
     this.emitHeader(ops);
     const items = this.session.items;
-    const memberGroup = buildRuns(this.session.order, items);
+    const memberGroup = buildRuns(this.session.order, items, this.internalSids);
+    const storm = buildStorms(this.session.order, this.internalSids);
     // a changed member dirties its leader's tally — the group
     // re-projects even when the leader's own item is identical
     const dirty = new Set<string>();
     for (const sid of this.session.order) {
-      const leader = memberGroup.get(sid);
+      const leader = memberGroup.get(sid) ?? storm.get(sid);
       if (leader !== undefined && leader !== sid && this.prev.get(sid) !== items.get(sid)) {
         dirty.add(leader);
       }
@@ -638,6 +792,31 @@ export class AcpImpl implements PaneImpl {
     for (const sid of this.session.order) {
       const item = items.get(sid);
       if (item === undefined) continue;
+      // an error marker inside a storm keeps its own row — the tally
+      // counts it AND the red `── turn failed ──` shows it, once per
+      // distinct (origin, error) per storm; repeats stay members only
+      const errorMarker = item.kind === 'marker' && item.markerKind === 'error';
+      const stormLeader = storm.get(sid);
+      if (stormLeader !== undefined && stormLeader !== sid) {
+        let emitErr = false;
+        if (errorMarker) {
+          const key = `${this.byMap.get(sid) ?? ''}|${item.text}`;
+          let seen = this.stormErrSeen.get(stormLeader);
+          if (seen === undefined) {
+            seen = new Set();
+            this.stormErrSeen.set(stormLeader, seen);
+          }
+          if (!seen.has(key)) {
+            seen.add(key);
+            emitErr = true;
+          }
+        }
+        if (!emitErr) {
+          const gid = this.ids.get(stormLeader);
+          if (gid !== undefined) this.ids.set(sid, gid);
+          continue;
+        }
+      }
       const leader = memberGroup.get(sid);
       if (leader !== undefined && leader !== sid) {
         // a member never owns a row — route its id at the group so
@@ -648,14 +827,25 @@ export class AcpImpl implements PaneImpl {
       }
       const was = this.prev.get(sid);
       const nowGrouped = memberGroup.has(sid);
+      const nowStorm = stormLeader === sid;
       const members = nowGrouped ? runMembers(this.session.order, items, sid) : undefined;
+      const stormSids = nowStorm
+        ? stormMembers(this.session.order, this.internalSids, sid)
+        : undefined;
       const changed =
-        was !== item || nowGrouped !== (this.grouped.get(sid) ?? false) || dirty.delete(sid);
+        was !== item ||
+        nowGrouped !== (this.grouped.get(sid) ?? false) ||
+        nowStorm !== (this.stormLeads.get(sid) ?? false) ||
+        dirty.delete(sid);
       this.grouped.set(sid, nowGrouped);
+      this.stormLeads.set(sid, nowStorm);
       if (was === item && !changed) continue;
       // turn_end emits no row — duration/ctx fold into the latest ▸
-      // activity line's arg (addendum 11)
-      if (item.kind === 'marker' && item.markerKind === 'turn_end') {
+      // activity line's arg (addendum 11). A storm LEADER is the
+      // exception: its own marker is silent but the storm item it
+      // heads is not — without the escape a storm opening on a
+      // clean end never emits its tally row
+      if (item.kind === 'marker' && item.markerKind === 'turn_end' && !nowStorm) {
         this.endFold(item, ops);
         continue;
       }
@@ -665,7 +855,93 @@ export class AcpImpl implements PaneImpl {
         this.ids.set(sid, id);
         this.emitted.push(id);
         const next =
-          members !== undefined
+          stormSids !== undefined
+            ? stormItem(
+                stormSids,
+                items,
+                this.byMap,
+                id,
+                true,
+                this.tsMap.get(sid),
+                this.byMap.get(sid)
+              )
+            : members !== undefined
+              ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
+              : project(
+                  item,
+                  id,
+                  this.args,
+                  true,
+                  this.tsMap.get(sid),
+                  this.judgeSids.has(sid),
+                  this.byMap.get(sid)
+                );
+        if (next === undefined) continue;
+        // an internal failure's banner carries its origin — inside a
+        // storm the head can't be trusted to name it
+        if (
+          errorMarker &&
+          this.internalSids.has(sid) &&
+          next.kind === 'turn' &&
+          item.kind === 'marker'
+        ) {
+          next.text = stormErrText(item, this.byMap.get(sid));
+        }
+        // the separator layer pays first — the birth row's minute and
+        // the turn origin at birth (a drain batch can span turns)
+        this.gutter.start(this.sidBy.get(sid));
+        for (const text of this.gutter.tick(this.tsMap.get(sid))) {
+          this.emitTime(ops, text, this.tsMap.get(sid));
+        }
+        ops.push({ op: 'append', item: next });
+        // a storm LED by an error marker — the failure row rides
+        // right after the ▸ tally (member dedup can't catch the
+        // leader: it IS the storm's slot)
+        if (stormSids !== undefined && errorMarker) {
+          const key = `${this.byMap.get(sid) ?? ''}|${item.text}`;
+          let seen = this.stormErrSeen.get(sid);
+          if (seen === undefined) {
+            seen = new Set();
+            this.stormErrSeen.set(sid, seen);
+          }
+          if (!seen.has(key)) {
+            seen.add(key);
+            const row = project(
+              item,
+              this.nextId++,
+              this.args,
+              true,
+              this.tsMap.get(sid),
+              this.judgeSids.has(sid),
+              this.byMap.get(sid)
+            );
+            if (row !== undefined && row.kind === 'turn' && item.kind === 'marker') {
+              row.text = stormErrText(item, this.byMap.get(sid));
+            }
+            if (row !== undefined) {
+              this.emitted.push(row.id);
+              ops.push({ op: 'append', item: row });
+            }
+          }
+        }
+        if (members !== undefined && next.kind === 'tool') {
+          this.lastActivity = { id, arg: next.arg ?? '' };
+        }
+        continue;
+      }
+      if (id === undefined) continue;
+      const next =
+        stormSids !== undefined
+          ? stormItem(
+              stormSids,
+              items,
+              this.byMap,
+              id,
+              true,
+              this.tsMap.get(sid),
+              this.byMap.get(sid)
+            )
+          : members !== undefined
             ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
             : project(
                 item,
@@ -676,32 +952,6 @@ export class AcpImpl implements PaneImpl {
                 this.judgeSids.has(sid),
                 this.byMap.get(sid)
               );
-        if (next === undefined) continue;
-        // the separator layer pays first — the birth row's minute and
-        // the turn origin at birth (a drain batch can span turns)
-        this.gutter.start(this.sidBy.get(sid));
-        for (const text of this.gutter.tick(this.tsMap.get(sid))) {
-          this.emitTime(ops, text, this.tsMap.get(sid));
-        }
-        ops.push({ op: 'append', item: next });
-        if (members !== undefined && next.kind === 'tool') {
-          this.lastActivity = { id, arg: next.arg ?? '' };
-        }
-        continue;
-      }
-      if (id === undefined) continue;
-      const next =
-        members !== undefined
-          ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
-          : project(
-              item,
-              id,
-              this.args,
-              true,
-              this.tsMap.get(sid),
-              this.judgeSids.has(sid),
-              this.byMap.get(sid)
-            );
       if (next === undefined) continue;
       if (members !== undefined && next.kind === 'tool') {
         this.lastActivity = { id, arg: next.arg ?? '' };
@@ -766,13 +1016,17 @@ export class AcpImpl implements PaneImpl {
       }
     };
     const ord = this.session.order;
-    const memberGroup = buildRuns(ord, this.session.items);
+    const memberGroup = buildRuns(ord, this.session.items, this.internalSids);
+    const storm = buildStorms(ord, this.internalSids);
     for (let i = 0; i < ord.length; i++) {
       emitPrompts(i);
       const sid = ord[i];
       if (sid === undefined) continue;
       const item = this.session.items.get(sid);
       if (item === undefined) continue;
+      const errorMarker = item.kind === 'marker' && item.markerKind === 'error';
+      const stormLeader = storm.get(sid);
+      if (stormLeader !== undefined && stormLeader !== sid && !errorMarker) continue;
       const leader = memberGroup.get(sid);
       if (leader !== undefined && leader !== sid) continue;
       let id = this.ids.get(sid);
@@ -812,15 +1066,50 @@ export class AcpImpl implements PaneImpl {
         }
         continue;
       }
-      const line = lineText(
-        acpLine(
-          item,
-          120,
-          0,
-          find,
-          item.kind === 'tool_call' ? this.args.get(item.toolCallId) : undefined
-        )
-      );
+      if (stormLeader === sid) {
+        // the ▸-storm line — same grammar; internal members show
+        // their own one-liners under the gutter
+        const memberSids = stormMembers(ord, this.internalSids, sid);
+        const st = stormItem(
+          memberSids,
+          this.session.items,
+          this.byMap,
+          id,
+          false,
+          undefined,
+          this.byMap.get(sid)
+        );
+        out.push(`▸ ${st.arg}`);
+        for (const msid of memberSids) {
+          const m = this.session.items.get(msid);
+          if (m === undefined) continue;
+          const ml = lineText(
+            acpLine(
+              m,
+              116,
+              0,
+              find,
+              m.kind === 'tool_call' ? this.args.get(m.toolCallId) : undefined
+            )
+          );
+          out.push(`│  ${ml === '' ? m.kind : ml.trimEnd()}`);
+        }
+        continue;
+      }
+      // an internal error marker prints its origin inline — inside a
+      // storm the lone banner can't be attributed otherwise
+      const line =
+        errorMarker && this.internalSids.has(sid) && item.kind === 'marker'
+          ? stormErrText(item, this.byMap.get(sid))
+          : lineText(
+              acpLine(
+                item,
+                120,
+                0,
+                find,
+                item.kind === 'tool_call' ? this.args.get(item.toolCallId) : undefined
+              )
+            );
       if (line !== '') {
         out.push(line);
         if (item.kind === 'tool_call') {

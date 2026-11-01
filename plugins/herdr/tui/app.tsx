@@ -485,23 +485,22 @@ function AcpRunRow(props: {
   );
 }
 
-/** One `┃`-barred block — their block grammar verbatim (capture
- *  rows 25-43): two base cells, then the peach `┃` on `#141414`
- *  for the block's whole height, content padded inside, the wash
- *  filling to the right edge. The bar is the box's `heavy` left
- *  border, so ANY content (a markdown renderable included) keeps
- *  the bar and the bg without per-line plumbing (addendum 18). */
+/** One `┃`-barred block — the bar flush at column 0 so the card's
+ *  text lands on the same column every other row's text does
+ *  (markers at 0, text at 2 — opencode's one-line edge, addendum 27).
+ *  The bar is the box's `heavy` left border, so ANY content (a
+ *  markdown renderable included) keeps the bar and the bg without
+ *  per-line plumbing (addendum 18). */
 function BarBlock(props: { children?: JSX.Element; selected?: boolean }) {
   return (
     <box
-      marginLeft={2}
       width="100%"
       flexShrink={0}
       border={['left']}
       borderStyle="heavy"
       borderColor={props.selected ? theme.accent : theme.peach}
       backgroundColor={theme.surface}
-      paddingLeft={2}
+      paddingLeft={1}
     >
       {props.children}
     </box>
@@ -561,7 +560,7 @@ function PromptRow(props: {
                   streaming
                   internalBlockMode="top-level"
                   flexShrink={0}
-                  maxWidth={props.width() - 5}
+                  maxWidth={props.width() - 2}
                 />
               </Show>
               <text
@@ -580,7 +579,7 @@ function PromptRow(props: {
             streaming
             internalBlockMode="top-level"
             flexShrink={0}
-            maxWidth={props.width() - 5}
+            maxWidth={props.width() - 2}
           />
         </Show>
       </Show>
@@ -743,18 +742,52 @@ function ItemRow(props: {
                                     <Show
                                       when={props.item.kind === 'time'}
                                       fallback={
-                                        /* side lines — turn markers, notes.
-                                         *  Long notes fold like prose
-                                         *  (addendum 20) */
+                                        /* side lines — turn markers, notes,
+                                         *  the ▸ internal-calls batch.
+                                         *  Folded → dim one-line summary.
+                                         *  Open + foldable → real markdown
+                                         *  (the batch's `- by → reply`
+                                         *  list). Everything else is an
+                                         *  authored plain line — plain
+                                         *  <text> so the TONE paints:
+                                         *  `✗`/`── turn failed` rows are
+                                         *  red, `──` dividers dim
+                                         *  (addendum 27 — the old path
+                                         *  ran them through markdown
+                                         *  with no fg, so errors were
+                                         *  never actually red). */
                                         <Show
-                                          when={textOpen() || !isFoldable(props.item)}
+                                          when={textOpen() && isFoldable(props.item)}
                                           fallback={
-                                            <text
-                                              fg={sideColor(tone())}
-                                              attributes={TextAttributes.DIM}
-                                              flexShrink={0}
-                                              content={foldSummary()}
-                                            />
+                                            <Show
+                                              when={textOpen() || !isFoldable(props.item)}
+                                              fallback={
+                                                <text
+                                                  fg={sideColor(tone())}
+                                                  attributes={TextAttributes.DIM}
+                                                  flexShrink={0}
+                                                  content={foldSummary()}
+                                                />
+                                              }
+                                            >
+                                              <box flexDirection="column" flexShrink={0}>
+                                                <For
+                                                  each={('text' in props.item
+                                                    ? props.item.text
+                                                    : ''
+                                                  ).split('\n')}
+                                                >
+                                                  {l => (
+                                                    <text
+                                                      fg={sideColor(tone())}
+                                                      attributes={TextAttributes.DIM}
+                                                      content={l}
+                                                      flexShrink={0}
+                                                    />
+                                                  )}
+                                                </For>
+                                              </box>
+                                            </Show>
                                           }
                                         >
                                           <markdown
@@ -820,9 +853,11 @@ function ItemRow(props: {
                             >
                               {/* agent speech — bare prose, no bullet
                                *  (addendum 26: every remaining prefix
-                               *  earns its cell). Long prose folds to a
+                               *  earns its cell), padded to the shared
+                               *  text column (markers 0 / text 2,
+                               *  addendum 27). Long prose folds to a
                                *  one-line summary. */}
-                              <box flexDirection="row" flexShrink={0} width="100%">
+                              <box flexDirection="row" flexShrink={0} width="100%" paddingLeft={2}>
                                 {/* minWidth:0 — a flex item's floor is
                                  *  its content width; without it long
                                  *  paragraphs hold their unwrapped
@@ -846,7 +881,7 @@ function ItemRow(props: {
                                       streaming
                                       internalBlockMode="top-level"
                                       flexShrink={0}
-                                      maxWidth={props.width() - 1}
+                                      maxWidth={props.width() - 3}
                                     />
                                   </Show>
                                 </box>

@@ -168,3 +168,74 @@ describe('the acp impl', () => {
     }
   });
 });
+
+describe('the acp impl — internal storms', () => {
+  const start = (by: string): ArchiveRow => ({ kind: 'turn', phase: 'start', by });
+  const stop = (error?: string): ArchiveRow => ({
+    kind: 'turn',
+    phase: 'stop',
+    ...(error !== undefined ? { stopReason: 'error', error } : { stopReason: 'end_turn' }),
+  });
+  const chunk = (text: string): ArchiveRow =>
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+
+  test('internal micro-turns collapse into one ▸ internal calls row', () => {
+    const impl = new AcpImpl();
+    for (let i = 0; i < 5; i++) {
+      impl.feed(start('provider:kilo'));
+      impl.feed(chunk('ok'));
+      impl.feed(stop());
+    }
+    impl.feed(start("acp provider 'x'"));
+    impl.feed(chunk('real reply'));
+    const appended = impl
+      .drain()
+      .filter(o => o.op === 'append')
+      .map(o => o.item);
+    const storm = appended.find(i => i.kind === 'tool' && i.toolCallId.startsWith('storm:')) as
+      | ToolItem
+      | undefined;
+    expect(storm).toBeDefined();
+    expect(storm?.title).toBe('internal');
+    expect(storm?.arg).toBe('5 internal calls · kilo');
+    // no per-reply message items — the fake `okok` merge is gone
+    expect(appended.filter(i => i.kind === 'message' && i.text.includes('ok')).length).toBe(0);
+    // the managed agent's own reply still lands
+    expect(appended.some(i => i.kind === 'message' && i.text === 'real reply')).toBe(true);
+  });
+
+  test('failed internal calls tally AND print origin-prefixed red rows, deduped', () => {
+    const impl = new AcpImpl();
+    for (let i = 0; i < 3; i++) {
+      impl.feed(start('provider:kilo'));
+      impl.feed(stop('Internal error'));
+    }
+    impl.feed(start('conductor:t'));
+    impl.feed(stop('boom'));
+    const appended = impl
+      .drain()
+      .filter(o => o.op === 'append')
+      .map(o => o.item);
+    const storm = appended.find(i => i.kind === 'tool' && i.toolCallId.startsWith('storm:')) as
+      | ToolItem
+      | undefined;
+    expect(storm?.arg).toBe('4 internal calls · 4 failed · kilo, t');
+    const errs = appended.filter(i => i.kind === 'turn' && i.text.startsWith('── turn failed'));
+    expect(errs.map(i => i.text)).toEqual([
+      '── turn failed — kilo · Internal error ──',
+      '── turn failed — t · boom ──',
+    ]);
+  });
+
+  test('a managed-agent failure keeps the bare banner', () => {
+    const impl = new AcpImpl();
+    impl.feed(start("acp provider 'x'"));
+    impl.feed(stop('blew up'));
+    const appended = impl
+      .drain()
+      .filter(o => o.op === 'append')
+      .map(o => o.item);
+    const errs = appended.filter(i => i.kind === 'turn' && i.text.startsWith('── turn failed'));
+    expect(errs.map(i => i.text)).toEqual(['── turn failed — blew up ──']);
+  });
+});

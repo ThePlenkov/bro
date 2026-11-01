@@ -26,7 +26,7 @@ import {
   toolContent,
 } from '../../../packages/providers/src/acp-render.ts';
 import { isJudgeTurn } from './verdict.ts';
-import { TimeGutter } from './view.ts';
+import { isInternalBy, shortBy, TimeGutter } from './view.ts';
 
 export type { ToolContent };
 
@@ -149,6 +149,36 @@ export class SessionModel {
   /** The separator layer — turn starts mark the origin, every item
    *  birth lazily owes the minute/origin heads and day markers. */
   private readonly gutter = new TimeGutter();
+  /** The chunk tail seals at every turn boundary — the next message
+   *  births a fresh item instead of merging into the LAST turn's
+   *  prose (the `okok`/`ok{}{}sum` artifact: N turns' one-token
+   *  replies glued into one fake message). */
+  private sealed = false;
+  /** Inside an internal turn — conductor/provider/transport calls
+   *  the orchestrator journals alongside the agent's. Their rows
+   *  never emit items; they batch into `micro` below. */
+  private curInternal = false;
+  /** The internal-call storm batch (addendum 27): a run of internal
+   *  rows collapses into ONE foldable `▸ N internal calls · K failed`
+   *  note whose body is the per-call detail list — the analytics the
+   *  fold owes the reader. Unique failures still emit their own red
+   *  `✗` row the moment they happen — errors never hide in a fold. */
+  private micro = {
+    id: 0,
+    calls: 0,
+    fails: 0,
+    errors: new Set<string>(),
+    details: [] as string[],
+    extra: 0,
+    pendBy: '',
+    pendQ: '',
+    pendText: '',
+    pendDetail: -1,
+    tools: new Set<string>(),
+    /** origin → call count, insert-ordered — the head's
+     *  `· kilo, fake +4` provenance glance (acp impl parity) */
+    origins: new Map<string, number>(),
+  };
 
   /** Every op produced since the last drain — the shell's queue. */
   drain(): Op[] {
@@ -159,19 +189,38 @@ export class SessionModel {
 
   /** One archive row — update rows dispatch into the item tree, turn
    *  and permission rows land as side items; the row's LED verdict
-   *  rides `this.verdict`. */
+   *  rides `this.verdict`. Internal-provenance rows (conductor:*,
+   *  provider:*, acp-transport:*) never dispatch — they batch into
+   *  the `▸ N internal calls` storm note. */
   feed(row: ArchiveRow): void {
     this.curTs = row.ts;
+    const internal =
+      row.by !== undefined && row.by !== '' ? isInternalBy(row.by) : this.curInternal;
     switch (row.kind) {
       case 'update':
+        if (internal) {
+          this.microUpdate(row);
+          break;
+        }
+        this.microClose();
         if (row.update !== undefined) this.update(row.update);
         break;
       case 'turn':
         if (row.phase === 'start') {
           this.judgeNow = isJudgeTurn(undefined, row.by);
           this.gutter.start(row.by);
+          this.sealed = true;
+          this.curInternal = isInternalBy(row.by);
+          if (this.curInternal) this.microStart(row.by);
+          else this.microClose();
         } else if (row.phase === 'stop') {
           this.judgeNow = false;
+          this.sealed = true;
+          if (this.curInternal || internal) {
+            this.microStop(row);
+            this.curInternal = false;
+            break;
+          }
           // a normal end_turn prints nothing — every turn ends;
           // only failures and abnormal stops earn a marker row
           const failed = row.error !== undefined && row.error !== '';
@@ -187,6 +236,18 @@ export class SessionModel {
         }
         break;
       case 'prompt':
+        if (internal) {
+          // a probe call's question — first line rides the batch
+          // detail (`by « question → reply`) instead of the card
+          const q = firstLine(safe(row.text ?? ''));
+          if (q !== '' && this.micro.pendDetail >= 0) {
+            this.micro.pendQ = q;
+            this.micro.details[this.micro.pendDetail] = this.microDetail();
+            this.microPatch();
+          }
+          break;
+        }
+        this.microClose();
         // the prompt row marks its turn — judge prompts carry the
         // typed preamble; the reply then classifies as a verdict
         this.judgeNow = isJudgeTurn(row.text, row.by);
@@ -194,6 +255,8 @@ export class SessionModel {
         this.push<TextItem>({ kind: 'prompt', text: row.text ?? '' });
         break;
       case 'permission': {
+        // visible even inside a storm — a headless internal call
+        // still wanted something — and the batch survives across it
         const what = row.title ?? 'permission request';
         const verdict = row.verdict ?? 'denied';
         this.side(
@@ -260,6 +323,179 @@ export class SessionModel {
     this.push<SideItem>({ kind, text, tone });
   }
 
+  /** Detail lines the fold keeps — past the cap calls tally into
+   *  `+N more` so a 900-call storm never grows the item's text. */
+  private static readonly MICRO_DETAILS = 30;
+
+  /** The batch note's text — `▸ N internal calls · K failed` then
+   *  the per-call details (markdown `-` list in the expanded body). */
+  private microText(): string {
+    const b = this.micro;
+    const origins = [...b.origins.keys()];
+    const org =
+      origins.length <= 3
+        ? origins.join(', ')
+        : `${origins.slice(0, 2).join(', ')} +${origins.length - 2}`;
+    const head = `▸ ${b.calls} internal ${b.calls === 1 ? 'call' : 'calls'}${b.fails > 0 ? ` · ${b.fails} failed` : ''}${org === '' ? '' : ` · ${org}`}`;
+    const more = b.extra > 0 ? `\n- +${b.extra} more` : '';
+    return `${head}${b.details.length > 0 ? `\n${b.details.join('\n')}` : ''}${more}`;
+  }
+
+  /** Birth-or-patch the batch item — the note exists from the first
+   *  absorbed row so a live storm's tally ticks in place. */
+  private microPatch(): void {
+    const text = this.microText();
+    if (this.micro.id === 0) {
+      const it = this.push<SideItem>({ kind: 'note', text, collapsed: true });
+      this.micro.id = it.id;
+      this.microItem = it;
+      return;
+    }
+    if (this.microItem !== undefined) this.microItem.text = text;
+    this.ops.push({ op: 'text', id: this.micro.id, text });
+  }
+  /** The open batch's own item — kept by reference so patching is
+   *  O(1) per absorbed row (an evicted item just stops painting). */
+  private microItem: SideItem | undefined;
+
+  /** The open turn's detail line — `by « question → reply` growing
+   *  as chunks land; the stop row appends the outcome glyph. */
+  private microDetail(): string {
+    const b = this.micro;
+    const q = b.pendQ === '' ? '' : ` « ${clip(b.pendQ, 48)}`;
+    const t = firstLine(safe(b.pendText));
+    const r = t === '' ? '' : ` → \`${clip(t, 48)}\``;
+    return `- ${b.pendBy}${q}${r}`;
+  }
+
+  /** An internal turn opened — one call in the tally, one pending
+   *  detail line the updates/stop keep patching. */
+  private microStart(by: string | undefined): void {
+    const b = this.micro;
+    b.calls++;
+    b.pendBy = shortBy(by) ?? by ?? '?';
+    b.origins.set(b.pendBy, (b.origins.get(b.pendBy) ?? 0) + 1);
+    b.pendQ = '';
+    b.pendText = '';
+    if (b.details.length < SessionModel.MICRO_DETAILS) {
+      b.details.push(this.microDetail());
+      b.pendDetail = b.details.length - 1;
+    } else {
+      b.extra++;
+      b.pendDetail = -1;
+    }
+    this.microPatch();
+  }
+
+  /** An internal turn closed — the pending detail seals with its
+   *  outcome (`✓` silent-ok, `✗` error, `◌` abnormal stop). Unique
+   *  errors also emit their own red row — visible without a fold. */
+  private microStop(row: ArchiveRow): void {
+    const b = this.micro;
+    const by = b.pendBy !== '' ? b.pendBy : (shortBy(row.by) ?? '?');
+    if (b.pendBy === '' && b.pendDetail < 0) {
+      // a stop whose start fell outside the slice — still a call
+      b.calls++;
+      b.origins.set(by, (b.origins.get(by) ?? 0) + 1);
+      if (b.details.length < SessionModel.MICRO_DETAILS) {
+        b.details.push(`- ${by}`);
+        b.pendDetail = b.details.length - 1;
+      } else {
+        b.extra++;
+      }
+    }
+    const failed = row.error !== undefined && row.error !== '';
+    const reason = row.stopReason ?? '';
+    const base = b.pendBy !== '' ? this.microDetail() : `- ${by}`;
+    let fin = base;
+    if (failed) fin = `${base} ✗ ${safe(row.error ?? '')}`;
+    else if (reason !== '' && reason !== 'end_turn') fin = `${base} ◌ ${safe(reason)}`;
+    else if (base === `- ${by}`) fin = `${base} ✓`;
+    if (b.pendDetail >= 0) b.details[b.pendDetail] = fin;
+    if (failed) {
+      b.fails++;
+      const key = `${by}|${row.error ?? ''}`;
+      if (!b.errors.has(key)) {
+        b.errors.add(key);
+        this.side('turn', `✗ ${by} · ${safe(row.error ?? '')}`, 'error');
+      }
+    }
+    b.pendBy = '';
+    b.pendQ = '';
+    b.pendText = '';
+    b.pendDetail = -1;
+    this.microPatch();
+  }
+
+  /** An internal update row — reply chunks grow the open turn's
+   *  detail; tool opens add a `⚙` line; every other kind is storm
+   *  noise the tally already covers. */
+  private microUpdate(row: ArchiveRow): void {
+    const u = row.update;
+    if (u === undefined) return;
+    const b = this.micro;
+    switch (u.sessionUpdate) {
+      case 'agent_message_chunk':
+      case 'agent_thought_chunk':
+      case 'user_message_chunk': {
+        const t = chunkText(u);
+        if (t === '') return;
+        if (b.pendDetail >= 0) {
+          b.pendText += t;
+          b.details[b.pendDetail] = this.microDetail();
+        } else if (b.details.length < SessionModel.MICRO_DETAILS) {
+          // an orphan chunk (no open turn) — its own call line
+          b.calls++;
+          const o = shortBy(row.by) ?? '?';
+          b.origins.set(o, (b.origins.get(o) ?? 0) + 1);
+          b.details.push(`- ${o} → \`${clip(firstLine(safe(t)), 48)}\``);
+        } else {
+          b.calls++;
+          b.extra++;
+        }
+        this.microPatch();
+        return;
+      }
+      case 'tool_call':
+      case 'tool_call_update': {
+        const id = String((u as { toolCallId?: unknown }).toolCallId ?? '');
+        if (id === '' || b.tools.has(id)) return;
+        b.tools.add(id);
+        const title = firstLine(
+          safe(String((u as { title?: unknown }).title ?? (u as { name?: unknown }).name ?? 'tool'))
+        );
+        if (b.details.length < SessionModel.MICRO_DETAILS) {
+          b.details.push(`- ${shortBy(row.by) ?? b.pendBy} ⚙ ${clip(title, 48)}`);
+        } else {
+          b.extra++;
+        }
+        this.microPatch();
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /** A non-internal row arrived — the storm run is over; the next
+   *  internal row opens a fresh batch item. The item itself stays. */
+  private microClose(): void {
+    const b = this.micro;
+    b.id = 0;
+    this.microItem = undefined;
+    b.calls = 0;
+    b.fails = 0;
+    b.errors.clear();
+    b.details = [];
+    b.extra = 0;
+    b.pendBy = '';
+    b.pendQ = '';
+    b.pendText = '';
+    b.pendDetail = -1;
+    b.tools.clear();
+    b.origins.clear();
+  }
+
   /** Chunks commit incrementally — a same-kind tail item grows via a
    *  text op, a kind switch (or any structural item) seals the tail
    *  and opens a new one. Pacing lives in the shell's op-drain timer,
@@ -267,11 +503,12 @@ export class SessionModel {
   private chunk(kind: 'message' | 'thought', text: string): void {
     if (text === '') return;
     const tail = this.items[this.items.length - 1];
-    if (tail !== undefined && tail.kind === kind) {
+    if (tail !== undefined && tail.kind === kind && !this.sealed) {
       tail.text += text;
       this.ops.push({ op: 'text', id: tail.id, text: tail.text });
       return;
     }
+    this.sealed = false;
     this.push<TextItem>({ kind, text });
   }
 

@@ -305,25 +305,42 @@ describe('SessionModel — time separators', () => {
   });
 
   test('a same-minute origin change re-heads; a mid-turn minute change re-heads with the new time', () => {
+    // managed-agent origins — internal ones collapse into the ▸
+    // storm note instead of birthing rows of their own
+    const m = new SessionModel();
+    m.feed(turnStart('2026-03-01T22:36:00Z', "acp provider 'kilo'"));
+    m.feed(msg('2026-03-01T22:36:05Z'));
+    m.feed(turnStart('2026-03-01T22:36:20Z', "acp provider 'cond'"));
+    m.feed(msg('2026-03-01T22:36:25Z'));
+    // still inside the cond turn, the minute rolls
+    m.feed(msg('2026-03-01T22:37:05Z'));
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:36:05Z')} ──`,
+      `── ${hhmm('2026-03-01T22:36:05Z')} · kilo ──`,
+      `── ${hhmm('2026-03-01T22:36:25Z')} · cond ──`,
+      `── ${hhmm('2026-03-01T22:37:05Z')} · cond ──`,
+    ]);
+  });
+
+  test('internal origin churn stays under one head — the storm is one group', () => {
     const m = new SessionModel();
     m.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
     m.feed(msg('2026-03-01T22:36:05Z'));
     m.feed(turnStart('2026-03-01T22:36:20Z', 'conductor:t'));
     m.feed(msg('2026-03-01T22:36:25Z'));
-    // still inside the conductor turn, the minute rolls
-    m.feed(msg('2026-03-01T22:37:05Z'));
     assert.deepEqual(times(m), [
       `── ${dayLabel('2026-03-01T22:36:05Z')} ──`,
       `── ${hhmm('2026-03-01T22:36:05Z')} · provider:kilo ──`,
-      `── ${hhmm('2026-03-01T22:36:25Z')} · conductor:t ──`,
-      `── ${hhmm('2026-03-01T22:37:05Z')} · conductor:t ──`,
     ]);
+    // …and the one storm note names both origins
+    const note = m.items.find(i => i.kind === 'note');
+    assert.match(note!.text, /^▸ 2 internal calls · kilo, t$/m);
   });
 
   test('a turn that births nothing earns no head; pre-turn rows head bare', () => {
     const m = new SessionModel();
     m.feed(msg('2026-03-01T22:35:55Z')); // pre-turn traffic — bare tick
-    m.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
+    m.feed(turnStart('2026-03-01T22:36:00Z', "acp provider 'x'"));
     m.feed({ kind: 'turn', phase: 'stop', ts: '2026-03-01T22:36:01Z', stopReason: 'end_turn' });
     assert.deepEqual(times(m), [
       `── ${dayLabel('2026-03-01T22:35:55Z')} ──`,
@@ -345,17 +362,104 @@ describe('SessionModel — time separators', () => {
   });
 
   test('a day change emits its marker before the next head', () => {
+    // +25h apart — a different LOCAL date in every TZ (fixed UTC
+    // dates can resolve to one local date, e.g. 23:59Z and 00:01Z
+    // are the same Mar-2 morning ahead of UTC)
+    const t1 = '2026-03-01T23:59:30Z';
+    const t2 = new Date(Date.parse(t1) + 25 * 3_600_000).toISOString();
     const m = new SessionModel();
-    m.feed(turnStart('2026-03-01T23:59:00Z', "acp provider 'x'"));
-    m.feed(msg('2026-03-01T23:59:30Z'));
-    m.feed(turnStart('2026-03-02T00:01:00Z', "acp provider 'x'"));
-    m.feed(msg('2026-03-02T00:01:05Z'));
+    m.feed(turnStart(t1, "acp provider 'x'"));
+    m.feed(msg(t1));
+    m.feed(turnStart(t2, "acp provider 'x'"));
+    m.feed(msg(t2));
     assert.deepEqual(times(m), [
-      `── ${dayLabel('2026-03-01T23:59:30Z')} ──`,
-      `── ${hhmm('2026-03-01T23:59:30Z')} · x ──`,
-      `── ${dayLabel('2026-03-02T00:01:05Z')} ──`,
-      `── ${hhmm('2026-03-02T00:01:05Z')} · x ──`,
+      `── ${dayLabel(t1)} ──`,
+      `── ${hhmm(t1)} · x ──`,
+      `── ${dayLabel(t2)} ──`,
+      `── ${hhmm(t2)} · x ──`,
     ]);
+  });
+});
+
+describe('SessionModel — internal storms + turn seals', () => {
+  const start = (by: string): ArchiveRow => ({ kind: 'turn', phase: 'start', by });
+  const stop = (error?: string, stopReason?: string): ArchiveRow => ({
+    kind: 'turn',
+    phase: 'stop',
+    ...(stopReason !== undefined ? { stopReason } : { stopReason: 'end_turn' }),
+    ...(error !== undefined ? { error } : {}),
+  });
+  const chunk = (text: string): ArchiveRow => ({
+    kind: 'update',
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } as never,
+  });
+  const texts = (m: SessionModel): string[] =>
+    m.items.filter(i => i.kind !== 'time').map(i => i.text.split('\n')[0] ?? '');
+
+  test('internal micro-turns collapse into one ▸ tally row — no fake merged replies', () => {
+    const m = new SessionModel();
+    for (let i = 0; i < 5; i++) {
+      m.feed(start('conductor'));
+      m.feed(chunk('ok'));
+      m.feed(stop());
+    }
+    m.feed(start("acp provider 'x'"));
+    m.feed(chunk('real reply'));
+    const note = m.items.find(i => i.kind === 'note');
+    assert.ok(note !== undefined);
+    assert.match(note!.text, /^▸ 5 internal calls · conductor$/m);
+    assert.ok(note!.text.includes('`ok`'));
+    // the five "ok" replies never became items of their own — and
+    // the agent's reply is untouched
+    assert.deepEqual(
+      texts(m).filter(t => t === 'real reply'),
+      ['real reply']
+    );
+    assert.equal(m.items.filter(i => i.kind === 'message' && i.text === 'okok').length, 0);
+  });
+
+  test('a turn boundary seals the message item — same-kind chunks never merge across turns', () => {
+    const m = new SessionModel();
+    m.feed(start("acp provider 'x'"));
+    m.feed(chunk('ok'));
+    m.feed(stop());
+    m.feed(start("acp provider 'x'"));
+    m.feed(chunk('ok'));
+    m.feed(stop());
+    const msgs = m.items.filter(i => i.kind === 'message');
+    assert.deepEqual(
+      msgs.map(i => i.text),
+      ['ok', 'ok']
+    );
+  });
+
+  test('failed internal calls keep visible ✗ rows — deduped by (origin,error), tally counts all', () => {
+    const m = new SessionModel();
+    for (let i = 0; i < 3; i++) {
+      m.feed(start('provider:kilo'));
+      m.feed(stop('Internal error'));
+    }
+    m.feed(start('conductor:t'));
+    m.feed(stop('boom'));
+    const errs = m.items.filter(i => i.kind === 'turn' && i.text.startsWith('✗'));
+    // 3 identical kilo failures → one visible row; conductor → one
+    assert.deepEqual(
+      errs.map(i => i.text),
+      ['✗ kilo · Internal error', '✗ t · boom']
+    );
+    const note = m.items.find(i => i.kind === 'note');
+    assert.match(note!.text, /^▸ 4 internal calls · 4 failed · kilo, t$/m);
+  });
+
+  test('a managed-agent failure keeps the bare banner — its head names the origin', () => {
+    const m = new SessionModel();
+    m.feed(start("acp provider 'x'"));
+    m.feed(stop('blew up'));
+    const errs = m.items.filter(i => i.kind === 'turn');
+    assert.deepEqual(
+      errs.map(i => i.text),
+      ['── turn failed — blew up ──']
+    );
   });
 });
 

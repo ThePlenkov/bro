@@ -93,6 +93,28 @@ export const headBy = (by: string | undefined): string | undefined => {
   return /^acp provider '([^']+)'$/.exec(by)?.[1] ?? by;
 };
 
+/** The session's own agent — the acp-worker journals its turns as
+ *  `acp` or `acp provider 'X'` (acp-worker.ts's `by`). Every other
+ *  provenance (`conductor:*`, `provider:*`, `acp-transport:*`,
+ *  `delegate`, `acp proxy`) is orchestrator machinery — a run of
+ *  those micro-turns collapses into one `▸ N internal calls` row
+ *  instead of one row per one-token reply (addendum 27). */
+const AGENT_BY = /^acp(?: provider '[^']+')?$/;
+export const isInternalBy = (by: string | undefined): boolean =>
+  by !== undefined && by !== '' && !AGENT_BY.test(by);
+
+/** The journal's `by` → a short origin label for compact rows —
+ *  `acp provider 'X'`→X, `provider:X`→X, `conductor:X`→X, anything
+ *  else verbatim. Undefined input stays undefined. */
+export const shortBy = (by: string | undefined): string | undefined => {
+  if (by === undefined || by === '') return undefined;
+  const m =
+    /^acp provider '([^']+)'$/.exec(by) ??
+    /^provider:(.+)$/.exec(by) ??
+    /^conductor:(.+)$/.exec(by);
+  return m?.[1] ?? by;
+};
+
 /** The separator layer — time as ROWS, not a column (addendum 25).
  *  `start()` records the turn's origin; `tick(ts)` runs before every
  *  item birth and returns the separator lines to emit first. Heads
@@ -302,19 +324,14 @@ export function printLines(item: Item): string[] {
       return rows([` ▸ ${item.text}`]);
     case 'prompt': {
       const ls = mdPlain(item.text);
-      if (!folded) return rows(['┃', ...ls.map(l => `┃  ${l}`), '┃']);
+      if (!folded) return rows(['┃', ...ls.map(l => `┃ ${l}`), '┃']);
       const shown = ls.slice(0, PROMPT_PREVIEW_LINES);
-      return rows([
-        '┃',
-        ...shown.map(l => `┃  ${l}`),
-        `┃  +${ls.length - shown.length} lines`,
-        '┃',
-      ]);
+      return rows(['┃', ...shown.map(l => `┃ ${l}`), `┃ +${ls.length - shown.length} lines`, '┃']);
     }
     case 'message':
       return folded
-        ? rows([`${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
-        : rows(mdPlain(item.text));
+        ? rows([`  ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text).map(l => `  ${l}`));
     case 'thought':
       return folded
         ? rows([`+ Thought · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
