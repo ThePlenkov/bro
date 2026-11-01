@@ -280,7 +280,7 @@ export function acpTransport(
     return expired || overflow > 0
   }
 
-  /** Idle-beyond-TTL and oldest-out-cap eviction — the same posture
+  /** Idle-beyond-TTL and oldest-over-cap eviction — the same posture
    *  the conductor's sweepSessions takes. Runs where the map grows
    *  (session/new); a mid-turn session is off-limits — its own failure
    *  path evicts it. */
