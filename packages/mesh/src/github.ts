@@ -243,8 +243,14 @@ function* fencedJsonBodies(comment: { body: string }): Generator<string> {
         return
       }
       // Malformed opener with junk on the opening line but a newline exists.
-      // Skip to the end of this line to avoid quadratic rescanning when there
-      // are many malformed markers on the same line.
+      // Check if there are other ```json markers on the same line - if so,
+      // continue scanning from after this opener to avoid skipping valid fences.
+      // If not, skip to end of line to avoid quadratic rescanning.
+      const restOfLine = body.slice(open + '```json'.length, eolCheck)
+      if (restOfLine.includes('```json')) {
+        i = open + '```json'.length
+        continue
+      }
       i = eolCheck + 1
       continue
     }
