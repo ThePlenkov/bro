@@ -1,6 +1,6 @@
 # Branch protection: keeping review bots off occupied branches
 
-Review bots with auto-fix (e.g. `kiloconnect[bot]` / Kilo Code Review) can push commits directly to PR branches, bypassing bro's occupancy plane and a live session's knowledge. bro's [foreign-push signal](../specs/bro-cqjd0.md) makes the bus tolerate and flag such pushes (the session is notified within one drive tick), but it cannot prevent them.
+Review bots with auto-fix (e.g. `kiloconnect[bot]` / Kilo Code Review) can push commits directly to PR branches, bypassing bro's occupancy plane and a live session's knowledge. bro's [foreign-push signal](../specs/bro-cqjd0.md) makes the bus tolerate and flag such pushes (the session is notified within one drive tick when the event publish succeeds; a failed publish is not retried), but it cannot prevent them.
 
 ## Options
 
@@ -13,24 +13,33 @@ Use this if you want to disable auto-fix pushes repo-wide.
 Ready-to-run example (substitute the repo and actor numeric IDs as appropriate):
 
 ```bash
-gh api -X POST repos/<owner>/<repo>/rulesets --input '{
+gh api -X POST repos/<owner>/<repo>/rulesets --input - <<'JSON'
+{
   "name": "no-review-bot-pushes",
   "target": "branch",
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["~ALL"], "exclude": [] } },
-  "rules": [{
-    "type": "restrict_pushes",
-    "parameters": {
-      "push_allowed_actor_ids": [<numeric user/bot IDs to allow>]
+  "rules": [
+    {
+      "type": "update",
+      "parameters": {
+        "update_allows_fetch_and_merge": true
+      }
     }
-  }]
-}'
+  ],
+  "bypass_actors": [
+    { "actor_id": <your_numeric_user_id>, "actor_type": "User", "bypass_mode": "always" },
+    { "actor_id": <dependabot_numeric_id>, "actor_type": "Integration", "bypass_mode": "always" },
+    { "actor_id": <github_actions_numeric_id>, "actor_type": "Integration", "bypass_mode": "always" }
+  ]
+}
+JSON
 ```
 
 Notes:
-- `push_allowed_actor_ids` requires **numeric GitHub database IDs**, not login names (e.g., not `"dependabot[bot]"`). Look them up with `gh api users/<login> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
-- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in the allow-list. `push_allowed_actor_ids` takes numeric database IDs — look them up with `gh api users/<actor> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`, `gh api user --jq .id`), or you will break normal updates and release workflows.
-- A wrong allow-list can lock you out; recovery is possible only through the ruleset UI.
+- Use **numeric GitHub database IDs** for actors (not login names like `"dependabot[bot]"`). Look them up with `gh api users/<login> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
+- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in `bypass_actors` or you will break normal updates and release workflows.
+- A wrong bypass list can lock you out of pushes. Recover by editing or deleting the ruleset in the UI, or through the REST API (for example `gh api -X DELETE repos/<owner>/<repo>/rulesets/<ruleset_id>`).
 - This is the blunt instrument — it disables the bots' auto-fix everywhere the ruleset applies.
 
 ### 2) Bot dashboard setting (per-integration)
