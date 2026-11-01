@@ -25,30 +25,48 @@ export function procStat(
   if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
     try {
       // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
-      const out = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], { encoding: 'utf8', timeout: 1000 })
+      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], { encoding: 'utf8', timeout: 1000 })
       const lines = out.trim().split('\n').filter(Boolean)
       if (lines.length === 0) return null
       const line = lines[0]
       const trimmed = line.trim()
-      // Extract pid, state, and lstart (may have spaces) - state can include modifiers like +, L, s
-      const m = trimmed.match(/^(\d+)\s+(\S+)\s+(.+)$/s)
-      if (m) {
-        const st = m[2]
-        return { state: st[0] ?? st ?? '', start: m[3].trim() }
+      // Strip the whole state token (may include modifiers like +, L, s) before parsing lstart
+      const start = trimmed.replace(/^\S+\s+/, '').trim()
+      if (start !== '') {
+        const st = trimmed.match(/^(\S+)/)?.[1] ?? ''
+        // Return just lstart as start; pid is already tracked separately by the caller
+        return { state: st[0] ?? st ?? '', start }
       }
-      // Try without pid in output format
-      const m2 = trimmed.match(/^(\S+)\s+(.+)$/s)
-      if (m2) {
-        const st = m2[1]
-        return { state: st[0] ?? st ?? '', start: m2[2].trim() }
+      // Try with pid in output format
+      try {
+        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], { encoding: 'utf8', timeout: 1000 })
+        const lines2 = out2.trim().split('\n').filter(Boolean)
+        if (lines2.length === 0) return null
+        const line2 = lines2[0]
+        const trimmed2 = line2.trim()
+        const m = trimmed2.match(/^(\d+)\s+(\S+)\s+(.+)$/s)
+        if (m) {
+          const st = m[2]
+          const sstart = trimmed2.replace(/^\d+\s+\S+\s+/, '').trim()
+          return { state: st[0] ?? st ?? '', start: sstart }
+        }
+        const m2 = trimmed2.match(/^(\S+)\s+(.+)$/s)
+        if (m2) {
+          const st = m2[1]
+          const sstart = trimmed2.replace(/^\S+\s+/, '').trim()
+          return { state: st[0] ?? st ?? '', start: sstart }
+        }
+      } catch {
+        // fall through
       }
       // Fallback to just state
       try {
         const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
         const st = out2.trim()[0] ?? ''
-        return { state: st, start: `${pid}` }
+        return { state: st, start: '' }
       } catch {
-        return { state: trimmed[0] ?? '', start: `${pid}` }
+        const st = trimmed.match(/^(\S)/)?.[1] ?? trimmed[0] ?? ''
+        return { state: st, start: '' }
       }
     } catch {
       return null
@@ -87,9 +105,25 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   if (st?.state === 'Z') {
     return false
   }
-  return (
-    pidStart === undefined || st === null || st.start === '' || st.start === pidStart
-  )
+  if (pidStart === undefined) {
+    return true
+  }
+  if (st === null || st.start === '') {
+    return true
+  }
+  // pidStart may be stored as "pid start" or just "start" for compatibility
+  if (st.start === pidStart) {
+    return true
+  }
+  // If stored as "<pid> <start>" match suffix
+  const parts = pidStart.trim().split(/\s+/)
+  if (parts.length >= 2) {
+    const startOnly = parts.slice(1).join(' ')
+    if (startOnly === st.start || st.start === startOnly) {
+      return true
+    }
+  }
+  return false
 }
 
 /** An attempt handle's identity — `<pid> [starttime]`: the worker

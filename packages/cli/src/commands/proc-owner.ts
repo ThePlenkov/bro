@@ -337,6 +337,9 @@ function processesRootedInDarwin(root: string, inside: (p: string) => boolean, p
       // fall through
     }
   }
+  if (process.platform !== 'darwin') {
+    return [];
+  }
   const hits: ProcHit[] = [];
   try {
     const out = execFileSync('ps', ['-axo', 'pid='], { encoding: 'utf8', timeout: 2000 });
@@ -348,16 +351,26 @@ function processesRootedInDarwin(root: string, inside: (p: string) => boolean, p
     if (pids.length === 0) return hits;
     const cwdMap = new Map<number, string>();
     try {
-      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', pids.join(',')], { encoding: 'utf8', timeout: 2000 });
-      let currentPid: number | null = null;
-      for (const l of lout.split('\n')) {
-        if (l.startsWith('p')) {
-          const v = Number(l.slice(1));
-          currentPid = Number.isInteger(v) ? v : null;
-          continue;
-        }
-        if (l.startsWith('n') && currentPid !== null) {
-          cwdMap.set(currentPid, l.slice(1));
+      if (pids.length > 0) {
+        const chunkSize = 200;
+        for (let i = 0; i < pids.length; i += chunkSize) {
+          const chunk = pids.slice(i, i + chunkSize);
+          try {
+            const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+            let currentPid: number | null = null;
+            for (const l of lout.split('\n')) {
+              if (l.startsWith('p')) {
+                const v = Number(l.slice(1));
+                currentPid = Number.isInteger(v) ? v : null;
+                continue;
+              }
+              if (l.startsWith('n') && currentPid !== null) {
+                cwdMap.set(currentPid, l.slice(1));
+              }
+            }
+          } catch {
+            // continue to next chunk
+          }
         }
       }
     } catch {
@@ -365,12 +378,19 @@ function processesRootedInDarwin(root: string, inside: (p: string) => boolean, p
     }
     const cmdMap = new Map<number, string>();
     try {
-      const coutAll = execFileSync('ps', ['-ww', '-o', 'pid=,args=', '-p', pids.join(',')], { encoding: 'utf8', timeout: 2000 });
-      // args may contain spaces; try to parse pid followed by rest
-      for (const l of coutAll.split('\n')) {
-        const m = l.match(/^\s*(\d+)\s+(.*)$/s);
-        if (m) {
-          cmdMap.set(Number(m[1]), m[2] ?? '');
+      const chunkSize = 200;
+      for (let i = 0; i < pids.length; i += chunkSize) {
+        const chunk = pids.slice(i, i + chunkSize);
+        try {
+          const coutAll = execFileSync('ps', ['-ww', '-o', 'pid=,args=', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+          for (const l of coutAll.split('\n')) {
+            const m = l.match(/^\s*(\d+)\s+(.*)$/s);
+            if (m) {
+              cmdMap.set(Number(m[1]), m[2] ?? '');
+            }
+          }
+        } catch {
+          // skip chunk
         }
       }
     } catch {
@@ -530,21 +550,57 @@ function agentProcessesInDarwin(root: string, procDir = '/proc'): ProcHit[] {
       // fall through
     }
   }
+  if (process.platform !== 'darwin') {
+    return [];
+  }
   const hits: ProcHit[] = [];
   try {
     const out = execFileSync('ps', ['-axo', 'pid='], { encoding: 'utf8', timeout: 2000 });
     const pids = out.split('\n').filter(p => /^\d+$/.test(p.trim())).map(p => Number(p.trim()));
+    if (pids.length === 0) return hits;
+    const cwdMap = new Map<number, string>();
+    try {
+      const chunkSize = 200;
+      for (let i = 0; i < pids.length; i += chunkSize) {
+        const chunk = pids.slice(i, i + chunkSize);
+        try {
+          const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+          let currentPid: number | null = null;
+          for (const l of lout.split('\n')) {
+            if (l.startsWith('p')) {
+              const v = Number(l.slice(1));
+              currentPid = Number.isInteger(v) ? v : null;
+              continue;
+            }
+            if (l.startsWith('n') && currentPid !== null) {
+              cwdMap.set(currentPid, l.slice(1));
+            }
+          }
+        } catch {
+          // continue
+        }
+      }
+    } catch {
+      // fall back
+    }
     for (const pid of pids) {
       if (pid === process.pid) continue;
       try {
-        const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 });
-        const cline = lout.split('\n').find(l => l.startsWith('n'));
-        if (!cline) continue;
-        const cwd = cline.slice(1);
+        let cwd = cwdMap.get(pid) || '';
+        if (!cwd) {
+          try {
+            const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 });
+            const cline = lout.split('\n').find(l => l.startsWith('n'));
+            if (!cline) continue;
+            cwd = cline.slice(1);
+          } catch {
+            continue;
+          }
+        }
         if (cwd !== root && !cwd.startsWith(root + sep)) {
           continue;
         }
-        const dir = join(procDir === '/proc' ? '/proc' : procDir, String(pid));
+        const dir = procDir === '/proc' ? join('/proc', String(pid)) : join(procDir, String(pid));
         if (procIsMonitor(dir)) {
           continue;
         }

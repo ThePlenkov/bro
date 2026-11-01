@@ -247,10 +247,12 @@ function readProcArgv(pid: number): string[] | undefined {
       const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
       if (tokens && tokens.length > 0) {
         const argv = tokens.map((t) => t.replace(/^["']|["']$/g, '')).filter((x) => x !== '')
-        return argv.length > 0 ? argv : undefined
+        if (argv.length > 0) {
+          return argv
+        }
       }
-      const argv = s.split(/\s+/).filter((x) => x !== '')
-      return argv.length > 0 ? argv : undefined
+      // If we can't safely tokenize, don't split on whitespace naively
+      return undefined
     } catch {
       return undefined
     }

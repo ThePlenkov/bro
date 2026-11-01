@@ -52,22 +52,20 @@ function readTcpTableLinux(table: string, remotePort: number, localPort: number)
 function peerInodeDarwin(remotePort: number, localPort: number): string | undefined {
   try {
     const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
-    const lp = `:${localPort}`
-    const rp = `:${remotePort}`
     for (const line of out.split('\n')) {
       if (!line.includes('TCP') || !line.includes('->')) continue
       const nameIdx = line.indexOf('TCP')
       const afterTcp = line.slice(nameIdx)
       const arrowIdx = afterTcp.indexOf('->')
       if (arrowIdx === -1) continue
-      const left = afterTcp.slice(0, arrowIdx)
-      const right = afterTcp.slice(arrowIdx + 2)
+      const left = afterTcp.slice(0, arrowIdx).trim()
+      const right = afterTcp.slice(arrowIdx + 2).trim()
       // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
-      // Look for the ports as standalone tokens/ends to avoid substring matches
-      const lpRe = new RegExp(`(^|[^0-9])${localPort}$|:${localPort}\\b`)
-      const rpRe = new RegExp(`(^|[^0-9])${remotePort}$|:${remotePort}\\b`)
-      if (!rpRe.test(left)) continue
-      if (!lpRe.test(right)) continue
+      // Anchor ports to word boundaries to avoid substring matches
+      const leftEndsWithRemote = new RegExp(`:${remotePort}$|[^0-9]${remotePort}$`).test(left) || left.endsWith(`:${remotePort}`)
+      const rightEndsWithLocal = new RegExp(`:${localPort}$|[^0-9]${localPort}$`).test(right) || right.endsWith(`:${localPort}`)
+      if (!leftEndsWithRemote) continue
+      if (!rightEndsWithLocal) continue
       const parts = line.trim().split(/\s+/)
       if (parts.length > 1 && /^\d+$/.test(parts[1])) {
         return `mac:${parts[1]}`

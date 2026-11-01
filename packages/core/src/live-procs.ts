@@ -283,33 +283,43 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         const ppid = Number(parts[1])
         if (!Number.isInteger(pid) || pid <= 0) continue
         // lstart can be 4 tokens (no year) or 5 tokens (with year) on macOS
-        // Find lstart by trying to parse from left; lstart is the date/time portion
-        // Try up to 6 tokens to be safe
+        // Parse lstart independently of comm by finding the parseable date/time sequence
         let lstart = ''
         let comm = ''
-        for (let t = 4; t <= 6 && t <= parts.length; t++) {
-          const candidate = parts.slice(2, 2 + t).join(' ')
-          const parsed = Date.parse(candidate)
-          if (!isNaN(parsed)) {
-            lstart = candidate
-            const commStartIdx = trimmed.indexOf(lstart) + lstart.length
-            comm = trimmed.slice(commStartIdx).trim()
-            if (comm === '') {
-              comm = parts[2 + t] ?? ''
+        // Try to find a parseable lstart starting at index 2
+        for (let start = 2; start <= parts.length - 1; start++) {
+          for (let len = 4; len <= 6 && start + len <= parts.length; len++) {
+            const candidate = parts.slice(start, start + len).join(' ')
+            const parsed = Date.parse(candidate)
+            if (!isNaN(parsed)) {
+              lstart = candidate
+              const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+              comm = trimmed.slice(commStartIdx).trim()
+              break
             }
-            break
+          }
+          if (lstart !== '') break
+        }
+        if (lstart === '' || comm === '') {
+          // Fallback: try from index 2 with len 4 or 5
+          for (let len = 4; len <= 5 && 2 + len <= parts.length; len++) {
+            const candidate = parts.slice(2, 2 + len).join(' ')
+            const parsed = Date.parse(candidate)
+            if (!isNaN(parsed)) {
+              lstart = candidate
+              const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+              comm = trimmed.slice(commStartIdx).trim()
+              break
+            }
           }
         }
         if (lstart === '') {
-          // Fallback to old behavior
-          const lstartTokens = 5
-          if (parts.length < 2 + lstartTokens + 1) continue
-          lstart = parts.slice(2, 2 + lstartTokens).join(' ')
+          continue
+        }
+        if (comm === '') {
+          // Last resort: take everything after the lstart found
           const commStartIdx = trimmed.indexOf(lstart) + lstart.length
           comm = trimmed.slice(commStartIdx).trim()
-          if (comm === '') {
-            comm = parts[2 + lstartTokens] ?? ''
-          }
         }
         let startMs = Date.now()
         try {
