@@ -1513,8 +1513,10 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
   // `res.write` back-pressures, the tail waits for 'drain' instead of
   // inflating res internals. A snapshot then streams at the reader's
   // pace; only a genuinely stuck follower (queue past the cap) drops.
-  const queue: string[] = [];
+  type QFrame = { frame: string; live: boolean };
+  const queue: QFrame[] = [];
   let queued = 0;
+  let liveQueued = 0;
   let waitingDrain = false;
   let endAfterQueue = false;
   // The initial burst (meta + snapshot + exit for an already-final
@@ -1524,6 +1526,7 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
   const drop = (): void => {
     queue.length = 0;
     queued = 0;
+    liveQueued = 0;
     handle?.stop();
     res.end();
   };
@@ -1535,9 +1538,13 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       // write() never refuses the frame — `false` is advisory ("over
       // high-water"), so the head is off the queue either way; on false
       // we just stop feeding it more until 'drain'
-      const frame = queue.shift()!;
-      queued -= Buffer.byteLength(frame);
-      if (!res.write(frame)) {
+      const item = queue.shift()!;
+      const len = Buffer.byteLength(item.frame);
+      queued -= len;
+      if (item.live) {
+        liveQueued -= len;
+      }
+      if (!res.write(item.frame)) {
         if (!waitingDrain) {
           waitingDrain = true;
           res.once('drain', () => {
@@ -1556,12 +1563,17 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     if (gone()) {
       return;
     }
-    queued += Buffer.byteLength(frame);
-    queue.push(frame);
-    if (!initial && queued > SSE_FOLLOW_BACKLOG) {
-      drop();
-      return;
+    const len = Buffer.byteLength(frame);
+    queued += len;
+    const isLive = !initial;
+    if (isLive) {
+      liveQueued += len;
+      if (liveQueued > SSE_FOLLOW_BACKLOG) {
+        drop();
+        return;
+      }
     }
+    queue.push({ frame, live: isLive });
     pump();
   };
   const finish = (): void => {
