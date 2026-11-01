@@ -24,13 +24,14 @@ const HARVEST_PREFIX = '.agents/review-debt/harvests/'
 // harvests/ holds one .jsonl per collect run — filenames sort by time;
 // only the newest few are needed for the recent-findings table
 const HARVEST_FETCH = 10
+const SNAPSHOT_KEY = 'bro:debt:snapshot:v1'
 
 interface Summary {
   generated_at: string
   open_count: number
   by_area: Record<string, number>
   by_author: Record<string, number>
-  duplicate_fingerprints: string[]
+  duplicate_fingerprints: Array<{ fingerprint: string; count: number; prs: number[] }>
   oldest_open: string | null
 }
 
@@ -64,6 +65,164 @@ interface Data {
   summary: Summary
   rows: Row[]
   findings: Finding[]
+}
+
+interface CachedSnapshot {
+  fetched_at: string
+  sha: string
+  summary: Summary
+  rows: Row[]
+  findings: Finding[]
+}
+
+type LoadError =
+  | { kind: 'rate_limited'; status: number; retryAfter?: string | null; reset?: string | null; message: string }
+  | { kind: 'ref_missing'; message: string }
+  | { kind: 'summary_failed'; message: string }
+  | { kind: 'unknown'; message: string }
+
+type CacheReason = 'rate_limited' | 'ref_missing' | 'summary_failed' | 'network' | 'unknown' | null
+
+function isRateLimitedStatus(status: number, res?: Response, body?: string) {
+  if (status === 429) return true
+  if (status === 403) {
+    const remaining = res?.headers?.get('x-ratelimit-remaining')
+    if (remaining === '0') return true
+    if (body && /rate limit/i.test(body)) return true
+    return false
+  }
+  return false
+}
+
+function getRateLimitHeaders(res: Response) {
+  const remaining = res.headers.get('x-ratelimit-remaining')
+  const reset = res.headers.get('x-ratelimit-reset')
+  const retryAfter = res.headers.get('retry-after')
+  return { remaining, reset, retryAfter }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+function readSnapshot(): CachedSnapshot | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOT_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (
+      !isPlainObject(parsed) ||
+      typeof parsed.fetched_at !== 'string' ||
+      typeof parsed.sha !== 'string' ||
+      !isPlainObject(parsed.summary)
+    ) {
+      return null
+    }
+    const summary = parsed.summary
+    if (
+      typeof summary.generated_at !== 'string' ||
+      typeof summary.open_count !== 'number' ||
+      !Number.isFinite(summary.open_count) ||
+      !isPlainObject(summary.by_area) ||
+      !isPlainObject(summary.by_author) ||
+      !Array.isArray(summary.duplicate_fingerprints) ||
+      summary.duplicate_fingerprints.some(
+        (d: unknown) =>
+          !isPlainObject(d) ||
+          typeof (d as any).fingerprint !== 'string' ||
+          typeof (d as any).count !== 'number' ||
+          !Number.isFinite((d as any).count) ||
+          !Array.isArray((d as any).prs) ||
+          (d as any).prs.some((pr: unknown) => typeof pr !== 'number' || !Number.isFinite(pr))
+      ) ||
+      Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number') ||
+      Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number')
+    ) {
+      return null
+    }
+    if (summary.oldest_open !== null && typeof summary.oldest_open !== 'string') {
+      return null
+    }
+    if (
+      !Array.isArray(parsed.rows) ||
+      parsed.rows.some((r: unknown) => {
+        if (!isPlainObject(r)) return true
+        if (typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') return true
+        if ((r as Row).fix_pr !== null && typeof (r as Row).fix_pr !== 'number') return true
+        if ((r as Row).fixed_at !== null && typeof (r as Row).fixed_at !== 'string') return true
+        if ((r as Row).notes !== null && typeof (r as Row).notes !== 'string') return true
+        return false
+      }) ||
+      !Array.isArray(parsed.findings) ||
+      parsed.findings.some((f: unknown) => {
+        if (!isPlainObject(f)) return true
+        if (typeof (f as Finding).thread_id !== 'string' || typeof (f as Finding).status !== 'string') return true
+        if (typeof (f as Finding).source_pr !== 'number' || !Number.isFinite((f as Finding).source_pr)) return true
+        if ((f as Finding).thread_url !== undefined && typeof (f as Finding).thread_url !== 'string') return true
+        if ((f as Finding).priority !== undefined && typeof (f as Finding).priority !== 'string') return true
+        if ((f as Finding).source_pr_title !== undefined && typeof (f as Finding).source_pr_title !== 'string') return true
+        if ((f as Finding).path !== undefined && typeof (f as Finding).path !== 'string') return true
+        if ((f as Finding).line !== undefined && (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))) return true
+        if ((f as Finding).author !== undefined && typeof (f as Finding).author !== 'string') return true
+        if ((f as Finding).body_preview !== undefined && typeof (f as Finding).body_preview !== 'string') return true
+        if ((f as Finding).area !== undefined && typeof (f as Finding).area !== 'string') return true
+        if ((f as Finding).fingerprint !== undefined && typeof (f as Finding).fingerprint !== 'string') return true
+        if ((f as Finding).harvested_at !== undefined && typeof (f as Finding).harvested_at !== 'string') return true
+        return false
+      })
+    ) {
+      return null
+    }
+    return {
+      fetched_at: parsed.fetched_at,
+      sha: parsed.sha,
+      summary: summary as Summary,
+      rows: parsed.rows as Row[],
+      findings: parsed.findings as Finding[],
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeSnapshot(snapshot: CachedSnapshot) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot))
+  } catch {
+    // ignore quota/errors
+  }
+}
+
+function formatAge(iso: string): string {
+  try {
+    const ts = Date.parse(iso)
+    if (Number.isNaN(ts)) return 'unknown age'
+    const diffMs = Date.now() - ts
+    if (diffMs < 0) return 'just now'
+    const minutes = Math.floor(diffMs / 60000)
+    if (minutes < 1) return 'just now'
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours}h ago`
+    const days = Math.floor(hours / 24)
+    if (days < 30) return `${days}d ago`
+    const date = new Date(ts)
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  } catch {
+    return 'unknown age'
+  }
+}
+
+function formatDateTime(iso: string): string {
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
 }
 
 function parseJsonl<T>(text: string): T[] {
@@ -101,23 +260,145 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
   return texts.flatMap((t) => parseJsonl<Finding>(t))
 }
 
-async function load(): Promise<Data> {
-  const ref = (await (await fetch(REF_API)).json()) as { object?: { sha?: string } }
-  const sha = ref.object?.sha
-  if (!sha) {
-    throw new Error('data ref not found')
+async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt: string; sha?: string; cacheReason?: CacheReason }> {
+  let refRes: Response
+  try {
+    refRes = await fetch(REF_API)
+  } catch (err) {
+    const cached = readSnapshot()
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'network' }
+    }
+    throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
   }
-  const [summary, ledgerRes, findings] = await Promise.all([
-    fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then((r) => {
-      if (!r.ok) throw new Error('summary fetch failed')
-      return r.json() as Promise<Summary>
-    }),
-    // the status overlay is optional — a fresh ledger may not exist yet;
-    // a 404 means "no rows", not a broken dashboard
-    fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => (r.ok ? r.text() : '')),
-    fetchHarvests(sha).catch(() => []), // harvests missing ≠ broken dashboard
-  ])
-  return { summary, rows: parseJsonl<Row>(ledgerRes), findings }
+
+  const refBodyPromise = refRes.clone().text().catch(() => '')
+  const refBody = await refBodyPromise
+  if (isRateLimitedStatus(refRes.status, refRes, refBody)) {
+    const cached = readSnapshot()
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'rate_limited' }
+    }
+    const { retryAfter, reset } = getRateLimitHeaders(refRes)
+    const resetMsg = !retryAfter && reset ? ` reset at ${new Date(parseInt(reset) * 1000).toISOString()}.` : ''
+    throw {
+      kind: 'rate_limited',
+      status: refRes.status,
+      retryAfter,
+      reset,
+      message: retryAfter ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.` : `GitHub API rate limit reached (HTTP ${refRes.status})${resetMsg ? resetMsg.slice(0, -1) + '.' : '.'}`,
+    } satisfies LoadError
+  }
+
+  if (!refRes.ok) {
+    const cached = readSnapshot()
+    if (cached && refRes.status === 404) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
+    }
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: refRes.status === 404 ? 'ref_missing' : 'unknown' }
+    }
+    throw { kind: refRes.status === 404 ? 'ref_missing' : 'unknown', message: `Failed to resolve bro/data ref (HTTP ${refRes.status}).` } satisfies LoadError
+  }
+
+  let refJson: any
+  try {
+    refJson = await refRes.json()
+  } catch (err) {
+    const cached = readSnapshot()
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+    }
+    throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
+  }
+
+  const sha = refJson?.object?.sha
+  if (!sha) {
+    const cached = readSnapshot()
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
+    }
+    throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError
+  }
+
+  try {
+    const [summaryRes, ledgerRes, findingsRes] = await Promise.allSettled([
+      fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then((r) => {
+        if (!r.ok) throw { kind: 'summary_failed', message: `summary fetch failed (HTTP ${r.status})` } satisfies LoadError
+        return r.json() as Promise<Summary>
+      }),
+      // the status overlay is optional — a fresh ledger may not exist yet;
+      // a 404 means "no rows", not a broken dashboard. Transient failures
+      // must fall back to cache rather than overwriting it with empty rows.
+      fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => {
+        if (r.ok) return r.text()
+        if (r.status === 404) return ''
+        throw { kind: 'unknown', message: `ledger fetch failed (HTTP ${r.status})` } satisfies LoadError
+      }),
+      fetchHarvests(sha).then((f) => ({ findings: f, ok: true })).catch(() => ({ findings: [] as Finding[], ok: false })), // harvests missing ≠ broken dashboard
+    ])
+
+    if (summaryRes.status !== 'fulfilled') {
+      const err = summaryRes.reason
+      if ((err as LoadError)?.kind) {
+        const cached = readSnapshot()
+        if (cached) {
+          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+        }
+        throw err
+      }
+      throw err
+    }
+
+    if (ledgerRes.status !== 'fulfilled') {
+      const err = ledgerRes.reason
+      if ((err as LoadError)?.kind) {
+        const cached = readSnapshot()
+        if (cached) {
+          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+        }
+        throw err
+      }
+      const cached = readSnapshot()
+      if (cached) {
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      }
+      throw err
+    }
+
+    const summary = summaryRes.value
+    const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : ''
+    const harvestRes = findingsRes.status === 'fulfilled' ? findingsRes.value : { findings: [] as Finding[], ok: false }
+    // Only cache if all artifact fetches completed successfully (ledger ok or 404, harvests ok)
+    if (!harvestRes.ok || ledgerRes.status !== 'fulfilled') {
+      const cached = readSnapshot()
+      if (cached) {
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      }
+      // If harvest failed and we have no cache, don't overwrite cache with empty data
+      if (!harvestRes.ok) {
+        throw { kind: 'unknown', message: 'failed to load harvests' } satisfies LoadError
+      }
+    }
+    const findings = harvestRes.findings
+    const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings }
+    const fetchedAt = new Date().toISOString()
+    writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings })
+    return { data, source: 'live', fetchedAt, sha }
+  } catch (err) {
+    if ((err as LoadError)?.kind) {
+      const cached = readSnapshot()
+      if (cached) {
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+      }
+      throw err
+    }
+    const cached = readSnapshot()
+    if (cached) {
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+    }
+    throw err
+  }
 }
 
 const STATUS_ORDER = ['open', 'claimed', 'done', 'wontfix', 'duplicate']
@@ -125,15 +406,66 @@ const STATUS_ORDER = ['open', 'claimed', 'done', 'wontfix', 'duplicate']
 function DebtDashboard() {
   const [data, setData] = useState<Data | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null)
+  const [retryAfter, setRetryAfter] = useState<string | null>(null)
+  const [source, setSource] = useState<'live' | 'cache' | null>(null)
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null)
+  const [sha, setSha] = useState<string | undefined>(undefined)
+  const [cacheReason, setCacheReason] = useState<CacheReason>(null)
 
   useEffect(() => {
+    let active = true
     load().then(
-      setData,
+      (res) => {
+        if (!active) return
+        setData(res.data)
+        setSource(res.source)
+        setFetchedAt(res.fetchedAt)
+        setSha(res.sha)
+        setCacheReason(res.cacheReason ?? null)
+        setError(null)
+        setErrorKind(null)
+        setRetryAfter(null)
+      },
       (err: unknown) => {
+        if (!active) return
         console.error('debt dashboard:', err)
-        setError('could not load the ledger — check the console for details')
+        setSource(null)
+        setCacheReason(null)
+        setFetchedAt(null)
+        setSha(undefined)
+        if (err && typeof err === 'object' && 'kind' in err) {
+          const e = err as LoadError
+          setErrorKind(e.kind)
+          if (e.kind === 'rate_limited') {
+            setRetryAfter(e.retryAfter ?? null)
+            setError(e.message)
+          } else if (e.kind === 'ref_missing') {
+            setError('data ref not found — the review-debt snapshot may not be published yet.')
+          } else if (e.kind === 'summary_failed') {
+            setError('summary fetch failed — could not load the latest review-debt summary.')
+          } else {
+            setError('could not load the ledger — check the console for details')
+          }
+          if (e.kind === 'summary_failed') {
+            setData(null)
+          } else {
+            setData(null)
+          }
+        } else if (err instanceof Error) {
+          setErrorKind('unknown')
+          setError(err.message === 'data ref not found' ? 'data ref not found — the review-debt snapshot may not be published yet.' : 'could not load the ledger — check the console for details')
+          setData(null)
+        } else {
+          setErrorKind('unknown')
+          setError('could not load the ledger — check the console for details')
+          setData(null)
+        }
       }
     )
+    return () => {
+      active = false
+    }
   }, [])
 
   const { counts, total, recent } = useMemo(() => {
@@ -196,7 +528,45 @@ function DebtDashboard() {
 
         {error !== null && (
           <section className="debt-empty">
-            <p>⚠ {error}</p>
+            <p>
+              ⚠ {error}
+              {errorKind === 'rate_limited' && (
+                <>
+                  {!retryAfter && (error?.includes('reset') || true) && (
+                    <>
+                      {' '}
+                      {(() => {
+                        // Try to extract reset from error message or just show generic message
+                        return null
+                      })()}
+                    </>
+                  )}
+                  {' '}
+                  <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated requests.
+                </>
+              )}
+            </p>
+          </section>
+        )}
+        {source === 'cache' && data !== null && (
+          <section className="debt-empty">
+            <p>
+              Showing last available snapshot{fetchedAt ? ` from ${formatDateTime(fetchedAt)} (${formatAge(fetchedAt)})` : ''}.
+              {sha ? (
+                <>
+                  {' '}Saved snapshot is pinned to commit{' '}
+                  <a href={`${GITHUB}/commit/${sha}`}>
+                    <code>{sha.slice(0, 7)}</code>
+                  </a>
+                  .
+                </>
+              ) : null}{' '}
+              {cacheReason === 'rate_limited' && 'Live data may be temporarily unavailable due to GitHub API limits.'}
+              {cacheReason === 'ref_missing' && 'Live data may be temporarily unavailable — the review-debt ref could not be resolved.'}
+              {cacheReason === 'summary_failed' && 'Live data may be temporarily unavailable — the review-debt summary could not be loaded.'}
+              {cacheReason === 'network' && 'Live data may be temporarily unavailable due to a network issue.'}
+              {(cacheReason === 'unknown' || cacheReason === null) && 'Live data may be temporarily unavailable.'}
+            </p>
           </section>
         )}
         {data === null && error === null && (
@@ -227,7 +597,10 @@ function DebtDashboard() {
                     month: 'short',
                   })}
                 </span>
-                <span className="stat-l">last sync {new Date(data.summary.generated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="stat-l">
+                  last sync {new Date(data.summary.generated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                  {source === 'cache' && fetchedAt ? ` · snapshot ${formatAge(fetchedAt)}` : ''}
+                </span>
               </div>
             </section>
 
