@@ -2055,11 +2055,13 @@ function effortModel(model: string | undefined, effort: string | undefined): str
  *  verbatim. */
 /** A function_call item replays as an assistant tool_use block. */
 function functionCallToMessages(it: RespItem): ClientMessage[] {
-  let input: unknown = {}
+  let input: unknown
   try {
     input = JSON.parse(it.arguments ?? '{}')
-  } catch {
-    input = {}
+  } catch (err) {
+    throw new Error(
+      `function_call arguments are not valid JSON (call_id=${it.call_id ?? it.id ?? 'unknown'}, name=${it.name ?? 'unknown'}): ${it.arguments}`
+    )
   }
   return [
     {
