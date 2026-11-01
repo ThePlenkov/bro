@@ -18,15 +18,10 @@ import { envelopeLabels, priorityTerm, toEnvelope, validateEnvelope, MESH_VERSIO
 
 export const GITHUB_LABEL_MAX = 50
 
-export interface GithubRepo {
-  owner: string
-  repo: string
-}
-
 /** A github repository coordinate — value object for the repo pair. */
 export class GitHubRepo {
-  owner: string
-  repo: string
+  readonly owner: string
+  readonly repo: string
   constructor(owner: string, repo: string) {
     this.owner = owner.toLowerCase()
     this.repo = repo.toLowerCase()
@@ -46,15 +41,16 @@ export class GitHubRepo {
   }
 }
 
+export type GithubRepo = GitHubRepo
+export type GithubRepoShape = GitHubRepo
+
 /** A github issue thread — the issue URL is the thread anchor. */
 export class GitHubIssueThread {
-  repo: GitHubRepo | null
-  number: number | null
-  url: string | null
-  constructor(repo: GitHubRepo | null, number: number | null, url: string | null) {
+  readonly repo: GitHubRepo | null
+  readonly number: number | null
+  constructor(repo: GitHubRepo | null, number: number | null) {
     this.repo = repo
     this.number = number
-    this.url = url
   }
 
   static parse(input: string): GitHubIssueThread {
@@ -63,25 +59,36 @@ export class GitHubIssueThread {
     if (m === null) {
       const repo = parseGithubRemote({ remote: t })
       if (repo === null) {
-        return new GitHubIssueThread(null, null, null)
+        return new GitHubIssueThread(null, null)
       }
-      return new GitHubIssueThread(GitHubRepo.from(repo), null, null)
+      return new GitHubIssueThread(GitHubRepo.from(repo), null)
     }
     const base = t.replace(/\/issues\/\d+$/, '')
     const repo = parseGithubRemote({ remote: base })
     const n = Number(m[1])
-    const url = repo === null ? null : issueUrl({ repo: GitHubRepo.from(repo), n })
-    return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), Number.isNaN(n) ? null : n, url)
+    if (repo === null || !Number.isSafeInteger(n)) {
+      return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), null)
+    }
+    return new GitHubIssueThread(GitHubRepo.from(repo), n)
   }
 
   static fromIssue(repo: GitHubRepo | { owner: string; repo: string }, n: number): GitHubIssueThread {
     const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo)
-    const url = issueUrl({ repo: r, n })
-    return new GitHubIssueThread(r, n, url)
+    if (!Number.isSafeInteger(n)) {
+      return new GitHubIssueThread(r, null)
+    }
+    return new GitHubIssueThread(r, n)
+  }
+
+  get url(): string | null {
+    if (this.repo === null || this.number === null) {
+      return null
+    }
+    return issueUrl({ repo: this.repo, n: this.number })
   }
 
   get isIssue(): boolean {
-    return this.repo !== null && this.number !== null && this.url !== null
+    return this.repo !== null && this.number !== null
   }
 
   toString(): string {
@@ -91,7 +98,7 @@ export class GitHubIssueThread {
 
 /** A github login/name — normalized to lowercase for comparison. */
 export class GitHubLogin {
-  value: string
+  readonly value: string
   constructor(value: string) {
     this.value = value.trim()
   }
@@ -122,6 +129,14 @@ export function toGitHubRepo(input: { remote: string } | { owner: string; repo: 
   if ('remote' in input) {
     const parsed = parseGithubRemote(input)
     return parsed === null ? null : GitHubRepo.from(parsed)
+  }
+  if (
+    typeof input.owner !== 'string' ||
+    typeof input.repo !== 'string' ||
+    input.owner.trim() === '' ||
+    input.repo.trim() === ''
+  ) {
+    return null
   }
   return GitHubRepo.from(input)
 }
@@ -210,11 +225,10 @@ function scpHostPath(input: { rest: string }): { host: string; path: string } | 
  *  Callers that only need the repo can pass a bare repo url — `n`
  *  comes back null. */
 export function issueKey(input: { thread: string }): { repo: GithubRepo | null; n: number | null } {
-  const t = input.thread.trim()
-  const m = /\/issues\/(\d+)$/.exec(t)
+  const t = GitHubIssueThread.parse(input.thread)
   return {
-    repo: parseGithubRemote({ remote: t.replace(/\/issues\/\d+$/, '') }),
-    n: m === null ? null : Number(m[1]),
+    repo: t.repo,
+    n: t.number,
   }
 }
 
@@ -570,18 +584,26 @@ export function githubProvenance(rec: {
   selfLogin: string | undefined
   ownRig: string | null
 }): { provenance?: string; error?: string } {
+  const author = GitHubLogin.from(rec.author)
   if (rec.peer !== undefined) {
     if (rec.peer.login === undefined) {
       return { error: `github binding has no login — records on this plane can't be authenticated` }
     }
-    if (rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
+    const peerLogin = GitHubLogin.from(rec.peer.login)
+    if (peerLogin !== null && author !== null && author.equals(peerLogin)) {
+      return { provenance: rec.peer.rig }
+    }
+    if (peerLogin !== null && rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
       return { provenance: rec.peer.rig }
     }
   }
-  if (rec.selfLogin !== undefined && rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
-    return rec.ownRig === null
-      ? { error: `own record, but this rig's identity doesn't resolve` }
-      : { provenance: rec.ownRig }
+  if (rec.selfLogin !== undefined) {
+    const self = GitHubLogin.from(rec.selfLogin)
+    if ((self !== null && author !== null && author.equals(self)) || rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
+      return rec.ownRig === null
+        ? { error: `own record, but this rig's identity doesn't resolve` }
+        : { provenance: rec.ownRig }
+    }
   }
   return {
     error: `comment author ${rec.author === '' ? 'unknown' : rec.author} is neither ${
