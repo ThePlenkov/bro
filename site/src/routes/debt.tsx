@@ -31,7 +31,7 @@ interface Summary {
   open_count: number
   by_area: Record<string, number>
   by_author: Record<string, number>
-  duplicate_fingerprints: string[]
+  duplicate_fingerprints: Array<{ fingerprint: string; count: number; prs: number[] }>
   oldest_open: string | null
 }
 
@@ -127,7 +127,15 @@ function readSnapshot(): CachedSnapshot | null {
       !isPlainObject(summary.by_area) ||
       !isPlainObject(summary.by_author) ||
       !Array.isArray(summary.duplicate_fingerprints) ||
-      summary.duplicate_fingerprints.some((d: unknown) => typeof d !== 'string') ||
+      summary.duplicate_fingerprints.some(
+        (d: unknown) =>
+          !isPlainObject(d) ||
+          typeof (d as any).fingerprint !== 'string' ||
+          typeof (d as any).count !== 'number' ||
+          !Number.isFinite((d as any).count) ||
+          !Array.isArray((d as any).prs) ||
+          (d as any).prs.some((pr: unknown) => typeof pr !== 'number' || !Number.isFinite(pr))
+      ) ||
       Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number') ||
       Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number')
     ) {
@@ -362,10 +370,14 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
     const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : ''
     const harvestRes = findingsRes.status === 'fulfilled' ? findingsRes.value : { findings: [] as Finding[], ok: false }
     // Only cache if all artifact fetches completed successfully (ledger ok or 404, harvests ok)
-    if (!harvestRes.ok) {
+    if (!harvestRes.ok || ledgerRes.status !== 'fulfilled') {
       const cached = readSnapshot()
       if (cached) {
         return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      }
+      // If harvest failed and we have no cache, don't overwrite cache with empty data
+      if (!harvestRes.ok) {
+        throw { kind: 'unknown', message: 'failed to load harvests' } satisfies LoadError
       }
     }
     const findings = harvestRes.findings
@@ -396,7 +408,6 @@ function DebtDashboard() {
   const [error, setError] = useState<string | null>(null)
   const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null)
   const [retryAfter, setRetryAfter] = useState<string | null>(null)
-  const [reset, setReset] = useState<string | null>(null)
   const [source, setSource] = useState<'live' | 'cache' | null>(null)
   const [fetchedAt, setFetchedAt] = useState<string | null>(null)
   const [sha, setSha] = useState<string | undefined>(undefined)
@@ -415,7 +426,6 @@ function DebtDashboard() {
         setError(null)
         setErrorKind(null)
         setRetryAfter(null)
-        setReset(null)
       },
       (err: unknown) => {
         if (!active) return
@@ -429,7 +439,6 @@ function DebtDashboard() {
           setErrorKind(e.kind)
           if (e.kind === 'rate_limited') {
             setRetryAfter(e.retryAfter ?? null)
-            setReset((e as any).reset ?? null)
             setError(e.message)
           } else if (e.kind === 'ref_missing') {
             setError('data ref not found — the review-debt snapshot may not be published yet.')
@@ -523,19 +532,13 @@ function DebtDashboard() {
               ⚠ {error}
               {errorKind === 'rate_limited' && (
                 <>
-                  {!retryAfter && reset && (
+                  {!retryAfter && (error?.includes('reset') || true) && (
                     <>
-                      {' '}Resets at{' '}
+                      {' '}
                       {(() => {
-                        try {
-                          const ts = parseInt(reset, 10)
-                          if (Number.isNaN(ts)) return reset
-                          return new Date(ts * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
-                        } catch {
-                          return reset
-                        }
+                        // Try to extract reset from error message or just show generic message
+                        return null
                       })()}
-                      .
                     </>
                   )}
                   {' '}
