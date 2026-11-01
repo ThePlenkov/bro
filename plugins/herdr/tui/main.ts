@@ -232,13 +232,13 @@ export async function runTui(argv: string[]): Promise<void> {
     useMouse: false,
     // no alternate screen — the feed renders INLINE, so herdr's own
     // scrollback holds every row: wheel scroll, drag-select, copy-mode
-    // all ride the terminal for free (addendum 10). 'split-footer' +
-    // footerHeight:2 keeps the frame's last two rows pinned on screen
-    // — the identity line and the keys line (addendum 16: the kit has
-    // no top-split, so identity joins the bottom chrome; the feed
-    // scrolls under the pinned pair into scrollback above).
-    screenMode: 'split-footer',
-    footerHeight: 2,
+    // all ride the terminal for free (addendum 10). 'split-footer'
+    // (addendum 16) was tried for pinned chrome and REVERTED: in that
+    // mode the renderable tree's height IS the footer strip and the
+    // scroll region is fed by captured stdout, not renderables — the
+    // feed stayed blank (field-found). 'main-screen' gives the tree
+    // the full screen; overflowing rows scroll into scrollback.
+    screenMode: 'main-screen',
   });
 
   const impl = await pickImpl(implArg(argv));

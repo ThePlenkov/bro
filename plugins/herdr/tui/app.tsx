@@ -827,7 +827,7 @@ function Pane(props: {
   const atBottom = () => {
     frame();
     const s = scroller();
-    if (s === undefined) return true;
+    if (s === undefined || s.scrollHeight === undefined) return true;
     return s.scrollTop + s.height >= s.scrollHeight - 1;
   };
   /** permission rows name their tool — look the call up by id. */
@@ -838,17 +838,20 @@ function Pane(props: {
     }
     return undefined;
   };
+  // inline feed: rows are natural-height output that flows into the
+  // terminal's scrollback — herdr owns scrolling (addendum 10). No
+  // scrollbox: in split-footer the scroll region isn't addressable
+  // as tree height, so a scrollbox collapses to ~1 row (field-found).
   return (
-    <box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
-      <scrollbox
+    <box flexDirection="column" width="100%" overflow="visible" backgroundColor={theme.base}>
+      <box
         ref={el => {
-          setScroller(el as ScrollBoxRenderable);
-          props.onScroller?.(el as ScrollBoxRenderable);
+          setScroller(el as unknown as ScrollBoxRenderable);
+          props.onScroller?.(el as unknown as ScrollBoxRenderable);
         }}
-        stickyScroll
-        stickyStart="bottom"
-        flexGrow={1}
+        flexDirection="column"
         width="100%"
+        overflow="visible"
         backgroundColor={theme.base}
       >
         <For each={props.store.state.order}>
@@ -882,7 +885,7 @@ function Pane(props: {
             </Show>
           )}
         </For>
-      </scrollbox>
+      </box>
       <Show when={!atBottom()}>
         <box
           flexDirection="row"
@@ -895,11 +898,10 @@ function Pane(props: {
           <text fg={theme.muted} content="Jump to latest ↓ " />
         </box>
       </Show>
-      {/* the pinned pair — split-footer holds the frame's last
-       *  footerHeight rows on screen while the feed scrolls above:
-       *  identity line, then keys line (addendum 16's fallback —
-       *  no top-split exists in the renderer, so identity joins
-       *  the bottom chrome rather than the scrolling feed) */}
+      {/* identity + keys are the frame's last rows — in main-screen
+       *  they ride the tail of the feed (the split-footer pin was
+       *  reverted: its renderable height IS the footer strip, the
+       *  scroll region takes only captured stdout — field-found) */}
       <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
@@ -944,8 +946,8 @@ export async function mountPane(opts: {
     opts.renderer
   );
   pane.toast = setToast;
-  pane.scroll = lines => scroller?.scrollBy(lines);
-  pane.scrollPage = dir => scroller?.scrollBy(dir * Math.max(1, opts.renderer.height - 2));
-  pane.scrollEdge = edge => scroller?.scrollTo(edge === 0 ? 0 : Infinity);
+  pane.scroll = lines => scroller?.scrollBy?.(lines);
+  pane.scrollPage = dir => scroller?.scrollBy?.(dir * Math.max(1, opts.renderer.height - 2));
+  pane.scrollEdge = edge => scroller?.scrollTo?.(edge === 0 ? 0 : Infinity);
   return pane;
 }

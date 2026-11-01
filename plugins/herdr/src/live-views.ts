@@ -53,9 +53,15 @@ interface LiveAgent {
 export function liveAgents(base: string): LiveAgent[] {
   const dir = join(base, 'bro', 'agents');
   const out = new Map<string, LiveAgent>();
-  for (const [id, e] of Object.entries(agentsJson(base))) {
+  for (const [key, e] of Object.entries(agentsJson(base))) {
     if (e.pid === undefined || !pidAlive(e.pid)) continue;
-    out.set(id, { id, events: join(dir, `${id}.events.jsonl`), worktree: e.worktree, pid: e.pid });
+    // the archive stem is the agent id (native-<hash>), not the run
+    // key — the entry's log path carries it: native-x.events.jsonl
+    // sits beside native-x.log. Keying on it also dedupes a run key
+    // and its handle-file sighting of the same agent.
+    const stem = e.log?.replace(/\.log$/, '') ?? join(dir, `${key}.events`);
+    const id = stem.split('/').pop() ?? key;
+    out.set(id, { id, events: `${stem}.events.jsonl`, worktree: e.worktree, pid: e.pid });
   }
   let names: string[] = [];
   try {
