@@ -1049,8 +1049,21 @@ class LiveTurn extends TagPump {
   ) {
     super(tools)
     if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs)
+      this.ping = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping)
+          return
+        }
+        try {
+          sse(res, 'ping', { type: 'ping' })
+        } catch {
+          if (this.ping) clearInterval(this.ping)
+        }
+      }, pingMs)
       this.ping.unref()
+      res.once('close', () => {
+        if (this.ping) clearInterval(this.ping)
+      })
     }
     sse(res, 'message_start', messageStartEvent(model, inputTokens))
   }
@@ -2263,9 +2276,20 @@ class RespLive extends TagPump {
     super(tools)
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
-        res.write(': ping\n\n')
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping)
+          return
+        }
+        try {
+          res.write(': ping\n\n')
+        } catch {
+          if (this.ping) clearInterval(this.ping)
+        }
       }, pingMs)
       this.ping.unref()
+      res.once('close', () => {
+        if (this.ping) clearInterval(this.ping)
+      })
     }
     sse(res, 'response.created', {
       type: 'response.created',
@@ -2420,7 +2444,11 @@ class RespLive extends TagPump {
    *  The message item carries the same status: 'incomplete' on a
    *  cancelled turn would read as a token cap, not the cancel it was. */
   finish(status: string, usageOut: number, reason?: string): void {
-    if (this.ping !== undefined) clearInterval(this.ping)
+    if (this.ping !== undefined) {
+      clearInterval(this.ping)
+      // @ts-ignore
+      ;(this as any).ping = undefined
+    }
     this.drainAll()
     const st = this.capped ? 'incomplete' : status
     this.closeItem(st)
@@ -2437,7 +2465,11 @@ class RespLive extends TagPump {
   }
 
   fail(type: string, message: string): void {
-    if (this.ping !== undefined) clearInterval(this.ping)
+    if (this.ping !== undefined) {
+      clearInterval(this.ping)
+      // @ts-ignore
+      ;(this as any).ping = undefined
+    }
     this.drainAll()
     sse(this.res, 'error', { type: 'error', code: type, message })
   }
@@ -3168,9 +3200,20 @@ class ChatLive extends TagPump {
     super(tools)
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
-        this.res.write(': ping\n\n')
+        if (this.res.writableEnded || this.res.destroyed) {
+          if (this.ping) clearInterval(this.ping)
+          return
+        }
+        try {
+          this.res.write(': ping\n\n')
+        } catch {
+          if (this.ping) clearInterval(this.ping)
+        }
       }, pingMs)
       this.ping.unref()
+      this.res.once('close', () => {
+        if (this.ping) clearInterval(this.ping)
+      })
     }
   }
 
@@ -3241,6 +3284,12 @@ class ChatLive extends TagPump {
    *  held tail flushes through the pump first — a non-marker tail is
    *  real content the wire still owes the client. */
   finish(stopReason: string, usage?: Record<string, unknown>): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping)
+      // @ts-ignore
+      ;(this as any).ping = undefined
+    }
+  }
     if (this.ping !== undefined) clearInterval(this.ping)
     if (this.stops !== undefined) this.feed(this.stops.flush())
     this.drainAll()

@@ -55,13 +55,16 @@ const CFG: ConductorConfig = {
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post(path, body) for /v1/* sends. */
-async function boot(fake: ReturnType<typeof fakeAcpAgent>): Promise<{
+async function boot(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  cfg: ConductorConfig = CFG
+): Promise<{
   url: string
   post: (path: string, body: unknown) => Promise<Response>
   close: () => Promise<void>
 }> {
   const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
   )
   const post = (path: string, body: unknown) =>
     fetch(`${url}${path}`, {
@@ -1111,6 +1114,59 @@ describe('output caps + loud input failures', () => {
       // cut must answer the same 'a', not the longer marker's ''
       assert.equal(body.choices[0].message.content, 'a')
       assert.equal(body.choices[0].finish_reason, 'stop')
+    } finally {
+      await close()
+    }
+  })
+})
+
+describe('serve /v1/* openai — keepalive', () => {
+  test('/v1/responses streams : ping while held and stops after terminal event', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fake = fakeAcpAgent({
+      updates: chunks('after'),
+      holdEnd: () => gate,
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake, { ...CFG, keepaliveMs: 40 })
+    try {
+      const r = await post('/v1/responses', { input: 'x', stream: true })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      release()
+      const raw = await r.text()
+      assert.ok(raw.includes(': ping'), 'ping comment frame present')
+      const tail = raw.slice(raw.lastIndexOf(': ping'))
+      assert.ok(
+        tail.includes('response.completed') || tail.includes('response.incomplete') || tail.includes('response.cancelled') || tail.includes('response.failed'),
+        'no ping after terminal event'
+      )
+    } finally {
+      await close()
+    }
+  })
+
+  test('/v1/chat/completions streams : ping while held and stops after terminal event', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fake = fakeAcpAgent({
+      updates: chunks('after'),
+      holdEnd: () => gate,
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake, { ...CFG, keepaliveMs: 40 })
+    try {
+      const r = await post('/v1/chat/completions', { messages: [{ role: 'user', content: 'x' }], stream: true })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      release()
+      const raw = await r.text()
+      assert.ok(raw.includes(': ping'), 'ping comment frame present')
+      const tail = raw.slice(raw.lastIndexOf(': ping'))
+      assert.ok(tail.includes('[DONE]'), 'no ping after terminal event')
     } finally {
       await close()
     }
