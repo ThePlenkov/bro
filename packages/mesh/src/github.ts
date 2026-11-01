@@ -23,6 +23,107 @@ export interface GithubRepo {
   repo: string
 }
 
+/** A github repository coordinate — value object for the repo pair. */
+export class GitHubRepo {
+  owner: string
+  repo: string
+  constructor(owner: string, repo: string) {
+    this.owner = owner.toLowerCase()
+    this.repo = repo.toLowerCase()
+  }
+
+  static from(input: { owner: string; repo: string }): GitHubRepo {
+    return new GitHubRepo(input.owner, input.repo)
+  }
+
+  equals(other: GitHubRepo | { owner: string; repo: string } | null | undefined): boolean {
+    if (other === null || other === undefined) return false
+    return this.owner === other.owner.toLowerCase() && this.repo === other.repo.toLowerCase()
+  }
+
+  toString(): string {
+    return `${this.owner}/${this.repo}`
+  }
+}
+
+/** A github issue thread — the issue URL is the thread anchor. */
+export class GitHubIssueThread {
+  repo: GitHubRepo | null
+  number: number | null
+  url: string | null
+  constructor(repo: GitHubRepo | null, number: number | null, url: string | null) {
+    this.repo = repo
+    this.number = number
+    this.url = url
+  }
+
+  static parse(input: string): GitHubIssueThread {
+    const t = input.trim()
+    const m = /\/issues\/(\d+)$/.exec(t)
+    if (m === null) {
+      const repo = parseGithubRemote({ remote: t })
+      if (repo === null) {
+        return new GitHubIssueThread(null, null, null)
+      }
+      return new GitHubIssueThread(GitHubRepo.from(repo), null, null)
+    }
+    const base = t.replace(/\/issues\/\d+$/, '')
+    const repo = parseGithubRemote({ remote: base })
+    const n = Number(m[1])
+    const url = repo === null ? null : issueUrl({ repo: GitHubRepo.from(repo), n })
+    return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), Number.isNaN(n) ? null : n, url)
+  }
+
+  static fromIssue(repo: GitHubRepo | { owner: string; repo: string }, n: number): GitHubIssueThread {
+    const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo)
+    const url = issueUrl({ repo: r, n })
+    return new GitHubIssueThread(r, n, url)
+  }
+
+  get isIssue(): boolean {
+    return this.repo !== null && this.number !== null && this.url !== null
+  }
+
+  toString(): string {
+    return this.url ?? ''
+  }
+}
+
+/** A github login/name — normalized to lowercase for comparison. */
+export class GitHubLogin {
+  value: string
+  constructor(value: string) {
+    this.value = value.trim()
+  }
+
+  static from(input: string | undefined | null): GitHubLogin | null {
+    if (typeof input !== 'string' || input.trim() === '') return null
+    return new GitHubLogin(input)
+  }
+
+  equals(other: GitHubLogin | string | undefined | null): boolean {
+    if (other === null || other === undefined) return false
+    const otherVal = other instanceof GitHubLogin ? other.value : other
+    if (typeof otherVal !== 'string') return false
+    return this.value.toLowerCase() === otherVal.trim().toLowerCase()
+  }
+
+  toString(): string {
+    return this.value
+  }
+}
+
+/** Normalize a repo/remote input to GitHubRepo. */
+export function toGitHubRepo(input: { remote: string } | { owner: string; repo: string } | string): GitHubRepo | null {
+  if (typeof input === 'string') {
+    return parseGithubRemote({ remote: input })
+  }
+  if ('remote' in input) {
+    return parseGithubRemote(input)
+  }
+  return GitHubRepo.from(input)
+}
+
 /** remote → {owner, repo} when it names a github.com repository —
  *  https/ssh/git@ forms, `.git` suffix and trailing slash tolerated.
  *  Other hosts and non-URL remotes return null: the caller reports
@@ -113,6 +214,11 @@ export function issueKey(input: { thread: string }): { repo: GithubRepo | null; 
     repo: parseGithubRemote({ remote: t.replace(/\/issues\/\d+$/, '') }),
     n: m === null ? null : Number(m[1]),
   }
+}
+
+/** A github thread's issue coordinate (object form). */
+export function parseIssueThread(input: { thread: string }): GitHubIssueThread {
+  return GitHubIssueThread.parse(input.thread)
 }
 
 export interface GhResult {
@@ -268,8 +374,9 @@ export interface GhRecord {
  *  read: a value named `*html*` taints every sink it flows into for
  *  the unsanitized-HTML scanners, and `api.github.com` urls are not
  *  thread anchors anyway. */
-function issueUrl(key: { repo: GithubRepo; n: number }): string {
-  return `https://github.com/${key.repo.owner}/${key.repo.repo}/issues/${key.n}`
+function issueUrl(key: { repo: GithubRepo | GitHubRepo; n: number }): string {
+  const repo = key.repo instanceof GitHubRepo ? key.repo : key.repo
+  return `https://github.com/${repo.owner}/${repo.repo}/issues/${key.n}`
 }
 
 interface GhIssue {
