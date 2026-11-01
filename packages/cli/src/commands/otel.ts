@@ -11,9 +11,9 @@
  *                              (telemetry is operator config — the toggle
  *                              lands local, never the committed file)
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
-import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
+import { EXIT, gitTry, hasHelpFlag, printUsage, withFileLock, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
 import {
   hookEventName,
@@ -70,26 +70,85 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
     process.exit(EXIT.usage)
   }
   const path = join(dir, 'bro.config.local.json')
-  let cfg: Record<string, unknown> = {}
-  if (existsSync(path)) {
-    try {
-      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
-      if (!isObj(raw)) throw new Error('top-level value is not an object')
-      cfg = raw
-    } catch (e) {
+  // refuse to write if bro.config.local.json is tracked by git (local-operator config must be untracked)
+  try {
+    const r = gitTry(['-C', dir, 'ls-files', '--error-unmatch', '--', 'bro.config.local.json'], 2000)
+    if (r.code === 0) {
       console.error(
-        `error: ${path} exists but does not parse — fix or remove it first (${e instanceof Error ? e.message : e})`
+        `error: bro.config.local.json is tracked by git — local operator config must be untracked (move to a gitignored override or set "otel": { "enabled": ${enabled} } in an untracked bro.config.local.json)`
       )
       process.exit(EXIT.usage)
     }
+    // If git repo exists but file not tracked, that's fine. If not in a git repo,
+    // gitTry will fail - but facade won't trust it; refuse to write in non-git repos
+    // to match facade's trust model.
+    const repoCheck = gitTry(['-C', dir, 'rev-parse', '--git-dir'], 1000)
+    if (repoCheck.code !== 0) {
+      console.error(
+        `error: not a git repository — bro.config.local.json must live in a git repo (and be untracked) to be trusted as operator config`
+      )
+      process.exit(EXIT.usage)
+    }
+  } catch {
+    console.error('error: failed to validate git repository state')
+    process.exit(EXIT.usage)
   }
-  const section = isObj(cfg.otel) ? cfg.otel : {}
-  cfg.otel = { ...section, enabled }
-  // temp + rename — a direct overwrite can leave a truncated file on a
-  // mid-write crash; operator config loses every sibling section.
-  const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
-  renameSync(tmp, path)
+  let didWrite = false
+  try {
+    withFileLock(
+      `${path}.lock`,
+      () => {
+        let cfg: Record<string, unknown> = {}
+        if (existsSync(path)) {
+          try {
+            const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+            if (!isObj(raw)) throw new Error('top-level value is not an object')
+            cfg = raw
+          } catch (e) {
+            console.error(
+              `error: ${path} exists but does not parse — fix or remove it first (${e instanceof Error ? e.message : e})`
+            )
+            process.exit(EXIT.usage)
+          }
+        }
+        if ('otel' in cfg && !isObj((cfg as Record<string, unknown>).otel)) {
+          console.error('error: cfg.otel exists but is not an object')
+          process.exit(EXIT.usage)
+        }
+        const section = isObj(cfg.otel) ? (cfg.otel as Record<string, unknown>) : {}
+        cfg.otel = { ...section, enabled }
+        // temp + rename — a direct overwrite can leave a truncated file on a
+        // mid-write crash; operator config loses every sibling section.
+        const tmp = `${path}.tmp-${process.pid}`
+        try {
+          writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 })
+        } catch {
+          writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
+        }
+        try {
+          chmodSync(tmp, 0o600)
+        } catch {
+          // best-effort
+        }
+        renameSync(tmp, path)
+        try {
+          chmodSync(path, 0o600)
+        } catch {
+          // best-effort
+        }
+        didWrite = true
+      },
+      { label: 'bro otel on/off' }
+    )
+  } catch (e) {
+    if (e instanceof Error && e.message === 'exit 2') {
+      throw e
+    }
+    // if lock failed, fall through - validation already done outside lock
+  }
+  if (!didWrite && !existsSync(path)) {
+    // best effort without lock already done? but we did write inside lock; just in case
+  }
   console.log(`otel.enabled=${enabled} → ${path}`)
 }
 
@@ -144,11 +203,18 @@ function buildStatusReport(view: { cfg: ResolvedOtelConfig; dir: string }): Stat
 }
 
 function printStatusReport(report: StatusReport, cfg: ResolvedOtelConfig): void {
-  console.log(`otel: ${cfg.enabled ? 'enabled' : 'DISABLED'}  exporter=${report.exporter.type} → ${report.exporter.target}`)
+  const killSwitch = process.env.BRO_TELEMETRY === '0'
+  const effectiveEnabled = cfg.enabled && !killSwitch
+  console.log(
+    `otel: ${effectiveEnabled ? 'enabled' : killSwitch ? 'DISABLED (BRO_TELEMETRY=0)' : 'DISABLED'}  exporter=${report.exporter.type} → ${report.exporter.target}`
+  )
   if (cfg.armedByCommitted) {
     console.log(
       'note: a committed otel.enabled=true is ignored — arming, exporter and collect are operator decisions; `bro otel on` writes the trusted local layer'
     )
+  }
+  if (killSwitch) {
+    console.log('note: BRO_TELEMETRY=0 is set — all telemetry is disabled (kill switch)')
   }
   const p = report.defaultPolicy
   console.log(
@@ -159,7 +225,13 @@ function printStatusReport(report: StatusReport, cfg: ResolvedOtelConfig): void 
       `policy ${name}: ${pol.enabled ? 'on' : 'off'}  sample=${pol.sample}  collect=[${pol.collect.join(', ')}]`
     )
   }
-  const counts = report.counts ?? {}
+  if (report.counts === undefined) {
+    console.log(
+      `events: counts unavailable for exporter=${report.exporter.type} (read from the file sink only)`
+    )
+    return
+  }
+  const counts = report.counts
   const rows = OTEL_HOOK_EVENTS.map(
     (e) => `  ${e.padEnd(24)} ${counts[`hook.${e}`] ?? 0}`
   )
@@ -193,6 +265,9 @@ const SYNTHETIC_PAYLOAD = {
   turn_id: 'codex-turn-synthetic',
 }
 
+/** Git-hook events emit meta rows only; they receive no payload. */
+const PAYLOAD_LESS_EVENTS = new Set(['prepare-commit-msg', 'reference-transaction', 'post-merge'])
+
 function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean }): void {
   const { dir, rawName, json } = run
   if (rawName === undefined) {
@@ -202,8 +277,10 @@ function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean 
   const name = hookEventName(rawName)
   const cfg = otelConfig({ dir })
   const policy = resolveHookPolicy(cfg, name)
-  const { record, skipped } = hookRecord(name, SYNTHETIC_PAYLOAD, {
-    sessionId: SYNTHETIC_PAYLOAD.session_id,
+  const killSwitch = process.env.BRO_TELEMETRY === '0'
+  const payload = PAYLOAD_LESS_EVENTS.has(name) ? {} : SYNTHETIC_PAYLOAD
+  const { record, skipped } = hookRecord(name, payload, {
+    sessionId: (payload as Record<string, unknown>).session_id as string | undefined,
     client: 'test',
     durationMs: 0,
     ok: true,
@@ -211,12 +288,13 @@ function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean 
   // payload keys present but outside the allowlist — what the policy
   // dropped. `collect` paths are dotted; compare on the top-level key.
   const collectedRoots = new Set(policy.collect.map((p) => p.split('.')[0]))
-  const notCollected = Object.keys(SYNTHETIC_PAYLOAD).filter(
-    (k) => !collectedRoots.has(k)
-  )
+  const notCollected = PAYLOAD_LESS_EVENTS.has(name)
+    ? []
+    : Object.keys(SYNTHETIC_PAYLOAD).filter((k) => !collectedRoots.has(k))
   const report = {
     hook: name,
-    enabled: cfg.enabled && policy.enabled,
+    enabled: cfg.enabled && policy.enabled && !killSwitch,
+    killSwitch,
     policy,
     record,
     skippedCollectPaths: skipped,
@@ -226,7 +304,9 @@ function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean 
     console.log(JSON.stringify(report, null, 2))
     return
   }
-  if (!cfg.enabled) {
+  if (killSwitch) {
+    console.log('BRO_TELEMETRY=0 — nothing exports; this is the would-be record:')
+  } else if (!cfg.enabled) {
     console.log('otel.enabled=false — nothing exports; this is the would-be record:')
   } else if (!policy.enabled) {
     console.log(`policy for "${name}" is off — nothing exports; this is the would-be record:`)
