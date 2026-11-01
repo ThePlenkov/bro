@@ -20,17 +20,17 @@
  *   prints it; possession of the 0600 file IS the auth boundary.
  */
 
-import { Readable } from 'node:stream'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export interface ProviderConfig {
   /** Messages-API base — the proxy forwards to `<upstream><req.url>`. */
-  upstream: string
+  upstream: string;
   /** The real credential — replaces the client's session token. */
-  apiKey: string
+  apiKey: string;
 }
 
-const DEFAULT_UPSTREAM = 'https://api.anthropic.com'
+const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 
 /** Provider config from the server's own environment — the upstream
  *  credential lives here, never in the client request. No key means
@@ -40,16 +40,16 @@ export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefin
   // a set-but-blank override must not starve the fallbacks — scan in
   // precedence order and take the first non-blank
   const apiKey = [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN].find(
-    (v) => v !== undefined && v.trim() !== ''
-  )
+    v => v !== undefined && v.trim() !== ''
+  );
   if (apiKey === undefined) {
-    return undefined
+    return undefined;
   }
-  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM
+  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM;
   while (upstream.endsWith('/')) {
-    upstream = upstream.slice(0, -1)
+    upstream = upstream.slice(0, -1);
   }
-  return { upstream, apiKey }
+  return { upstream, apiKey };
 }
 
 /** Headers that must not ride the proxy — hop-by-hop framing, the
@@ -68,7 +68,7 @@ const DROP_REQUEST = new Set([
   'content-length',
   'authorization',
   'x-api-key',
-])
+]);
 
 const DROP_RESPONSE = new Set([
   'connection',
@@ -79,37 +79,35 @@ const DROP_RESPONSE = new Set([
   'trailer',
   'transfer-encoding',
   'upgrade',
-])
+]);
 
 function forwardHeaders(req: IncomingMessage, apiKey: string): Record<string, string> {
-  const out: Record<string, string> = {}
+  const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(req.headers)) {
-    const lower = name.toLowerCase()
+    const lower = name.toLowerCase();
     if (DROP_REQUEST.has(lower) || value === undefined) {
-      continue
+      continue;
     }
-    out[lower] = Array.isArray(value) ? value.join(', ') : value
+    out[lower] = Array.isArray(value) ? value.join(', ') : value;
   }
   // the credential swap — the client proves the session token, the
   // upstream sees the real key; apiKeyHelper output never crosses
-  out['x-api-key'] = apiKey
-  out.authorization = `Bearer ${apiKey}`
+  out['x-api-key'] = apiKey;
+  out.authorization = `Bearer ${apiKey}`;
   // identity only — a gzip'd upstream body would arrive decompressed
   // by fetch while the response headers still said gzip + a stale
   // content-length; forcing identity keeps the pipe byte-honest
-  out['accept-encoding'] = 'identity'
-  return out
+  out['accept-encoding'] = 'identity';
+  return out;
 }
 
-const HAS_BODY = new Set(['POST', 'PUT', 'PATCH'])
+const HAS_BODY = new Set(['POST', 'PUT', 'PATCH']);
 
 /** The Anthropic-shaped transport error — claude-code surfaces the
  *  envelope it understands instead of a bare socket failure. */
 function sendUpstreamError(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(
-    `${JSON.stringify({ type: 'error', error: { type: 'api_error', message } })}\n`
-  )
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(`${JSON.stringify({ type: 'error', error: { type: 'api_error', message } })}\n`);
 }
 
 /** `(req, res)` raw-stream proxy for `/v1/*` — sits below the
@@ -118,51 +116,79 @@ function sendUpstreamError(res: ServerResponse, status: number, message: string)
 export function providerProxy(
   cfg: ProviderConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    const method = req.method ?? 'GET'
-    const target = `${cfg.upstream}${req.url ?? '/'}`
-    // the client going away must stop the upstream work — an SSE
-    // generation otherwise runs to completion billing tokens against
-    // nobody's session
-    const abort = new AbortController()
-    res.on('close', () => abort.abort())
-    let upstream: Response
-    try {
-      upstream = await fetch(target, {
-        method,
-        headers: forwardHeaders(req, cfg.apiKey),
-        signal: abort.signal,
-        // never auto-follow — a cross-origin redirect would carry the
-        // swapped x-api-key to a host it was never minted for
-        redirect: 'manual',
-        ...(HAS_BODY.has(method)
+  return (req, res) => forwardUpstream(req, res, cfg);
+}
+
+/** The upstream fetch + response-pipe both proxy paths share —
+ *  `payload` overrides the request body (the conductor's fast lane
+ *  buffers the client's JSON to rewrite `model` before forwarding);
+ *  absent, the request streams through like the plain proxy. */
+async function forwardUpstream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ProviderConfig,
+  payload?: string
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const target = `${cfg.upstream}${req.url ?? '/'}`;
+  // the client going away must stop the upstream work — an SSE
+  // generation otherwise runs to completion billing tokens against
+  // nobody's session
+  const abort = new AbortController();
+  res.on('close', () => abort.abort());
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers: forwardHeaders(req, cfg.apiKey),
+      signal: abort.signal,
+      // never auto-follow — a cross-origin redirect would carry the
+      // swapped x-api-key to a host it was never minted for
+      redirect: 'manual',
+      ...(payload !== undefined
+        ? { body: payload }
+        : HAS_BODY.has(method)
           ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const }
           : {}),
-      })
-    } catch (err) {
-      sendUpstreamError(
-        res,
-        502,
-        `bro provider: upstream unreachable — ${err instanceof Error ? err.message : String(err)}`
-      )
-      return
-    }
-
-    const headers: Record<string, string> = {}
-    upstream.headers.forEach((value, name) => {
-      if (!DROP_RESPONSE.has(name.toLowerCase())) {
-        headers[name] = value
-      }
-    })
-    res.writeHead(upstream.status, headers)
-    if (upstream.body === null) {
-      res.end()
-      return
-    }
-    const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream)
-    // mid-stream failures can't re-send the status — destroy is the
-    // honest end: the client's transport reports a truncated response
-    body.on('error', () => res.destroy())
-    body.pipe(res)
+    });
+  } catch (err) {
+    sendUpstreamError(
+      res,
+      502,
+      `bro provider: upstream unreachable — ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
   }
+
+  const headers: Record<string, string> = {};
+  upstream.headers.forEach((value, name) => {
+    if (!DROP_RESPONSE.has(name.toLowerCase())) {
+      headers[name] = value;
+    }
+  });
+  res.writeHead(upstream.status, headers);
+  if (upstream.body === null) {
+    res.end();
+    return;
+  }
+  const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
+  // mid-stream failures can't re-send the status — destroy is the
+  // honest end: the client's transport reports a truncated response
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+}
+
+/** `(req, res)` forward for a request whose body is already buffered —
+ *  the conductor's fast lane (spec bro-6asnu) parsed the client's JSON
+ *  to classify it, so the raw stream is spent; the serialized body
+ *  rides instead. Headers and the credential swap are providerProxy's
+ *  own; a string body lets the transport re-frame `content-length`
+ *  for the (possibly rewritten) payload. */
+export function forwardBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ProviderConfig,
+  payload: string
+): Promise<void> {
+  return forwardUpstream(req, res, cfg, payload);
 }

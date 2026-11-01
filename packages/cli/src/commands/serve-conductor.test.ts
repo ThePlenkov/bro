@@ -1,15 +1,22 @@
 /** `bro serve` conductor — /v1/messages answers from an acp provider
  *  session instead of an HTTP upstream (spec bro-xeozo). */
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { agent, type SessionConfigOption, type SessionUpdate, type StopReason } from '@agentclientprotocol/sdk'
-import { fakeAcpAgent } from '@broject/providers/testkit'
-import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
-import type { ConductorConfig } from './serve-conductor.ts'
-import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import {
+  agent,
+  type SessionConfigOption,
+  type SessionUpdate,
+  type StopReason,
+} from '@agentclientprotocol/sdk';
+import { fakeAcpAgent } from '@broject/providers/testkit';
+import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
+import type { ConductorConfig } from './serve-conductor.ts';
+import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -21,17 +28,17 @@ const MODEL_OPTION: SessionConfigOption = {
     { value: 'swe-x', name: 'SWE X' },
     { value: 'swe-y', name: 'SWE Y' },
   ],
-}
+};
 
-const auth = authHeaders
+const auth = authHeaders;
 
 /** Each entry becomes its own agent_message_chunk — splits inside a
  *  <tool_call> tag exercise the conductor's incremental parser. */
 const chunks = (...texts: string[]): SessionUpdate[] =>
-  texts.map((text) => ({
+  texts.map(text => ({
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text' as const, text },
-  }))
+  }));
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post() for repeated /v1/messages sends. */
@@ -39,20 +46,20 @@ async function boot(
   fake: ReturnType<typeof fakeAcpAgent>,
   cfg: ConductorConfig = CFG
 ): Promise<{
-  url: string
-  post: (body: unknown) => Promise<Response>
-  close: () => Promise<void>
+  url: string;
+  post: (body: unknown) => Promise<Response>;
+  close: () => Promise<void>;
 }> {
   const { url, close } = await listen(
     deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
-  )
+  );
   const post = (body: unknown) =>
     fetch(`${url}/v1/messages`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
       body: JSON.stringify(body),
-    })
-  return { url, post, close }
+    });
+  return { url, post, close };
 }
 
 /** Boot the conductor over `fake` and POST /v1/messages —
@@ -62,25 +69,25 @@ async function postMessages(
   body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
   cfg: ConductorConfig = CFG
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  const { url, post, close } = await boot(fake, cfg)
-  return { r: await post(body), url, close }
+  const { url, post, close } = await boot(fake, cfg);
+  return { r: await post(body), url, close };
 }
 
 /** Collected text_delta payloads from a parsed SSE stream. */
 function textDeltas(ev: Awaited<ReturnType<typeof sseEvents>>): string[] {
   return ev
     .filter(
-      (e) =>
+      e =>
         e.event === 'content_block_delta' &&
         (e.data.delta as { type: string }).type === 'text_delta'
     )
-    .map((e) => (e.data.delta as { text: string }).text)
+    .map(e => (e.data.delta as { text: string }).text);
 }
 
 /** The turn's terminal stop_reason off the message_delta event. */
 function stopReason(ev: Awaited<ReturnType<typeof sseEvents>>): string {
-  const md = ev.find((e) => e.event === 'message_delta')
-  return (md?.data.delta as { stop_reason: string }).stop_reason
+  const md = ev.find(e => e.event === 'message_delta');
+  return (md?.data.delta as { stop_reason: string }).stop_reason;
 }
 
 /** Boot the conductor over `fake` and POST a streamed /v1/messages —
@@ -90,41 +97,41 @@ async function postStream(
   body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true },
   cfg: ConductorConfig = CFG
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  return postMessages(fake, body, cfg)
+  return postMessages(fake, body, cfg);
 }
 
 const CFG: ConductorConfig = {
   backend: 'dv-acp',
   entry: { type: 'acp' as const, command: 'dv acp' } as {
-    type: 'acp'
-    command: string
-    model?: string
+    type: 'acp';
+    command: string;
+    model?: string;
   },
   cwd: '/repo',
   timeoutMs: 10_000,
   agents: {},
-}
+};
 
 describe('conductorConfig', () => {
   // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
   // in ~/.config/bro would leak a backend into the 'unset env' assertions;
   // this suite reads an empty global config dir instead
-  const prevXdg = process.env.XDG_CONFIG_HOME
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'));
   after(() => {
-    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
-    else process.env.XDG_CONFIG_HOME = prevXdg
-  })
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+  });
   const providers = {
     'dv-acp': { type: 'acp' as const, command: 'dv acp', model: 'swe-y' },
     cli1: { type: 'cli' as const, command: 'x run' },
-  }
+  };
   test('unset env → undefined; resolves backend+model pin', () => {
-    assert.equal(conductorConfig({}, '/r', providers), undefined)
-    assert.equal(conductorConfig({ BRO_PROVIDER_BACKEND: ' ' }, '/r', providers), undefined)
-    const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)
-    assert.equal(cfg?.backend, 'dv-acp')
-    assert.equal(cfg?.model, 'swe-y')
+    assert.equal(conductorConfig({}, '/r', providers), undefined);
+    assert.equal(conductorConfig({ BRO_PROVIDER_BACKEND: ' ' }, '/r', providers), undefined);
+    const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers);
+    assert.equal(cfg?.backend, 'dv-acp');
+    assert.equal(cfg?.model, 'swe-y');
     assert.equal(
       conductorConfig(
         { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_MODEL: 'swe-z' },
@@ -132,10 +139,10 @@ describe('conductorConfig', () => {
         providers
       )?.model,
       'swe-z'
-    )
-  })
+    );
+  });
   test('serve.backend in config is the env-less backend pin; env wins', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
     writeFileSync(
       join(dir, 'bro.config.local.json'),
       JSON.stringify({
@@ -145,45 +152,45 @@ describe('conductorConfig', () => {
           other: { type: 'acp', command: 'o acp' },
         },
       })
-    )
+    );
     // no env — the config section carries the backend
-    const cfg = conductorConfig({}, dir)
-    assert.equal(cfg?.backend, 'dv-acp')
-    assert.equal(cfg?.model, 'swe-y')
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.backend, 'dv-acp');
+    assert.equal(cfg?.model, 'swe-y');
     // env is the explicit operator pin — it overrides the config
-    assert.equal(
-      conductorConfig({ BRO_PROVIDER_BACKEND: 'other' }, dir)?.backend,
-      'other'
-    )
-  })
+    assert.equal(conductorConfig({ BRO_PROVIDER_BACKEND: 'other' }, dir)?.backend, 'other');
+  });
   test('a negative/zero timeout falls back to the default', () => {
     for (const raw of ['-5', '0', 'abc']) {
       const cfg = conductorConfig(
         { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_TIMEOUT_MS: raw },
         '/r',
         providers
-      )
-      assert.equal(cfg?.timeoutMs, 120_000, raw)
+      );
+      assert.equal(cfg?.timeoutMs, 120_000, raw);
     }
-  })
+  });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
       () => conductorConfig({ BRO_PROVIDER_BACKEND: 'nope' }, '/r', providers),
       /providers\.nope is not configured/
-    )
+    );
     assert.throws(
       () => conductorConfig({ BRO_PROVIDER_BACKEND: 'cli1' }, '/r', providers),
       /type 'cli' — the conductor needs an 'acp' entry/
-    )
-  })
+    );
+  });
   test('BRO_PROVIDER_CATALOG resolves a second entry for /v1/models', () => {
     const cfg = conductorConfig(
       { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_CATALOG: 'cli1' },
       '/r',
       providers
-    )
-    assert.equal(cfg?.catalog?.name, 'cli1')
-    assert.equal(conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.catalog, undefined)
+    );
+    assert.equal(cfg?.catalog?.name, 'cli1');
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.catalog,
+      undefined
+    );
     assert.throws(
       () =>
         conductorConfig(
@@ -192,77 +199,147 @@ describe('conductorConfig', () => {
           providers
         ),
       /providers\.nope is not configured/
-    )
-  })
-})
+    );
+  });
+
+  test('the fast lane arms on the upstream key pair — env pins win (bro-6asnu)', () => {
+    const env = { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_API_KEY: 'k' };
+    const cfg = conductorConfig(env, '/r', providers);
+    assert.equal(cfg?.fast?.upstream, 'https://api.anthropic.com');
+    assert.equal(cfg?.fast?.apiKey, 'k');
+    assert.equal(cfg?.fast?.model, undefined);
+    assert.equal(cfg?.fast?.maxTokens, 2048);
+    // every pin: upstream host, model rewrite, classification cap
+    const pinned = conductorConfig(
+      {
+        ...env,
+        BRO_PROVIDER_UPSTREAM: 'http://up.example/v1/',
+        BRO_PROVIDER_FAST_MODEL: 'haiku-x',
+        BRO_PROVIDER_FAST_MAX_TOKENS: '512',
+      },
+      '/r',
+      providers
+    );
+    assert.equal(pinned?.fast?.upstream, 'http://up.example/v1');
+    assert.equal(pinned?.fast?.model, 'haiku-x');
+    assert.equal(pinned?.fast?.maxTokens, 512);
+    // a non-positive cap falls back to the default
+    assert.equal(
+      conductorConfig({ ...env, BRO_PROVIDER_FAST_MAX_TOKENS: '0' }, '/r', providers)?.fast
+        ?.maxTokens,
+      2048
+    );
+    // the ambient credential fallbacks arm it like the byte proxy does
+    assert.equal(
+      conductorConfig(
+        { BRO_PROVIDER_BACKEND: 'dv-acp', ANTHROPIC_AUTH_TOKEN: 't' },
+        '/r',
+        providers
+      )?.fast?.apiKey,
+      't'
+    );
+    // no key at all → unarmed, fast shapes still conduct
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.fast,
+      undefined
+    );
+    // the off switch — every spelling
+    for (const flag of ['off', '0', 'false', 'OFF']) {
+      assert.equal(
+        conductorConfig({ ...env, BRO_PROVIDER_FAST_LANE: flag }, '/r', providers)?.fast,
+        undefined,
+        flag
+      );
+    }
+  });
+
+  test('serve.fastModel + serve.fastLane ride the config file (bro-6asnu)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fast-'));
+    const write = (serve: Record<string, unknown>) =>
+      writeFileSync(
+        join(dir, 'bro.config.local.json'),
+        JSON.stringify({
+          serve,
+          providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+        })
+      );
+    write({ backend: 'dv-acp', fastLane: false });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast, undefined);
+    write({ backend: 'dv-acp', fastModel: 'haiku-cfg' });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast?.model, 'haiku-cfg');
+    // env wins over the committed pin
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_API_KEY: 'k', BRO_PROVIDER_FAST_MODEL: 'env-m' }, dir)?.fast
+        ?.model,
+      'env-m'
+    );
+  });
+});
 
 describe('parseReply', () => {
   test('text segments + tool_use blocks keep reply order', () => {
     const blocks = parseReply(
       'hello <tool_call>{"name":"ls","input":{"dir":"/"}}</tool_call> done'
-    )
-    assert.equal(blocks.length, 3)
-    assert.equal(blocks[0]?.type, 'text')
-    assert.equal(blocks[1]?.type, 'tool_use')
-    assert.equal(blocks[1]?.name, 'ls')
-    assert.match(blocks[1]?.id ?? '', /^toolu_[0-9a-f]{16}$/)
-    assert.equal(blocks[2]?.type, 'text')
-  })
+    );
+    assert.equal(blocks.length, 3);
+    assert.equal(blocks[0]?.type, 'text');
+    assert.equal(blocks[1]?.type, 'tool_use');
+    assert.equal(blocks[1]?.name, 'ls');
+    assert.match(blocks[1]?.id ?? '', /^toolu_[0-9a-f]{16}$/);
+    assert.equal(blocks[2]?.type, 'text');
+  });
   test('a scalar tool input lands wrapped — anthropic needs an object', () => {
-    const blocks = parseReply('<tool_call>{"name":"ls","input":"/tmp"}</tool_call>')
-    assert.deepEqual(blocks[0]?.input, { value: '/tmp' })
-  })
+    const blocks = parseReply('<tool_call>{"name":"ls","input":"/tmp"}</tool_call>');
+    assert.deepEqual(blocks[0]?.input, { value: '/tmp' });
+  });
   test('unparseable tool_call stays raw text — no invented calls', () => {
-    const blocks = parseReply('x <tool_call>{nope</tool_call> y')
-    assert.equal(blocks.length, 1)
-    assert.match(blocks[0]?.text ?? '', /<tool_call>\{nope/)
-  })
-})
+    const blocks = parseReply('x <tool_call>{nope</tool_call> y');
+    assert.equal(blocks.length, 1);
+    assert.match(blocks[0]?.text ?? '', /<tool_call>\{nope/);
+  });
+});
 
 async function sseEvents(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
-  const raw = await r.text()
+  const raw = await r.text();
   return raw
     .split('\n\n')
-    .filter((b) => b.trim() !== '')
-    .map((b) => {
-      const event = b.match(/^event: (.+)$/m)?.[1] ?? ''
-      const data = JSON.parse(b.match(/^data: (.+)$/m)?.[1] ?? '{}')
-      return { event, data }
-    })
+    .filter(b => b.trim() !== '')
+    .map(b => {
+      const event = b.match(/^event: (.+)$/m)?.[1] ?? '';
+      const data = JSON.parse(b.match(/^data: (.+)$/m)?.[1] ?? '{}');
+      return { event, data };
+    });
 }
 
 describe('serve /v1/* — the conductor plane', () => {
   test('POST /v1/messages streams the anthropic SSE shape from an acp turn', async () => {
-    const fake = fakeAcpAgent({ replyText: 'hi there', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'hi there', configOptions: [MODEL_OPTION] });
     const { r, close } = await postStream(fake, {
       model: 'claude-sonnet-4-5',
       messages: [{ role: 'user', content: 'say hi' }],
       stream: true,
-    })
+    });
     try {
-      assert.equal(r.status, 200)
-      assert.equal(r.headers.get('content-type'), 'text/event-stream')
-      const ev = await sseEvents(r)
-      const kinds = ev.map((e) => e.event)
-      assert.deepEqual(kinds.slice(0, 2), ['message_start', 'content_block_start'])
-      assert.equal(kinds.at(-1), 'message_stop')
-      const delta = ev.find((e) => e.event === 'content_block_delta')
-      assert.deepEqual(delta?.data.delta, { type: 'text_delta', text: 'hi there' })
-      const start = ev.find((e) => e.event === 'message_start')
+      assert.equal(r.status, 200);
+      assert.equal(r.headers.get('content-type'), 'text/event-stream');
+      const ev = await sseEvents(r);
+      const kinds = ev.map(e => e.event);
+      assert.deepEqual(kinds.slice(0, 2), ['message_start', 'content_block_start']);
+      assert.equal(kinds.at(-1), 'message_stop');
+      const delta = ev.find(e => e.event === 'content_block_delta');
+      assert.deepEqual(delta?.data.delta, { type: 'text_delta', text: 'hi there' });
+      const start = ev.find(e => e.event === 'message_start');
       // message_start names the served label at turn start — the bare
       // request id echoes as a display label (a real pin would win)
-      assert.equal(
-        (start?.data.message as { model: string }).model,
-        'claude-sonnet-4-5'
-      )
-      assert.equal(stopReason(ev), 'end_turn')
+      assert.equal((start?.data.message as { model: string }).model, 'claude-sonnet-4-5');
+      assert.equal(stopReason(ev), 'end_turn');
       // the conversation reached the agent serialized, not the client's model id
-      assert.match(fake.prompts[0] ?? '', /say hi/)
-      assert.match(fake.prompts[0] ?? '', /<turn role="user">/)
+      assert.match(fake.prompts[0] ?? '', /say hi/);
+      assert.match(fake.prompts[0] ?? '', /<turn role="user">/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   // bro-7izjx — base64 image blocks ride the wire as real ACP image
   // content when the agent advertised promptCapabilities.image;
@@ -282,63 +359,68 @@ describe('serve /v1/* — the conductor plane', () => {
       },
     ],
     stream: true,
-  }
+  };
 
   test('an image-capable agent receives the image block on the wire', async () => {
     const fake = fakeAcpAgent({
       replyText: 'a png',
       configOptions: [MODEL_OPTION],
       imageCapable: true,
-    })
-    const { r, close } = await postStream(fake, IMAGE_BODY)
+    });
+    const { r, close } = await postStream(fake, IMAGE_BODY);
     try {
-      assert.equal(r.status, 200)
-      await r.text()
-      const img = fake.blocks[0]?.find((b) => b.type === 'image')
-      assert.deepEqual(img, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' })
+      assert.equal(r.status, 200);
+      await r.text();
+      const img = fake.blocks[0]?.find(b => b.type === 'image');
+      assert.deepEqual(img, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' });
       // the turn wrapper still frames the text around the image
-      assert.match(fake.prompts[0] ?? '', /<turn role="user">what is this/)
+      assert.match(fake.prompts[0] ?? '', /<turn role="user">what is this/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('an agent without the image capability gets the [image] marker instead', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { r, close } = await postStream(fake, IMAGE_BODY)
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+    const { r, close } = await postStream(fake, IMAGE_BODY);
     try {
-      assert.equal(r.status, 200)
-      await r.text()
-      assert.equal(fake.blocks[0]?.every((b) => b.type === 'text'), true)
-      assert.match(fake.prompts[0] ?? '', /\[image\]/)
+      assert.equal(r.status, 200);
+      await r.text();
+      assert.equal(
+        fake.blocks[0]?.every(b => b.type === 'text'),
+        true
+      );
+      assert.match(fake.prompts[0] ?? '', /\[image\]/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a <tool_call> reply lands as tool_use + stop_reason tool_use', async () => {
     const fake = fakeAcpAgent({
       replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'list' }],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
+      const ev = await sseEvents(r);
       const tu = ev.find(
-        (e) => e.event === 'content_block_delta' && (e.data.delta as { type: string }).type === 'input_json_delta'
-      )
-      assert.ok(tu, 'tool_use delta present')
+        e =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      );
+      assert.ok(tu, 'tool_use delta present');
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
-      })
-      assert.equal(stopReason(ev), 'tool_use')
+      });
+      assert.equal(stopReason(ev), 'tool_use');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   // bro-6fk80 — a cancelled or backend-ended turn must never read as a
   // clean end_turn; the acp reason surfaces as a non-standard
@@ -348,18 +430,18 @@ describe('serve /v1/* — the conductor plane', () => {
       replyText: 'partial',
       configOptions: [MODEL_OPTION],
       stopReason: 'cancelled',
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'x' }],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
-      assert.equal(stopReason(ev), 'cancelled')
+      const ev = await sseEvents(r);
+      assert.equal(stopReason(ev), 'cancelled');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a non-enum acp reason forwards raw — buffered, then replayed', async () => {
     // devin's adapter emits error/auth_required outside the acp enum —
@@ -368,37 +450,37 @@ describe('serve /v1/* — the conductor plane', () => {
       replyText: 'partial',
       configOptions: [MODEL_OPTION],
       stopReason: 'auth_required' as StopReason,
-    })
-    const { post, close } = await boot(fake)
+    });
+    const { post, close } = await boot(fake);
     try {
-      const body = { messages: [{ role: 'user', content: 'x' }], stream: false }
-      const first = await (await post(body)).json()
-      assert.equal(first.stop_reason, 'auth_required')
+      const body = { messages: [{ role: 'user', content: 'x' }], stream: false };
+      const first = await (await post(body)).json();
+      assert.equal(first.stop_reason, 'auth_required');
       // the recorded reply replays the same reason — no second turn,
       // no silent end_turn
-      const re = await (await post(body)).json()
-      assert.equal(re.stop_reason, 'auth_required')
-      assert.equal(fake.prompts.length, 1)
+      const re = await (await post(body)).json();
+      assert.equal(re.stop_reason, 'auth_required');
+      assert.equal(fake.prompts.length, 1);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a provider/model request id pins the acp session model', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
     const { r, close } = await postMessages(fake, {
       model: 'dv-acp/swe-y',
       messages: [{ role: 'user', content: 'x' }],
       stream: false,
-    })
+    });
     try {
-      assert.equal(r.status, 200)
-      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
-      assert.equal((await r.json()).model, 'swe-y')
+      assert.equal(r.status, 200);
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }]);
+      assert.equal((await r.json()).model, 'swe-y');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a composite <base>-<level> id applies model + thought_level together', async () => {
     // devin's swe-2 family: -medium/-high/-max are the thinking dimension,
@@ -427,24 +509,24 @@ describe('serve /v1/* — the conductor plane', () => {
           { value: 'max', name: 'max' },
         ],
       },
-    ]
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: DEVIN_OPTIONS })
+    ];
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: DEVIN_OPTIONS });
     const { r, close } = await postMessages(fake, {
       model: 'dv-acp/swe-2-max',
       messages: [{ role: 'user', content: 'x' }],
       stream: false,
-    })
+    });
     try {
-      assert.equal(r.status, 200)
+      assert.equal(r.status, 200);
       assert.deepEqual(fake.configSets, [
         { configId: 'model', value: 'swe-2-high' },
         { configId: 'thought_level', value: 'max' },
-      ])
-      assert.equal((await r.json()).model, 'swe-2-max')
+      ]);
+      assert.equal((await r.json()).model, 'swe-2-max');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a spawn-pinned composite already live skips the set calls', async () => {
     const LIVE: SessionConfigOption[] = [
@@ -467,103 +549,103 @@ describe('serve /v1/* — the conductor plane', () => {
           { value: 'max', name: 'x' },
         ],
       },
-    ]
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: LIVE })
+    ];
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: LIVE });
     const { r, close } = await postMessages(fake, {
       model: 'dv-acp/swe-2-max',
       messages: [{ role: 'user', content: 'x' }],
       stream: false,
-    })
+    });
     try {
-      assert.equal(r.status, 200)
-      assert.deepEqual(fake.configSets, [])
-      assert.equal((await r.json()).model, 'swe-2-max')
+      assert.equal(r.status, 200);
+      assert.deepEqual(fake.configSets, []);
+      assert.equal((await r.json()).model, 'swe-2-max');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('stream:false answers a buffered anthropic message', async () => {
-    const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] })
-    const { r, close } = await postMessages(fake)
+    const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake);
     try {
-      assert.equal(r.headers.get('content-type'), 'application/json')
-      const body = await r.json()
-      assert.equal(body.type, 'message')
-      assert.equal(body.model, 'swe-x')
-      assert.equal(body.stop_reason, 'end_turn')
-      assert.deepEqual(body.content, [{ type: 'text', text: 'plain' }])
+      assert.equal(r.headers.get('content-type'), 'application/json');
+      const body = await r.json();
+      assert.equal(body.type, 'message');
+      assert.equal(body.model, 'swe-x');
+      assert.equal(body.stop_reason, 'end_turn');
+      assert.deepEqual(body.content, [{ type: 'text', text: 'plain' }]);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('GET /v1/models enumerates the backend catalog; count_tokens estimates', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
     const { url, close } = await listen(
       deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    );
     try {
-      const r = await fetch(`${url}/v1/models`, { headers: auth })
-      const body = await r.json()
+      const r = await fetch(`${url}/v1/models`, { headers: auth });
+      const body = await r.json();
       assert.deepEqual(
         body.data.map((m: { id: string }) => m.id),
         ['dv-acp/swe-x', 'dv-acp/swe-y']
-      )
+      );
       // acp catalog names surface as display_name — pickers show the
       // human label, clients pin the id
       assert.deepEqual(
         body.data.map((m: { display_name: string }) => m.display_name),
         ['SWE X', 'SWE Y']
-      )
+      );
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
         headers: { ...auth, 'content-type': 'application/json' },
         body: 'x'.repeat(400),
-      })
-      assert.equal((await c.json()).input_tokens, 100)
+      });
+      assert.equal((await c.json()).input_tokens, 100);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a tool-less backend serves its configured pin as label and catalog row', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const fake = fakeAcpAgent({ replyText: 'sum' });
     const { r, url, close } = await postMessages(
       fake,
       { messages: [{ role: 'user', content: 'x' }], stream: false },
       { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
-    )
+    );
     try {
-      assert.equal(r.status, 200)
-      assert.equal((await r.json()).model, 'swe-sum')
-      assert.deepEqual(fake.configSets, [])
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).model, 'swe-sum');
+      assert.deepEqual(fake.configSets, []);
       // the pin is a one-row catalog — a tool-less backend still names itself
-      const m = await fetch(`${url}/v1/models`, { headers: auth })
+      const m = await fetch(`${url}/v1/models`, { headers: auth });
       assert.deepEqual(
         (await m.json()).data.map((x: { id: string }) => x.id),
         ['dv-acp/swe-sum']
-      )
+      );
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('an unpinned tool-less backend answers "unknown" and an empty catalog', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
-    const { r, url, close } = await postMessages(fake)
+    const fake = fakeAcpAgent({ replyText: 'sum' });
+    const { r, url, close } = await postMessages(fake);
     try {
-      assert.equal(r.status, 200)
-      assert.equal((await r.json()).model, 'unknown')
-      const m = await fetch(`${url}/v1/models`, { headers: auth })
-      assert.deepEqual((await m.json()).data, [])
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).model, 'unknown');
+      const m = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.deepEqual((await m.json()).data, []);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('BRO_PROVIDER_CATALOG models come from the catalog entry, not the backend', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const fake = fakeAcpAgent({ replyText: 'sum' });
     const cfg = {
       ...CFG,
       catalog: {
@@ -574,57 +656,57 @@ describe('serve /v1/* — the conductor plane', () => {
           models: { 'typesafe/jev-1.13': 'systemone' as const },
         },
       },
-    }
+    };
     const { url, close } = await listen(
       deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
-    )
+    );
     try {
-      const r = await fetch(`${url}/v1/models`, { headers: auth })
+      const r = await fetch(`${url}/v1/models`, { headers: auth });
       assert.deepEqual(
         (await r.json()).data.map((m: { id: string }) => m.id),
         ['orcarouter/typesafe/jev-1.13']
-      )
+      );
       // the backend itself still answers messages
       const msg = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { ...auth, 'content-type': 'application/json' },
         body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
-      assert.equal(msg.status, 200)
+      });
+      assert.equal(msg.status, 200);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('backend errors map to anthropic-shaped errors, never a hang', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
-    const { r, close } = await postMessages(fake)
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' });
+    const { r, close } = await postMessages(fake);
     try {
-      assert.equal(r.status, 529)
-      const body = await r.json()
-      assert.equal(body.type, 'error')
-      assert.match(body.error.message, /conductor/)
+      assert.equal(r.status, 529);
+      const body = await r.json();
+      assert.equal(body.type, 'error');
+      assert.match(body.error.message, /conductor/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('streamed deltas reach the wire before the turn completes', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => {
-      release = resolve
-    })
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
     const fake = fakeAcpAgent({
       updates: chunks('he', 'llo'),
       holdEnd: () => gate,
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      assert.equal(r.status, 200)
-      const reader = (r.body as NonNullable<typeof r.body>).getReader()
-      const dec = new TextDecoder()
-      let buf = ''
+      assert.equal(r.status, 200);
+      const reader = (r.body as NonNullable<typeof r.body>).getReader();
+      const dec = new TextDecoder();
+      let buf = '';
       // the turn is still held open — every byte here proves the
       // response left before end_turn, not in a buffered burst
       const readOnce = () =>
@@ -636,25 +718,25 @@ describe('serve /v1/* — the conductor plane', () => {
               5000
             )
           ),
-        ])
+        ]);
       while (!buf.includes('llo')) {
-        const { done, value } = await readOnce()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
+        const { done, value } = await readOnce();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
       }
-      assert.match(buf, /"text":"he"/)
-      assert.match(buf, /"text":"llo"/)
-      release()
+      assert.match(buf, /"text":"he"/);
+      assert.match(buf, /"text":"llo"/);
+      release();
       for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
       }
-      assert.match(buf, /event: message_stop/)
+      assert.match(buf, /event: message_stop/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a <tool_call> split across deltas lands as one tool_use block', async () => {
     const fake = fakeAcpAgent({
@@ -664,46 +746,46 @@ describe('serve /v1/* — the conductor plane', () => {
         '_call> done'
       ),
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'list' }],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
-      const texts = textDeltas(ev)
-      assert.deepEqual(texts, ['checking ', ' done'])
+      const ev = await sseEvents(r);
+      const texts = textDeltas(ev);
+      assert.deepEqual(texts, ['checking ', ' done']);
       const tu = ev.find(
-        (e) =>
+        e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
-      )
-      assert.ok(tu, 'tool_use delta present')
-      assert.equal(tu.data.index, 1)
+      );
+      assert.ok(tu, 'tool_use delta present');
+      assert.equal(tu.data.index, 1);
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
-      })
-      assert.equal(stopReason(ev), 'tool_use')
+      });
+      assert.equal(stopReason(ev), 'tool_use');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('malformed and unclosed <tool_call> markup streams as plain text', async () => {
     const fake = fakeAcpAgent({
       updates: chunks('x <tool_call>{nope</tool_call> y <tool_call>{"na'),
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const text = textDeltas(ev).join('')
-      assert.equal(text, 'x <tool_call>{nope</tool_call> y <tool_call>{"na')
-      assert.equal(stopReason(ev), 'end_turn')
+      const ev = await sseEvents(r);
+      const text = textDeltas(ev).join('');
+      assert.equal(text, 'x <tool_call>{nope</tool_call> y <tool_call>{"na');
+      assert.equal(stopReason(ev), 'end_turn');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('agent-side tool_call lifecycle narrates as text edges — never tool_use', async () => {
     const fake = fakeAcpAgent({
@@ -775,28 +857,29 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('done'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const text = textDeltas(ev).join('')
-      assert.match(text, /⏺ exec: ls \/tmp/)
-      assert.match(text, /✓ exec: ls \/tmp/)
-      assert.match(text, /⏺ instant\n✓ instant/)
-      assert.match(text, /✓ exec: pwd/)
-      assert.match(text, /✓ exec: df/)
-      assert.equal((text.match(/✓/g) ?? []).length, 4)
-      assert.ok(!text.includes('ignored'))
+      const ev = await sseEvents(r);
+      const text = textDeltas(ev).join('');
+      assert.match(text, /⏺ exec: ls \/tmp/);
+      assert.match(text, /✓ exec: ls \/tmp/);
+      assert.match(text, /⏺ instant\n✓ instant/);
+      assert.match(text, /✓ exec: pwd/);
+      assert.match(text, /✓ exec: df/);
+      assert.equal((text.match(/✓/g) ?? []).length, 4);
+      assert.ok(!text.includes('ignored'));
       // narration is text — no tool_use block invented, no tool_use stop
       assert.equal(
-        ev.filter((e) => (e.data.delta as { type: string } | undefined)?.type === 'input_json_delta').length,
+        ev.filter(e => (e.data.delta as { type: string } | undefined)?.type === 'input_json_delta')
+          .length,
         0
-      )
-      assert.equal(stopReason(ev), 'end_turn')
+      );
+      assert.equal(stopReason(ev), 'end_turn');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('tool_call lifecycle also emits structured tool_activity events — 3 tools, in order, before message_stop', async () => {
     const fake = fakeAcpAgent({
@@ -842,37 +925,37 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('done'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const acts = ev.filter((e) => e.event === 'tool_activity').map((e) => e.data)
+      const ev = await sseEvents(r);
+      const acts = ev.filter(e => e.event === 'tool_activity').map(e => e.data);
       assert.deepEqual(
-        acts.map((a) => `${a.phase}:${a.toolCallId}`),
+        acts.map(a => `${a.phase}:${a.toolCallId}`),
         ['open:tc-1', 'open:tc-2', 'finish:tc-1', 'open:tc-3', 'finish:tc-3', 'finish:tc-2']
-      )
+      );
       // payloads carry the shared bus shape — title/kind/status plus
       // the terminalId lifted out of tool content
-      const open1 = acts.find((a) => a.phase === 'open' && a.toolCallId === 'tc-1')
-      assert.equal(open1?.title, 'exec: a')
-      assert.equal(open1?.kind, 'execute')
-      assert.equal(open1?.status, 'in_progress')
-      const finish3 = acts.find((a) => a.phase === 'finish' && a.toolCallId === 'tc-3')
-      assert.equal(finish3?.status, 'failed')
-      const open3 = acts.find((a) => a.phase === 'open' && a.toolCallId === 'tc-3')
-      assert.equal(open3?.terminalId, 'term-9')
+      const open1 = acts.find(a => a.phase === 'open' && a.toolCallId === 'tc-1');
+      assert.equal(open1?.title, 'exec: a');
+      assert.equal(open1?.kind, 'execute');
+      assert.equal(open1?.status, 'in_progress');
+      const finish3 = acts.find(a => a.phase === 'finish' && a.toolCallId === 'tc-3');
+      assert.equal(finish3?.status, 'failed');
+      const open3 = acts.find(a => a.phase === 'open' && a.toolCallId === 'tc-3');
+      assert.equal(open3?.terminalId, 'term-9');
       // every event precedes message_stop
-      const stopIdx = ev.findIndex((e) => e.event === 'message_stop')
-      assert.ok(stopIdx > 0)
+      const stopIdx = ev.findIndex(e => e.event === 'message_stop');
+      assert.ok(stopIdx > 0);
       ev.forEach((e, i) => {
-        if (e.event === 'tool_activity') assert.ok(i < stopIdx, 'activity before message_stop')
-      })
+        if (e.event === 'tool_activity') assert.ok(i < stopIdx, 'activity before message_stop');
+      });
       // activity is an envelope, not a block — nothing invents tool_use
-      assert.equal(stopReason(ev), 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('tool_activity edges: first-seen-terminal opens+finishes; churn and dupes emit nothing', async () => {
     const fake = fakeAcpAgent({
@@ -901,25 +984,25 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('x'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const acts = ev.filter((e) => e.event === 'tool_activity').map((e) => e.data)
+      const ev = await sseEvents(r);
+      const acts = ev.filter(e => e.event === 'tool_activity').map(e => e.data);
       assert.deepEqual(
-        acts.map((a) => `${a.phase}:${a.toolCallId}`),
+        acts.map(a => `${a.phase}:${a.toolCallId}`),
         ['open:tc-9', 'finish:tc-9']
-      )
+      );
       // the synthesized open edge drops the terminal status (it lies)
-      assert.equal(acts[0]?.status, undefined)
-      assert.equal(acts[1]?.status, 'completed')
+      assert.equal(acts[0]?.status, undefined);
+      assert.equal(acts[1]?.status, 'completed');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('tool_activity bounds titles like the narration label does', async () => {
-    const longTitle = `exec: ${'x'.repeat(300)}\nsecond line ignored`
+    const longTitle = `exec: ${'x'.repeat(300)}\nsecond line ignored`;
     const fake = fakeAcpAgent({
       updates: [
         {
@@ -932,18 +1015,18 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('x'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const open = ev.find((e) => e.event === 'tool_activity')?.data
-      assert.equal((open?.title as string).length, 118)
-      assert.ok((open?.title as string).endsWith('…'))
-      assert.ok(!(open?.title as string).includes('second line'))
+      const ev = await sseEvents(r);
+      const open = ev.find(e => e.event === 'tool_activity')?.data;
+      assert.equal((open?.title as string).length, 118);
+      assert.ok((open?.title as string).endsWith('…'));
+      assert.ok(!(open?.title as string).includes('second line'));
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('narration landing mid partial-tag keeps stream order — held tail completes into the block', async () => {
     const fake = fakeAcpAgent({
@@ -959,22 +1042,22 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('ll>{"name":"ls","input":{}}</tool_call> end'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { r, close } = await postStream(fake)
+    });
+    const { r, close } = await postStream(fake);
     try {
-      const ev = await sseEvents(r)
-      const texts = textDeltas(ev)
-      assert.deepEqual(texts, ['work ', '\n⏺ exec: ls\n', ' end'])
+      const ev = await sseEvents(r);
+      const texts = textDeltas(ev);
+      assert.deepEqual(texts, ['work ', '\n⏺ exec: ls\n', ' end']);
       const tu = ev.find(
-        (e) =>
+        e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
-      )
-      assert.ok(tu, 'the split tag still completes into one tool_use block')
+      );
+      assert.ok(tu, 'the split tag still completes into one tool_use block');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   // bro-cfwc1 — narration mid-tag corrupts a post-hoc re-parse of the
   // emitted text; the recorded reply must keep the wire's real shape.
@@ -992,94 +1075,94 @@ describe('serve /v1/* — the conductor plane', () => {
         ...chunks('ll>{"name":"ls","input":{}}</tool_call> end'),
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const { post, close } = await boot(fake)
+    });
+    const { post, close } = await boot(fake);
     try {
-      const body = { messages: [{ role: 'user', content: 'list' }], stream: true }
-      const ev = await sseEvents(await post(body))
+      const body = { messages: [{ role: 'user', content: 'list' }], stream: true };
+      const ev = await sseEvents(await post(body));
       // live wire: narration rides text, the split tag completes
       assert.ok(
         ev.some(
-          (e) =>
+          e =>
             e.event === 'content_block_delta' &&
             (e.data.delta as { type: string }).type === 'input_json_delta'
         )
-      )
+      );
       // an identical resend replays the RECORDED reply — narration
       // must not sit inside the unfinished tag's markup
-      const re = await sseEvents(await post(body))
+      const re = await sseEvents(await post(body));
       const tu = re.find(
-        (e) =>
+        e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
-      )
-      assert.ok(tu, 'the replay still carries the tool_use — not broken markup')
+      );
+      assert.ok(tu, 'the replay still carries the tool_use — not broken markup');
       // the exact replayed text: narration in place, no markup shards —
       // a mid-tag corruption splits the literal into <tool_ca…ll>, which
       // a doesNotMatch on the full tag would evade
-      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end'])
-      assert.equal(stopReason(re), 'tool_use')
+      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end']);
+      assert.equal(stopReason(re), 'tool_use');
       // one prompt total — the resend replayed, never re-ran the turn
-      assert.equal(fake.prompts.length, 1)
+      assert.equal(fake.prompts.length, 1);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a failed streamed turn lands as an in-stream error event', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
-    const { r, close } = await postStream(fake)
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' });
+    const { r, close } = await postStream(fake);
     try {
       // headers commit at turn start — the failure can only travel
       // as an SSE event on the open stream
-      assert.equal(r.status, 200)
-      const ev = await sseEvents(r)
-      const err = ev.find((e) => e.event === 'error')
-      assert.ok(err, 'error event present')
+      assert.equal(r.status, 200);
+      const ev = await sseEvents(r);
+      const err = ev.find(e => e.event === 'error');
+      assert.ok(err, 'error event present');
       // the wrapped acp failure is availability-class — the anthropic
       // wire's own name for a backend outage mid-stream
-      assert.equal((err.data.error as { type: string }).type, 'overloaded_error')
-      assert.match((err.data.error as { message: string }).message, /conductor/)
+      assert.equal((err.data.error as { type: string }).type, 'overloaded_error');
+      assert.match((err.data.error as { message: string }).message, /conductor/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('the conductor surfaces the live link terminal registry (bro-eua0d)', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x' })
-    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } });
     // no request yet — the pooled link doesn't exist, so no registry
-    assert.equal(proxy.terminals(), undefined)
-    const { url, close } = await listen(deps({ provider: proxy }))
+    assert.equal(proxy.terminals(), undefined);
+    const { url, close } = await listen(deps({ provider: proxy }));
     try {
       const r = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { ...auth, 'content-type': 'application/json' },
         body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
-      assert.equal(r.status, 200)
-      const reg = proxy.terminals()
-      assert.ok(reg, 'the pooled acp link carries its terminal registry')
+      });
+      assert.equal(r.status, 200);
+      const reg = proxy.terminals();
+      assert.ok(reg, 'the pooled acp link carries its terminal registry');
       // the registry is the live one — an agent terminal/create call
       // over the link lands in it
       const { terminalId } = await reg.create({
         params: { command: 'sh', args: ['-c', 'echo via-conductor'], env: [] },
-      } as never)
+      } as never);
       for (let i = 0; i < 100; i++) {
-        const snap = await reg.output({ params: { terminalId } } as never)
+        const snap = await reg.output({ params: { terminalId } } as never);
         if (snap.output.includes('via-conductor')) {
-          break
+          break;
         }
-        await new Promise((r2) => setTimeout(r2, 10))
+        await new Promise(r2 => setTimeout(r2, 10));
       }
-      const snap = await reg.output({ params: { terminalId } } as never)
-      assert.match(snap.output, /via-conductor/)
-      await reg.release({ params: { terminalId } } as never)
+      const snap = await reg.output({ params: { terminalId } } as never);
+      assert.match(snap.output, /via-conductor/);
+      await reg.release({ params: { terminalId } } as never);
     } finally {
-      await close()
+      await close();
     }
-  })
-})
+  });
+});
 
 // bro-whn25 — the messages API is stateless but a claude client resends
 // full history anyway, so the conductor retains one acp session per
@@ -1095,7 +1178,7 @@ describe('serve /v1/* — retained acp sessions', () => {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json', ...opts.headers },
       body: JSON.stringify({ model: opts.model, messages, stream: false }),
-    })
+    });
 
   /** Every case needs the same listener over a scripted acp peer — the
    *  helper carries the boilerplate so each test is just the posts. */
@@ -1103,96 +1186,90 @@ describe('serve /v1/* — retained acp sessions', () => {
     fakeOpts: Parameters<typeof fakeAcpAgent>[0],
     fn: (ctx: { fake: ReturnType<typeof fakeAcpAgent>; url: string }) => Promise<void>
   ): Promise<void> => {
-    const fake = fakeAcpAgent(fakeOpts)
+    const fake = fakeAcpAgent(fakeOpts);
     const { url, close } = await listen(
       deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    );
     try {
-      await fn({ fake, url })
+      await fn({ fake, url });
     } finally {
-      await close()
+      await close();
     }
-  }
+  };
 
   test('a continued conversation reuses one session and sends only the delta', () =>
     withConductor({ replyText: 'r1', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
-      const t1 = await post(url, [{ role: 'user', content: 'first' }])
-      assert.equal(t1.status, 200)
+      const t1 = await post(url, [{ role: 'user', content: 'first' }]);
+      assert.equal(t1.status, 200);
       // the client resends full history — own echo included
       const t2 = await post(url, [
         { role: 'user', content: 'first' },
         { role: 'assistant', content: 'r1' },
         { role: 'user', content: 'second' },
-      ])
-      assert.equal(t2.status, 200)
+      ]);
+      assert.equal(t2.status, 200);
       const t3 = await post(url, [
         { role: 'user', content: 'first' },
         { role: 'assistant', content: 'r1' },
         { role: 'user', content: 'second' },
         { role: 'assistant', content: 'r2' },
         { role: 'user', content: 'third' },
-      ])
-      assert.equal(t3.status, 200)
+      ]);
+      assert.equal(t3.status, 200);
       // one session/new carried all three turns
-      assert.equal(fake.sessions.length, 1)
-      assert.equal(fake.prompts.length, 3)
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 3);
       // turn 2 saw only its delta — the prior turns are session context
-      assert.match(fake.prompts[1] ?? '', /second/)
-      assert.doesNotMatch(fake.prompts[1] ?? '', /first/)
-      assert.match(fake.prompts[2] ?? '', /third/)
-      assert.doesNotMatch(fake.prompts[2] ?? '', /first|second/)
+      assert.match(fake.prompts[1] ?? '', /second/);
+      assert.doesNotMatch(fake.prompts[1] ?? '', /first/);
+      assert.match(fake.prompts[2] ?? '', /third/);
+      assert.doesNotMatch(fake.prompts[2] ?? '', /first|second/);
       // the internal f: fingerprint is NEVER echoed — a client must not
       // pin back into the fingerprint namespace
-      assert.equal(t1.headers.get('x-bro-session'), null)
-    }))
+      assert.equal(t1.headers.get('x-bro-session'), null);
+    }));
 
   test('an identical resend replays the reply without a new turn', () =>
     withConductor(
       { replyText: 'same answer', configOptions: [MODEL_OPTION] },
       async ({ fake, url }) => {
-        const msgs = [{ role: 'user', content: 'ping' }]
-        assert.equal((await post(url, msgs)).status, 200)
-        const retry = await post(url, msgs)
-        assert.equal(retry.status, 200)
-        assert.equal((await retry.json()).content[0].text, 'same answer')
+        const msgs = [{ role: 'user', content: 'ping' }];
+        assert.equal((await post(url, msgs)).status, 200);
+        const retry = await post(url, msgs);
+        assert.equal(retry.status, 200);
+        assert.equal((await retry.json()).content[0].text, 'same answer');
         // a retry never reaches the agent — one prompt total
-        assert.equal(fake.prompts.length, 1)
-        assert.equal(fake.sessions.length, 1)
+        assert.equal(fake.prompts.length, 1);
+        assert.equal(fake.sessions.length, 1);
       }
-    ))
+    ));
 
   test('x-bro-session keys explicitly; different pins get different sessions', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
-      const msgs = [{ role: 'user', content: 'same first turn' }]
-      const ra = await post(url, msgs, { headers: { 'x-bro-session': 'a' } })
-      assert.equal(ra.status, 200)
+      const msgs = [{ role: 'user', content: 'same first turn' }];
+      const ra = await post(url, msgs, { headers: { 'x-bro-session': 'a' } });
+      assert.equal(ra.status, 200);
       // a client pin is echoed back for the client to confirm
-      assert.equal(ra.headers.get('x-bro-session'), 'h:a')
-      assert.equal(
-        (await post(url, msgs, { headers: { 'x-bro-session': 'b' } })).status,
-        200
-      )
+      assert.equal(ra.headers.get('x-bro-session'), 'h:a');
+      assert.equal((await post(url, msgs, { headers: { 'x-bro-session': 'b' } })).status, 200);
       // identical bodies, different pins — two sessions, no replay
-      assert.equal(fake.sessions.length, 2)
-      assert.equal(fake.prompts.length, 2)
+      assert.equal(fake.sessions.length, 2);
+      assert.equal(fake.prompts.length, 2);
       // pin a keeps its session across a real continuation
       const more = [
         { role: 'user', content: 'same first turn' },
         { role: 'assistant', content: 'x' },
         { role: 'user', content: 'more' },
-      ]
-      assert.equal(
-        (await post(url, more, { headers: { 'x-bro-session': 'a' } })).status,
-        200
-      )
-      assert.equal(fake.sessions.length, 2)
-      assert.match(fake.prompts[2] ?? '', /more/)
-    }))
+      ];
+      assert.equal((await post(url, more, { headers: { 'x-bro-session': 'a' } })).status, 200);
+      assert.equal(fake.sessions.length, 2);
+      assert.match(fake.prompts[2] ?? '', /more/);
+    }));
 
   test('an edited prefix under a pinned key evicts and restarts', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
-      const pin = { headers: { 'x-bro-session': 's' } }
-      assert.equal((await post(url, [{ role: 'user', content: 'orig' }], pin)).status, 200)
+      const pin = { headers: { 'x-bro-session': 's' } };
+      assert.equal((await post(url, [{ role: 'user', content: 'orig' }], pin)).status, 200);
       // the client rewrote history — the stored prefix proof fails
       const r = await post(
         url,
@@ -1202,28 +1279,28 @@ describe('serve /v1/* — retained acp sessions', () => {
           { role: 'user', content: 'next' },
         ],
         pin
-      )
-      assert.equal(r.status, 200)
+      );
+      assert.equal(r.status, 200);
       // a fresh session got the FULL body, not a delta
-      assert.equal(fake.sessions.length, 2)
-      assert.match(fake.prompts[1] ?? '', /EDITED/)
-      assert.match(fake.prompts[1] ?? '', /next/)
-    }))
+      assert.equal(fake.sessions.length, 2);
+      assert.match(fake.prompts[1] ?? '', /EDITED/);
+      assert.match(fake.prompts[1] ?? '', /next/);
+    }));
 
   test('a differing model mid-conversation re-pins the live session', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
-      const pin = { headers: { 'x-bro-session': 'pin' } }
-      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200)
+      const pin = { headers: { 'x-bro-session': 'pin' } };
+      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200);
       const cont = [
         { role: 'user', content: 'a' },
         { role: 'assistant', content: 'x' },
         { role: 'user', content: 'b' },
-      ]
-      assert.equal((await post(url, cont, { ...pin, model: 'dv-acp/swe-y' })).status, 200)
+      ];
+      assert.equal((await post(url, cont, { ...pin, model: 'dv-acp/swe-y' })).status, 200);
       // same session, the new pin applied on it
-      assert.equal(fake.sessions.length, 1)
-      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
-    }))
+      assert.equal(fake.sessions.length, 1);
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }]);
+    }));
 
   test('histories differing only in image data never collide', () =>
     withConductor({ replyText: 'x', imageCapable: true }, async ({ fake, url }) => {
@@ -1235,38 +1312,41 @@ describe('serve /v1/* — retained acp sessions', () => {
             { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
           ],
         },
-      ]
+      ];
       // serTurn collapses both to `[image]` — the fingerprint must
       // still tell them apart (codeant #569)
-      assert.equal((await post(url, img('aGVsbG8='))).status, 200)
-      assert.equal((await post(url, img('d29ybGQ='))).status, 200)
-      assert.equal(fake.sessions.length, 2)
-      assert.equal(fake.prompts.length, 2)
-    }))
+      assert.equal((await post(url, img('aGVsbG8='))).status, 200);
+      assert.equal((await post(url, img('d29ybGQ='))).status, 200);
+      assert.equal(fake.sessions.length, 2);
+      assert.equal(fake.prompts.length, 2);
+    }));
 
   test('a resend pinning a different model re-pins without a new turn', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
-      const pin = { headers: { 'x-bro-session': 's' } }
-      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200)
+      const pin = { headers: { 'x-bro-session': 's' } };
+      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200);
       // same history, new model pin — the session re-pins and the
       // recorded reply replays; no duplicate turn reaches the agent
-      const r = await post(url, [{ role: 'user', content: 'a' }], { ...pin, model: 'dv-acp/swe-y' })
-      assert.equal(r.status, 200)
-      assert.equal(fake.sessions.length, 1)
-      assert.equal(fake.prompts.length, 1)
-      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
-    }))
+      const r = await post(url, [{ role: 'user', content: 'a' }], {
+        ...pin,
+        model: 'dv-acp/swe-y',
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 1);
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }]);
+    }));
 
   test('a failed turn evicts — the retry opens a fresh session', () =>
     withConductor({ replyText: 'x', failPrompt: 'generic' }, async ({ fake, url }) => {
-      const pin = { headers: { 'x-bro-session': 's' } }
-      const turn = { role: 'user', content: 'a' }
-      assert.equal((await post(url, [turn], pin)).status, 529)
-      assert.equal((await post(url, [turn], pin)).status, 529)
+      const pin = { headers: { 'x-bro-session': 's' } };
+      const turn = { role: 'user', content: 'a' };
+      assert.equal((await post(url, [turn], pin)).status, 529);
+      assert.equal((await post(url, [turn], pin)).status, 529);
       // each attempt opened (and lost) its own session — a poisoned
       // session is never implicitly retried
-      assert.equal(fake.sessions.length, 2)
-    }))
+      assert.equal(fake.sessions.length, 2);
+    }));
 
   test('a claude [1m] context suffix resolves to the base model pin', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
@@ -1274,41 +1354,41 @@ describe('serve /v1/* — retained acp sessions', () => {
       // client-side context opt-in, not a different catalog model
       const r = await post(url, [{ role: 'user', content: 'a' }], {
         model: 'dv-acp/swe-y[1m]',
-      })
-      assert.equal(r.status, 200)
-      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
-    }))
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }]);
+    }));
 
   test('dispose() tears down the pooled transport — the shutdown path the exit hook cannot reach', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } });
     // an unused pool — dispose before the first turn must not throw
-    proxy.dispose()
-    const { url, close } = await listen(deps({ provider: proxy }))
+    proxy.dispose();
+    const { url, close } = await listen(deps({ provider: proxy }));
     try {
       // disposed-before-link: the resolve guard kills the fresh peer on
       // arrival — the request reports unavailable, never a half-dead 200
-      const r1 = await post(url, [{ role: 'user', content: 'a' }])
-      assert.notEqual(r1.status, 200)
-      await r1.text()
+      const r1 = await post(url, [{ role: 'user', content: 'a' }]);
+      assert.notEqual(r1.status, 200);
+      await r1.text();
     } finally {
-      await close()
+      await close();
     }
 
     // live pool: a turn first, then dispose — the next request must not
     // silently succeed on the dead transport
-    const fake2 = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const proxy2 = conductorProxy(CFG, { acp: { peer: fake2.app } })
-    const { url: url2, close: close2 } = await listen(deps({ provider: proxy2 }))
+    const fake2 = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    const proxy2 = conductorProxy(CFG, { acp: { peer: fake2.app } });
+    const { url: url2, close: close2 } = await listen(deps({ provider: proxy2 }));
     try {
-      assert.equal((await post(url2, [{ role: 'user', content: 'a' }])).status, 200)
-      proxy2.dispose()
-      proxy2.dispose() // idempotent — double-dispose is not an error
-      const r2 = await post(url2, [{ role: 'user', content: 'a' }])
-      assert.notEqual(r2.status, 200)
-      await r2.text()
+      assert.equal((await post(url2, [{ role: 'user', content: 'a' }])).status, 200);
+      proxy2.dispose();
+      proxy2.dispose(); // idempotent — double-dispose is not an error
+      const r2 = await post(url2, [{ role: 'user', content: 'a' }]);
+      assert.notEqual(r2.status, 200);
+      await r2.text();
     } finally {
-      await close2()
+      await close2();
     }
 
     // a link still mid-handshake holds no live peer — dispose aborts
@@ -1317,88 +1397,95 @@ describe('serve /v1/* — retained acp sessions', () => {
     const hanging = agent({ name: 'hang' }).onRequest(
       'initialize',
       () => new Promise<never>(() => {})
-    )
-    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } })
-    const { url: url3, close: close3 } = await listen(deps({ provider: proxy3 }))
+    );
+    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } });
+    const { url: url3, close: close3 } = await listen(deps({ provider: proxy3 }));
     try {
-      const t0 = Date.now()
-      const inflight = post(url3, [{ role: 'user', content: 'a' }])
-      await new Promise((r) => setTimeout(r, 50))
-      proxy3.dispose()
-      const r3 = await inflight
-      assert.notEqual(r3.status, 200)
-      await r3.text()
+      const t0 = Date.now();
+      const inflight = post(url3, [{ role: 'user', content: 'a' }]);
+      await new Promise(r => setTimeout(r, 50));
+      proxy3.dispose();
+      const r3 = await inflight;
+      assert.notEqual(r3.status, 200);
+      await r3.text();
       assert.ok(
         Date.now() - t0 < CFG.timeoutMs,
         'the pending open waited out the request deadline'
-      )
+      );
     } finally {
-      await close3()
+      await close3();
     }
-  })
-})
+  });
+});
 
 // bro-bvipw.1 — the anthropic surface beyond the happy path:
 // tool_choice steers the contract, stop_sequences truncate the wire,
 // errors classify into the wire's own taxonomy, and a held turn keeps
 // the stream alive with pings.
 describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive', () => {
-  const tools = [
-    { name: 'ls', description: 'list', input_schema: { type: 'object' } },
-  ]
+  const tools = [{ name: 'ls', description: 'list', input_schema: { type: 'object' } }];
   const withTools = (choice?: unknown) => ({
     messages: [{ role: 'user', content: 'go' }],
     tools,
     tool_choice: choice,
     stream: false,
-  })
+  });
 
   // one boot + one prompt assertion per row — the contract text each
   // tool_choice mode produces (or withholds)
   const choiceCases: { name: string; choice: unknown; want?: RegExp; notWant?: string }[] = [
-    { name: 'auto leaves the contract alone', choice: { type: 'auto' }, want: /<tools>/, notWant: 'MUST' },
+    {
+      name: 'auto leaves the contract alone',
+      choice: { type: 'auto' },
+      want: /<tools>/,
+      notWant: 'MUST',
+    },
     {
       name: 'any appends a must-call line to the contract',
       choice: { type: 'any' },
       want: /<tools>[\s\S]*MUST respond with a tool call/,
     },
-    { name: 'tool names the required call', choice: { type: 'tool', name: 'ls' }, want: /MUST call the tool "ls"/ },
+    {
+      name: 'tool names the required call',
+      choice: { type: 'tool', name: 'ls' },
+      want: /MUST call the tool "ls"/,
+    },
     { name: 'none withholds the tools contract', choice: { type: 'none' }, notWant: '<tools>' },
-  ]
+  ];
   for (const c of choiceCases) {
     test(`tool_choice ${c.name}`, async () => {
-      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-      const { close } = await postMessages(fake, withTools(c.choice))
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+      const { close } = await postMessages(fake, withTools(c.choice));
       try {
-        const prompt = fake.prompts[0] ?? ''
-        if (c.want !== undefined) assert.match(prompt, c.want)
-        if (c.notWant !== undefined) assert.ok(!prompt.includes(c.notWant), prompt)
+        const prompt = fake.prompts[0] ?? '';
+        if (c.want !== undefined) assert.match(prompt, c.want);
+        if (c.notWant !== undefined) assert.ok(!prompt.includes(c.notWant), prompt);
       } finally {
-        await close()
+        await close();
       }
-    })
+    });
   }
 
   test('stop_sequences cut streamed text at a marker split across deltas', async () => {
     const fake = fakeAcpAgent({
       updates: chunks('hello ST', 'OP world'),
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'x' }],
       stop_sequences: ['STOP'],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
-      assert.equal(textDeltas(ev).join(''), 'hello ')
-      assert.equal(stopReason(ev), 'stop_sequence')
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_sequence: string }).stop_sequence, 'STOP')
+      const ev = await sseEvents(r);
+      assert.equal(textDeltas(ev).join(''), 'hello ');
+      assert.equal(stopReason(ev), 'stop_sequence');
+      const md = ev.find(e => e.event === 'message_delta');
+      assert.equal((md?.data.delta as { stop_sequence: string }).stop_sequence, 'STOP');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a stop hit mutes later tool narration — nothing emits past the cut', async () => {
     const fake = fakeAcpAgent({
@@ -1414,134 +1501,137 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
         ...chunks(' trailing'),
       ],
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'x' }],
       stop_sequences: ['STOP'],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
-      assert.equal(textDeltas(ev).join(''), 'hello ')
-      assert.equal(stopReason(ev), 'stop_sequence')
+      const ev = await sseEvents(r);
+      assert.equal(textDeltas(ev).join(''), 'hello ');
+      assert.equal(stopReason(ev), 'stop_sequence');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('stop_sequences truncate the buffered reply and report stop_sequence', async () => {
-    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] });
     const { r, close } = await postMessages(fake, {
       messages: [{ role: 'user', content: 'x' }],
       stop_sequences: ['MARK'],
       stream: false,
-    })
+    });
     try {
-      const body = await r.json()
-      assert.equal(body.stop_reason, 'stop_sequence')
-      assert.equal(body.stop_sequence, 'MARK')
-      assert.equal(body.content[0].text, 'abc ')
+      const body = await r.json();
+      assert.equal(body.stop_reason, 'stop_sequence');
+      assert.equal(body.stop_sequence, 'MARK');
+      assert.equal(body.content[0].text, 'abc ');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('an absent stop_sequence holds nothing back — tail flushes whole', async () => {
     const fake = fakeAcpAgent({
       updates: chunks('end without ma', 'rker'),
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(fake, {
       messages: [{ role: 'user', content: 'x' }],
       stop_sequences: ['NOMATCH'],
       stream: true,
-    })
+    });
     try {
-      const ev = await sseEvents(r)
-      assert.equal(textDeltas(ev).join(''), 'end without marker')
+      const ev = await sseEvents(r);
+      assert.equal(textDeltas(ev).join(''), 'end without marker');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a missing messages array answers 400 invalid_request_error', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x' })
-    const { r, close } = await postMessages(fake, { model: 'x', stream: false })
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const { r, close } = await postMessages(fake, { model: 'x', stream: false });
     try {
-      assert.equal(r.status, 400)
-      const body = await r.json()
-      assert.equal(body.error.type, 'invalid_request_error')
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.type, 'invalid_request_error');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a rate-limited backend answers 429 + Retry-After', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' })
-    const { r, close } = await postMessages(fake)
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' });
+    const { r, close } = await postMessages(fake);
     try {
-      assert.equal(r.status, 429)
-      assert.ok(r.headers.get('retry-after') !== null)
-      const body = await r.json()
-      assert.equal(body.error.type, 'rate_limit_error')
+      assert.equal(r.status, 429);
+      assert.ok(r.headers.get('retry-after') !== null);
+      const body = await r.json();
+      assert.equal(body.error.type, 'rate_limit_error');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a held stream emits keepalive pings until the turn lands', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => {
-      release = resolve
-    })
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
     const fake = fakeAcpAgent({
       updates: chunks('after'),
       holdEnd: () => gate,
       configOptions: [MODEL_OPTION],
-    })
+    });
     const { r, close } = await postStream(
       fake,
       { messages: [{ role: 'user', content: 'x' }], stream: true },
       { ...CFG, keepaliveMs: 40 }
-    )
+    );
     try {
-      await new Promise((resolve) => setTimeout(resolve, 150))
-      release()
-      const ev = await sseEvents(r)
-      assert.ok(ev.some((e) => e.event === 'ping'), 'ping event present')
-      assert.equal(stopReason(ev), 'end_turn')
+      await new Promise(resolve => setTimeout(resolve, 150));
+      release();
+      const ev = await sseEvents(r);
+      assert.ok(
+        ev.some(e => e.event === 'ping'),
+        'ping event present'
+      );
+      assert.equal(stopReason(ev), 'end_turn');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a streamed stop_sequence hit still records the cut reply for replay', async () => {
-    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
-    const { post, close } = await boot(fake)
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
     try {
       const body = {
         messages: [{ role: 'user', content: 'x' }],
         stop_sequences: ['MARK'],
         stream: true,
-      }
-      const ev = await sseEvents(await post(body))
-      assert.equal(textDeltas(ev).join(''), 'abc ')
+      };
+      const ev = await sseEvents(await post(body));
+      assert.equal(textDeltas(ev).join(''), 'abc ');
       // the resend replays the recorded reply — the cut text, not ''
-      const re = await sseEvents(await post(body))
-      assert.equal(textDeltas(re).join(''), 'abc ')
-      assert.equal(stopReason(re), 'stop_sequence')
+      const re = await sseEvents(await post(body));
+      assert.equal(textDeltas(re).join(''), 'abc ');
+      assert.equal(stopReason(re), 'stop_sequence');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   // bro-vfbyc — a trimmed reply leaves the retained session holding
   // text the client never received: it may replay, never continue.
   test('a stop-cut turn retires the session — the trimmed echo reseeds fresh', async () => {
-    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
-    const { post, close } = await boot(fake)
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
     try {
-      const stop_sequences = ['MARK']
+      const stop_sequences = ['MARK'];
       assert.equal(
         (
           await post({
@@ -1551,7 +1641,7 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
           })
         ).status,
         200
-      )
+      );
       const cont = await post({
         messages: [
           { role: 'user', content: 'first' },
@@ -1561,79 +1651,243 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
         ],
         stop_sequences,
         stream: false,
-      })
-      assert.equal(cont.status, 200)
+      });
+      assert.equal(cont.status, 200);
       // a NEW session re-serialized the resent history whole — the
       // trimmed echo included — so its context IS the client's view
-      assert.equal(fake.sessions.length, 2)
-      assert.match(fake.prompts[1] ?? '', /first/)
-      assert.match(fake.prompts[1] ?? '', /abc /)
-      assert.match(fake.prompts[1] ?? '', /second/)
+      assert.equal(fake.sessions.length, 2);
+      assert.match(fake.prompts[1] ?? '', /first/);
+      assert.match(fake.prompts[1] ?? '', /abc /);
+      assert.match(fake.prompts[1] ?? '', /second/);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a cross-chunk stop hit records the streamed cut, not a full-text re-match', async () => {
     const fake = fakeAcpAgent({
       updates: chunks('abc', 'd'),
       configOptions: [MODEL_OPTION],
-    })
-    const { post, close } = await boot(fake)
+    });
+    const { post, close } = await boot(fake);
     try {
       const body = {
         messages: [{ role: 'user', content: 'x' }],
         stop_sequences: ['abcd', 'bc'],
         stream: true,
-      }
+      };
       // 'bc' completes first in stream order — the cut is 'a', even
       // though 'abcd' sits earlier in the settled text
-      const ev = await sseEvents(await post(body))
-      assert.equal(textDeltas(ev).join(''), 'a')
-      assert.equal(stopReason(ev), 'stop_sequence')
-      const replay = await sseEvents(await post(body))
-      assert.equal(textDeltas(replay).join(''), 'a')
-      assert.equal(stopReason(replay), 'stop_sequence')
+      const ev = await sseEvents(await post(body));
+      assert.equal(textDeltas(ev).join(''), 'a');
+      assert.equal(stopReason(ev), 'stop_sequence');
+      const replay = await sseEvents(await post(body));
+      assert.equal(textDeltas(replay).join(''), 'a');
+      assert.equal(stopReason(replay), 'stop_sequence');
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('changed stop_sequences on identical history take a fresh turn, not a replay', async () => {
-    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
-    const { post, close } = await boot(fake)
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
     try {
       const postSeq = (stop_sequences: string[]) =>
         post({
           messages: [{ role: 'user', content: 'x' }],
           stop_sequences,
           stream: false,
-        })
-      const first = await (await postSeq(['MARK'])).json()
-      assert.equal(first.content[0].text, 'abc ')
+        });
+      const first = await (await postSeq(['MARK'])).json();
+      assert.equal(first.content[0].text, 'abc ');
       // same history, different markers — the recorded reply must not
       // replay; a fresh turn runs and answers under the new stops
-      const second = await (await postSeq(['NOMATCH'])).json()
-      assert.equal(second.content[0].text, 'abc MARK tail')
-      assert.equal(fake.prompts.length, 2)
+      const second = await (await postSeq(['NOMATCH'])).json();
+      assert.equal(second.content[0].text, 'abc MARK tail');
+      assert.equal(fake.prompts.length, 2);
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
   test('a non-array stop_sequences answers 400 invalid_request_error', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const { post, close } = await boot(fake)
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
     try {
       const r = await post({
         messages: [{ role: 'user', content: 'x' }],
         stop_sequences: 'STOP',
-      })
-      assert.equal(r.status, 400)
-      const body = await r.json()
-      assert.equal(body.error.type, 'invalid_request_error')
+      });
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.type, 'invalid_request_error');
     } finally {
-      await close()
+      await close();
     }
-  })
-})
+  });
+});
+
+// --- the fast lane (bro-6asnu) ------------------------------------------
+// A classifier-shaped /v1/messages call byte-forwards to the direct
+// upstream instead of paying session/new.
+
+/** A canned Messages upstream — records every forwarded call and
+ *  answers a fixed anthropic reply; stands in for api.anthropic.com. */
+async function upstreamStub(): Promise<{
+  url: string;
+  calls: { path?: string; apiKey?: string; body: { model?: string } }[];
+  close: () => Promise<void>;
+}> {
+  const calls: { path?: string; apiKey?: string; body: { model?: string } }[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', c => {
+      raw += c;
+    });
+    req.on('end', () => {
+      calls.push({
+        path: req.url,
+        apiKey: req.headers['x-api-key'] as string | undefined,
+        body: JSON.parse(raw === '' ? '{}' : raw) as { model?: string },
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'msg_up',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'upstream-answer' }],
+          model: 'upstream-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 7, output_tokens: 3 },
+        })
+      );
+    });
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    calls,
+    close: () => new Promise<void>(r => server.close(() => r())),
+  };
+}
+
+describe('conductor fast lane (bro-6asnu)', () => {
+  /** fast-lane cfg pointing at the test's stub upstream. */
+  const fastCfg = (upstream: string, model?: string): ConductorConfig => ({
+    ...CFG,
+    fast: { upstream, apiKey: 'up-key', model, maxTokens: 2048 },
+  });
+
+  const CLASSIFIER_BODY = {
+    model: 'dv-acp/swe-2-max',
+    max_tokens: 512,
+    messages: [
+      {
+        role: 'user',
+        content:
+          'Evaluate whether this tool call is safe: {"name":"Bash","input":{"command":"rm x"}}',
+      },
+    ],
+    stream: false,
+  };
+
+  test('a classifier-shaped call byte-forwards upstream — no session/new', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'session answer' });
+    const { r, close } = await postMessages(fake, CLASSIFIER_BODY, fastCfg(up.url));
+    try {
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'upstream-answer');
+      // the whole call rode the upstream — credential swapped, path and
+      // model forwarded verbatim (no pin configured)
+      assert.equal(up.calls.length, 1);
+      assert.equal(up.calls[0]?.path, '/v1/messages');
+      assert.equal(up.calls[0]?.apiKey, 'up-key');
+      assert.equal(up.calls[0]?.body.model, 'dv-acp/swe-2-max');
+      // and no acp session was paid
+      assert.equal(fake.sessions.length, 0);
+      assert.equal(fake.prompts.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('fast.model rewrites the forwarded body — the inherited-lane fix', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const { r, close } = await postMessages(
+      fake,
+      CLASSIFIER_BODY,
+      fastCfg(up.url, 'claude-haiku-4-5')
+    );
+    try {
+      assert.equal(r.status, 200);
+      // the conductor-only id never reaches the upstream
+      assert.equal(up.calls[0]?.body.model, 'claude-haiku-4-5');
+      assert.equal(fake.sessions.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a tool-carrying call conducts even inside the token cap', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        tools: [{ name: 'Bash', description: 'run', input_schema: {} }],
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a session-scale cap conducts — compaction stays on the session lane', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 32_000,
+        messages: [{ role: 'user', content: 'summarize the whole thread' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('an unarmed lane still conducts the fast-shaped call', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake); // CFG carries no fast lane
+    try {
+      const r = await post({ ...CLASSIFIER_BODY, model: undefined });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'agent answer');
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+    }
+  });
+});
