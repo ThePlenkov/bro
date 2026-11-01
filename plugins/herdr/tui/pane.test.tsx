@@ -151,12 +151,29 @@ describe('the Solid session pane', () => {
           },
         ]);
       }
+      // a live call lands last — the strip's in-flight row
+      pane.writer.apply([
+        {
+          op: 'append',
+          item: {
+            id: 99,
+            kind: 'tool',
+            toolCallId: 't99',
+            title: 'live-call',
+            status: 'live',
+            bodyLanded: false,
+            collapsed: false,
+            foldTouched: false,
+            content: [],
+          },
+        },
+      ]);
       await setup.flush();
       const frame = await setup.captureCharFrame();
-      // the strip holds only the tail — the front rows retired and
-      // were handed to the printer, never clipped away silently
-      assert.ok(printed.length >= 15, `expected ≥15 retired, got ${printed.length}`);
-      assert.match(frame, /grep p24/);
+      // every settled row retired — the strip is in-flight rows
+      // only; retired rows went to the printer, never clipped
+      assert.ok(printed.length >= 25, `expected ≥25 retired, got ${printed.length}`);
+      assert.match(frame, /live-call/);
       assert.doesNotMatch(frame, /grep p0\b/);
     } finally {
       await setup.dispose();
@@ -227,5 +244,82 @@ describe('the Solid session pane', () => {
     } finally {
       await p.dispose();
     }
+  });
+
+  test('a long prompt folds by default and expands on toggle', async () => {
+    const p = await mount();
+    try {
+      const text = Array.from({ length: 20 }, (_, i) => `row ${i} **b${i}**`).join('\n');
+      p.model.feed({ kind: 'prompt', text });
+      await p.flush();
+      let frame = await p.frame();
+      // folded: a +N lines summary, never the raw block
+      assert.match(frame, /\+\d+ lines/);
+      assert.doesNotMatch(frame, /row 15/);
+
+      // select lands on it (foldable rows join the walk), toggle pins it open
+      p.writer.select(1);
+      p.writer.toggle();
+      await p.flush();
+      frame = await p.frame();
+      assert.match(frame, /row 14/);
+      // and it is REAL markdown — the literal markers never paint
+      assert.doesNotMatch(frame, /\*\*b14\*\*/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('a settled row flushes to scrollback even under the strip budget', async () => {
+    const { mountPane } = await loadPane();
+    const setup = await createTestRenderer({ width: 60, height: 20 });
+    const printed: string[] = [];
+    const pane = await mountPane({
+      renderer: setup.renderer,
+      meta: { worktree: '/tmp/wt' },
+      onRetire: items => {
+        for (const it of items) printed.push(...(it.kind === 'tool' ? [it.title] : []));
+      },
+    });
+    try {
+      pane.writer.apply([
+        {
+          op: 'append',
+          item: {
+            id: 1,
+            kind: 'tool',
+            toolCallId: 't1',
+            title: 'done-call',
+            status: 'completed',
+            bodyLanded: true,
+            collapsed: false,
+            foldTouched: false,
+            content: [],
+          },
+        },
+      ]);
+      await setup.flush();
+      // a terminal call settles immediately — it prints rather than
+      // idling in the live strip waiting for the budget to fill
+      assert.deepEqual(printed, ['done-call']);
+    } finally {
+      await setup.dispose();
+    }
+  });
+
+  test('printLines conceals markdown and folds long text', async () => {
+    const { printLines } = await import('./view.ts');
+    const text = ['**bold** and [x](https://u)', '<details>', ...Array(20).fill('l')].join('\n');
+    const folded = printLines({
+      id: 1,
+      kind: 'prompt',
+      text,
+      collapsed: true,
+    });
+    assert.match(folded.join('\n'), /\+\d+ lines/);
+    const open = printLines({ id: 1, kind: 'prompt', text });
+    const joined = open.join('\n');
+    assert.match(joined, /bold and x \(https:\/\/u\)/);
+    assert.doesNotMatch(joined, /\*\*|<details>/);
   });
 });

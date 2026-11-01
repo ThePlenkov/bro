@@ -776,17 +776,37 @@ restored visible paint but silently CLIPPED every row past the
 viewport (a 72-row replay yielded exactly 48 lines, 50 of 70 tool
 rows lost — nothing ever reaches herdr scrollback). The final
 shape is the designed mechanism: `screenMode: 'split-footer'` +
-`footerHeight: TAIL_BUDGET + 3` keeps a bounded live tail plus the
-identity/keys chrome as renderables, while `createPane` retires
-oldest items once the tail exceeds `TAIL_BUDGET` rows and
-`main.ts` `process.stdout.write`s their `printLines()` form —
-OpenTUI captures stdout into the scroll region and herdr's native
-scrollback owns wheel/copy/select. Verified live: a 70-tool
-replay yields 148 scrollback lines (`max_offset_from_bottom`
-> 100), the mktj6 pane shows 573; prompt `┃` blocks, compact
-> `⏺ ✓` rows, and the pinned chrome all present. `pane run` does
-> NOT replace a busy pane — code changes need a fresh workspace to
-> be seen.
+`footerHeight: TAIL_BUDGET + 3` — the renderable tree is ONLY the
+footer strip (in-flight rows + the pinned ` bro: session` identity
+- keys chrome), and the feed reaches the scroll region as captured
+  stdout writes. `createPane` retires a PREFIX of the item order:
+  settled items (`isSettled` — terminal tools, closed text blocks)
+  flush the moment they settle, and any prefix past `TAIL_BUDGET`
+  live rows follows. Prefix-only eviction keeps scrollback order
+  identical to the feed; the selected item and the still-open tail
+  chunk always stay live. Verified live: a 70-tool replay yields
+  148 scrollback lines (`max_offset_from_bottom` > 100), mktj6 573,
+  the l8c4f.16 live pane 1737; prompt `┃` blocks, compact `⏺ ✓`
+  rows, and the pinned chrome all present. `pane run` does NOT
+  replace a busy pane — code changes need a fresh workspace to be
+  seen.
+
+**Addendum 20 — folds + markdown integrity**: every text-ish block
+longer than `FOLD_TEXT_AT` (8) source lines folds by default to a
+`first line · +N lines` summary (prompt, message, thought, note —
+`TextItem.collapsed`, same `foldTouched`/selection-peek grammar as
+tool cards; the j/k walk now includes foldable text rows). Enter/c
+expands — prompts, prose, thoughts and notes render through
+`<markdown conceal streaming>` (fences highlight via the shared
+tree-sitter client); a pinned-open tool body renders its full
+content as `toolBodyMd()` markdown (diffs become ` ```diff `
+fences). The scrollback path cannot carry renderables, so
+`printLines()` runs `mdPlain()` — the plain-text `conceal`
+equivalent: `**`/`` ` ``/link syntax/HTML tags strip, links print
+`text (url)`, fence bodies keep as indented code. A folded row
+prints only its summary. Field-verified on w4W: mktj6's 458-line
+review-thread prompt paints as `┃ Prompt / +458 lines`, zero raw
+`**`/`<details>`/`<review-threads>` literals in the buffer.
 
 ## Risks
 

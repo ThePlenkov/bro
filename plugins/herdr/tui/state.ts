@@ -13,7 +13,7 @@
  * after the first eviction.
  */
 import type { Item, Op, ToolItem } from './model.ts';
-import { contentLineCount } from './view.ts';
+import { contentLineCount, isFoldable } from './view.ts';
 
 /** The header bar's live fields — what the shell knows that the
  *  items do not: whose worktree, whose session, and the LED verdict
@@ -56,9 +56,13 @@ export function emptyState(meta?: Partial<PaneMeta>, foldAll?: boolean): PaneSta
   };
 }
 
-/** The ids of the tool cards, in order — the j/k walk path. */
+/** The ids of the foldable rows, in order — the j/k walk path:
+ *  tool cards plus text blocks long enough to fold (addendum 20). */
 export function toolIds(state: PaneState): number[] {
-  return state.order.filter(id => state.byId[id]?.kind === 'tool');
+  return state.order.filter(id => {
+    const it = state.byId[id];
+    return it !== undefined && isFoldable(it);
+  });
 }
 
 /**
@@ -93,6 +97,11 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
         ) {
           item.collapsed = true;
         }
+        // Long text blocks fold by default too — a 300-line review
+        // dump never owns the screen unpinned (addendum 20).
+        if (item.kind !== 'tool' && isFoldable(item)) {
+          item.collapsed = true;
+        }
         byId[op.item.id] = item;
         order = [...order, op.item.id];
         break;
@@ -102,7 +111,15 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
         // A text op for an item the pane no longer holds (evicted
         // before the op drained) is dropped — its row is gone.
         if (item === undefined || item.kind === 'tool') break;
-        byId[op.id] = { ...item, text: op.text };
+        {
+          const next = { ...item, text: op.text };
+          // A block that grows past the fold threshold collapses —
+          // a deliberate user fold is never overridden.
+          if (next.foldTouched !== true && isFoldable(next)) {
+            next.collapsed = true;
+          }
+          byId[op.id] = next;
+        }
         break;
       }
       case 'tool': {

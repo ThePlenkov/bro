@@ -20,6 +20,7 @@ import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
+import { firstLine } from '../../../packages/providers/src/acp-render.ts';
 import {
   acpCardRows,
   acpLine,
@@ -44,10 +45,14 @@ import {
   argHead,
   cardGlyphColor,
   hhmm,
+  isFoldable,
+  isSettled,
+  mdPlain,
   rowHeight,
   sideColor,
   TAIL_BUDGET,
   toolBodyLines,
+  toolBodyMd,
 } from './view.ts';
 
 /** The store the tree renders from. */
@@ -113,22 +118,27 @@ export function createPane(
     setState(reconcile(plain, { key: null }));
   };
 
-  /** The live tail's row budget is the footer strip minus chrome;
-   *  anything pushed past it retires — the caller prints its lines
-   *  to captured stdout (scroll region → real scrollback) and the
-   *  tree evicts it. Retired rows are immutable history; the tail's
-   *  recent items keep repainting live. */
+  /** Retirement feeds the scroll region: settled items (terminal
+   *  tools, closed text blocks — isSettled) flush to captured
+   *  stdout the moment they settle, and any prefix past the live
+   *  strip's row budget follows. Only a PREFIX ever retires, so
+   *  scrollback order matches the feed's order; the selected item
+   *  and the tail item always stay live. The strip itself is just
+   *  in-flight rows plus the pinned chrome. */
   const retire = (next: PaneState): PaneState => {
     if (onRetire === undefined) return next;
+    const lastId = next.order[next.order.length - 1];
     let total = 0;
     for (const id of next.order) total += rowHeight(next.byId[id] as Item);
-    if (total <= TAIL_BUDGET) return next;
     const retired: number[] = [];
     for (const id of next.order) {
-      if (total <= TAIL_BUDGET || retired.length >= next.order.length - 1) break;
+      const it = next.byId[id] as Item;
+      if (id === next.selected) break;
+      if (!isSettled(it, id === lastId) && total <= TAIL_BUDGET) break;
       retired.push(id);
-      total -= rowHeight(next.byId[id] as Item);
+      total -= rowHeight(it);
     }
+    if (retired.length === 0) return next;
     onRetire(retired.map(id => next.byId[id] as Item));
     return applyOps(next, [{ op: 'evict', ids: retired }]);
   };
@@ -145,7 +155,7 @@ export function createPane(
       },
       toggle() {
         const item = plain.byId[plain.selected];
-        if (item === undefined || item.kind !== 'tool') return;
+        if (item === undefined || !isFoldable(item)) return;
         publish({
           ...plain,
           // foldTouched marks the user's explicit fold — the
@@ -243,7 +253,7 @@ function Spinner(props: { fg: string }) {
  *  renders dim+indented under it, capped at 3 lines then `+N more`;
  *  `(no output)` results paint nothing — one compact row per call
  *  (opencode grammar — the first demo's shape restored). */
-function ToolCard(props: { item: ToolItem; selected: boolean }) {
+function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyle }) {
   const kind = () =>
     props.item.toolKind !== undefined && props.item.toolKind !== ''
       ? ` [${props.item.toolKind}]`
@@ -253,6 +263,7 @@ function ToolCard(props: { item: ToolItem; selected: boolean }) {
     return a !== '' ? ` ${a}` : '';
   };
   const body = createMemo(() => toolBodyLines(props.item));
+  const md = createMemo(() => toolBodyMd(props.item));
   return (
     <box
       flexDirection="column"
@@ -280,26 +291,45 @@ function ToolCard(props: { item: ToolItem; selected: boolean }) {
           content={`${kind()}${argHeadSeg()}`}
         />
       </box>
+      {/* pinned open (Enter/c) — the FULL body as real markdown:
+       *  prose formats, fences highlight via tree-sitter. The
+       *  j/k selection peek keeps the ≤3-line plain preview. */}
       <Show
-        when={
-          (!props.item.collapsed || (props.selected && props.item.foldTouched !== true)) &&
-          body().lines.length > 0
+        when={!props.item.collapsed && md() !== ''}
+        fallback={
+          <Show when={props.selected && props.item.foldTouched !== true && body().lines.length > 0}>
+            <box flexDirection="column" paddingLeft={2} flexShrink={0}>
+              <For each={body().lines}>
+                {l => (
+                  <text
+                    fg={theme.muted}
+                    attributes={TextAttributes.DIM}
+                    content={l}
+                    flexShrink={0}
+                  />
+                )}
+              </For>
+              <Show when={body().more > 0}>
+                <text
+                  fg={theme.muted}
+                  attributes={TextAttributes.DIM}
+                  content={`+${body().more} more`}
+                  flexShrink={0}
+                />
+              </Show>
+            </box>
+          </Show>
         }
       >
         <box flexDirection="column" paddingLeft={2} flexShrink={0}>
-          <For each={body().lines}>
-            {l => (
-              <text fg={theme.muted} attributes={TextAttributes.DIM} content={l} flexShrink={0} />
-            )}
-          </For>
-          <Show when={body().more > 0}>
-            <text
-              fg={theme.muted}
-              attributes={TextAttributes.DIM}
-              content={`+${body().more} more`}
-              flexShrink={0}
-            />
-          </Show>
+          <markdown
+            content={md()}
+            syntaxStyle={props.syntax}
+            conceal
+            streaming
+            internalBlockMode="top-level"
+            flexShrink={0}
+          />
         </box>
       </Show>
     </box>
@@ -467,8 +497,12 @@ function BarPad() {
  *  tree-sitter client is the shared default <code> already uses.
  *  Empty text (no journaled prompt, no `.prompt.md` sibling) is
  *  the marker. */
-function PromptRow(props: { item: Item; syntax: SyntaxStyle }) {
+function PromptRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }) {
   const text = createMemo(() => ('text' in props.item ? props.item.text : ''));
+  // the selection peek opens an untouched fold while it holds the
+  // row; Enter/c pins it (the tool cards' own grammar)
+  const open = () =>
+    props.item.collapsed !== true || (props.selected && props.item.foldTouched !== true);
   return (
     <BarBlock>
       <BarPad />
@@ -480,14 +514,26 @@ function PromptRow(props: { item: Item; syntax: SyntaxStyle }) {
           <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
         }
       >
-        <markdown
-          content={text()}
-          syntaxStyle={props.syntax}
-          conceal
-          streaming
-          internalBlockMode="top-level"
-          flexShrink={0}
-        />
+        <Show
+          when={open()}
+          fallback={
+            <text
+              fg={theme.muted}
+              attributes={TextAttributes.DIM}
+              content={`+${text().split('\n').length} lines — Enter expands`}
+              flexShrink={0}
+            />
+          }
+        >
+          <markdown
+            content={text()}
+            syntaxStyle={props.syntax}
+            conceal
+            streaming
+            internalBlockMode="top-level"
+            flexShrink={0}
+          />
+        </Show>
       </Show>
       <BarPad />
     </BarBlock>
@@ -543,6 +589,15 @@ function ItemRow(props: {
     return v.model === undefined && by !== undefined ? { ...v, badge: by } : v;
   });
   const thought = createMemo(() => props.item.kind === 'thought');
+  // foldable text rows — the selection peek opens an untouched fold,
+  // Enter/c pins it; folded rows read `first line · +N lines`
+  const textOpen = () =>
+    props.item.collapsed !== true || (props.selected && props.item.foldTouched !== true);
+  const textOf = () => ('text' in props.item ? props.item.text : '');
+  const foldSummary = () => {
+    const n = textOf().split('\n').length;
+    return `${firstLine(mdPlain(textOf()).join('\n'))}${n > 1 ? ` · +${n} lines` : ''}`;
+  };
   const tone = createMemo(() => {
     const it = props.item;
     return it.kind === 'turn' || it.kind === 'permission' || it.kind === 'note'
@@ -636,46 +691,95 @@ function ItemRow(props: {
                                 <Show
                                   when={thought()}
                                   fallback={
-                                    <text
-                                      fg={sideColor(tone())}
-                                      attributes={TextAttributes.DIM}
-                                      flexShrink={0}
-                                      content={props.item.kind === 'tool' ? '' : props.item.text}
-                                    />
+                                    /* side lines — turn markers, notes. Long
+                                     *  notes fold like prose (addendum 20) */
+                                    <Show
+                                      when={textOpen() || !isFoldable(props.item)}
+                                      fallback={
+                                        <text
+                                          fg={sideColor(tone())}
+                                          attributes={TextAttributes.DIM}
+                                          flexShrink={0}
+                                          content={foldSummary()}
+                                        />
+                                      }
+                                    >
+                                      <markdown
+                                        content={textOf()}
+                                        syntaxStyle={props.syntax}
+                                        conceal
+                                        streaming
+                                        internalBlockMode="top-level"
+                                        flexShrink={0}
+                                      />
+                                    </Show>
                                   }
                                 >
                                   {/* `+ Thought` — their amber collapsed
-                                   *  thought row (capture rows 3/11/23) */}
-                                  <box flexDirection="row" flexShrink={0}>
-                                    <text fg={theme.amber} content="+ " />
-                                    <text fg={theme.amber} content="Thought" />
-                                    <text
-                                      fg={theme.muted}
-                                      attributes={TextAttributes.DIM}
-                                      content={` · ${props.item.kind === 'tool' ? '' : props.item.text.split('\n')[0]}`}
-                                    />
+                                   *  thought row (capture rows 3/11/23);
+                                   *  open it shows the body as markdown */}
+                                  <box flexDirection="column" flexShrink={0}>
+                                    <box flexDirection="row" flexShrink={0}>
+                                      <text fg={theme.amber} content="+ " />
+                                      <text fg={theme.amber} content="Thought" />
+                                      <text
+                                        fg={theme.muted}
+                                        attributes={TextAttributes.DIM}
+                                        content={` · ${foldSummary()}`}
+                                      />
+                                    </box>
+                                    <Show when={textOpen() && isFoldable(props.item)}>
+                                      <box paddingLeft={2} flexShrink={0}>
+                                        <markdown
+                                          content={textOf()}
+                                          syntaxStyle={props.syntax}
+                                          conceal
+                                          streaming
+                                          internalBlockMode="top-level"
+                                          flexShrink={0}
+                                        />
+                                      </box>
+                                    </Show>
                                   </box>
                                 </Show>
                               }
                             >
                               {/* `⏺` — their assistant bullet; quiet prose
-                               *  to its right (addendum 12/13) */}
+                               *  to its right (addendum 12/13). Long prose
+                               *  folds to a one-line summary. */}
                               <box flexDirection="row" flexShrink={0} width="100%">
                                 <text fg={theme.peach} content="⏺ " />
                                 <box flexGrow={1} flexShrink={0}>
-                                  <markdown
-                                    content={props.item.kind === 'tool' ? '' : props.item.text}
-                                    syntaxStyle={props.syntax}
-                                    streaming
-                                    internalBlockMode="top-level"
-                                    flexShrink={0}
-                                  />
+                                  <Show
+                                    when={textOpen() || !isFoldable(props.item)}
+                                    fallback={
+                                      <text
+                                        fg={theme.muted}
+                                        attributes={TextAttributes.DIM}
+                                        content={foldSummary()}
+                                        flexShrink={0}
+                                      />
+                                    }
+                                  >
+                                    <markdown
+                                      content={props.item.kind === 'tool' ? '' : textOf()}
+                                      syntaxStyle={props.syntax}
+                                      conceal
+                                      streaming
+                                      internalBlockMode="top-level"
+                                      flexShrink={0}
+                                    />
+                                  </Show>
                                 </box>
                               </box>
                             </Show>
                           }
                         >
-                          <PromptRow item={props.item} syntax={props.syntax} />
+                          <PromptRow
+                            item={props.item}
+                            syntax={props.syntax}
+                            selected={props.selected}
+                          />
                         </Show>
                       }
                     >
@@ -690,7 +794,7 @@ function ItemRow(props: {
                     </Show>
                   }
                 >
-                  {item => <ToolCard item={item} selected={props.selected} />}
+                  {item => <ToolCard item={item} selected={props.selected} syntax={props.syntax} />}
                 </Show>
               </Show>
             </Show>

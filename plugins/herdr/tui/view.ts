@@ -81,6 +81,73 @@ export const hhmm = (at: string | undefined): string => {
  *  viewport's worth; scrollback is where history must live). */
 export const TAIL_BUDGET = 15;
 
+/** A text block past this many lines folds by default — the row
+ *  shows a `+N lines` summary instead of dumping the whole block
+ *  (addendum 20: a 300-line review thread must never take the
+ *  screen unpinned). */
+export const FOLD_TEXT_AT = 8;
+
+/** The item kinds whose text folds — prompt, agent prose, thought,
+ *  and long side notes. Headers/turns/permissions stay unfolded. */
+const FOLDABLE = new Set(['prompt', 'message', 'thought', 'note']);
+
+/** Can the row carry a fold? Tools always can; text items can once
+ *  they pass FOLD_TEXT_AT lines (or are already collapsed). */
+export function isFoldable(item: Item): boolean {
+  if (item.kind === 'tool') return true;
+  return (
+    FOLDABLE.has(item.kind) &&
+    (item.collapsed === true || ('text' in item && item.text.split('\n').length > FOLD_TEXT_AT))
+  );
+}
+
+/** May the item leave the live strip for scrollback? Settled items
+ *  will never paint again: a terminal tool, any settled one-liner —
+ *  and a message/thought only once it is no longer the tail item,
+ *  since the open chunk keeps absorbing text. In-flight rows stay
+ *  live so updates keep repainting them. */
+export function isSettled(item: Item, isLast: boolean): boolean {
+  if (item.kind === 'tool') return item.status !== 'live';
+  if (item.kind === 'message' || item.kind === 'thought') return !isLast;
+  return true;
+}
+
+/** Markdown → plain text for the captured-stdout scrollback path
+ *  and the collapsed previews: markers conceal (the renderable's
+ *  `conceal` equivalent), links print `text (url)`, fences drop to
+ *  indented code, HTML tags vanish. Raw `**`/`<details>` literals
+ *  never reach the pane (addendum 20). */
+export function mdPlain(text: string): string[] {
+  const out: string[] = [];
+  let fence = false;
+  for (const raw of text.split('\n')) {
+    if (/^\s*(`{3,}|~{3,})/.test(raw)) {
+      fence = !fence;
+      continue;
+    }
+    if (fence) {
+      out.push(`    ${raw}`);
+      continue;
+    }
+    out.push(
+      raw
+        .replace(/^\s{0,3}#{1,6}\s+/, '')
+        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/\[([^\]]*)\]\(([^)]*)\)/g, '$1 ($2)')
+        .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        .replace(/\*([^*\n]+)\*/g, '$1')
+        .replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, '$1$2')
+        .replace(/~~([^~]+)~~/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^\s*>\s?/, '  ')
+        .replace(/<[^>]+>/g, '')
+    );
+  }
+  return out;
+}
+
 /** The line form a row prints to the scroll region as — the same
  *  grammar the tree paints: `┃` prompt block, `⏺` tool/message,
  *  `+ Thought`, `──` markers, `▸` header, and a ≤3-line + `+N more`
@@ -90,30 +157,38 @@ export function printLines(item: Item): string[] {
   const stamp = item.at !== undefined ? `${hhmm(item.at)} ` : '      ';
   const rows = (lines: string[]): string[] =>
     lines.map((l, i) => `${i === 0 ? stamp : '      '}${l}`);
+  const folded = item.collapsed === true;
+  const more = 'text' in item ? item.text.split('\n').length : 0;
   switch (item.kind) {
     case 'header':
       return rows([` ▸ ${item.text}`]);
     case 'prompt':
-      return rows(['┃', '┃  Prompt', '┃', ...item.text.split('\n').map(l => `┃  ${l}`), '┃']);
+      return folded
+        ? rows(['┃', '┃  Prompt', `┃  +${more} lines`, '┃'])
+        : rows(['┃', '┃  Prompt', '┃', ...mdPlain(item.text).map(l => `┃  ${l}`), '┃']);
     case 'message':
-      return rows(item.text.split('\n').map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
+      return folded
+        ? rows([`⏺ ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
     case 'thought':
-      return rows([`+ Thought · ${firstLine(item.text)}`]);
+      return folded
+        ? rows([`+ Thought · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `+ Thought · ${l}` : `  ${l}`)));
     case 'tool': {
       const g = item.status === 'completed' ? '✓' : item.status === 'live' ? '…' : '✗';
       const kind = item.toolKind !== undefined && item.toolKind !== '' ? ` [${item.toolKind}]` : '';
       const arg = argHead(item, 120);
       const head = `⏺ ${g} ${item.title}${kind}${arg !== '' ? ` ${arg}` : ''}`;
       const out = [head];
-      if (!item.collapsed) {
-        const body = toolBodyLines(item);
-        for (const l of body.lines) out.push(`  ${l}`);
-        if (body.more > 0) out.push(`  +${body.more} more`);
-      }
+      const body = toolBodyLines(item, folded ? 3 : Number.POSITIVE_INFINITY);
+      for (const l of body.lines) out.push(`  ${l}`);
+      if (body.more > 0) out.push(`  +${body.more} more`);
       return rows(out);
     }
     default:
-      return rows(item.text.split('\n'));
+      return folded
+        ? rows([`${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text));
   }
 }
 
@@ -150,6 +225,36 @@ export function toolBodyLines(item: ToolItem, max = 3): { lines: string[]; more:
     }
   }
   return { lines: all.slice(0, max), more: Math.max(0, all.length - max) };
+}
+
+/** The card body as markdown for the pinned-open view — text
+ *  content passes through as real markdown (the `<markdown>`
+ *  renderable formats it), diffs become ```` ```diff ```` fences so
+ *  the tree-sitter path highlights them, and the rest degrades to
+ *  plain notes (addendum 20). */
+export function toolBodyMd(item: ToolItem): string {
+  const out: string[] = [];
+  const arg = argBody(item);
+  if (arg !== undefined) out.push('```sh', arg, '```');
+  for (const c of item.content) {
+    if (c.kind === 'text') {
+      if (EMPTY_OUTPUT.test(c.text)) continue;
+      out.push(c.text);
+    } else if (c.kind === 'diff') {
+      out.push(
+        '```diff',
+        `─ ${c.path}`,
+        ...(c.old ?? '').split('\n').map(l => `-${l}`),
+        ...(c.cur ?? '').split('\n').map(l => `+${l}`),
+        '```'
+      );
+    } else if (c.kind === 'terminal') {
+      out.push(`terminal output is not archived (terminal ${c.id})`);
+    } else {
+      out.push(`[${c.type}]`);
+    }
+  }
+  return out.join('\n');
 }
 
 /** The unified diff text a patch renders as — the two sides

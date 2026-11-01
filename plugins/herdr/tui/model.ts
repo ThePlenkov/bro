@@ -52,6 +52,12 @@ export interface TextItem {
   /** The row's `by` label — the call's origin (provider/conductor)
    *  rendered on turn blocks and verdict badges (addendum 11). */
   by?: string;
+  /** Long text blocks fold by default — the row shows a `+N lines`
+   *  summary until the user expands it (addendum 20). */
+  collapsed?: boolean;
+  /** The user explicitly toggled the fold — auto-fold never
+   *  overrides a deliberate state. */
+  foldTouched?: boolean;
   /** The impl's source item (acp impl: their Item). The view renders
    *  the impl's row language when present — opaque to this seam. */
   vi?: unknown;
@@ -97,6 +103,8 @@ export interface SideItem {
   tone?: 'warn' | 'error';
   at?: string;
   by?: string;
+  collapsed?: boolean;
+  foldTouched?: boolean;
   vi?: unknown;
 }
 
