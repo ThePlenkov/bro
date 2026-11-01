@@ -682,8 +682,7 @@ export async function pumpTurn(
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx,
-  cwd?: string,
-  drainTimeoutMs?: number
+  cwd?: string
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });

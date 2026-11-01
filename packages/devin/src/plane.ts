@@ -243,16 +243,11 @@ export function countDevinSessions(
 const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/
 
 /** Worker classification for one locked pid — a spawned (never
- *  interactive) devin session. Probes:
+ *  interactive) devin session. Two /proc probes, either suffices:
  *  the BRO_AGENT_ID env badge every bro backend pins into the worker's
- *  env (inherited by the devin child a wrapper spawns) classifies a
- *  worker and takes precedence over BRO_HOOKS=0;
- *  BRO_HOOKS=0 marks a machine backend (acp provider/conductor service
- *  child) as not a worker (never counted against
- *  agents.devin.maxWorkers) when no BRO_AGENT_ID is present (BRO_AGENT_ID
- *  wins); and a non-terminal stdin (`fd/0` outside the tty devices —
- *  headless pipes, null, sockets; interactive devin reads a terminal)
- *  classifies a worker.
+ *  env (inherited by the devin child a wrapper spawns), and a
+ *  non-terminal stdin (`fd/0` outside the tty devices — headless
+ *  pipes, null, sockets; interactive devin reads a terminal).
  *
  *  A pid neither probe verifies is NOT a worker: unreadable state only
  *  undercounts the worker lane — while phantom workers would refuse
@@ -262,19 +257,14 @@ const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/
  *  classifier has no /proc at all. */
 export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   const dir = join(procDir, String(pid))
-  let environ: string | undefined
   try {
-    environ = readFileSync(join(dir, 'environ'), 'utf8')
     // NUL-anchored: environ entries are NUL-separated and an
+    const environ = readFileSync(join(dir, 'environ'), 'utf8')
     // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
     // AGENT_ENV_RE convention)
     if (/(?:^|\0)BRO_AGENT_ID=/.test(environ)) {
       return true
     }
-    // BRO_HOOKS=0 marks a machine backend (acp provider/conductor
-    // service child) — not an agent worker; never count against
-    // agents.devin.maxWorkers. A real bro worker carries BRO_AGENT_ID and
-    // must be counted even if it inherits BRO_HOOKS=0 from a parent tree.
     if (/(?:^|\0)BRO_HOOKS=0(?:\0|$)/.test(environ)) {
       return false
     }

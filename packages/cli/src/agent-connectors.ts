@@ -285,8 +285,14 @@ export function fleetCapOf(env: AgentConnectorEnv): number {
  *  no-silent-fallthrough rule). */
 export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfile {
   const profiles = env.fleet?.profiles;
-  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  // hasOwn pins the lookup to configured keys — 'constructor'/'__proto__' must not
   // resolve to an inherited member and skip the missing-profile error
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input',
+    );
+  }
   const profile =
     profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
   if (profile === undefined) {
