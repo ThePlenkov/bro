@@ -182,7 +182,7 @@ function scanWastelandPeer(
     return
   }
   for (const row of board.rows) {
-    const projected = projectWanted(row, selfRig)
+    const projected = projectWanted({ row, selfRig })
     for (const e of projected.errors) {
       errors.push(`${peer.alias}: ${e}`)
     }
