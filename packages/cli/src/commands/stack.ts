@@ -483,7 +483,7 @@ function cmdList(argv: string[]): void {
  *  goes too when no worktree still holds it (a checked-out branch can't
  *  be deleted; the owner's worktree keeps it until `work leave`). */
 function retireMerged(
-  m: MemberView,
+  m: Pick<MemberView, 'branch' | 'worktree'>,
   root: string,
   lines: string[]
 ): void {
