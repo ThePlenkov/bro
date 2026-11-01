@@ -121,10 +121,10 @@ export interface GhResult {
   err: string
 }
 
-function gh(args: string[], opts: { input?: string } = {}): GhResult {
-  const p = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
-    stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-    input: opts.input,
+function gh(call: { args: string[]; input?: string }): GhResult {
+  const p = spawnSync('gh', call.args, { // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
+    stdio: [call.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+    input: call.input,
     encoding: 'utf8',
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
@@ -142,8 +142,8 @@ function gh(args: string[], opts: { input?: string } = {}): GhResult {
   }
 }
 
-function ghJson<T>(args: string[], opts: { input?: string } = {}): { data?: T; error?: string } {
-  const r = gh(args, opts)
+function ghJson<T>(call: { args: string[]; input?: string }): { data?: T; error?: string } {
+  const r = gh(call)
   if (r.code !== 0) {
     return { error: r.err || r.out }
   }
@@ -157,7 +157,7 @@ function ghJson<T>(args: string[], opts: { input?: string } = {}): { data?: T; e
 /** The caller's authenticated github account — the `self` side of the
  *  author check. Absent when gh is missing or unauthenticated. */
 export function selfLogin(): { login?: string; error?: string } {
-  const r = ghJson<{ login?: string }>(['api', 'user'])
+  const r = ghJson<{ login?: string }>({ args: ['api', 'user'] })
   if (r.error !== undefined) {
     return { error: r.error }
   }
@@ -292,21 +292,19 @@ function apiPath(call: { repo: GithubRepo; suffix: string }): string {
  *  — the wire shape is pages-of-rows, so the read flattens before
  *  iterating. */
 function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
-  const r = ghJson<(GhIssueRow | GhIssueRow[])[]>(
-    [
+  const r = ghJson<(GhIssueRow | GhIssueRow[])[]>({
+    args: [
       'api',
       `${apiPath({ repo, suffix: 'issues' })}?labels=mesh:kind:request&state=all&per_page=100`,
       '--paginate',
       '--slurp',
     ],
-  )
+  })
   if (r.error !== undefined) {
     return { issues: [], error: `${repo.owner}/${repo.repo}: issue list failed — ${r.error}` }
   }
   return {
-    issues: (r.data ?? []).flat().filter(
-      (i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number',
-    ),
+    issues: filterIssueRows(slurpedRows(r.data)),
   }
 }
 
@@ -318,16 +316,14 @@ interface GhCommentRow {
 /** Every envelope-bearing comment on one issue — comments that parse
  *  to nothing are error lines (a comment is not a record unless the
  *  last validating block says so). */
-export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRecord[]; errors: string[] } {
-  const r = ghJson<(GhCommentRow | GhCommentRow[])[]>(
-    ['api', apiPath({ repo, suffix: `issues/${issue.number}/comments` }), '--paginate', '--slurp'],
-  )
-  if (r.error !== undefined) {
-    return { records: [], errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`] }
-  }
+function collectIssueCommentRecords(
+  repo: GithubRepo,
+  issue: GhIssue,
+  comments: GhCommentRow[],
+): { records: GhRecord[]; errors: string[] } {
   const records: GhRecord[] = []
   const errors: string[] = []
-  for (const c of (r.data ?? []).flat()) {
+  for (const c of comments) {
     const text = typeof c.body === 'string' ? c.body : ''
     if (!text.includes('```json')) {
       continue
@@ -346,6 +342,43 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
   return { records, errors }
 }
 
+function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
+  const out: T[] = []
+  for (const item of data ?? []) {
+    if (Array.isArray(item)) {
+      out.push(...(item as T[]))
+    } else {
+      out.push(item)
+    }
+  }
+  return out
+}
+
+function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
+  return rows.filter((i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number')
+}
+
+export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRecord[]; errors: string[] } {
+  const r = ghJson<(GhCommentRow | GhCommentRow[])[]>({
+    args: ['api', apiPath({ repo, suffix: `issues/${issue.number}/comments` }), '--paginate', '--slurp'],
+  })
+  if (r.error !== undefined) {
+    return { records: [], errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`] }
+  }
+  return collectIssueCommentRecords(repo, issue, slurpedRows(r.data))
+}
+
+function scanIssues(repo: GithubRepo, issues: GhIssue[]): { records: GhRecord[]; errors: string[] } {
+  const records: GhRecord[] = []
+  const errors: string[] = []
+  for (const issue of issues) {
+    const cs = issueComments(repo, issue)
+    records.push(...cs.records)
+    errors.push(...cs.errors)
+  }
+  return { records, errors }
+}
+
 /** The label-narrowed, comment-verified scan: every mesh record across
  *  every request-labelled issue on the peer's repo. */
 export function scanGithub(input: { remote: string }): { records: GhRecord[]; errors: string[] } {
@@ -357,14 +390,7 @@ export function scanGithub(input: { remote: string }): { records: GhRecord[]; er
   if (listed.error !== undefined) {
     return { records: [], errors: [listed.error] }
   }
-  const records: GhRecord[] = []
-  const errors: string[] = []
-  for (const issue of listed.issues) {
-    const cs = issueComments(repo, issue)
-    records.push(...cs.records)
-    errors.push(...cs.errors)
-  }
-  return { records, errors }
+  return scanIssues(repo, listed.issues)
 }
 
 /** The wire envelope for a posted request — id/thread are filled by
@@ -398,26 +424,26 @@ function requestEnvelope(input: {
  *  --label`) because the API creates missing labels on first use and
  *  a repo that never carried mesh labels must not fail its first
  *  delivery. */
-function createIssue(
-  repo: GithubRepo,
-  input: { title: string; from: string; to: string; body?: string },
-  labels: string[],
-): { issue?: string; number?: number; error?: string } {
-  const created = ghJson<{ number?: number }>(
-    ['api', apiPath({ repo, suffix: 'issues' }), '--input', '-'],
-    { input: JSON.stringify({
-      title: input.title,
-      body: renderIssueBody(input),
-      labels,
-    }) },
-  )
+function createIssue(call: {
+  repo: GithubRepo
+  input: { title: string; from: string; to: string; body?: string }
+  labels: string[]
+}): { issue?: string; number?: number; error?: string } {
+  const created = ghJson<{ number?: number }>({
+    args: ['api', apiPath({ repo: call.repo, suffix: 'issues' }), '--input', '-'],
+    input: JSON.stringify({
+      title: call.input.title,
+      body: renderIssueBody(call.input),
+      labels: call.labels,
+    }),
+  })
   if (created.error !== undefined) {
-    return { error: `${repo.owner}/${repo.repo}: issue create failed — ${created.error}` }
+    return { error: `${call.repo.owner}/${call.repo.repo}: issue create failed — ${created.error}` }
   }
   const number = created.data?.number
   return typeof number === 'number'
-    ? { issue: issueUrl({ repo, n: number }), number }
-    : { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
+    ? { issue: issueUrl({ repo: call.repo, n: number }), number }
+    : { error: `${call.repo.owner}/${call.repo.repo}: issue create returned no number` }
 }
 
 /** Delivery: POST the prose issue, then POST the `request` record as
@@ -431,7 +457,7 @@ export function postRequest(
     return { error: `remote "${input.remote}" is not a github url` }
   }
   const env = requestEnvelope(input)
-  const created = createIssue(repo, input, routingLabels(env))
+  const created = createIssue({ repo, input, labels: routingLabels(env) })
   if (created.error !== undefined) {
     return { error: created.error }
   }
@@ -439,10 +465,10 @@ export function postRequest(
     return { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
   }
   const env2 = { ...env, id: created.issue, thread: created.issue }
-  const commented = ghJson<{ id?: number }>(
-    ['api', apiPath({ repo, suffix: `issues/${created.number}/comments` }), '--input', '-'],
-    { input: JSON.stringify({ body: renderComment(env2) }) },
-  )
+  const commented = ghJson<{ id?: number }>({
+    args: ['api', apiPath({ repo, suffix: `issues/${created.number}/comments` }), '--input', '-'],
+    input: JSON.stringify({ body: renderComment(env2) }),
+  })
   if (commented.error !== undefined) {
     return { error: `issue ${created.issue} created but the record comment failed — ${commented.error}` }
   }
@@ -491,10 +517,10 @@ export function postComment(comment: { thread: string; env: MeshEnvelope }): { e
   }
   const repo = key.repo
   const n = key.n
-  const r = ghJson<{ id?: number }>(
-    ['api', apiPath({ repo, suffix: `issues/${n}/comments` }), '--input', '-'],
-    { input: JSON.stringify({ body: renderComment(comment.env) }) },
-  )
+  const r = ghJson<{ id?: number }>({
+    args: ['api', apiPath({ repo, suffix: `issues/${n}/comments` }), '--input', '-'],
+    input: JSON.stringify({ body: renderComment(comment.env) }),
+  })
   if (r.error !== undefined) {
     return { error: `${repo.owner}/${repo.repo}#${n}: comment failed — ${r.error}` }
   }
