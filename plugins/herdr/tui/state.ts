@@ -86,7 +86,7 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
       case 'append': {
         const item = { ...op.item };
         // A card born carrying a body lands folded — every completed
-        // call is a compact `⏺ ✓` row; the body (file dumps, JSON
+        // call is a compact `✓` row; the body (file dumps, JSON
         // output) never takes the feed unpinned. Enter/c or the j/k
         // peek reveals it.
         if (item.kind === 'tool' && item.bodyLanded) {

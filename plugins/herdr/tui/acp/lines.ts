@@ -94,17 +94,16 @@ const firstLine = (s: string): string => {
   return i < 0 ? s : s.slice(0, i);
 };
 
-/** `⏺ ✓ Bash arg …           #1` — the mass row: their `⏺` bullet,
- *  the status glyph inline, title + clipped arg dim, right-aligned
- *  tail. One compact row per call; output lives under it only when
- *  the card is open — never a box, never a rule (opencode grammar). */
+/** `✓ Bash arg …           #1` — the mass row: the status glyph
+ *  inline, title + clipped arg dim, right-aligned tail. One compact
+ *  row per call; output lives under it only when the card is open —
+ *  never a box, never a rule, no `⏺` bullet (addendum 26). */
 const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string): Segment[] => {
   const live = item.toolStatus === 'in_progress' || item.toolStatus === 'pending';
   const g = live
     ? { text: LIVE[frame % LIVE.length] ?? '⠋', token: 'glyph.live' }
     : (TOOL_GLYPH[item.toolStatus] ?? { text: '○', token: 'marker' });
   const segs: Segment[] = [
-    { text: '⏺ ', token: 'marker' },
     { text: `${g.text} `, token: g.token },
     { text: item.title === '' ? (item.toolName ?? 'tool') : item.title, token: 'arg' },
   ];
@@ -309,7 +308,7 @@ export const acpCardRows = (vi: unknown, width: number): CardLine[] => {
 /** Their `list.ts` grouping, our item vocabulary: user / agent /
  *  activity / plan / marker. Legacy items map by kind — geometry is
  *  shared, vocabulary stays per-impl. */
-export type ItemGroup = 'user' | 'agent' | 'activity' | 'plan' | 'marker';
+export type ItemGroup = 'user' | 'agent' | 'activity' | 'plan' | 'marker' | 'time';
 
 export const itemGroup = (item: { kind: string; vi?: unknown }): ItemGroup => {
   const vi = item.vi as TheirItem | undefined;
@@ -336,12 +335,16 @@ export const itemGroup = (item: { kind: string; vi?: unknown }): ItemGroup => {
     case 'turn':
     case 'permission':
       return 'marker';
+    case 'time':
+      return 'time';
     default:
       return 'activity';
   }
 };
 
 /** Their spacing rule: a blank row before user/agent text and on any
- *  group change; activity stays tight. */
+ *  group change; activity stays tight. A `time` head gets its blank
+ *  BEFORE it (the previous group closes) and hugs its own group —
+ *  `prev === 'time'` spaces nothing. */
 export const spacingBefore = (prev: ItemGroup, next: ItemGroup): number =>
-  prev === next && next !== 'user' && next !== 'agent' ? 0 : 1;
+  prev === next && next !== 'user' && next !== 'agent' ? 0 : prev === 'time' ? 0 : 1;

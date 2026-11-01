@@ -958,6 +958,26 @@ ahead of the separators (a slice can open mid-session, where the
 first turn-start is an internal micro-call — the prompt still names
 the agent).
 
+**Bullets earn their cell** (addendum 26): the `⏺` prefix painted on
+every message and every tool row was decoration — the status glyph
+(`✓`/`✗`/spinner) already marks a call, and prose needs no bullet.
+Every `⏺` is gone from the live rows, the acp segment language, and
+the scrollback projection; what remains earns its cell — status
+glyphs, `+ Thought`, `◈ plan`, `⚠`, `◌`, `▸` fold heads, `┃` cards,
+`──` separators. The prompt card dropped its `Prompt` title (the
+peach `┃` is the label) and a folded prompt keeps its first
+`PROMPT_PREVIEW_LINES` (default 5, `BRO_TUI_PROMPT_PREVIEW`
+override) lines rendered as markdown, then `+M more lines — Enter
+expands`; a preview cut inside a code fence appends its close so the
+fold hint never gets eaten. Selection got two fixes the fold
+contract needed to work at all: `select`/`toggle` scroll the row
+into view (`scrollChildIntoView`, `align: 'nearest'` — a peek that
+opens off-screen looks like a dead key), and the prompt card shows
+its selection by the bar turning `accent` — it already carries
+`surface` so the usual wash could not signal it. `time` items joined
+`itemGroup`/`spacingBefore` as their own group: air before a head
+(closes the previous group), none after (hugs its own).
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

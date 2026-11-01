@@ -52,6 +52,7 @@ import {
   isSettled,
   mdPlain,
   mdSource,
+  PROMPT_PREVIEW_LINES,
   rowHeight,
   sideColor,
   TAIL_BUDGET,
@@ -93,6 +94,10 @@ export interface Pane {
   scrollPage?: (dir: -1 | 1) => void;
   /** Jump to the top (0) or the bottom (1). */
   scrollEdge?: (edge: 0 | 1) => void;
+  /** Bring an item's row into the viewport — the shell wires it to
+   *  the scrollbox's scrollChildIntoView; select/toggle call it so a
+   *  peek or fold never happens off-screen. */
+  scrollToRow?: (id: number) => void;
   /** The feed's scrollbox — tests poll its bar's visibility before
    *  sending mouse events at it. */
   scroller?: ScrollBoxRenderable;
@@ -151,7 +156,7 @@ export function createPane(
     return applyOps(next, [{ op: 'evict', ids: retired }]);
   };
 
-  return {
+  const pane: Pane = {
     store: { state },
     writer: {
       apply(ops) {
@@ -159,7 +164,11 @@ export function createPane(
         publish(retire(applyOps(plain, ops)));
       },
       select(delta) {
-        publish({ ...plain, selected: moveSelection(plain, delta) });
+        const selected = moveSelection(plain, delta);
+        publish({ ...plain, selected });
+        // the selection peeks a fold open — useless if it happens
+        // off-screen; the row follows the walk into view
+        if (selected >= 0) pane.scrollToRow?.(selected);
       },
       toggle() {
         const item = plain.byId[plain.selected];
@@ -174,6 +183,8 @@ export function createPane(
             [item.id]: { ...item, collapsed: !item.collapsed, foldTouched: true },
           },
         });
+        // an open card can outgrow the viewport — keep its head in view
+        pane.scrollToRow?.(item.id);
       },
       copy() {
         const sel = plain.byId[plain.selected];
@@ -187,6 +198,7 @@ export function createPane(
       },
     },
   };
+  return pane;
 }
 
 /** The markdown/code/diff style derived from the palette — one
@@ -256,7 +268,7 @@ function Spinner(props: { fg: string }) {
   return <text fg={props.fg} content={SPINNER[tick() % SPINNER.length]} />;
 }
 
-/** The tool call — the feed's mass row, never a box: `⏺` + status
+/** The tool call — the feed's mass row, never a box: status
  *  glyph + the call's name and short arg, all dim. Non-empty output
  *  renders dim+indented under it, capped at 3 lines then `+N more`;
  *  `(no output)` results paint nothing — one compact row per call
@@ -278,7 +290,6 @@ function ToolCard(props: {
       backgroundColor={props.selected ? theme.surface : undefined}
     >
       <box flexDirection="row" height={1} flexShrink={0}>
-        <text fg={theme.muted} attributes={TextAttributes.DIM} content="⏺ " />
         <Show
           when={props.item.status === 'live'}
           fallback={
@@ -480,7 +491,7 @@ function AcpRunRow(props: {
  *  filling to the right edge. The bar is the box's `heavy` left
  *  border, so ANY content (a markdown renderable included) keeps
  *  the bar and the bg without per-line plumbing (addendum 18). */
-function BarBlock(props: { children?: JSX.Element }) {
+function BarBlock(props: { children?: JSX.Element; selected?: boolean }) {
   return (
     <box
       marginLeft={2}
@@ -488,7 +499,7 @@ function BarBlock(props: { children?: JSX.Element }) {
       flexShrink={0}
       border={['left']}
       borderStyle="heavy"
-      borderColor={theme.peach}
+      borderColor={props.selected ? theme.accent : theme.peach}
       backgroundColor={theme.surface}
       paddingLeft={2}
     >
@@ -503,12 +514,13 @@ function BarPad() {
   return <box height={1} flexShrink={0} />;
 }
 
-/** The caller prompt — "what was asked" as their `┃` card: a dim
- *  title, then the prompt as REAL markdown (addendum 18): links,
- *  bold, lists and code fences render, markers conceal; the
- *  tree-sitter client is the shared default <code> already uses.
- *  Empty text (no journaled prompt, no `.prompt.md` sibling) is
- *  the marker. */
+/** The caller prompt — "what was asked" as their `┃` card, no title
+ *  (the peach bar IS the label): the prompt as REAL markdown
+ *  (addendum 18): links, bold, lists and code fences render, markers
+ *  conceal; the tree-sitter client is the shared default <code>
+ *  already uses. Folded it keeps its first PROMPT_PREVIEW_LINES lines
+ *  visible then `+M more`. Empty text (no journaled prompt, no
+ *  `.prompt.md` sibling) is the marker. */
 function PromptRow(props: {
   item: Item;
   syntax: SyntaxStyle;
@@ -516,14 +528,20 @@ function PromptRow(props: {
   width: () => number;
 }) {
   const text = createMemo(() => ('text' in props.item ? mdSource(props.item.text) : ''));
+  const lines = createMemo(() => text().split('\n'));
+  // the folded preview — first N lines; a cut that lands inside a
+  // code fence closes it so the renderable doesn't eat the `+more` row
+  const preview = createMemo(() => {
+    const ls = lines().slice(0, PROMPT_PREVIEW_LINES);
+    if (ls.filter(l => /^\s*(`{3,}|~{3,})/.test(l)).length % 2 === 1) ls.push('```');
+    return ls.join('\n');
+  });
   // the selection peek opens an untouched fold while it holds the
   // row; Enter/c pins it (the tool cards' own grammar)
   const open = () =>
     props.item.collapsed !== true || (props.selected && props.item.foldTouched !== true);
   return (
-    <BarBlock>
-      <BarPad />
-      <text fg={theme.muted} content="Prompt" flexShrink={0} />
+    <BarBlock selected={props.selected}>
       <BarPad />
       <Show
         when={text() !== ''}
@@ -534,12 +552,25 @@ function PromptRow(props: {
         <Show
           when={open()}
           fallback={
-            <text
-              fg={theme.muted}
-              attributes={TextAttributes.DIM}
-              content={`+${text().split('\n').length} lines — Enter expands`}
-              flexShrink={0}
-            />
+            <>
+              <Show when={PROMPT_PREVIEW_LINES > 0}>
+                <markdown
+                  content={preview()}
+                  syntaxStyle={props.syntax}
+                  conceal
+                  streaming
+                  internalBlockMode="top-level"
+                  flexShrink={0}
+                  maxWidth={props.width() - 5}
+                />
+              </Show>
+              <text
+                fg={theme.muted}
+                attributes={TextAttributes.DIM}
+                content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Enter expands`}
+                flexShrink={0}
+              />
+            </>
           }
         >
           <markdown
@@ -777,11 +808,11 @@ function ItemRow(props: {
                                 </Show>
                               }
                             >
-                              {/* `⏺` — their assistant bullet; quiet prose
-                               *  to its right (addendum 12/13). Long prose
-                               *  folds to a one-line summary. */}
+                              {/* agent speech — bare prose, no bullet
+                               *  (addendum 26: every remaining prefix
+                               *  earns its cell). Long prose folds to a
+                               *  one-line summary. */}
                               <box flexDirection="row" flexShrink={0} width="100%">
-                                <text fg={theme.peach} content="⏺ " />
                                 {/* minWidth:0 — a flex item's floor is
                                  *  its content width; without it long
                                  *  paragraphs hold their unwrapped
@@ -805,7 +836,7 @@ function ItemRow(props: {
                                       streaming
                                       internalBlockMode="top-level"
                                       flexShrink={0}
-                                      maxWidth={props.width() - 2}
+                                      maxWidth={props.width() - 1}
                                     />
                                   </Show>
                                 </box>
@@ -1050,7 +1081,9 @@ function Pane(props: {
                   return prev === undefined ? 0 : spacingBefore(itemGroup(prev), itemGroup(item));
                 };
                 return (
-                  <>
+                  // the row's own box — its `id` is the scrollbox's
+                  // scrollChildIntoView handle (j/k follows the walk)
+                  <box id={`row-${id}`} flexDirection="column" flexShrink={0} width="100%">
                     <Show when={margin() > 0}>
                       <box height={margin()} width="100%" flexShrink={0} />
                     </Show>
@@ -1062,7 +1095,7 @@ function Pane(props: {
                       frame={frame}
                       findTool={findTool}
                     />
-                  </>
+                  </box>
                 );
               }}
             </Show>
@@ -1145,5 +1178,6 @@ export async function mountPane(opts: {
   pane.scroll = lines => scroller?.scrollBy?.(lines);
   pane.scrollPage = dir => scroller?.scrollBy?.(dir * Math.max(1, opts.renderer.height - 2));
   pane.scrollEdge = edge => scroller?.scrollTo?.(edge === 0 ? 0 : Infinity);
+  pane.scrollToRow = id => scroller?.scrollChildIntoView?.(`row-${id}`, { align: 'nearest' });
   return pane;
 }

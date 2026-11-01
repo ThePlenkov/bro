@@ -163,6 +163,13 @@ const FOLDABLE_AT: Record<string, number> = {
   thought: 40,
 };
 
+/** The folded caller prompt keeps its first lines visible — enough
+ *  to know what was asked without handing the block the screen
+ *  (addendum 26). `BRO_TUI_PROMPT_PREVIEW` overrides; `0` restores
+ *  the bare `+N lines` summary. */
+const envPreview = Number.parseInt(process.env.BRO_TUI_PROMPT_PREVIEW ?? '', 10);
+export const PROMPT_PREVIEW_LINES = Number.isNaN(envPreview) ? 5 : Math.max(0, envPreview);
+
 /** Can the row carry a fold? Tools always can; text items can once
  *  they pass their kind's threshold (or are already collapsed). */
 export function isFoldable(item: Item): boolean {
@@ -293,14 +300,21 @@ export function printLines(item: Item): string[] {
   switch (item.kind) {
     case 'header':
       return rows([` ▸ ${item.text}`]);
-    case 'prompt':
-      return folded
-        ? rows(['┃', '┃  Prompt', `┃  +${more} lines`, '┃'])
-        : rows(['┃', '┃  Prompt', '┃', ...mdPlain(item.text).map(l => `┃  ${l}`), '┃']);
+    case 'prompt': {
+      const ls = mdPlain(item.text);
+      if (!folded) return rows(['┃', ...ls.map(l => `┃  ${l}`), '┃']);
+      const shown = ls.slice(0, PROMPT_PREVIEW_LINES);
+      return rows([
+        '┃',
+        ...shown.map(l => `┃  ${l}`),
+        `┃  +${ls.length - shown.length} lines`,
+        '┃',
+      ]);
+    }
     case 'message':
       return folded
-        ? rows([`⏺ ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
-        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
+        ? rows([`${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
+        : rows(mdPlain(item.text));
     case 'thought':
       return folded
         ? rows([`+ Thought · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
@@ -308,7 +322,7 @@ export function printLines(item: Item): string[] {
     case 'tool': {
       const g = item.status === 'completed' ? '✓' : item.status === 'live' ? '…' : '✗';
       const tail = toolTail(item);
-      const head = `⏺ ${g} ${item.title}${tail.kind}${tail.arg}${tail.tally}`;
+      const head = `${g} ${item.title}${tail.kind}${tail.arg}${tail.tally}`;
       const out = [head];
       // a collapsed row is just the head — generated file/output bodies
       // never dump into the feed. An open row prints a capped preview

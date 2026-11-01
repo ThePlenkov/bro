@@ -10,7 +10,7 @@
  * already consumes (`state.ts`), so `app.tsx`, the writer, and the
  * key bindings are impl-agnostic by construction. What differs per
  * impl is the item tree's SHAPE. Tool bodies fold on landing for
- * every impl — a completed call is one compact `⏺ ✓` row; its
+ * every impl — a completed call is one compact `✓` row; its
  * output (file dumps, JSON) never owns the feed unpinned.
  */
 import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';

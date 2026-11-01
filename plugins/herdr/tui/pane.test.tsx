@@ -339,16 +339,20 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a long prompt folds by default and expands on toggle', async () => {
+  test('a long prompt folds to a head preview and expands on toggle', async () => {
     const p = await mount();
     try {
       const text = Array.from({ length: 20 }, (_, i) => `row ${i} **b${i}**`).join('\n');
       p.model.feed({ kind: 'prompt', text });
       await p.flush();
       let frame = await p.frame();
-      // folded: a +N lines summary, never the raw block
-      assert.match(frame, /\+\d+ lines/);
+      // folded: the first PROMPT_PREVIEW_LINES stay visible, the
+      // rest folds to a `+M more` summary — never the raw block, and
+      // no 'Prompt' title (the peach bar is the label)
+      assert.match(frame, /row 0/);
+      assert.match(frame, /\+\d+ more lines — Enter expands/);
       assert.doesNotMatch(frame, /row 15/);
+      assert.doesNotMatch(frame, /Prompt/);
 
       // select lands on it (foldable rows join the walk), toggle pins it open
       p.writer.select(1);
@@ -358,6 +362,34 @@ describe('the Solid session pane', () => {
       assert.match(frame, /row 14/);
       // and it is REAL markdown — the literal markers never paint
       assert.doesNotMatch(frame, /\*\*b14\*\*/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('j/k scrolls the selected row into view (off-screen foldable)', async () => {
+    const p = await mount();
+    try {
+      p.model.feed({
+        kind: 'prompt',
+        text: Array.from({ length: 30 }, (_, i) => `prompt row ${i}`).join('\n'),
+      });
+      for (let i = 0; i < 60; i++)
+        p.model.feed({
+          kind: 'update',
+          ts: `2026-03-02T10:${String(1 + Math.floor(i / 6)).padStart(2, '0')}:00Z`,
+          update: { sessionUpdate: 'session_info_update', title: `n${i}` } as never,
+        });
+      await p.flush();
+      // the feed is pinned at the bottom — the prompt is off-screen
+      assert.doesNotMatch(await p.frame(), /prompt row/);
+      // j lands on it (first foldable) and the viewport follows
+      p.writer.select(1);
+      await p.flush();
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /prompt row|more lines/);
+      assert.match(frame, /Jump to latest/);
     } finally {
       await p.dispose();
     }
