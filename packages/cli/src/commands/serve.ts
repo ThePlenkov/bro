@@ -1542,10 +1542,10 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       }
     }
     handle?.stop();
-    // If only initial frames remain and nothing is coming, don't end the stream here;
-    // pump will handle it. But per the issue, drop() clears - better to be aggressive
-    // about stopping the live stream. For now, just stop the handle and let remaining
-    // initial frames flush.
+    // No more live frames will arrive; end the stream once the initial/snapshot
+    // frames flush.
+    endAfterQueue = true;
+    pump();
   };
   const drop = (): void => {
     queue.length = 0;
