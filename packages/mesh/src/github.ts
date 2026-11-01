@@ -228,8 +228,17 @@ function* fencedJsonBodies(comment: { body: string }): Generator<string> {
   while (i < body.length) {
     const fence = findNextFence(body, i)
     if (fence === null) {
+      // findNextFence returns null if no ```json exists OR if the fence is
+      // malformed (no newline / junk on the opening line).  Re-search to
+      // distinguish: if there is no ```json at all we are done; otherwise
+      // advance past the malformed opener and keep scanning.
       const open = body.indexOf('```json', i)
       if (open === -1) {
+        return
+      }
+      const eolCheck = body.indexOf('\n', open + '```json'.length)
+      if (eolCheck === -1) {
+        // No newline after this opener — nothing further can be valid.
         return
       }
       i = open + '```json'.length
@@ -306,7 +315,7 @@ function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
 }
 
 function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
-  return rows.filter((i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number')
+  return rows.filter((i): i is GhIssue => i !== null && typeof i === 'object' && typeof i.number === 'number')
 }
 
 /** Issues carrying the request label — the label is an index, so a
