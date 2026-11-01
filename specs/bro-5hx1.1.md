@@ -360,5 +360,5 @@ packages/cli/src/commands/serve.ts     StepSpawnRequest fields pass through
   startup error with a clear message, same class as a missing `bd`.
 - **ACP agent crash mid-turn** surfaces as transport death → non-zero
   exit → the existing cause ladder. Works *because* the driver owns the
-  artifacts — the failure mode this spec must not regress is the log
-  tail carrying the provider's real error text.
+  artifacts — the failure mode this spec must not regress is both `.log`
+  and `.stderr` tails carrying the provider's real error text.
