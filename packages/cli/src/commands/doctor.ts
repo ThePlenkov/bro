@@ -2033,7 +2033,7 @@ function meshPeerChecks(
       remote?: unknown;
       transport?: unknown;
       login?: unknown;
-    } | undefined;
+    };
     const p = parsePeer(alias, peers[alias]);
     if (p === null) {
       bad++;
@@ -2044,7 +2044,7 @@ function meshPeerChecks(
     }
     if (
       p.transport === 'github' &&
-      (raw === undefined || typeof raw.transport !== 'string' || raw.transport === '') &&
+      (typeof raw.transport !== 'string' || raw.transport === '') &&
       (p.login === undefined || p.login === '')
     ) {
       missingLogin++;
@@ -2054,8 +2054,10 @@ function meshPeerChecks(
     const row = check(
       'mesh-peers',
       'warn',
-      `${bad}/${aliases.length} peer binding(s) unparseable`,
-      'each needs {"rig": "mesh://org/repo", "remote": "…"}'
+      `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
+      missingLogin > 0
+        ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
+        : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
     );
     return { row, remotes };
   }
