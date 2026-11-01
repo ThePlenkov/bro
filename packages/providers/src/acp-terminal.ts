@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import type {
   ClientApp,
@@ -22,6 +23,7 @@ import type {
   WaitForTerminalExitRequest,
   WaitForTerminalExitResponse,
 } from '@agentclientprotocol/sdk'
+import { procStat } from '@broject/core'
 
 interface TerminalEntry {
   child: ChildProcess
@@ -49,6 +51,10 @@ interface TerminalEntry {
    *  chunks so a live `data` never surfaces a U+FFFD boundary. */
   listeners: Set<TerminalFollower>
   decoder: StringDecoder
+  /** Pinned identity of the process group leader at spawn — prevents
+   *  killing a recycled PID after reuse (bro-oovnz). */
+  pgid?: number
+  pidStart?: string
 }
 
 /** A follower's taps — `data` per appended chunk (utf8), `exit` once
@@ -176,6 +182,8 @@ export class AcpTerminals {
       limit: ctx.params.outputByteLimit ?? this.defaultLimit,
       listeners: new Set(),
       decoder: new StringDecoder('utf8'),
+      pgid: typeof child.pid === 'number' ? child.pid : undefined,
+      pidStart: typeof child.pid === 'number' ? procStat(child.pid)?.start ?? undefined : undefined,
     }
     const settle = (exitCode: number | null, signal: string | null): void => {
       entry.exitStatus ??= { exitCode, signal }
@@ -327,12 +335,43 @@ export class AcpTerminals {
       )
     })
 
+  private canKillProcessGroup(entry: TerminalEntry): number | null {
+    if (process.platform === 'win32') {
+      return null
+    }
+    const pgid = entry.pgid
+    if (typeof pgid !== 'number' || pgid <= 0) {
+      return null
+    }
+    // Pin the process identity at spawn and verify the group still belongs
+    // to this terminal before signaling; skip the group kill when ownership
+    // cannot be proven.
+    if (entry.pidStart === undefined) {
+      return null
+    }
+    const st = procStat(pgid)
+    if (st === null || st.state === 'Z') {
+      return null
+    }
+    if (st.start !== entry.pidStart) {
+      return null
+    }
+    try {
+      process.kill(-pgid, 0)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+        return null
+      }
+    }
+    return pgid
+  }
+
   readonly kill: ClientRequestHandler<KillTerminalRequest, void> = (ctx) => {
     const entry = this.get(ctx.params.terminalId)
-    const pid = entry.child.pid
-    if (pid && process.platform !== 'win32') {
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
       try {
-        process.kill(-pid, 'SIGTERM')
+        process.kill(-pgid, 'SIGTERM')
         return
       } catch {}
     }
@@ -381,16 +420,22 @@ export class AcpTerminals {
     // Always SIGKILL the whole process group if possible so orphaned
     // grandchildren (e.g. backgrounded jobs under sh -c) don't outlive
     // release — even if the shell already exited, descendants may remain.
-    const pid = entry.child.pid
-    if (pid && process.platform !== 'win32') {
+    // But only if we can prove ownership (pin identity at spawn).
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
       try {
-        process.kill(-pid, 'SIGKILL')
+        process.kill(-pgid, 'SIGKILL')
       } catch {
         try {
           entry.child.kill('SIGKILL')
         } catch {}
       }
+    } else if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
     } else {
+      // Cannot prove ownership - skip group kill to avoid killing recycled pids
       try {
         entry.child.kill('SIGKILL')
       } catch {}
@@ -417,16 +462,21 @@ export class AcpTerminals {
       // timer fires post-dispose, and resolve waiters deterministically
       entry.stopped = true
       clearTimeout(entry.closeTimer)
-      const pid = entry.child.pid
-      if (pid && process.platform !== 'win32') {
+      const pgid = this.canKillProcessGroup(entry)
+      if (pgid !== null) {
         try {
-          process.kill(-pid, 'SIGKILL')
+          process.kill(-pgid, 'SIGKILL')
         } catch {
           try {
             entry.child.kill('SIGKILL')
           } catch {}
         }
+      } else if (process.platform === 'win32') {
+        try {
+          entry.child.kill('SIGKILL')
+        } catch {}
       } else {
+        // Cannot prove ownership - skip group kill to avoid killing recycled pids
         try {
           entry.child.kill('SIGKILL')
         } catch {}
