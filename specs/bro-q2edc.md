@@ -764,13 +764,25 @@ without a worktree made the archive path `ctxDir` → ENOTDIR on
 fleetStatusPath); `loadState` reconstructed `PluginState`
 field-by-field and DROPPED `liveViews`, so records never survived
 a tick (every converge would have re-opened duplicate workspaces).
-**Known-open**: under a real herdr pane the chrome pins and the
-report lands (`● working · streaming`) but the feed region paints
-blank even though `impl.drain()` delivers ~7.3k ops into
-`writer.apply` and `applyOps` yields items in isolation — the
-render leg under real geometry is still being chased; `pane run`
-also does NOT replace a busy pane, so code changes need a fresh
-workspace to be seen.
+**Render-mode regression found in the field, reverted**: under a
+real herdr pane the feed painted blank even though `impl.drain()`
+delivered ~7.3k ops into `writer.apply` and `applyOps` yielded
+items in isolation. Root cause: `split-footer`'s render geometry
+gives the renderable tree ONLY the footer strip
+(`renderHeight = footerHeight`, `renderOffset = terminalHeight - N`)
+— the scroll region is fed by _captured stdout_, never by
+renderables, so a renderable feed can never reach it, and a
+scrollbox collapses to ~1 row. Addendum 16's split-footer was
+reverted to `main-screen`: the tree gets the full screen and a
+plain column of rows overflows into native scrollback; the
+scrollbox is gone for the same reason (key-scrolling is now
+herdr's — copy-mode/wheel; `pane.scroll*` no-ops). Identity+keys
+ride the frame's last rows rather than pinning — the addendum-16
+complaint (chrome scrolls off during replay) is the accepted
+trade until a captured-stdout feed redesign. Verified live:
+`🤖 view:*` panes render prompt `┃` blocks, `⏺`/`▸` rows, tool
+cards, and the pinned-pair chrome. `pane run` does NOT replace a
+busy pane — code changes need a fresh workspace to be seen.
 
 ## Risks
 
