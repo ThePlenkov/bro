@@ -106,6 +106,9 @@ function secondsArg(flag: string, raw: string | undefined): number {
   if (raw === undefined || raw.startsWith('--')) {
     fail(`${flag} needs a seconds value`);
   }
+  if (raw.trim() === '') {
+    fail(`${flag} needs a numeric seconds value, got "${raw}"`);
+  }
   const n = Number(raw);
   if (!Number.isFinite(n)) {
     fail(`${flag} needs a numeric seconds value, got "${raw}"`);
@@ -295,8 +298,12 @@ function settleAbsent(w: Watch, read: DepRead): void {
  *  lifecycle fact: a reject envelope means re-post. The verdict is
  *  the envelope SET, not the reduced stage — a ship followed by a
  *  reject is contradictory lifecycle history, not a free dep. */
-function threadOf(w: Watch, ctx: WaitCtx): ReturnType<typeof meshThread> {
-  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, { gitCommon: ctx.common, pull: false });
+function threadOf(w: Watch, ctx: WaitCtx, timeoutMs?: number): ReturnType<typeof meshThread> {
+  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, {
+    gitCommon: ctx.common,
+    pull: false,
+    timeoutMs,
+  });
   for (const e of thread.errors) {
     console.error(`! wait ${w.arg}: ${e}`);
   }
@@ -379,9 +386,10 @@ function settleFromPlanes(
   w: Watch,
   ctx: WaitCtx,
   read: DepRead,
-  req: NonNullable<DepRead['request']>
+  req: NonNullable<DepRead['request']>,
+  timeoutMs?: number
 ): void {
-  const thread = threadOf(w, ctx);
+  const thread = threadOf(w, ctx, timeoutMs);
   if (rejected(w, read, thread) || shipped(w, read)) {
     return;
   }
@@ -401,7 +409,10 @@ function settleFromPlanes(
 /** one poll of one unsettled watch — records a verdict or bumps the
  *  blip counter; the watch carries the state */
 function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
-  const read = readDepState(w.plane, w.ref.id, timeoutMs);
+  const readTimeout = timeoutMs === undefined ? undefined : Math.max(1, Math.floor(timeoutMs));
+  // budget reused before reading thread/replica — recompute a smaller
+  // slice for any follow-up reads that must fit in the remaining window
+  const read = readDepState(w.plane, w.ref.id, readTimeout);
   if (read.errors.length > 0) {
     noteReadErrors(w, read.errors);
     return;
@@ -416,7 +427,9 @@ function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
     }
     return;
   }
-  settleFromPlanes(w, ctx, read, req);
+  const threadTimeout =
+    readTimeout === undefined ? undefined : Math.max(1, Math.floor(readTimeout * 0.5));
+  settleFromPlanes(w, ctx, read, req, threadTimeout);
 }
 
 /** terminal verdicts by precedence — a bad ref (2) outranks a dead
