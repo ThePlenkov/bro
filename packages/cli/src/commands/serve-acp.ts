@@ -550,19 +550,6 @@ export function acpTransport(
     }
   }
 
-  /** One agent app per accepted downstream connection — `st` is that
-   *  connection's state for its whole life (the SDK gives handlers a
-   *  fresh AgentContext wrapper per request, so the app closure is the
-   *  only stable conn-scope). */
-  const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
-    const app = agent({ name: 'bro-acp' })
-    attachDisconnectHandler(app, st)
-    registerAgentRequests(app, st)
-    registerAgentNotifications(app, st)
-    return app
-  }
-
   const attachDisconnectHandler = (
     app: ReturnType<typeof agent>,
     st: ConnState
@@ -616,6 +603,19 @@ export function acpTransport(
     // session/load · resume · fork · list · delete · providers_* ·
     // logout · nes_* · document_* stay unregistered — the SDK answers
     // method-not-found and advertised capabilities never offer them
+  }
+
+  /** One agent app per accepted downstream connection — `st` is that
+   *  connection's state for its whole life (the SDK gives handlers a
+   *  fresh AgentContext wrapper per request, so the app closure is the
+   *  only stable conn-scope). */
+  const buildAgent = () => {
+    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
+    const app = agent({ name: 'bro-acp' })
+    attachDisconnectHandler(app, st)
+    registerAgentRequests(app, st)
+    registerAgentNotifications(app, st)
+    return app
   }
 
   const handle = createNodeHttpHandler(new AcpServer({ createAgent: buildAgent }))
