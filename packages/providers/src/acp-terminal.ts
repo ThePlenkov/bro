@@ -138,6 +138,7 @@ export class AcpTerminals {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     }
     /** argv verbatim, always the first attempt — bare names resolve via
      *  PATH and spaced paths exec literally. Agents like devin instead put
@@ -327,7 +328,17 @@ export class AcpTerminals {
     })
 
   readonly kill: ClientRequestHandler<KillTerminalRequest, void> = (ctx) => {
-    this.get(ctx.params.terminalId).child.kill('SIGTERM')
+    const entry = this.get(ctx.params.terminalId)
+    const pid = entry.child.pid
+    if (pid && process.platform !== 'win32') {
+      try {
+        process.kill(-pid, 'SIGTERM')
+        return
+      } catch {}
+    }
+    try {
+      entry.child.kill('SIGTERM')
+    } catch {}
   }
 
   /** Drain the waiters with the best-known status and mark the entry
@@ -368,9 +379,22 @@ export class AcpTerminals {
     // a late timer would resolve waiters with a synthetic null status
     clearTimeout(entry.closeTimer)
     if (entry.exitStatus === null) {
-      // still running: SIGKILL's own 'exit' settles the real status and
-      // resolves pending wait_for_exit through the normal path
-      entry.child.kill('SIGKILL')
+      // still running: SIGKILL the whole process group so orphaned
+      // grandchildren (e.g. backgrounded jobs under sh -c) don't outlive
+      const pid = entry.child.pid
+      if (pid && process.platform !== 'win32') {
+        try {
+          process.kill(-pid, 'SIGKILL')
+        } catch {
+          try {
+            entry.child.kill('SIGKILL')
+          } catch {}
+        }
+      } else {
+        try {
+          entry.child.kill('SIGKILL')
+        } catch {}
+      }
     } else {
       // exited but 'close' may never come — the timer just cleared was
       // the last guaranteed flush; resolve waiters now, on the real status
@@ -396,7 +420,20 @@ export class AcpTerminals {
       entry.stopped = true
       clearTimeout(entry.closeTimer)
       if (entry.exitStatus === null) {
-        entry.child.kill('SIGKILL')
+        const pid = entry.child.pid
+        if (pid && process.platform !== 'win32') {
+          try {
+            process.kill(-pid, 'SIGKILL')
+          } catch {
+            try {
+              entry.child.kill('SIGKILL')
+            } catch {}
+          }
+        } else {
+          try {
+            entry.child.kill('SIGKILL')
+          } catch {}
+        }
       } else {
         this.flushEntry(entry)
       }
