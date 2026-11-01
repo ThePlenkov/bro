@@ -1523,26 +1523,33 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     handle?.stop();
     res.end();
   };
+  const writeNextFrame = (): boolean => {
+    if (queue.length === 0 || gone()) {
+      return false;
+    }
+    // write() never refuses the frame — `false` is advisory ("over
+    // high-water"), so the head is off the queue either way; on false
+    // we just stop feeding it more until 'drain'
+    const frame = queue.shift()!;
+    queued -= Buffer.byteLength(frame);
+    if (res.write(frame)) {
+      return true;
+    }
+    if (!waitingDrain) {
+      waitingDrain = true;
+      res.once('drain', () => {
+        waitingDrain = false;
+        pump();
+      });
+    }
+    return false;
+  };
   const pump = (): void => {
     if (waitingDrain) {
       return;
     }
-    while (queue.length > 0 && !gone()) {
-      // write() never refuses the frame — `false` is advisory ("over
-      // high-water"), so the head is off the queue either way; on false
-      // we just stop feeding it more until 'drain'
-      const frame = queue.shift()!;
-      queued -= Buffer.byteLength(frame);
-      if (!res.write(frame)) {
-        if (!waitingDrain) {
-          waitingDrain = true;
-          res.once('drain', () => {
-            waitingDrain = false;
-            pump();
-          });
-        }
-        return;
-      }
+    while (writeNextFrame()) {
+      // continue
     }
     if (queue.length === 0 && endAfterQueue && !gone()) {
       res.end();
@@ -1566,9 +1573,24 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       res.end();
     }
   };
+  const isHighSurrogate = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
+  const isLowSurrogate = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
+  const adjustForSurrogatePair = (chunk: string, i: number, end: number): number => {
+    if (end <= i || end >= chunk.length) {
+      return end;
+    }
+    const c1 = chunk.charCodeAt(end - 1);
+    const c2 = chunk.charCodeAt(end);
+    if (!isHighSurrogate(c1) || !isLowSurrogate(c2)) {
+      return end;
+    }
+    return end - 1 > i ? end - 1 : Math.min(end + 1, chunk.length);
+  };
   const sse = (chunk: string): void => {
-    for (let i = 0; i < chunk.length; i += SSE_SNAPSHOT_SLICE) {
-      enqueue(`data: ${JSON.stringify(chunk.slice(i, i + SSE_SNAPSHOT_SLICE))}\n\n`);
+    for (let i = 0; i < chunk.length; ) {
+      const end = adjustForSurrogatePair(chunk, i, Math.min(i + SSE_SNAPSHOT_SLICE, chunk.length));
+      enqueue(`data: ${JSON.stringify(chunk.slice(i, end === i ? Math.min(i + 1, chunk.length) : end))}\n\n`);
+      i = end === i ? Math.min(i + 1, chunk.length) : end;
     }
   };
   // headers before follow() — a registry that fires `exit` at subscribe
