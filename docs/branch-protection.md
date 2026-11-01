@@ -10,7 +10,7 @@ A push ruleset with `restrict_pushes` blocks all but an allow-list of actors fro
 
 Use this if you want to disable auto-fix pushes repo-wide.
 
-Ready-to-run example (substitute the repo and actor IDs as appropriate):
+Ready-to-run example (substitute the repo and actor numeric IDs as appropriate):
 
 ```bash
 gh api -X POST repos/<owner>/<repo>/rulesets --input '{
@@ -21,14 +21,15 @@ gh api -X POST repos/<owner>/<repo>/rulesets --input '{
   "rules": [{
     "type": "restrict_pushes",
     "parameters": {
-      "push_allowed_actor_ids": [<user/bot ids to allow>]
+      "push_allowed_actor_ids": [<numeric user/bot IDs to allow>]
     }
   }]
 }'
 ```
 
 Notes:
-- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in the allow-list or you will break normal updates and release workflows.
+- `push_allowed_actor_ids` requires **numeric GitHub database IDs**, not login names (e.g., not `"dependabot[bot]"`). Look them up with `gh api users/<login> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
+- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in the allow-list (by their numeric IDs) or you will break normal updates and release workflows.
 - A wrong allow-list can lock you out; recovery is possible only through the ruleset UI.
 - This is the blunt instrument — it disables the bots' auto-fix everywhere the ruleset applies.
 
