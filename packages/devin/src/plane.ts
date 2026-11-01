@@ -244,14 +244,15 @@ const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/
 
 /** Worker classification for one locked pid — a spawned (never
  *  interactive) devin session. Probes:
- *  BRO_HOOKS=0 marks a machine backend (acp provider/conductor service
- *  child) as not a worker (never counted against
- *  agents.devin.maxWorkers) and takes precedence over the worker badge;
  *  the BRO_AGENT_ID env badge every bro backend pins into the worker's
  *  env (inherited by the devin child a wrapper spawns) classifies a
- *  worker; and a non-terminal stdin (`fd/0` outside the tty devices —
- *  headless pipes, null, sockets; interactive devin reads a terminal)
- *  classifies a worker.
+ *  worker and takes precedence over BRO_HOOKS=0;
+ *  BRO_HOOKS=0 marks a machine backend (acp provider/conductor service
+ *  child) as not a worker (never counted against
+ *  agents.devin.maxWorkers) when no BRO_AGENT_ID is present; and a
+ *  non-terminal stdin (`fd/0` outside the tty devices — headless pipes,
+ *  null, sockets; interactive devin reads a terminal) classifies a
+ *  worker.
  *
  *  A pid neither probe verifies is NOT a worker: unreadable state only
  *  undercounts the worker lane — while phantom workers would refuse
