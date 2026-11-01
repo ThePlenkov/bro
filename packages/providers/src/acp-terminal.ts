@@ -7,7 +7,6 @@
  */
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import type {
   ClientApp,
@@ -338,12 +337,38 @@ export class AcpTerminals {
       )
     })
 
+  private isValidPgid(pgid: unknown): pgid is number {
+    return typeof pgid === 'number' && pgid > 0
+  }
+
+  private isGroupAlive(pgid: number, pidStart: string): boolean {
+    const st = procStat(pgid)
+    if (st === null || st.state === 'Z') {
+      return false
+    }
+    if (st.start !== pidStart) {
+      return false
+    }
+    return true
+  }
+
+  private canSignalGroup(pgid: number): boolean {
+    try {
+      process.kill(-pgid, 0)
+      return true
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EPERM') {
+        return true
+      }
+      return false
+    }
+  }
+
   private canKillProcessGroup(entry: TerminalEntry): number | null {
     if (process.platform === 'win32') {
       return null
     }
-    const pgid = entry.pgid
-    if (typeof pgid !== 'number' || pgid <= 0) {
+    if (!this.isValidPgid(entry.pgid)) {
       return null
     }
     // Pin the process identity at spawn and verify the group still belongs
@@ -352,21 +377,13 @@ export class AcpTerminals {
     if (entry.pidStart === undefined) {
       return null
     }
-    const st = procStat(pgid)
-    if (st === null || st.state === 'Z') {
+    if (!this.isGroupAlive(entry.pgid, entry.pidStart)) {
       return null
     }
-    if (st.start !== entry.pidStart) {
+    if (!this.canSignalGroup(entry.pgid)) {
       return null
     }
-    try {
-      process.kill(-pgid, 0)
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
-        return null
-      }
-    }
-    return pgid
+    return entry.pgid
   }
 
   readonly kill: ClientRequestHandler<KillTerminalRequest, void> = (ctx) => {
