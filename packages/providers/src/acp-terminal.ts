@@ -364,10 +364,7 @@ export class AcpTerminals {
     }
   }
 
-  private canKillProcessGroup(entry: TerminalEntry): number | null {
-    if (process.platform === 'win32') {
-      return null
-    }
+  private ownershipPgid(entry: TerminalEntry): number | null {
     if (!this.isValidPgid(entry.pgid)) {
       return null
     }
@@ -380,10 +377,21 @@ export class AcpTerminals {
     if (!this.isGroupAlive(entry.pgid, entry.pidStart)) {
       return null
     }
-    if (!this.canSignalGroup(entry.pgid)) {
+    return entry.pgid
+  }
+
+  private canKillProcessGroup(entry: TerminalEntry): number | null {
+    if (process.platform === 'win32') {
       return null
     }
-    return entry.pgid
+    const pgid = this.ownershipPgid(entry)
+    if (pgid === null) {
+      return null
+    }
+    if (!this.canSignalGroup(pgid)) {
+      return null
+    }
+    return pgid
   }
 
   readonly kill: ClientRequestHandler<KillTerminalRequest, void> = (ctx) => {
@@ -473,12 +481,6 @@ export class AcpTerminals {
       this.flushEntry(entry)
     }
     this.entries.delete(ctx.params.terminalId)
-    return
-    if (entry.exitStatus !== null) {
-      // exited but 'close' may never come — resolve waiters now, on the real status
-      this.flushEntry(entry)
-    }
-    this.entries.delete(ctx.params.terminalId)
   }
 
   register(app: ClientApp): ClientApp {
@@ -490,37 +492,41 @@ export class AcpTerminals {
       .onRequest('terminal/wait_for_exit', this.waitForExit)
   }
 
+  private killEntryOnDispose(entry: TerminalEntry): void {
+    const pgid = this.canKillProcessGroup(entry)
+    if (pgid !== null) {
+      try {
+        process.kill(-pgid, 'SIGKILL')
+      } catch {
+        // fall through to platform-specific handling
+      }
+      if (entry.exitStatus !== null) {
+        this.flushEntry(entry)
+      }
+      return
+    }
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
+      if (entry.exitStatus !== null) {
+        this.flushEntry(entry)
+      }
+      return
+    }
+    // Cannot prove ownership - skip all kills to avoid killing recycled pids
+    if (entry.exitStatus !== null) {
+      this.flushEntry(entry)
+    }
+  }
+
   dispose(): void {
     for (const entry of this.entries.values()) {
       // same discipline as release: cancel a pending grace flush so no
       // timer fires post-dispose, and resolve waiters deterministically
       entry.stopped = true
       clearTimeout(entry.closeTimer)
-      const pgid = this.canKillProcessGroup(entry)
-      if (pgid !== null) {
-        try {
-          process.kill(-pgid, 'SIGKILL')
-        } catch {
-          // fall through to platform-specific handling
-        }
-        if (entry.exitStatus !== null) {
-          this.flushEntry(entry)
-        }
-        continue
-      }
-      if (process.platform === 'win32') {
-        try {
-          entry.child.kill('SIGKILL')
-        } catch {}
-        if (entry.exitStatus !== null) {
-          this.flushEntry(entry)
-        }
-        continue
-      }
-      // Cannot prove ownership - skip all kills to avoid killing recycled pids
-      if (entry.exitStatus !== null) {
-        this.flushEntry(entry)
-      }
+      this.killEntryOnDispose(entry)
     }
     this.entries.clear()
   }
