@@ -47,6 +47,7 @@ import {
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import { implArg, type PaneImpl, pickImpl } from './impl.ts';
+import { sysCopy } from './view.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -278,6 +279,7 @@ export async function runTui(argv: string[]): Promise<void> {
       const text = pane.writer.copy();
       if (text === undefined || text === '') return;
       process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
+      sysCopy(text);
       pane.toast?.('copied');
       if (toastTimer !== undefined) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => pane.toast?.(''), 1500);

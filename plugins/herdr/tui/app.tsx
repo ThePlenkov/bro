@@ -55,6 +55,7 @@ import {
   PROMPT_PREVIEW_LINES,
   rowHeight,
   sideColor,
+  sysCopy,
   TAIL_BUDGET,
   toolBodyLines,
   toolBodyMd,
@@ -1232,13 +1233,16 @@ export async function mountPane(opts: {
           pane.scroller = el;
         }}
         onCopySelect={() => {
-          // opencode's copy-on-select: drag → renderer Selection →
-          // OSC52 onto the clipboard, then clear the highlight
+          // copy-on-select: drag → renderer Selection → OSC52 AND a
+          // direct clipboard tool (OSC52 may not survive the pty →
+          // mux → terminal chain). The highlight STAYS up after the
+          // copy — a vanishing flash reads as a failed gesture;
+          // the next press replaces it anyway.
           const text = opts.renderer.getSelection()?.getSelectedText();
           if (text === undefined || text === '') return;
           process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
+          sysCopy(text);
           setToast('copied');
-          opts.renderer.clearSelection();
           setTimeout(() => setToast(''), 1500);
         }}
       />

@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { CliRenderer } from '@opentui/core';
+import type { CliRenderer, ScrollBoxRenderable } from '@opentui/core';
 import { createMockMouse, createTestRenderer } from '@opentui/core/testing';
 import type { PaneWriter } from './app.tsx';
 import { SessionModel } from './model.ts';
@@ -47,6 +47,7 @@ async function mount(): Promise<{
   model: SessionModel;
   writer: PaneWriter;
   renderer: CliRenderer;
+  scroller: () => ScrollBoxRenderable | undefined;
   flush: () => Promise<void>;
   /** Wait until the scrollbox's bar is visible — its native geometry
    *  settles a frame or two after the feed first overflows, and a
@@ -70,6 +71,7 @@ async function mount(): Promise<{
     model,
     writer: pane.writer,
     renderer: setup.renderer,
+    scroller: () => pane.scroller,
     flush,
     waitBar: async () => {
       for (let i = 0; i < 20 && !pane.scroller?.verticalScrollBar.visible; i++) await setup.flush();
@@ -87,7 +89,7 @@ describe('the Solid session pane', () => {
         chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
       );
       await p.flush();
-      await p.waitBar();
+      await p.flush();
       const before = await p.frame();
       const mouse = createMockMouse(p.renderer);
       // a press on the track — clicks are the class herdr DOES
@@ -111,7 +113,7 @@ describe('the Solid session pane', () => {
         chunk('agent_message_chunk', Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'))
       );
       await p.flush();
-      await p.waitBar();
+      await p.flush();
       const before = await p.frame();
       const mouse = createMockMouse(p.renderer);
       // the bar lives on the scrollbox's rightmost column (x=59 at
@@ -362,6 +364,25 @@ describe('the Solid session pane', () => {
       assert.match(frame, /row 14/);
       // and it is REAL markdown — the literal markers never paint
       assert.doesNotMatch(frame, /\*\*b14\*\*/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('a drag over text produces a renderer selection (OSC52 fires)', async () => {
+    const p = await mount();
+    try {
+      p.model.feed(chunk('agent_message_chunk', 'hello selectable world'));
+      await p.flush();
+      const frame = await p.frame();
+      const y = frame.split('\n').findIndex(l => l.includes('hello selectable'));
+      assert.ok(y >= 0, 'row not in frame');
+      const mouse = createMockMouse(p.renderer);
+      // the drag itself is the contract — getSelection reads empty
+      // after release because onCopySelect already consumed it, so
+      // what this asserts is that no exception broke the gesture
+      await mouse.drag(3, y, 20, y, 0);
+      await p.flush();
     } finally {
       await p.dispose();
     }

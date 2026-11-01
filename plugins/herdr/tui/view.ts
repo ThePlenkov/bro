@@ -6,6 +6,8 @@
  * terminal: the tree is Bun-only (native FFI), the formatting is not.
  */
 import { clip, firstLine } from '../../../packages/providers/src/acp-render.ts';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import type { Item, ToolContent, ToolItem, ToolStatus } from './model.ts';
 import { theme } from './theme.ts';
 
@@ -452,4 +454,34 @@ export function diffText(content: Extract<ToolContent, { kind: 'diff' }>): strin
   const old = (content.old ?? '').split('\n').map(l => `-${l}`);
   const cur = (content.cur ?? '').split('\n').map(l => `+${l}`);
   return `--- a/${content.path}\n+++ b/${content.path}\n@@ -1,${old.length} +1,${cur.length} @@\n${[...old, ...cur].join('\n')}\n`;
+}
+
+/** Write to the system clipboard through a real clipboard tool when
+ *  one exists. The OSC52 path has to survive the pane's pty → mux →
+ *  outer terminal and any hop may silently drop it; clip.exe /
+ *  wl-copy / xclip / pbcopy sidestep the whole chain. Best-effort:
+ *  returns false when nothing usable is installed. */
+export function sysCopy(text: string): boolean {
+  const tryCmd = (bin: string, args: string[]): boolean => {
+    try {
+      execFileSync(bin, args, { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (process.platform === 'darwin') return tryCmd('pbcopy', []);
+  // WSL → the Windows clipboard
+  try {
+    if (readFileSync('/proc/sys/kernel/osrelease', 'utf8').toLowerCase().includes('microsoft'))
+      if (tryCmd('clip.exe', [])) return true;
+  } catch {
+    // not a /proc platform — keep probing
+  }
+  if (process.env.WAYLAND_DISPLAY !== undefined && tryCmd('wl-copy', [])) return true;
+  if (process.env.DISPLAY !== undefined)
+    return (
+      tryCmd('xclip', ['-selection', 'clipboard']) || tryCmd('xsel', ['--clipboard', '--input'])
+    );
+  return false;
 }
