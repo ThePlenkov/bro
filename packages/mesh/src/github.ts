@@ -116,10 +116,12 @@ export class GitHubLogin {
 /** Normalize a repo/remote input to GitHubRepo. */
 export function toGitHubRepo(input: { remote: string } | { owner: string; repo: string } | string): GitHubRepo | null {
   if (typeof input === 'string') {
-    return parseGithubRemote({ remote: input })
+    const parsed = parseGithubRemote({ remote: input })
+    return parsed === null ? null : GitHubRepo.from(parsed)
   }
   if ('remote' in input) {
-    return parseGithubRemote(input)
+    const parsed = parseGithubRemote(input)
+    return parsed === null ? null : GitHubRepo.from(parsed)
   }
   return GitHubRepo.from(input)
 }
