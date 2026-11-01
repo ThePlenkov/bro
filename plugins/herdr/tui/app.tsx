@@ -102,10 +102,10 @@ export interface Pane {
    *  the scrollbox's scrollChildIntoView; select/toggle call it so a
    *  peek or fold never happens off-screen. */
   scrollToRow?: (id: number) => void;
-  /** A mouse click on a row: unselected foldable → select (the peek
-   *  opens); already selected → the Enter toggle. Click IS the
-   *  j/k-then-Enter gesture — scrolling to a ▸ row and hitting Enter
-   *  with nothing selected does nothing otherwise (addendum 27). */
+  /** A mouse press on a row — a double-click (same foldable row
+   *  inside 400ms) selects and toggles the pin. Single presses are
+   *  deliberately inert so drag-select/copy never fights the fold
+   *  chrome; non-foldable rows ignore presses as before. */
   clickRow?: (id: number) => void;
   /** The feed's scrollbox — tests poll its bar's visibility before
    *  sending mouse events at it. */
@@ -219,19 +219,23 @@ export function createPane(
       },
     },
   };
-  // click a foldable row: first click selects (the peek opens —
-  // same as j/k arriving), a second click toggles the pin — the
-  // Enter gesture. Non-foldable rows ignore the click so prose
-  // stays free for drag-select/copy.
+  // DOUBLE-click a foldable row toggles it — one gesture selects
+  // and pins (or closes). A single click is left alone entirely so
+  // drag-select/copy never fights the fold chrome: the row only
+  // responds when a second press lands on the same row inside the
+  // window. Non-foldable rows ignore the click as before.
+  let lastClick: { id: number; t: number } | undefined;
   pane.clickRow = id => {
     const item = plain.byId[id];
     if (item === undefined || !isFoldable(item)) return;
-    if (plain.selected === id) {
-      pane.writer.toggle();
-    } else {
-      publish({ ...plain, selected: id });
-      pane.scrollToRow?.(id);
-    }
+    const now = Date.now();
+    const dbl = lastClick?.id === id && now - lastClick.t < 400;
+    lastClick = { id, t: now };
+    if (!dbl) return;
+    lastClick = undefined;
+    if (plain.selected !== id) publish({ ...plain, selected: id });
+    pane.writer.toggle();
+    pane.scrollToRow?.(id);
   };
   return pane;
 }
@@ -1086,8 +1090,8 @@ function Pane(props: {
   /** mouse-up after a drag-select → OSC52 copy (opencode's
    *  copy-on-select on the renderer's own selection) */
   onCopySelect?: (event: MouseEvent) => void;
-  /** mouse-down on a row → select-and-peek / pin toggle — the
-   *  click IS the j/k-then-Enter gesture (addendum 27) */
+  /** mouse-down on a row → double-click detection → pin toggle —
+   *  a single click stays free for drag-select/copy (addendum 27) */
   onRowClick?: (id: number) => void;
 }) {
   const renderer = useRenderer();

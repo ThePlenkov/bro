@@ -367,7 +367,7 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a click selects+peeks a foldable row; a second click pins the toggle', async () => {
+  test('a double-click toggles a foldable row; a single press stays inert', async () => {
     const p = await mount();
     try {
       p.model.feed(
@@ -382,12 +382,11 @@ describe('the Solid session pane', () => {
       const y = folded.split('\n').findIndex(l => /\+\d+ lines/.test(l));
       assert.ok(y >= 0, 'folded row not in frame');
       const mouse = createMockMouse(p.renderer);
+      // a single press is deliberately inert — drag-select/copy's slot
       await mouse.click(5, y, 0);
       await p.flush();
-      // the click IS the j/k arrive — the selection's peek opens it
-      const peeked = await p.frame();
-      assert.match(peeked, /line 40/);
-      // second click = the Enter gesture — pins the toggle
+      assert.doesNotMatch(await p.frame(), /line 40/);
+      // the second press inside the window = the double-click toggle
       await mouse.click(5, y, 0);
       await p.flush();
       assert.match(await p.frame(), /line 40/);
