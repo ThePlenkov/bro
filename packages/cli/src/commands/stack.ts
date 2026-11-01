@@ -440,6 +440,23 @@ function memberLine(
   return `  ${m.n}  ${m.slug}  ${m.branch}  base ${base}${stale ? ' (stale edge)' : ''}  ${wt}  ${pr}`
 }
 
+function printPublishHint(
+  stacks: ReturnType<typeof resolveStacks>,
+  members: MemberView[],
+  name: string
+): void {
+  if (stacks?.publish === undefined || stacks.membership === undefined) {
+    return
+  }
+  const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
+  const unstacked = open.filter((m) => stacks.membership!(m) === null)
+  if (open.length >= 2 && unstacked.length > 0) {
+    console.log(
+      `  ${unstacked.length} of ${open.length} open member PRs not in a stack on the host — \`bro stack publish ${name}\``
+    )
+  }
+}
+
 function cmdList(argv: string[]): void {
   const pos = positionals(argv, NAME_FLAGS)
   const main = mainWorktree()
@@ -458,18 +475,7 @@ function cmdList(argv: string[]): void {
     for (const m of members) {
       console.log(memberLine(m, defaultBase, rev, main.path))
     }
-    // the publish hint needs both caps: membership detects the gap,
-    // publish is the fix it names. Neither present → the host has no
-    // stack registry and there is nothing to hint at.
-    if (stacks?.publish !== undefined && stacks.membership !== undefined) {
-      const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
-      const unstacked = open.filter((m) => stacks.membership!(m) === null)
-      if (open.length >= 2 && unstacked.length > 0) {
-        console.log(
-          `  ${unstacked.length} of ${open.length} open member PRs not in a stack on the host — \`bro stack publish ${name}\``
-        )
-      }
-    }
+    printPublishHint(stacks, members, name)
   }
 }
 
@@ -644,6 +650,58 @@ function membershipPreflight(
   return 'unproven'
 }
 
+function buildPublishChain(
+  open: MemberView[],
+  defaultBase: string
+): StackChainMember[] {
+  return open.map((m) => ({
+    branch: m.branch,
+    base: displayBase(m, defaultBase),
+    pr: m.pr,
+    headSha: m.headSha,
+  }))
+}
+
+function publishStackChain(
+  name: string,
+  stacks: StackFacade,
+  chain: StackChainMember[],
+  lines: string[]
+): PublishOutcome {
+  try {
+    const hit = stacks.publish?.(chain)
+    if (hit === null || hit === undefined) {
+      lines.push(`  stack ${name} publish failed — host reported no membership`)
+      return 'failed'
+    }
+    lines.push(`  stack ${name} published — stack #${hit.id}`)
+    return 'registered'
+  } catch (err) {
+    lines.push(`  stack ${name} publish failed — ${(err as Error).message}`)
+    return 'failed'
+  }
+}
+
+function handlePublishPreflight(
+  name: string,
+  open: MemberView[],
+  stacks: StackFacade,
+  lines: string[],
+  quiet: boolean
+): PublishOutcome | undefined {
+  if (stacks.membership === undefined) {
+    return undefined
+  }
+  const pre = membershipPreflight(name, open, stacks.membership, lines, quiet)
+  if (pre === 'refused') {
+    return 'failed'
+  }
+  if (pre === 'registered') {
+    return 'registered'
+  }
+  return undefined
+}
+
 /** Register the chain's open member PRs as the host's stack object —
  *  `gh stack link` on GitHub, absent everywhere chains are detected
  *  from the base links themselves. `quiet` is the cascade caller:
@@ -666,33 +724,12 @@ function publishStack(
     }
     return 'skipped'
   }
-  if (stacks.membership !== undefined) {
-    const pre = membershipPreflight(name, open, stacks.membership, lines, quiet)
-    if (pre === 'refused') {
-      return 'failed'
-    }
-    if (pre === 'registered') {
-      return 'registered'
-    }
+  const pre = handlePublishPreflight(name, open, stacks, lines, quiet)
+  if (pre !== undefined) {
+    return pre
   }
-  const chain: StackChainMember[] = open.map((m) => ({
-    branch: m.branch,
-    base: displayBase(m, defaultBase),
-    pr: m.pr,
-    headSha: m.headSha,
-  }))
-  try {
-    const hit = stacks.publish?.(chain)
-    if (hit === null || hit === undefined) {
-      lines.push(`  stack ${name} publish failed — host reported no membership`)
-      return 'failed'
-    }
-    lines.push(`  stack ${name} published — stack #${hit.id}`)
-    return 'registered'
-  } catch (err) {
-    lines.push(`  stack ${name} publish failed — ${(err as Error).message}`)
-    return 'failed'
-  }
+  const chain = buildPublishChain(open, defaultBase)
+  return publishStackChain(name, stacks, chain, lines)
 }
 
 /** `bro stack publish [<name>]` — the post-hoc verb: member PRs are
@@ -795,6 +832,33 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
   return true
 }
 
+function runStackSyncCascade(ctx: SyncCtx, members: MemberView[]): boolean {
+  let intact = true
+  for (const item of planSync(members, ctx.defaultBase)) {
+    if (!syncMember(item, ctx)) {
+      intact = false
+    }
+  }
+  return intact
+}
+
+function maybeAutoPublish(
+  intact: boolean,
+  stacks: StackFacade | undefined,
+  name: string,
+  members: MemberView[],
+  ctx: SyncCtx,
+  status?: { publishFailed: boolean }
+): void {
+  if (!intact || stacks?.publish === undefined) {
+    return
+  }
+  const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true)
+  if (outcome === 'failed' && status !== undefined) {
+    status.publishFailed = true
+  }
+}
+
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
  *  post-merge step. Per-member cascade ownership comes from the
  *  connector's stacks facade: when the platform already retargeted the
@@ -821,24 +885,19 @@ export function syncStack(
     lines: [],
   }
   const members = collectMembers(name, root, ctx.rev)
-  // A clean cascade — nothing skipped, nothing refused — leaves the
-  // chain's base==prev-head invariant proven, which is exactly what the
-  // host's stack registration demands. A dirty member or a failed move
-  // breaks it: defer publish instead of feeding the tool a reject.
-  let intact = true
-  for (const item of planSync(members, ctx.defaultBase)) {
-    if (!syncMember(item, ctx)) {
-      intact = false
-    }
-  }
-  const stacks = ctx.stacks
-  if (intact && stacks?.publish !== undefined) {
-    const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true)
-    if (outcome === 'failed' && status !== undefined) {
-      status.publishFailed = true
-    }
-  }
+  const intact = runStackSyncCascade(ctx, members)
+  maybeAutoPublish(intact, ctx.stacks, name, members, ctx, status)
   return ctx.lines
+}
+
+function printSyncResult(lines: string[]): void {
+  if (lines.length === 0) {
+    console.log('  in sync')
+    return
+  }
+  for (const l of lines) {
+    console.log(l)
+  }
 }
 
 function cmdSync(argv: string[]): void {
@@ -853,13 +912,7 @@ function cmdSync(argv: string[]): void {
     console.log(`stack ${name}:`)
     const status = { publishFailed: false }
     const lines = syncStack(main.path, name, status)
-    if (lines.length === 0) {
-      console.log('  in sync')
-    } else {
-      for (const l of lines) {
-        console.log(l)
-      }
-    }
+    printSyncResult(lines)
     if (status.publishFailed) {
       process.exitCode = 1
     }
@@ -867,6 +920,155 @@ function cmdSync(argv: string[]): void {
 }
 
 const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin'])
+
+function mergeOptsFrom(argv: string[]): StackMergeOpts {
+  const picked = (['--squash', '--merge', '--rebase'] as const).filter((f) => argv.includes(f))
+  if (picked.length > 1) {
+    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`)
+    usage()
+  }
+  return {
+    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
+    admin: argv.includes('--admin'),
+  }
+}
+
+function resolveMergeStackName(argv: string[]): string | undefined {
+  const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true })
+  return (
+    flag(argv, '--name') ??
+    pos[0] ??
+    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name
+  )
+}
+
+function computeMergeable(
+  live: Array<{
+    branch: string
+    pr?: number
+    prState?: string
+    headSha?: string
+  }>,
+  rev: { repo: string; facade: ReviewFacade } | undefined,
+  stacks: ReturnType<typeof resolveStacks>
+): Array<{
+  branch: string
+  pr?: number
+  prState?: string
+  headSha?: string
+}> | undefined {
+  let mergeable = live
+  if (rev !== undefined) {
+    const cut = live.findIndex((m) => m.pr === undefined || m.prState !== 'OPEN')
+    mergeable = cut === -1 ? live : live.slice(0, cut)
+    if (mergeable.length === 0) {
+      console.error(
+        `error: bottom member ${live[0]!.branch} has no OPEN PR — nothing can merge past it`
+      )
+      process.exitCode = 1
+      return undefined
+    }
+    if (mergeable.length < live.length) {
+      console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`)
+    }
+    return mergeable
+  }
+  if (stacks?.mergeChain === undefined) {
+    console.error('error: no merge path — no review host and no stacks connector serve this repo')
+    process.exitCode = 1
+    return undefined
+  }
+  return mergeable
+}
+
+async function gateMergeable(
+  mergeable: Array<{ branch: string; pr?: number }>,
+  main: ReturnType<typeof mainWorktree>,
+  rev: { repo: string; facade: ReviewFacade }
+): Promise<boolean> {
+  const act = loadBroConfig(main.path).act
+  for (const m of mergeable) {
+    const pr = m.pr
+    if (pr === undefined) {
+      continue
+    }
+    const state = await fetchPrActState(
+      rev.facade,
+      { repo: rev.repo, pr },
+      {
+        ignoreChecks: act.ignoreChecks,
+        checkHistory: checkHistory(main.path),
+        maxRounds: act.maxRounds,
+        docsPaths: act.docsPaths,
+        docsMaxRounds: act.docsMaxRounds,
+        requireApproval: act.requireApproval,
+        approvers: act.approvers,
+        resolveLedger: resolveLedger(main.path),
+      }
+    )
+    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
+    if (gate.ok) {
+      continue
+    }
+    console.error(
+      `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
+    )
+    for (const b of gate.blockers) {
+      console.error(`  blocker: ${b}`)
+    }
+    process.exitCode = 1
+    return false
+  }
+  return true
+}
+
+function doStackMerge(
+  mergeable: Array<{ branch: string; pr?: number; headSha?: string }>,
+  trunk: string,
+  opts: StackMergeOpts,
+  stacks: ReturnType<typeof resolveStacks>,
+  rev: { repo: string; facade: ReviewFacade } | undefined
+) {
+  const chain: StackChainMember[] = mergeable.map((m) => ({
+    branch: m.branch,
+    base: trunk,
+    pr: m.pr,
+    headSha: m.headSha,
+  }))
+  const report =
+    stacks?.mergeChain?.(chain, opts) ??
+    (rev !== undefined
+      ? mergeChainPerLayer(rev.facade, rev.repo, chain, opts, (m) =>
+          stacks?.cascade?.(m) ?? MANUAL_CASCADE
+        )
+      : undefined)
+  if (report === undefined) {
+    console.error('error: stack merge declined — no connector can merge this chain')
+    process.exitCode = 1
+    return undefined
+  }
+  return report
+}
+
+function postMergeRetire(
+  mergeable: Array<{ branch: string; pr?: number }>,
+  report: { lines: string[]; merged: string[] },
+  main: ReturnType<typeof mainWorktree>
+): void {
+  for (const l of report.lines) {
+    console.log(l)
+  }
+  const mergedSet = new Set(report.merged)
+  for (const m of mergeable) {
+    if (mergedSet.has(m.branch) && m.pr === undefined) {
+      const retireLines: string[] = []
+      retireMerged(m, main.path, retireLines)
+      for (const l of retireLines) {
+        console.log(l)
+      }
+    }
+  }
+}
 
 /** `bro stack merge` — land the chain bottom→top through the
  *  connector's own mechanism: `gh stack merge` where the extension
@@ -876,24 +1078,12 @@ const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin'])
  *  evaluated BEFORE the first merge call — refusing early keeps even
  *  the per-layer fallback effectively all-or-nothing on the gate axis. */
 async function cmdMerge(argv: string[]): Promise<void> {
-  const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true })
-  const name =
-    flag(argv, '--name') ??
-    pos[0] ??
-    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name
+  const name = resolveMergeStackName(argv)
   if (name === undefined || !isStackName(name)) {
     console.error('error: no stack context — pass a name or run inside a member worktree')
     usage()
   }
-  const picked = (['--squash', '--merge', '--rebase'] as const).filter((f) => argv.includes(f))
-  if (picked.length > 1) {
-    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`)
-    usage()
-  }
-  const opts: StackMergeOpts = {
-    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
-    admin: argv.includes('--admin'),
-  }
+  const opts = mergeOptsFrom(argv)
   const main = mainWorktree()
   const trunk = defaultBranchName() ?? main.branch ?? 'main'
   const rev = resolveReview(main.path)
@@ -908,27 +1098,8 @@ async function cmdMerge(argv: string[]): Promise<void> {
     console.log('nothing to merge — every member already landed')
     return
   }
-  // The merge set is the contiguous prefix that CAN land — on a review
-  // host that means an OPEN PR per member, so a PR-less or closed member
-  // breaks the chain (nothing merges past it). Forge-less, every member
-  // is mergeable: git lands the whole chain.
-  let mergeable = live
-  if (rev !== undefined) {
-    const cut = live.findIndex((m) => m.pr === undefined || m.prState !== 'OPEN')
-    mergeable = cut === -1 ? live : live.slice(0, cut)
-    if (mergeable.length === 0) {
-      console.error(
-        `error: bottom member ${live[0]!.branch} has no OPEN PR — nothing can merge past it`
-      )
-      process.exitCode = 1
-      return
-    }
-    if (mergeable.length < live.length) {
-      console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`)
-    }
-  } else if (stacks?.mergeChain === undefined) {
-    console.error('error: no merge path — no review host and no stacks connector serve this repo')
-    process.exitCode = 1
+  const mergeable = computeMergeable(live, rev, stacks)
+  if (mergeable === undefined) {
     return
   }
 
@@ -945,81 +1116,14 @@ async function cmdMerge(argv: string[]): Promise<void> {
     return
   }
   try {
-    // gate every mergeable layer before the first merge — an unresolved
-    // thread three layers up must not leave the bottom two landed
-    if (rev !== undefined) {
-      const act = loadBroConfig(main.path).act
-      for (const m of mergeable) {
-        const pr = m.pr
-        if (pr === undefined) {
-          continue // unreachable — the prefix guarantees an OPEN PR
-        }
-        const state = await fetchPrActState(
-          rev.facade,
-          { repo: rev.repo, pr },
-          {
-            ignoreChecks: act.ignoreChecks,
-            checkHistory: checkHistory(main.path),
-            maxRounds: act.maxRounds,
-            docsPaths: act.docsPaths,
-            docsMaxRounds: act.docsMaxRounds,
-            requireApproval: act.requireApproval,
-            approvers: act.approvers,
-            resolveLedger: resolveLedger(main.path),
-          }
-        )
-        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
-        if (!gate.ok) {
-          console.error(
-            `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
-          )
-          for (const b of gate.blockers) {
-            console.error(`  blocker: ${b}`)
-          }
-          process.exitCode = 1
-          return
-        }
-      }
-    }
-    const chain: StackChainMember[] = mergeable.map((m) => ({
-      branch: m.branch,
-      base: trunk,
-      pr: m.pr,
-      headSha: m.headSha,
-    }))
-    const report =
-      stacks?.mergeChain?.(chain, opts) ??
-      (rev !== undefined
-        ? mergeChainPerLayer(rev.facade, rev.repo, chain, opts, (m) =>
-            stacks?.cascade?.(m) ?? MANUAL_CASCADE
-          )
-        : undefined)
-    if (report === undefined) {
-      // a stacks facade that declined and no reviews facade to fall
-      // back on — git-only connectors always carry mergeChain, so this
-      // is the no-connector corner
-      console.error('error: stack merge declined — no connector can merge this chain')
-      process.exitCode = 1
+    if (rev !== undefined && !(await gateMergeable(mergeable, main, rev))) {
       return
     }
-    for (const l of report.lines) {
-      console.log(l)
+    const report = doStackMerge(mergeable, trunk, opts, stacks, rev)
+    if (report === undefined) {
+      return
     }
-    // a PR-less member that landed is invisible to sync's MERGED
-    // detection — retire it here; members with reviews retire inside
-    // the sync pass their host reports
-    const mergedSet = new Set(report.merged)
-    for (const m of mergeable) {
-      if (mergedSet.has(m.branch) && m.pr === undefined) {
-        const retireLines: string[] = []
-        retireMerged(m, main.path, retireLines)
-        for (const l of retireLines) {
-          console.log(l)
-        }
-      }
-    }
-    // the post-merge cascade: forge-merged retirement, retargets,
-    // rebases — same pass `bro stack sync` runs
+    postMergeRetire(mergeable, report, main)
     for (const l of syncStack(main.path, name)) {
       console.log(l)
     }
