@@ -243,11 +243,17 @@ export function countDevinSessions(
 const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/
 
 /** Worker classification for one locked pid — a spawned (never
- *  interactive) devin session. Two /proc probes, either suffices:
+ *  interactive) devin session. Probes:
  *  the BRO_AGENT_ID env badge every bro backend pins into the worker's
- *  env (inherited by the devin child a wrapper spawns), and a
- *  non-terminal stdin (`fd/0` outside the tty devices — headless
- *  pipes, null, sockets; interactive devin reads a terminal).
+ *  env (inherited by the devin child a wrapper spawns) — checked first and
+ *  takes precedence; and a non-terminal stdin (`fd/0` outside the tty
+ *  devices — headless pipes, null, sockets; interactive devin reads a
+ *  terminal).
+ *
+ *  BRO_HOOKS=0 is an exclusion that overrides the stdin probe: it marks
+ *  a machine backend (acp provider/conductor service child) as not a
+ *  worker (never counted against agents.devin.maxWorkers), but only when
+ *  BRO_AGENT_ID is not present (the worker badge takes precedence).
  *
  *  A pid neither probe verifies is NOT a worker: unreadable state only
  *  undercounts the worker lane — while phantom workers would refuse
