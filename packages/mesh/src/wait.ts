@@ -185,14 +185,31 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
 
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir);
-    out.request =
-      store.get<{
-        id: string;
-        status?: string;
-        labels?: string[];
-        closed_at?: string;
-        updated_at?: string;
-      }>(id) ?? null;
+    const getTimeout = remaining(timeoutMs);
+    const sAny = store as any;
+    if (typeof sAny.getWithTimeout === 'function' && getTimeout !== undefined) {
+      try {
+        const res = sAny.getWithTimeout(id, getTimeout);
+        out.request = res?.value ?? res ?? null;
+      } catch (err) {
+        out.request = null;
+      }
+    } else if (typeof sAny.get === 'function') {
+      try {
+        out.request =
+          store.get<{
+            id: string;
+            status?: string;
+            labels?: string[];
+            closed_at?: string;
+            updated_at?: string;
+          }>(id) ?? null;
+      } catch {
+        out.request = null;
+      }
+    } else {
+      out.request = null;
+    }
   } catch (err) {
     out.errors.push(
       `${plane.peer.alias}: posting store unreadable — ` +
@@ -204,7 +221,7 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     // the replica answers its own presence — no manifest/.dolt/root
     // stamp means nothing materialized yet; `bro mesh pull` is the fix
     out.replicaAgeMs = replicaAgeMs(plane.peerDir);
-    const shipTimeout = remaining(timeoutMs);
+    let shipTimeout = remaining(timeoutMs);
     const shipped =
       out.replicaAgeMs === undefined
         ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
@@ -216,7 +233,8 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     }
     return out;
   }
-  const shipped = shippedOnCheckout(plane.peer, id, remaining(timeoutMs));
+  let checkoutTimeout = remaining(timeoutMs);
+  const shipped = shippedOnCheckout(plane.peer, id, checkoutTimeout);
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
   } else {

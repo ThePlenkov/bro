@@ -125,7 +125,7 @@ function scanRemote(
   errors: string[],
   timeoutMs?: number
 ): void {
-  const synced = syncReplica(gitCommon, peer.alias, peer.remote);
+  const synced = syncReplica(gitCommon, peer.alias, peer.remote, timeoutMs);
   if (synced.path === undefined) {
     errors.push(synced.error ?? `${peer.alias}: replica sync failed`);
     return;
@@ -143,7 +143,8 @@ function scanLocal(
   peer: MeshPeer,
   out: PeerRecord[],
   errors: string[],
-  closedLocal: boolean
+  closedLocal: boolean,
+  timeoutMs?: number
 ): void {
   const dir = localCheckout(peer.remote);
   if (dir === null) {
@@ -152,13 +153,32 @@ function scanLocal(
   }
   let rows: (BeadLike & { status?: string })[];
   try {
-    // closedLocal needs the store's own all-filter off too — the
-    // backend drops closed rows before this loop ever sees them.
-    // limit:0 likewise — a configured page must not hide envelopes
-    rows = storeFor(dir).list<BeadLike & { status?: string }>({
-      all: closedLocal || undefined,
-      limit: 0,
-    });
+    const store = storeFor(dir) as any;
+    if (typeof store.listWithTimeout === 'function' && timeoutMs !== undefined) {
+      try {
+        const res = store.listWithTimeout(
+          {
+            all: closedLocal || undefined,
+            limit: 0,
+          },
+          timeoutMs
+        );
+        rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
+      } catch (err) {
+        errors.push(
+          `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
+        );
+        return;
+      }
+    } else {
+      // closedLocal needs the store's own all-filter off too — the
+      // backend drops closed rows before this loop ever sees them.
+      // limit:0 likewise — a configured page must not hide envelopes
+      rows = store.list<BeadLike & { status?: string }>({
+        all: closedLocal || undefined,
+        limit: 0,
+      });
+    }
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
@@ -322,7 +342,7 @@ function scanPeer(
   errors: string[]
 ): void {
   if (peer.transport === 'local') {
-    scanLocal(peer, out, errors, ctx.closedLocal === true);
+    scanLocal(peer, out, errors, ctx.closedLocal === true, ctx.timeoutMs);
     return;
   }
   if (peer.transport === 'github') {

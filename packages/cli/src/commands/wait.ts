@@ -81,6 +81,7 @@ interface WaitCtx {
   dir: string;
   peers: MeshPeer[];
   common: string;
+  deadline?: number;
 }
 
 function fail(message: string): never {
@@ -299,10 +300,23 @@ function settleAbsent(w: Watch, read: DepRead): void {
  *  the envelope SET, not the reduced stage — a ship followed by a
  *  reject is contradictory lifecycle history, not a free dep. */
 function threadOf(w: Watch, ctx: WaitCtx, timeoutMs?: number): ReturnType<typeof meshThread> {
+  let t = timeoutMs;
+  const d = ctx.deadline;
+  if (d !== undefined) {
+    const rem = Math.max(0, d - performance.now());
+    if (t === undefined) {
+      t = rem < 1 ? undefined : Math.max(1, Math.floor(rem));
+    } else {
+      t = Math.min(t, rem < 1 ? 0 : Math.max(1, Math.floor(rem)));
+    }
+    if (t !== undefined && t < 1) {
+      t = undefined;
+    }
+  }
   const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, {
     gitCommon: ctx.common,
     pull: false,
-    timeoutMs,
+    timeoutMs: t,
   });
   for (const e of thread.errors) {
     console.error(`! wait ${w.arg}: ${e}`);
@@ -409,10 +423,12 @@ function settleFromPlanes(
 /** one poll of one unsettled watch — records a verdict or bumps the
  *  blip counter; the watch carries the state */
 function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
-  const readTimeout = timeoutMs === undefined ? undefined : Math.max(1, Math.floor(timeoutMs));
+  const now = performance.now();
+  const deadline = ctx as unknown as { deadline?: number };
+  const readTimeoutBase = timeoutMs === undefined ? undefined : Math.max(1, Math.floor(timeoutMs));
   // budget reused before reading thread/replica — recompute a smaller
   // slice for any follow-up reads that must fit in the remaining window
-  const read = readDepState(w.plane, w.ref.id, readTimeout);
+  const read = readDepState(w.plane, w.ref.id, readTimeoutBase);
   if (read.errors.length > 0) {
     noteReadErrors(w, read.errors);
     return;
@@ -427,8 +443,22 @@ function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
     }
     return;
   }
-  const threadTimeout =
-    readTimeout === undefined ? undefined : Math.max(1, Math.floor(readTimeout * 0.5));
+  let threadTimeout =
+    readTimeoutBase === undefined ? undefined : Math.max(1, Math.floor(readTimeoutBase * 0.5));
+  // recompute remaining budget immediately before calling thread/read paths that can run again
+  if (readTimeoutBase !== undefined) {
+    const d = (ctx as unknown as { deadline?: number }).deadline;
+    if (d !== undefined) {
+      const rem = Math.max(0, d - now);
+      threadTimeout =
+        rem < 1
+          ? undefined
+          : Math.min(threadTimeout ?? readTimeoutBase, Math.max(1, Math.floor(rem * 0.5)));
+      if (threadTimeout !== undefined && threadTimeout < 1) {
+        threadTimeout = undefined;
+      }
+    }
+  }
   settleFromPlanes(w, ctx, read, req, threadTimeout);
 }
 
@@ -458,18 +488,24 @@ function pollUnsettled(
   ctx: WaitCtx,
   o: { deadline: number; timeout: number }
 ): void {
+  const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
+  const unsettledCount = watches.filter(w => w.settled === undefined).length;
+  if (remainingMs !== undefined && unsettledCount > 0 && remainingMs < unsettledCount) {
+    return;
+  }
+  const doltTimeoutMs =
+    remainingMs === undefined || unsettledCount === 0
+      ? undefined
+      : Math.min(120_000, Math.floor(remainingMs / unsettledCount));
+  if (doltTimeoutMs !== undefined && doltTimeoutMs < 1) {
+    return;
+  }
   for (const w of watches) {
     if (w.settled !== undefined) {
       continue;
     }
-    const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
-    const unsettledCount = watches.filter(x => x.settled === undefined).length;
-    const timeoutMs =
-      remainingMs === undefined || unsettledCount === 0
-        ? undefined
-        : Math.min(120_000, Math.max(1, Math.floor(remainingMs / unsettledCount)));
     try {
-      pollWatch(w, ctx, timeoutMs);
+      pollWatch(w, ctx, doltTimeoutMs);
     } catch (err) {
       noteReadErrors(w, [
         `unexpected poll failure — ${err instanceof Error ? err.message : String(err)}`,
@@ -488,6 +524,7 @@ async function watchLoop(
   // monotonic clock for the bound — a wall-clock step must not stretch
   // a --timeout past its elapsed budget
   const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY;
+  (ctx as WaitCtx).deadline = deadline === Number.POSITIVE_INFINITY ? undefined : deadline;
   const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
   while (performance.now() < deadline) {
     // plumb remaining budget into dolt subprocesses so a hung replica read

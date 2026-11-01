@@ -68,10 +68,23 @@ const STAGE_RANK: Record<ThreadStage, number> = {
   accepted: 3,
 };
 
-function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
+function ownBeads(dir: string, timeoutMs?: number): { rows: BeadLike[]; error?: string } {
   try {
+    const store = taskStore(dir) as any;
+    if (typeof store.listWithTimeout === 'function' && timeoutMs !== undefined) {
+      try {
+        const res = store.listWithTimeout({ labels: ['mesh:v:1'], all: true }, timeoutMs);
+        const rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
+        return { rows };
+      } catch (err) {
+        return {
+          rows: [],
+          error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
     return {
-      rows: taskStore(dir).list<BeadLike>({ labels: ['mesh:v:1'], all: true }),
+      rows: store.list<BeadLike>({ labels: ['mesh:v:1'], all: true }),
     };
   } catch (err) {
     return {
@@ -350,7 +363,7 @@ export function meshThread(
     login: lazyLogin(),
   };
 
-  const own = ownBeads(dir);
+  const own = ownBeads(dir, call.timeoutMs);
   if (own.error !== undefined) {
     state.errors.push(`self: ${own.error}`);
   }

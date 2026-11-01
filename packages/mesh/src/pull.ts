@@ -25,10 +25,20 @@ function dolt(args: string[], cwd?: string, timeoutMs = 120_000): DoltResult {
     timeout: timeoutMs,
     maxBuffer: 32 * 1024 * 1024,
   });
+  const stderr = (p.stderr ?? '').trim();
+  const msg = (p.error?.message ?? '').trim();
+  const err =
+    stderr !== ''
+      ? stderr
+      : msg !== ''
+        ? msg
+        : p.signal
+          ? `dolt killed by signal ${p.signal}`
+          : 'dolt failed';
   return {
-    code: p.status ?? 1,
+    code: p.status ?? (p.error ? 1 : 1),
     out: p.stdout ?? '',
-    err: (p.stderr ?? p.error?.message ?? '').trim(),
+    err,
   };
 }
 
@@ -42,13 +52,16 @@ export function replicaDir(gitCommon: string, alias: string): string {
 export function syncReplica(
   gitCommon: string,
   alias: string,
-  remote: string
+  remote: string,
+  timeoutMs?: number
 ): { path?: string; error?: string } {
   const dir = replicaDir(gitCommon, alias);
   if (remote.startsWith('-')) {
     return { error: `${alias}: invalid remote '${remote}' — must not start with '-'` };
   }
-  const r = existsSync(join(dir, '.dolt')) ? dolt(['pull'], dir) : dolt(['clone', remote, dir]);
+  const r = existsSync(join(dir, '.dolt'))
+    ? dolt(['pull'], dir, timeoutMs)
+    : dolt(['clone', remote, dir], undefined, timeoutMs);
   if (r.code !== 0 || !existsSync(join(dir, '.dolt'))) {
     return { error: `${alias}: replica sync failed — ${r.err || r.out}`.trim() };
   }
