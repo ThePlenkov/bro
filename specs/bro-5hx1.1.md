@@ -232,9 +232,10 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
    ContentBlock (baseline-required content — no capability negotiation
    needed).
 6. **`session/update` notifications → the `.log`.** One rendered line
-   per update — the log stays the observability plane *and* the exit-
-   cause classifier's input: provider walls (rate-limit/quota text the
-   agent prints) must reach it or `classifyExitCause` reads 'crash'.
+   per update — the log stays the observability plane **and** the exit-cause
+   classifier's input; provider walls (rate-limit/quota text the agent
+   prints) must reach the classifier input (both `.log` and `.stderr`
+   tails, per bro-e2ec0), or `classifyExitCause` reads 'crash'.
 7. **`session/request_permission` → a defined policy field.** The
    `acp` entry union gains `autoApprove?: boolean` (this spec amends
    bro-ribc.1's union — the kind file owns the wire detail); a spawn
@@ -256,10 +257,11 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
 10. **turn end** — the `session/prompt` response's `stopReason` maps to
     the driver's exit code: `end_turn` → 0; `max_tokens`,
     `max_turn_requests`, `refused`, `cancelled`, transport death, or a
-    handshake failure → non-zero. The wrapper writes `.exit`, the log
-    tail classifies the cause — every existing mechanic (respawn block
-    on `rate_limited`/`quota`, `lost — respawn?`) works unchanged
-    because the driver speaks the same artifacts.
+    handshake failure → non-zero. The wrapper writes `.exit`, both
+    `.log` and `.stderr` tails feed the exit-cause classifier — every
+    existing mechanic (respawn block on `rate_limited`/`quota`,
+    `lost — respawn?`) works unchanged because the driver speaks the
+    same artifacts.
 
 `acpSessionId` lands on the registry entry (`opts.entry`) for debugging
 — inspect-only, never a second handle.
@@ -358,5 +360,5 @@ packages/cli/src/commands/serve.ts     StepSpawnRequest fields pass through
   startup error with a clear message, same class as a missing `bd`.
 - **ACP agent crash mid-turn** surfaces as transport death → non-zero
   exit → the existing cause ladder. Works *because* the driver owns the
-  artifacts — the failure mode this spec must not regress is the log
-  tail carrying the provider's real error text.
+  artifacts — the failure mode this spec must not regress is both `.log`
+  and `.stderr` tails carrying the provider's real error text.
