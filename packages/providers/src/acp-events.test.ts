@@ -69,7 +69,6 @@ async function probeAgent(dir: string) {
   const res = await busProbe(busSocketPath(dir)!, {
     filter: { topics: ['agent'] },
     windowMs: 250,
-    settleMs: 25,
   });
   return res.events;
 }

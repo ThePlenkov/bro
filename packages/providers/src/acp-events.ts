@@ -74,7 +74,7 @@ export interface AgentTurnPlane {
   update(u: SessionUpdate): void;
   start(): void;
   stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
-  drain(): Promise<void>;
+  drain(timeoutMs?: number): Promise<void>;
 }
 
 const TERMINAL_STATUS = new Set(['completed', 'failed']);
@@ -340,11 +340,12 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       emit('turn', p);
     },
 
-    async drain() {
+    async drain(timeoutMs?: number) {
+      const cap = timeoutMs ?? DRAIN_CAP_MS;
       await Promise.race([
         queue.then(() => undefined),
         new Promise<void>(resolve => {
-          const t = setTimeout(resolve, DRAIN_CAP_MS);
+          const t = setTimeout(resolve, cap);
           t.unref?.();
         }),
       ]);
