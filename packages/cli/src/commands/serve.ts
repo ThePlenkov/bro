@@ -1422,7 +1422,7 @@ async function routeAgentEvents(
  *  dropped rather than letting one slow client grow `bro serve`'s
  *  buffered output without bound. The reconnect lands on a fresh
  *  snapshot, so a dropped follower loses nothing but a retry. */
-const SSE_FOLLOW_BACKLOG = 1_048_576;
+const SSE_FOLLOW_BACKLOG = 2_097_152;
 
 /** Output slices this size pace a big snapshot through the drain loop —
  *  one JSON frame can never single-handedly blow the backlog cap. */
@@ -1524,6 +1524,9 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     res.end();
   };
   const pump = (): void => {
+    if (waitingDrain) {
+      return;
+    }
     while (queue.length > 0 && !gone()) {
       // write() never refuses the frame — `false` is advisory ("over
       // high-water"), so the head is off the queue either way; on false
