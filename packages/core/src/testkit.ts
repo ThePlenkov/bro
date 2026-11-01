@@ -96,7 +96,7 @@ export function testGitSpawn(
 export function scrubEnv(extra: string[] = []): () => void {
   const ambient = /^(BEADS_DIR|BRO_)/
   const scrubbed = (k: string) =>
-    AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)
+    AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k) || k === 'XDG_CONFIG_HOME'
   const saved: Record<string, string | undefined> = {}
   for (const k of Object.keys(process.env)) {
     if (scrubbed(k)) {
@@ -107,11 +107,24 @@ export function scrubEnv(extra: string[] = []): () => void {
   // record absent extras and the pin keys as undefined too — a var the
   // code-under-test sets during the scrub window must not leak past
   // the restore
-  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
+  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'XDG_CONFIG_HOME']) {
     if (!(k in saved)) saved[k] = process.env[k]
   }
   process.env.GIT_CONFIG_NOSYSTEM = '1'
   process.env.GIT_CONFIG_GLOBAL = devNull
+  // Point global config to an empty temp dir so host ~/.config/bro can't leak in
+  try {
+    const { tmpDir } = require('./testtmp.ts')
+    const dir = tmpDir('bro-xdg-')
+    process.env.XDG_CONFIG_HOME = dir
+  } catch {
+    // best effort
+  }
+  process.env.BRO_TEST = '1'
+  process.env.BRO_NO_GLOBAL_CONFIG = '1'
+  if (!(process.env.XDG_CONFIG_HOME in saved)) {
+    saved['XDG_CONFIG_HOME'] = undefined
+  }
   return () => {
     // the pattern classes are unbounded — rescan so a pin re-added
     // mid-window dies here instead of leaking into the next suite
@@ -125,6 +138,8 @@ export function scrubEnv(extra: string[] = []): () => void {
         process.env[k] = v
       }
     }
+    if (!('BRO_TEST' in saved)) delete process.env.BRO_TEST
+    if (!('BRO_NO_GLOBAL_CONFIG' in saved)) delete process.env.BRO_NO_GLOBAL_CONFIG
   }
 }
 

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { agent, type SessionConfigOption, type SessionUpdate, type StopReason } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
+import { scrubEnv } from '@broject/core'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
@@ -110,7 +111,11 @@ describe('conductorConfig', () => {
   // in ~/.config/bro would leak a backend into the 'unset env' assertions;
   // this suite reads an empty global config dir instead
   const prevXdg = process.env.XDG_CONFIG_HOME
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
+  const xdg = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
+  process.env.XDG_CONFIG_HOME = xdg
+  process.env.BRO_TEST = '1'
+  process.env.BRO_NO_GLOBAL_CONFIG = '1'
+  after(scrubEnv())
   after(() => {
     if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
     else process.env.XDG_CONFIG_HOME = prevXdg
