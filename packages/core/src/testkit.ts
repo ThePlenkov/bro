@@ -10,6 +10,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import type { ExecFileSyncOptions, SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process'
 import { devNull } from 'node:os'
+import { tmpDir } from './testtmp.ts'
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -92,11 +93,13 @@ export function testGitSpawn(
  *  test spawns git or resolves the store in-process inherits pins that
  *  redirect those lookups into the OUTER repo — same leak testGit
  *  closes for the test's own spawns. The null-config pins are set too
- *  so in-process git children can't read host hooks/config either. */
+ *  so in-process git children can't read host hooks/config either.
+ *  Sets `XDG_CONFIG_HOME` to an empty temp dir so host `~/.config/bro`
+ *  can't leak in, and sets `BRO_TEST=1` and `BRO_NO_GLOBAL_CONFIG=1`. */
 export function scrubEnv(extra: string[] = []): () => void {
   const ambient = /^(BEADS_DIR|BRO_)/
   const scrubbed = (k: string) =>
-    AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)
+    AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k) || k === 'XDG_CONFIG_HOME'
   const saved: Record<string, string | undefined> = {}
   for (const k of Object.keys(process.env)) {
     if (scrubbed(k)) {
@@ -107,11 +110,19 @@ export function scrubEnv(extra: string[] = []): () => void {
   // record absent extras and the pin keys as undefined too — a var the
   // code-under-test sets during the scrub window must not leak past
   // the restore
-  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
+  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'XDG_CONFIG_HOME']) {
     if (!(k in saved)) saved[k] = process.env[k]
   }
   process.env.GIT_CONFIG_NOSYSTEM = '1'
   process.env.GIT_CONFIG_GLOBAL = devNull
+  // Point global config to an empty temp dir so host ~/.config/bro can't leak in
+  const dir = tmpDir('bro-xdg-')
+  process.env.XDG_CONFIG_HOME = dir
+  process.env.BRO_TEST = '1'
+  process.env.BRO_NO_GLOBAL_CONFIG = '1'
+  if (!('XDG_CONFIG_HOME' in saved)) {
+    saved['XDG_CONFIG_HOME'] = undefined
+  }
   return () => {
     // the pattern classes are unbounded — rescan so a pin re-added
     // mid-window dies here instead of leaking into the next suite
@@ -125,6 +136,8 @@ export function scrubEnv(extra: string[] = []): () => void {
         process.env[k] = v
       }
     }
+    if (!('BRO_TEST' in saved)) delete process.env.BRO_TEST
+    if (!('BRO_NO_GLOBAL_CONFIG' in saved)) delete process.env.BRO_NO_GLOBAL_CONFIG
   }
 }
 
