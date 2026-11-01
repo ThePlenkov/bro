@@ -1363,15 +1363,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
   if (b.status === 0) {
     return true;
   }
@@ -1937,6 +1934,16 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    if (exit.code === 0 && !superseded) {
+      // If the fix worker exited cleanly but did not resolve threads,
+      // we must not let the cycle loop forever. Do not auto-retry here;
+      // let the gate re-poll and the memberAction decide. However, ensure
+      // we don't re-trigger without budget pressure - the gate will see
+      // current thread state. Also log to make the behavior explicit.
+      console.error(
+        `loop ${prRef(ctx, m.pr)}: fix worker exited 0 without obvious thread resolution — gate will re-poll`
+      );
+    }
     return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
