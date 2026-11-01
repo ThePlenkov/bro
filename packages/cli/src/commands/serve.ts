@@ -1573,32 +1573,25 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       res.end();
     }
   };
-  const isHighSurrogate = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
-  const isLowSurrogate = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
-  const isSurrogatePair = (c1: number, c2: number): boolean => isHighSurrogate(c1) && isLowSurrogate(c2);
   const adjustForSurrogatePair = (chunk: string, i: number, end: number): number => {
-    if (end >= chunk.length) {
+    if (end <= i || end >= chunk.length) {
       return end;
     }
     const c1 = chunk.charCodeAt(end - 1);
     const c2 = chunk.charCodeAt(end);
-    if (!isSurrogatePair(c1, c2)) {
+    if (c1 < 0xd800 || c1 > 0xdbff || c2 < 0xdc00 || c2 > 0xdfff) {
       return end;
     }
-    if (end > i) {
+    if (end - 1 > i) {
       return end - 1;
     }
     return Math.min(end + 1, chunk.length);
   };
   const sse = (chunk: string): void => {
     for (let i = 0; i < chunk.length; ) {
-      let end = Math.min(i + SSE_SNAPSHOT_SLICE, chunk.length);
-      end = adjustForSurrogatePair(chunk, i, end);
-      if (end === i) {
-        end = Math.min(i + 1, chunk.length);
-      }
-      enqueue(`data: ${JSON.stringify(chunk.slice(i, end))}\n\n`);
-      i = end;
+      const end = adjustForSurrogatePair(chunk, i, Math.min(i + SSE_SNAPSHOT_SLICE, chunk.length));
+      enqueue(`data: ${JSON.stringify(chunk.slice(i, end === i ? Math.min(i + 1, chunk.length) : end))}\n\n`);
+      i = end === i ? Math.min(i + 1, chunk.length) : end;
     }
   };
   // headers before follow() — a registry that fires `exit` at subscribe
