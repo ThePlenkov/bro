@@ -343,7 +343,15 @@ function collectIssueCommentRecords(
 }
 
 function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
-  return (data ?? []).flat()
+  const out: T[] = []
+  for (const item of data ?? []) {
+    if (Array.isArray(item)) {
+      out.push(...(item as T[]))
+    } else {
+      out.push(item)
+    }
+  }
+  return out
 }
 
 function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
