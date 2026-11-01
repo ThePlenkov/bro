@@ -1567,8 +1567,25 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     }
   };
   const sse = (chunk: string): void => {
-    for (let i = 0; i < chunk.length; i += SSE_SNAPSHOT_SLICE) {
-      enqueue(`data: ${JSON.stringify(chunk.slice(i, i + SSE_SNAPSHOT_SLICE))}\n\n`);
+    for (let i = 0; i < chunk.length; ) {
+      let end = Math.min(i + SSE_SNAPSHOT_SLICE, chunk.length);
+      if (end < chunk.length) {
+        const c1 = chunk.charCodeAt(end - 1);
+        const c2 = chunk.charCodeAt(end);
+        // avoid splitting a UTF-16 surrogate pair
+        if (c1 >= 0xd800 && c1 <= 0xdbff && c2 >= 0xdc00 && c2 <= 0xdfff) {
+          if (end > i) {
+            end -= 1;
+          } else {
+            end = Math.min(end + 1, chunk.length);
+          }
+        }
+      }
+      if (end === i) {
+        end = Math.min(i + 1, chunk.length);
+      }
+      enqueue(`data: ${JSON.stringify(chunk.slice(i, end))}\n\n`);
+      i = end;
     }
   };
   // headers before follow() — a registry that fires `exit` at subscribe
