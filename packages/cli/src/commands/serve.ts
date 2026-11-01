@@ -1126,6 +1126,37 @@ export function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
 /** One request's guard → route → send pipeline, lifted out of the
  *  handler closure so each level stays under the SonarCloud
  *  cognitive-complexity ceiling. */
+function rejectForeignHost(req: IncomingMessage, res: ServerResponse, isWebhook: boolean): boolean {
+  if (isWebhook) {
+    return false;
+  }
+  if (!isLoopbackHostHeader(req.headers.host)) {
+    send(res, 403, { error: 'loopback host only' });
+    return true;
+  }
+  return false;
+}
+
+function rejectUntrustedWrite(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  isWebhook: boolean,
+  token: string,
+  statePathHint: string
+): boolean {
+  if (isWebhook || !WRITE_METHODS.has(method)) {
+    return false;
+  }
+  const wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  const refusal = writeGuard(req, token, wantsBody, statePathHint);
+  if (refusal !== undefined) {
+    send(res, refusal.status, refusal.body, refusal);
+    return true;
+  }
+  return false;
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1144,8 +1175,7 @@ async function handleRequest(
     // special: a mis-signed POST is a 401 inside the handler and
     // the 202 body leaks nothing (spec specs/bro-huy5o.7.md).
     const webhookRoute = url.pathname.startsWith('/api/v1/webhooks/');
-    if (!webhookRoute && !isLoopbackHostHeader(req.headers.host)) {
-      send(res, 403, { error: 'loopback host only' });
+    if (rejectForeignHost(req, res, webhookRoute)) {
       return;
     }
     // self-answering routes chain first — each returns true once it
@@ -1154,17 +1184,14 @@ async function handleRequest(
     if (await routeSelfAnswering(req, res, url, deps, token, statePathHint)) {
       return;
     }
-    const wantsBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
-    if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
-      const refusal = writeGuard(req, token, wantsBody, statePathHint);
-      if (refusal !== undefined) {
-        send(res, refusal.status, refusal.body, refusal);
-        return;
-      }
+    const method = req.method ?? 'GET';
+    if (rejectUntrustedWrite(req, res, method, webhookRoute, token, statePathHint)) {
+      return;
     }
+    const wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
     const rawBody = wantsBody ? await readBody(req) : undefined;
     const r = await routeRequest(
-      req.method ?? 'GET',
+      method,
       url.pathname,
       rawBody,
       deps,
