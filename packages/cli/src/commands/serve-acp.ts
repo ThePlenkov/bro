@@ -171,6 +171,14 @@ export function acpTransport(
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>()
+  /** Touch a session for LRU — insertion order IS the sweep's LRU
+   *  order (delete + reinsert moves it to the end). */
+  const touchSession = (sid: string, sess: BrokeredSession): void => {
+    sess.lastSeen = Date.now()
+    sessions.delete(sid)
+    sessions.set(sid, sess)
+  }
+
   /** `conn` scopes the hit to the owning connection — the map is
    *  transport-wide, so an unscoped lookup would let one connection
    *  drive or close a FOREIGN session by id (codeant #581). The bridge
@@ -187,15 +195,10 @@ export function acpTransport(
     if (sess === undefined) {
       return undefined
     }
-    if (conn !== undefined) {
-      if (sess.conn !== conn) {
-        return undefined
-      }
+    if (conn !== undefined && sess.conn !== conn) {
+      return undefined
     }
-    // hits re-insert — insertion order IS the sweep's LRU order
-    sess.lastSeen = Date.now()
-    sessions.delete(sid)
-    sessions.set(sid, sess)
+    touchSession(sid, sess)
     return sess
   }
 
@@ -271,6 +274,12 @@ export function acpTransport(
     release(sid)
   }
 
+  const shouldEvict = (s: BrokeredSession, now: number, overflow: number): boolean => {
+    if (s.busy) return false
+    const expired = now - s.lastSeen > SESS_TTL_MS
+    return expired || overflow > 0
+  }
+
   /** Idle-beyond-TTL and oldest-over-cap eviction — the same posture
    *  the conductor's sweepSessions takes. Runs where the map grows
    *  (session/new); a mid-turn session is off-limits — its own failure
@@ -282,12 +291,7 @@ export function acpTransport(
     // flight (the +1 reservation a bare cap check misses)
     let overflow = sessions.size - SESS_CAP + 1
     for (const [sid, s] of sessions) {
-      if (s.busy) {
-        continue
-      }
-      if (now - s.lastSeen <= SESS_TTL_MS && overflow <= 0) {
-        continue
-      }
+      if (!shouldEvict(s, now, overflow)) continue
       closeUpstream(s, sid)
       overflow--
     }
@@ -380,6 +384,20 @@ export function acpTransport(
     }
   }
 
+  /** Displace a previous brokered session that collided on the same id
+   *  (e.g. upstream reissues ids across a link death+respawn). */
+  const displacePrevious = (sid: string): void => {
+    const prev = sessions.get(sid)
+    if (prev === undefined) return
+    prev.conn.sessions.delete(sid)
+    disposeQuiet(prev.retained)
+  }
+
+  const extractBead = (params: Record<string, unknown>): string | undefined => {
+    const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
+    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
+  }
+
   /** session/new → retain one upstream session per brokered id. The
    *  client's params pass verbatim (cwd, mcpServers, _meta) — the model
    *  pin lives inside acpSessionRetain; the map grows only here so the
@@ -403,11 +421,7 @@ export function acpTransport(
       // colliding set must not leak the displaced handle (and the
       // old owner must not later close the NEW session under the
       // reused id)
-      const prev = sessions.get(retained.sessionId)
-      if (prev !== undefined) {
-        prev.conn.sessions.delete(retained.sessionId)
-        disposeQuiet(prev.retained)
-      }
+      displacePrevious(retained.sessionId)
       const brokered: BrokeredSession = {
         retained,
         peer,
@@ -427,8 +441,7 @@ export function acpTransport(
       // a bro--<bead-id>-shaped session cwd attributes the
       // session (dirs are named <repo>--<beadId>, the bead id
       // itself is <prefix>-<slug>)
-      const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
-      const bead = /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
+      const bead = extractBead(params)
       otelEvent('acp.transport.session', {
         backend: cfg.backend,
         'acp.client': st.clientName,
@@ -449,6 +462,20 @@ export function acpTransport(
     if (sid !== undefined && sessions.get(sid) === sess) {
       closeUpstream(sess, sid)
     }
+  }
+
+  /** Forward updates from the upstream turn to the owning downstream
+   *  client — backpressure lives on the peer's per-request streams; this
+   *  fan-out must not block the pump. */
+  const forwardUpdate = (sess: BrokeredSession, sid: string | undefined) => (update: unknown) => {
+    // forward each update as it arrives — notify queues onto the session's
+    // SSE stream and the SDK's buffered-bytes/output-stall limits are the
+    // backpressure contract
+    if (sid === undefined) return
+    sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
+      // the client went away mid-turn — conn.closed
+      // cleanup owns the session drop
+    })
   }
 
   /** session/prompt → the turn on the session's own retained handle —
@@ -478,16 +505,7 @@ export function acpTransport(
         {
           signal,
           by,
-          onUpdate: (update) => {
-            // forward each update as it arrives — notify queues
-            // onto the session's SSE stream and the SDK's
-            // buffered-bytes/output-stall limits are the
-            // backpressure contract
-            sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
-              // the client went away mid-turn — conn.closed
-              // cleanup owns the session drop
-            })
-          },
+          onUpdate: forwardUpdate(sess, sid),
         }
       )
       return r.response
