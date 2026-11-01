@@ -469,11 +469,13 @@ async function watchLoop(
   while (performance.now() < deadline) {
     const remainingMs = o.timeout > 0 ? Math.max(0, deadline - performance.now()) : undefined;
     // plumb remaining budget into dolt subprocesses so a hung replica read
-    // cannot overshoot the --timeout by the full dolt timeout
+    // cannot overshoot the --timeout by the full dolt timeout; divide by
+    // unsettled watches so sequential polls don't multiply the budget
+    const unsettledCount = watches.filter(w => w.settled === undefined).length;
     const doltTimeoutMs =
-      remainingMs === undefined
+      remainingMs === undefined || unsettledCount === 0
         ? undefined
-        : Math.min(120_000, Math.max(1, Math.floor(remainingMs)));
+        : Math.min(120_000, Math.max(1, Math.floor(remainingMs / unsettledCount)));
     pollUnsettled(watches, ctx, doltTimeoutMs);
     const out = aggregate(watches);
     if (out !== undefined) {
