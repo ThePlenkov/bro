@@ -1574,12 +1574,17 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     }
   };
   const adjustForSurrogatePair = (chunk: string, i: number, end: number): number => {
-    if (end <= i || end >= chunk.length) {
+    if (end <= i) {
+      return end;
+    }
+    if (end >= chunk.length) {
       return end;
     }
     const c1 = chunk.charCodeAt(end - 1);
     const c2 = chunk.charCodeAt(end);
-    if (c1 < 0xd800 || c1 > 0xdbff || c2 < 0xdc00 || c2 > 0xdfff) {
+    const isHighSurrogate = c1 >= 0xd800 && c1 <= 0xdbff;
+    const isLowSurrogate = c2 >= 0xdc00 && c2 <= 0xdfff;
+    if (!isHighSurrogate || !isLowSurrogate) {
       return end;
     }
     if (end - 1 > i) {
