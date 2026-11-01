@@ -238,6 +238,9 @@ export class AcpTerminals {
           if (!entry.stopped) {
             const [file, argv] = shellOf()
             entry.child = spawn(file, argv, opts)
+            entry.pgid = typeof entry.child.pid === 'number' ? entry.child.pid : undefined
+            entry.pidStart =
+              typeof entry.child.pid === 'number' ? procStat(entry.child.pid)?.start ?? undefined : undefined
             wire(entry.child)
             return
           }
@@ -375,9 +378,13 @@ export class AcpTerminals {
         return
       } catch {}
     }
-    try {
-      entry.child.kill('SIGTERM')
-    } catch {}
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGTERM')
+      } catch {}
+      return
+    }
+    // Cannot prove ownership - skip killing recycled pids
   }
 
   /** Drain the waiters with the best-known status and mark the entry
@@ -425,21 +432,31 @@ export class AcpTerminals {
     if (pgid !== null) {
       try {
         process.kill(-pgid, 'SIGKILL')
+        this.entries.delete(ctx.params.terminalId)
+        return
       } catch {
-        try {
-          entry.child.kill('SIGKILL')
-        } catch {}
+        // If group kill fails, only kill the direct child on win32
       }
-    } else if (process.platform === 'win32') {
-      try {
-        entry.child.kill('SIGKILL')
-      } catch {}
-    } else {
-      // Cannot prove ownership - skip group kill to avoid killing recycled pids
-      try {
-        entry.child.kill('SIGKILL')
-      } catch {}
     }
+    if (process.platform === 'win32') {
+      try {
+        entry.child.kill('SIGKILL')
+      } catch {}
+      if (entry.exitStatus !== null) {
+        // exited but 'close' may never come — resolve waiters now, on the real status
+        this.flushEntry(entry)
+      }
+      this.entries.delete(ctx.params.terminalId)
+      return
+    }
+    // Cannot prove ownership - skip group kill to avoid killing recycled pids
+    // Do not kill the direct child either if we cannot prove ownership
+    if (entry.exitStatus !== null) {
+      // exited but 'close' may never come — resolve waiters now, on the real status
+      this.flushEntry(entry)
+    }
+    this.entries.delete(ctx.params.terminalId)
+    return
     if (entry.exitStatus !== null) {
       // exited but 'close' may never come — resolve waiters now, on the real status
       this.flushEntry(entry)
@@ -467,20 +484,23 @@ export class AcpTerminals {
         try {
           process.kill(-pgid, 'SIGKILL')
         } catch {
-          try {
-            entry.child.kill('SIGKILL')
-          } catch {}
+          // fall through to platform-specific handling
         }
-      } else if (process.platform === 'win32') {
-        try {
-          entry.child.kill('SIGKILL')
-        } catch {}
-      } else {
-        // Cannot prove ownership - skip group kill to avoid killing recycled pids
-        try {
-          entry.child.kill('SIGKILL')
-        } catch {}
+        if (entry.exitStatus !== null) {
+          this.flushEntry(entry)
+        }
+        continue
       }
+      if (process.platform === 'win32') {
+        try {
+          entry.child.kill('SIGKILL')
+        } catch {}
+        if (entry.exitStatus !== null) {
+          this.flushEntry(entry)
+        }
+        continue
+      }
+      // Cannot prove ownership - skip all kills to avoid killing recycled pids
       if (entry.exitStatus !== null) {
         this.flushEntry(entry)
       }
