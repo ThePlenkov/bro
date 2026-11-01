@@ -495,16 +495,45 @@ export async function runMol(deps: RunDeps, cfg: RunArgs, molId: string): Promis
  *  the keyed event also coalesces repeat sightings on the mailbox.
  *  Fail-open like every emit — a gate report never stalls the runner. */
 export async function publishGate(dir: string, molId: string, detail: string): Promise<void> {
+  return publishConvoyEvent('gate', dir, molId, detail);
+}
+
+type ConvoyPublishKind = 'gate' | 'parked' | 'stopped' | 'failed';
+
+const PUBLISH_LABELS: Record<ConvoyPublishKind, string> = {
+  gate: 'HUMAN GATE ready',
+  parked: 'parked',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
+const PUBLISH_KEY_PREFIX: Record<ConvoyPublishKind, string> = {
+  gate: 'convoy-gate-',
+  parked: 'convoy-parked-',
+  stopped: 'convoy-stopped-',
+  failed: 'convoy-failed-',
+};
+
+async function publishConvoyEvent(
+  kind: ConvoyPublishKind,
+  dir: string,
+  molId: string,
+  detail: string
+): Promise<void> {
   try {
+    const label = PUBLISH_LABELS[kind];
+    const payload =
+      kind === 'gate'
+        ? `convoy ${molId}: ${label}` +
+          (detail === '' ? '' : ` — ${detail}`) +
+          ' — human input needed'
+        : `convoy ${molId}: ${label}` + (detail === '' ? '' : ` — ${detail}`);
     await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
       topic: 'convoy',
-      kind: 'gate',
-      key: `convoy-gate-${molId}`,
+      kind,
+      key: `${PUBLISH_KEY_PREFIX[kind]}${molId}`,
       source: 'convoy',
-      payload:
-        `convoy ${molId}: HUMAN GATE ready` +
-        (detail === '' ? '' : ` — ${detail}`) +
-        ' — human input needed',
+      payload,
     });
   } catch {
     // fail-open — sinks/mailbox are advisory edges, never a runner failure
@@ -515,49 +544,19 @@ export async function publishGate(dir: string, molId: string, detail: string): P
  *  rate limit) — notify the operator so they can act. Fail-open like every
  *  emit. */
 export async function publishParked(dir: string, molId: string, detail: string): Promise<void> {
-  try {
-    await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
-      topic: 'convoy',
-      kind: 'parked',
-      key: `convoy-parked-${molId}`,
-      source: 'convoy',
-      payload: `convoy ${molId}: parked` + (detail === '' ? '' : ` — ${detail}`),
-    });
-  } catch {
-    // fail-open — sinks/mailbox are advisory edges, never a runner failure
-  }
+  return publishConvoyEvent('parked', dir, molId, detail);
 }
 
 /** An operator-stopped mol — report it so a detached queue doesn't go
  *  blind. Fail-open like every emit. */
 export async function publishStopped(dir: string, molId: string, detail: string): Promise<void> {
-  try {
-    await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
-      topic: 'convoy',
-      kind: 'stopped',
-      key: `convoy-stopped-${molId}`,
-      source: 'convoy',
-      payload: `convoy ${molId}: stopped` + (detail === '' ? '' : ` — ${detail}`),
-    });
-  } catch {
-    // fail-open — sinks/mailbox are advisory edges, never a runner failure
-  }
+  return publishConvoyEvent('stopped', dir, molId, detail);
 }
 
 /** Attempts exhausted for a mol — report it so a detached queue doesn't go
  *  blind. Fail-open like every emit. */
 export async function publishFailed(dir: string, molId: string, detail: string): Promise<void> {
-  try {
-    await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
-      topic: 'convoy',
-      kind: 'failed',
-      key: `convoy-failed-${molId}`,
-      source: 'convoy',
-      payload: `convoy ${molId}: failed` + (detail === '' ? '' : ` — ${detail}`),
-    });
-  } catch {
-    // fail-open — sinks/mailbox are advisory edges, never a runner failure
-  }
+  return publishConvoyEvent('failed', dir, molId, detail);
 }
 
 /** The queue: each mol in order, sequential like the script it
