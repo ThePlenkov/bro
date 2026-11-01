@@ -50,6 +50,9 @@ export interface ThreadState {
   /** the side that owes the next move — absent on a terminal verdict */
   turn?: 'requester' | 'worker';
   errors: string[];
+  /** peer scans that failed — tracked separately from admission errors */
+  scanFailed?: boolean;
+  scanErrors?: string[];
 }
 
 const STAGE_OF: Record<MeshKind, ThreadStage> = {
@@ -380,7 +383,11 @@ export function meshThread(
     selfRig: ownRig ?? undefined,
     timeoutMs: call.timeoutMs,
   });
-  state.errors.push(...scan.errors);
+  if (scan.errors.length > 0) {
+    state.scanFailed = true;
+    state.scanErrors = scan.errors.slice();
+    state.errors.push(...scan.errors);
+  }
   for (const r of scan.records) {
     admitPeerRecord(r, ctx);
   }

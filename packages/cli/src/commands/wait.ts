@@ -386,8 +386,11 @@ function closedUnshipped(w: Watch, read: DepRead): boolean {
 
 /** closed provides:<id> on the peer plane — the dep's own release
  *  rule fired, the wait is over */
-function shipped(w: Watch, read: DepRead): boolean {
+function shipped(w: Watch, read: DepRead, thread?: ReturnType<typeof meshThread>): boolean {
   if (read.shipped !== true) {
+    return false;
+  }
+  if (thread && (thread as any).scanFailed === true) {
     return false;
   }
   w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs };
@@ -404,7 +407,20 @@ function settleFromPlanes(
   timeoutMs?: number
 ): void {
   const thread = threadOf(w, ctx, timeoutMs);
-  if (rejected(w, read, thread) || shipped(w, read)) {
+  if (rejected(w, read, thread) || shipped(w, read, thread)) {
+    return;
+  }
+  if ((thread as any).scanFailed === true) {
+    // Do not settle free when a peer scan failed; keep waiting/retry
+    if (req.status === 'closed') {
+      // don't settle actionable as closed-unshipped if scan failed?
+      // but keep behavior: still may be actionable later; just don't free
+    }
+    w.closedUnshipped = 0;
+    console.error(
+      `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
+        (thread.turn !== undefined ? ` — ${thread.turn}'s move` : '')
+    );
     return;
   }
   if (req.status === 'closed') {
@@ -488,21 +504,21 @@ function pollUnsettled(
   ctx: WaitCtx,
   o: { deadline: number; timeout: number }
 ): void {
-  const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
-  const unsettledCount = watches.filter(w => w.settled === undefined).length;
-  if (remainingMs !== undefined && unsettledCount > 0 && remainingMs < unsettledCount) {
-    return;
-  }
-  const doltTimeoutMs =
-    remainingMs === undefined || unsettledCount === 0
-      ? undefined
-      : Math.min(120_000, Math.floor(remainingMs / unsettledCount));
-  if (doltTimeoutMs !== undefined && doltTimeoutMs < 1) {
-    return;
-  }
   for (const w of watches) {
     if (w.settled !== undefined) {
       continue;
+    }
+    const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
+    const unsettledCount = watches.filter(x => x.settled === undefined).length;
+    if (remainingMs !== undefined && unsettledCount > 0 && remainingMs < unsettledCount) {
+      return;
+    }
+    const doltTimeoutMs =
+      remainingMs === undefined || unsettledCount === 0
+        ? undefined
+        : Math.min(120_000, Math.floor(remainingMs / unsettledCount));
+    if (doltTimeoutMs !== undefined && doltTimeoutMs < 1) {
+      return;
     }
     try {
       pollWatch(w, ctx, doltTimeoutMs);
