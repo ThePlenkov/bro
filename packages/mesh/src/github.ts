@@ -198,6 +198,26 @@ export function renderComment(env: MeshEnvelope): string {
   return '```json\n' + JSON.stringify(env).replace(/`/g, '\\u0060') + '\n```'
 }
 
+function findNextFence(body: string, start: number): { open: number; after: number; eol: number } | null {
+  const open = body.indexOf('```json', start)
+  if (open === -1) {
+    return null
+  }
+  const after = open + '```json'.length
+  const eol = body.indexOf('\n', after)
+  if (eol === -1) {
+    return null
+  }
+  if (body.slice(after, eol).trim() !== '') {
+    return null
+  }
+  return { open, after, eol }
+}
+
+function findClosingFence(body: string, from: number): number {
+  return body.indexOf('```', from)
+}
+
 /** fenced ```json block bodies, in document order — indexOf scanning,
  *  not a regex: the fence pattern on uncontrolled comment text is a
  *  polynomial-backtracking surface (CodeQL). A fence is ```json,
@@ -205,26 +225,21 @@ export function renderComment(env: MeshEnvelope): string {
 function* fencedJsonBodies(comment: { body: string }): Generator<string> {
   const body = comment.body
   let i = 0
-  for (;;) {
-    const open = body.indexOf('```json', i)
-    if (open === -1) {
-      return
-    }
-    const after = open + '```json'.length
-    const eol = body.indexOf('\n', after)
-    if (eol === -1) {
-      return
-    }
-    if (body.slice(after, eol).trim() !== '') {
-      // ```json <junk> — not a record fence; keep scanning past it
-      i = after
+  while (i < body.length) {
+    const fence = findNextFence(body, i)
+    if (fence === null) {
+      const open = body.indexOf('```json', i)
+      if (open === -1) {
+        return
+      }
+      i = open + '```json'.length
       continue
     }
-    const close = body.indexOf('```', eol + 1)
+    const close = findClosingFence(body, fence.eol + 1)
     if (close === -1) {
       return
     }
-    yield body.slice(eol + 1, close)
+    yield body.slice(fence.eol + 1, close)
     i = close + '```'.length
   }
 }
@@ -286,6 +301,14 @@ function apiPath(call: { repo: GithubRepo; suffix: string }): string {
   return `repos/${call.repo.owner}/${call.repo.repo}/${call.suffix}`
 }
 
+function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
+  return (data ?? []).flat()
+}
+
+function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
+  return rows.filter((i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number')
+}
+
 /** Issues carrying the request label — the label is an index, so a
  *  miss means "no mesh traffic", not a crash; the API failure is the
  *  error line. `--paginate --slurp` wraps every page in its own array
@@ -304,9 +327,7 @@ function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
     return { issues: [], error: `${repo.owner}/${repo.repo}: issue list failed — ${r.error}` }
   }
   return {
-    issues: (r.data ?? []).flat().filter(
-      (i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number',
-    ),
+    issues: filterIssueRows(slurpedRows(r.data)),
   }
 }
 
@@ -315,19 +336,14 @@ interface GhCommentRow {
   body?: string
 }
 
-/** Every envelope-bearing comment on one issue — comments that parse
- *  to nothing are error lines (a comment is not a record unless the
- *  last validating block says so). */
-export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRecord[]; errors: string[] } {
-  const r = ghJson<(GhCommentRow | GhCommentRow[])[]>(
-    ['api', apiPath({ repo, suffix: `issues/${issue.number}/comments` }), '--paginate', '--slurp'],
-  )
-  if (r.error !== undefined) {
-    return { records: [], errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`] }
-  }
+function collectIssueCommentRecords(
+  repo: GithubRepo,
+  issue: GhIssue,
+  comments: GhCommentRow[],
+): { records: GhRecord[]; errors: string[] } {
   const records: GhRecord[] = []
   const errors: string[] = []
-  for (const c of (r.data ?? []).flat()) {
+  for (const c of comments) {
     const text = typeof c.body === 'string' ? c.body : ''
     if (!text.includes('```json')) {
       continue
@@ -346,6 +362,30 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
   return { records, errors }
 }
 
+/** Every envelope-bearing comment on one issue — comments that parse
+ *  to nothing are error lines (a comment is not a record unless the
+ *  last validating block says so). */
+export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRecord[]; errors: string[] } {
+  const r = ghJson<(GhCommentRow | GhCommentRow[])[]>(
+    ['api', apiPath({ repo, suffix: `issues/${issue.number}/comments` }), '--paginate', '--slurp'],
+  )
+  if (r.error !== undefined) {
+    return { records: [], errors: [`${repo.owner}/${repo.repo}#${issue.number}: comments failed — ${r.error}`] }
+  }
+  return collectIssueCommentRecords(repo, issue, slurpedRows(r.data))
+}
+
+function scanIssues(repo: GithubRepo, issues: GhIssue[]): { records: GhRecord[]; errors: string[] } {
+  const records: GhRecord[] = []
+  const errors: string[] = []
+  for (const issue of issues) {
+    const cs = issueComments(repo, issue)
+    records.push(...cs.records)
+    errors.push(...cs.errors)
+  }
+  return { records, errors }
+}
+
 /** The label-narrowed, comment-verified scan: every mesh record across
  *  every request-labelled issue on the peer's repo. */
 export function scanGithub(input: { remote: string }): { records: GhRecord[]; errors: string[] } {
@@ -357,14 +397,7 @@ export function scanGithub(input: { remote: string }): { records: GhRecord[]; er
   if (listed.error !== undefined) {
     return { records: [], errors: [listed.error] }
   }
-  const records: GhRecord[] = []
-  const errors: string[] = []
-  for (const issue of listed.issues) {
-    const cs = issueComments(repo, issue)
-    records.push(...cs.records)
-    errors.push(...cs.errors)
-  }
-  return { records, errors }
+  return scanIssues(repo, listed.issues)
 }
 
 /** The wire envelope for a posted request — id/thread are filled by
@@ -420,6 +453,17 @@ function createIssue(
     : { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
 }
 
+function postRequestComment(repo: GithubRepo, number: number, env: MeshEnvelope): string | null {
+  const commented = ghJson<{ id?: number }>(
+    ['api', apiPath({ repo, suffix: `issues/${number}/comments` }), '--input', '-'],
+    { input: JSON.stringify({ body: renderComment(env) }) },
+  )
+  if (commented.error !== undefined) {
+    return commented.error
+  }
+  return null
+}
+
 /** Delivery: POST the prose issue, then POST the `request` record as
  *  the first comment — id = thread = the issue url, so every later
  *  lifecycle comment threads to it. */
@@ -439,12 +483,9 @@ export function postRequest(
     return { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
   }
   const env2 = { ...env, id: created.issue, thread: created.issue }
-  const commented = ghJson<{ id?: number }>(
-    ['api', apiPath({ repo, suffix: `issues/${created.number}/comments` }), '--input', '-'],
-    { input: JSON.stringify({ body: renderComment(env2) }) },
-  )
-  if (commented.error !== undefined) {
-    return { error: `issue ${created.issue} created but the record comment failed — ${commented.error}` }
+  const commentErr = postRequestComment(repo, created.number, env2)
+  if (commentErr !== null) {
+    return { error: `issue ${created.issue} created but the record comment failed — ${commentErr}` }
   }
   return { issue: created.issue }
 }
