@@ -37,9 +37,9 @@ JSON
 ```
 
 Notes:
-- Use **numeric GitHub database IDs** for actors (not login names like `"dependabot[bot]"`). Look them up with `gh api users/<login> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
+- Use **numeric GitHub database IDs** for actors (not login names like `"dependabot[bot]"`). `push_allowed_actor_ids`/bypass actor IDs must be numeric database IDs — look them up with `gh api users/<actor> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
 - You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in `bypass_actors` or you will break normal updates and release workflows.
-- A wrong bypass list can lock you out of pushes. Recover by editing or deleting the ruleset in the UI, or through the REST API (for example `gh api -X DELETE repos/<owner>/<repo>/rulesets/<ruleset_id>`).
+- A wrong bypass list can lock you out of pushes. Recover by editing or deleting the ruleset in the UI or REST API (e.g. `gh api -X DELETE repos/<owner>/<repo>/rulesets/<ruleset_id>`); the ruleset ID is required.
 - This is the blunt instrument — it disables the bots' auto-fix everywhere the ruleset applies.
 
 ### 2) Bot dashboard setting (per-integration)
