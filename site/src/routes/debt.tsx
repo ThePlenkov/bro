@@ -76,10 +76,12 @@ interface CachedSnapshot {
 }
 
 type LoadError =
-  | { kind: 'rate_limited'; status: number; retryAfter?: string | null; message: string }
+  | { kind: 'rate_limited'; status: number; retryAfter?: string | null; reset?: string | null; message: string }
   | { kind: 'ref_missing'; message: string }
   | { kind: 'summary_failed'; message: string }
   | { kind: 'unknown'; message: string }
+
+type CacheReason = 'rate_limited' | 'ref_missing' | 'summary_failed' | 'network' | 'unknown' | null
 
 function isRateLimitedStatus(status: number, res?: Response, body?: string) {
   if (status === 429) return true
@@ -99,6 +101,10 @@ function getRateLimitHeaders(res: Response) {
   return { remaining, reset, retryAfter }
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
 function readSnapshot(): CachedSnapshot | null {
   if (typeof window === 'undefined') return null
   try {
@@ -106,18 +112,39 @@ function readSnapshot(): CachedSnapshot | null {
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (
-      !parsed ||
-      typeof parsed !== 'object' ||
+      !isPlainObject(parsed) ||
       typeof parsed.fetched_at !== 'string' ||
       typeof parsed.sha !== 'string' ||
-      !parsed.summary ||
-      typeof parsed.summary !== 'object' ||
-      !Array.isArray(parsed.rows) ||
-      !Array.isArray(parsed.findings)
+      !isPlainObject(parsed.summary)
     ) {
       return null
     }
-    return parsed as CachedSnapshot
+    const summary = parsed.summary
+    if (
+      typeof summary.generated_at !== 'string' ||
+      typeof summary.open_count !== 'number' ||
+      !isPlainObject(summary.by_area) ||
+      !isPlainObject(summary.by_author) ||
+      !Array.isArray(summary.duplicate_fingerprints) ||
+      summary.duplicate_fingerprints.some((d: unknown) => typeof d !== 'string')
+    ) {
+      return null
+    }
+    if (
+      !Array.isArray(parsed.rows) ||
+      parsed.rows.some((r: unknown) => !isPlainObject(r) || typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') ||
+      !Array.isArray(parsed.findings) ||
+      parsed.findings.some((f: unknown) => !isPlainObject(f) || typeof (f as Finding).thread_id !== 'string' || typeof (f as Finding).status !== 'string' || typeof (f as Finding).source_pr !== 'number')
+    ) {
+      return null
+    }
+    return {
+      fetched_at: parsed.fetched_at,
+      sha: parsed.sha,
+      summary: summary as Summary,
+      rows: parsed.rows as Row[],
+      findings: parsed.findings as Finding[],
+    }
   } catch {
     return null
   }
@@ -197,14 +224,14 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
   return texts.flatMap((t) => parseJsonl<Finding>(t))
 }
 
-async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt: string; sha?: string }> {
+async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt: string; sha?: string; cacheReason?: CacheReason }> {
   let refRes: Response
   try {
     refRes = await fetch(REF_API)
   } catch (err) {
     const cached = readSnapshot()
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'network' }
     }
     throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
   }
@@ -214,24 +241,26 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
   if (isRateLimitedStatus(refRes.status, refRes, refBody)) {
     const cached = readSnapshot()
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'rate_limited' }
     }
-    const { retryAfter } = getRateLimitHeaders(refRes)
+    const { retryAfter, reset } = getRateLimitHeaders(refRes)
+    const resetMsg = !retryAfter && reset ? ` reset at ${new Date(parseInt(reset) * 1000).toISOString()}.` : ''
     throw {
       kind: 'rate_limited',
       status: refRes.status,
       retryAfter,
-      message: retryAfter ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.` : `GitHub API rate limit reached (HTTP ${refRes.status}).`,
+      reset,
+      message: retryAfter ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.` : `GitHub API rate limit reached (HTTP ${refRes.status})${resetMsg ? resetMsg.slice(0, -1) + '.' : '.'}`,
     } satisfies LoadError
   }
 
   if (!refRes.ok) {
     const cached = readSnapshot()
     if (cached && refRes.status === 404) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
     }
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: refRes.status === 404 ? 'ref_missing' : 'unknown' }
     }
     throw { kind: refRes.status === 404 ? 'ref_missing' : 'unknown', message: `Failed to resolve bro/data ref (HTTP ${refRes.status}).` } satisfies LoadError
   }
@@ -242,7 +271,7 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
   } catch (err) {
     const cached = readSnapshot()
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
     }
     throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
   }
@@ -251,13 +280,13 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
   if (!sha) {
     const cached = readSnapshot()
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
     }
     throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError
   }
 
   try {
-    const [summary, ledgerRes, findings] = await Promise.all([
+    const [summaryRes, ledgerRes, findingsRes] = await Promise.allSettled([
       fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then((r) => {
         if (!r.ok) throw { kind: 'summary_failed', message: `summary fetch failed (HTTP ${r.status})` } satisfies LoadError
         return r.json() as Promise<Summary>
@@ -272,7 +301,41 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
       }),
       fetchHarvests(sha).catch(() => []), // harvests missing ≠ broken dashboard
     ])
-    const data: Data = { summary, rows: parseJsonl<Row>(ledgerRes), findings }
+
+    if (summaryRes.status !== 'fulfilled') {
+      const err = summaryRes.reason
+      if ((err as LoadError)?.kind) {
+        const cached = readSnapshot()
+        if (cached) {
+          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+        }
+        throw err
+      }
+      throw err
+    }
+
+    if (ledgerRes.status !== 'fulfilled') {
+      const err = ledgerRes.reason
+      if ((err as LoadError)?.kind) {
+        const cached = readSnapshot()
+        if (cached) {
+          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+        }
+        throw err
+      }
+      const cached = readSnapshot()
+      if (cached) {
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      }
+      throw err
+    }
+
+    const summary = summaryRes.value
+    const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : ''
+    const findings = findingsRes.status === 'fulfilled' ? findingsRes.value : []
+    // Do not cache if ledger or harvests failed in unexpected ways that we couldn't recover cleanly
+    // But we already handled - only cache on complete successful fetches of all required artifacts
+    const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings }
     const fetchedAt = new Date().toISOString()
     writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings })
     return { data, source: 'live', fetchedAt, sha }
@@ -280,13 +343,13 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
     if ((err as LoadError)?.kind) {
       const cached = readSnapshot()
       if (cached) {
-        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
       }
       throw err
     }
     const cached = readSnapshot()
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha }
+      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
     }
     throw err
   }
@@ -299,9 +362,11 @@ function DebtDashboard() {
   const [error, setError] = useState<string | null>(null)
   const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null)
   const [retryAfter, setRetryAfter] = useState<string | null>(null)
+  const [reset, setReset] = useState<string | null>(null)
   const [source, setSource] = useState<'live' | 'cache' | null>(null)
   const [fetchedAt, setFetchedAt] = useState<string | null>(null)
   const [sha, setSha] = useState<string | undefined>(undefined)
+  const [cacheReason, setCacheReason] = useState<CacheReason>(null)
 
   useEffect(() => {
     let active = true
@@ -312,9 +377,11 @@ function DebtDashboard() {
         setSource(res.source)
         setFetchedAt(res.fetchedAt)
         setSha(res.sha)
+        setCacheReason(res.cacheReason ?? null)
         setError(null)
         setErrorKind(null)
         setRetryAfter(null)
+        setReset(null)
       },
       (err: unknown) => {
         if (!active) return
@@ -324,6 +391,7 @@ function DebtDashboard() {
           setErrorKind(e.kind)
           if (e.kind === 'rate_limited') {
             setRetryAfter(e.retryAfter ?? null)
+            setReset((e as any).reset ?? null)
             setError(e.message)
           } else if (e.kind === 'ref_missing') {
             setError('data ref not found — the review-debt snapshot may not be published yet.')
@@ -435,7 +503,11 @@ function DebtDashboard() {
                   .
                 </>
               ) : null}{' '}
-              Live data may be temporarily unavailable due to GitHub API limits.
+              {cacheReason === 'rate_limited' && 'Live data may be temporarily unavailable due to GitHub API limits.'}
+              {cacheReason === 'ref_missing' && 'Live data may be temporarily unavailable — the review-debt ref could not be resolved.'}
+              {cacheReason === 'summary_failed' && 'Live data may be temporarily unavailable — the review-debt summary could not be loaded.'}
+              {cacheReason === 'network' && 'Live data may be temporarily unavailable due to a network issue.'}
+              {(cacheReason === 'unknown' || cacheReason === null) && 'Live data may be temporarily unavailable.'}
             </p>
           </section>
         )}
