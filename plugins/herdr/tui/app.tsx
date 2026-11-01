@@ -98,6 +98,11 @@ export interface Pane {
    *  the scrollbox's scrollChildIntoView; select/toggle call it so a
    *  peek or fold never happens off-screen. */
   scrollToRow?: (id: number) => void;
+  /** A mouse click on a row: unselected foldable → select (the peek
+   *  opens); already selected → the Enter toggle. Click IS the
+   *  j/k-then-Enter gesture — scrolling to a ▸ row and hitting Enter
+   *  with nothing selected does nothing otherwise (addendum 27). */
+  clickRow?: (id: number) => void;
   /** The feed's scrollbox — tests poll its bar's visibility before
    *  sending mouse events at it. */
   scroller?: ScrollBoxRenderable;
@@ -197,6 +202,20 @@ export function createPane(
         publish(withMeta(plain, meta));
       },
     },
+  };
+  // click a foldable row: first click selects (the peek opens —
+  // same as j/k arriving), a second click toggles the pin — the
+  // Enter gesture. Non-foldable rows ignore the click so prose
+  // stays free for drag-select/copy.
+  pane.clickRow = id => {
+    const item = plain.byId[id];
+    if (item === undefined || !isFoldable(item)) return;
+    if (plain.selected === id) {
+      pane.writer.toggle();
+    } else {
+      publish({ ...plain, selected: id });
+      pane.scrollToRow?.(id);
+    }
   };
   return pane;
 }
@@ -1051,6 +1070,9 @@ function Pane(props: {
   /** mouse-up after a drag-select → OSC52 copy (opencode's
    *  copy-on-select on the renderer's own selection) */
   onCopySelect?: (event: MouseEvent) => void;
+  /** mouse-down on a row → select-and-peek / pin toggle — the
+   *  click IS the j/k-then-Enter gesture (addendum 27) */
+  onRowClick?: (id: number) => void;
 }) {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
@@ -1134,7 +1156,13 @@ function Pane(props: {
                 return (
                   // the row's own box — its `id` is the scrollbox's
                   // scrollChildIntoView handle (j/k follows the walk)
-                  <box id={`row-${id}`} flexDirection="column" flexShrink={0} width="100%">
+                  <box
+                    id={`row-${id}`}
+                    flexDirection="column"
+                    flexShrink={0}
+                    width="100%"
+                    onMouseDown={() => props.onRowClick?.(id)}
+                  >
                     <Show when={margin() > 0}>
                       <box height={margin()} width="100%" flexShrink={0} />
                     </Show>
@@ -1211,6 +1239,7 @@ export async function mountPane(opts: {
           scroller = el;
           pane.scroller = el;
         }}
+        onRowClick={id => pane.clickRow?.(id)}
         onCopySelect={() => {
           // opencode's copy-on-select: drag → renderer Selection →
           // OSC52 onto the clipboard, then clear the highlight

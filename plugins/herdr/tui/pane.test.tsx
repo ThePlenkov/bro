@@ -367,6 +367,35 @@ describe('the Solid session pane', () => {
     }
   });
 
+  test('a click selects+peeks a foldable row; a second click pins the toggle', async () => {
+    const p = await mount();
+    try {
+      p.model.feed(
+        chunk('agent_message_chunk', Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n'))
+      );
+      await p.flush();
+      await p.flush();
+      const folded = await p.frame();
+      assert.match(folded, /\+\d+ lines/);
+      assert.doesNotMatch(folded, /line 40/);
+      // the folded row's screen position — the `+N lines` line
+      const y = folded.split('\n').findIndex(l => /\+\d+ lines/.test(l));
+      assert.ok(y >= 0, 'folded row not in frame');
+      const mouse = createMockMouse(p.renderer);
+      await mouse.click(5, y, 0);
+      await p.flush();
+      // the click IS the j/k arrive — the selection's peek opens it
+      const peeked = await p.frame();
+      assert.match(peeked, /line 40/);
+      // second click = the Enter gesture — pins the toggle
+      await mouse.click(5, y, 0);
+      await p.flush();
+      assert.match(await p.frame(), /line 40/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
   test('j/k scrolls the selected row into view (off-screen foldable)', async () => {
     const p = await mount();
     try {
