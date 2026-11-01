@@ -1573,24 +1573,18 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
       res.end();
     }
   };
+  const isHighSurrogate = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
+  const isLowSurrogate = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
   const adjustForSurrogatePair = (chunk: string, i: number, end: number): number => {
-    if (end <= i) {
-      return end;
-    }
-    if (end >= chunk.length) {
+    if (end <= i || end >= chunk.length) {
       return end;
     }
     const c1 = chunk.charCodeAt(end - 1);
     const c2 = chunk.charCodeAt(end);
-    const isHighSurrogate = c1 >= 0xd800 && c1 <= 0xdbff;
-    const isLowSurrogate = c2 >= 0xdc00 && c2 <= 0xdfff;
-    if (!isHighSurrogate || !isLowSurrogate) {
+    if (!isHighSurrogate(c1) || !isLowSurrogate(c2)) {
       return end;
     }
-    if (end - 1 > i) {
-      return end - 1;
-    }
-    return Math.min(end + 1, chunk.length);
+    return end - 1 > i ? end - 1 : Math.min(end + 1, chunk.length);
   };
   const sse = (chunk: string): void => {
     for (let i = 0; i < chunk.length; ) {
