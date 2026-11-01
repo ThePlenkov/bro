@@ -123,18 +123,46 @@ function readSnapshot(): CachedSnapshot | null {
     if (
       typeof summary.generated_at !== 'string' ||
       typeof summary.open_count !== 'number' ||
+      !Number.isFinite(summary.open_count) ||
       !isPlainObject(summary.by_area) ||
       !isPlainObject(summary.by_author) ||
       !Array.isArray(summary.duplicate_fingerprints) ||
-      summary.duplicate_fingerprints.some((d: unknown) => typeof d !== 'string')
+      summary.duplicate_fingerprints.some((d: unknown) => typeof d !== 'string') ||
+      Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number') ||
+      Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number')
     ) {
+      return null
+    }
+    if (summary.oldest_open !== null && typeof summary.oldest_open !== 'string') {
       return null
     }
     if (
       !Array.isArray(parsed.rows) ||
-      parsed.rows.some((r: unknown) => !isPlainObject(r) || typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') ||
+      parsed.rows.some((r: unknown) => {
+        if (!isPlainObject(r)) return true
+        if (typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') return true
+        if ((r as Row).fix_pr !== null && typeof (r as Row).fix_pr !== 'number') return true
+        if ((r as Row).fixed_at !== null && typeof (r as Row).fixed_at !== 'string') return true
+        if ((r as Row).notes !== null && typeof (r as Row).notes !== 'string') return true
+        return false
+      }) ||
       !Array.isArray(parsed.findings) ||
-      parsed.findings.some((f: unknown) => !isPlainObject(f) || typeof (f as Finding).thread_id !== 'string' || typeof (f as Finding).status !== 'string' || typeof (f as Finding).source_pr !== 'number')
+      parsed.findings.some((f: unknown) => {
+        if (!isPlainObject(f)) return true
+        if (typeof (f as Finding).thread_id !== 'string' || typeof (f as Finding).status !== 'string') return true
+        if (typeof (f as Finding).source_pr !== 'number' || !Number.isFinite((f as Finding).source_pr)) return true
+        if ((f as Finding).thread_url !== undefined && typeof (f as Finding).thread_url !== 'string') return true
+        if ((f as Finding).priority !== undefined && typeof (f as Finding).priority !== 'string') return true
+        if ((f as Finding).source_pr_title !== undefined && typeof (f as Finding).source_pr_title !== 'string') return true
+        if ((f as Finding).path !== undefined && typeof (f as Finding).path !== 'string') return true
+        if ((f as Finding).line !== undefined && (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))) return true
+        if ((f as Finding).author !== undefined && typeof (f as Finding).author !== 'string') return true
+        if ((f as Finding).body_preview !== undefined && typeof (f as Finding).body_preview !== 'string') return true
+        if ((f as Finding).area !== undefined && typeof (f as Finding).area !== 'string') return true
+        if ((f as Finding).fingerprint !== undefined && typeof (f as Finding).fingerprint !== 'string') return true
+        if ((f as Finding).harvested_at !== undefined && typeof (f as Finding).harvested_at !== 'string') return true
+        return false
+      })
     ) {
       return null
     }
@@ -299,7 +327,7 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
         if (r.status === 404) return ''
         throw { kind: 'unknown', message: `ledger fetch failed (HTTP ${r.status})` } satisfies LoadError
       }),
-      fetchHarvests(sha).catch(() => []), // harvests missing ≠ broken dashboard
+      fetchHarvests(sha).then((f) => ({ findings: f, ok: true })).catch(() => ({ findings: [] as Finding[], ok: false })), // harvests missing ≠ broken dashboard
     ])
 
     if (summaryRes.status !== 'fulfilled') {
@@ -332,9 +360,15 @@ async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt
 
     const summary = summaryRes.value
     const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : ''
-    const findings = findingsRes.status === 'fulfilled' ? findingsRes.value : []
-    // Do not cache if ledger or harvests failed in unexpected ways that we couldn't recover cleanly
-    // But we already handled - only cache on complete successful fetches of all required artifacts
+    const harvestRes = findingsRes.status === 'fulfilled' ? findingsRes.value : { findings: [] as Finding[], ok: false }
+    // Only cache if all artifact fetches completed successfully (ledger ok or 404, harvests ok)
+    if (!harvestRes.ok) {
+      const cached = readSnapshot()
+      if (cached) {
+        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      }
+    }
+    const findings = harvestRes.findings
     const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings }
     const fetchedAt = new Date().toISOString()
     writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings })
@@ -386,6 +420,10 @@ function DebtDashboard() {
       (err: unknown) => {
         if (!active) return
         console.error('debt dashboard:', err)
+        setSource(null)
+        setCacheReason(null)
+        setFetchedAt(null)
+        setSha(undefined)
         if (err && typeof err === 'object' && 'kind' in err) {
           const e = err as LoadError
           setErrorKind(e.kind)
@@ -401,6 +439,8 @@ function DebtDashboard() {
             setError('could not load the ledger — check the console for details')
           }
           if (e.kind === 'summary_failed') {
+            setData(null)
+          } else {
             setData(null)
           }
         } else if (err instanceof Error) {
@@ -483,6 +523,21 @@ function DebtDashboard() {
               ⚠ {error}
               {errorKind === 'rate_limited' && (
                 <>
+                  {!retryAfter && reset && (
+                    <>
+                      {' '}Resets at{' '}
+                      {(() => {
+                        try {
+                          const ts = parseInt(reset, 10)
+                          if (Number.isNaN(ts)) return reset
+                          return new Date(ts * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+                        } catch {
+                          return reset
+                        }
+                      })()}
+                      .
+                    </>
+                  )}
                   {' '}
                   <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated requests.
                 </>
