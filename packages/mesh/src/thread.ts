@@ -8,11 +8,11 @@
  *   posted → claimed → submitted ─┬─ accepted
  *                                 └─ rejected
  */
-import { gitTry, taskStore } from '@broject/core'
-import { envelopeFromBead, type BeadLike, type MeshEnvelope, type MeshKind } from './envelope.ts'
-import { selfRig } from './identity.ts'
-import type { MeshPeer } from './peers.ts'
-import { meshScan, type PeerRecord } from './inbox.ts'
+import { gitTry, taskStore } from '@broject/core';
+import { envelopeFromBead, type BeadLike, type MeshEnvelope, type MeshKind } from './envelope.ts';
+import { selfRig } from './identity.ts';
+import type { MeshPeer } from './peers.ts';
+import { meshScan, type PeerRecord } from './inbox.ts';
 import {
   githubProvenance,
   issueComments,
@@ -20,36 +20,39 @@ import {
   parseGithubRemote,
   selfLogin as ghSelfLogin,
   type GhRecord,
-} from './github.ts'
+} from './github.ts';
 
-export type ThreadStage = 'posted' | 'claimed' | 'submitted' | 'accepted' | 'rejected'
+export type ThreadStage = 'posted' | 'claimed' | 'submitted' | 'accepted' | 'rejected';
 
 export interface ThreadState {
   /** the request envelope — thread anchor; absent when the request is
    *  on a store we cannot read */
-  request?: MeshEnvelope
+  request?: MeshEnvelope;
   /** all lifecycle envelopes seen for the thread */
-  envelopes: MeshEnvelope[]
+  envelopes: MeshEnvelope[];
   /** envelope id → the bound peer rig the record arrived over. The
    *  binding is the authoritative sender for replies; a record with
    *  no entry came from our own store. On a `local` peer the entry
    *  is the envelope's `from` — the binding attests the store, not
    *  the author (delivered threads carry the requester's records). */
-  provenance: Record<string, string>
+  provenance: Record<string, string>;
   /** the peer that produced the REQUEST envelope — a `local` peer
    *  means the thread's anchor store is that checkout; lifecycle
    *  writes land there, not in our own store. */
-  requestPeer?: MeshPeer
+  requestPeer?: MeshPeer;
   /** the thread names this reduction merged — the asked thread plus
    *  aliases recovered from own-store mirror beads' `external_ref`
    *  (a github mirror names the issue url; a wasteland one the
    *  `w-<hash>`). Callers that write to a non-beads plane pick the
    *  canonical thread from this list. */
-  threads: string[]
-  stage?: ThreadStage
+  threads: string[];
+  stage?: ThreadStage;
   /** the side that owes the next move — absent on a terminal verdict */
-  turn?: 'requester' | 'worker'
-  errors: string[]
+  turn?: 'requester' | 'worker';
+  errors: string[];
+  /** peer scans that failed — tracked separately from admission errors */
+  scanFailed?: boolean;
+  scanErrors?: string[];
 }
 
 const STAGE_OF: Record<MeshKind, ThreadStage> = {
@@ -58,7 +61,7 @@ const STAGE_OF: Record<MeshKind, ThreadStage> = {
   result: 'submitted',
   accept: 'accepted',
   reject: 'rejected',
-}
+};
 
 const STAGE_RANK: Record<ThreadStage, number> = {
   posted: 0,
@@ -66,18 +69,31 @@ const STAGE_RANK: Record<ThreadStage, number> = {
   submitted: 2,
   rejected: 3,
   accepted: 3,
-}
+};
 
-function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
+function ownBeads(dir: string, timeoutMs?: number): { rows: BeadLike[]; error?: string } {
   try {
-    return {
-      rows: taskStore(dir).list<BeadLike>({ labels: ['mesh:v:1'], all: true }),
+    const store = taskStore(dir) as any;
+    if (typeof store.listWithTimeout === 'function' && timeoutMs !== undefined) {
+      try {
+        const res = store.listWithTimeout({ labels: ['mesh:v:1'], all: true }, timeoutMs);
+        const rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
+        return { rows };
+      } catch (err) {
+        return {
+          rows: [],
+          error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
+    return {
+      rows: store.list<BeadLike>({ labels: ['mesh:v:1'], all: true }),
+    };
   } catch (err) {
     return {
       rows: [],
       error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
-    }
+    };
   }
 }
 
@@ -100,65 +116,60 @@ function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
  *  the record's real field and provenance is `from`. */
 /** The transport's say on who a record is from — a provenance rig, or
  *  the error explaining why the record is dropped. */
-function peerProvenance(
-  r: PeerRecord,
-  ctx: ReduceCtx,
-): { provenance?: string; error?: string } {
+function peerProvenance(r: PeerRecord, ctx: ReduceCtx): { provenance?: string; error?: string } {
   if (r.transport === 'github') {
     const v = githubProvenance({
       author: r.author ?? '',
-      peer: ctx.peers.find((p) => p.alias === r.peer),
+      peer: ctx.peers.find(p => p.alias === r.peer),
       selfLogin: ctx.login.get(),
       ownRig: ctx.ownRig,
-    })
+    });
     return v.provenance === undefined
       ? { error: v.error ?? 'unauthenticated' }
-      : { provenance: v.provenance }
+      : { provenance: v.provenance };
   }
   if (r.transport === 'wasteland') {
-    return { provenance: r.envelope.from }
+    return { provenance: r.envelope.from };
   }
-  return ownRecordAdmits(r, ctx)
+  return ownRecordAdmits(r, ctx);
 }
 
 /** beads-remote and local peers — the `from` attests the binding rig;
  *  on `local` checkouts the store can carry OUR records too. */
 function admitsFrom(r: PeerRecord, ownRig: string | null): boolean {
   if (r.envelope.from === r.peerRig) {
-    return true
+    return true;
   }
-  const localSelf = r.transport === 'local' && ownRig !== null
-  return localSelf && r.envelope.from === ownRig
+  const localSelf = r.transport === 'local' && ownRig !== null;
+  return localSelf && r.envelope.from === ownRig;
 }
 
 function ownRecordAdmits(r: PeerRecord, ctx: ReduceCtx): { provenance?: string; error?: string } {
   return admitsFrom(r, ctx.ownRig)
     ? { provenance: r.transport === 'local' ? r.envelope.from : r.peerRig }
-    : { error: `from ${r.envelope.from} doesn't match peer rig ${r.peerRig}` }
+    : { error: `from ${r.envelope.from} doesn't match peer rig ${r.peerRig}` };
 }
 
 /** The shared admit tail — dedupe id, keep the envelope, pin who
  *  sent it. */
 function markAdmitted(env: MeshEnvelope, provenance: string, ctx: ReduceCtx): void {
-  ctx.seen.add(env.id)
-  ctx.state.envelopes.push(env)
-  ctx.state.provenance[env.id] = provenance
+  ctx.seen.add(env.id);
+  ctx.state.envelopes.push(env);
+  ctx.state.provenance[env.id] = provenance;
 }
 
 function admitPeerRecord(r: PeerRecord, ctx: ReduceCtx): void {
   if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
-    return
+    return;
   }
-  const v = peerProvenance(r, ctx)
+  const v = peerProvenance(r, ctx);
   if (v.provenance === undefined) {
-    ctx.state.errors.push(
-      `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error}`
-    )
-    return
+    ctx.state.errors.push(`${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error}`);
+    return;
   }
-  markAdmitted(r.envelope, v.provenance, ctx)
+  markAdmitted(r.envelope, v.provenance, ctx);
   if (r.envelope.kind === 'request') {
-    ctx.state.requestPeer = ctx.peers.find((p) => p.alias === r.peer)
+    ctx.state.requestPeer = ctx.peers.find(p => p.alias === r.peer);
   }
 }
 
@@ -168,25 +179,25 @@ function admitPeerRecord(r: PeerRecord, ctx: ReduceCtx): void {
 /** The reduction's working set — every admit leg shares it; one record
  *  keeps each helper's arg list under the repo's max-4 ceiling. */
 interface ReduceCtx {
-  threads: Set<string>
-  seen: Set<string>
-  state: ThreadState
-  ownRig: string | null
-  peers: MeshPeer[]
-  login: { get: () => string | undefined }
+  threads: Set<string>;
+  seen: Set<string>;
+  state: ThreadState;
+  ownRig: string | null;
+  peers: MeshPeer[];
+  login: { get: () => string | undefined };
 }
 
 function lazyLogin(): ReduceCtx['login'] {
-  let ready = false
-  let login: string | undefined
+  let ready = false;
+  let login: string | undefined;
   const get = (): string | undefined => {
     if (!ready) {
-      ready = true
-      login = ghSelfLogin().login
+      ready = true;
+      login = ghSelfLogin().login;
     }
-    return login
-  }
-  return { get }
+    return login;
+  };
+  return { get };
 }
 
 /** Own-store leg: mirror beads carry the remote thread in
@@ -195,21 +206,19 @@ function lazyLogin(): ReduceCtx['login'] {
  *  and the mirror still anchors it). Admits every own envelope whose
  *  thread or alias is in the set. */
 function aliasOf(row: BeadLike): string | null {
-  return typeof row.external_ref === 'string' && row.external_ref !== ''
-    ? row.external_ref
-    : null
+  return typeof row.external_ref === 'string' && row.external_ref !== '' ? row.external_ref : null;
 }
 
 /** The alias direction an own bead adds: its external_ref when the
  *  bead IS the asked thread, its own thread when the ref names it. */
 function aliasThread(env: MeshEnvelope | null, ext: string | null, thread: string): string | null {
   if (env === null) {
-    return null
+    return null;
   }
   if (env.thread === thread && ext !== null) {
-    return ext
+    return ext;
   }
-  return ext === thread ? env.thread : null
+  return ext === thread ? env.thread : null;
 }
 
 /** First pass over own beads — alias recovery only (the asked thread
@@ -217,12 +226,12 @@ function aliasThread(env: MeshEnvelope | null, ext: string | null, thread: strin
 function collectAliases(
   ownEnvs: { row: BeadLike; env: MeshEnvelope | null }[],
   thread: string,
-  ctx: ReduceCtx,
+  ctx: ReduceCtx
 ): void {
   for (const { row, env } of ownEnvs) {
-    const alias = aliasThread(env, aliasOf(row), thread)
+    const alias = aliasThread(env, aliasOf(row), thread);
     if (alias !== null) {
-      ctx.threads.add(alias)
+      ctx.threads.add(alias);
     }
   }
 }
@@ -231,18 +240,18 @@ function collectAliases(
  *  `external_ref` alias is in the asked set. */
 function ownAdmits(env: MeshEnvelope, ext: string | null, ctx: ReduceCtx): boolean {
   if (ctx.threads.has(env.thread)) {
-    return true
+    return true;
   }
-  return ext !== null && ctx.threads.has(ext)
+  return ext !== null && ctx.threads.has(ext);
 }
 
 function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
-  const ownEnvs = rows.map((row) => ({ row, env: envelopeFromBead(row) }))
-  collectAliases(ownEnvs, thread, ctx)
+  const ownEnvs = rows.map(row => ({ row, env: envelopeFromBead(row) }));
+  collectAliases(ownEnvs, thread, ctx);
   for (const { row, env } of ownEnvs) {
     if (env !== null && ownAdmits(env, aliasOf(row), ctx)) {
-      ctx.seen.add(env.id)
-      ctx.state.envelopes.push(env)
+      ctx.seen.add(env.id);
+      ctx.state.envelopes.push(env);
     }
   }
 }
@@ -253,83 +262,87 @@ function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
  *  Same provenance rule as the peer scan: a bound login attests the
  *  peer, this account attests us, anything else drops flagged. */
 function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  const selfRepo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  const selfRepo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null;
   if (selfRepo === null) {
-    return
+    return;
   }
   for (const t of ctx.threads) {
-    admitIssueComments(t, selfRepo, ctx)
+    admitIssueComments(t, selfRepo, ctx);
   }
 }
 
 /** One thread alias → its issue comments, admitted when they name the
  *  origin's repo. */
-function admitIssueComments(t: string, selfRepo: { owner: string; repo: string }, ctx: ReduceCtx): void {
-  const k = issueKey({ thread: t })
+function admitIssueComments(
+  t: string,
+  selfRepo: { owner: string; repo: string },
+  ctx: ReduceCtx
+): void {
+  const k = issueKey({ thread: t });
   if (k.repo === null || k.n === null) {
-    return
+    return;
   }
-  const { repo, n } = k
+  const { repo, n } = k;
   if (repo.owner !== selfRepo.owner || repo.repo !== selfRepo.repo) {
-    return
+    return;
   }
-  const cs = issueComments(repo, { number: n })
+  const cs = issueComments(repo, { number: n });
   for (const e of cs.errors) {
-    ctx.state.errors.push(`self: ${e}`)
+    ctx.state.errors.push(`self: ${e}`);
   }
   for (const r of cs.records) {
-    admitSelfRepoRecord(r, ctx)
+    admitSelfRepoRecord(r, ctx);
   }
 }
 
 function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
   if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
-    return
+    return;
   }
   const bound = ctx.peers.find(
-    (p) => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase(),
-  )
+    p => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase()
+  );
   const v = githubProvenance({
     author: r.author,
     peer: bound,
     selfLogin: ctx.login.get(),
     ownRig: ctx.ownRig,
-  })
+  });
   if (v.provenance === undefined) {
     ctx.state.errors.push(
       `self: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error ?? 'unauthenticated'}`
-    )
-    return
+    );
+    return;
   }
-  markAdmitted(r.envelope, v.provenance, ctx)
+  markAdmitted(r.envelope, v.provenance, ctx);
   if (r.envelope.kind === 'request' && bound !== undefined) {
-    ctx.state.requestPeer = bound
+    ctx.state.requestPeer = bound;
   }
 }
 
 /** The furthest stage any admitted envelope reached. */
 function highestStage(envelopes: MeshEnvelope[]): ThreadStage | undefined {
-  let stage: ThreadStage | undefined
+  let stage: ThreadStage | undefined;
   for (const e of envelopes) {
-    const s = STAGE_OF[e.kind]
+    const s = STAGE_OF[e.kind];
     if (stage === undefined || STAGE_RANK[s] > STAGE_RANK[stage]) {
-      stage = s
+      stage = s;
     }
   }
-  return stage
+  return stage;
 }
 
 /** Highest-stage envelope wins; the turn is the side that owes the
  *  next move — both verdicts are terminal (a revised result re-opens
  *  as a new request thread, not a turn). */
 function reduceStage(state: ThreadState): void {
-  state.request = state.envelopes.find((e) => e.kind === 'request')
-  state.stage = highestStage(state.envelopes)
+  state.request = state.envelopes.find(e => e.kind === 'request');
+  state.stage = highestStage(state.envelopes);
   if (state.stage === 'posted' || state.stage === 'claimed') {
-    state.turn = 'worker'
+    state.turn = 'worker';
   } else if (state.stage === 'submitted') {
-    state.turn = 'requester'
+    state.turn = 'requester';
   }
 }
 
@@ -340,10 +353,10 @@ export function meshThread(
   dir: string,
   peers: MeshPeer[],
   thread: string,
-  call: { gitCommon: string; pull?: boolean },
+  call: { gitCommon: string; pull?: boolean; timeoutMs?: number }
 ): ThreadState {
-  const state: ThreadState = { envelopes: [], provenance: {}, threads: [], errors: [] }
-  const ownRig = selfRig(dir)
+  const state: ThreadState = { envelopes: [], provenance: {}, threads: [], errors: [] };
+  const ownRig = selfRig(dir);
   const ctx: ReduceCtx = {
     threads: new Set([thread]),
     seen: new Set(),
@@ -351,14 +364,14 @@ export function meshThread(
     ownRig,
     peers,
     login: lazyLogin(),
-  }
+  };
 
-  const own = ownBeads(dir)
+  const own = ownBeads(dir, call.timeoutMs);
   if (own.error !== undefined) {
-    state.errors.push(`self: ${own.error}`)
+    state.errors.push(`self: ${own.error}`);
   }
-  admitOwnBeads(own.rows, thread, ctx)
-  state.threads = [...ctx.threads]
+  admitOwnBeads(own.rows, thread, ctx);
+  state.threads = [...ctx.threads];
 
   // `closedLocal` — the request anchor's `bd close` is `done`'s ship
   // precondition, so a closed request bead is a healthy thread's
@@ -368,13 +381,18 @@ export function meshThread(
     pull: call.pull,
     closedLocal: true,
     selfRig: ownRig ?? undefined,
-  })
-  state.errors.push(...scan.errors)
+    timeoutMs: call.timeoutMs,
+  });
+  if (scan.errors.length > 0) {
+    state.scanFailed = true;
+    state.scanErrors = scan.errors.slice();
+    state.errors.push(...scan.errors);
+  }
   for (const r of scan.records) {
-    admitPeerRecord(r, ctx)
+    admitPeerRecord(r, ctx);
   }
 
-  admitSelfRepoGithub(dir, ctx)
-  reduceStage(state)
-  return state
+  admitSelfRepoGithub(dir, ctx);
+  reduceStage(state);
+  return state;
 }

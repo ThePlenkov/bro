@@ -9,54 +9,64 @@
  * store holds, with provenance. `meshInbox` is the request filter on
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
-import { taskStore, gitTry } from '@broject/core'
-import { storeFor } from './post.ts'
-import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
-import { existsSync } from 'node:fs'
-import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts'
-import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
-import { parseGithubRemote, scanGithub, selfLogin } from './github.ts'
-import { browseWanted, projectWanted } from './wasteland.ts'
+import { taskStore, gitTry } from '@broject/core';
+import { storeFor } from './post.ts';
+import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts';
+import { existsSync } from 'node:fs';
+import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts';
+import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts';
+import { parseGithubRemote, scanGithub, selfLogin } from './github.ts';
+import { browseWanted, projectWanted } from './wasteland.ts';
 
 export interface PeerRecord {
   /** The peer alias the record arrived over — the provenance. */
-  peer: string
+  peer: string;
   /** The rig the binding declares for that alias. */
-  peerRig: string
+  peerRig: string;
   /** The binding's transport — 'local' attests the STORE, not the
    *  author: delivered envelopes carry the requester's `from` in a
    *  store the binding names (specs/cross-repo/bro-oam4). */
-  transport: MeshTransport
-  envelope: MeshEnvelope
-  beadId: string
+  transport: MeshTransport;
+  envelope: MeshEnvelope;
+  beadId: string;
   /** the authenticated account that authored the record — github
    *  comments only; the binding's `login` is what it's checked
    *  against (specs/cross-repo/bro-kim1e Trust). */
-  author?: string
+  author?: string;
   /** the record's author matched no peer binding's `login` and is not
    *  this account — surfaced flagged, never silently dropped */
-  unbound?: boolean
+  unbound?: boolean;
 }
 
 export interface InboundRequest extends PeerRecord {
   /** envelope.from !== peer.rig — flagged, never trusted (spec Trust). */
-  mismatch: boolean
+  mismatch: boolean;
   /** own-store row whose `from` matches no peer binding — surfaced
    *  like `mismatch`, never silently dropped. */
-  unbound?: boolean
+  unbound?: boolean;
 }
 
 export interface ScanResult {
-  records: PeerRecord[]
-  errors: string[]
+  records: PeerRecord[];
+  errors: string[];
 }
 
 export interface InboxResult {
-  requests: InboundRequest[]
-  errors: string[]
+  requests: InboundRequest[];
+  errors: string[];
 }
 
-function rowToBead(row: { id: string; title: string; description?: string; notes?: string; priority?: number; external_ref?: string | null }, labels: string[]): BeadLike {
+function rowToBead(
+  row: {
+    id: string;
+    title: string;
+    description?: string;
+    notes?: string;
+    priority?: number;
+    external_ref?: string | null;
+  },
+  labels: string[]
+): BeadLike {
   return {
     id: row.id,
     title: row.title,
@@ -65,44 +75,62 @@ function rowToBead(row: { id: string; title: string; description?: string; notes
     priority: row.priority,
     external_ref: row.external_ref,
     labels,
-  }
+  };
 }
 
 function admitRow(peer: MeshPeer, bead: BeadLike, out: PeerRecord[]): void {
-  const env = envelopeFromBead(bead)
+  const env = envelopeFromBead(bead);
   if (env !== null) {
-    out.push({ peer: peer.alias, peerRig: peer.rig, transport: peer.transport, envelope: env, beadId: bead.id })
+    out.push({
+      peer: peer.alias,
+      peerRig: peer.rig,
+      transport: peer.transport,
+      envelope: env,
+      beadId: bead.id,
+    });
   }
 }
 
-function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const found = meshIssues(dir)
+function scanReplica(
+  dir: string,
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  timeoutMs?: number
+): void {
+  const found = meshIssues(dir, timeoutMs);
   if (found.error !== undefined) {
-    errors.push(`${peer.alias}: ${found.error}`)
-    return
+    errors.push(`${peer.alias}: ${found.error}`);
+    return;
   }
   for (const row of found.rows) {
     if (row.status === 'closed') {
-      continue
+      continue;
     }
-    const labels = issueLabels(dir, row.id)
+    const labels = issueLabels(dir, row.id, timeoutMs);
     if (labels.error !== undefined) {
-      errors.push(`${peer.alias}: labels for ${row.id} failed — ${labels.error}`)
-      continue
+      errors.push(`${peer.alias}: labels for ${row.id} failed — ${labels.error}`);
+      continue;
     }
-    admitRow(peer, rowToBead(row, labels.labels), out)
+    admitRow(peer, rowToBead(row, labels.labels), out);
   }
 }
 
 /** beads-remote: sync the replica (clone||pull), query mesh-labelled
  *  issues, emit every envelope found. */
-function scanRemote(gitCommon: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const synced = syncReplica(gitCommon, peer.alias, peer.remote)
+function scanRemote(
+  gitCommon: string,
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  timeoutMs?: number
+): void {
+  const synced = syncReplica(gitCommon, peer.alias, peer.remote, timeoutMs);
   if (synced.path === undefined) {
-    errors.push(synced.error ?? `${peer.alias}: replica sync failed`)
-    return
+    errors.push(synced.error ?? `${peer.alias}: replica sync failed`);
+    return;
   }
-  scanReplica(synced.path, peer, out, errors)
+  scanReplica(synced.path, peer, out, errors, timeoutMs);
 }
 
 /** local: read the peer's live store read-only — `bd -C <checkout>
@@ -116,32 +144,52 @@ function scanLocal(
   out: PeerRecord[],
   errors: string[],
   closedLocal: boolean,
+  timeoutMs?: number
 ): void {
-  const dir = localCheckout(peer.remote)
+  const dir = localCheckout(peer.remote);
   if (dir === null) {
-    errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`)
-    return
+    errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`);
+    return;
   }
-  let rows: (BeadLike & { status?: string })[]
+  let rows: (BeadLike & { status?: string })[];
   try {
-    // closedLocal needs the store's own all-filter off too — the
-    // backend drops closed rows before this loop ever sees them.
-    // limit:0 likewise — a configured page must not hide envelopes
-    rows = storeFor(dir).list<BeadLike & { status?: string }>({
-      all: closedLocal || undefined,
-      limit: 0,
-    })
+    const store = storeFor(dir) as any;
+    if (typeof store.listWithTimeout === 'function' && timeoutMs !== undefined) {
+      try {
+        const res = store.listWithTimeout(
+          {
+            all: closedLocal || undefined,
+            limit: 0,
+          },
+          timeoutMs
+        );
+        rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
+      } catch (err) {
+        errors.push(
+          `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
+        );
+        return;
+      }
+    } else {
+      // closedLocal needs the store's own all-filter off too — the
+      // backend drops closed rows before this loop ever sees them.
+      // limit:0 likewise — a configured page must not hide envelopes
+      rows = store.list<BeadLike & { status?: string }>({
+        all: closedLocal || undefined,
+        limit: 0,
+      });
+    }
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
-    )
-    return
+    );
+    return;
   }
   for (const row of rows) {
     if (row.status === 'closed' && !closedLocal) {
-      continue
+      continue;
     }
-    admitRow(peer, row, out)
+    admitRow(peer, row, out);
   }
 }
 
@@ -151,9 +199,9 @@ function scanLocal(
  *  replica to pull — every read is a live `gh` call, `pull:false`
  *  changes nothing. */
 function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const scan = scanGithub({ remote: peer.remote })
+  const scan = scanGithub({ remote: peer.remote });
   for (const e of scan.errors) {
-    errors.push(`${peer.alias}: ${e}`)
+    errors.push(`${peer.alias}: ${e}`);
   }
   for (const r of scan.records) {
     out.push({
@@ -163,7 +211,7 @@ function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): vo
       envelope: r.envelope,
       beadId: r.issue,
       author: r.author,
-    })
+    });
   }
 }
 
@@ -174,20 +222,26 @@ function scanWastelandPeer(
   peer: MeshPeer,
   selfRig: string | undefined,
   out: PeerRecord[],
-  errors: string[],
+  errors: string[]
 ): void {
-  const board = browseWanted(peer.remote)
+  const board = browseWanted(peer.remote);
   if (board.error !== undefined) {
-    errors.push(`${peer.alias}: ${board.error}`)
-    return
+    errors.push(`${peer.alias}: ${board.error}`);
+    return;
   }
   for (const row of board.rows) {
-    const projected = projectWanted(row, selfRig)
+    const projected = projectWanted(row, selfRig);
     for (const e of projected.errors) {
-      errors.push(`${peer.alias}: ${e}`)
+      errors.push(`${peer.alias}: ${e}`);
     }
     for (const env of projected.envelopes) {
-      out.push({ peer: peer.alias, peerRig: peer.rig, transport: 'wasteland', envelope: env, beadId: row.id })
+      out.push({
+        peer: peer.alias,
+        peerRig: peer.rig,
+        transport: 'wasteland',
+        envelope: env,
+        beadId: row.id,
+      });
     }
   }
 }
@@ -203,26 +257,33 @@ function scanWastelandPeer(
 function admitOwnGithubRecord(
   r: { issue: string; author: string; envelope: PeerRecord['envelope'] },
   ctx: { peers: MeshPeer[]; selfRig: string; selfLogin: string | undefined },
-  out: PeerRecord[],
+  out: PeerRecord[]
 ): void {
   const bound = ctx.peers.find(
-    (p) => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase(),
-  )
+    p => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase()
+  );
   // verdicts land as comments on the request's own issue — they count
   // only from an authenticated bound author, and they feed the
   // terminal set so a verdicted github request leaves the inbox
-  const isVerdict = r.envelope.kind === 'accept' || r.envelope.kind === 'reject'
+  const isVerdict = r.envelope.kind === 'accept' || r.envelope.kind === 'reject';
   if (r.envelope.kind !== 'request' && !isVerdict) {
-    return
+    return;
   }
   if (bound !== undefined) {
-    out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
-    return
+    out.push({
+      peer: bound.alias,
+      peerRig: bound.rig,
+      transport: 'github',
+      envelope: r.envelope,
+      beadId: r.issue,
+      author: r.author,
+    });
+    return;
   }
   if (isVerdict) {
-    return
+    return;
   }
-  out.push(unboundGithubRow(r, ctx))
+  out.push(unboundGithubRow(r, ctx));
 }
 
 /** An unattributed request: ours when the authenticated author is this
@@ -230,10 +291,10 @@ function admitOwnGithubRecord(
  *  `unbound` and attributed to the envelope's claimed origin. */
 function unboundGithubRow(
   r: { issue: string; author: string; envelope: PeerRecord['envelope'] },
-  ctx: { selfRig: string; selfLogin: string | undefined },
+  ctx: { selfRig: string; selfLogin: string | undefined }
 ): PeerRecord {
   const self =
-    ctx.selfLogin !== undefined && r.author.toLowerCase() === ctx.selfLogin.toLowerCase()
+    ctx.selfLogin !== undefined && r.author.toLowerCase() === ctx.selfLogin.toLowerCase();
   return {
     peer: 'github',
     peerRig: self ? ctx.selfRig : r.envelope.from,
@@ -242,26 +303,26 @@ function unboundGithubRow(
     beadId: r.issue,
     author: r.author,
     unbound: self ? undefined : true,
-  }
+  };
 }
 
 function scanOwnGithub(
   ctx: { dir: string; peers: MeshPeer[]; selfRig: string },
   out: PeerRecord[],
-  errors: string[],
+  errors: string[]
 ): void {
-  const origin = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
-  const repo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null
+  const origin = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin']);
+  const repo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null;
   if (repo === null) {
-    return
+    return;
   }
-  const scan = scanGithub({ remote: `https://github.com/${repo.owner}/${repo.repo}` })
+  const scan = scanGithub({ remote: `https://github.com/${repo.owner}/${repo.repo}` });
   for (const e of scan.errors) {
-    errors.push(`self: ${e}`)
+    errors.push(`self: ${e}`);
   }
-  const admission = { peers: ctx.peers, selfRig: ctx.selfRig, selfLogin: selfLogin().login }
+  const admission = { peers: ctx.peers, selfRig: ctx.selfRig, selfLogin: selfLogin().login };
   for (const r of scan.records) {
-    admitOwnGithubRecord(r, admission, out)
+    admitOwnGithubRecord(r, admission, out);
   }
 }
 
@@ -270,30 +331,36 @@ function scanOwnGithub(
  *  replica is simply empty. */
 function scanPeer(
   peer: MeshPeer,
-  ctx: { gitCommon: string; pull?: boolean; closedLocal?: boolean; selfRig?: string },
+  ctx: {
+    gitCommon: string;
+    pull?: boolean;
+    closedLocal?: boolean;
+    selfRig?: string;
+    timeoutMs?: number;
+  },
   out: PeerRecord[],
-  errors: string[],
+  errors: string[]
 ): void {
   if (peer.transport === 'local') {
-    scanLocal(peer, out, errors, ctx.closedLocal === true)
-    return
+    scanLocal(peer, out, errors, ctx.closedLocal === true, ctx.timeoutMs);
+    return;
   }
   if (peer.transport === 'github') {
-    scanGithubPeer(peer, out, errors)
-    return
+    scanGithubPeer(peer, out, errors);
+    return;
   }
   if (peer.transport === 'wasteland') {
-    scanWastelandPeer(peer, ctx.selfRig, out, errors)
-    return
+    scanWastelandPeer(peer, ctx.selfRig, out, errors);
+    return;
   }
   if (ctx.pull === false) {
-    const dir = replicaDir(ctx.gitCommon, peer.alias)
+    const dir = replicaDir(ctx.gitCommon, peer.alias);
     if (existsSync(dir)) {
-      scanReplica(dir, peer, out, errors)
+      scanReplica(dir, peer, out, errors, ctx.timeoutMs);
     }
-    return
+    return;
   }
-  scanRemote(ctx.gitCommon, peer, out, errors)
+  scanRemote(ctx.gitCommon, peer, out, errors, ctx.timeoutMs);
 }
 
 /** Pull + scan every configured peer — every mesh envelope, every
@@ -305,14 +372,25 @@ export function meshScan(
   dir: string,
   peers: MeshPeer[],
   gitCommon: string,
-  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string } = {},
+  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string; timeoutMs?: number } = {}
 ): ScanResult {
-  const out: PeerRecord[] = []
-  const errors: string[] = []
+  const out: PeerRecord[] = [];
+  const errors: string[] = [];
   for (const peer of peers) {
-    scanPeer(peer, { gitCommon, pull: opts.pull, closedLocal: opts.closedLocal, selfRig: opts.selfRig }, out, errors)
+    scanPeer(
+      peer,
+      {
+        gitCommon,
+        pull: opts.pull,
+        closedLocal: opts.closedLocal,
+        selfRig: opts.selfRig,
+        timeoutMs: opts.timeoutMs,
+      },
+      out,
+      errors
+    );
   }
-  return { records: out, errors }
+  return { records: out, errors };
 }
 
 /** The request filter over the scan — pending requests addressed to
@@ -328,14 +406,14 @@ export function meshScan(
  *  not inbox material — and must never feed the terminal set. */
 function scanOwnStore(dir: string, selfRig: string, records: PeerRecord[], errors: string[]): void {
   try {
-    const rows = taskStore(dir).list<BeadLike & { status?: string }>({ limit: 0 })
+    const rows = taskStore(dir).list<BeadLike & { status?: string }>({ limit: 0 });
     for (const row of rows) {
       if (row.status === 'closed') {
-        continue
+        continue;
       }
-      const env = envelopeFromBead(row)
+      const env = envelopeFromBead(row);
       if (env?.to !== selfRig) {
-        continue
+        continue;
       }
       records.push({
         peer: 'self',
@@ -343,10 +421,10 @@ function scanOwnStore(dir: string, selfRig: string, records: PeerRecord[], error
         transport: 'local',
         envelope: env,
         beadId: row.id,
-      })
+      });
     }
   } catch (err) {
-    errors.push(`self: store list failed — ${err instanceof Error ? err.message : String(err)}`)
+    errors.push(`self: store list failed — ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -357,59 +435,62 @@ function scanOwnStore(dir: string, selfRig: string, records: PeerRecord[], error
  *  verdict only closes requests that arrived over the same binding. */
 function isBoundVerdict(r: PeerRecord): boolean {
   if (r.peer === 'self' || r.envelope.from !== r.peerRig) {
-    return false
+    return false;
   }
-  return r.envelope.kind === 'accept' || r.envelope.kind === 'reject'
+  return r.envelope.kind === 'accept' || r.envelope.kind === 'reject';
 }
 
 function terminalThreads(records: PeerRecord[]): Set<string> {
-  const terminal = new Set<string>()
+  const terminal = new Set<string>();
   for (const r of records) {
     if (isBoundVerdict(r)) {
-      terminal.add(`${r.peer}:${r.envelope.thread}`)
+      terminal.add(`${r.peer}:${r.envelope.thread}`);
     }
   }
-  return terminal
+  return terminal;
 }
 
 /** kind=request, addressed to me, and no bound verdict already
  *  closed the thread on this binding. */
 function isPendingRequest(r: PeerRecord, selfRig: string, terminal: Set<string>): boolean {
   if (r.envelope.kind !== 'request' || r.envelope.to !== selfRig) {
-    return false
+    return false;
   }
-  return !terminal.has(`${r.peer}:${r.envelope.thread}`)
+  return !terminal.has(`${r.peer}:${r.envelope.thread}`);
 }
 
 /** `mismatch` flags from≠binding (wasteland rows carry their own
  *  poster — that shape is not impersonation); `unbound` flags
  *  own-store rows matching no peer rig. */
 function inboundFlags(r: PeerRecord, bound: Set<string>): { mismatch: boolean; unbound?: boolean } {
-  const attested = r.peer !== 'self' && r.transport !== 'wasteland'
-  const unbound = r.unbound === true || (r.peer === 'self' && !bound.has(r.envelope.from))
-  return { mismatch: attested && r.envelope.from !== r.peerRig, unbound: unbound ? true : undefined }
+  const attested = r.peer !== 'self' && r.transport !== 'wasteland';
+  const unbound = r.unbound === true || (r.peer === 'self' && !bound.has(r.envelope.from));
+  return {
+    mismatch: attested && r.envelope.from !== r.peerRig,
+    unbound: unbound ? true : undefined,
+  };
 }
 
 /** Pending requests, verdict-filtered, with provenance flags. */
 function reduceInbox(records: PeerRecord[], selfRig: string, bound: Set<string>): InboundRequest[] {
-  const terminal = terminalThreads(records)
+  const terminal = terminalThreads(records);
   return records
-    .filter((r) => isPendingRequest(r, selfRig, terminal))
-    .map((r) => ({ ...r, ...inboundFlags(r, bound) }))
+    .filter(r => isPendingRequest(r, selfRig, terminal))
+    .map(r => ({ ...r, ...inboundFlags(r, bound) }));
 }
 
 export function meshInbox(
   dir: string,
   peers: MeshPeer[],
-  ctx: { selfRig: string; gitCommon: string; pull?: boolean },
+  ctx: { selfRig: string; gitCommon: string; pull?: boolean }
 ): InboxResult {
-  const { selfRig, gitCommon } = ctx
-  const { records, errors } = meshScan(dir, peers, gitCommon, { pull: ctx.pull, selfRig })
+  const { selfRig, gitCommon } = ctx;
+  const { records, errors } = meshScan(dir, peers, gitCommon, { pull: ctx.pull, selfRig });
   // a `from` matching no binding is surfaced flagged `unbound`, like mismatch
-  const bound = new Set(peers.map((p) => p.rig))
-  scanOwnStore(dir, selfRig, records, errors)
+  const bound = new Set(peers.map(p => p.rig));
+  scanOwnStore(dir, selfRig, records, errors);
   // the github plane's inbound half — issues filed on MY repo; `to`
   //  filtering below keeps only what was actually addressed to me
-  scanOwnGithub({ dir, peers, selfRig }, records, errors)
-  return { requests: reduceInbox(records, selfRig, bound), errors }
+  scanOwnGithub({ dir, peers, selfRig }, records, errors);
+  return { requests: reduceInbox(records, selfRig, bound), errors };
 }
