@@ -29,12 +29,15 @@ self-hosted instances can be selected through `connectors.reviews`.
 
 ## Task backends (facades and connectors)
 
-bro's task facade is backend-agnostic. Commands like `bro next`, `bro
-convoy`, drill/work planning, and the agent loop call the tasks facade; a
-configured connector supplies the backend. The facade contract keeps
-vendor details pluggable — not every backend implements beads-specific
-features (publish/import projections, certain metadata shapes), and bro
-documents honest absences per connector rather than assuming parity.
+bro's task facade is backend-agnostic. Commands like `bro next`, drill/work
+planning, and the agent loop call the tasks facade; a configured connector
+supplies the backend. `bro convoy` currently requires Beads (molecules/formulas
+and bead-backed DAG state) and does not run against Linear or Jira alone;
+other task-backend support is opt-in per command as documented. The facade
+contract keeps vendor details pluggable — not every backend implements
+beads-specific features (publish/import projections, certain metadata
+shapes), and bro documents honest absences per connector rather than
+assuming parity.
 
 ### Beads (`bd`)
 
@@ -59,8 +62,8 @@ evidence record even when the beads projection is disabled.
   integration (`provider = "linear"`), mapping to bro states/deps/children
   with `<!-- bro: {...} -->` trailer metadata.
 - **Honest absences:** **`publish` is not implemented** (no bead→issue
-  projection mapping in this milestone); some beads-specific projections
-  (e.g. certain import flows) may not map 1:1 to Linear; see the
+  projection mapping in this milestone). Some beads-specific projections
+  (e.g. certain import flows) may not map 1:1 to Linear — see the
   [package README](https://github.com/ThePlenkov/bro/blob/main/packages/linear/README.md)
   for mapping details.
 
