@@ -16,10 +16,6 @@ import {
   runnerSpawnReq,
   runMol,
   runQueue,
-  publishFailed,
-  publishGate,
-  publishParked,
-  publishStopped,
   type RunDeps,
 } from './convoy-run.ts';
 
@@ -494,35 +490,6 @@ describe('runQueue', () => {
     const rs = await runQueue(w.deps, { ...CFG, mols: ['m-gate', 'm-done'] });
     assert.equal(rs[0].verdict, 'gated');
     assert.deepEqual(seq, ['next:m-gate', 'gated:m-gate', 'next:m-done']);
-  });
-
-  test('parked/stopped/failed verdicts fire matching hooks in order', async () => {
-    const w = world();
-    const seq: string[] = [];
-    w.nexts.set('m-park', [next('step')]);
-    w.nexts.set('m-stop', [next('step')]);
-    w.nexts.set('m-fail', [next('step')]);
-    w.states.set('n-1', [{ state: 'blocked', cause: 'quota' }]);
-    w.entries.set('m-park', {
-      agentId: 'n-1',
-      backend: 'native',
-      spawnedAt: 'x',
-      cause: 'quota',
-    });
-    w.states.set('n-2', ['stopped']);
-    w.deps.onParked = async r => void seq.push(`parked:${r.mol}`);
-    w.deps.onStopped = async r => void seq.push(`stopped:${r.mol}`);
-    w.deps.onFailed = async r => void seq.push(`failed:${r.mol}`);
-    const rs = await runQueue(w.deps, {
-      ...CFG,
-      mols: ['m-park', 'm-stop', 'm-fail'],
-      attempts: 1,
-    });
-    assert.deepEqual(
-      rs.map(r => r.verdict),
-      ['parked', 'stopped', 'failed']
-    );
-    assert.deepEqual(seq, ['parked:m-park', 'stopped:m-stop', 'failed:m-fail']);
   });
 
   test('--open merges the open set without duplicating named mols', async () => {

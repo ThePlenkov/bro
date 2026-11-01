@@ -171,14 +171,6 @@ export function acpTransport(
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>()
-  /** Touch a session for LRU — insertion order IS the sweep's LRU
-   *  order (delete + reinsert moves it to the end). */
-  const touchSession = (sid: string, sess: BrokeredSession): void => {
-    sess.lastSeen = Date.now()
-    sessions.delete(sid)
-    sessions.set(sid, sess)
-  }
-
   /** `conn` scopes the hit to the owning connection — the map is
    *  transport-wide, so an unscoped lookup would let one connection
    *  drive or close a FOREIGN session by id (codeant #581). The bridge
@@ -188,17 +180,17 @@ export function acpTransport(
     conn?: ConnState
   ): BrokeredSession | undefined => {
     const sid = idOf(params)
-    if (sid === undefined) {
-      return undefined
-    }
-    const sess = sessions.get(sid)
+    const sess = sid === undefined ? undefined : sessions.get(sid)
     if (sess === undefined) {
       return undefined
     }
     if (conn !== undefined && sess.conn !== conn) {
       return undefined
     }
-    touchSession(sid, sess)
+    // hits re-insert — insertion order IS the sweep's LRU order
+    sess.lastSeen = Date.now()
+    sessions.delete(sid as string)
+    sessions.set(sid as string, sess)
     return sess
   }
 
@@ -274,12 +266,6 @@ export function acpTransport(
     release(sid)
   }
 
-  const shouldEvict = (s: BrokeredSession, now: number, overflow: number): boolean => {
-    if (s.busy) return false
-    const expired = now - s.lastSeen > SESS_TTL_MS
-    return expired || overflow > 0
-  }
-
   /** Idle-beyond-TTL and oldest-over-cap eviction — the same posture
    *  the conductor's sweepSessions takes. Runs where the map grows
    *  (session/new); a mid-turn session is off-limits — its own failure
@@ -291,7 +277,12 @@ export function acpTransport(
     // flight (the +1 reservation a bare cap check misses)
     let overflow = sessions.size - SESS_CAP + 1
     for (const [sid, s] of sessions) {
-      if (!shouldEvict(s, now, overflow)) continue
+      if (s.busy) {
+        continue
+      }
+      if (now - s.lastSeen <= SESS_TTL_MS && overflow <= 0) {
+        continue
+      }
       closeUpstream(s, sid)
       overflow--
     }
@@ -384,20 +375,6 @@ export function acpTransport(
     }
   }
 
-  /** Displace a previous brokered session that collided on the same id
-   *  (e.g. upstream reissues ids across a link death+respawn). */
-  const displacePrevious = (sid: string): void => {
-    const prev = sessions.get(sid)
-    if (prev === undefined) return
-    prev.conn.sessions.delete(sid)
-    disposeQuiet(prev.retained)
-  }
-
-  const extractBead = (params: Record<string, unknown>): string | undefined => {
-    const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
-    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
-  }
-
   /** session/new → retain one upstream session per brokered id. The
    *  client's params pass verbatim (cwd, mcpServers, _meta) — the model
    *  pin lives inside acpSessionRetain; the map grows only here so the
@@ -421,7 +398,11 @@ export function acpTransport(
       // colliding set must not leak the displaced handle (and the
       // old owner must not later close the NEW session under the
       // reused id)
-      displacePrevious(retained.sessionId)
+      const prev = sessions.get(retained.sessionId)
+      if (prev !== undefined) {
+        prev.conn.sessions.delete(retained.sessionId)
+        disposeQuiet(prev.retained)
+      }
       const brokered: BrokeredSession = {
         retained,
         peer,
@@ -441,7 +422,8 @@ export function acpTransport(
       // a bro--<bead-id>-shaped session cwd attributes the
       // session (dirs are named <repo>--<beadId>, the bead id
       // itself is <prefix>-<slug>)
-      const bead = extractBead(params)
+      const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
+      const bead = /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
       otelEvent('acp.transport.session', {
         backend: cfg.backend,
         'acp.client': st.clientName,
@@ -462,20 +444,6 @@ export function acpTransport(
     if (sid !== undefined && sessions.get(sid) === sess) {
       closeUpstream(sess, sid)
     }
-  }
-
-  /** Forward updates from the upstream turn to the owning downstream
-   *  client — backpressure lives on the peer's per-request streams; this
-   *  fan-out must not block the pump. */
-  const forwardUpdate = (sess: BrokeredSession, sid: string | undefined) => (update: unknown) => {
-    // forward each update as it arrives — notify queues onto the session's
-    // SSE stream and the SDK's buffered-bytes/output-stall limits are the
-    // backpressure contract
-    if (sid === undefined) return
-    sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
-      // the client went away mid-turn — conn.closed
-      // cleanup owns the session drop
-    })
   }
 
   /** session/prompt → the turn on the session's own retained handle —
@@ -505,7 +473,16 @@ export function acpTransport(
         {
           signal,
           by,
-          onUpdate: forwardUpdate(sess, sid),
+          onUpdate: (update) => {
+            // forward each update as it arrives — notify queues
+            // onto the session's SSE stream and the SDK's
+            // buffered-bytes/output-stall limits are the
+            // backpressure contract
+            sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
+              // the client went away mid-turn — conn.closed
+              // cleanup owns the session drop
+            })
+          },
         }
       )
       return r.response
@@ -573,10 +550,13 @@ export function acpTransport(
     }
   }
 
-  const attachDisconnectHandler = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
+  /** One agent app per accepted downstream connection — `st` is that
+   *  connection's state for its whole life (the SDK gives handlers a
+   *  fresh AgentContext wrapper per request, so the app closure is the
+   *  only stable conn-scope). */
+  const buildAgent = () => {
+    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
+    const app = agent({ name: 'bro-acp' })
     // AcpServer runs onConnect after initialize answers — the
     // disconnect cleanup attaches there. Settle-either-way: a rejected
     // `closed` still means the connection is gone — no session leaks.
@@ -590,12 +570,6 @@ export function acpTransport(
         }
       )
     })
-  }
-
-  const registerAgentRequests = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
     const req = (
       method: string,
       handler: (ctx: AgentRequestContext<Record<string, unknown>>) => unknown
@@ -611,12 +585,6 @@ export function acpTransport(
     )
     req('session/set_mode', (ctx) => forwardSession('session/set_mode', ctx.params, st))
     req('authenticate', (ctx) => onAuthenticate(ctx.params))
-  }
-
-  const registerAgentNotifications = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
     app.onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
       const sess = sessionOf(ctx.params, st)
       sess?.peer.ctx
@@ -626,18 +594,6 @@ export function acpTransport(
     // session/load · resume · fork · list · delete · providers_* ·
     // logout · nes_* · document_* stay unregistered — the SDK answers
     // method-not-found and advertised capabilities never offer them
-  }
-
-  /** One agent app per accepted downstream connection — `st` is that
-   *  connection's state for its whole life (the SDK gives handlers a
-   *  fresh AgentContext wrapper per request, so the app closure is the
-   *  only stable conn-scope). */
-  const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
-    const app = agent({ name: 'bro-acp' })
-    attachDisconnectHandler(app, st)
-    registerAgentRequests(app, st)
-    registerAgentNotifications(app, st)
     return app
   }
 

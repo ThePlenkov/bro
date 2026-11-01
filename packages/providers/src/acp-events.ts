@@ -46,10 +46,8 @@ export const AGENT_USAGE_THROTTLE_MS = 2_000;
 
 /** Upper bound on drain() — publishes self-bound at the bus timeout
  *  each, but a wedged half-open socket could still serialize N events
- *  into N×timeout; the drain cap keeps a worker's exit prompt.
- *  Raised to tolerate parallel CI load (nx) where socket connect/ack
- *  latency compounds across sequential publishes. */
-const DRAIN_CAP_MS = 10_000;
+ *  into N×timeout; the drain cap keeps a worker's exit prompt. */
+const DRAIN_CAP_MS = 3_000;
 
 export interface AgentTurnPlaneOpts {
   /** The session's cwd — resolves the repo's bus socket and the agent
@@ -74,7 +72,7 @@ export interface AgentTurnPlane {
   update(u: SessionUpdate): void;
   start(): void;
   stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
-  drain(timeoutMs?: number): Promise<void>;
+  drain(): Promise<void>;
 }
 
 const TERMINAL_STATUS = new Set(['completed', 'failed']);
@@ -340,15 +338,11 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       emit('turn', p);
     },
 
-    async drain(timeoutMs?: number) {
-      const cap =
-        timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
-          ? Math.min(timeoutMs, 2_147_483_647)
-          : DRAIN_CAP_MS;
+    async drain() {
       await Promise.race([
         queue.then(() => undefined),
         new Promise<void>(resolve => {
-          const t = setTimeout(resolve, cap);
+          const t = setTimeout(resolve, DRAIN_CAP_MS);
           t.unref?.();
         }),
       ]);

@@ -175,12 +175,6 @@ export interface RunDeps {
    *  gate's whole point; it cannot wait for the rest of the sequential
    *  queue to drain. */
   onGated?: (r: MolResult) => Promise<void>;
-  /** Fires the moment a mol settles 'parked' (quota/wall with no reset). */
-  onParked?: (r: MolResult) => Promise<void>;
-  /** Fires the moment a mol settles 'stopped' (operator down). */
-  onStopped?: (r: MolResult) => Promise<void>;
-  /** Fires the moment a mol settles 'failed' (attempts exhausted). */
-  onFailed?: (r: MolResult) => Promise<void>;
 }
 
 const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'lost', 'stopped', 'blocked']);
@@ -495,68 +489,20 @@ export async function runMol(deps: RunDeps, cfg: RunArgs, molId: string): Promis
  *  the keyed event also coalesces repeat sightings on the mailbox.
  *  Fail-open like every emit — a gate report never stalls the runner. */
 export async function publishGate(dir: string, molId: string, detail: string): Promise<void> {
-  return publishConvoyEvent('gate', dir, molId, detail);
-}
-
-type ConvoyPublishKind = 'gate' | 'parked' | 'stopped' | 'failed';
-
-const PUBLISH_LABELS: Record<ConvoyPublishKind, string> = {
-  gate: 'HUMAN GATE ready',
-  parked: 'parked',
-  stopped: 'stopped',
-  failed: 'failed',
-};
-
-const PUBLISH_KEY_PREFIX: Record<ConvoyPublishKind, string> = {
-  gate: 'convoy-gate-',
-  parked: 'convoy-parked-',
-  stopped: 'convoy-stopped-',
-  failed: 'convoy-failed-',
-};
-
-async function publishConvoyEvent(
-  kind: ConvoyPublishKind,
-  dir: string,
-  molId: string,
-  detail: string
-): Promise<void> {
   try {
-    const label = PUBLISH_LABELS[kind];
-    const payload =
-      kind === 'gate'
-        ? `convoy ${molId}: ${label}` +
-          (detail === '' ? '' : ` — ${detail}`) +
-          ' — human input needed'
-        : `convoy ${molId}: ${label}` + (detail === '' ? '' : ` — ${detail}`);
     await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
       topic: 'convoy',
-      kind,
-      key: `${PUBLISH_KEY_PREFIX[kind]}${molId}`,
+      kind: 'gate',
+      key: `convoy-gate-${molId}`,
       source: 'convoy',
-      payload,
+      payload:
+        `convoy ${molId}: HUMAN GATE ready` +
+        (detail === '' ? '' : ` — ${detail}`) +
+        ' — human input needed',
     });
   } catch {
     // fail-open — sinks/mailbox are advisory edges, never a runner failure
   }
-}
-
-/** A mol parked on a budget wall with no advertised end (quota / no-reset
- *  rate limit) — notify the operator so they can act. Fail-open like every
- *  emit. */
-export async function publishParked(dir: string, molId: string, detail: string): Promise<void> {
-  return publishConvoyEvent('parked', dir, molId, detail);
-}
-
-/** An operator-stopped mol — report it so a detached queue doesn't go
- *  blind. Fail-open like every emit. */
-export async function publishStopped(dir: string, molId: string, detail: string): Promise<void> {
-  return publishConvoyEvent('stopped', dir, molId, detail);
-}
-
-/** Attempts exhausted for a mol — report it so a detached queue doesn't go
- *  blind. Fail-open like every emit. */
-export async function publishFailed(dir: string, molId: string, detail: string): Promise<void> {
-  return publishConvoyEvent('failed', dir, molId, detail);
 }
 
 /** The queue: each mol in order, sequential like the script it
@@ -575,12 +521,6 @@ export async function runQueue(deps: RunDeps, cfg: RunArgs): Promise<MolResult[]
     const r = await runMol(deps, cfg, molId); // NOSONAR — a convoy runs its mols in order, never fanned out
     if (r.verdict === 'gated') {
       await deps.onGated?.(r); // NOSONAR — serial by contract
-    } else if (r.verdict === 'parked') {
-      await deps.onParked?.(r);
-    } else if (r.verdict === 'stopped') {
-      await deps.onStopped?.(r);
-    } else if (r.verdict === 'failed') {
-      await deps.onFailed?.(r);
     }
     results.push(r);
   }
@@ -636,9 +576,6 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
     now: () => Date.now(),
     say,
     onGated: r => publishGate(dir, r.mol, r.detail ?? ''),
-    onParked: r => publishParked(dir, r.mol, r.detail ?? ''),
-    onStopped: r => publishStopped(dir, r.mol, r.detail ?? ''),
-    onFailed: r => publishFailed(dir, r.mol, r.detail ?? ''),
   };
 
   const results = await runQueue(deps, cfg);

@@ -362,7 +362,6 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
           log(renderAcpUpdate(u))
         }
       }
-      const drainTimeoutMs = Number(process.env.BRO_WORKER_DRAIN_MS)
       const r = await pumpTurn(
         session,
         promptText,
@@ -374,11 +373,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         undefined,
         by,
         undefined,
-        spec.cwd,
-        Math.min(
-          Number.isFinite(drainTimeoutMs) && drainTimeoutMs > 0 ? drainTimeoutMs : 10_000,
-          2_147_483_647
-        )
+        spec.cwd
       ).finally(flush)
       log(`turn stopped — ${r.stopReason}`)
       return r.stopReason === 'end_turn' ? 0 : 1
