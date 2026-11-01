@@ -219,19 +219,22 @@ describe('SessionModel — content classification', () => {
 });
 
 describe('SessionModel — side rows + verdict', () => {
-  test('turn start/stop and permission land as side items', () => {
+  test('a normal end_turn prints no marker; abnormal stops and permissions land as side items', () => {
     const m = new SessionModel();
     m.feed({ kind: 'turn', phase: 'start' });
     m.feed({ kind: 'turn', phase: 'stop', stopReason: 'end_turn' });
     m.feed({ kind: 'permission', title: 'Write /x', verdict: 'denied' });
     assert.deepEqual(
       m.items.map(i => i.kind),
-      ['turn', 'permission']
+      ['permission']
     );
-    assert.ok(m.items[0]!.kind === 'turn' && m.items[0]!.text.includes('turn complete'));
-    assert.ok(m.items[1]!.text.includes('permission ‹Write /x›'));
+    assert.ok(m.items[0]!.text.includes('permission ‹Write /x›'));
     assert.equal(m.verdict?.led.state, 'blocked');
     assert.equal(m.verdict?.mode, 'permission — denied');
+
+    m.feed({ kind: 'turn', phase: 'stop', stopReason: 'cancelled' });
+    const last = m.items.at(-1)!;
+    assert.ok(last.kind === 'turn' && last.text.includes('turn ended (cancelled)'));
   });
 
   test('turn stop clean → idle; error → blocked', () => {

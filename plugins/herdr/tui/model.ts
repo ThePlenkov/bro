@@ -166,12 +166,16 @@ export class SessionModel {
           this.judgeNow = isJudgeTurn(undefined, row.by);
         } else if (row.phase === 'stop') {
           this.judgeNow = false;
+          // a normal end_turn prints nothing — every turn ends;
+          // only failures and abnormal stops earn a marker row
           const failed = row.error !== undefined && row.error !== '';
+          const reason = row.stopReason ?? '';
+          if (!failed && (reason === '' || reason === 'end_turn')) break;
           this.side(
             'turn',
             failed
               ? `── turn failed — ${safe(row.error ?? '')} ──`
-              : `── turn complete${row.stopReason !== undefined && row.stopReason !== '' ? ` (${safe(row.stopReason)})` : ''} ──`,
+              : `── turn ended (${safe(reason)}) ──`,
             failed ? 'error' : undefined
           );
         }

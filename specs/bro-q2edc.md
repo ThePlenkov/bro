@@ -918,6 +918,17 @@ every prop combo tried (the `│` gutter paints, the quote text
 never mounts) — pre-existing, not caused by the clamp; fix is a
 `renderNode` override or an upstream bump, deferred.
 
+**Quiet turn ends** (addendum 24): `── turn complete (end_turn) ──`
+was noise — every turn ends, so a marker row per stop doubled the
+feed's banner count (the acp impl already emits no `turn_end`
+row, its duration/ctx fold into the ▸ activity line). The legacy
+feed now matches: `end_turn`/missing stopReason prints nothing,
+`error` prints `── turn failed — <err> ──`, any other stopReason
+(`cancelled`, `max_tokens`, `refusal`, …) prints `── turn ended
+(<reason>) ──`. The imperative `AcpRenderer.turnEnd` keeps its
+marker — acp-watch treats it as a settle signal, not just
+display.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

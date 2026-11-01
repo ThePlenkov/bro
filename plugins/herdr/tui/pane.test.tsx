@@ -300,12 +300,15 @@ describe('the Solid session pane', () => {
     }
   });
 
-  test('a turn boundary is announced', async () => {
+  test('an abnormal turn end is marked; a clean end_turn is silent', async () => {
     const p = await mount();
     try {
-      p.model.feed({ kind: 'turn', phase: 'stop' });
+      p.model.feed({ kind: 'turn', phase: 'stop', stopReason: 'end_turn' });
       await p.flush();
-      assert.match(await p.frame(), /turn complete/);
+      assert.doesNotMatch(await p.frame(), /turn/);
+      p.model.feed({ kind: 'turn', phase: 'stop', stopReason: 'cancelled' });
+      await p.flush();
+      assert.match(await p.frame(), /turn ended \(cancelled\)/);
     } finally {
       await p.dispose();
     }
