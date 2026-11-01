@@ -3028,11 +3028,13 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
   }
   const content = chatContent(m.content)
   for (const tc of m.tool_calls ?? []) {
-    let input: unknown = {}
+    let input: unknown
     try {
       input = JSON.parse(tc.function?.arguments ?? '{}')
-    } catch {
-      input = {}
+    } catch (err) {
+      throw new Error(
+        `tool_calls[].function.arguments are not valid JSON (id=${tc.id ?? 'unknown'}, name=${tc.function?.name ?? 'unknown'}): ${tc.function?.arguments}`
+      )
     }
     content.push({
       type: 'tool_use',
