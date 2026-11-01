@@ -1,5 +1,4 @@
 ---
-
 name: check
 description: "Use when the repo has a sverka workflow (sverka.config.ts) or the user asks to run checks/scans through bro. Thin wrapper over `bro check` — mechanics live in the CLI; this skill carries policy only."
 ---
@@ -17,12 +16,12 @@ status/duration lines, totals, findings + verdict when evaluated.
 
 ## Commands
 
-| Command                  | What it does                                                                                                                                                                 |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bro check`              | Run the repo's sverka workflow (default entry, text report). Exit code mirrors sverka — CI-able                                                                              |
-| `bro check --json`       | Structured output: `{command:"check", data:{planId,status,steps[],findings?,verdict?}, durationMs}`; on evaluation failure also `evaluationStatus:"failed", evaluationError` |
-| `bro check --evaluate`   | Also collect `*.sarif` artifacts and run sverka's policy gate (verdict→exit code)                                                                                            |
-| `bro check --root <dir>` | Run against another checkout — its bro.config and node_modules apply                                                                                                         |
+| Command | What it does |
+| ------- | ------------ |
+| `bro check` | Run the repo's sverka workflow (default entry, text report). Exit code mirrors sverka — CI-able |
+| `bro check --json` | Structured output: `{command:"check", data:{planId,status,steps[],findings?,verdict?}, durationMs}`; on evaluation failure also `evaluationStatus:"failed", evaluationError` |
+| `bro check --evaluate` | Also collect `*.sarif` artifacts and run sverka's policy gate (verdict→exit code) |
+| `bro check --root <dir>` | Run against another checkout — its bro.config and node_modules apply |
 
 `--config`, `--entry`, `--executor host|docker`, `-q`, `-v` pass through
 to `sverka run`.
