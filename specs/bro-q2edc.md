@@ -951,6 +951,12 @@ still heads each item under its own turn. Content rows gained the
 six columns back; markdown budgets shrank (`-8`→`-2`,
 `-11`→`-5`, `-6`→`-1`). `at` stays on items (copy, scrollback),
 and `printLines` prints the separator items like the tree.
+The `.prompt.md` fallback row feeds with `ts` = the slice's first
+event and `by` = the first `acp provider 'X'` turn's origin — it is
+the session's first event and heads the feed rather than orphaning
+ahead of the separators (a slice can open mid-session, where the
+first turn-start is an internal micro-call — the prompt still names
+the agent).
 
 ## Risks
 

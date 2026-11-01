@@ -97,7 +97,19 @@ function readPrompt(eventsPath: string): string | undefined {
  *  fallback for older archives, never a duplicate). */
 function feedArchive(impl: PaneImpl, eventsPath: string, rows: ArchiveRow[]): void {
   if (!rows.some(r => r.kind === 'prompt')) {
-    impl.feed({ kind: 'prompt', text: readPrompt(eventsPath) });
+    // the fallback prompt IS the session's first event — it heads the
+    // feed (addendum 25), never an unstamped orphan ahead of the
+    // separators. Its origin is the session's own agent (the first
+    // `acp provider` turn — a slice can open mid-session where the
+    // first turn-start is an internal micro-call); its time is the
+    // slice's first event. No agent turn in the slice → bare head.
+    const agent = rows.find(r => /^acp provider '/.test(r.by ?? ''));
+    impl.feed({
+      kind: 'prompt',
+      text: readPrompt(eventsPath),
+      ts: rows[0]?.ts,
+      by: agent?.by,
+    });
   }
   for (const row of rows) impl.feed(row);
 }
