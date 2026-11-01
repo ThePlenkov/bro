@@ -146,59 +146,41 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       const mcpServers = [
         { type: 'stdio', name: 'mine', command: 'mcp-server', args: ['--x'], env: [] },
       ]
-      const s = (await c.agent.request('session/new', {
+      const s = await c.agent.request('session/new', {
         cwd: '/work/bro--bro-ymbq1',
         mcpServers,
         _meta: { bead: 'bro-ymbq1' },
-      })) as { sessionId: string }
+      }) as { sessionId: string }
       assert.equal(s.sessionId, 'sess-1')
-      // verbatim passthrough: cwd, mcpServers, _meta all reached the
-      // agent (the fake's schema parse normalizes the shape — assert
-      // the values it must not have touched)
-      const req = fake.sessionRequests[0]
-      assert.ok(req)
-      assert.equal(req.cwd, '/work/bro--bro-ymbq1')
-      assert.equal(req._meta?.bead, 'bro-ymbq1')
-      assert.equal(req.mcpServers?.[0]?.name, 'mine')
-      assert.equal((req.mcpServers?.[0] as { command?: string }).command, 'mcp-server')
+      assertPassthrough(fake)
     } finally {
       await c.conn.close()
       await close()
     }
   })
 
+  function assertPassthrough(fake: FakeAcpAgent) {
+    const req = fake.sessionRequests[0]
+    assert.ok(req)
+    assert.equal(req.cwd, '/work/bro--bro-ymbq1')
+    assert.equal(req._meta?.bead, 'bro-ymbq1')
+    assert.equal(req.mcpServers?.[0]?.name, 'mine')
+    assert.equal((req.mcpServers?.[0] as { command?: string }).command, 'mcp-server')
+  }
+
   test('session/update notifications fan out live mid-turn', async () => {
     const gate = defer()
-    const fake = fakeAcpAgent({
-      updates: [
-        {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'hello ' },
-        },
-        {
-          sessionUpdate: 'tool_call',
-          toolCallId: 'tc-1',
-          title: 'ls /tmp',
-          kind: 'execute',
-          status: 'in_progress',
-        } as SessionUpdate,
-      ],
-      holdPromptUntil: gate.promise,
-    })
+    const fake = fakeAcpAgent({ updates: makeUpdates(), holdPromptUntil: gate.promise })
     const { url, close } = await listenAcp(fake)
     const c = openClient(url)
     try {
-      await c.agent.request('initialize', INIT_PARAMS)
-      await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
+      await boot(c)
       const p = c.agent.request('session/prompt', {
         sessionId: 'sess-1',
         prompt: [{ type: 'text', text: 'say hi' }],
       })
-      // the upstream turn is HELD — updates arriving now are live
-      // fan-out, not a post-hoc batch
       await until(() => c.updates.length === 2, 'session/update fan-out')
-      assert.equal(c.updates[0]?.update.sessionUpdate, 'agent_message_chunk')
-      assert.equal(c.updates[1]?.update.sessionUpdate, 'tool_call')
+      assertFanout(c)
       gate.resolve()
       const r = (await p) as { stopReason: string }
       assert.equal(r.stopReason, 'end_turn')
@@ -208,6 +190,32 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       await close()
     }
   })
+
+  async function boot(c: TestClient) {
+    await c.agent.request('initialize', INIT_PARAMS)
+    await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
+  }
+
+  function makeUpdates(): SessionUpdate[] {
+    return [
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello ' },
+      },
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-1',
+        title: 'ls /tmp',
+        kind: 'execute',
+        status: 'in_progress',
+      } as SessionUpdate,
+    ]
+  }
+
+  function assertFanout(c: TestClient) {
+    assert.equal(c.updates[0]?.update.sessionUpdate, 'agent_message_chunk')
+    assert.equal(c.updates[1]?.update.sessionUpdate, 'tool_call')
+  }
 
   test('agent→client requests ride the bridge — permission and fs/read_text_file', async () => {
     const fake = fakeAcpAgent({
