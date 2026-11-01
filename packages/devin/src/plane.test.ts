@@ -213,6 +213,15 @@ describe('countDevinSessions', () => {
 })
 
 describe('devinPidIsWorker', () => {
+  test('BRO_HOOKS=0 marks a machine backend service child as not a worker', () => {
+    withProc((procDir, mk) => {
+      mk(601, 'PATH=/bin\0BRO_HOOKS=0\0', 'pipe:[1]')
+      assert.equal(devinPidIsWorker(601, procDir), false)
+      mk(602, 'PATH=/bin\0BRO_HOOKS=0\0BRO_AGENT_ID=abc\0', 'pipe:[1]')
+      assert.equal(devinPidIsWorker(602, procDir), true)
+    })
+  })
+
   test('the BRO_AGENT_ID env badge classifies a worker — NUL-anchored', () => {
     withProc((procDir, mk) => {
       mk(101, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0HOME=/h\0', '/dev/pts/3')
