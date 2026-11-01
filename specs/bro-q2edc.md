@@ -853,6 +853,25 @@ expanded 458-line review prompt renders clean markdown (rules lists,
 placeholders like `<millis>` survive the narrowed strip), scroll +
 `Jump to latest ↓` + scrollbar gutter live, chrome pinned.
 
+**Mouse on** (addendum 22 — supersedes addendum 7): `useMouse: true`
+on both `createCliRenderer` and `mountPane`. Reason: terminals
+emulated scrollbar-drag never reached the app while reporting was off
+— `useMouse:false` told the terminal the app takes no mouse at all,
+so the scrollbox's own `handleBarMouse` (thumb drag), `scrollByWheel`
+(momentum scroll) and renderer-native drag Selection were all dead.
+This is opencode's exact config: mouse reporting on, hit-tested by
+OpenTUI itself. Copy-on-select replaces the lost native-drag-select:
+the root box's `onMouseUp` reads `renderer.getSelection()
+?.getSelectedText()`, writes `OSC 52;c;<base64>` to stdout, toasts
+'copied', and `clearSelection()`s — the same `Selection.copy` shape
+opencode ships. `?1007` was removed: terminal mouse tracking takes
+precedence over alternate-scroll once the app holds a mouse mode.
+Keyboard scroll (`scrollBy`/`scrollTo`) and Ctrl+C row copy are
+unchanged. Escape hatch for terminal-native selection stays the
+universal one — Shift+drag bypasses app reporting. Verified on w58:
+feed scrolls with `Jump to latest ↓` + live scrollbar, chrome pinned,
+host scrollback still `max_offset_from_bottom: 0`.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

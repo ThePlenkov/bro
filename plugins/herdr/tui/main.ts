@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch, writeSync } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
@@ -203,19 +203,11 @@ export async function runTui(argv: string[]): Promise<void> {
           workerLed: { state: pidAlive(entry?.pid) ? 'working' : 'idle' },
         };
 
-  // clean start + mode setup BEFORE createCliRenderer: afterwards
-  // stdout rides the renderer's own writer and ESC bytes surface as
-  // literal text (field bug). `?1007h` = alternate-scroll — with
-  // mouse reporting off the terminal translates the wheel into arrow
-  // keys, so the wheel reaches the scrollbox without button tracking.
-  process.stdout.write('\x1b[2J\x1b[3J\x1b[H\x1b[?1007h');
-  process.on('exit', () => {
-    try {
-      writeSync(1, '\x1b[?1007l');
-    } catch {
-      // stdout already gone — the terminal's own teardown resets 1007
-    }
-  });
+  // clean start BEFORE createCliRenderer: afterwards stdout rides the
+  // renderer's own writer and ESC bytes surface as literal text
+  // (field bug). No ?1007 here — the app holds mouse reporting, which
+  // takes precedence over alternate-scroll.
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 
   const base = base0;
   const statePath = fleetStatusPath(base, ctxDir);
@@ -233,11 +225,10 @@ export async function runTui(argv: string[]): Promise<void> {
     // Ctrl+C is a key, not a signal: the pane copies (addendum 8);
     // herdr owns lifecycle — no exit path lives here (addendum 2)
     exitOnCtrlC: false,
-    // no mouse features — reporting would steal native/herdr
-    // selection; copy must work without Shift (addendum 7). The feed
-    // scrolls inside its scrollbox — the wheel reaches it as arrow
-    // keys through alternate-scroll (CSI ? 1007), not mouse reports.
-    useMouse: false,
+    // mouse ON — the opencode config: wheel hits the scrollbox's own
+    // handler (momentum scroll), the scrollbar thumb drags, and
+    // renderer-native drag-select feeds copy-on-select via OSC52.
+    useMouse: true,
     // alternate-screen owns the whole buffer — frames repaint in place
     // and NOTHING lands in herdr's scrollback, killing the double
     // scroll (main-screen pushed every repaint into the scroll region:

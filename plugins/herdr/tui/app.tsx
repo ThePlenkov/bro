@@ -15,7 +15,12 @@
  * transform before importing this file.
  */
 
-import type { CliRenderer, NativeResourceOwner, ScrollBoxRenderable } from '@opentui/core';
+import type {
+  CliRenderer,
+  MouseEvent,
+  NativeResourceOwner,
+  ScrollBoxRenderable,
+} from '@opentui/core';
 import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
@@ -921,13 +926,15 @@ function Pane(props: {
   syntax: SyntaxStyle;
   toast: () => string;
   onScroller?: (el: ScrollBoxRenderable) => void;
+  /** mouse-up after a drag-select → OSC52 copy (opencode's
+   *  copy-on-select on the renderer's own selection) */
+  onCopySelect?: (event: MouseEvent) => void;
 }) {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
   onAnimationTick(10, () => setFrame(f => f + 1));
   const [scroller, setScroller] = createSignal<ScrollBoxRenderable>();
-  /** off-bottom → their `Jump to latest ↓` chip shows; the wheel
-   *  path is herdr's scrollback, this covers keyboard scrolling. */
+  /** off-bottom → their `Jump to latest ↓` chip shows */
   const atBottom = () => {
     frame();
     const s = scroller();
@@ -949,12 +956,14 @@ function Pane(props: {
   // keys chrome sits OUTSIDE the scrollbox, flexShrink=0 at the bottom
   // of the column — pinned there always, never scrolled or clipped.
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: terminal renderer — mouse events are hit-tested coordinates, not DOM a11y
     <box
       flexDirection="column"
       width="100%"
       height="100%"
       overflow="hidden"
       backgroundColor={theme.base}
+      onMouseUp={props.onCopySelect}
     >
       <scrollbox
         ref={el => {
@@ -1041,10 +1050,11 @@ export async function mountPane(opts: {
    *  a scrollbox renderable — the production shape. */
   onRetire?: (items: Item[]) => void;
 }): Promise<Pane> {
-  // mouse capture OFF — the pane uses no mouse features, and holding
-  // reporting steals native selection (addendum 7: copy must work
-  // without Shift; herdr's own selection rides the same release)
-  opts.renderer.useMouse = false;
+  // mouse ON — the opencode config: mouse reporting enables the
+  // scrollbox's own wheel handler (momentum scroll), the scrollbar
+  // thumb drag, and renderer-native drag selection. Copy-on-select
+  // is handled by the root box's onMouseUp → OSC52.
+  opts.renderer.useMouse = true;
   const pane = createPane(opts.meta, opts.foldAll, opts.copyItem, opts.onRetire);
   const syntax = syntaxStyle(opts.renderer.nativeScene);
   const [toast, setToast] = createSignal('');
@@ -1057,6 +1067,16 @@ export async function mountPane(opts: {
         toast={toast}
         onScroller={el => {
           scroller = el;
+        }}
+        onCopySelect={() => {
+          // opencode's copy-on-select: drag → renderer Selection →
+          // OSC52 onto the clipboard, then clear the highlight
+          const text = opts.renderer.getSelection()?.getSelectedText();
+          if (text === undefined || text === '') return;
+          process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
+          setToast('copied');
+          opts.renderer.clearSelection();
+          setTimeout(() => setToast(''), 1500);
         }}
       />
     ),
