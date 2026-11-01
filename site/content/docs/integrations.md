@@ -27,11 +27,92 @@ support is intentionally a review facade, not a claim that every GitHub
 surface exists on GitLab. GitLab.com is detected from the origin remote;
 self-hosted instances can be selected through `connectors.reviews`.
 
-## Beads and the store
+## Task backends (facades and connectors)
+
+bro's task facade is backend-agnostic. Commands like `bro next`, drill/work
+planning, and the agent loop call the tasks facade; a configured connector
+supplies the backend. `bro convoy` currently requires Beads (molecules/formulas
+and bead-backed DAG state) and does not run against Linear or Jira alone;
+other task-backend support is opt-in per command as documented. The facade
+contract keeps vendor details pluggable — not every backend implements
+beads-specific features (publish/import projections, certain metadata
+shapes), and bro documents honest absences per connector rather than
+assuming parity.
+
+### Beads (`bd`)
 
 `bd` is the default task and memory backend. Drill frames, review debt,
 retros, and work claims use the task facade; the JSONL ledger remains the
 evidence record even when the beads projection is disabled.
+
+### Linear
+
+[Linear](https://linear.app/) is supported as an opt-in `tasks` backend via
+[`@broject/linear`](https://github.com/ThePlenkov/bro/tree/main/packages/linear).
+
+- **Selection:** `connectors.tasks = "linear"` in `bro.config.json` (name-only
+  opt-in; a git remote never auto-selects Linear).
+- **Auth/prerequisites:** `LINEAR_API_KEY` (Linear → Settings → Security &
+  access), sent verbatim in the `Authorization` header. `LINEAR_TEAM` is
+  required when the workspace has more than one team; optional if there's
+  exactly one.
+- **Version availability:** Linear support is available in the current `bro`
+  package line (shipped with `@broject/linear`).
+- **Capabilities:** issues as `TaskStore`/`TaskStoreAsync`, `bro query`
+  integration (`provider = "linear"`), mapping to bro states/deps/children
+  with `<!-- bro: {...} -->` trailer metadata.
+- **Honest absences:** **`publish` is not implemented** (no bead→issue
+  projection mapping in this milestone). Some beads-specific projections
+  (e.g. certain import flows) may not map 1:1 to Linear — see the
+  [package README](https://github.com/ThePlenkov/bro/blob/main/packages/linear/README.md)
+  for mapping details.
+
+### Jira (Cloud and Data Center/Server)
+
+[Jira](https://www.atlassian.com/software/jira) is supported as an opt-in
+`tasks` backend via [`@broject/jira`](https://github.com/ThePlenkov/bro/tree/main/packages/jira),
+with separate connectors for Cloud and Data Center/Server.
+
+- **Selection:** name-only opt-in — `connectors.tasks = "jira"` (Cloud) or
+  `connectors.tasks = "jira-dc"` (Data Center/Server). Nothing in the repo
+  remote/structure auto-selects Jira.
+- **Auth/prerequisites:** the `atlassian` CLI must be installed and
+  authenticated (`atlassian auth login` or `ATLASSIAN_TOKEN`). For Data
+  Center, `ATLASSIAN_TOKEN` must be a personal access token (Bearer). Pin the
+  site via `JIRA_BASE_URL`/`ATLASSIAN_BASE_URL` for Cloud. `jira-dc` requires a site base via `JIRA_DC_BASE_URL`
+  (or the CLI config `baseUrl`) so it never defaults to api.atlassian.com; do not share `JIRA_BASE_URL` with it. Set `JIRA_PROJECT`/`ATLASSIAN_PROJECT`
+  if the site has multiple visible projects.
+- **Version availability:** Jira support is available in the current `bro`
+  package line (shipped with `@broject/jira`).
+- **Capabilities:** issue CRUD/state/deps/children over the `atlassian` CLI's
+  REST passthrough, JQL via `bro query`, Cloud (ADF) and DC (plain text)
+  body mapping with `<!-- bro: {...} -->` trailer support.
+- **Honest absences:** **`publish` is not implemented** (no bead→issue
+  projection mapping in this milestone). Custom link types are resolved
+  by name against the site's link types (no faking as comments). Some
+  beads-specific features may not be supported — see the
+  [package README](https://github.com/ThePlenkov/bro/blob/main/packages/jira/README.md)
+  for details.
+
+### Keeping your existing tracker
+
+If you already use Linear or Jira (or any supported tracker), you do **not**
+need to migrate to beads to use bro's task facade. Set
+`connectors.tasks` to the appropriate backend and configure auth/prerequisites
+above. bro commands that consume the tasks facade will route through that
+connector. Beads-specific features (e.g. certain projections/imports) remain
+beads-centric; connectors document their capabilities and honest absences
+explicitly.
+
+**Facade → connector → capabilities (quick matrix)**
+
+| Facade | Connectors | Selection | Notes |
+| --- | --- | --- | --- |
+| `reviews` | `github` (`gh`), `gitlab` (`glab`) | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations. |
+| `tasks` | `beads` (`bd`, default), `github`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default. | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
+| `queries` | `github`, `gitlab`, `atlassian`, `linear` | Configured via `connectors.queries` or per `bro query` step | Plan-driven fan-out across providers. |
+| `agents` | Native/tmux/Gas City backends | Configured via `connectors.agents` | Detached agents/workers. |
+| `specs` | Native + tool-layout matchers | Detected or explicitly configured | Spec-driven workflows. |
 
 ## Agent clients
 
