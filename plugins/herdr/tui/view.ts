@@ -65,7 +65,7 @@ export function contentLineCount(item: ToolItem): number {
   return n;
 }
 
-/** `at` → the `HH:MM` gutter stamp (local time — the reader's
+/** `at` → the `HH:MM` separator stamp (local time — the reader's
  *  clock, not the journal's UTC). Missing stamps render nothing. */
 export const hhmm = (at: string | undefined): string => {
   if (at === undefined) return '';
@@ -73,6 +73,72 @@ export const hhmm = (at: string | undefined): string => {
   if (Number.isNaN(d.getTime())) return '';
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `at` → the day-change label — `2 Mar` (British, no year: multi-day
+ *  replays rarely cross one, and the head carries the minute too). */
+export const dayLabel = (at: string): string => {
+  const d = new Date(at);
+  return `${d.getDate()} ${MONTHS[d.getMonth()] ?? '?'}`;
+};
+
+/** The journal's `by` → the head's origin label. The session's own
+ *  agent (`acp provider 'X'`) unwraps to its name — the pane's most
+ *  important identity; internal calls (`conductor:t`, `provider:kilo`,
+ *  `acp-transport:x`) keep their raw label so internal work never
+ *  masquerades as the agent's. */
+export const headBy = (by: string | undefined): string | undefined => {
+  if (by === undefined || by === '') return undefined;
+  return /^acp provider '([^']+)'$/.exec(by)?.[1] ?? by;
+};
+
+/** The separator layer — time as ROWS, not a column (addendum 25).
+ *  `start()` records the turn's origin; `tick(ts)` runs before every
+ *  item birth and returns the separator lines to emit first. Heads
+ *  are keyed on (minute, by): a micro-turn storm in one minute under
+ *  one origin collapses to a single `── HH:MM · by ──`, a same-minute
+ *  origin change re-heads, a mid-turn minute change re-heads with the
+ *  new time (long turns re-anchor their origin on scroll), a day
+ *  change emits `── D Mmm ──` first. Laziness is the point: a turn
+ *  that births no visible item earns no head. */
+export class TimeGutter {
+  private day: string | undefined;
+  private min: string | undefined;
+  private by: string | undefined;
+  private curBy: string | undefined;
+  /** A turn (or journaled prompt) started — the next birth heads
+   *  under this origin. A by-less start clears it: orphan items head
+   *  bare rather than inherit a dead turn's origin. */
+  start(by: string | undefined): void {
+    this.curBy = headBy(by);
+  }
+  /** Separator lines owed before an item stamped `ts` — [] when the
+   *  (minute, by) group already holds. */
+  tick(ts: string | undefined): string[] {
+    if (ts === undefined) return [];
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return [];
+    const out: string[] = [];
+    // the day key is LOCAL — the same clock hhmm/dayLabel print, so
+    // a 23:59Z event already "tomorrow" for the reader lands under
+    // the new day's marker, never under yesterday's
+    const day = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    if (day !== this.day) {
+      this.day = day;
+      this.min = undefined;
+      this.by = undefined;
+      out.push(`── ${dayLabel(ts)} ──`);
+    }
+    const m = hhmm(ts);
+    if (m !== this.min || this.curBy !== this.by) {
+      this.min = m;
+      this.by = this.curBy;
+      out.push(this.curBy !== undefined ? `── ${m} · ${this.curBy} ──` : `── ${m} ──`);
+    }
+    return out;
+  }
+}
 
 /** Rows the live tail keeps in the footer strip — older items are
  *  retired: printed to captured stdout (the terminal's scroll
@@ -221,9 +287,7 @@ export function toolTail(item: ToolItem): { kind: string; arg: string; tally: st
 }
 
 export function printLines(item: Item): string[] {
-  const stamp = item.at !== undefined ? `${hhmm(item.at)} ` : '      ';
-  const rows = (lines: string[]): string[] =>
-    lines.map((l, i) => `${i === 0 ? stamp : '      '}${l}`);
+  const rows = (lines: string[]): string[] => lines;
   const folded = item.collapsed === true;
   const more = 'text' in item ? item.text.split('\n').length : 0;
   switch (item.kind) {

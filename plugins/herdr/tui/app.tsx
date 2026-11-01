@@ -48,7 +48,6 @@ import { ledColor, theme } from './theme.ts';
 import { type VerdictView, verdictOf } from './verdict.ts';
 import {
   cardGlyphColor,
-  hhmm,
   isFoldable,
   isSettled,
   mdPlain,
@@ -341,7 +340,7 @@ function ToolCard(props: {
             streaming
             internalBlockMode="top-level"
             flexShrink={0}
-            maxWidth={props.width() - 8}
+            maxWidth={props.width() - 2}
           />
         </box>
       </Show>
@@ -550,7 +549,7 @@ function PromptRow(props: {
             streaming
             internalBlockMode="top-level"
             flexShrink={0}
-            maxWidth={props.width() - 11}
+            maxWidth={props.width() - 5}
           />
         </Show>
       </Show>
@@ -638,21 +637,9 @@ function ItemRow(props: {
     return undefined;
   });
   return (
-    // the end-user timeline gutter: every row carries its archive `ts`
-    // as a dim HH:MM — one glance tells WHEN the step happened
+    // time is ROWS now — the `── HH:MM · by ──` separators own the
+    // timeline, content rows keep the full width (addendum 25)
     <box flexDirection="row" flexShrink={0} width="100%">
-      <Show when={props.item.at !== undefined}>
-        {/* the stamp needs an explicit width — an auto-width <text>
-         *  in a flex row shrinks to one column and its digits wrap
-         *  vertically (field-found: `:`/`4`/`4` down the gutter) */}
-        <box width={6} flexShrink={0}>
-          <text
-            fg={theme.muted}
-            attributes={TextAttributes.DIM}
-            content={`${hhmm(props.item.at)} `}
-          />
-        </box>
-      </Show>
       <box flexDirection="column" flexGrow={1} flexShrink={0} minWidth={0}>
         <Show
           when={verdict() === undefined}
@@ -710,28 +697,53 @@ function ItemRow(props: {
                                 <Show
                                   when={thought()}
                                   fallback={
-                                    /* side lines — turn markers, notes. Long
-                                     *  notes fold like prose (addendum 20) */
+                                    /* time separators — dim one-liners,
+                                     *  never markdown */
                                     <Show
-                                      when={textOpen() || !isFoldable(props.item)}
+                                      when={props.item.kind === 'time'}
                                       fallback={
-                                        <text
-                                          fg={sideColor(tone())}
-                                          attributes={TextAttributes.DIM}
-                                          flexShrink={0}
-                                          content={foldSummary()}
-                                        />
+                                        /* side lines — turn markers, notes.
+                                         *  Long notes fold like prose
+                                         *  (addendum 20) */
+                                        <Show
+                                          when={textOpen() || !isFoldable(props.item)}
+                                          fallback={
+                                            <text
+                                              fg={sideColor(tone())}
+                                              attributes={TextAttributes.DIM}
+                                              flexShrink={0}
+                                              content={foldSummary()}
+                                            />
+                                          }
+                                        >
+                                          <markdown
+                                            content={textOf()}
+                                            syntaxStyle={props.syntax}
+                                            conceal
+                                            streaming
+                                            internalBlockMode="top-level"
+                                            flexShrink={0}
+                                            maxWidth={props.width() - 1}
+                                          />
+                                        </Show>
                                       }
                                     >
-                                      <markdown
-                                        content={textOf()}
-                                        syntaxStyle={props.syntax}
-                                        conceal
-                                        streaming
-                                        internalBlockMode="top-level"
-                                        flexShrink={0}
-                                        maxWidth={props.width() - 6}
-                                      />
+                                      <box flexDirection="column" flexShrink={0}>
+                                        <For
+                                          each={('text' in props.item ? props.item.text : '').split(
+                                            '\n'
+                                          )}
+                                        >
+                                          {l => (
+                                            <text
+                                              fg={theme.muted}
+                                              attributes={TextAttributes.DIM}
+                                              content={l}
+                                              flexShrink={0}
+                                            />
+                                          )}
+                                        </For>
+                                      </box>
                                     </Show>
                                   }
                                 >
@@ -757,7 +769,7 @@ function ItemRow(props: {
                                           streaming
                                           internalBlockMode="top-level"
                                           flexShrink={0}
-                                          maxWidth={props.width() - 8}
+                                          maxWidth={props.width() - 2}
                                         />
                                       </box>
                                     </Show>
@@ -793,7 +805,7 @@ function ItemRow(props: {
                                       streaming
                                       internalBlockMode="top-level"
                                       flexShrink={0}
-                                      maxWidth={props.width() - 8}
+                                      maxWidth={props.width() - 2}
                                     />
                                   </Show>
                                 </box>

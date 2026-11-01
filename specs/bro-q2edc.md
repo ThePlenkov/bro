@@ -929,6 +929,29 @@ feed now matches: `end_turn`/missing stopReason prints nothing,
 marker — acp-watch treats it as a settle signal, not just
 display.
 
+**Time as rows** (addendum 25): the `HH:MM ` gutter column died —
+six cells of identical stamps per burst was noise, and a column
+could never grow to carry a date. The timeline now speaks the
+pane's separator grammar: `TimeGutter` (view.ts) emits `time` items
+before births, keyed on (minute, origin) — a turn start marks the
+origin (`gutter.start(by)`; `acp provider 'X'` unwraps to X,
+`provider:`/`conductor:`/`acp-transport:` labels stay raw so
+internal work never masquerades as the agent), and the next item
+birth lazily emits `── HH:MM · by ──` when minute OR origin
+changed. Consequences: a micro-turn storm in one minute under one
+origin collapses to one head; a mid-turn minute roll re-heads with
+the new time (long turns re-anchor their origin on scroll); an
+origin change in the same minute re-heads; a day change emits
+`── D Mmm ──` first (the first birth of the feed anchors the day).
+A turn that births nothing earns no head; the origin persists past
+`turn stop` until the next start (post-turn stragglers stay in the
+last group). The acp impl feeds the same gutter in `drain()` —
+per-sid birth origin via `sidBy` so a drain batch spanning turns
+still heads each item under its own turn. Content rows gained the
+six columns back; markdown budgets shrank (`-8`→`-2`,
+`-11`→`-5`, `-6`→`-1`). `at` stays on items (copy, scrollback),
+and `printLines` prints the separator items like the tree.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

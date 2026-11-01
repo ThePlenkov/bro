@@ -26,6 +26,7 @@ import {
   toolContent,
 } from '../../../packages/providers/src/acp-render.ts';
 import { isJudgeTurn } from './verdict.ts';
+import { TimeGutter } from './view.ts';
 
 export type { ToolContent };
 
@@ -94,12 +95,13 @@ export interface ToolItem {
   runs?: readonly unknown[];
 }
 
-/** A one-shot line — turn boundary, permission ask, plan block, or a
- *  dim one-liner for every other update kind. `tone` is the pane's
+/** A one-shot line — turn boundary, permission ask, plan block, a
+ *  time separator (minute/origin heads and day markers), or a dim
+ *  one-liner for every other update kind. `tone` is the pane's
  *  accent hint: permission asks read warn, failed turns read error. */
 export interface SideItem {
   id: number;
-  kind: 'turn' | 'permission' | 'note';
+  kind: 'turn' | 'permission' | 'note' | 'time';
   text: string;
   tone?: 'warn' | 'error';
   at?: string;
@@ -144,6 +146,9 @@ export class SessionModel {
    *  gutter time; judge-turn flag set by `prompt`/`turn` rows. */
   private curTs: string | undefined;
   private judgeNow = false;
+  /** The separator layer — turn starts mark the origin, every item
+   *  birth lazily owes the minute/origin heads and day markers. */
+  private readonly gutter = new TimeGutter();
 
   /** Every op produced since the last drain — the shell's queue. */
   drain(): Op[] {
@@ -164,6 +169,7 @@ export class SessionModel {
       case 'turn':
         if (row.phase === 'start') {
           this.judgeNow = isJudgeTurn(undefined, row.by);
+          this.gutter.start(row.by);
         } else if (row.phase === 'stop') {
           this.judgeNow = false;
           // a normal end_turn prints nothing — every turn ends;
@@ -184,6 +190,7 @@ export class SessionModel {
         // the prompt row marks its turn — judge prompts carry the
         // typed preamble; the reply then classifies as a verdict
         this.judgeNow = isJudgeTurn(row.text, row.by);
+        this.gutter.start(row.by);
         this.push<TextItem>({ kind: 'prompt', text: row.text ?? '' });
         break;
       case 'permission': {
@@ -227,10 +234,16 @@ export class SessionModel {
     }
   }
 
-  /** Append + record — every item birth goes through here, stamped
-   *  with the row's `ts` (the pane's gutter) and, for messages, the
-   *  judge-turn flag. */
+  /** Append + record — every item birth goes through here, first
+   *  paying the separator layer whatever the row's `ts` owes (day
+   *  marker, then the `── HH:MM · by ──` group head). Stamped with
+   *  the row's `ts` and, for messages, the judge-turn flag. */
   private push<T extends Item>(item: Omit<T, 'id'>): T {
+    for (const text of this.gutter.tick(this.curTs)) {
+      const sep: SideItem = { id: this.nextId++, kind: 'time', text, at: this.curTs };
+      this.items.push(sep);
+      this.ops.push({ op: 'append', item: sep });
+    }
     const judge = 'kind' in item && item.kind === 'message' && this.judgeNow;
     const it = {
       ...item,

@@ -6,7 +6,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
-import { MAX_ITEMS, SessionModel, type Op, type ToolItem } from '../tui/model.ts';
+import { MAX_ITEMS, type Op, SessionModel, type ToolItem } from '../tui/model.ts';
+import { dayLabel, hhmm } from '../tui/view.ts';
 
 const upd = (u: Record<string, unknown>): ArchiveRow => ({ kind: 'update', update: u as never });
 const chunk = (kind: string, text: string): ArchiveRow =>
@@ -252,6 +253,109 @@ describe('SessionModel — side rows + verdict', () => {
     assert.equal(m.verdict?.led.state, 'working');
     m.feed({ kind: 'future-kind', phase: '?' } as ArchiveRow);
     assert.equal(m.items[m.items.length - 1]!.kind, 'note'); // session info note still last
+  });
+});
+
+describe('SessionModel — time separators', () => {
+  const msg = (ts: string, text = 'hi'): ArchiveRow => ({
+    kind: 'update',
+    ts,
+    // a note per row — chunks of one kind would merge into the tail
+    // item (no birth, no head); these always birth a fresh item
+    update: { sessionUpdate: 'session_info_update', title: text } as never,
+  });
+  const turnStart = (ts: string, by?: string): ArchiveRow => ({
+    kind: 'turn',
+    phase: 'start',
+    ts,
+    ...(by !== undefined ? { by } : {}),
+  });
+  const times = (m: SessionModel): string[] =>
+    m.items.filter(i => i.kind === 'time').map(i => i.text);
+
+  test('a turn start lazily heads its group — minute · origin, provider unwrapped', () => {
+    const m = new SessionModel();
+    m.feed(turnStart('2026-03-01T22:36:00Z', "acp provider 'devin-acp'"));
+    m.feed(msg('2026-03-01T22:36:05Z'));
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:36:05Z')} ──`, // the first birth anchors the day
+      `── ${hhmm('2026-03-01T22:36:05Z')} · devin-acp ──`,
+    ]);
+    // internal labels keep their raw by — never masquerade as the agent
+    const m2 = new SessionModel();
+    m2.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
+    m2.feed(msg('2026-03-01T22:36:05Z'));
+    assert.deepEqual(times(m2), [
+      `── ${dayLabel('2026-03-01T22:36:05Z')} ──`,
+      `── ${hhmm('2026-03-01T22:36:05Z')} · provider:kilo ──`,
+    ]);
+  });
+
+  test('a micro-turn storm under one origin collapses to one head', () => {
+    const m = new SessionModel();
+    for (let i = 0; i < 5; i++) {
+      m.feed(turnStart('2026-03-01T22:36:00Z', 'conductor:t'));
+      m.feed(msg('2026-03-01T22:36:10Z', `v${i}`));
+      m.feed({ kind: 'turn', phase: 'stop', ts: '2026-03-01T22:36:10Z', stopReason: 'end_turn' });
+    }
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:36:10Z')} ──`,
+      `── ${hhmm('2026-03-01T22:36:10Z')} · conductor:t ──`,
+    ]);
+  });
+
+  test('a same-minute origin change re-heads; a mid-turn minute change re-heads with the new time', () => {
+    const m = new SessionModel();
+    m.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
+    m.feed(msg('2026-03-01T22:36:05Z'));
+    m.feed(turnStart('2026-03-01T22:36:20Z', 'conductor:t'));
+    m.feed(msg('2026-03-01T22:36:25Z'));
+    // still inside the conductor turn, the minute rolls
+    m.feed(msg('2026-03-01T22:37:05Z'));
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:36:05Z')} ──`,
+      `── ${hhmm('2026-03-01T22:36:05Z')} · provider:kilo ──`,
+      `── ${hhmm('2026-03-01T22:36:25Z')} · conductor:t ──`,
+      `── ${hhmm('2026-03-01T22:37:05Z')} · conductor:t ──`,
+    ]);
+  });
+
+  test('a turn that births nothing earns no head; pre-turn rows head bare', () => {
+    const m = new SessionModel();
+    m.feed(msg('2026-03-01T22:35:55Z')); // pre-turn traffic — bare tick
+    m.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
+    m.feed({ kind: 'turn', phase: 'stop', ts: '2026-03-01T22:36:01Z', stopReason: 'end_turn' });
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:35:55Z')} ──`,
+      `── ${hhmm('2026-03-01T22:35:55Z')} ──`,
+    ]);
+  });
+
+  test('post-turn stragglers keep the last origin until the next start', () => {
+    const m = new SessionModel();
+    m.feed(turnStart('2026-03-01T22:36:00Z', 'provider:kilo'));
+    m.feed(msg('2026-03-01T22:36:05Z'));
+    m.feed({ kind: 'turn', phase: 'stop', ts: '2026-03-01T22:36:06Z', stopReason: 'end_turn' });
+    m.feed(msg('2026-03-01T22:37:05Z')); // between turns — still the kilo group
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T22:36:05Z')} ──`,
+      `── ${hhmm('2026-03-01T22:36:05Z')} · provider:kilo ──`,
+      `── ${hhmm('2026-03-01T22:37:05Z')} · provider:kilo ──`,
+    ]);
+  });
+
+  test('a day change emits its marker before the next head', () => {
+    const m = new SessionModel();
+    m.feed(turnStart('2026-03-01T23:59:00Z', "acp provider 'x'"));
+    m.feed(msg('2026-03-01T23:59:30Z'));
+    m.feed(turnStart('2026-03-02T00:01:00Z', "acp provider 'x'"));
+    m.feed(msg('2026-03-02T00:01:05Z'));
+    assert.deepEqual(times(m), [
+      `── ${dayLabel('2026-03-01T23:59:30Z')} ──`,
+      `── ${hhmm('2026-03-01T23:59:30Z')} · x ──`,
+      `── ${dayLabel('2026-03-02T00:01:05Z')} ──`,
+      `── ${hhmm('2026-03-02T00:01:05Z')} · x ──`,
+    ]);
   });
 });
 

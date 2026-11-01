@@ -52,6 +52,7 @@ import {
   type ToolCallItem,
 } from '../vendor/acp-model/src/index.ts';
 import { isJudgeTurn, verdictOf } from '../verdict.ts';
+import { headBy, TimeGutter } from '../view.ts';
 import { acpLine, lineText } from './lines.ts';
 
 /** sessionUpdate kinds their reducer handles (items or absorbed
@@ -439,6 +440,13 @@ export class AcpImpl implements PaneImpl {
    *  dump interleaves them at `pos` (the session-order length when
    *  the row landed) so per-turn prompts stay chronological. */
   private readonly prompts: { pos: number; item: TextItem }[] = [];
+  /** The separator layer — time heads/days as rows (addendum 25). */
+  private readonly gutter = new TimeGutter();
+  /** The open turn's origin — sids born under it head their group. */
+  private curBy: string | undefined;
+  /** Their sid → the turn origin at item birth (update rows carry no
+   *  `by`; the turn's `by` is on the start row). */
+  private readonly sidBy = new Map<string, string>();
   private ops: Op[] = [];
 
   /** The shell's context — agent/worktree for the feed header. */
@@ -457,6 +465,7 @@ export class AcpImpl implements PaneImpl {
       // the prompt row marks its turn — a typed-preamble body (or a
       // judge `by`) labels the reply for the verdict classifier
       this.judgeNow = isJudgeTurn(row.text, row.by);
+      this.curBy = headBy(row.by);
       const id = this.nextId++;
       const item: TextItem = {
         id,
@@ -466,13 +475,17 @@ export class AcpImpl implements PaneImpl {
         ...(row.by !== undefined ? { by: shortBy(row.by) } : {}),
       };
       this.emitted.push(id);
+      this.gutter.start(row.by);
+      for (const text of this.gutter.tick(row.ts)) this.emitTime(this.ops, text, row.ts);
       this.ops.push({ op: 'append', item });
       this.prompts.push({ pos: this.session.order.length, item });
       return;
     }
     if (row.kind === 'turn') {
-      if (row.phase === 'start') this.judgeNow = isJudgeTurn(undefined, row.by);
-      else if (row.phase === 'stop') this.judgeNow = false;
+      if (row.phase === 'start') {
+        this.judgeNow = isJudgeTurn(undefined, row.by);
+        this.curBy = headBy(row.by);
+      } else if (row.phase === 'stop') this.judgeNow = false;
     }
     // the arg stash — their items drop rawInput, our header wants it
     if (row.kind === 'update' && row.update !== undefined) {
@@ -502,6 +515,7 @@ export class AcpImpl implements PaneImpl {
       if (sid === undefined) continue;
       if (row.ts !== undefined) this.tsMap.set(sid, row.ts);
       if (row.by !== undefined) this.byMap.set(sid, shortBy(row.by) ?? row.by);
+      if (this.curBy !== undefined) this.sidBy.set(sid, this.curBy);
       if (this.judgeNow) this.judgeSids.add(sid);
     }
   }
@@ -581,6 +595,14 @@ export class AcpImpl implements PaneImpl {
     }
   }
 
+  /** A `── HH:MM · by ──` or `── D Mmm ──` separator op — ids ride
+   *  the same counter and eviction frontier as items. */
+  private emitTime(ops: Op[], text: string, ts: string | undefined): void {
+    const id = this.nextId++;
+    this.emitted.push(id);
+    ops.push({ op: 'append', item: { id, kind: 'time', text, at: ts } });
+  }
+
   /** A turn_end marker → an arg patch on the latest ▸ activity item:
    *  ` · 45.4s · ctx 38k/200k` appended once, no standalone row. */
   private endFold(item: Extract<MarkerItem, { markerKind: 'turn_end' }>, ops: Op[]): void {
@@ -655,6 +677,12 @@ export class AcpImpl implements PaneImpl {
                 this.byMap.get(sid)
               );
         if (next === undefined) continue;
+        // the separator layer pays first — the birth row's minute and
+        // the turn origin at birth (a drain batch can span turns)
+        this.gutter.start(this.sidBy.get(sid));
+        for (const text of this.gutter.tick(this.tsMap.get(sid))) {
+          this.emitTime(ops, text, this.tsMap.get(sid));
+        }
         ops.push({ op: 'append', item: next });
         if (members !== undefined && next.kind === 'tool') {
           this.lastActivity = { id, arg: next.arg ?? '' };

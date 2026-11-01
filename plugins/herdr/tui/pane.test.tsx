@@ -314,6 +314,31 @@ describe('the Solid session pane', () => {
     }
   });
 
+  test('a turn start heads its group — time rows, not a gutter column', async () => {
+    const p = await mount();
+    try {
+      p.model.feed({
+        kind: 'turn',
+        phase: 'start',
+        ts: '2026-03-01T22:36:00Z',
+        by: "acp provider 'devin-acp'",
+      });
+      p.model.feed({
+        kind: 'update',
+        ts: '2026-03-01T22:36:05Z',
+        update: { sessionUpdate: 'session_info_update', title: 's' } as never,
+      });
+      p.model.feed(chunk('agent_message_chunk', 'working'));
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /── \d{2}:\d{2} · devin-acp ──/);
+      assert.match(frame, /── \d+ \w+ ──/); // the day anchor
+      assert.match(frame, /working/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
   test('a long prompt folds by default and expands on toggle', async () => {
     const p = await mount();
     try {
