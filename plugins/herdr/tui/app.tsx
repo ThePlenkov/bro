@@ -42,7 +42,6 @@ import {
 import { ledColor, theme } from './theme.ts';
 import { type VerdictView, verdictOf } from './verdict.ts';
 import {
-  argHead,
   cardGlyphColor,
   hhmm,
   isFoldable,
@@ -53,6 +52,7 @@ import {
   TAIL_BUDGET,
   toolBodyLines,
   toolBodyMd,
+  toolTail,
 } from './view.ts';
 
 /** The store the tree renders from. */
@@ -254,14 +254,7 @@ function Spinner(props: { fg: string }) {
  *  `(no output)` results paint nothing — one compact row per call
  *  (opencode grammar — the first demo's shape restored). */
 function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyle }) {
-  const kind = () =>
-    props.item.toolKind !== undefined && props.item.toolKind !== ''
-      ? ` [${props.item.toolKind}]`
-      : '';
-  const argHeadSeg = () => {
-    const a = argHead(props.item);
-    return a !== '' ? ` ${a}` : '';
-  };
+  const tail = createMemo(() => toolTail(props.item));
   const body = createMemo(() => toolBodyLines(props.item));
   const md = createMemo(() => toolBodyMd(props.item));
   return (
@@ -288,8 +281,9 @@ function ToolCard(props: { item: ToolItem; selected: boolean; syntax: SyntaxStyl
         <text
           fg={theme.muted}
           attributes={TextAttributes.DIM}
-          content={`${kind()}${argHeadSeg()}`}
+          content={`${tail().kind}${tail().arg}`}
         />
+        <text fg={theme.muted} attributes={TextAttributes.DIM} content={tail().tally} />
       </box>
       {/* pinned open (Enter/c) — the FULL body as real markdown:
        *  prose formats, fences highlight via tree-sitter. The
@@ -864,7 +858,14 @@ function HeaderBar(props: { meta: PaneMeta }) {
     return w === '' ? '…' : (w.split('/').filter(Boolean).pop() ?? w);
   };
   return (
-    <box flexDirection="row" width="100%" height={1} backgroundColor={theme.surface} flexShrink={0}>
+    <box
+      flexDirection="row"
+      width="100%"
+      height={1}
+      minHeight={1}
+      backgroundColor={theme.surface}
+      flexShrink={0}
+    >
       <text fg={theme.accent} attributes={TextAttributes.BOLD} content=" bro: session" />
       <text fg={theme.muted} content={` — ${slug()}`} />
       <Show when={props.meta.agent !== ''}>
@@ -889,7 +890,14 @@ function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
     return w === '' ? '' : (w.split('/').filter(Boolean).pop() ?? w);
   };
   return (
-    <box flexDirection="row" width="100%" height={1} flexShrink={0} backgroundColor={theme.base}>
+    <box
+      flexDirection="row"
+      width="100%"
+      height={1}
+      minHeight={1}
+      flexShrink={0}
+      backgroundColor={theme.base}
+    >
       <Show
         when={props.toast() === ''}
         fallback={<text fg={theme.accent} content={`  ${props.toast()}`} />}
@@ -933,12 +941,23 @@ function Pane(props: {
     }
     return undefined;
   };
-  // inline feed: rows are natural-height output that flows into the
-  // terminal's scrollback — herdr owns scrolling (addendum 10). No
-  // scrollbox: in split-footer the scroll region isn't addressable
-  // as tree height, so a scrollbox collapses to ~1 row (field-found).
+  // split-footer: the renderable tree IS the `footerHeight` band at
+  // the bottom of the screen — its height never grows past the band,
+  // and OpenTUI anchors the band's TOP, so anything past it clips off
+  // the BOTTOM. The identity/keys chrome must therefore always be the
+  // strip's last rows. The feed sits in a bottom-anchored
+  // (justifyContent='flex-end'), top-clipping (overflow='hidden')
+  // column that flex-fills the space above the chrome: when the live
+  // tail overruns the band the OLDEST rows clip off the top and the
+  // status bar can never be pushed off-screen (the user ask).
   return (
-    <box flexDirection="column" width="100%" overflow="visible" backgroundColor={theme.base}>
+    <box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      overflow="hidden"
+      backgroundColor={theme.base}
+    >
       <box
         ref={el => {
           setScroller(el as unknown as ScrollBoxRenderable);
@@ -946,7 +965,10 @@ function Pane(props: {
         }}
         flexDirection="column"
         width="100%"
-        overflow="visible"
+        flexGrow={1}
+        minHeight={0}
+        overflow="hidden"
+        justifyContent="flex-end"
         backgroundColor={theme.base}
       >
         <For each={props.store.state.order}>
@@ -993,10 +1015,9 @@ function Pane(props: {
           <text fg={theme.muted} content="Jump to latest ↓ " />
         </box>
       </Show>
-      {/* identity + keys are the frame's last rows — in main-screen
-       *  they ride the tail of the feed (the split-footer pin was
-       *  reverted: its renderable height IS the footer strip, the
-       *  scroll region takes only captured stdout — field-found) */}
+      {/* identity + keys are the strip's LAST rows — pinned at the
+       *  bottom of the footer band, flexShrink=0 so an overrun feed
+       *  clips off the top instead of pushing them off-screen */}
       <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>

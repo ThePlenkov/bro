@@ -87,17 +87,24 @@ export const TAIL_BUDGET = 15;
  *  screen unpinned). */
 export const FOLD_TEXT_AT = 8;
 
-/** The item kinds whose text folds — prompt, agent prose, thought,
- *  and long side notes. Headers/turns/permissions stay unfolded. */
-const FOLDABLE = new Set(['prompt', 'message', 'thought', 'note']);
+/** The fold thresholds by kind — prompt/note dumps fold tight, but
+ *  agent prose is the pane's content and stays open until it is
+ *  truly long (addendum 20). */
+const FOLDABLE_AT: Record<string, number> = {
+  prompt: FOLD_TEXT_AT,
+  note: FOLD_TEXT_AT,
+  message: 40,
+  thought: 40,
+};
 
 /** Can the row carry a fold? Tools always can; text items can once
- *  they pass FOLD_TEXT_AT lines (or are already collapsed). */
+ *  they pass their kind's threshold (or are already collapsed). */
 export function isFoldable(item: Item): boolean {
   if (item.kind === 'tool') return true;
+  const at = FOLDABLE_AT[item.kind];
   return (
-    FOLDABLE.has(item.kind) &&
-    (item.collapsed === true || ('text' in item && item.text.split('\n').length > FOLD_TEXT_AT))
+    at !== undefined &&
+    (item.collapsed === true || ('text' in item && item.text.split('\n').length > at))
   );
 }
 
@@ -148,47 +155,183 @@ export function mdPlain(text: string): string[] {
   return out;
 }
 
+/* ── Scrollback styling ───────────────────────────────────────────
+ * Captured stdout is the ONLY path into herdr scrollback — and it
+ * carries real ANSI, so retired rows keep the pane's formatting:
+ * truecolor foregrounds from the same theme tokens, SGR bold/dim/
+ * underline. `mdStyled` is the stdout equivalent of the
+ * renderable's `<markdown conceal>` — markers never survive. */
+
+const ESC = '\x1b[';
+const RESET = `${ESC}0m`;
+const BOLD = `${ESC}1m`;
+const DIM = `${ESC}2m`;
+const UNDER = `${ESC}4m`;
+
+/** `#rrggbb` → a truecolor SGR foreground. */
+const fg = (hex: string): string => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `${ESC}38;2;${r};${g};${b}m`;
+};
+
+const C = {
+  muted: fg(theme.muted),
+  emph: fg(theme.emph),
+  peach: fg(theme.peach),
+  amber: fg(theme.amber),
+  cyan: fg(theme.cyan),
+  success: fg(theme.success),
+  error: fg(theme.error),
+  warning: fg(theme.warning),
+} as const;
+
+/** Markdown → ANSI-styled lines for the scroll region — headings
+ *  go bold-emph, bold goes bold, links go cyan-underline `t (u)`,
+ *  inline code goes cyan, fences keep their body as muted indented
+ *  code, HTML tags vanish. Same transforms as mdPlain + SGR. */
+export function mdStyled(text: string): string[] {
+  const out: string[] = [];
+  let fence = false;
+  for (const raw of text.split('\n')) {
+    if (/^\s*(`{3,}|~{3,})/.test(raw)) {
+      fence = !fence;
+      continue;
+    }
+    if (fence) {
+      out.push(`${C.muted}    ${raw}${RESET}`);
+      continue;
+    }
+    const heading = /^\s{0,3}#{1,6}\s+/.test(raw);
+    const quote = /^\s*>\s?/.test(raw);
+    const l = raw
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]*)\]\(([^)]*)\)/g, `${C.cyan}${UNDER}$1${RESET}${C.muted} ($2)${RESET}`)
+      .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
+      .replace(/\*\*([^*]+)\*\*/g, `${BOLD}$1${RESET}`)
+      .replace(/__([^_]+)__/g, `${BOLD}$1${RESET}`)
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, '$1$2')
+      .replace(/~~([^~]+)~~/g, '$1')
+      .replace(/`([^`]+)`/g, `${C.cyan}$1${RESET}`)
+      .replace(/<[^>]+>/g, '')
+      .replace(/^\s{0,3}#{1,6}\s+/, '')
+      .replace(/^\s*>\s?/, `${C.muted}┃ ${RESET}`);
+    void quote;
+    out.push(heading ? `${BOLD}${C.emph}${l}${RESET}` : l);
+  }
+  return out;
+}
+
 /** The line form a row prints to the scroll region as — the same
  *  grammar the tree paints: `┃` prompt block, `⏺` tool/message,
  *  `+ Thought`, `──` markers, `▸` header, and a ≤3-line + `+N more`
  *  body under an open call. Plain text — the scroll region is a
  *  captured-stdout feed, not a renderable surface. */
+/** The tool row's meaningful tail — ` [kind]` only where the kind
+ *  adds signal (a `command`/`grep` title already says `execute`),
+ *  then the arg's first line unless it merely repeats the title or
+ *  is the call's cwd. Diff content tallies as `+a −b`. */
+export function toolTail(item: ToolItem): { kind: string; arg: string; tally: string } {
+  const kind =
+    item.toolKind !== undefined && item.toolKind !== '' && item.toolKind !== 'execute'
+      ? ` [${item.toolKind}]`
+      : '';
+  let arg = argHead(item);
+  const first = item.arg !== undefined ? firstLine(item.arg) : '';
+  if (
+    arg === '' ||
+    item.title.includes(first) ||
+    (item.toolKind === 'execute' && first.startsWith('/'))
+  ) {
+    arg = '';
+  } else {
+    arg = ` ${arg}`;
+  }
+  let add = 0;
+  let del = 0;
+  for (const c of item.content) {
+    if (c.kind === 'diff') {
+      del += (c.old ?? '').split('\n').filter(l => l !== '').length;
+      add += (c.cur ?? '').split('\n').filter(l => l !== '').length;
+    }
+  }
+  const tally = add + del > 0 ? ` +${add} −${del}` : '';
+  return { kind, arg, tally };
+}
+
 export function printLines(item: Item): string[] {
-  const stamp = item.at !== undefined ? `${hhmm(item.at)} ` : '      ';
+  const stamp = `${C.muted}${item.at !== undefined ? `${hhmm(item.at)} ` : '     '}${RESET}`;
   const rows = (lines: string[]): string[] =>
     lines.map((l, i) => `${i === 0 ? stamp : '      '}${l}`);
   const folded = item.collapsed === true;
   const more = 'text' in item ? item.text.split('\n').length : 0;
   switch (item.kind) {
     case 'header':
-      return rows([` ▸ ${item.text}`]);
+      return rows([`${C.emph} ▸ ${item.text}${RESET}`]);
     case 'prompt':
       return folded
-        ? rows(['┃', '┃  Prompt', `┃  +${more} lines`, '┃'])
-        : rows(['┃', '┃  Prompt', '┃', ...mdPlain(item.text).map(l => `┃  ${l}`), '┃']);
+        ? rows([
+            `${C.peach}┃${RESET}`,
+            `${C.peach}┃${RESET}  Prompt`,
+            `${C.peach}┃${RESET}  ${C.muted}+${more} lines${RESET}`,
+            `${C.peach}┃${RESET}`,
+          ])
+        : rows([
+            `${C.peach}┃${RESET}`,
+            `${C.peach}┃${RESET}  ${C.muted}Prompt${RESET}`,
+            `${C.peach}┃${RESET}`,
+            ...mdStyled(item.text).map(l => `${C.peach}┃${RESET}  ${l}`),
+            `${C.peach}┃${RESET}`,
+          ]);
     case 'message':
       return folded
-        ? rows([`⏺ ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
-        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `⏺ ${l}` : `  ${l}`)));
+        ? rows([
+            `${C.peach}⏺${RESET} ${C.muted}${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`,
+          ])
+        : rows(
+            mdStyled(item.text).map((l, i) => (i === 0 ? `${C.peach}⏺${RESET} ${l}` : `  ${l}`))
+          );
     case 'thought':
       return folded
-        ? rows([`+ Thought · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
-        : rows(mdPlain(item.text).map((l, i) => (i === 0 ? `+ Thought · ${l}` : `  ${l}`)));
+        ? rows([
+            `${C.amber}+ Thought${RESET}${C.muted} · ${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`,
+          ])
+        : rows([
+            `${C.amber}+ Thought${RESET}`,
+            ...mdStyled(item.text).map(l => `  ${C.muted}${l}${RESET}`),
+          ]);
     case 'tool': {
-      const g = item.status === 'completed' ? '✓' : item.status === 'live' ? '…' : '✗';
-      const kind = item.toolKind !== undefined && item.toolKind !== '' ? ` [${item.toolKind}]` : '';
-      const arg = argHead(item, 120);
-      const head = `⏺ ${g} ${item.title}${kind}${arg !== '' ? ` ${arg}` : ''}`;
+      const g =
+        item.status === 'completed'
+          ? `${C.success}✓${RESET}`
+          : item.status === 'live'
+            ? `${C.warning}…${RESET}`
+            : `${C.error}✗${RESET}`;
+      const tail = toolTail(item);
+      const head = `${C.muted}⏺${RESET} ${g} ${C.muted}${item.title}${tail.kind}${tail.arg}${RESET}${tail.tally !== '' ? `${C.muted}${tail.tally}${RESET}` : ''}`;
       const out = [head];
-      const body = toolBodyLines(item, folded ? 3 : Number.POSITIVE_INFINITY);
-      for (const l of body.lines) out.push(`  ${l}`);
-      if (body.more > 0) out.push(`  +${body.more} more`);
+      // collapsed = the row only — file dumps never print (the user
+      // asked for opencode's quiet mass row); open shows the body
+      if (!folded) {
+        const body = toolBodyLines(item, Number.POSITIVE_INFINITY);
+        for (const l of body.lines) {
+          out.push(
+            l.startsWith('+ ')
+              ? `  ${C.success}${l}${RESET}`
+              : l.startsWith('- ')
+                ? `  ${C.error}${l}${RESET}`
+                : `  ${C.muted}${l}${RESET}`
+          );
+        }
+      }
       return rows(out);
     }
     default:
       return folded
-        ? rows([`${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines`])
-        : rows(mdPlain(item.text));
+        ? rows([`${C.muted}${firstLine(mdPlain(item.text).join('\n'))} · +${more} lines${RESET}`])
+        : rows(mdStyled(item.text));
   }
 }
 

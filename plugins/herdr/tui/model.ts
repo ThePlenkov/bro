@@ -20,6 +20,7 @@ import {
   firstLine,
   type SessionUpdateLike,
   safe,
+  safeBlock,
   type ToolContent,
   toolArg,
   toolContent,
@@ -288,7 +289,11 @@ export class SessionModel {
     const item = rec.item;
     for (const k of ['title', 'name'] as const) {
       const v = t[k];
-      if (typeof v === 'string' && v !== '') item.title = safe(v);
+      // the header is ONE line — a multiline wire title (a heredoc
+      // command) keeps its first non-empty line, never a ⏎ mash
+      if (typeof v === 'string' && v !== '') {
+        item.title = clip(firstLine(safeBlock(v)), 80);
+      }
     }
     if (typeof t.kind === 'string' && t.kind !== '') item.toolKind = safe(t.kind);
     const arg = toolArg(t, item.toolKind);

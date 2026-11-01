@@ -114,8 +114,9 @@ describe('the Solid session pane', () => {
       await p.flush();
       const frame = await p.frame();
       assert.match(frame, /Bash/);
-      assert.match(frame, /execute/);
       assert.match(frame, /PASS 2330\/2330/);
+      // opencode grammar — an execute call carries no kind badge
+      assert.doesNotMatch(frame, /\[execute\]/);
     } finally {
       await p.dispose();
     }
@@ -316,10 +317,13 @@ describe('the Solid session pane', () => {
       text,
       collapsed: true,
     });
-    assert.match(folded.join('\n'), /\+\d+ lines/);
+    const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(folded.map(strip).join('\n'), /\+\d+ lines/);
     const open = printLines({ id: 1, kind: 'prompt', text });
-    const joined = open.join('\n');
+    const joined = open.map(strip).join('\n');
     assert.match(joined, /bold and x \(https:\/\/u\)/);
     assert.doesNotMatch(joined, /\*\*|<details>/);
+    // and the scroll region gets real styling — SGR sequences paint
+    assert.match(open.join('\n'), /\x1b\[38;2;/);
   });
 });
