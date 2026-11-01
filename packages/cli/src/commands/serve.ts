@@ -1517,6 +1517,10 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
   let queued = 0;
   let waitingDrain = false;
   let endAfterQueue = false;
+  // The initial burst (meta + snapshot + exit for an already-final
+  // terminal) travels synchronously through enqueue() with no drain
+  // opportunity — count only live frames against the backlog cap.
+  let initial = true;
   const drop = (): void => {
     queue.length = 0;
     queued = 0;
@@ -1554,7 +1558,7 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     }
     queued += Buffer.byteLength(frame);
     queue.push(frame);
-    if (queued > SSE_FOLLOW_BACKLOG) {
+    if (!initial && queued > SSE_FOLLOW_BACKLOG) {
       drop();
       return;
     }
@@ -1612,9 +1616,11 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     // child's 'exit' while 'close' still owes the last piped bytes, and
     // ending here would drop them plus leak the registered listener
     enqueue(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`);
+    initial = false;
     finish();
     return;
   }
+  initial = false;
   res.on('close', () => handle?.stop());
 }
 
