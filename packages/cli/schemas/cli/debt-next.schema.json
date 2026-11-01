@@ -1,7 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://broject.dev/schemas/cli/debt-next.schema.json",
-  "title": "bro debt next --json",
-  "type": "object",
-  "additionalProperties": true
-}
