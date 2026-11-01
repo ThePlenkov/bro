@@ -76,6 +76,9 @@ interface GitLabIssue {
   labels?: string[]
   milestone?: { title?: string } | null
   references?: { full?: string }
+  blocking_issues_count?: number
+  blocked_issues_count?: number
+  has_blocked_issues?: boolean
 }
 
 const actorCache = new Map<string, string>()
@@ -121,7 +124,19 @@ function assigneesOf(i: GitLabIssue): string[] {
 }
 
 function isBlocked(i: GitLabIssue, labels: string[]): boolean {
-  return labels.includes(BLOCKED_LABEL)
+  if (labels.includes(BLOCKED_LABEL)) {
+    return true
+  }
+  if (typeof i.blocking_issues_count === 'number' && i.blocking_issues_count > 0) {
+    return true
+  }
+  if (typeof i.blocked_issues_count === 'number' && i.blocked_issues_count > 0) {
+    return true
+  }
+  if (i.has_blocked_issues === true) {
+    return true
+  }
+  return false
 }
 
 function statusOf(i: GitLabIssue, labels: string[], assignees: string[]): string {
@@ -156,12 +171,15 @@ function priorityOf(labels: string[], meta: Record<string, unknown>): number {
   return typeof p === 'number' ? p : DEFAULT_PRIORITY
 }
 
-function toRow(i: GitLabIssue, projectPath: string): TaskRow {
+function toRow(i: GitLabIssue, projectPath: string, baseProjectPath?: string): TaskRow {
   const labels = labelsOf(i)
   const assignees = assigneesOf(i)
   const meta = bodyMeta(i.description ?? undefined)
+  const base = baseProjectPath ?? projectPath
+  const isForeign = base.toLowerCase() !== projectPath.toLowerCase()
+  const id = isForeign ? `${projectPath}#${i.iid}` : String(i.iid)
   const row: TaskRow & { created_at?: string } = {
-    id: String(i.iid),
+    id,
     title: i.title,
     status: statusOf(i, labels, assignees),
     issue_type: issueTypeOf(labels, meta),
@@ -192,10 +210,7 @@ function assertNoNewline(v: string, name: string): void {
   }
 }
 
-function sanitizeField(v: string, name: string): string {
-  assertNoNewline(v, name)
-  return v
-}
+
 
 // --- id resolution -------------------------------------------------------------
 
@@ -305,7 +320,7 @@ function queryIssuesSync(dir: string, states: string[], limit: number): GitLabIs
   for (const state of states) {
     const endpoint = `${api(projectPath, 'issues')}?state=${state}&per_page=100`
     try {
-      const rows = glabPaged<GitLabIssue>(endpoint, gopts(dir))
+      const rows = glabPaged<GitLabIssue>(endpoint, { ...gopts(dir), limit: Math.max(0, limit - out.length) })
       out.push(...rows)
       if (out.length >= limit) {
         break
@@ -327,7 +342,7 @@ async function queryIssuesAsync(dir: string, states: string[], limit: number): P
   for (const state of states) {
     const endpoint = `${api(projectPath, 'issues')}?state=${state}&per_page=100`
     try {
-      const rows = await glabPagedAsync<GitLabIssue>(endpoint, gopts(dir))
+      const rows = await glabPagedAsync<GitLabIssue>(endpoint, { ...gopts(dir), limit: Math.max(0, limit - out.length) })
       out.push(...rows)
       if (out.length >= limit) {
         break
@@ -391,7 +406,6 @@ function createSync(dir: string, input: TaskInput): GitLabIssue {
   assertNoNewline(input.title, 'title')
   const args: string[] = ['api', '-X', 'POST', api(projectPath, 'issues'), '-f', `title=${input.title}`]
   if (desc) {
-    assertNoNewline(desc, 'description')
     args.push('-f', `description=${desc}`)
   }
   if (input.labels?.length) {
@@ -416,7 +430,6 @@ function updateSync(dir: string, id: string, patch: Record<string, string | numb
       assertNoNewline(String(v), 'title')
       args.push('-f', `title=${v}`)
     } else if (k === 'description' || k === 'body') {
-      assertNoNewline(String(v), 'description')
       args.push('-f', `description=${v}`)
     } else if (k === 'status') {
       throw new Error('gitlab tasks: status updates not supported via update; use reopen/close')
@@ -513,7 +526,6 @@ function reopenSync(dir: string, id: string): void {
 function closeSync(dir: string, id: string, reason?: string): void {
   const ref = parseIssueRef(dir, id)
   if (reason) {
-    assertNoNewline(reason, 'note')
     const r = glabTry(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${reason}`], gopts(dir))
     if (r.code !== 0) {
       throw new Error(`gitlab tasks: failed to add close note to ${id}`)
@@ -573,12 +585,14 @@ export function gitlabTasks(dir: string): TaskStore {
   return {
     list: (f = {}) => {
       const issues = queryIssuesSync(dir, statesFor(f), fetchCap(f))
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir))).map(pub)
+      const base = resolveProjectPath(dir)
+      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
       return applyFilter(rows, f) as never
     },
     ready: (f = {}) => {
+      const base = resolveProjectPath(dir)
       const issues = queryIssuesSync(dir, ['opened'], QUERY_CAP)
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir))).map(pub)
+      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
       let q = rows.filter((r) => r.status !== 'closed')
       if ((f.labels?.length ?? 0) > 0) {
         for (const l of f.labels!) q = q.filter((r) => r.labels?.includes(l))
@@ -592,10 +606,11 @@ export function gitlabTasks(dir: string): TaskStore {
     },
     get: (id) => {
       const ref = parseIssueRef(dir, id)
+      const base = resolveProjectPath(dir)
       const i = getIssueSync(dir, ref)
-      return i === undefined ? undefined : (toRow(i, ref.projectPath) as never)
+      return i === undefined ? undefined : (toRow(i, ref.projectPath, base) as never)
     },
-    create: (i) => toRow(createSync(dir, i), resolveProjectPath(dir)) as never,
+    create: (i) => toRow(createSync(dir, i), resolveProjectPath(dir), resolveProjectPath(dir)) as never,
     update: (id, patch) => updateSync(dir, id, patch),
     claim: (id) => claimSync(dir, id),
     claimCapability: () => CLAIM_CAPABILITY,
@@ -605,7 +620,6 @@ export function gitlabTasks(dir: string): TaskStore {
     remove: (id) => removeSync(dir, id),
     note: (id, text) => {
       const ref = parseIssueRef(dir, id)
-      assertNoNewline(text, 'note')
       glab(['api', '-X', 'POST', api(ref.projectPath, `issues/${ref.iid}/notes`), '-f', `body=${text}`], gopts(dir))
     },
     children: (_id) => {
@@ -632,13 +646,15 @@ export function gitlabTasks(dir: string): TaskStore {
 export function gitlabTasksAsync(dir: string): TaskStoreAsync {
   return {
     list: async (f = {}) => {
+      const base = resolveProjectPath(dir)
       const issues = await queryIssuesAsync(dir, statesFor(f), fetchCap(f))
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir))).map(pub)
+      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
       return applyFilter(rows, f)
     },
     ready: async (f = {}) => {
+      const base = resolveProjectPath(dir)
       const issues = await queryIssuesAsync(dir, ['opened'], QUERY_CAP)
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir))).map(pub)
+      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
       let q = rows.filter((r) => r.status !== 'closed')
       if ((f.labels?.length ?? 0) > 0) {
         for (const l of f.labels!) q = q.filter((r) => r.labels?.includes(l))
@@ -652,8 +668,9 @@ export function gitlabTasksAsync(dir: string): TaskStoreAsync {
     },
     get: async (id) => {
       const ref = parseIssueRef(dir, id)
+      const base = resolveProjectPath(dir)
       const i = await getIssueAsync(dir, ref)
-      return i === undefined ? undefined : toRow(i, ref.projectPath)
+      return i === undefined ? undefined : toRow(i, ref.projectPath, base)
     },
     children: async () => {
       throw new Error('gitlab tasks: children not supported')
