@@ -27,7 +27,7 @@ import {
   type ModelEvent,
   reduce,
   type Session,
-} from './vendor/acp-model/src/index.ts';
+} from '../../../packages/acp/model/src/index.ts';
 
 const at = (row: ArchiveRow): number => {
   const ts = (row as { ts?: string }).ts;

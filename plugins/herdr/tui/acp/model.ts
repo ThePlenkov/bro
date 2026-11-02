@@ -50,7 +50,7 @@ import {
   type Session,
   type Item as TheirItem,
   type ToolCallItem,
-} from '../vendor/acp-model/src/index.ts';
+} from '../../../../packages/acp/model/src/index.ts';
 import { isJudgeTurn, verdictOf } from '../verdict.ts';
 import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../view.ts';
 import { acpLine, lineText } from './lines.ts';

@@ -12,7 +12,7 @@ import type {
   Item as TheirItem,
   ThoughtItem,
   ToolCallItem,
-} from '../vendor/acp-model/src/index.ts';
+} from '../../../../packages/acp/model/src/index.ts';
 
 /** One painted cell — `token` names the semantic role (theme resolves
  *  it), `fill` names a surface role for the cell/row background. */

@@ -7,7 +7,17 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!**/schemas/**", "!site/content/docs/reference/**", "!**/vendor/**"]
+    "includes": [
+      "**",
+      "!**/schemas/**",
+      "!site/content/docs/reference/**",
+      "!**/vendor/**",
+      "!packages/acp/model/src/content.ts",
+      "!packages/acp/model/src/index.ts",
+      "!packages/acp/model/src/reducer.ts",
+      "!packages/acp/model/src/sanitiser.ts",
+      "!packages/acp/model/src/types.ts"
+    ]
   },
   "formatter": {
     "enabled": true,
