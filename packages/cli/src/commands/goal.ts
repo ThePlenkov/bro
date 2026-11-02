@@ -381,6 +381,8 @@ interface GoalArgs {
   asJson: boolean
   /** Non-flag argv after consuming --session/--turns values. */
   positional: string[]
+  /** When true, tail after -- must be treated verbatim (no verb dispatch). */
+  verbatim: boolean
 }
 
 function parseGoalArgs(argv: string[]): GoalArgs {
@@ -408,11 +410,13 @@ function parseGoalArgs(argv: string[]): GoalArgs {
     turns = n
   }
   const valueIdx = new Set([si, ti].filter((i) => i >= 0).map((i) => i + 1))
+  const verbatim = tail.length > 0
   return {
     session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
     turns,
     asJson: head.includes('--json'),
-    positional: tail.length > 0 ? tail : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    positional: verbatim ? tail : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    verbatim,
   }
 }
 
@@ -499,22 +503,26 @@ export function runGoalCommand(argv: string[]): void {
     )
   }
   const dir = process.cwd()
-  const { session, turns, asJson, positional } = parseGoalArgs(argv)
+  const { session, turns, asJson, positional, verbatim } = parseGoalArgs(argv)
   const target = session ?? SEED
   const verb = positional[0]
   // a session-scoped verb binds the session's materialized goal — the
   // seed is consumed, not left behind to re-seed the next session
   const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
 
-  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
+  if (!verbatim && verb !== undefined && CLEAR_ALIASES.has(verb)) {
     withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson))
     return
   }
-  if (verb === 'pause' || verb === 'resume') {
+  if (!verbatim && (verb === 'pause' || verb === 'resume')) {
     withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson))
     return
   }
-  if (verb === 'status' || verb === undefined) {
+  if (!verbatim && (verb === 'status' || verb === undefined)) {
+    printStatus(verbGoal(), target, asJson)
+    return
+  }
+  if (positional.length === 0) {
     printStatus(verbGoal(), target, asJson)
     return
   }
