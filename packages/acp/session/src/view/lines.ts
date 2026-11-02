@@ -248,7 +248,7 @@ export function toolTail(item: ToolItem): { kind: string; arg: string; tally: st
   const tally = add + del > 0 ? ` +${add} −${del}` : '';
   return { kind, arg, tally };
 }
-export function printLines(item: Item): string[] /* NOSONAR */ {
+export function printLines(item: Item): string[] /* NOSONAR typescript:S3776 */ {
   const rows = (lines: string[]): string[] => lines;
   const folded = item.collapsed === true;
   const more = 'text' in item ? item.text.split('\n').length : 0;

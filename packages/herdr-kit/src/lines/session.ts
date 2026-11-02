@@ -201,7 +201,11 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
    *  turn rows print the boundary; permission rows print the ask. The
    *  LED mapping is the shared verdict — the pane stays readonly:
    *  rows render, nothing answers back. */
-  const eventRow = (a: Attach, row: ArchiveRow, t: SessionTarget): void => /* NOSONAR */ {
+  const eventRow = (
+    a: Attach,
+    row: ArchiveRow,
+    t: SessionTarget
+  ): void => /* NOSONAR typescript:S3776 */ {
     switch (row.kind) {
       case 'update':
         if (row.update !== undefined) renderer?.update(row.update);

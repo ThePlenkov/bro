@@ -63,7 +63,7 @@ export async function serve(opts: ServeOpts): Promise<ServedPane> {
    *  Ctrl+C copies the current row as OSC 52. No quit binding — the
    *  pane's owner owns lifecycle. */
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  renderer.keyInput.on('keypress', key => /* NOSONAR */ {
+  renderer.keyInput.on('keypress', key => /* NOSONAR typescript:S3776 */ {
     if (key.ctrl && key.name === 'c') {
       const text = pane.writer.copy();
       if (text === undefined || text === '') return;

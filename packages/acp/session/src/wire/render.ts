@@ -444,7 +444,7 @@ export class AcpRenderer {
     }
   }
 
-  private onTool(u: SessionUpdateLike): void /* NOSONAR */ {
+  private onTool(u: SessionUpdateLike): void /* NOSONAR typescript:S3776 */ {
     const t = u as {
       toolCallId?: string;
       title?: string | null;

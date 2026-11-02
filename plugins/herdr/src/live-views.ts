@@ -130,7 +130,7 @@ function openViewWorkspace(a: LiveAgent): string | undefined {
 /** Converge live agents → view panes. `state.liveViews` maps agentId
  *  → {workspace, pane_id}; agents whose worktree already carries a
  *  managed session pane are skipped — one view per agent, never two. */
-export function convergeLiveViews(
+export function convergeLiveViews /* NOSONAR typescript:S3776 */(
   base: string,
   _main: string,
   state: PluginState,

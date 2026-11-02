@@ -244,7 +244,10 @@ const EMPTY_OUTPUT = (s: string): boolean => {
  *  between blocks, `▸ JSON` for pure-JSON results. Text output is
  *  capped at 3 lines then `+N more`, and `(no output)` results are
  *  dropped before any row exists. */
-export const acpCardRows = (vi: unknown, width: number): CardLine[] => /* NOSONAR */ {
+export const acpCardRows = (
+  vi: unknown,
+  width: number
+): CardLine[] => /* NOSONAR typescript:S3776 */ {
   const item = vi as TheirItem;
   if (item.kind !== 'tool_call') return [];
   const w = Math.max(20, width);

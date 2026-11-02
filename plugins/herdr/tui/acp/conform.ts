@@ -82,7 +82,7 @@ interface Stats {
   messageChars: number;
   verdict: string;
 }
-const run = async (name: string): Promise<Stats> => /* NOSONAR */ {
+const run = async (name: string): Promise<Stats> => /* NOSONAR typescript:S3776 */ {
   const impl = await pickImpl(name, {});
   // the .prompt.md fallback — same posture as the live feed: only
   // when the archive itself journals no prompt rows
