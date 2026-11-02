@@ -236,14 +236,18 @@ function convergeWorkspaces(
  *  live mirror retires the fallback tail in the same pass. The
  *  recorded ws id must match the live one — a stale `managed` record
  *  left by a user reopen must not put our pane on their workspace. */
-function convergeRenderers(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeRenderers(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  sessionArmed: Set<string>
+): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      // the acp lane shows exactly one pane — the session view folds
+      // an armed session pane shows exactly one pane — the view folds
       // the bus tail in (spec bro-l8wqu)
       const rctx = { path, ws, state: ctx.state };
-      if (laneOf(p.lanes, path) === 'acp') retireEvents(rctx);
+      if (sessionArmed.has(path)) retireEvents(rctx);
       else ensureRenderer(rctx);
     }
   }
@@ -256,14 +260,18 @@ function convergeRenderers(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx
  *  renderers so the pane-order decision sees the settled set. Same
  *  managed-record guard as the renderer: a stale `managed` record
  *  must not put our pane on a user's workspace. */
-function convergeStatuses(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeStatuses(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  sessionArmed: Set<string>
+): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      // the acp lane folds the status strip into the session pane
+      // an armed session pane folds the status strip into the view
       // (spec bro-l8wqu)
       const rctx = { path, ws, state: ctx.state };
-      if (laneOf(p.lanes, path) === 'acp') retireStatus(rctx);
+      if (sessionArmed.has(path)) retireStatus(rctx);
       else ensureStatus(rctx);
     }
   }
@@ -277,10 +285,10 @@ function convergeStatuses(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx)
  *  every step or the whole workspace vanishes (dogfood finding). Same
  *  managed-record guard as the renderer. */
 function convergeSessionsAcp(
-  p: Planes,
   wsForPath: Map<string, string>,
   ctx: WsCtx,
-  liveByTree: Map<string, { id: string; events: string }>
+  liveByTree: Map<string, { id: string; events: string }>,
+  sessionArmed: Set<string>
 ): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
@@ -289,7 +297,7 @@ function convergeSessionsAcp(
     // events archive resolves — the journal is the truth, not the
     // provider kind (native workers journal ACP events too).
     const agent = liveByTree.get(path);
-    if (laneOf(p.lanes, path) === 'acp' || agent !== undefined) {
+    if (sessionArmed.has(path)) {
       ensureSession({ path, ws, state: ctx.state, ...(agent !== undefined ? { agent } : {}) });
     }
   }
@@ -301,19 +309,13 @@ function convergeSessionsAcp(
  *  viewable→empty flip the fallback set armed first, so closing the
  *  session pane never empties the workspace. */
 function convergeSessions(
-  p: Planes,
   wsForPath: Map<string, string>,
   ctx: WsCtx,
-  liveByTree: Map<string, { id: string; events: string }>
+  sessionArmed: Set<string>
 ): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
-    if (
-      rec?.managed === true &&
-      rec.ws === ws &&
-      laneOf(p.lanes, path) !== 'acp' &&
-      !liveByTree.has(path)
-    ) {
+    if (rec?.managed === true && rec.ws === ws && !sessionArmed.has(path)) {
       retireSession({ path, ws, state: ctx.state });
     }
   }
@@ -398,14 +400,22 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   for (const a of liveAgents(base)) {
     if (a.worktree !== undefined) liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
+  // where a session pane lives it is the ONE human pane — the acp
+  // lane's attach OR any worktree whose agent journal resolves; every
+  // other surface (mirror tail, events renderer, status strip) folds
+  // into it on the same predicate
+  const sessionArmed = new Set(liveByTree.keys());
+  for (const [path, lane] of Object.entries(p.lanes)) {
+    if (lane === 'acp') sessionArmed.add(path);
+  }
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes
-  convergeSessionsAcp(p, wsForPath, ctx, liveByTree);
-  convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
-  markExitedMirrors(p, ctx.state);
-  convergeRenderers(p, wsForPath, ctx);
-  convergeStatuses(p, wsForPath, ctx);
-  convergeSessions(p, wsForPath, ctx, liveByTree);
+  convergeSessionsAcp(wsForPath, ctx, liveByTree, sessionArmed);
+  convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionArmed);
+  markExitedMirrors(p, ctx.state, sessionArmed);
+  convergeRenderers(wsForPath, ctx, sessionArmed);
+  convergeStatuses(wsForPath, ctx, sessionArmed);
+  convergeSessions(wsForPath, ctx, sessionArmed);
   // live agents with no armed worktree get a plugin-owned view
   // workspace+pane; armed trees are covered by their own panes
   convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()));
