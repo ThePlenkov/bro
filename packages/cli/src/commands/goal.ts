@@ -415,7 +415,9 @@ function parseGoalArgs(argv: string[]): GoalArgs {
     session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
     turns,
     asJson: head.includes('--json'),
-    positional: verbatim ? tail : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    positional: verbatim
+      ? [...head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)), ...tail]
+      : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
     verbatim,
   }
 }
@@ -519,10 +521,6 @@ export function runGoalCommand(argv: string[]): void {
     return
   }
   if (!verbatim && (verb === 'status' || verb === undefined)) {
-    printStatus(verbGoal(), target, asJson)
-    return
-  }
-  if (positional.length === 0) {
     printStatus(verbGoal(), target, asJson)
     return
   }
