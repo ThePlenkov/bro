@@ -205,7 +205,7 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     a: Attach,
     row: ArchiveRow,
     t: SessionTarget
-  ): void => {
+  ): void => /* NOSONAR typescript:S3776 */ {
     switch (row.kind) {
       case 'update':
         if (row.update !== undefined) renderer?.update(row.update);

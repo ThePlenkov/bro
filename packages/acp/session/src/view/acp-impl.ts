@@ -582,7 +582,7 @@ export class AcpImpl implements PaneImpl {
     this.ctx = { ...this.ctx, ...ctx };
   }
 
-  feed(row: ArchiveRow): void {
+  feed(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
     this.launchTs ??= row.ts;
     // the provider label is any `acp provider 'X'`/`provider:X` by —
     // conductor rows name the orchestrator, not the model

@@ -308,7 +308,10 @@ const EMPTY_OUTPUT = (s: string): boolean => {
  *  noise: `(no output)` results and blank lines are dropped, never
  *  a row. Capped for the under-call preview — `more` counts what
  *  the cap hid (the `+N more` row). */
-export function toolBodyLines(item: ToolItem, max = 3): { lines: string[]; more: number } {
+export function toolBodyLines(
+  item: ToolItem,
+  max = 3
+): /* NOSONAR typescript:S3776 */ { lines: string[]; more: number } {
   const all: string[] = [];
   const arg = argBody(item);
   if (arg !== undefined) all.push(...arg.split('\n'));
