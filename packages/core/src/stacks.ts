@@ -288,9 +288,11 @@ export function gitStacks(dir: string): StackFacade {
             '--count',
             `${fork}..${m.branch}`,
           ]).out.trim()
-          if (mergeCount !== '' && mergeCount !== '0') {
+          if (mergeCount === '' || Number(mergeCount) > 0) {
             lines.push(
-              `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
+              mergeCount === ''
+                ? `  ${m.branch} — could not count merge commits in range; merge aborted`
+                : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
             )
             break
           }
