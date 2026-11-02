@@ -570,9 +570,13 @@ export function bdStoreBlocker(): string | undefined {
     // must retry and not rely on the process-exit sweep (which races the
     // still-starting daemon). Remove from the exit sweep to avoid double
     // cleanup.
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-    const idx = tmpDirs.indexOf(dir);
-    if (idx >= 0) tmpDirs.splice(idx, 1);
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      const idx = tmpDirs.indexOf(dir);
+      if (idx >= 0) tmpDirs.splice(idx, 1);
+    } catch {
+      // keep the directory registered so the exit sweep still sees it
+    }
   }
 }
 
