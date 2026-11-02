@@ -336,6 +336,7 @@ function ToolCard(props: {
   selected: boolean;
   syntax: SyntaxStyle;
   width: () => number;
+  onToggle?: () => void;
 }) {
   const tail = createMemo(() => toolTail(props.item));
   const body = createMemo(() => toolBodyLines(props.item));
@@ -366,6 +367,10 @@ function ToolCard(props: {
           content={`${tail().kind}${tail().arg}`}
         />
         <text fg={theme.muted} attributes={TextAttributes.DIM} content={tail().tally} />
+        <box flexGrow={1} />
+        <Show when={md() !== ''}>
+          <FoldBtn open={!props.item.collapsed} onToggle={props.onToggle} />
+        </Show>
       </box>
       {/* pinned open (Enter/c) — the FULL body as real markdown:
        *  prose formats, fences highlight via tree-sitter. The
@@ -411,6 +416,14 @@ function ToolCard(props: {
             flexShrink={0}
             maxWidth={props.width() - 2}
           />
+        </box>
+      </Show>
+      {/* a long body scrolls the title row away — the foot button
+       *  keeps a close target on screen, same as the prompt card */}
+      <Show when={!props.item.collapsed && md() !== ''}>
+        <box flexDirection="row" flexShrink={0} width="100%">
+          <box flexGrow={1} />
+          <FoldBtn open={true} onToggle={props.onToggle} />
         </box>
       </Show>
     </box>
@@ -493,6 +506,7 @@ function AcpRunRow(props: {
   width: () => number;
   frame: () => number;
   findTool: (toolCallId: string) => unknown;
+  onToggle?: () => void;
 }) {
   return (
     <box flexDirection="column" flexShrink={0}>
@@ -517,10 +531,12 @@ function AcpRunRow(props: {
           attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
           content={props.item.arg ?? ''}
         />
+        <box flexGrow={1} />
+        <FoldBtn open={props.item.collapsed !== true} onToggle={props.onToggle} />
       </box>
       {/* selection previews: a still-collapsed run shows its members
-       *  while it holds the selection (j/k), Enter/c pins it open —
-       *  no mouse path exists by design (addendum 7) */}
+       *  while it holds the selection (j/k), Enter/c pins it open;
+       *  the FoldBtn on the head row is the mouse path */}
       <Show when={!props.item.collapsed || (props.selected && props.item.foldTouched !== true)}>
         <For each={props.item.runs ?? []}>
           {m => (
@@ -540,6 +556,23 @@ function AcpRunRow(props: {
         </For>
       </Show>
     </box>
+  );
+}
+
+/** The `▸ show more`/`▾ show less` click target — the ONLY mouse
+ *  surface a foldable row carries: selectable=false keeps it out of
+ *  every drag-selection, and its press pin-toggles the row it sits on
+ *  (the prompt card's button grammar, generalised). */
+function FoldBtn(props: { open: boolean; onToggle?: () => void }) {
+  return (
+    <text
+      fg={props.open ? theme.muted : theme.accent}
+      attributes={props.open ? TextAttributes.DIM : undefined}
+      content={props.open ? '▾ show less ' : '▸ show more '}
+      selectable={false}
+      onMouseDown={() => props.onToggle?.()}
+      flexShrink={0}
+    />
   );
 }
 
@@ -631,16 +664,7 @@ function PromptRow(props: {
                   content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Space expands`}
                   flexGrow={1}
                 />
-                {/* the card's one mouse target — selectable=false so
-                 *  a press here can never start a drag-selection;
-                 *  everything else on the card stays copy-clean */}
-                <text
-                  fg={theme.accent}
-                  content="▸ show more "
-                  selectable={false}
-                  onMouseDown={() => props.onToggle?.()}
-                  flexShrink={0}
-                />
+                <FoldBtn open={false} onToggle={props.onToggle} />
               </box>
             </>
           }
@@ -657,14 +681,7 @@ function PromptRow(props: {
           <Show when={isFoldable(props.item)}>
             <box flexDirection="row" flexShrink={0} width="100%">
               <box flexGrow={1} />
-              <text
-                fg={theme.muted}
-                attributes={TextAttributes.DIM}
-                content="▾ show less "
-                selectable={false}
-                onMouseDown={() => props.onToggle?.()}
-                flexShrink={0}
-              />
+              <FoldBtn open={true} onToggle={props.onToggle} />
             </box>
           </Show>
         </Show>
@@ -781,7 +798,17 @@ function ItemRow(props: {
               when={segs() === null}
               fallback={
                 <box flexDirection="column" flexShrink={0}>
-                  <AcpSegRow segs={segs() ?? []} selected={props.selected} />
+                  <box flexDirection="row" width="100%" flexShrink={0}>
+                    <box flexGrow={1} minWidth={0}>
+                      <AcpSegRow segs={segs() ?? []} selected={props.selected} />
+                    </box>
+                    <Show when={tool() !== undefined}>
+                      <FoldBtn
+                        open={tool()?.collapsed !== true}
+                        onToggle={() => props.onToggleRow?.(props.item.id)}
+                      />
+                    </Show>
+                  </box>
                   <Show
                     when={
                       tool() !== undefined &&
@@ -793,6 +820,12 @@ function ItemRow(props: {
                       syntax={props.syntax}
                       width={props.width}
                     />
+                  </Show>
+                  <Show when={tool() !== undefined && tool()?.collapsed !== true}>
+                    <box flexDirection="row" flexShrink={0} width="100%">
+                      <box flexGrow={1} />
+                      <FoldBtn open={true} onToggle={() => props.onToggleRow?.(props.item.id)} />
+                    </box>
                   </Show>
                 </box>
               }
@@ -806,6 +839,7 @@ function ItemRow(props: {
                     width={props.width}
                     frame={props.frame}
                     findTool={props.findTool}
+                    onToggle={() => props.onToggleRow?.(props.item.id)}
                   />
                 }
               >
@@ -850,12 +884,25 @@ function ItemRow(props: {
                                             <Show
                                               when={textOpen() || !isFoldable(props.item)}
                                               fallback={
-                                                <text
-                                                  fg={sideColor(tone())}
-                                                  attributes={TextAttributes.DIM}
+                                                <box
+                                                  flexDirection="row"
+                                                  width="100%"
                                                   flexShrink={0}
-                                                  content={foldSummary()}
-                                                />
+                                                >
+                                                  <text
+                                                    fg={sideColor(tone())}
+                                                    attributes={TextAttributes.DIM}
+                                                    flexShrink={0}
+                                                    flexGrow={1}
+                                                    content={foldSummary()}
+                                                  />
+                                                  <FoldBtn
+                                                    open={false}
+                                                    onToggle={() =>
+                                                      props.onToggleRow?.(props.item.id)
+                                                    }
+                                                  />
+                                                </box>
                                               }
                                             >
                                               <box flexDirection="column" flexShrink={0}>
@@ -878,15 +925,24 @@ function ItemRow(props: {
                                             </Show>
                                           }
                                         >
-                                          <markdown
-                                            content={textOf()}
-                                            syntaxStyle={props.syntax}
-                                            conceal
-                                            streaming
-                                            internalBlockMode="top-level"
-                                            flexShrink={0}
-                                            maxWidth={props.width() - 1}
-                                          />
+                                          <box flexDirection="column" flexShrink={0}>
+                                            <markdown
+                                              content={textOf()}
+                                              syntaxStyle={props.syntax}
+                                              conceal
+                                              streaming
+                                              internalBlockMode="top-level"
+                                              flexShrink={0}
+                                              maxWidth={props.width() - 1}
+                                            />
+                                            <box flexDirection="row" flexShrink={0} width="100%">
+                                              <box flexGrow={1} />
+                                              <FoldBtn
+                                                open={true}
+                                                onToggle={() => props.onToggleRow?.(props.item.id)}
+                                              />
+                                            </box>
+                                          </box>
                                         </Show>
                                       }
                                     >
@@ -913,14 +969,21 @@ function ItemRow(props: {
                                    *  thought row (capture rows 3/11/23);
                                    *  open it shows the body as markdown */}
                                   <box flexDirection="column" flexShrink={0}>
-                                    <box flexDirection="row" flexShrink={0}>
+                                    <box flexDirection="row" flexShrink={0} width="100%">
                                       <text fg={theme.amber} content="+ " />
                                       <text fg={theme.amber} content="Thought" />
                                       <text
                                         fg={theme.muted}
                                         attributes={TextAttributes.DIM}
                                         content={` · ${foldSummary()}`}
+                                        flexGrow={1}
                                       />
+                                      <Show when={isFoldable(props.item)}>
+                                        <FoldBtn
+                                          open={props.item.collapsed !== true}
+                                          onToggle={() => props.onToggleRow?.(props.item.id)}
+                                        />
+                                      </Show>
                                     </box>
                                     <Show when={textOpen() && isFoldable(props.item)}>
                                       <box paddingLeft={2} flexShrink={0}>
@@ -945,34 +1008,56 @@ function ItemRow(props: {
                                *  text column (markers 0 / text 2,
                                *  addendum 27). Long prose folds to a
                                *  one-line summary. */}
-                              <box flexDirection="row" flexShrink={0} width="100%" paddingLeft={2}>
-                                {/* minWidth:0 — a flex item's floor is
-                                 *  its content width; without it long
-                                 *  paragraphs hold their unwrapped
-                                 *  width and clip under the scrollbar */}
-                                <box flexGrow={1} flexShrink={0} minWidth={0}>
-                                  <Show
-                                    when={textOpen() || !isFoldable(props.item)}
-                                    fallback={
-                                      <text
-                                        fg={theme.muted}
-                                        attributes={TextAttributes.DIM}
-                                        content={foldSummary()}
+                              <box flexDirection="column" flexShrink={0} width="100%">
+                                <box
+                                  flexDirection="row"
+                                  flexShrink={0}
+                                  width="100%"
+                                  paddingLeft={2}
+                                >
+                                  {/* minWidth:0 — a flex item's floor is
+                                   *  its content width; without it long
+                                   *  paragraphs hold their unwrapped
+                                   *  width and clip under the scrollbar */}
+                                  <box flexGrow={1} flexShrink={0} minWidth={0}>
+                                    <Show
+                                      when={textOpen() || !isFoldable(props.item)}
+                                      fallback={
+                                        <text
+                                          fg={theme.muted}
+                                          attributes={TextAttributes.DIM}
+                                          content={foldSummary()}
+                                          flexShrink={0}
+                                        />
+                                      }
+                                    >
+                                      <markdown
+                                        content={props.item.kind === 'tool' ? '' : textOf()}
+                                        syntaxStyle={props.syntax}
+                                        conceal
+                                        streaming
+                                        internalBlockMode="top-level"
                                         flexShrink={0}
+                                        maxWidth={props.width() - 3}
                                       />
-                                    }
-                                  >
-                                    <markdown
-                                      content={props.item.kind === 'tool' ? '' : textOf()}
-                                      syntaxStyle={props.syntax}
-                                      conceal
-                                      streaming
-                                      internalBlockMode="top-level"
-                                      flexShrink={0}
-                                      maxWidth={props.width() - 3}
+                                    </Show>
+                                  </box>
+                                  <Show when={!textOpen() && isFoldable(props.item)}>
+                                    <FoldBtn
+                                      open={false}
+                                      onToggle={() => props.onToggleRow?.(props.item.id)}
                                     />
                                   </Show>
                                 </box>
+                                <Show when={textOpen() && isFoldable(props.item)}>
+                                  <box flexDirection="row" flexShrink={0} width="100%">
+                                    <box flexGrow={1} />
+                                    <FoldBtn
+                                      open={true}
+                                      onToggle={() => props.onToggleRow?.(props.item.id)}
+                                    />
+                                  </box>
+                                </Show>
                               </box>
                             </Show>
                           }
@@ -1004,6 +1089,7 @@ function ItemRow(props: {
                       selected={props.selected}
                       syntax={props.syntax}
                       width={props.width}
+                      onToggle={() => props.onToggleRow?.(props.item.id)}
                     />
                   )}
                 </Show>

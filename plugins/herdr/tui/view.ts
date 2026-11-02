@@ -464,7 +464,14 @@ export function diffText(content: Extract<ToolContent, { kind: 'diff' }>): strin
 export function sysCopy(text: string): boolean {
   const tryCmd = (bin: string, args: string[]): boolean => {
     try {
-      execFileSync(bin, args, { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
+      // bounded: a wedged clip.exe (clipboard locked, headless env)
+      // must never freeze the renderer — execFileSync blocks the
+      // whole event loop while the child lives
+      execFileSync(bin, args, {
+        input: text,
+        stdio: ['pipe', 'ignore', 'ignore'],
+        timeout: 400,
+      });
       return true;
     } catch {
       return false;
