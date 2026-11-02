@@ -271,27 +271,41 @@ export function gitStacks(dir: string): StackFacade {
           // went empty mid-range — patch-identical to trunk, an
           // --allow-empty, a duplicate inside the branch — and is skipped;
           // any other failure aborts the replay and reports like before.
+          //
+          // Merge commits carry conflict resolutions that aren't replayable
+          // by cherry-picking parents alone — refuse rather than silently
+          // drop them.
           const fork = gitTry(['-C', main.path, 'merge-base', trunk, m.branch]).out.trim()
-          const picks =
-            fork === ''
-              ? []
-              : // --topo-order, not default date order — skewed
-                // timestamps would replay a child before its parent
-                gitTry([
-                  '-C',
-                  main.path,
-                  'rev-list',
-                  '--topo-order',
-                  '--reverse',
-                  '--no-merges',
-                  `${fork}..${m.branch}`,
-                ])
-                  .out.split('\n')
-                  .filter(Boolean)
-          let r =
-            fork === ''
-              ? { code: 1, out: '', err: `no merge-base with ${trunk}` }
-              : { code: 0, out: '', err: '' }
+          if (fork === '') {
+            lines.push(`  ${m.branch} has no merge-base with ${trunk}`)
+            break
+          }
+          const mergeCount = gitTry([
+            '-C',
+            main.path,
+            'rev-list',
+            '--merges',
+            '--count',
+            `${fork}..${m.branch}`,
+          ]).out.trim()
+          if (mergeCount !== '' && mergeCount !== '0') {
+            lines.push(
+              `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
+            )
+            break
+          }
+          const picks = gitTry([
+            '-C',
+            main.path,
+            'rev-list',
+            '--topo-order',
+            '--reverse',
+            '--no-merges',
+            `${fork}..${m.branch}`,
+          ])
+            .out.split('\n')
+            .filter(Boolean)
+          let r = { code: 0, out: '', err: '' }
           for (const sha of picks) {
             const p = gitTry(['-C', main.path, 'cherry-pick', sha])
             if (p.code === 0) {
