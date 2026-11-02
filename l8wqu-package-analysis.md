@@ -75,51 +75,53 @@ Plus two file-doc contracts: `FleetPaneState` (writer: cli projector; readers:
 cli panes, plugin `lanes.ts`, tui) and the herdr pane-report envelope
 (`reportSession`/`releaseSession`/`PANE_SOURCE`/`plain`, used by cli + tui).
 
-## 4. Proposed packages — target shape
+## 4. Proposed packages — consolidated to 5
 
-Owner scope (revised): **existing packages are untouched**; the extraction
-material is this PR's new code **plus everything reusable currently sitting
-in `packages/cli` and `plugins/herdr`**. Target shape:
+Owner scope (final): 9 packages was too fine-grained for ~14k LOC —
+consolidate to **4 new packages**, each internally layered but exposing
+ONE public index. Existing packages stay untouched; extraction material
+is this PR's new code plus everything reusable sitting in `packages/cli`
+and `plugins/herdr`. Target shape:
 
-- `packages/acp/*` — reusable ACP tooling, imports **nothing** from bro
-  code. Internal layering inside the family: `model`/`wire`/`archive`
-  (pure) → `view` (renderer-independent) → `tui` (Bun/OpenTUI).
-- `packages/<bro-side>` — new bro packages for fleet/herdr glue; may
-  depend on `@broject/core` + `acp/*`.
+- `packages/acp/*` — reusable ACP tooling, a closed subtree: acp code
+  imports **only siblings + external deps** (enforced mechanically).
+- `packages/herdr-kit` — one bro-side package bridging bro/fleet/herdr
+  to the acp layer; may import `@broject/core` + `acp/*`.
 - `packages/cli` — ends as **command wiring**: argv, `loadBroConfig`,
   env, stdout formatting; all logic delegates to package APIs.
 - `plugins/herdr` — ends as **thin glue**: herdr workspace/pane/agent
   API calls ↔ bro state ↔ package calls; no model/render/lifecycle mass.
 - `packages/providers` — keeps the write side (needs `@broject/core`);
-  imports `acp-archive`'s `ArchiveRow` schema so writer/readers share
+  imports `acp-session`'s `ArchiveRow` schema so writer/readers share
   one declared contract.
 
-| Package                           | Path                     | Moves in                                                                                                                                                                                                                                          | Public API                                                                                                                                                                                                                                                                                                                                              | Consumers                                                                         |
-| --------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **`@broject/acp-model`**          | `packages/acp/model`     | `tui/vendor/acp-model/` verbatim (Apache-2.0, ATTRIBUTION/NOTICE, pin `70b8a6d`)                                                                                                                                                                  | `createSession`, `reduce`, `Session`, `Item` union, `ModelEvent`, `sanitise`                                                                                                                                                                                                                                                                            | acp-view's `AcpImpl`                                                              |
-| **`@broject/acp-wire`**           | `packages/acp/wire`      | helper half of `providers/acp-render.ts`; the plugin copy deletes to an import                                                                                                                                                                    | `SessionUpdateLike`, `PermissionRequestLike`, `ToolWire`, `ToolContent`, `safe`, `safeBlock`, `clip`, `firstLine`, `chunkText`, `toolArg`, `toolContent`, `DONE_STATUS`, `ALWAYS_KINDS`/`pickOption` perm policy, **`JUDGE_PROMPT_MARK`** (owned here; `providers/acp.ts` imports it for `TYPED_PREAMBLE`), `plain`; plus `AcpRenderer` line-mode class | providers (re-export), session-lines, plugin `acp-watch`, acp-view                |
-| **`@broject/acp-archive`**        | `packages/acp/archive`   | `cli/session-feed.ts` lower half; `archiveFile`/path contract from `acp-events.ts`; both duplicated tail pumps (`session-view`+`tui/main.ts`); `readPrompt` `.prompt.md` derivation                                                               | `ArchiveRow`(+kind union), `parseArchiveRows`, `readTailSlice`, `sizeOf`, `TAIL_BYTES`, `tailArchive(path,{offset,widen})`, `rowVerdict`, `eventsVerdict`, `eventsFile(agentsHome,agentId)`, `promptFile(eventsPath)`, `logStem`, `PaneLed`/`LedState`                                                                                                  | providers writer, session-lines, fleet-status (led), acp-tui, herdr-views         |
-| **`@broject/acp-view`**           | `packages/acp/view`      | `tui/model.ts`, `impl.ts`, `state.ts`, `view.ts`, `verdict.ts`, `theme.ts`, `acp/model.ts`, `acp/lines.ts`, `acp/conform.ts`(→testkit)                                                                                                            | `Item`/`Op`/`PaneState`, `applyOps`, `PaneImpl`+`pickImpl` registry, `SessionModel`(legacy), `AcpImpl`(acp), `TimeGutter`, fold/settle rules, `verdictOf`/`isJudgeTurn`, `Segment`/`CardLine`/`acpLine`/`acpCardRows`/`itemGroup`, `printLines`/`toolBody*`/`mdPlain`/`mdSource`, `theme`/`ledColor`, `dumpItems`/`copyItem`                            | acp-tui, session-lines (dump/headless), future renderers                          |
-| **`@broject/acp-tui`** (Bun-only) | `packages/acp/tui`       | `tui/app.tsx`, `tui/main.ts` generic half                                                                                                                                                                                                         | components: `Pane`, `ToolCard`, `PromptRow`, `VerdictRow`, `AcpToolBody`, `HeaderBar`, `FooterBar`, scrollbox chrome; shell: `createPane`, `mountPane`, `serve({target:{events,agent,worktree}, report:(led,mode)=>void})` — resolved target + report callback in, no herdr/config imports                                                              | plugin `tui/main.ts` glue, published `bunx` entry                                 |
-| **`@broject/fleet-status`**       | `packages/fleet-status`  | `cli/fleet-state.ts` whole (doc schema + `PaneLed` re-export); `herdr-projector.ts` classifier (`laneOf`/`events`/`labelFor` projection); `SessionTarget`/`resolveTarget`/`targetKey`/`sessionAgentOf`/`viewVerdict` from `herdr-session-view.ts` | `FleetPaneState`, `parseFleetState`, `fleetStatusPath`, `nextSeq`, `projectFleetStatus`, `SessionTarget`, `resolveTarget`, `targetKey`, `sessionAgentOf`, `viewVerdict`                                                                                                                                                                                 | cli herdr-* commands, plugin `lanes.ts`, session-lines, plugin `tui/main.ts` glue |
-| **`@broject/session-lines`**      | `packages/session-lines` | `herdr-session-view.ts` lifecycle minus argv/env — attach `session/load` leg, tail events, render via `AcpRenderer`, report loop                                                                                                                  | `runSessionView({target, out, report, opts})` — resolved target in, lines out, led via callback                                                                                                                                                                                                                                                         | cli `herdr session-view` (thin wrapper), herdr-views `viewCommand` fallback       |
-| **`@broject/herdr-client`**       | `packages/herdr-client`  | `session-feed.ts` upper half (`paneArgs`/`reportSession`/`releaseSession`/`sessionMetaArgs`/`SESSION_PANE_AGENT`); `PANE_SOURCE`/`plain` from `herdr-status-view.ts`; `pidAlive`/`agentsJson` from plugin `lib.ts`+`tui/main.ts`                  | spawnSync herdr verbs, pane-report envelope, registry reads (`agents.json`), `pidAlive`, `plain`                                                                                                                                                                                                                                                        | cli herdr-* commands, plugin `lib.ts`, session-lines, plugin `tui/main.ts` glue   |
-| **`@broject/herdr-views`**        | `packages/herdr-views`   | `live-views.ts` + `sessions.ts` **decision** layer (discover→converge→ensure/retire/retry; bun probe→command choice)                                                                                                                              | `convergeViews({live, existing, policy}) → Action[]` (spawn/retire/retry), `viewCommand(spec,{bun}) → argv`, `ensureSession`/`retireSession` decisions — all pure over an injected exec/discovery seam                                                                                                                                                  | plugin `reconcile.ts`/`sessions.ts` glue; cli could reuse later                   |
+| Package                           | Path                   | Moves in                                                                                                                                                                                                                                                                                                | Public API                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Consumers                                                                                                |
+| --------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **`@broject/acp-model`**          | `packages/acp/model`   | `tui/vendor/acp-model/` verbatim (Apache-2.0, ATTRIBUTION/NOTICE, pin `70b8a6d`)                                                                                                                                                                                                                        | `createSession`, `reduce`, `Session`, `Item` union, `ModelEvent`, `sanitise`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `acp-session`'s `AcpImpl`                                                                                |
+| **`@broject/acp-session`**        | `packages/acp/session` | `providers/acp-render.ts` (helpers + `AcpRenderer`; the plugin copy deletes to an import); `cli/session-feed.ts` archive half; `acp-events.ts` path/schema contract; both duplicated tail pumps; `tui/{model,impl,state,view,verdict,theme}.ts`; `tui/acp/{model,lines,conform}.ts` (conform → testkit) | One index over `src/{wire,archive,model,view}` — **wire**: `SessionUpdateLike`/`PermissionRequestLike`/`ToolWire`/`ToolContent`, `safe`/`safeBlock`/`clip`/`firstLine`/`chunkText`, `toolArg`/`toolContent`, `DONE_STATUS`, `ALWAYS_KINDS`/`pickOption`, **`JUDGE_PROMPT_MARK`**, `plain`, `AcpRenderer`. **archive**: `ArchiveRow`(+kind), `parseArchiveRows`, `readTailSlice`/`sizeOf`/`TAIL_BYTES`, `tailArchive(path,{offset,widen})`, `rowVerdict`/`eventsVerdict`, `eventsFile`/`promptFile`/`logStem`, `PaneLed`/`LedState`. **model**: `Item`/`Op`/`PaneState`, `applyOps`, `PaneImpl`+`pickImpl`, `SessionModel`(legacy)/`AcpImpl`(acp), `TimeGutter`, fold/settle rules. **view**: `Segment`/`CardLine`/`acpLine`/`acpCardRows`/`itemGroup`, `printLines`/`toolBody*`/`mdPlain`/`mdSource`, `theme`/`ledColor`, `verdictOf`/`isJudgeTurn`, `dumpItems`/`copyItem` | providers (writer + re-export shim), herdr-kit (lines/fleet), acp-tui, plugin `acp-watch`, cli dump path |
+| **`@broject/acp-tui`** (Bun-only) | `packages/acp/tui`     | `tui/app.tsx`, `tui/main.ts` generic half                                                                                                                                                                                                                                                               | components: `Pane`, `ToolCard`, `PromptRow`, `VerdictRow`, `AcpToolBody`, `HeaderBar`, `FooterBar`, scrollbox chrome; shell: `createPane`, `mountPane`, `serve({target:{events,agent,worktree}, report:(led,mode)=>void})` — resolved target + report callback in                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | plugin `tui/main.ts` glue, published `bunx` entry                                                        |
+| **`@broject/herdr-kit`**          | `packages/herdr-kit`   | `session-feed.ts` envelope half; `cli/fleet-state.ts` whole; `herdr-projector.ts` classifier; `herdr-session-view.ts` lifecycle; `PANE_SOURCE`/`plain` from `herdr-status-view.ts`; `live-views.ts`+`sessions.ts` decision layer; `pidAlive`/`agentsJson` from `lib.ts`+`tui/main.ts`                   | One index over `src/{client,fleet,lines,views}` — **client**: `paneArgs`/`reportSession`/`releaseSession`/`sessionMetaArgs`/`SESSION_PANE_AGENT`, `PANE_SOURCE`, `plain`, `pidAlive`, `agentsJson` (the only place `spawnSync('herdr',…)` lives). **fleet**: `FleetPaneState`, `parseFleetState`, `fleetStatusPath`, `nextSeq`, `projectFleetStatus`, `SessionTarget`, `resolveTarget`, `targetKey`, `sessionAgentOf`, `viewVerdict`. **lines**: `runSessionView({target,out,report})` lifecycle (attach/tail/render/report). **views**: `convergeViews({live,existing,policy}) → Action[]`, `viewCommand(spec,{bun}) → argv`, `ensureSession`/`retireSession` decisions                                                                                                                                                                                                    | cli herdr-* commands, plugin `src/*` + `tui/main.ts` glue                                                |
 
-Internal layering (owner's point 6) inside each package:
+**Hard rules (import-graph enforced, generalized from the vendored
+test):** `acp-session` imports only `@broject/acp-model` + external
+deps — **no `@opentui/*`, no `solid-js`, no `@broject/*`** (acp-model
+excepted). `acp-tui` imports `acp-session` + `acp-model` + externals
+only — herdr arrives as a `report` callback, never an import.
 
-- `acp/archive`, `acp/wire`, `acp/model`: pure data + IO-at-edge
-  (`tailArchive` takes a path, nothing else touches fs).
-- `acp/view`: rows in via `feed()`, ops out via `drain()` — no fs, no
-  renderer, no herdr. Segments/cards are data; paint is the renderer's.
-- `acp/tui`: `components/` (pure Solid) → `shell/` (`mountPane`,
-  writer, OSC52, keys; consumes `PaneImpl`) → `serve()` entry (wires
-  `tailArchive` + impl + store). `report` is a callback — herdr never
-  imported.
-- `fleet-status`, `session-lines`, `herdr-views`: decisions/APIs take
-  resolved inputs; bro config reads stay outside (cli/plugin inject).
-- `herdr-client`: the one place `spawnSync('herdr', …)` lives — pure
-  argv builders at the top, exec seam below.
+Internal layering (owner's point 6) — now module-level inside each package:
+
+- `acp-session`: `src/wire` → `archive` → `model` → `view`. Decode only →
+  IO-at-edge (`tailArchive` takes a path; nothing else touches fs) →
+  `feed()`/`drain()` ops model (no fs, no renderer) → segments/cards as
+  data (paint is the renderer's). One `src/index.ts` re-exports all.
+- `acp-tui`: `components/` (pure Solid) → `shell/` (`mountPane`, writer,
+  OSC52, keys; consumes `PaneImpl`) → `serve()` entry (wires
+  `tailArchive` + impl + store).
+- `herdr-kit`: `client/` (pure argv builders over one exec seam) —
+  `fleet/` (doc schema + projection + target resolution) — `lines/`
+  (resolved target in, lines out, led via callback) — `views/` (pure
+  converge decisions over injected exec/discovery). bro config reads
+  stay outside; cli/plugin inject resolved inputs.
 
 ## 5. What stays as glue (not extracted)
 
@@ -127,49 +129,58 @@ Internal layering (owner's point 6) inside each package:
   `loadBroConfig` + provider map resolution (the only place config may be
   read — packages take resolved inputs), `HERDR_ENV` checks, stdout
   formatting. Commands become 10–30 line wrappers: `herdr session-view` →
-  `session-lines.runSessionView`; `herdr session-feed` → `acp-archive` +
-  `herdr-client`; `herdr fleet-status*`/`projector` → `fleet-status`
+  `herdr-kit.runSessionView`; `herdr session-feed` → `acp-session` +
+  `herdr-kit.client`; `herdr fleet-status*`/`projector` → `herdr-kit.fleet`
   project/write calls.
 - **plugins/herdr — thin herdr↔bro glue**: `reconcile`/`lanes`/`mirrors`/
   `statuses`/`renderers`/`planes` orchestration (bro↔herdr convergence
   policy IS the plugin's job), `PluginState` file persistence, herdr
-  workspace/pane API calls (via `herdr-client`), `acp-watch` (argv →
-  `acp-wire` renderer), thin `tui/main.ts` entry (resolve target via
-  `fleet-status` → spawn `acp-tui.serve` → `report` callback calls
-  `herdr-client`). The plugin keeps **no** model/render/tail/verdict code.
+  workspace/pane API calls (via `herdr-kit.client`), `acp-watch` (argv →
+  `acp-session.AcpRenderer`), thin `tui/main.ts` entry (resolve target via
+  `herdr-kit.fleet` → spawn `acp-tui.serve` → `report` callback calls
+  `herdr-kit.client`). The plugin keeps **no** model/render/tail/verdict code.
 - **providers — writer stays**: `agentTurnPlane`/`agentEventRecord`/
   `pumpTurn`/`acp-worker` need `@broject/core` (bus, paths, private
-  files); they import the `ArchiveRow` schema from `acp-archive` so
+  files); they import the `ArchiveRow` schema from `acp-session` so
   writer and readers share one declared contract.
 - **`live-views`/`sessions` exec side stays in the plugin** — the
   discovery (`agents.json` read), state persistence, and `herdrTry` exec
-  are glue; only the _decision_ layer moves into `herdr-views`.
+  are glue; only the _decision_ layer moves into `herdr-kit.views`.
 
 ## 6. Extraction order (each step green on its own)
 
-1. **`@broject/acp-wire`** — pure move; providers re-exports for compat.
-   `plugins/herdr/src/acp-render.ts` becomes a 1-line re-export (or relative
-   source import). Kills the 646-line copy. Zero deps, zero risk.
-2. **`@broject/acp-archive` + `@broject/herdr-client`** — split
-   `session-feed.ts` at its natural seam: archive IO → `acp/archive`,
-   pane-report envelope → `herdr-client`. Writer (`acp-events.ts`)
-   switches to the shared `ArchiveRow`. Path helpers kill 4 naming
-   re-derivations.
-3. **`@broject/fleet-status`** — `fleet-state.ts` moves whole; the
-   projector classifier and `resolveTarget`/`targetKey` follow; cli
-   commands become thin wrappers. Three doc readers converge.
-4. **`@broject/acp-model`** — vendor → workspace package (attribution
-   files travel; sdk as peer/type-only dep — reconcile the `1.5.0` pin
-   vs root `^1.7.0`).
-5. **`@broject/acp-view`** — the big move; do it ONCE imports 1–4 exist
-   so every edge is a package name, not a `../../../` path. This is where
-   the §2 duplications converge (one permission text, one PLAN_BOX, one
-   `shortBy`, one storm impl — keep both `PaneImpl`s but share internals).
-6. **`@broject/acp-tui`** — Bun app last; `app.tsx` + `serve()` shell.
-   Plugin `tui/main.ts` shrinks to resolve→spawn→report glue.
-7. **`@broject/session-lines` + `@broject/herdr-views`** — cli
-   `session-view` and plugin `live-views`/`sessions` hollow out to glue
-   in the same pass; their logic lands in packages.
+Consolidation doesn't serialize the work — `acp-session` and `herdr-kit`
+are still staged internally, but land as ONE package each:
+
+1. **`@broject/acp-model`** — promote `tui/vendor/acp-model/` to
+   `packages/acp/model` (attribution files travel; sdk as peer/type-only
+   dep — reconcile the `1.5.0` pin vs root `^1.7.0`). Mechanical,
+   unblocks `AcpImpl` later.
+2. **`@broject/acp-session`** — grown in three internal passes, each
+   independently mergeable:
+   (a) `wire/` — `acp-render.ts` helpers + `AcpRenderer` +
+   `JUDGE_PROMPT_MARK` move in; providers re-exports for compat;
+   `plugins/herdr/src/acp-render.ts` becomes a 1-line re-export.
+   Kills the 646-line copy.
+   (b) `archive/` — `session-feed.ts`'s lower half + the path/schema
+   contract from `acp-events.ts` + one shared `tailArchive` (absorbs
+   both duplicated pumps) + `PaneLed`. Writer switches to the shared
+   `ArchiveRow`; path helpers kill 4 naming re-derivations. The
+   envelope half of `session-feed.ts` stays in cli until step 3.
+   (c) `model/` + `view/` — the tui view-model moves in (model/impl/
+   state/view/verdict/theme + `acp/{model,lines}` + conform→testkit).
+   §2 duplications converge here: one permission text, one PLAN_BOX,
+   one `shortBy`, one storm impl — both `PaneImpl`s kept, internals shared.
+3. **`@broject/herdr-kit`** — staged: (a) `client/` envelope +
+   `fleet/` doc schema + projector classifier (cli commands become thin
+   wrappers; three doc readers converge); (b) `lines/` session-view
+   lifecycle; (c) `views/` live-views/sessions decisions.
+4. **`@broject/acp-tui`** — Bun app last: `app.tsx` + `serve()` shell.
+   Plugin `tui/main.ts` shrinks to resolve→spawn→report glue in the
+   same pass.
+5. **Glue thin-out** — lands incrementally at each step: cli wrappers
+   at step 3, plugin deletes its deep imports/copy/live-views logic at
+   steps 2–4.
 
 Each step: keep re-exports at the old paths until all call sites move, then
 delete the shim. `tui-impl/tui-model/tui-state/pane.test.tsx` tests move with
@@ -182,13 +193,21 @@ their code (they're already split Node-safe vs Bun correctly).
   Node 22 strips types; same trick tui uses), (b) give the plugin a
   `package.json`+install step, (c) keep vendoring (the bug we're fixing).
   Decide once; (a) is honest and free.
-- **R2 — freezing a young seam.** `Item.vi`/`ToolItem.runs` are impl-specific
-  escape hatches the Op contract tolerates. Publishing `acp-view` locks
-  them (Hyrum). Acceptable if documented "opaque to the seam", else normalize
-  before extraction.
-- **R3 — runtime boundary.** `acp-view` must NEVER import `@opentui/*`/
-  `solid-js` — port the vendored import-graph test (`test/import-graph.test.ts`
-  upstream already asserts this mechanically) so a regression fails in CI.
+- **R2 — frozen seams, mitigated by consolidation.** `Item.vi`/`ToolItem.runs`
+  are impl-specific escape hatches the Op contract tolerates. With the
+  5-package shape there are only **2 public surfaces** (`acp-session`'s and
+  `herdr-kit`'s index) instead of 8 package boundaries — the hatches become
+  internal modules, not published contracts. Still document them
+  "opaque to the seam", else normalize before extraction.
+- **R3 — runtime boundary is now THE gate.** `acp-session` must never import
+  `@opentui/*`, `solid-js`, or `@broject/*` (except `acp-model`) — the
+  vendored import-graph test (`test/import-graph.test.ts`) generalizes to
+  cover this and runs in CI. **The trade to accept:** inside the merged
+  packages, layering (`wire→archive→model→view`, `client/fleet/lines/views`)
+  is enforced by _test and convention_, not npm deps — weaker than the
+  9-package version where `package.json` enforced it. That puts more weight
+  on the import-graph check: add layer-direction assertions (e.g. `view/`
+  may not import `wire/` internals except via the index) to the same test.
 - **R4 — vendored provenance.** Promoting `acp-model` to a workspace package:
   Apache-2.0 LICENSE/NOTICE/ATTRIBUTION must travel with it, `private` or
   published under a name that doesn't squat the upstream `acp-model` name
@@ -201,54 +220,58 @@ their code (they're already split Node-safe vs Bun correctly).
   `acp/conform.ts` probe + `--dump` snapshots are the regression net; run them
   per step, not at the end.
 - **R7 — `JUDGE_PROMPT_MARK` is already rot.** `tui/verdict.ts` re-states the
-  preamble literal. Move the constant to `acp-wire`; `acp.ts` builds
-  `TYPED_PREAMBLE` from it — one source.
+  preamble literal. Move the constant to `acp-session`'s `wire` module;
+  `acp.ts` builds `TYPED_PREAMBLE` from it — one source.
 - **R8 — `loadBroConfig` reach.** `tui/main.ts` reads cli internals for the
   providers map. Packages take `ProviderLike` in; only the cli glue reads
   config. (The projector already writes `provider`/`model`/`lane`/`events` into
   the fleet doc — the viewer's config read is mostly redundant for the events
   lane; needed only for the rare `session/load` attach leg.)
 - **R9 — `session-feed.ts` is two modules.** Archive contract (pure) vs herdr
-  report envelope (`spawnSync herdr`, `PANE_SOURCE`). Don't smuggle the herdr
-  half into `acp-archive` — that's a bro-integration dependency the package
-  must not carry.
+  report envelope (`spawnSync herdr`, `PANE_SOURCE`). Under consolidation the
+  split is clean: archive half → `acp-session`, envelope half → `herdr-kit`
+  — don't smuggle the herdr half into `acp-session`; that's a bro-integration
+  dependency it must not carry.
 - **R10 — `--dump` portability.** `main.ts`'s dump path drags `packages/cli`
   sources that use TS parameter properties (Node's stripper rejects → Bun-only
-  anyway). Once the model lives in packages the dump path needs only
-  `acp-archive`+`acp-view` and becomes Node-clean for free.
+  anyway). Once the model lives in `acp-session` the dump path needs only that
+  one package and becomes Node-clean for free.
+- **R11 — merged packages mix Node-safe and Bun-adjacent logic.** Inside
+  `herdr-kit`, `client/` execs herdr while `fleet/` is pure doc parsing —
+  keep the exec seam confined to `client/` so the other modules stay
+  testable without a herdr binary. Same inside `acp-session`: `archive/`
+  is the only fs-touching layer.
 
 ## 8. Monorepo taxonomy — where the new packages land
 
 Owner refinement: **the 23 existing packages are untouched** — no
-`packages/bro/` migration, no restructuring. That leaves two questions:
-where the new `acp` family lives, and where the new bro-side packages
-live.
+`packages/bro/` migration, no restructuring. The 4 new packages land
+as follows — the `acp` family grouped, `herdr-kit` flat:
 
 ```
 packages/
   acp/               ← NEW grouped family (born grouped, zero conflicts)
-    model/ wire/ archive/ view/ tui/
-  fleet-status/      ← NEW bro-side packages, flat — same convention as
-  herdr-client/        the untouched 23 (uniform `ls`, no second rule)
-  herdr-views/
-  session-lines/
+    model/ session/ tui/
+  herdr-kit/         ← NEW bro-side package, flat at root
   <23 existing dirs — untouched>
 plugins/             unchanged — connector plugins, different unit
 ```
 
-Why `acp/` groups but the bro-side four stay flat:
+Why `acp/` groups but `herdr-kit` stays flat:
 
 - The acp family is a **closed subtree with a hard rule** — `acp/*` may
   import only `acp/*` + external deps — so the directory boundary _is_
-  the enforcement boundary (one import-graph check covers it).
-- The bro-side packages (`fleet-status`, `herdr-client`, `herdr-views`,
-  `session-lines`) may import anything (`core`, `acp/*`, each other);
-  grouping them under a `packages/bro/` dir would create a `bro/` dir
+  the enforcement boundary (one import-graph check covers all three
+  packages at once). Even at only 3 leaves, the grouping is the rule's
+  visible home and the family's identity as a publishable product line
+  (`bunx @broject/acp-tui`).
+- `herdr-kit` is bro-side and may import anything (`core`, `acp/*`);
+  grouping it under a `packages/bro/` dir would create a `bro/` dir
   that pointedly does _not_ contain `cli`/`providers` — more confusing
-  than flat. If a future cleanup migrates legacy under `bro/`, these
-  four move with it cheaply.
-- npm names stay flat regardless (`@broject/acp-model` at
-  `packages/acp/model`); dirs carry taxonomy, names carry identity.
+  than flat. If a future cleanup migrates legacy under `bro/`, it moves
+  with it cheaply.
+- npm names stay flat regardless (`@broject/acp-session` at
+  `packages/acp/session`); dirs carry taxonomy, names carry identity.
 
 Mechanics: `workspaces: ["packages/*", "packages/acp/*"]`; nx has no
 `project.json` files and infers projects from workspaces — no change
@@ -256,10 +279,11 @@ needed; per-package `tsdown`/`tsconfig` are self-relative; nothing new
 is pinned by scripts.
 
 **Enforcement rule (mechanical, in CI):** `packages/acp/**` sources must
-not import from `packages/bro`-side paths or `@broject/{core,cli,
-providers,fleet-status,herdr-*}` — generalize the vendored
-import-graph test the model package already ships. That makes "lighter
-core" a gate, not a goal.
+not import `@opentui/*`, `solid-js`, or `@broject/*` beyond `acp-model` —
+generalize the vendored import-graph test the model package already
+ships, plus intra-package layer assertions (`view/` may not reach
+`wire/` internals except via the index). That makes "lighter core" a
+gate, not a goal.
 
 ## 9. What this buys the core
 
@@ -273,10 +297,10 @@ core" a gate, not a goal.
   logic, every `../../../packages/**` deep import — what remains is
   herdr API calls + state files + converge orchestration.
 - `plugins/herdr/tui` becomes ~one file: resolve target →
-  `acp-tui.serve` → `herdr-client.report`.
-- Net: the `.events.jsonl` contract becomes ONE schema owned by one
-  package with a writer (providers) and readers (session-lines, acp-tui,
-  fleet-status) all importing it — the fix for the actual disease this
+  `acp-tui.serve` → `herdr-kit.client.report`.
+- Net: the `.events.jsonl` contract becomes ONE schema owned by
+  `acp-session` with a writer (providers) and readers (`herdr-kit`,
+  `acp-tui`) all importing it — the fix for the actual disease this
   PR worked around three different ways. And `acp/*` stands alone as a
   publishable ACP tooling family (`bunx @broject/acp-tui`) that bro
   happens to consume.
