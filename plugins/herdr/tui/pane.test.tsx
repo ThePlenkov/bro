@@ -471,6 +471,15 @@ describe('the Solid session pane', () => {
       const frame = await p.frame();
       assert.match(frame, /prompt row|more lines/);
       assert.match(frame, /Jump to latest/);
+      // the chip is a click target — a press jumps back to the tail
+      const chipY = frame.split('\n').findIndex(l => l.includes('Jump to latest'));
+      const chipX = frame.split('\n')[chipY].indexOf('Jump to latest');
+      const mouse = createMockMouse(p.renderer);
+      await mouse.click(chipX + 2, chipY, 0);
+      await p.flush();
+      const back = await p.frame();
+      assert.doesNotMatch(back, /Jump to latest/);
+      assert.match(back, /n59/);
     } finally {
       await p.dispose();
     }

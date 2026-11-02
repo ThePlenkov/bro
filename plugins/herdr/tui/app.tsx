@@ -1254,7 +1254,14 @@ function Pane(props: {
           backgroundColor={theme.base}
         >
           <box flexGrow={1} />
-          <text fg={theme.muted} content="Jump to latest ↓ " />
+          {/* a real click target like the show-more button — off the
+           *  selection grammar so a press never starts a drag */}
+          <text
+            fg={theme.accent}
+            content="Jump to latest ↓ "
+            selectable={false}
+            onMouseDown={() => scroller()?.scrollTo?.(Infinity)}
+          />
         </box>
       </Show>
       {/* identity + keys — pinned at the bottom, OUTSIDE the scrollbox,
