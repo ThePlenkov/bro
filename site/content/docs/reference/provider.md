@@ -1,4 +1,5 @@
 ---
+
 title: "bro provider"
 description: "Claude-facing Messages-API plane — host listener + url|token|env wiring helpers"
 ---
@@ -7,9 +8,9 @@ description: "Claude-facing Messages-API plane — host listener + url|token|env
 
 `bro provider url|token|env`
 
-| | |
-| --- | --- |
-| group | `fleet` |
-| npm latest | unreleased — lands in `0.3.0` |
-| skill | `provider` |
-
+|            |                                              |
+| ---------- | -------------------------------------------- |
+| group      | `fleet`                                      |
+| npm latest | unreleased — lands in `0.3.0`                |
+| skill      | `provider`                                   |
+| guide      | [commands/provider](/docs/commands/provider) |
