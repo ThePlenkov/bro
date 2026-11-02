@@ -138,10 +138,10 @@ export function mdPlain(text: string): string[] {
       continue;
     }
     out.push(
-      raw
+      stripTags(raw)
         .replace(/^\s{0,3}#{1,6}\s+/, '')
-        .replace(/!\[([^\]!]*)\]\([^)]*\)/g, '$1')
-        .replace(/\[([^\]]*)\]\(([^)]*)\)/g, '$1 ($2)')
+        .replace(/!\[([^\]!]*)\]\([^()]*\)/g, '$1')
+        .replace(/\[([^\]]*)\]\(([^()]*)\)/g, '$1 ($2)')
         .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
         .replace(/\*\*([^*]+)\*\*/g, '$1')
         .replace(/__([^_]+)__/g, '$1')
@@ -150,12 +150,26 @@ export function mdPlain(text: string): string[] {
         .replace(/~~([^~]+)~~/g, '$1')
         .replace(/`([^`]+)`/g, '$1')
         .replace(/^\s*>\s?/, '  ')
-        .replace(/<[^>]*>/g, '')
-        .replace(/</g, '')
     );
   }
   return out;
 }
+
+/** HTML-looking tags out of a line — a linear scan, no regex: `<`
+ *  opens a tag that runs to `>`; an unclosed `<` keeps its char (it
+ *  was never a tag) so ordinary text like `a < b` survives. */
+const stripTags = (s: string): string => {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const open = s.indexOf('<', i);
+    if (open === -1) return out + s.slice(i);
+    out += s.slice(i, open);
+    const close = s.indexOf('>', open + 1);
+    if (close === -1) return out + s.slice(open);
+    i = close + 1;
+  }
+};
 
 /** `<!-- ... -->` comments out of a line — a linear scan, no regex:
  *  an unterminated comment eats to end-of-line and no `<!--` can
