@@ -84,7 +84,12 @@ export function sessionCommand(
 function armSession(ctx: RenderCtx, paneId: string): boolean {
   herdrTry(['pane', 'rename', paneId, SESSION_LABEL]);
   if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path, ctx.agent)])) return false;
-  ctx.state.sessions[ctx.path] = { workspace: ctx.ws, worktree: ctx.path, pane_id: paneId };
+  ctx.state.sessions[ctx.path] = {
+    workspace: ctx.ws,
+    worktree: ctx.path,
+    pane_id: paneId,
+    agent_id: ctx.agent?.id,
+  };
   return true;
 }
 
@@ -140,8 +145,19 @@ export function ensureSession(ctx: RenderCtx): void {
     broLabels: BRO_LABELS,
     exists: paneExists,
     idle: paneIdle,
+    agent: ctx.agent,
   });
   if (act.kind === 'none') return;
+  if (act.kind === 'rebind') {
+    // the worktree got a new live agent — the running pane is pinned
+    // to the dead archive; close it and let this same pass re-arm
+    // through the record-less path below
+    herdrTry(['pane', 'close', act.paneId]);
+    delete ctx.state.sessions[ctx.path];
+    log(`session pane ${act.paneId} → ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
+    ensureSession(ctx);
+    return;
+  }
   if (act.kind === 'split') {
     armViaSplit(ctx, panes);
     return;

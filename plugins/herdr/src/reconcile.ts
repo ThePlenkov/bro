@@ -396,9 +396,15 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   const base = gitCommonDir(p.main) ?? p.main;
   // live agents by worktree — the session pane's viewable set AND its
   // direct archive binding; one registry scan feeds both halves
+  const live = liveAgents(base);
   const liveByTree = new Map<string, { id: string; events: string }>();
-  for (const a of liveAgents(base)) {
-    if (a.worktree !== undefined) liveByTree.set(a.worktree, { id: a.id, events: a.events });
+  for (const a of live) {
+    if (a.worktree === undefined) continue;
+    // the status plane keys on absolute paths; a registry worktree may
+    // be relative — normalize to the main checkout the same way
+    // resolveDetail does or the lookup silently never fires
+    const key = isAbsolute(a.worktree) ? a.worktree : resolve(p.main, a.worktree);
+    liveByTree.set(key, { id: a.id, events: a.events });
   }
   // where a session pane lives it is the ONE human pane — the acp
   // lane's attach OR any worktree whose agent journal resolves; every
@@ -418,7 +424,7 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   convergeSessions(wsForPath, ctx, sessionArmed);
   // live agents with no armed worktree get a plugin-owned view
   // workspace+pane; armed trees are covered by their own panes
-  convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()));
+  convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()), live);
   const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
   return {

@@ -47,12 +47,12 @@ import {
   release as paneRelease,
   report as paneReport,
   parseFleetState,
-  pidAlive,
   resolveTarget,
   SESSION_IDENTITY,
   type SessionTarget,
   sessionAgentOf,
   targetKey,
+  workerLedState,
 } from '../../../packages/herdr-kit/src/index.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
@@ -192,9 +192,7 @@ export async function runTui(argv: string[]): Promise<void> {
           events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
           agent: agentArg,
           slug: agentArg,
-          workerLed: {
-            state: entry?.pid !== undefined && pidAlive(entry.pid) ? 'working' : 'idle',
-          },
+          workerLed: { state: workerLedState(entry, eventsArg ?? undefined) },
         };
 
   const base = base0;

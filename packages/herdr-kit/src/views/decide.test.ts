@@ -92,6 +92,55 @@ test('decideSession — recorded live pane keeps; idle re-arms; none splits; fre
   );
 });
 
+test('decideSession — a different live agent rebinds the recorded pane', () => {
+  const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS', agent_id: 'native-old' };
+  const panes = [{ pane_id: 'pS', label: LABEL }];
+  const decide = (agent?: { id: string }) =>
+    decideSession({
+      rec,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+      agent,
+    });
+  // a new agent on the same worktree → close + re-arm, never keep tailing
+  assert.deepEqual(decide({ id: 'native-new' }), { kind: 'rebind', paneId: 'pS' });
+  // the same bound agent → the live pane keeps
+  assert.deepEqual(decide({ id: 'native-old' }), { kind: 'none' });
+  // a record without a binding + no resolved agent → no rebind storm
+  const bare = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
+  assert.deepEqual(
+    decideSession({
+      rec: bare,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+    }),
+    { kind: 'none' }
+  );
+  // …but a fresh agent against an unbound record rebinds (the pane was
+  // armed worktree-resolved; the direct archive is the better binding)
+  assert.deepEqual(
+    decideSession({
+      rec: bare,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+      agent: { id: 'native-new' },
+    }),
+    { kind: 'rebind', paneId: 'pS' }
+  );
+});
+
 test('decideSessionRetire — recorded-if-live else orphan label', () => {
   const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
   // recorded pane still carries our label → close it

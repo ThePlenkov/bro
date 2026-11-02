@@ -13,9 +13,14 @@ export interface ViewBins {
 
 /** The managed-workspace session pane — the OpenTUI app bound to the
  *  worktree when tui+bun resolve, `bro herdr session-view` else. */
-export function sessionViewArgv(worktree: string, bins: ViewBins): string[] {
+export function sessionViewArgv(
+  worktree: string,
+  bins: ViewBins,
+  agent?: { id: string; events: string }
+): string[] {
   if (bins.bun !== undefined && bins.tui !== undefined) {
-    return [bins.bun, 'run', bins.tui, worktree];
+    const direct = agent === undefined ? [] : ['--events', agent.events, '--agent', agent.id];
+    return [bins.bun, 'run', bins.tui, ...direct, worktree];
   }
   return [bins.bro, 'herdr', 'session-view', worktree];
 }
