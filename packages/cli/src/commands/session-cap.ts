@@ -135,7 +135,12 @@ function judgeView(
  *  otherwise. */
 function callKey(command: string, ctx: ConnectorCtx): string {
   const id = ctx.toolUseId;
-  return id === undefined || id === '' ? commandKey(command) : `id-${id}`;
+  if (id === undefined || id === '') {
+    return commandKey(command);
+  }
+  // Reservation keys become filenames; strip path segments to prevent traversal.
+  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_');
+  return `id-${safe}`;
 }
 
 /** A short digest of a command — the claim's key half. The same
