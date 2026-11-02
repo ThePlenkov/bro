@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { eventsFile, logStem, promptFile, proxyEventsFile } from './paths.ts';
-import { parseArchiveRows, readTailSlice, TAIL_BYTES, tailArchive, tailWindow } from './tail.ts';
+import {
+  parseArchiveRows,
+  readTailSlice,
+  TAIL_BYTES,
+  tailArchive,
+  tailWindow,
+  utf8End,
+} from './tail.ts';
 
 const file = (name: string, content: string): string => {
   const path = join(mkdtempSync(join(tmpdir(), 'tail-')), name);
@@ -89,5 +96,24 @@ describe('the path contract', () => {
     assert.ok(ev.startsWith('/common/bro/agents/'));
     // `.._escape` is a filename, not a `..` path segment — no traversal
     assert.ok(!ev.split('/').includes('..'));
+  });
+});
+
+describe('utf8End — the pump holds back an incomplete UTF-8 tail', () => {
+  test('ascii and complete sequences consume everything', () => {
+    assert.equal(utf8End(Buffer.from('CLI-LOG-LINE')), 12);
+    assert.equal(utf8End(Buffer.from('a ✓ b')), Buffer.from('a ✓ b').length);
+    assert.equal(utf8End(Buffer.from('emoji 🎉')), Buffer.from('emoji 🎉').length);
+  });
+  test('a truncated multi-byte tail waits for its missing bytes', () => {
+    const full = Buffer.from('done ✓');
+    const cut = full.subarray(0, full.length - 1); // drop the last ✓ byte
+    assert.equal(utf8End(cut), full.length - 3); // 'done ' survives, ✓ waits
+    const cut2 = full.subarray(0, full.length - 2);
+    assert.equal(utf8End(cut2), full.length - 3);
+  });
+  test('a lead byte alone at the tail is incomplete, not consumed', () => {
+    const b = Buffer.concat([Buffer.from('ok '), Buffer.from([0xe2])]);
+    assert.equal(utf8End(b), 3);
   });
 });

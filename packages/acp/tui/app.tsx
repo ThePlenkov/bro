@@ -245,7 +245,7 @@ export function createPane(
         const last = plain.byId[plain.order[plain.order.length - 1]];
         const item = sel !== undefined && sel.kind === 'tool' ? sel : (sel ?? last);
         if (item === undefined) return undefined;
-        return copyItem?.(item) ?? ('text' in item ? item.text : '');
+        return copyItem !== undefined ? copyItem(item) : 'text' in item ? item.text : '';
       },
       setMeta(meta) {
         publish(withMeta(plain, meta));

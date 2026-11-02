@@ -76,6 +76,21 @@ export function completePart(buf: Buffer): number {
   return buf.lastIndexOf(0x0a) + 1;
 }
 
+/** Byte count through the last complete UTF-8 character — a slice that
+ *  ends mid-sequence holds the partial bytes back (they'd decode as
+ *  U+FFFD while the offset advanced past them) so the next pump re-reads
+ *  them once the writer completes the char. */
+export function utf8End(buf: Buffer): number {
+  let i = buf.length;
+  while (i > 0 && i > buf.length - 4 && (buf[i - 1] & 0xc0) === 0x80) i--;
+  if (i === 0) return buf.length;
+  const lead = buf[i - 1];
+  if ((lead & 0x80) === 0) return buf.length;
+  const need =
+    (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+  return i - 1 + need <= buf.length ? buf.length : i - 1;
+}
+
 /** The tail-windowed slice of an append-only file — at most `cap`
  *  bytes ending at EOF (`cap <= 0` reads the whole file), advanced
  *  past the first (partial) line so a mid-file read never starts

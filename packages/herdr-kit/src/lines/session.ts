@@ -16,6 +16,7 @@ import {
   rowVerdict,
   tailArchive,
   tailWindow,
+  utf8End,
 } from '@broject/acp-session';
 import type { ProviderEntry } from '@broject/core';
 import type {
@@ -150,8 +151,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (a.logPath === undefined) return;
     const more = readTailSlice(a.logPath, a.logOffset ?? 0);
     if (more === undefined) return;
-    a.logOffset = more.size;
-    for (const line of more.text.split('\n')) {
+    const end = utf8End(more.buf);
+    if (end === 0) return;
+    a.logOffset = (a.logOffset ?? 0) + end;
+    for (const line of more.buf.subarray(0, end).toString('utf8').split('\n')) {
       if (line !== '') out(plain(line));
     }
   };
