@@ -554,16 +554,30 @@ echo "Error: No such object" >&2; exit 1
  *  `t.skip` should print. `undefined` means bd fully works. */
 export function bdStoreBlocker(): string | undefined {
   const dir = tmpDir('bro-bd-probe-');
-  if (bdTry(['--version'], 10_000, dir).code !== 0) {
-    return 'bd not installed';
+  try {
+    if (bdTry(['--version'], 10_000, dir).code !== 0) {
+      return 'bd not installed';
+    }
+    // a checkout-shaped scratch: a bd build that insists on a git
+    // worktree for init must probe "store works", never "dir had no git"
+    git(['init', '-q'], dir);
+    const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
+    return r.code === 0
+      ? undefined
+      : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
+  } finally {
+    // bd/dolt can spawn a background daemon on init; rmSync the probe dir
+    // must retry and not rely on the process-exit sweep (which races the
+    // still-starting daemon). Remove from the exit sweep to avoid double
+    // cleanup.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      const idx = tmpDirs.indexOf(dir);
+      if (idx >= 0) tmpDirs.splice(idx, 1);
+    } catch {
+      // keep the directory registered so the exit sweep still sees it
+    }
   }
-  // a checkout-shaped scratch: a bd build that insists on a git
-  // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q'], dir);
-  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
-  return r.code === 0
-    ? undefined
-    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
 }
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
