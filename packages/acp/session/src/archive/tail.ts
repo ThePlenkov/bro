@@ -44,18 +44,31 @@ export function readTailSlice(
 
 /** Every complete JSONL row in a slice — blank lines skip, a torn
  *  tail row (still being written) drops and the next complete read
- *  picks it up. */
+ *  picks it up. Non-record values (a stray `null` or `[...]` line)
+ *  drop too — `feed()` reads `row.kind` unconditionally. */
 export function parseArchiveRows(text: string): ArchiveRow[] {
   const rows: ArchiveRow[] = [];
   for (const line of text.split('\n')) {
     if (line === '') continue;
     try {
-      rows.push(JSON.parse(line) as ArchiveRow);
+      const row: unknown = JSON.parse(line);
+      if (typeof row === 'object' && row !== null && !Array.isArray(row)) {
+        rows.push(row as ArchiveRow);
+      }
     } catch {
       // partial line — dropped until the row completes on disk
     }
   }
   return rows;
+}
+
+/** The complete-line boundary of a slice — the byte count through
+ *  the last `\n` (0 when nothing terminates yet). A resume reader
+ *  advances its offset by exactly this so a torn tail row (writer
+ *  mid-append) re-reads whole on the next pump instead of being
+ *  split and lost. */
+export function completePart(text: string): number {
+  return text.lastIndexOf('\n') + 1;
 }
 
 /** The tail-windowed slice of an append-only file — at most `cap`
@@ -70,7 +83,9 @@ export function tailWindow(
   const slice = readTailSlice(path, from);
   if (slice === undefined) return undefined;
   const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-  return { text: slice.text.slice(start), offset: slice.size };
+  const body = slice.text.slice(start);
+  const end = completePart(body);
+  return { text: body.slice(0, end), offset: from + start + end };
 }
 
 /** One replay of an archive's tail — the bounded window, parsed to

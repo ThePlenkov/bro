@@ -6,9 +6,11 @@
 import { join } from 'node:path';
 
 /** The session-owning agent's durable journal —
- *  `<common>/bro/agents/<agentId>.events.jsonl`. */
+ *  `<common>/bro/agents/<agentId>.events.jsonl`. The id rides a file
+ *  path — sanitize like proxyEventsFile does so a registry-carried
+ *  id cannot escape `bro/agents/`. */
 export const eventsFile = (common: string, agentId: string): string =>
-  join(common, 'bro', 'agents', `${agentId}.events.jsonl`);
+  join(common, 'bro', 'agents', `${agentId.replace(/[^\w.-]/g, '_')}.events.jsonl`);
 
 /** The proxy-scope journal — `<common>/bro/proxy/acp-<sid>-p<pid>
  *  .events.jsonl`. `-p<pid>` keeps two concurrent proxy runs of the

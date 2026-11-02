@@ -237,7 +237,10 @@ export function toolArg(u: ToolWire, kind: string | undefined): string | undefin
     return clip(safeBlock(u.rawInput), ARG_MAX);
   if (typeof u.rawInput === 'object' && u.rawInput !== null) {
     const raw = u.rawInput as Record<string, unknown>;
-    const keys = [...(kind !== undefined ? (ARG_KEYS[kind] ?? []) : []), ...ARG_FALLBACK];
+    const keys = [
+      ...(kind !== undefined && Object.hasOwn(ARG_KEYS, kind) ? ARG_KEYS[kind] : []),
+      ...ARG_FALLBACK,
+    ];
     for (const k of keys) {
       const v = raw[k];
       if (typeof v === 'string' && v !== '') return clip(safeBlock(v), ARG_MAX);

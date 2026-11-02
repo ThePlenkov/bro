@@ -9,6 +9,7 @@ import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import {
   type ArchiveRow,
+  completePart,
   PERMISSION_FALLBACK,
   parseArchiveRows,
   readTailSlice,
@@ -149,8 +150,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (a.logPath === undefined) return;
     const more = readTailSlice(a.logPath, a.logOffset ?? 0);
     if (more === undefined) return;
-    a.logOffset = more.size;
-    for (const line of more.text.split('\n')) {
+    const end = completePart(more.text);
+    if (end === 0) return;
+    a.logOffset = (a.logOffset ?? 0) + end;
+    for (const line of more.text.slice(0, end).split('\n')) {
       if (line !== '') out(plain(line));
     }
   };
@@ -233,8 +236,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (a.eventsPath === undefined) return;
     const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
     if (more === undefined) return;
-    a.eventsOffset = more.size;
-    for (const row of parseArchiveRows(more.text)) {
+    const end = completePart(more.text);
+    if (end === 0) return;
+    a.eventsOffset = (a.eventsOffset ?? 0) + end;
+    for (const row of parseArchiveRows(more.text.slice(0, end))) {
       eventRow(a, row, t);
     }
   };

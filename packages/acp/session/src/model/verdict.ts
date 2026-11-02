@@ -56,7 +56,8 @@ const SHAPES: Record<string, (a: Record<string, unknown>) => string | undefined>
 const answerLine = (a: unknown): string | undefined => {
   if (typeof a !== 'object' || a === null) return undefined;
   const r = a as Record<string, unknown>;
-  const fn = typeof r.type === 'string' ? SHAPES[r.type] : undefined;
+  const fn =
+    typeof r.type === 'string' && Object.hasOwn(SHAPES, r.type) ? SHAPES[r.type] : undefined;
   if (fn !== undefined) return fn(r);
   // type-less answers still render when a single shape key is present
   for (const key of Object.keys(SHAPES)) {

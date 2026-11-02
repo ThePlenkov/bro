@@ -94,9 +94,25 @@ test('decideSession — recorded live pane keeps; idle re-arms; none splits; fre
 
 test('decideSessionRetire — recorded-if-live else orphan label', () => {
   const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
+  // recorded pane still carries our label → close it
   assert.deepEqual(
-    decideSessionRetire({ rec, panes: [], sessionLabel: LABEL, exists: () => true }),
+    decideSessionRetire({
+      rec,
+      panes: [{ pane_id: 'pS', label: LABEL }],
+      sessionLabel: LABEL,
+      exists: () => true,
+    }),
     { closeId: 'pS' }
+  );
+  // a recycled pane id wearing a foreign label is not ours to close
+  assert.deepEqual(
+    decideSessionRetire({
+      rec,
+      panes: [{ pane_id: 'pS', label: 'shell' }],
+      sessionLabel: LABEL,
+      exists: () => true,
+    }),
+    { closeId: undefined }
   );
   assert.deepEqual(
     decideSessionRetire({

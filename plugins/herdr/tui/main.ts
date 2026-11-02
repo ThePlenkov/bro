@@ -24,6 +24,7 @@ import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import {
   type ArchiveRow,
+  completePart,
   eventsFile,
   eventsVerdict,
   implArg,
@@ -132,8 +133,8 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
   const target = resolveTarget(state, worktree, providers(worktree));
   const eventsPath =
     eventsArg ??
-    target?.events ??
-    (agentArg !== undefined ? eventsFile(base, agentArg) : undefined);
+    (agentArg !== undefined ? eventsFile(base, agentArg) : undefined) ??
+    target?.events;
   const impl = await pickImpl(implArg(argv));
   impl.setContext?.({ worktree, agent: agentArg ?? sessionAgentOf(target) });
   if (eventsPath !== undefined) {
@@ -239,8 +240,10 @@ export async function runTui(argv: string[]): Promise<void> {
     if (cur?.eventsPath === undefined) return;
     const more = readTailSlice(cur.eventsPath, cur.offset);
     if (more === undefined) return;
-    cur.offset = more.size;
-    const rows = parseArchiveRows(more.text);
+    const end = completePart(more.text);
+    if (end === 0) return;
+    cur.offset += end;
+    const rows = parseArchiveRows(more.text.slice(0, end));
     // a session born after the pane: the first landed slice carries
     // the same prompt-sidecar fallback the arm-time replay does
     if (cur.seeded !== true) {

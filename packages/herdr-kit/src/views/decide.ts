@@ -33,7 +33,9 @@ export function pickPane(
   broLabels: Set<string>,
   idle: (paneId: string) => boolean
 ): { id?: string; adopted: boolean } {
-  const orphan = panes.find(p => p.label === sessionLabel && !bound.has(p.pane_id));
+  const orphan = panes.find(
+    p => p.label === sessionLabel && !bound.has(p.pane_id) && idle(p.pane_id)
+  );
   if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
   const free = panes.find(
     p =>
@@ -74,7 +76,10 @@ export function decideSessionRetire(input: {
   exists: (paneId: string) => boolean;
 }): { closeId?: string } {
   const { rec } = input;
-  if (rec !== undefined && input.exists(rec.pane_id)) return { closeId: rec.pane_id };
+  const recPane = input.panes.find(p => p.pane_id === rec?.pane_id);
+  if (rec !== undefined && input.exists(rec.pane_id) && recPane?.label === input.sessionLabel) {
+    return { closeId: rec.pane_id };
+  }
   return { closeId: input.panes.find(p => p.label === input.sessionLabel)?.pane_id };
 }
 
