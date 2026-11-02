@@ -152,23 +152,25 @@ function commandRemovals(
   const out: Removal[] = [];
   // a group change kills the `bro <old-group> <name>` spelling; a group
   // ADDED to a formerly top-level command only adds one
-  if (committed.group !== live.group) {
-    if (committed.group !== undefined) {
-      out.push({ path: `${name}.group`, value: committed.group });
-    } else if (live.group !== undefined) {
-      out.push({ path: `${name}.group`, value: undefined });
-    }
+  if (committed.group !== live.group && committed.group !== undefined) {
+    out.push({ path: `${name}.group`, value: committed.group });
   }
   // aliasOf and argvPrefix differences reroute the invocation — added,
   // changed, or removed, the spelling runs different code
   if (committed.aliasOf !== live.aliasOf) {
     if (committed.aliasOf !== undefined || live.aliasOf !== undefined) {
-      out.push({ path: `${name}.aliasOf`, value: committed.aliasOf });
+      out.push({
+        path: `${name}.aliasOf`,
+        value: committed.aliasOf === undefined ? null : committed.aliasOf,
+      });
     }
   }
   if (!eqJson(committed.argvPrefix, live.argvPrefix)) {
     if (committed.argvPrefix !== undefined || live.argvPrefix !== undefined) {
-      out.push({ path: `${name}.argvPrefix`, value: committed.argvPrefix });
+      out.push({
+        path: `${name}.argvPrefix`,
+        value: committed.argvPrefix === undefined ? null : committed.argvPrefix,
+      });
     }
   }
   out.push(...diffContract(name, committed.contract, live.contract));
