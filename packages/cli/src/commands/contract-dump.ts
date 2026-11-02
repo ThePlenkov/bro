@@ -106,5 +106,3 @@ export function buildDump(
     commands: Object.fromEntries(commands),
   };
 }
-
-export { CONTRACT_VERSION };

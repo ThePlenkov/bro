@@ -14,7 +14,7 @@ function readJsonFile<T>(path: string): T {
     return JSON.parse(readFileSync(path, 'utf8')) as T;
   } catch (err) {
     console.error(`contract: ${path} — ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(2);
+    return process.exit(2) as never;
   }
 }
 
