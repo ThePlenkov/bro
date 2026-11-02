@@ -61,7 +61,7 @@ import {
   type VerdictView,
   verdictOf,
   withMeta,
-} from '../../../packages/acp/session/src/index.ts';
+} from '../session/src/index.ts';
 
 /** The store the tree renders from. */
 export interface PaneStore {

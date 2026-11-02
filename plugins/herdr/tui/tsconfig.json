@@ -11,6 +11,12 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["*.ts", "*.tsx"],
+  "include": [
+    "*.ts",
+    "*.tsx",
+    "../../../packages/acp/tui/*.ts",
+    "../../../packages/acp/tui/*.tsx",
+    "../../../packages/acp/tui/preload.d.ts"
+  ],
   "exclude": ["*.test.ts"]
 }

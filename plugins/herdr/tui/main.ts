@@ -22,7 +22,6 @@
 import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
-import { createCliRenderer } from '@opentui/core';
 import {
   type ArchiveRow,
   eventsFile,
@@ -38,23 +37,22 @@ import {
   TAIL_BYTES,
   tailArchive,
 } from '../../../packages/acp/session/src/index.ts';
+import { serve } from '../../../packages/acp/tui/serve.ts';
+import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import {
+  agentEntry,
   type FleetPaneState,
   fleetStatusPath,
+  release as paneRelease,
+  report as paneReport,
   parseFleetState,
-} from '../../../packages/cli/src/commands/fleet-state.ts';
-import {
+  pidAlive,
   resolveTarget,
+  SESSION_IDENTITY,
   type SessionTarget,
-  targetKey,
-} from '../../../packages/cli/src/commands/herdr-session-view.ts';
-import {
-  releaseSession,
-  reportSession,
   sessionAgentOf,
-} from '../../../packages/cli/src/commands/session-feed.ts';
-import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
-import { agentEntry, pidAlive } from '../../../packages/herdr-kit/src/index.ts';
+  targetKey,
+} from '../../../packages/herdr-kit/src/index.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -192,94 +190,24 @@ export async function runTui(argv: string[]): Promise<void> {
           },
         };
 
-  // clean start BEFORE createCliRenderer: afterwards stdout rides the
-  // renderer's own writer and ESC bytes surface as literal text
-  // (field bug). No ?1007 here — the app holds mouse reporting, which
-  // takes precedence over alternate-scroll.
-  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
-
   const base = base0;
   const statePath = fleetStatusPath(base, ctxDir);
   mkdirSync(dirname(statePath), { recursive: true });
 
-  // The Solid JSX transform is a Bun plugin, and it must be
-  // registered BEFORE the .tsx tree is loaded — a static import
-  // would resolve the JSX first and fail on the React runtime.
-  // Hence the dynamic import; everything above this line stays
-  // Node-loadable, so the --dump path never needs Bun.
-  await import('@opentui/solid/preload');
-  const { mountPane } = await import('./app.tsx');
-
-  const renderer = await createCliRenderer({
-    // Ctrl+C is a key, not a signal: the pane copies (addendum 8);
-    // herdr owns lifecycle — no exit path lives here (addendum 2)
-    exitOnCtrlC: false,
-    // mouse ON — the opencode config: wheel hits the scrollbox's own
-    // handler (momentum scroll), the scrollbar thumb drags, and
-    // renderer-native drag-select feeds copy-on-select via OSC52.
-    useMouse: true,
-    // "drag" mode (?1002) not "motion" (?1003): we have no hover UI,
-    // and herdr forwards button-held motion — the class lazygit/btop
-    // use — while any-event tracking can fall back to local select.
-    enableMouseMovement: false,
-    // alternate-screen owns the whole buffer — frames repaint in place
-    // and NOTHING lands in herdr's scrollback, killing the double
-    // scroll (main-screen pushed every repaint into the scroll region:
-    // wheel scrolled stale frames while the scrollbox scrolled the
-    // feed). One scroll: the scrollbox's scrollTop. Chrome stays
-    // outside the scrollbox, pinned at the bottom of the buffer.
-    screenMode: 'alternate-screen',
-  });
-
   const impl = await pickImpl(implArg(argv));
   impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: agentArg });
-  const pane = await mountPane({
-    renderer,
+
+  // the shell — renderer + JSX preload + mount + keymap — is
+  // @broject/acp-tui's serve(); this process stays glue: target
+  // resolution, feed, report
+  const { pane } = await serve({
     meta: { worktree: entry?.worktree ?? ctxDir },
     foldAll: impl.fold === 'folded',
     copyItem: it => impl.copyText?.(it) ?? ('text' in it ? it.text : ''),
     // no onRetire — the feed lives ENTIRELY in the scrollbox as
     // renderables: every row keeps markdown/color/expand chrome, and
     // scrolling is the scrollbox's scrollTop, not captured stdout.
-  });
-
-  // --- keys: j/k walk the tool cards, Enter/c folds one, arrows and
-  // PgUp/PgDn/Home/End scroll (the wheel rides them via ?1007), and
-  // Ctrl+C copies the current row as OSC 52 — the terminal puts it on
-  // the system clipboard where it speaks OSC 52 at all. No quit
-  // binding — herdr owns the pane's lifecycle; the pane exits on
-  // its close (signal → process.exit → 'exit' releases the session).
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  renderer.keyInput.on('keypress', key => {
-    if (key.ctrl && key.name === 'c') {
-      const text = pane.writer.copy();
-      if (text === undefined || text === '') return;
-      process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
-      sysCopy(text);
-      pane.toast?.('copied');
-      if (toastTimer !== undefined) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => pane.toast?.(''), 1500);
-    } else if (key.name === 'j') pane.writer.select(1);
-    else if (key.name === 'k') pane.writer.select(-1);
-    // ±3 — the opencode wheel step (CustomSpeedScroll(3)); ?1007
-    // delivers the wheel as these same arrow keys, so one detent
-    // feels like a real scroll, not a crawl
-    else if (key.name === 'up') pane.scroll?.(-3);
-    else if (key.name === 'down') pane.scroll?.(3);
-    else if (key.name === 'pageup') pane.scrollPage?.(-1);
-    else if (key.name === 'pagedown') pane.scrollPage?.(1);
-    else if (key.name === 'home') pane.scrollEdge?.(0);
-    else if (key.name === 'end') pane.scrollEdge?.(1);
-    else if (key.name === 'a') pane.writer.toggleAll(true);
-    else if (key.name === 'z') pane.writer.toggleAll(false);
-    else if (
-      key.name === 'return' ||
-      key.name === 'enter' ||
-      key.name === 'c' ||
-      key.name === 'space' ||
-      key.name === ' '
-    )
-      pane.writer.toggle();
+    copy: sysCopy,
   });
 
   // --- the feed: fleet doc → target → archive tail → model → tree
@@ -365,7 +293,7 @@ export async function runTui(argv: string[]): Promise<void> {
     const mark = `${v.led.state}|${v.mode}|${agent}`;
     if (mark === lastReport) return;
     lastReport = mark;
-    reportSession(paneId, agent, v.led, v.mode);
+    paneReport(paneId, agent, v.led, v.mode, SESSION_IDENTITY);
     impl.setContext?.({ agent });
     pane.writer.setMeta({ agent, led: v.led.state, mode: v.mode });
   };
@@ -382,7 +310,7 @@ export async function runTui(argv: string[]): Promise<void> {
     report();
   };
 
-  process.on('exit', () => releaseSession(paneId));
+  process.on('exit', () => paneRelease(paneId, SESSION_IDENTITY));
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(sig, () => process.exit(0));
   }
