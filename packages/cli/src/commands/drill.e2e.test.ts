@@ -46,12 +46,11 @@ describe('bro drill -- passthrough', () => {
     assert.match(r.stdout, /--ephemeral/)
   })
 
-  test('drill up -- --report passes report as result when after --', () => {
+  test('drill up -- --report after separator is rejected as positional', () => {
     const { main, env: e } = fixture()
     const d = cli(main, e, ['down', 'x'])
     assert.equal(d.code, 0)
-    // --report after -- would be consumed as result? parseUp needs --result; but test focuses on flag scanning
     const u = cli(main, e, ['up', '--result', 'done', '--', '--report'])
-    assert.equal(u.code, 0, u.stderr)
+    assert.equal(u.code, 2)
   })
 })

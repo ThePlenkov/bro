@@ -38,6 +38,11 @@ import {
 } from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
+const flagZone = (argv: string[]): string[] => {
+  const end = argv.indexOf('--')
+  return end === -1 ? argv : argv.slice(0, end)
+}
+
 function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro drill <command> [args…]
 
@@ -89,8 +94,7 @@ function parseDown(rest: string[]) {
     console.error('error: drill down requires a title')
     process.exit(2)
   }
-  const sep = rest.indexOf('--')
-  const head = sep === -1 ? rest : rest.slice(0, sep)
+  const head = flagZone(rest)
   return {
     title,
     opts: {
@@ -109,8 +113,7 @@ function parseUp(rest: string[]) {
     console.error('error: drill up requires --result — a frame must return a curated finding')
     process.exit(2)
   }
-  const sep = rest.indexOf('--')
-  const head = sep === -1 ? rest : rest.slice(0, sep)
+  const head = flagZone(rest)
   return {
     id: flag(rest, '--id'),
     result,
