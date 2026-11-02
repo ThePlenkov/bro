@@ -17,11 +17,14 @@ export function sizeOf(path: string): number {
   }
 }
 
-/** A chunk of an append-only file — from byte `from` to EOF. */
+/** A chunk of an append-only file — from byte `from` to EOF. `buf`
+ *  is the raw slice; boundary math must run on it — string indices
+ *  count code units, the offsets on disk count bytes, and a torn
+ *  head can surface as U+FFFD that no string-side length recovers. */
 export function readTailSlice(
   path: string,
   from: number
-): { text: string; size: number } | undefined {
+): { text: string; buf: Buffer; size: number } | undefined {
   let fd: number;
   let size: number;
   try {
@@ -33,10 +36,10 @@ export function readTailSlice(
   try {
     const start = Math.min(Math.max(0, from), size);
     const len = size - start;
-    if (len === 0) return { text: '', size };
+    if (len === 0) return { text: '', buf: Buffer.alloc(0), size };
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, start);
-    return { text: buf.toString('utf8'), size };
+    return { text: buf.toString('utf8'), buf, size };
   } finally {
     closeSync(fd);
   }
@@ -62,13 +65,15 @@ export function parseArchiveRows(text: string): ArchiveRow[] {
   return rows;
 }
 
-/** The complete-line boundary of a slice — the byte count through
+/** The complete-line boundary of a slice — the BYTE count through
  *  the last `\n` (0 when nothing terminates yet). A resume reader
  *  advances its offset by exactly this so a torn tail row (writer
  *  mid-append) re-reads whole on the next pump instead of being
- *  split and lost. */
-export function completePart(text: string): number {
-  return text.lastIndexOf('\n') + 1;
+ *  split and lost. Operates on the raw buffer: a `\n` byte can never
+ *  sit inside a multi-byte sequence, so the result always lands on
+ *  a real line boundary — code-unit math does not. */
+export function completePart(buf: Buffer): number {
+  return buf.lastIndexOf(0x0a) + 1;
 }
 
 /** The tail-windowed slice of an append-only file — at most `cap`
@@ -82,10 +87,12 @@ export function tailWindow(
   const from = cap <= 0 ? 0 : Math.max(0, sizeOf(path) - cap);
   const slice = readTailSlice(path, from);
   if (slice === undefined) return undefined;
-  const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-  const body = slice.text.slice(start);
-  const end = completePart(body);
-  return { text: body.slice(0, end), offset: from + start + end };
+  const start = from > 0 ? slice.buf.indexOf(0x0a) + 1 : 0;
+  const end = completePart(slice.buf);
+  return {
+    text: slice.buf.subarray(start, end).toString('utf8'),
+    offset: from + end,
+  };
 }
 
 /** One replay of an archive's tail — the bounded window, parsed to

@@ -150,10 +150,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (a.logPath === undefined) return;
     const more = readTailSlice(a.logPath, a.logOffset ?? 0);
     if (more === undefined) return;
-    const end = completePart(more.text);
+    const end = completePart(more.buf);
     if (end === 0) return;
     a.logOffset = (a.logOffset ?? 0) + end;
-    for (const line of more.text.slice(0, end).split('\n')) {
+    for (const line of more.buf.subarray(0, end).toString('utf8').split('\n')) {
       if (line !== '') out(plain(line));
     }
   };
@@ -236,10 +236,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (a.eventsPath === undefined) return;
     const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
     if (more === undefined) return;
-    const end = completePart(more.text);
+    const end = completePart(more.buf);
     if (end === 0) return;
     a.eventsOffset = (a.eventsOffset ?? 0) + end;
-    for (const row of parseArchiveRows(more.text.slice(0, end))) {
+    for (const row of parseArchiveRows(more.buf.subarray(0, end).toString('utf8'))) {
       eventRow(a, row, t);
     }
   };

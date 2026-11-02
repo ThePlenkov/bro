@@ -22,7 +22,10 @@ describe('parseArchiveRows', () => {
 describe('readTailSlice', () => {
   test('reads from the offset through EOF', () => {
     const path = file('a.events.jsonl', '0123456789');
-    assert.deepEqual(readTailSlice(path, 4), { text: '456789', size: 10 });
+    const s = readTailSlice(path, 4);
+    assert.equal(s?.text, '456789');
+    assert.equal(s?.size, 10);
+    assert.equal(s?.buf.toString('utf8'), '456789');
     assert.equal(readTailSlice(path, 50)?.text, '');
     assert.equal(readTailSlice(join(tmpdir(), 'no-such', 'f'), 0), undefined);
   });
@@ -42,6 +45,18 @@ describe('tailWindow', () => {
   });
   test('an unreadable file yields undefined', () => {
     assert.equal(tailWindow(join(tmpdir(), 'no-such', 'f')), undefined);
+  });
+  test('offsets count bytes, not code units — multi-byte rows resume correctly', () => {
+    const path = file('mb.events.jsonl', '✓ one\n→ two\n✗ three\n');
+    const w = tailWindow(path, 14);
+    assert.equal(w?.text, '✗ three\n');
+    // resume from the returned offset — a byte position — lands on a
+    // real boundary and re-reads nothing
+    const s = readTailSlice(path, w?.offset ?? -1);
+    assert.equal(s?.text, '');
+    // and a whole-file window's offset is exactly the byte length
+    const whole = tailWindow(path);
+    assert.equal(whole?.offset, Buffer.byteLength('✓ one\n→ two\n✗ three\n'));
   });
 });
 
@@ -68,5 +83,11 @@ describe('the path contract', () => {
     );
     assert.equal(promptFile(ev), '/common/bro/agents/agent-1.prompt.md');
     assert.equal(logStem(ev), '/common/bro/agents/agent-1');
+  });
+  test('eventsFile sanitizes the registry-provided agent id', () => {
+    const ev = eventsFile('/common', '../escape');
+    assert.ok(ev.startsWith('/common/bro/agents/'));
+    // `.._escape` is a filename, not a `..` path segment — no traversal
+    assert.ok(!ev.split('/').includes('..'));
   });
 });

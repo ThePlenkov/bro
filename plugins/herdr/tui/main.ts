@@ -240,10 +240,10 @@ export async function runTui(argv: string[]): Promise<void> {
     if (cur?.eventsPath === undefined) return;
     const more = readTailSlice(cur.eventsPath, cur.offset);
     if (more === undefined) return;
-    const end = completePart(more.text);
+    const end = completePart(more.buf);
     if (end === 0) return;
     cur.offset += end;
-    const rows = parseArchiveRows(more.text.slice(0, end));
+    const rows = parseArchiveRows(more.buf.subarray(0, end).toString('utf8'));
     // a session born after the pane: the first landed slice carries
     // the same prompt-sidecar fallback the arm-time replay does
     if (cur.seeded !== true) {
