@@ -22,6 +22,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
+import { agentsJson as kitAgentsJson } from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
@@ -230,15 +231,7 @@ export interface AgentEntry {
 
 export function agentsJson(repo: string): Record<string, AgentEntry> {
   const gd = gitCommonDir(repo);
-  if (gd === null) return {};
-  try {
-    const v = JSON.parse(readFileSync(join(gd, 'bro', 'agents.json'), 'utf8')) as unknown;
-    return typeof v === 'object' && v !== null && !Array.isArray(v)
-      ? (v as Record<string, AgentEntry>)
-      : {};
-  } catch {
-    return {};
-  }
+  return gd === null ? {} : kitAgentsJson(gd);
 }
 
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
@@ -246,26 +239,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-function procStart(pid: number): string | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const close = stat.lastIndexOf(')');
-    return stat.slice(close + 2).split(' ')[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function pidAlive(pid: number, start?: string): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-  if (start === undefined || start === '') return true;
-  const st = procStart(pid);
-  return st === null || st === start;
-}
+export { pidAlive } from '../../../packages/herdr-kit/src/index.ts';
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */

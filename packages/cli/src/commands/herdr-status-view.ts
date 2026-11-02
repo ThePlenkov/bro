@@ -6,63 +6,32 @@
  * the daemon projector wrote to the worktree's fleet-state file;
  * on exit it releases, with herdr's ~1s idle-shell probe as the net.
  */
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { gitCommonDir } from '@broject/core';
 import {
-  type FleetPaneState,
-  fleetStatusPath,
-  nextSeq,
+  call,
+  metaArgs as kitMetaArgs,
+  releaseArgs as kitReleaseArgs,
+  reportArgs as kitReportArgs,
   type PaneLed,
-  parseFleetState,
-} from './fleet-state.ts';
+  plain,
+  STATUS_IDENTITY,
+} from '@broject/herdr-kit';
+import { type FleetPaneState, fleetStatusPath, nextSeq, parseFleetState } from './fleet-state.ts';
 
-export const PANE_SOURCE = 'bro:fleet';
-export const PANE_AGENT = 'bro-status';
+export { PANE_SOURCE, plain } from '@broject/herdr-kit';
+export const PANE_AGENT = STATUS_IDENTITY.agent;
 
-/** Milliseconds — every herdr call is fire-and-forget behind a short
- *  fuse; a wedged socket must not freeze the view. */
-const HERDR_TIMEOUT_MS = 5_000;
-
-const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
-
-function call(args: string[]): void {
-  try {
-    spawnSync(herdrBin(), args, { timeout: HERDR_TIMEOUT_MS, stdio: 'ignore' });
-  } catch {
-    // every report is advisory — a dead socket retires to the watch loop
-  }
-}
-
-/** The shared report/release/metadata envelope — `bro:fleet` (never
- *  `herdr:`-reserved), `bro-status` (self-reported, unrecognized by
- *  design), unix-micros seq. */
-function paneArgs(verb: string, pane: string, seq: number): string[] {
-  return ['pane', verb, pane, '--source', PANE_SOURCE, '--agent', PANE_AGENT, '--seq', String(seq)];
-}
-
-/** The report-agent argv for one semantic state. */
+/** The report-agent argv for one semantic state (status identity). */
 export function reportArgs(pane: string, led: PaneLed, seq: number): string[] {
-  const args = [...paneArgs('report-agent', pane, seq), '--state', led.state];
-  if (led.message !== undefined && led.message !== '') {
-    args.push('--message', led.message);
-  }
-  return args;
+  return kitReportArgs(pane, led, seq, STATUS_IDENTITY);
 }
 
 /** The release argv for pane exit — clears name, state, and any
  *  resume binding so the shell-return probe isn't left to clean up. */
 export function releaseArgs(pane: string, seq: number): string[] {
-  return paneArgs('release-agent', pane, seq);
-}
-
-/** Strip C0/C1 control bytes from untrusted text — a bead title is
- *  operator input, and an embedded ESC written to the pane is terminal
- *  injection (clear-screen, title-set, worse). */
-export function plain(s: string): string {
-  // eslint-disable-next-line no-control-regex -- sanitizing is the point
-  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+  return kitReleaseArgs(pane, seq, STATUS_IDENTITY);
 }
 
 /** The display-text argvs — presentation only: `--display-agent` names
@@ -74,20 +43,13 @@ export function plain(s: string): string {
  *  lands in call 2. `undefined` state → clear everything back to the
  *  bare `bro-status` binding. */
 export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[][] {
-  // herdr rejects set-and-clear in one call, and --clear-state-labels
-  // wipes display-agent too — so: call 1 clears only, call 2 writes
-  // the display name and the label together.
-  const calls = [[...paneArgs('report-metadata', pane, seq), '--clear-state-labels']];
-  const set = [
-    ...paneArgs('report-metadata', pane, seq + 1),
-    '--display-agent',
-    plain(s?.agent ?? s?.slug ?? 'fleet'),
-  ];
-  if (s !== undefined && s.status !== '') {
-    set.push('--state-label', `${s.led.state}=${plain(s.status)}`);
-  }
-  calls.push(set);
-  return calls;
+  return kitMetaArgs(
+    pane,
+    seq,
+    STATUS_IDENTITY,
+    s?.agent ?? s?.slug ?? 'fleet',
+    s !== undefined && s.status !== '' ? `${s.led.state}=${plain(s.status)}` : undefined
+  );
 }
 
 /** OSC8 hyperlink — `#N` stays `#N` on screen but a ctrl/cmd-click

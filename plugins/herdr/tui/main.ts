@@ -54,6 +54,7 @@ import {
   sessionAgentOf,
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
+import { agentEntry, pidAlive } from '../../../packages/herdr-kit/src/index.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -149,33 +150,6 @@ const opt = (argv: string[], flag: string): string | undefined => {
 /** Liveness floor for a direct `--agent` target — the archive's own
  *  verdict rides on top (eventsVerdict); pid probing replaces the
  *  fleet doc's workerLed so the viewer never needs a daemon file. */
-const pidAlive = (pid: number | undefined): boolean => {
-  if (pid === undefined) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-/** One agents.json entry — the registry the plugin resolves `--agent`
- *  through: worktree for context, pid for the liveness floor. */
-function agentEntry(
-  base: string,
-  id: string | undefined
-): { worktree?: string; pid?: number; provider?: string } | undefined {
-  if (id === undefined) return undefined;
-  try {
-    const reg = JSON.parse(readFileSync(`${base}/bro/agents.json`, 'utf8')) as Record<
-      string,
-      { worktree?: string; pid?: number; provider?: string }
-    >;
-    return reg[id];
-  } catch {
-    return undefined;
-  }
-}
 
 export async function runTui(argv: string[]): Promise<void> {
   // a flag's VALUE is not a positional — `--events <path>` alone must
@@ -213,7 +187,9 @@ export async function runTui(argv: string[]): Promise<void> {
           events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
           agent: agentArg,
           slug: agentArg,
-          workerLed: { state: pidAlive(entry?.pid) ? 'working' : 'idle' },
+          workerLed: {
+            state: entry?.pid !== undefined && pidAlive(entry.pid) ? 'working' : 'idle',
+          },
         };
 
   // clean start BEFORE createCliRenderer: afterwards stdout rides the

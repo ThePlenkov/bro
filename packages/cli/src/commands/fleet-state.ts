@@ -81,21 +81,10 @@ export function fleetStatusDir(base: string): string {
 
 const safe = (s: string): string => s.replace(/[^\w.-]+/g, '_');
 
-/** The `bro:fleet` report seq — unix MICROS, monotonic per process
- *  (`hook_report_is_newer` drops anything not strictly higher, so a
- *  wall-clock regress or two reports inside one microsecond must
- *  still emit a bigger number than the last). Nanos are not
- *  representable: `now·1e6` exceeds 2^53 today, and the `seqLast + 1`
- *  clamp would round straight back to `seqLast` — silently emitting
- *  the same seq twice. The pane process is the steady-state writer;
- *  the daemon's backstop pushes share the source and win on
- *  freshness, so a coarser cross-process collision only ever drops a
- *  content-equal write. */
-let seqLast = 0;
-export function nextSeq(now = Date.now()): number {
-  seqLast = Math.max(now * 1e3, seqLast + 1);
-  return seqLast;
-}
+/** The `bro:fleet` report seq — moved to @broject/herdr-kit's envelope
+ *  so every reporter (pane, cli, projector) shares one process-wide
+ *  counter; re-exported here for this file's many callers. */
+export { nextSeq } from '@broject/herdr-kit';
 
 /** The state file for one worktree — readable basename plus a hash of
  *  the realpath so two trees sharing a basename can never collide
