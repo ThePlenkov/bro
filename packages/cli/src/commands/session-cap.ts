@@ -68,7 +68,7 @@ export function sessionCapVerdict(
   }
   let views: SessionCapView[];
   try {
-    views = sessionCapViews(command, bags, process.env as Record<string, string>);
+    views = sessionCapViews(command, bags);
   } catch {
     // the count could not be established — a hook fails OPEN
     return [];
