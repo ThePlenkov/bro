@@ -114,6 +114,11 @@ if (verb === 'pane list') {
 } else if (verb === 'worktree open') {
   const ws = (scenario.openWorkspaceId ?? 'wOpened') as string;
   out({ workspace_id: ws, workspace: { workspace_id: ws } });
+} else if (verb === 'workspace close') {
+  const id = args[2] ?? args[args.indexOf('close') + 1] ?? '';
+  local.gone.push(id);
+  save();
+  out({});
 } else {
   out({});
 }
