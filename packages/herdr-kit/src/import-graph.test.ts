@@ -35,7 +35,12 @@ const LAYERS: Record<string, string[]> = {
   'index.ts': ['client', 'fleet', 'lines', 'views'],
 };
 
-const BARE_OK = new Set(['@broject/core', '@broject/acp-session', '@broject/acp-model']);
+const BARE_OK = new Set([
+  '@broject/core',
+  '@broject/acp-session',
+  '@broject/acp-model',
+  '@broject/providers',
+]);
 
 test('the exec seam: only client/exec.ts spawns', () => {
   for (const f of walk(SRC)) {

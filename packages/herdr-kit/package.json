@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@broject/acp-session": "^0.3.0",
-    "@broject/core": "^0.3.0"
+    "@broject/core": "^0.3.0",
+    "@broject/providers": "^0.3.0"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",
@@ -37,5 +38,5 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro-side herdr bridge kit — pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions"
+  "description": "bro-side herdr bridge kit \u2014 pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions"
 }

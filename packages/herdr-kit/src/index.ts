@@ -9,3 +9,4 @@
 export type { LedState, PaneLed } from '@broject/acp-session';
 export * from './client/index.ts';
 export * from './fleet/index.ts';
+export * from './lines/index.ts';
