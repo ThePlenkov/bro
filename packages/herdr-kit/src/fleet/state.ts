@@ -18,18 +18,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import type { LedState, PaneLed } from '@broject/acp-session';
 
-/** Herdr's reportable pane states — `done` is not reportable, `idle`
- *  renders the native `✓` on unviewed panes. */
-export type LedState = 'working' | 'blocked' | 'idle' | 'unknown';
-
-/** The semantic verdict the status pane self-reports — always a
- *  report: the pane is a dashboard, so `stopped` reads `idle` and
- *  release is reserved for the process's own exit. */
-export interface PaneLed {
-  state: LedState;
-  message?: string;
-}
+/** The LED vocabulary lives in @broject/acp-session (archive layer) —
+ *  re-exported here so this file's many callers keep resolving. */
+export type { LedState, PaneLed };
 
 /** One managed worktree's projection, as the status pane consumes it. */
 export interface FleetPaneState {
@@ -63,6 +56,18 @@ export interface FleetPaneState {
   /** The session-owning agent's native log — the pane's fallback
    *  stream when no ACP attach resolves. */
   log?: string;
+  /** The workspace's lane kind (spec bro-l8wqu) — 'acp' when the
+   *  session-owning agent's provider resolves `type === 'acp'`: the
+   *  workspace composes exactly one pane (the session view) and its
+   *  label keeps the 🤖 prefix; absent means the interactive/
+   *  fallback set (⚙️ prefix, mirror + status + events). */
+  lane?: 'acp';
+  /** The session-owning agent's `.events.jsonl` archive —
+   *  `<common>/bro/agents/<agentId>.events.jsonl` — the pane's live
+   *  cross-process stream (spec bro-l8wqu): raw session/update rows
+   *  bookended by turn start/stop, written by the worker's pumpTurn.
+   *  Present only on the acp lane when the owner carries a badge. */
+  events?: string;
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;
@@ -76,21 +81,10 @@ export function fleetStatusDir(base: string): string {
 
 const safe = (s: string): string => s.replace(/[^\w.-]+/g, '_');
 
-/** The `bro:fleet` report seq — unix MICROS, monotonic per process
- *  (`hook_report_is_newer` drops anything not strictly higher, so a
- *  wall-clock regress or two reports inside one microsecond must
- *  still emit a bigger number than the last). Nanos are not
- *  representable: `now·1e6` exceeds 2^53 today, and the `seqLast + 1`
- *  clamp would round straight back to `seqLast` — silently emitting
- *  the same seq twice. The pane process is the steady-state writer;
- *  the daemon's backstop pushes share the source and win on
- *  freshness, so a coarser cross-process collision only ever drops a
- *  content-equal write. */
-let seqLast = 0;
-export function nextSeq(now = Date.now()): number {
-  seqLast = Math.max(now * 1e3, seqLast + 1);
-  return seqLast;
-}
+/** The `bro:fleet` report seq — moved to @broject/herdr-kit's envelope
+ *  so every reporter (pane, cli, projector) shares one process-wide
+ *  counter; re-exported here for this file's many callers. */
+export { nextSeq } from '../client/index.ts';
 
 /** The state file for one worktree — readable basename plus a hash of
  *  the realpath so two trees sharing a basename can never collide
@@ -147,6 +141,8 @@ const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = [
   'provider',
   'model',
   'log',
+  'lane',
+  'events',
 ];
 
 /** Parse + shape-check one document — anything else is a miss, never

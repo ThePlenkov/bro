@@ -41,6 +41,7 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
 import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
 import { otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
@@ -673,6 +674,28 @@ function tracedUpdates(
  *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
  *  so the plane observer is attached once, not per transport. `cwd`
  *  anchors the bus socket + the per-agent .events.jsonl archive. */
+/** `string | ContentBlock[]` → the journaled prompt text. Text blocks
+ *  carry their text, links and embedded resources their URI, media a
+ *  `[type]` marker — the archive row says what was asked, it is not a
+ *  byte-exact request echo. */
+export const promptText = (prompt: string | ContentBlock[]): string => {
+  if (typeof prompt === 'string') return prompt;
+  return prompt
+    .map(b => {
+      switch (b.type) {
+        case 'text':
+          return b.text;
+        case 'resource_link':
+          return b.uri;
+        case 'resource':
+          return b.resource.uri;
+        default:
+          return `[${b.type}]`;
+      }
+    })
+    .join('\n');
+};
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -687,7 +710,7 @@ export async function pumpTurn(
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
-  plane.start();
+  plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
@@ -1411,7 +1434,7 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
  *  even ran tools in dogfooding). The preamble states the shapes
  *  mapAnswer validates — field names are the wire's, not aliases. */
 const TYPED_PREAMBLE = [
-  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  `You are a ${JUDGE_PROMPT_MARK}. The user message below is a JSON body {state, questions}.`,
   'Reply with STRICT JSON only — no prose, no markdown fences:',
   '{"answers": {"<question-id>": <answer>, ...}}',
   'Answer shape per question type — copy the question\'s "type":',

@@ -75,18 +75,24 @@ function wsHasLiveMirror(ws: string, state: PluginState): boolean {
   );
 }
 
-/** Close the redundant tail under a live mirror — recorded pane or
- *  orphan-labeled one, either way it goes. */
-function retireTail(rec: RendererRec | undefined, ctx: RenderCtx): void {
+/** Close a redundant tail — recorded pane or orphan-labeled one,
+ *  either way it goes. `why` names the retire cause in the log. */
+function retireTail(rec: RendererRec | undefined, ctx: RenderCtx, why: string): void {
   const stale =
     rec !== undefined && paneExists(rec.pane_id)
       ? rec.pane_id
       : paneList(ctx.ws).find(x => x.label === RENDER_LABEL)?.pane_id;
   if (stale !== undefined) {
     herdrTry(['pane', 'close', stale]);
-    log(`retire events pane ${stale} — a live mirror renders ${ctx.ws}`);
+    log(`retire events pane ${stale} — ${why} (${ctx.ws})`);
   }
   delete ctx.state.renderers[ctx.path];
+}
+
+/** The acp lane shows exactly one pane — the session view folds the
+ *  bus tail in (spec bro-l8wqu). */
+export function retireEvents(ctx: RenderCtx): void {
+  retireTail(ctx.state.renderers[ctx.path], ctx, 'session pane is the one human pane');
 }
 
 /** Arm `paneId` and report the outcome — '(adopted)' when the pane
@@ -117,7 +123,7 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
 export function ensureRenderer(ctx: RenderCtx): void {
   const rec = ctx.state.renderers[ctx.path];
   if (wsHasLiveMirror(ctx.ws, ctx.state)) {
-    retireTail(rec, ctx);
+    retireTail(rec, ctx, 'a live mirror renders the workspace');
     return;
   }
   // a recorded pane that still exists but idles means the tail died —

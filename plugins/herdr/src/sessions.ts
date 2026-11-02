@@ -9,17 +9,27 @@
  * is dropped, never resurrected. bro state is never written — pane
  * mechanics only.
  */
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import {
-  boundPaneIds,
+  decideSession,
+  decideSessionRetire,
+  dropOrphanRecords,
+  sessionViewCommand,
+} from '../../../packages/herdr-kit/src/index.ts';
+import {
   BRO,
   BRO_LABELS,
+  boundPaneIds,
   type HerdrPane,
   herdrOk,
   herdrTry,
+  PLUGIN_ROOT,
+  type PluginState,
   paneExists,
   paneIdle,
   paneList,
-  type PluginState,
   SESSION_LABEL,
   shq,
 } from './lib.ts';
@@ -32,8 +42,34 @@ const log = (s: string): void => console.log(`[reconcile] ${s}`);
  *  lands ~45% of the main pane's width. */
 const SESSION_RATIO = '0.55';
 
-function sessionCommand(worktreePath: string): string {
-  return `${shq(BRO)} herdr session-view ${shq(worktreePath)}`;
+/** The OpenTUI entrypoint under the plugin root (spec bro-q2edc). */
+const TUI_MAIN = join(PLUGIN_ROOT, 'tui', 'main.ts');
+
+/** The TUI's runtime — `BUN_BIN_PATH` is the live override (a path
+ *  wins, the empty string forces the fallback — tests and operators
+ *  pin the mode without touching PATH); unset means probe `bun
+ *  --version` once and cache. Without bun the session pane degrades
+ *  to the line-mode session-view, never breaks. */
+let probedBun: string | null | undefined;
+export function bun(): string | undefined {
+  const env = process.env.BUN_BIN_PATH;
+  if (env !== undefined) return env === '' ? undefined : env;
+  if (probedBun === undefined) {
+    const ok = spawnSync('bun', ['--version'], { stdio: 'ignore' }); // NOSONAR — PATH lookup is the contract
+    probedBun = ok.error === undefined && ok.status === 0 ? 'bun' : null;
+  }
+  return probedBun ?? undefined;
+}
+
+/** The pane command — the OpenTUI app when its entrypoint + runtime
+ *  resolve, the line-mode session-view otherwise. */
+export function sessionCommand(worktreePath: string): string {
+  const b = existsSync(TUI_MAIN) ? bun() : undefined;
+  return sessionViewCommand(
+    worktreePath,
+    { ...(b !== undefined ? { bun: b, tui: TUI_MAIN } : {}), bro: BRO },
+    shq
+  );
 }
 
 /** Label the pane, run session-view into it, record the binding.
@@ -84,42 +120,46 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   armAndReport(ctx, newPane, false);
 }
 
-/** The pane the session role may take: an unbound orphan carrying our
- *  label first, then any idle pane not bound to another bro role and
- *  not wearing any bro-role label. */
-function pickPane(panes: HerdrPane[], bound: Set<string>): { id?: string; adopted: boolean } {
-  const orphan = panes.find(p => p.label === SESSION_LABEL && !bound.has(p.pane_id));
-  if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
-  const free = panes.find(
-    p =>
-      !bound.has(p.pane_id) &&
-      (p.label === undefined || !BRO_LABELS.has(p.label)) &&
-      paneIdle(p.pane_id)
-  );
-  return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
-}
-
-/** One workspace's session-pane convergence: record → re-arm/adopt →
- *  orphan-label → idle pane → split, so exactly one `bro: session`
- *  lives per managed workspace alongside `bro: status`. */
+/** One workspace's session-pane convergence — the decision lives in
+ *  herdr-kit's views module (record → re-arm/adopt → orphan-label →
+ *  idle pane → split); this is the exec half: probe, decide, run. */
 export function ensureSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
-  // a recorded pane that still exists but idles means session-view
-  // died — the pane is a live shell; re-arm it rather than counting
-  // it done
-  if (rec !== undefined && paneExists(rec.pane_id)) {
-    if (!paneIdle(rec.pane_id)) return;
-    armAndReport(ctx, rec.pane_id, true);
-    return;
-  }
-
   const panes = paneList(ctx.ws);
-  const pick = pickPane(panes, boundPaneIds(ctx.state));
-  if (pick.id === undefined) {
+  const act = decideSession({
+    rec,
+    panes,
+    bound: boundPaneIds(ctx.state),
+    sessionLabel: SESSION_LABEL,
+    broLabels: BRO_LABELS,
+    exists: paneExists,
+    idle: paneIdle,
+  });
+  if (act.kind === 'none') return;
+  if (act.kind === 'split') {
     armViaSplit(ctx, panes);
     return;
   }
-  armAndReport(ctx, pick.id, pick.adopted);
+  armAndReport(ctx, act.paneId, act.adopted);
+}
+
+/** Non-acp lanes carry no session pane (spec bro-l8wqu): for a
+ *  non-acp worker the view only duplicated the mirror, and a
+ *  worker-less arm has nothing to show. Close the recorded or
+ *  orphan-labeled `bro: session` pane and drop the record. */
+export function retireSession(ctx: RenderCtx): void {
+  const rec = ctx.state.sessions[ctx.path];
+  const { closeId } = decideSessionRetire({
+    rec,
+    panes: paneList(ctx.ws),
+    sessionLabel: SESSION_LABEL,
+    exists: paneExists,
+  });
+  if (closeId !== undefined) {
+    herdrTry(['pane', 'close', closeId]);
+    log(`retire session pane ${closeId} — not an acp lane (${ctx.ws})`);
+  }
+  delete ctx.state.sessions[ctx.path];
 }
 
 /** Workspaces that lost their arm get their session record dropped —
@@ -127,9 +167,7 @@ export function ensureSession(ctx: RenderCtx): void {
  *  the record is ours: a rec pointing at a closed workspace can never
  *  resurrect a pane there. */
 export function dropOrphanSessions(state: PluginState, liveWsIds: Set<string>): void {
-  for (const [path, rec] of Object.entries(state.sessions)) {
-    if (!liveWsIds.has(rec.workspace)) {
-      delete state.sessions[path];
-    }
+  for (const path of dropOrphanRecords(state.sessions, liveWsIds)) {
+    delete state.sessions[path];
   }
 }

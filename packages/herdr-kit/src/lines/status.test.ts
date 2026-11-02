@@ -3,18 +3,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
-import { fleetStatusPath, type FleetPaneState, writeFleetState } from './fleet-state.ts';
+import { STATUS_IDENTITY } from '../client/index.ts';
+import { type FleetPaneState, fleetStatusPath, writeFleetState } from '../fleet/state.ts';
 import {
   applyRaw,
-  metaArgs,
+  statusMetaArgs as metaArgs,
   PANE_AGENT,
-  PANE_SOURCE,
   plain,
-  releaseArgs,
+  statusReleaseArgs as releaseArgs,
   renderView,
-  reportArgs,
+  statusReportArgs as reportArgs,
   runStatusView,
-} from './herdr-status-view.ts';
+} from './status.ts';
 
 const NOW = Date.now();
 
@@ -50,7 +50,7 @@ describe('reportArgs / releaseArgs — the bro:fleet contract', () => {
       '--message',
       'lost',
     ]);
-    assert.equal(PANE_SOURCE.startsWith('herdr:'), false);
+    assert.equal(STATUS_IDENTITY.source.startsWith('herdr:'), false);
   });
 
   test('a message-less state emits no --message flag', () => {

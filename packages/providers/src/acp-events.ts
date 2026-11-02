@@ -22,16 +22,17 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { eventsFile, proxyEventsFile } from '@broject/acp-session';
 import {
   appendPrivateFileSync,
   busPublish,
   busSocketPath,
+  type EventInput,
   gitCommonDir,
   mkdirPrivateSync,
-  type EventInput,
 } from '@broject/core';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
  *  that is not must never become a path segment under bro/agents/.
@@ -72,7 +73,11 @@ export interface AgentTurnPlaneOpts {
  *  start()/stop() bookends, drain() to settle queued publishes. */
 export interface AgentTurnPlane {
   update(u: SessionUpdate): void;
-  start(): void;
+  /** `prompt` — the flattened request text — journals a `kind:'prompt'`
+   *  row right after turn start: the archive otherwise carries ZERO
+   *  user-side records (session/prompt is RPC, never journaled) and a
+   *  pane replaying the file can't say what was asked (spec bro-q2edc). */
+  start(prompt?: string): void;
   stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
   drain(timeoutMs?: number): Promise<void>;
 }
@@ -124,17 +129,43 @@ const archiveFile = (
     return undefined;
   }
   if (scope === 'proxy') {
-    return join(
-      common,
-      'bro',
-      'proxy',
-      `acp-${sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
-    );
+    return proxyEventsFile(common, sessionId, process.pid);
   }
-  return agentId === undefined
-    ? undefined
-    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`);
+  return agentId === undefined ? undefined : eventsFile(common, agentId);
 };
+
+/** An out-of-band archive row — same file, same shape, written outside
+ *  pumpTurn's update funnel (spec bro-l8wqu). The one consumer today is
+ *  the acp-worker's permission handler: `session/request_permission` is
+ *  a client-bound request, never a session/update notification, so a
+ *  cross-process viewer only sees it if the worker records it here.
+ *  Unbadged processes archive nothing — same posture as the plane. */
+export function agentEventRecord(
+  cwd: string,
+  sessionId: string,
+  by: string,
+  row: Record<string, unknown>
+): void {
+  const badge = process.env.BRO_AGENT_ID?.trim();
+  const agentId =
+    badge !== undefined && badge !== '' && SAFE_AGENT_ID.test(badge) ? badge : undefined;
+  const file = archiveFile(
+    'agents',
+    agentId === undefined ? null : gitCommonDir(cwd),
+    agentId,
+    sessionId
+  );
+  if (file === undefined) return;
+  try {
+    mkdirPrivateSync(dirname(file));
+    appendPrivateFileSync(
+      file,
+      `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, by, key: agentId, ...row })}\n`
+    );
+  } catch {
+    /* the archive is telemetry — a disk failure never fails a turn */
+  }
+}
 
 /** The plane for one turn — resolved sinks are computed once so the
  *  per-update cost is a Map lookup plus a queued socket write. */
@@ -292,9 +323,15 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   };
 
   return {
-    start() {
+    start(prompt?: string) {
       record({ ...stamp(), kind: 'turn', phase: 'start' });
       emit('turn', { phase: 'start', sessionId: opts.sessionId });
+      if (prompt !== undefined && prompt !== '') {
+        record({ ...stamp(), kind: 'prompt', text: prompt });
+        // the bus gets the compact form — the archive holds the full
+        // body; a reader needing the whole prompt reads the file
+        emit('prompt', { sessionId: opts.sessionId, text: prompt.slice(0, 200) });
+      }
     },
 
     update(u) {

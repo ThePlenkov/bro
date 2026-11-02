@@ -1328,7 +1328,9 @@ async function runFixRound(
       });
     }
   } catch (err) {
-    console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    console.error(
+      `loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
+    );
     // admitSessionSlot/sessionQuotaOf threw before assignment completed —
     // templateReservation is still undefined, nothing to release
     // Let respawnRound handle cap (decrements rounds) and other failures
@@ -1808,7 +1810,10 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
         molStep: lead.id,
         prompt,
         repoRoot: item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
+        env: {
+          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
+          [BATCH_MARKER_ENV]: '1',
+        },
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -1820,7 +1825,10 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: templateReservationKey,
         molStep: lead.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: {
+          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
+          [BATCH_MARKER_ENV]: '1',
+        },
       });
     }
   } catch (err) {
@@ -2354,7 +2362,10 @@ async function respawnRound(
     // repeated refusals must not burn fixRounds into a park
     if (err instanceof SpawnError && err.kind === 'cap') {
       m.rounds -= 1;
-    } else if (err instanceof SpawnError && (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input')) {
+    } else if (
+      err instanceof SpawnError &&
+      (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input')
+    ) {
       m.rounds -= 1;
     }
     console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`);
@@ -2425,7 +2436,9 @@ async function runRebaseRound(
       });
     }
   } catch (err) {
-    console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    console.error(
+      `loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
+    );
     throw err;
   }
   let code: number | null = null;
