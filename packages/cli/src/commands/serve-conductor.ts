@@ -2536,13 +2536,20 @@ function pruneChains(
   const stale: string[] = [];
   const alive: string[] = [];
   for (const [id, e] of chains) {
-    (sessions.has(e.key) ? alive : stale).push(id);
+    if (sessions.has(e.key)) {
+      alive.push(id);
+    } else {
+      stale.push(id);
+    }
   }
   for (const id of stale) {
     chains.delete(id);
   }
   let overflow = chains.size - CHAIN_CAP;
-  for (let i = 0; i < alive.length && overflow > 0; i++) {
+  for (let i = 0; i < alive.length; i++) {
+    if (overflow <= 0) {
+      break;
+    }
     chains.delete(alive[i]);
     overflow--;
   }
