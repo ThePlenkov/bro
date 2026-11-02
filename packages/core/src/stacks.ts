@@ -280,13 +280,14 @@ export function gitStacks(dir: string): StackFacade {
             lines.push(`  ${m.branch} has no merge-base with ${trunk}`)
             break
           }
+          const head = m.branch
           const mergeCount = gitTry([
             '-C',
             main.path,
             'rev-list',
             '--merges',
             '--count',
-            `${fork}..${m.branch}`,
+            `${fork}..${head}`,
           ]).out.trim()
           if (mergeCount === '' || Number(mergeCount) > 0) {
             lines.push(
@@ -296,17 +297,20 @@ export function gitStacks(dir: string): StackFacade {
             )
             break
           }
-          const picks = gitTry([
+          const pickResult = gitTry([
             '-C',
             main.path,
             'rev-list',
             '--topo-order',
             '--reverse',
             '--no-merges',
-            `${fork}..${m.branch}`,
+            `${fork}..${head}`,
           ])
-            .out.split('\n')
-            .filter(Boolean)
+          if (pickResult.code !== 0) {
+            lines.push(`  ${m.branch} — could not enumerate commits in range; merge aborted`)
+            break
+          }
+          const picks = pickResult.out.split('\n').filter(Boolean)
           // Re-check for merge commits to close a race where the branch advances
           // between the initial count and building the pick list.
           const mergeCountAfter = gitTry([
@@ -315,7 +319,7 @@ export function gitStacks(dir: string): StackFacade {
             'rev-list',
             '--merges',
             '--count',
-            `${fork}..${m.branch}`,
+            `${fork}..${head}`,
           ]).out.trim()
           if (mergeCountAfter === '' || Number(mergeCountAfter) > 0) {
             lines.push(
