@@ -144,35 +144,58 @@ function diffContract(name: string, committed: unknown, live: CliContract | unde
 
 /** Invocation-meaning scalars on a surviving command — a difference
  *  reroutes `bro <name>` under the same spelling. */
+function groupRemoval(
+  name: string,
+  committed: Record<string, unknown>,
+  live: ContractCommandRow
+): Removal[] {
+  if (committed.group !== live.group && committed.group !== undefined) {
+    return [{ path: `${name}.group`, value: committed.group }];
+  }
+  return [];
+}
+
+function aliasOfRemoval(
+  name: string,
+  committed: Record<string, unknown>,
+  live: ContractCommandRow
+): Removal[] {
+  if (committed.aliasOf === live.aliasOf) {
+    return [];
+  }
+  return [
+    {
+      path: `${name}.aliasOf`,
+      value: committed.aliasOf === undefined ? null : committed.aliasOf,
+    },
+  ];
+}
+
+function argvPrefixRemoval(
+  name: string,
+  committed: Record<string, unknown>,
+  live: ContractCommandRow
+): Removal[] {
+  if (eqJson(committed.argvPrefix, live.argvPrefix)) {
+    return [];
+  }
+  return [
+    {
+      path: `${name}.argvPrefix`,
+      value: committed.argvPrefix === undefined ? null : committed.argvPrefix,
+    },
+  ];
+}
+
 function commandRemovals(
   name: string,
   committed: Record<string, unknown>,
   live: ContractCommandRow
 ): Removal[] {
   const out: Removal[] = [];
-  // a group change kills the `bro <old-group> <name>` spelling; a group
-  // ADDED to a formerly top-level command only adds one
-  if (committed.group !== live.group && committed.group !== undefined) {
-    out.push({ path: `${name}.group`, value: committed.group });
-  }
-  // aliasOf and argvPrefix differences reroute the invocation — added,
-  // changed, or removed, the spelling runs different code
-  if (committed.aliasOf !== live.aliasOf) {
-    if (committed.aliasOf !== undefined || live.aliasOf !== undefined) {
-      out.push({
-        path: `${name}.aliasOf`,
-        value: committed.aliasOf === undefined ? null : committed.aliasOf,
-      });
-    }
-  }
-  if (!eqJson(committed.argvPrefix, live.argvPrefix)) {
-    if (committed.argvPrefix !== undefined || live.argvPrefix !== undefined) {
-      out.push({
-        path: `${name}.argvPrefix`,
-        value: committed.argvPrefix === undefined ? null : committed.argvPrefix,
-      });
-    }
-  }
+  out.push(...groupRemoval(name, committed, live));
+  out.push(...aliasOfRemoval(name, committed, live));
+  out.push(...argvPrefixRemoval(name, committed, live));
   out.push(...diffContract(name, committed.contract, live.contract));
   return out;
 }
