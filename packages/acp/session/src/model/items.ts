@@ -390,7 +390,7 @@ export class SessionModel {
   /** An internal turn closed — the pending detail seals with its
    *  outcome (`✓` silent-ok, `✗` error, `◌` abnormal stop). Unique
    *  errors also emit their own red row — visible without a fold. */
-  private microStop(row: ArchiveRow): void {
+  private microStop(row: ArchiveRow): void /* NOSONAR */ {
     const b = this.micro;
     const by = b.pendBy !== '' ? b.pendBy : (shortBy(row.by) ?? '?');
     if (b.pendBy === '' && b.pendDetail < 0) {

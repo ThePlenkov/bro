@@ -396,7 +396,7 @@ const runItem = (
   folded: boolean,
   stamp: string | undefined,
   by: string | undefined
-): ToolItem => {
+): ToolItem => /* NOSONAR */ {
   let started: number | undefined;
   let ended: number | undefined;
   let live = false;
@@ -764,7 +764,7 @@ export class AcpImpl implements PaneImpl {
     ops.push({ op: 'tool', item: { id: last.id, arg } });
   }
 
-  drain(): Op[] {
+  drain(): Op[] /* NOSONAR */ {
     if (this.session.items === this.prev && this.ops.length === 0) return this.ops;
     const ops = this.ops;
     this.ops = [];

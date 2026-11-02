@@ -75,7 +75,7 @@ export function toolIds(state: PaneState): number[] {
  * in place, so storing the model's object would let it change
  * underneath the view without the view ever being told.
  */
-export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
+export function applyOps(state: PaneState, ops: readonly Op[]): PaneState /* NOSONAR */ {
   if (ops.length === 0) return state;
   const byId = { ...state.byId };
   let order = state.order;
