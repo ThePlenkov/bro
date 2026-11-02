@@ -7,7 +7,7 @@
  *   bun test plugins/herdr/tui/acp/model.test.ts
  */
 import { describe, expect, test } from 'bun:test';
-import type { ArchiveRow } from '../../../../packages/cli/src/commands/session-feed.ts';
+import type { ArchiveRow } from '../../../../packages/acp/session/src/index.ts';
 import type { ToolItem } from '../model.ts';
 import { AcpImpl } from './model.ts';
 

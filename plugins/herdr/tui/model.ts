@@ -11,13 +11,14 @@
  * sanitize posture — is the providers' `acp-render` module verbatim.
  */
 
-import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
-import { type ArchiveRow, rowVerdict } from '../../../packages/cli/src/commands/session-feed.ts';
 import {
+  type ArchiveRow,
   chunkText,
   clip,
   DONE_STATUS,
   firstLine,
+  type PaneLed,
+  rowVerdict,
   type SessionUpdateLike,
   safe,
   safeBlock,

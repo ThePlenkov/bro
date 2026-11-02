@@ -5,4 +5,6 @@
 //   wire ← archive ← model ← view
 // The index is the package's one public surface; internal modules are
 // reachable only through it.
+
+export * from './archive/index.ts';
 export * from './wire/index.ts';

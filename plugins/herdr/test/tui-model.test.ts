@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
+import type { ArchiveRow } from '../../../packages/acp/session/src/index.ts';
 import { MAX_ITEMS, type Op, SessionModel, type ToolItem } from '../tui/model.ts';
 import { dayLabel, hhmm } from '../tui/view.ts';
 

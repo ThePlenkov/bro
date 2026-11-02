@@ -18,18 +18,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import type { LedState, PaneLed } from '@broject/acp-session';
 
-/** Herdr's reportable pane states — `done` is not reportable, `idle`
- *  renders the native `✓` on unviewed panes. */
-export type LedState = 'working' | 'blocked' | 'idle' | 'unknown';
-
-/** The semantic verdict the status pane self-reports — always a
- *  report: the pane is a dashboard, so `stopped` reads `idle` and
- *  release is reserved for the process's own exit. */
-export interface PaneLed {
-  state: LedState;
-  message?: string;
-}
+/** The LED vocabulary lives in @broject/acp-session (archive layer) —
+ *  re-exported here so this file's many callers keep resolving. */
+export type { LedState, PaneLed };
 
 /** One managed worktree's projection, as the status pane consumes it. */
 export interface FleetPaneState {

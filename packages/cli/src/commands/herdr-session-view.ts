@@ -22,8 +22,17 @@
  * `bro-session` report authority held while occupied, two-call
  * metadata, release on every exit, dedup on real moves only.
  */
-import { mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
+import {
+  type ArchiveRow,
+  eventsVerdict,
+  parseArchiveRows,
+  readTailSlice,
+  rowVerdict,
+  tailArchive,
+  tailWindow,
+} from '@broject/acp-session';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
@@ -31,27 +40,20 @@ import type {
   AcpSessionViewSpec,
   SessionUpdateLike,
 } from '@broject/providers';
+import { loadBroConfig } from '../plugins.ts';
 import {
   type FleetPaneState,
   fleetStatusPath,
   type PaneLed,
   parseFleetState,
 } from './fleet-state.ts';
+import { plain } from './herdr-status-view.ts';
 import {
-  type ArchiveRow,
-  eventsVerdict,
-  parseArchiveRows,
-  readTailSlice,
   releaseSession,
   reportSession,
-  rowVerdict,
-  sessionAgentOf,
   SESSION_PANE_AGENT,
-  sizeOf,
-  TAIL_BYTES,
+  sessionAgentOf,
 } from './session-feed.ts';
-import { plain } from './herdr-status-view.ts';
-import { loadBroConfig } from '../plugins.ts';
 
 export { SESSION_PANE_AGENT };
 
@@ -319,16 +321,13 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
   const tailLog = (a: Attach, path: string): void => {
     a.mode = 'log';
     a.logPath = path;
-    const from = Math.max(0, sizeOf(path) - TAIL_BYTES);
-    const slice = readTailSlice(path, from);
-    if (slice === undefined) {
+    const window = tailWindow(path);
+    if (window === undefined) {
       dim(`── log tail ${path} — unreadable ──`);
       return;
     }
-    a.logOffset = slice.size;
-    // a mid-file read starts inside a line — drop the partial head
-    const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-    for (const line of slice.text.slice(start).split('\n')) {
+    a.logOffset = window.offset;
+    for (const line of window.text.split('\n')) {
       if (line !== '') out(plain(line));
     }
     try {
@@ -406,15 +405,13 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
   const tailEvents = (a: Attach, t: SessionTarget, path: string): void => {
     a.mode = 'events';
     a.eventsPath = path;
-    const from = Math.max(0, sizeOf(path) - TAIL_BYTES);
-    const slice = readTailSlice(path, from);
-    if (slice === undefined) {
+    const tail = tailArchive(path);
+    if (tail === undefined) {
       dim(`── session events ${path} — unreadable; waiting for the worker ──`);
       return;
     }
-    a.eventsOffset = slice.size;
-    const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-    for (const row of parseArchiveRows(slice.text.slice(start))) {
+    a.eventsOffset = tail.offset;
+    for (const row of tail.rows) {
       eventRow(a, row, t);
     }
     try {

@@ -22,16 +22,17 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { eventsFile, proxyEventsFile } from '@broject/acp-session';
 import {
   appendPrivateFileSync,
   busPublish,
   busSocketPath,
+  type EventInput,
   gitCommonDir,
   mkdirPrivateSync,
-  type EventInput,
 } from '@broject/core';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
  *  that is not must never become a path segment under bro/agents/.
@@ -126,16 +127,9 @@ const archiveFile = (
     return undefined;
   }
   if (scope === 'proxy') {
-    return join(
-      common,
-      'bro',
-      'proxy',
-      `acp-${sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
-    );
+    return proxyEventsFile(common, sessionId, process.pid);
   }
-  return agentId === undefined
-    ? undefined
-    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`);
+  return agentId === undefined ? undefined : eventsFile(common, agentId);
 };
 
 /** An out-of-band archive row — same file, same shape, written outside

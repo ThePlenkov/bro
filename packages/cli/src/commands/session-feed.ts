@@ -1,17 +1,26 @@
 /**
- * session-feed — the `bro: session` pane's shared feed contract (spec
- * bro-l8wqu → bro-q2edc): the `.events.jsonl` archive row shapes, the
- * byte-windowed tail read, the row→LED verdict, and the `bro:fleet`/
- * `bro-session` report envelope. Both pane frontends consume it —
- * `bro herdr session-view` (the line-mode fallback) and the OpenTUI
- * pane (`plugins/herdr/tui`, which imports this file directly) — so
- * the wire semantics live here once, not twice.
+ * session-feed — the `bro: session` pane's report envelope (spec
+ * bro-l8wqu → bro-q2edc): the `bro:fleet`/`bro-session` herdr calls
+ * that pin a pane's semantic state. The archive half (`.events.jsonl`
+ * row shapes, the byte-windowed tail read, the row→LED verdict) moved
+ * to @broject/acp-session — re-exported below so existing call sites
+ * keep resolving until they migrate.
  */
 import { spawnSync } from 'node:child_process';
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
-import type { SessionUpdateLike } from '@broject/providers';
 import { nextSeq, type PaneLed } from './fleet-state.ts';
 import { PANE_SOURCE, plain } from './herdr-status-view.ts';
+
+export {
+  type ArchiveRow,
+  eventsVerdict,
+  parseArchiveRows,
+  readTailSlice,
+  rowVerdict,
+  sizeOf,
+  TAIL_BYTES,
+  tailArchive,
+  tailWindow,
+} from '@broject/acp-session';
 
 export const SESSION_PANE_AGENT = 'bro-session';
 
@@ -105,129 +114,4 @@ export function sessionAgentOf(
   t: { agent?: string; session?: { provider?: string }; slug?: string } | undefined
 ): string {
   return t?.agent ?? t?.session?.provider ?? t?.slug ?? 'session';
-}
-
-// --- the archive feed ----------------------------------------------------
-
-/** The open-tail cap — a dead session's archive or log can run to
- *  megabytes; the pane scrolls back through the last chunk, not the
- *  corpus. */
-export const TAIL_BYTES = 64 * 1024;
-
-/** statSync().size or 0 — the tail math's floor. */
-export function sizeOf(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
-}
-
-/** One archive row — the shapes `agentTurnPlane` and the worker's
- *  permission seam write (spec bro-l8wqu). Unknown kinds parse
- *  through harmlessly — forward-compatible tail. */
-export interface ArchiveRow {
-  kind?: string;
-  /** The journal stamp — every row `agentTurnPlane` writes carries
-   *  it; the pane's time gutter and judge-turn detection ride on
-   *  these two fields. */
-  ts?: string;
-  by?: string;
-  phase?: string;
-  update?: SessionUpdateLike;
-  stopReason?: string;
-  error?: string;
-  title?: string;
-  verdict?: string;
-  /** `kind: 'prompt'` — journaled by `AgentTurnPlane.start` (the turn's
-   *  flattened request text); older archives without one may carry an
-   *  injected sibling `.prompt.md` row instead — same shape, `text`. */
-  text?: string;
-}
-
-/** A chunk of an append-only file — from byte `from` to EOF. */
-export function readTailSlice(
-  path: string,
-  from: number
-): { text: string; size: number } | undefined {
-  let fd: number;
-  let size: number;
-  try {
-    size = statSync(path).size;
-    fd = openSync(path, 'r');
-  } catch {
-    return undefined;
-  }
-  try {
-    const start = Math.min(Math.max(0, from), size);
-    const len = size - start;
-    if (len === 0) return { text: '', size };
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, start);
-    return { text: buf.toString('utf8'), size };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Every complete JSONL row in a slice — blank lines skip, a torn
- *  tail row (still being written) drops and the next complete read
- *  picks it up. */
-export function parseArchiveRows(text: string): ArchiveRow[] {
-  const rows: ArchiveRow[] = [];
-  for (const line of text.split('\n')) {
-    if (line === '') continue;
-    try {
-      rows.push(JSON.parse(line) as ArchiveRow);
-    } catch {
-      // partial line — dropped until the row completes on disk
-    }
-  }
-  return rows;
-}
-
-/** The archive's own LED for one row — last row wins: a turn start or
- *  update is working, a clean stop is idle, an error/denied-ask is
- *  blocked. `undefined` means the row carries no verdict (unknown
- *  kinds, malformed). */
-export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | undefined {
-  switch (row.kind) {
-    case 'update':
-      return row.update !== undefined
-        ? { led: { state: 'working' }, mode: 'streaming' }
-        : undefined;
-    case 'turn':
-      if (row.phase === 'start') return { led: { state: 'working' }, mode: 'turn' };
-      if (row.phase === 'stop') {
-        return row.error !== undefined && row.error !== ''
-          ? { led: { state: 'blocked' }, mode: 'turn error' }
-          : { led: { state: 'idle' }, mode: 'turn complete' };
-      }
-      return undefined;
-    case 'permission':
-      return {
-        led: { state: 'blocked' },
-        mode: `permission — ${row.verdict ?? 'denied'}`,
-      };
-    default:
-      return undefined;
-  }
-}
-
-/** The events leg's whole verdict — the worker verdict is the floor
- *  (a blocked worker beats a stale 'working' archive state), the last
- *  row's verdict rides on top, and a fresh archive inherits the
- *  worker's posture (spec bro-l8wqu LED contract). */
-export function eventsVerdict(
-  workerLed: PaneLed,
-  row: { led: PaneLed; mode: string } | undefined
-): { led: PaneLed; mode: string } {
-  if (workerLed.state === 'blocked') {
-    return { led: { state: 'blocked' }, mode: row?.mode ?? 'worker blocked' };
-  }
-  if (row !== undefined) return { led: row.led, mode: row.mode };
-  return {
-    led: { state: workerLed.state === 'working' ? 'working' : 'idle' },
-    mode: 'session events',
-  };
 }

@@ -18,16 +18,13 @@
 import { readFileSync } from 'node:fs';
 import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
 import {
-  type ArchiveRow,
-  parseArchiveRows,
-} from '../../../packages/cli/src/commands/session-feed.ts';
-import { SessionModel } from './model.ts';
-import {
   createSession,
   type ModelEvent,
   reduce,
   type Session,
 } from '../../../packages/acp/model/src/index.ts';
+import { type ArchiveRow, parseArchiveRows } from '../../../packages/acp/session/src/index.ts';
+import { SessionModel } from './model.ts';
 
 const at = (row: ArchiveRow): number => {
   const ts = (row as { ts?: string }).ts;

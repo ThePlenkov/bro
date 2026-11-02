@@ -4,7 +4,6 @@
  *  an import). Every acp-impl item carries its source `Item` on `vi`;
  *  the view calls `acpLine` per row and paints the segments. */
 
-import { theme } from '../theme.ts';
 import type {
   MarkerItem,
   PermissionRecordItem,
@@ -13,6 +12,7 @@ import type {
   ThoughtItem,
   ToolCallItem,
 } from '../../../../packages/acp/model/src/index.ts';
+import { theme } from '../theme.ts';
 
 /** One painted cell — `token` names the semantic role (theme resolves
  *  it), `fill` names a surface role for the cell/row background. */

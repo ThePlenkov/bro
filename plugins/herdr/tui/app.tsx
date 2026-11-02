@@ -40,9 +40,9 @@ import {
   applyOps,
   emptyState,
   moveSelection,
-  toolIds,
   type PaneMeta,
   type PaneState,
+  toolIds,
   withMeta,
 } from './state.ts';
 import { ledColor, theme } from './theme.ts';

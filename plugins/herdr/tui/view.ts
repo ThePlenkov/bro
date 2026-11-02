@@ -5,9 +5,10 @@
  * These live apart from `app.tsx` so they stay testable without a
  * terminal: the tree is Bun-only (native FFI), the formatting is not.
  */
-import { clip, firstLine } from '../../../packages/acp/session/src/index.ts';
+
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { clip, firstLine } from '../../../packages/acp/session/src/index.ts';
 import type { Item, ToolContent, ToolItem, ToolStatus } from './model.ts';
 import { theme } from './theme.ts';
 

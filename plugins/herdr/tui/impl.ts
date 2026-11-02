@@ -13,8 +13,7 @@
  * every impl — a completed call is one compact `✓` row; its
  * output (file dumps, JSON) never owns the feed unpinned.
  */
-import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
-import type { ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
+import type { ArchiveRow, PaneLed } from '../../../packages/acp/session/src/index.ts';
 import { copyItem, type Item, type Op, SessionModel } from './model.ts';
 
 /** Historical fold-policy names — retained for the impl seam; tool

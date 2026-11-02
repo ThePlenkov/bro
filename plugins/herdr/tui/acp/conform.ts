@@ -18,8 +18,7 @@
  *  - permissions: same count
  */
 import { readFileSync } from 'node:fs';
-import { parseArchiveRows } from '../../../../packages/cli/src/commands/session-feed.ts';
-import { chunkText } from '../../../../packages/acp/session/src/index.ts';
+import { chunkText, parseArchiveRows } from '../../../../packages/acp/session/src/index.ts';
 import { pickImpl } from '../impl.ts';
 import type { Item } from '../model.ts';
 

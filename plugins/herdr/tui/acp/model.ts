@@ -21,8 +21,18 @@
  */
 
 import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
-import type { PaneLed } from '../../../../packages/cli/src/commands/fleet-state.ts';
-import type { ArchiveRow } from '../../../../packages/cli/src/commands/session-feed.ts';
+import {
+  createSession,
+  type MarkerItem,
+  type ModelEvent,
+  type PermissionRecordItem,
+  type PlanItem,
+  reduce,
+  type Session,
+  type Item as TheirItem,
+  type ToolCallItem,
+} from '../../../../packages/acp/model/src/index.ts';
+import type { ArchiveRow, PaneLed } from '../../../../packages/acp/session/src/index.ts';
 import {
   type SessionUpdateLike,
   type ToolWire,
@@ -40,17 +50,6 @@ import {
   type ToolItem,
   type ToolStatus,
 } from '../model.ts';
-import {
-  createSession,
-  type MarkerItem,
-  type ModelEvent,
-  type PermissionRecordItem,
-  type PlanItem,
-  reduce,
-  type Session,
-  type Item as TheirItem,
-  type ToolCallItem,
-} from '../../../../packages/acp/model/src/index.ts';
 import { isJudgeTurn, verdictOf } from '../verdict.ts';
 import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../view.ts';
 import { acpLine, lineText } from './lines.ts';

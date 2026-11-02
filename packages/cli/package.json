@@ -74,6 +74,7 @@
     }
   },
   "dependencies": {
+    "@broject/acp-session": "^0.3.0",
     "@broject/bro-pack": "^0.3.0",
     "@broject/devin": "^0.3.0",
     "@broject/mcp": "^0.3.0",

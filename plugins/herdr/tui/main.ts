@@ -24,9 +24,19 @@ import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
 import {
+  type ArchiveRow,
+  eventsFile,
+  eventsVerdict,
+  type PaneLed,
+  parseArchiveRows,
+  promptFile,
+  readTailSlice,
+  TAIL_BYTES,
+  tailArchive,
+} from '../../../packages/acp/session/src/index.ts';
+import {
   type FleetPaneState,
   fleetStatusPath,
-  type PaneLed,
   parseFleetState,
 } from '../../../packages/cli/src/commands/fleet-state.ts';
 import {
@@ -35,15 +45,9 @@ import {
   targetKey,
 } from '../../../packages/cli/src/commands/herdr-session-view.ts';
 import {
-  type ArchiveRow,
-  eventsVerdict,
-  parseArchiveRows,
-  readTailSlice,
   releaseSession,
   reportSession,
   sessionAgentOf,
-  sizeOf,
-  TAIL_BYTES,
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import { implArg, type PaneImpl, pickImpl } from './impl.ts';
@@ -86,7 +90,7 @@ const providers = (worktree: string): Record<string, ProviderEntry> => {
  *  unavailable` marker; never fabricate. */
 function readPrompt(eventsPath: string): string | undefined {
   try {
-    return readFileSync(eventsPath.replace(/\.events\.jsonl$/, '.prompt.md'), 'utf8');
+    return readFileSync(promptFile(eventsPath), 'utf8');
   } catch {
     return undefined;
   }
@@ -126,12 +130,8 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
   const impl = await pickImpl(implArg(argv));
   impl.setContext?.({ worktree, agent: sessionAgentOf(target) });
   if (target?.events !== undefined) {
-    const from = Math.max(0, sizeOf(target.events) - TAIL_BYTES);
-    const slice = readTailSlice(target.events, from);
-    if (slice !== undefined) {
-      const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      feedArchive(impl, target.events, parseArchiveRows(slice.text.slice(start)));
-    }
+    const tail = tailArchive(target.events);
+    if (tail !== undefined) feedArchive(impl, target.events, tail.rows);
     impl.beginLive();
   }
   for (const line of impl.dump()) process.stdout.write(`${line}\n`);
@@ -208,9 +208,7 @@ export async function runTui(argv: string[]): Promise<void> {
       : {
           worktree: entry?.worktree ?? ctxDir,
           status: 'live',
-          events:
-            eventsArg ??
-            (agentArg !== undefined ? `${base0}/bro/agents/${agentArg}.events.jsonl` : undefined),
+          events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
           agent: agentArg,
           slug: agentArg,
           workerLed: { state: pidAlive(entry?.pid) ? 'working' : 'idle' },
@@ -347,7 +345,6 @@ export async function runTui(argv: string[]): Promise<void> {
     if (t.events === undefined) return;
     const path = t.events;
     cur = { key: targetKey(t), eventsPath: path, offset: 0 };
-    const size = sizeOf(path);
     // A window of pure `update` rows attaches to items born outside
     // it — an update storm for one tool call can fill the whole tail
     // and drain zero items. Widen 64KB → 4MB → whole file until a
@@ -355,13 +352,11 @@ export async function runTui(argv: string[]): Promise<void> {
     // — update rows are not idempotent under a re-feed.
     let rows: ArchiveRow[] | undefined;
     for (const win of [TAIL_BYTES, 4 * 1024 * 1024, 0]) {
-      const from = win === 0 ? 0 : Math.max(0, size - win);
-      const slice = readTailSlice(path, from);
-      if (slice === undefined) break;
-      cur.offset = slice.size;
-      const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      rows = parseArchiveRows(slice.text.slice(start));
-      if (from === 0 || rows.some(r => r.kind !== 'update')) break;
+      const tail = tailArchive(path, win);
+      if (tail === undefined) break;
+      cur.offset = tail.offset;
+      rows = tail.rows;
+      if (win === 0 || rows.some(r => r.kind !== 'update')) break;
     }
     if (rows !== undefined) {
       cur.seeded = true;
