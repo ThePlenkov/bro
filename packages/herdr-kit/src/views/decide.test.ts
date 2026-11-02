@@ -177,6 +177,17 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
   );
   assert.equal(sessionViewCommand('/t', { bro: 'bro' }, q), "'bro' herdr session-view '/t'");
   assert.equal(
+    sessionViewCommand('/t', { bun: 'bun', tui: '/main.ts', bro: 'bro' }, q, {
+      id: 'n1',
+      events: '/e.jsonl',
+    }),
+    "'bun' run '/main.ts' --events '/e.jsonl' --agent 'n1' '/t'"
+  );
+  assert.equal(
+    sessionViewCommand('/t', { bro: 'bro' }, q, { id: 'n1', events: '/e.jsonl' }),
+    "'bro' herdr session-view '/t'"
+  );
+  assert.equal(
     liveViewCommand(
       { events: '/e.jsonl', id: 'n1', worktree: '/t' },
       { bun: 'bun', tui: '/main.ts', bro: 'bro' },

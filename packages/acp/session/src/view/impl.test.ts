@@ -15,10 +15,9 @@ describe('the pane impl seam', () => {
     assert.deepEqual(IMPL_NAMES.sort(), ['acp', 'legacy']);
   });
 
-  test('the default stays legacy — no flag, no env', async () => {
+  test('the default is acp — no flag, no env', async () => {
     const impl = await pickImpl(undefined, {});
-    assert.equal(impl.name, 'legacy');
-    assert.equal(impl.fold, 'legacy');
+    assert.equal(impl.name, 'acp');
   });
 
   test('argv beats env beats default', async () => {

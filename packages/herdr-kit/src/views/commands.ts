@@ -39,10 +39,12 @@ export function liveViewArgv(
 export function sessionViewCommand(
   worktree: string,
   bins: ViewBins,
-  q: (s: string) => string
+  q: (s: string) => string,
+  agent?: { id: string; events: string }
 ): string {
   if (bins.bun !== undefined && bins.tui !== undefined) {
-    return `${q(bins.bun)} run ${q(bins.tui)} ${q(worktree)}`;
+    const direct = agent === undefined ? '' : ` --events ${q(agent.events)} --agent ${q(agent.id)}`;
+    return `${q(bins.bun)} run ${q(bins.tui)}${direct} ${q(worktree)}`;
   }
   return `${q(bins.bro)} herdr session-view ${q(worktree)}`;
 }

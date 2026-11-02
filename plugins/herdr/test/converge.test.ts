@@ -475,7 +475,10 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
   });
 
   test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
-    reset({ panes: [{ pane_id: 'pV' }, { pane_id: 'pX' }], paneIds: ['pV', 'pX'] });
+    reset({
+      panes: [{ pane_id: 'pV', label: 'bro: session' }, { pane_id: 'pX' }],
+      paneIds: ['pV', 'pX'],
+    });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };

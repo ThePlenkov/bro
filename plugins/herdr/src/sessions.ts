@@ -62,13 +62,19 @@ export function bun(): string | undefined {
 }
 
 /** The pane command — the OpenTUI app when its entrypoint + runtime
- *  resolve, the line-mode session-view otherwise. */
-export function sessionCommand(worktreePath: string): string {
+ *  resolve, the line-mode session-view otherwise. A resolved agent
+ *  binds the archive directly (`--events`/`--agent`): the worktree→
+ *  projector→journal path breaks on lanes the doc never marks acp. */
+export function sessionCommand(
+  worktreePath: string,
+  agent?: { id: string; events: string }
+): string {
   const b = existsSync(TUI_MAIN) ? bun() : undefined;
   return sessionViewCommand(
     worktreePath,
     { ...(b !== undefined ? { bun: b, tui: TUI_MAIN } : {}), bro: BRO },
-    shq
+    shq,
+    agent
   );
 }
 
@@ -77,7 +83,7 @@ export function sessionCommand(worktreePath: string): string {
  *  the same path. */
 function armSession(ctx: RenderCtx, paneId: string): boolean {
   herdrTry(['pane', 'rename', paneId, SESSION_LABEL]);
-  if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path)])) return false;
+  if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path, ctx.agent)])) return false;
   ctx.state.sessions[ctx.path] = { workspace: ctx.ws, worktree: ctx.path, pane_id: paneId };
   return true;
 }
@@ -143,10 +149,10 @@ export function ensureSession(ctx: RenderCtx): void {
   armAndReport(ctx, act.paneId, act.adopted);
 }
 
-/** Non-acp lanes carry no session pane (spec bro-l8wqu): for a
- *  non-acp worker the view only duplicated the mirror, and a
- *  worker-less arm has nothing to show. Close the recorded or
- *  orphan-labeled `bro: session` pane and drop the record. */
+/** Lanes with nothing to show carry no session pane (spec
+ *  bro-l8wqu): no acp session, no live agent journal — a worker-less
+ *  arm renders `waiting for projector` forever. Close the recorded
+ *  or orphan-labeled `bro: session` pane and drop the record. */
 export function retireSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
   const { closeId } = decideSessionRetire({
@@ -157,7 +163,7 @@ export function retireSession(ctx: RenderCtx): void {
   });
   if (closeId !== undefined) {
     herdrTry(['pane', 'close', closeId]);
-    log(`retire session pane ${closeId} — not an acp lane (${ctx.ws})`);
+    log(`retire session pane ${closeId} — no resolvable session (${ctx.ws})`);
   }
   delete ctx.state.sessions[ctx.path];
 }
