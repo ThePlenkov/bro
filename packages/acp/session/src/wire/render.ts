@@ -164,7 +164,22 @@ export interface RenderOpts {
   color?: boolean;
 }
 
-const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' };
+/** The plan entry's checkbox — one vocabulary for every renderer
+ *  (the wire's plan block, the legacy model's plan item, the acp
+ *  impl's plan card). */
+export const PLAN_BOX: Record<string, string> = {
+  completed: '[x]',
+  in_progress: '[>]',
+  pending: '[ ]',
+};
+
+/** Status → its box, `[~]` for unknown. */
+export const planBox = (status: string | undefined): string => PLAN_BOX[status ?? ''] ?? '[~]';
+
+/** The permission ask's fallback title — every permission surface
+ *  (wire renderer, item model, session-view line) shares the literal
+ *  so a rename lands once. */
+export const PERMISSION_FALLBACK = 'permission request';
 
 /** Wire value → display scalar; objects get a `?` instead of
  *  `[object Object]` — status lines only carry primitives. */
@@ -476,7 +491,7 @@ export class AcpRenderer {
     const entries = (u['entries'] as { content?: string; status?: string }[] | undefined) ?? [];
     this.out(this.dim('── plan ──'));
     for (const e of entries) {
-      const box = PLAN_BOX[e.status ?? ''] ?? '[~]';
+      const box = planBox(e.status);
       this.out(`  ${box} ${e.content !== undefined ? safe(e.content) : '?'}`);
     }
   }
@@ -589,7 +604,7 @@ export class AcpRenderer {
   ): { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } {
     this.flush();
     const title = safe(
-      params.toolCall?.title ?? params.toolCall?.toolCallId ?? 'permission request'
+      params.toolCall?.title ?? params.toolCall?.toolCallId ?? PERMISSION_FALLBACK
     );
     const options = params.options ?? [];
     const names = options.map(o => safe(o.name ?? o.optionId ?? '?')).join(', ');

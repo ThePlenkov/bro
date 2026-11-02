@@ -18,9 +18,12 @@
  *  - permissions: same count
  */
 import { readFileSync } from 'node:fs';
-import { chunkText, parseArchiveRows } from '../../../../packages/acp/session/src/index.ts';
-import { pickImpl } from '../impl.ts';
-import type { Item } from '../model.ts';
+import {
+  chunkText,
+  type Item,
+  parseArchiveRows,
+  pickImpl,
+} from '../../../../packages/acp/session/src/index.ts';
 
 const path = process.argv[2];
 if (path === undefined) {

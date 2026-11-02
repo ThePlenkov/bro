@@ -12,8 +12,8 @@
  * items, so an index-keyed row would show the wrong item's updates
  * after the first eviction.
  */
-import type { Item, Op, ToolItem } from './model.ts';
-import { isFoldable } from './view.ts';
+import type { Item, Op, ToolItem } from '../model/items.ts';
+import { isFoldable } from './lines.ts';
 
 /** The header bar's live fields — what the shell knows that the
  *  items do not: whose worktree, whose session, and the LED verdict

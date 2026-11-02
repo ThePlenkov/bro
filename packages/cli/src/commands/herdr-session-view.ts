@@ -27,6 +27,7 @@ import { basename, dirname } from 'node:path';
 import {
   type ArchiveRow,
   eventsVerdict,
+  PERMISSION_FALLBACK,
   parseArchiveRows,
   readTailSlice,
   rowVerdict,
@@ -372,7 +373,7 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
         }
         break;
       case 'permission': {
-        const what = row.title ?? 'permission request';
+        const what = row.title ?? PERMISSION_FALLBACK;
         const verdict = row.verdict ?? 'denied';
         dim(
           `── ⚠ permission ‹${what}› — ${verdict} (headless driver; open a terminal in this workspace to handle interactively) ──`

@@ -7,7 +7,7 @@
  *  shape (noul/choice/score — provider-judge's wire contract).
  *  Data-driven: adding a caller is a table row, not a special case. */
 
-import { JUDGE_PROMPT_MARK } from '../../../packages/acp/session/src/index.ts';
+import { JUDGE_PROMPT_MARK } from '../wire/index.ts';
 
 export interface VerdictView {
   /** Short badge label — the caller's name (model when the reply

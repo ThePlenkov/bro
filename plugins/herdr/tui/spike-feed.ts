@@ -23,8 +23,11 @@ import {
   reduce,
   type Session,
 } from '../../../packages/acp/model/src/index.ts';
-import { type ArchiveRow, parseArchiveRows } from '../../../packages/acp/session/src/index.ts';
-import { SessionModel } from './model.ts';
+import {
+  type ArchiveRow,
+  parseArchiveRows,
+  SessionModel,
+} from '../../../packages/acp/session/src/index.ts';
 
 const at = (row: ArchiveRow): number => {
   const ts = (row as { ts?: string }).ts;

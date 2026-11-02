@@ -25,43 +25,43 @@ import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { firstLine } from '../../../packages/acp/session/src/index.ts';
 import {
   acpCardRows,
   acpLine,
-  fillColor,
-  itemGroup,
-  type Segment,
-  segStyle,
-  spacingBefore,
-} from './acp/lines.ts';
-import type { Item, Op, ToolItem } from './model.ts';
-import {
   applyOps,
-  emptyState,
-  moveSelection,
-  type PaneMeta,
-  type PaneState,
-  toolIds,
-  withMeta,
-} from './state.ts';
-import { ledColor, theme } from './theme.ts';
-import { type VerdictView, verdictOf } from './verdict.ts';
-import {
   cardGlyphColor,
+  emptyState,
+  fillColor,
+  firstLine,
+  type Item,
   isFoldable,
   isSettled,
+  itemGroup,
+  ledColor,
   mdPlain,
   mdSource,
+  moveSelection,
+  type Op,
+  type PaneMeta,
+  type PaneState,
   PROMPT_PREVIEW_LINES,
   rowHeight,
+  type Segment,
+  segStyle,
   sideColor,
+  spacingBefore,
   sysCopy,
   TAIL_BUDGET,
+  type ToolItem,
+  theme,
   toolBodyLines,
   toolBodyMd,
+  toolIds,
   toolTail,
-} from './view.ts';
+  type VerdictView,
+  verdictOf,
+  withMeta,
+} from '../../../packages/acp/session/src/index.ts';
 
 /** The store the tree renders from. */
 export interface PaneStore {

@@ -7,9 +7,8 @@
  *   bun test plugins/herdr/tui/acp/model.test.ts
  */
 import { describe, expect, test } from 'bun:test';
-import type { ArchiveRow } from '../../../../packages/acp/session/src/index.ts';
-import type { ToolItem } from '../model.ts';
-import { AcpImpl } from './model.ts';
+import type { ArchiveRow, ToolItem } from '../../../../packages/acp/session/src/index.ts';
+import { AcpImpl } from '../../../../packages/acp/session/src/view/acp-impl.ts';
 
 const update = (u: Record<string, unknown>): ArchiveRow => ({
   kind: 'update',

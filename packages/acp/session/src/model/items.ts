@@ -11,23 +11,24 @@
  * sanitize posture — is the providers' `acp-render` module verbatim.
  */
 
+import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import { rowVerdict } from '../archive/index.ts';
 import {
-  type ArchiveRow,
   chunkText,
   clip,
   DONE_STATUS,
   firstLine,
-  type PaneLed,
-  rowVerdict,
+  PERMISSION_FALLBACK,
+  planBox,
   type SessionUpdateLike,
   safe,
   safeBlock,
   type ToolContent,
   toolArg,
   toolContent,
-} from '../../../packages/acp/session/src/index.ts';
+} from '../wire/index.ts';
+import { fmtUsage, isInternalBy, shortBy, TimeGutter } from './fmt.ts';
 import { isJudgeTurn } from './verdict.ts';
-import { fmtUsage, isInternalBy, shortBy, TimeGutter } from './view.ts';
 
 export type { ToolContent };
 
@@ -128,8 +129,6 @@ interface ToolRec {
   status?: string;
   edge?: string;
 }
-
-const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' };
 
 const scalar = (v: unknown): string => {
   const t = typeof v;
@@ -258,7 +257,7 @@ export class SessionModel {
       case 'permission': {
         // visible even inside a storm — a headless internal call
         // still wanted something — and the batch survives across it
-        const what = row.title ?? 'permission request';
+        const what = row.title ?? PERMISSION_FALLBACK;
         const verdict = row.verdict ?? 'denied';
         this.side(
           'permission',
@@ -592,7 +591,7 @@ export class SessionModel {
     const entries = (u.entries as { content?: string; status?: string }[] | undefined) ?? [];
     const lines = ['── plan ──'];
     for (const e of entries) {
-      const box = PLAN_BOX[e.status ?? ''] ?? '[~]';
+      const box = planBox(e.status);
       lines.push(`  ${box} ${e.content !== undefined ? safe(e.content) : '?'}`);
     }
     this.side('note', lines.join('\n'));

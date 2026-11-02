@@ -5,9 +5,12 @@
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ArchiveRow } from '../../../packages/acp/session/src/index.ts';
-import { MAX_ITEMS, type Op, SessionModel, type ToolItem } from '../tui/model.ts';
-import { dayLabel, hhmm } from '../tui/view.ts';
+import type { ArchiveRow } from '../archive/index.ts';
+import { dayLabel, hhmm } from './fmt.ts';
+import { type Item, MAX_ITEMS, type Op, SessionModel, type ToolItem } from './items.ts';
+
+/** The item's text payload — every non-tool item carries one. */
+const txt = (i: Item | undefined): string => (i !== undefined && 'text' in i ? i.text : '');
 
 const upd = (u: Record<string, unknown>): ArchiveRow => ({ kind: 'update', update: u as never });
 const chunk = (kind: string, text: string): ArchiveRow =>
@@ -229,7 +232,7 @@ describe('SessionModel — side rows + verdict', () => {
       m.items.map(i => i.kind),
       ['permission']
     );
-    assert.ok(m.items[0]!.text.includes('permission ‹Write /x›'));
+    assert.ok(txt(m.items[0]).includes('permission ‹Write /x›'));
     assert.equal(m.verdict?.led.state, 'blocked');
     assert.equal(m.verdict?.mode, 'permission — denied');
 
@@ -271,7 +274,7 @@ describe('SessionModel — time separators', () => {
     ...(by !== undefined ? { by } : {}),
   });
   const times = (m: SessionModel): string[] =>
-    m.items.filter(i => i.kind === 'time').map(i => i.text);
+    m.items.filter(i => i.kind === 'time').map(i => txt(i));
 
   test('a turn start lazily heads its group — minute · origin, provider unwrapped', () => {
     const m = new SessionModel();
@@ -334,7 +337,7 @@ describe('SessionModel — time separators', () => {
     ]);
     // …and the one storm note names both origins
     const note = m.items.find(i => i.kind === 'note');
-    assert.match(note!.text, /^▸ 2 internal calls · kilo, t$/m);
+    assert.match(txt(note), /^▸ 2 internal calls · kilo, t$/m);
   });
 
   test('a turn that births nothing earns no head; pre-turn rows head bare', () => {
@@ -394,7 +397,7 @@ describe('SessionModel — internal storms + turn seals', () => {
     update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } as never,
   });
   const texts = (m: SessionModel): string[] =>
-    m.items.filter(i => i.kind !== 'time').map(i => i.text.split('\n')[0] ?? '');
+    m.items.filter(i => i.kind !== 'time').map(i => txt(i).split('\n')[0] ?? '');
 
   test('internal micro-turns collapse into one ▸ tally row — no fake merged replies', () => {
     const m = new SessionModel();
@@ -407,8 +410,8 @@ describe('SessionModel — internal storms + turn seals', () => {
     m.feed(chunk('real reply'));
     const note = m.items.find(i => i.kind === 'note');
     assert.ok(note !== undefined);
-    assert.match(note!.text, /^▸ 5 internal calls · conductor$/m);
-    assert.ok(note!.text.includes('`ok`'));
+    assert.match(txt(note), /^▸ 5 internal calls · conductor$/m);
+    assert.ok(txt(note).includes('`ok`'));
     // the five "ok" replies never became items of their own — and
     // the agent's reply is untouched
     assert.deepEqual(
@@ -428,7 +431,7 @@ describe('SessionModel — internal storms + turn seals', () => {
     m.feed(stop());
     const msgs = m.items.filter(i => i.kind === 'message');
     assert.deepEqual(
-      msgs.map(i => i.text),
+      msgs.map(i => txt(i)),
       ['ok', 'ok']
     );
   });
@@ -444,11 +447,11 @@ describe('SessionModel — internal storms + turn seals', () => {
     const errs = m.items.filter(i => i.kind === 'turn' && i.text.startsWith('✗'));
     // 3 identical kilo failures → one visible row; conductor → one
     assert.deepEqual(
-      errs.map(i => i.text),
+      errs.map(i => txt(i)),
       ['✗ kilo · Internal error', '✗ t · boom']
     );
     const note = m.items.find(i => i.kind === 'note');
-    assert.match(note!.text, /^▸ 4 internal calls · 4 failed · kilo, t$/m);
+    assert.match(txt(note), /^▸ 4 internal calls · 4 failed · kilo, t$/m);
   });
 
   test('a managed-agent failure keeps the bare banner — its head names the origin', () => {
@@ -457,7 +460,7 @@ describe('SessionModel — internal storms + turn seals', () => {
     m.feed(stop('blew up'));
     const errs = m.items.filter(i => i.kind === 'turn');
     assert.deepEqual(
-      errs.map(i => i.text),
+      errs.map(i => txt(i)),
       ['── turn failed — blew up ──']
     );
   });
@@ -506,7 +509,7 @@ describe('SessionModel — eviction + toggle + plan', () => {
       })
     );
     const it = m.items[0]!;
-    assert.ok(it.text.includes('[x] do it'));
-    assert.ok(it.text.includes('[>] doing'));
+    assert.ok(txt(it).includes('[x] do it'));
+    assert.ok(txt(it).includes('[>] doing'));
   });
 });

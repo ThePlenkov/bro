@@ -31,14 +31,9 @@ import {
   type Session,
   type Item as TheirItem,
   type ToolCallItem,
-} from '../../../../packages/acp/model/src/index.ts';
-import type { ArchiveRow, PaneLed } from '../../../../packages/acp/session/src/index.ts';
-import {
-  type SessionUpdateLike,
-  type ToolWire,
-  toolArg,
-} from '../../../../packages/acp/session/src/index.ts';
-import type { FoldPolicy, PaneImpl } from '../impl.ts';
+} from '@broject/acp-model';
+import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../model/fmt.ts';
 import {
   dumpContent,
   dumpItems,
@@ -49,10 +44,11 @@ import {
   type TextItem,
   type ToolItem,
   type ToolStatus,
-} from '../model.ts';
-import { isJudgeTurn, verdictOf } from '../verdict.ts';
-import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../view.ts';
-import { acpLine, lineText } from './lines.ts';
+} from '../model/items.ts';
+import { isJudgeTurn, verdictOf } from '../model/verdict.ts';
+import { planBox, type SessionUpdateLike, type ToolWire, toolArg } from '../wire/index.ts';
+import { acpLine, lineText } from './acp-lines.ts';
+import type { FoldPolicy, PaneImpl } from './impl.ts';
 
 /** sessionUpdate kinds their reducer handles (items or absorbed
  *  session state — usage/mode/config/commands/info). Anything else
@@ -184,12 +180,10 @@ const toolItem = (
   };
 };
 
-const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' };
-
 const planItem = (item: PlanItem, id: number): SideItem => {
   const lines = ['── plan ──'];
   for (const e of item.entries) {
-    lines.push(`  ${PLAN_BOX[e.status] ?? '[~]'} ${e.content}`);
+    lines.push(`  ${planBox(e.status)} ${e.content}`);
   }
   return { id, kind: 'note', text: lines.join('\n'), vi: item };
 };

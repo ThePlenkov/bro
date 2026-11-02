@@ -1,11 +1,12 @@
-import { expect, test } from 'bun:test';
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { isJudgeTurn, JUDGE_PROMPT_MARK, verdictOf } from './verdict.ts';
 
 test('a journaled judge prompt marks its turn', () => {
-  expect(isJudgeTurn(`Intro\n\n${JUDGE_PROMPT_MARK}\n…`, undefined)).toBe(true);
-  expect(isJudgeTurn('a plain user prompt', undefined)).toBe(false);
-  expect(isJudgeTurn(undefined, 'bro review act:judge')).toBe(true);
-  expect(isJudgeTurn(undefined, 'agent-update')).toBe(false);
+  assert.equal(isJudgeTurn(`Intro\n\n${JUDGE_PROMPT_MARK}\n…`, undefined), true);
+  assert.equal(isJudgeTurn('a plain user prompt', undefined), false);
+  assert.equal(isJudgeTurn(undefined, 'bro review act:judge'), true);
+  assert.equal(isJudgeTurn(undefined, 'agent-update'), false);
 });
 
 test('a wrapped {answers} body classifies — badge + field table', () => {
@@ -17,12 +18,12 @@ test('a wrapped {answers} body classifies — badge + field table', () => {
       },
     })
   );
-  expect(v?.badge).toBe('verdict');
-  expect(v?.fields).toEqual([
+  assert.equal(v?.badge, 'verdict');
+  assert.deepEqual(v?.fields, [
     ['route', 'choice: a (a:0.90 b:0.10)'],
     ['sure', 'noul 0.87'],
   ]);
-  expect(v?.summary).toContain('route choice: a');
+  assert.ok(v?.summary.includes('route choice: a'));
 });
 
 test('a reply naming its model badges with it — generic, not branded', () => {
@@ -32,24 +33,24 @@ test('a reply naming its model badges with it — generic, not branded', () => {
       answers: { route: { type: 'choice', choice: 'a' } },
     })
   );
-  expect(v?.model).toBe('typesafe/jev-1.13');
-  expect(v?.badge).toBe('typesafe/jev-1.13');
+  assert.equal(v?.model, 'typesafe/jev-1.13');
+  assert.equal(v?.badge, 'typesafe/jev-1.13');
 });
 
 test('a bare {qid:answer} map classifies; score renders', () => {
   const v = verdictOf(JSON.stringify({ quality: { type: 'score', score: 2.5 } }));
-  expect(v?.fields).toEqual([['quality', 'score: 2.50']]);
+  assert.deepEqual(v?.fields, [['quality', 'score: 2.50']]);
 });
 
 test('type-less answers still classify on a lone shape key', () => {
   const v = verdictOf(JSON.stringify({ go: { noul: 0.5 } }));
-  expect(v?.fields).toEqual([['go', 'noul 0.50']]);
+  assert.deepEqual(v?.fields, [['go', 'noul 0.50']]);
 });
 
 test('unknown/malformed bodies stay undefined — the ▸ JSON row keeps them', () => {
-  expect(verdictOf('not json')).toBeUndefined();
-  expect(verdictOf('{"a":{"type":"mystery","x":1}}')).toBeUndefined();
-  expect(verdictOf('{"a":{"type":"choice"}}')).toBeUndefined(); // empty choice
-  expect(verdictOf('{}')).toBeUndefined();
-  expect(verdictOf('{"a":1}')).toBeUndefined(); // non-object answer
+  assert.equal(verdictOf('not json'), undefined);
+  assert.equal(verdictOf('{"a":{"type":"mystery","x":1}}'), undefined);
+  assert.equal(verdictOf('{"a":{"type":"choice"}}'), undefined); // empty choice
+  assert.equal(verdictOf('{}'), undefined);
+  assert.equal(verdictOf('{"a":1}'), undefined); // non-object answer
 });

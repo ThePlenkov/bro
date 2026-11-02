@@ -13,8 +13,8 @@
  * every impl — a completed call is one compact `✓` row; its
  * output (file dumps, JSON) never owns the feed unpinned.
  */
-import type { ArchiveRow, PaneLed } from '../../../packages/acp/session/src/index.ts';
-import { copyItem, type Item, type Op, SessionModel } from './model.ts';
+import type { ArchiveRow, PaneLed } from '../archive/index.ts';
+import { copyItem, type Item, type Op, SessionModel } from '../model/items.ts';
 
 /** Historical fold-policy names — retained for the impl seam; tool
  *  bodies fold on landing under either. */
@@ -79,7 +79,7 @@ class LegacyImpl implements PaneImpl {
  *  load `acp-model`. */
 const IMPLS: Record<string, () => PaneImpl | Promise<PaneImpl>> = {
   legacy: () => new LegacyImpl(),
-  acp: async () => new (await import('./acp/model.ts')).AcpImpl(),
+  acp: async () => new (await import('./acp-impl.ts')).AcpImpl(),
 };
 
 /** The impl ids the registry knows — for usage text. */

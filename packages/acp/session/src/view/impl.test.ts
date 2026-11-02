@@ -7,8 +7,8 @@
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ArchiveRow } from '../../../packages/acp/session/src/index.ts';
-import { IMPL_NAMES, implArg, pickImpl } from '../tui/impl.ts';
+import type { ArchiveRow } from '../archive/index.ts';
+import { IMPL_NAMES, implArg, pickImpl } from './impl.ts';
 
 describe('the pane impl seam', () => {
   test('the registry knows legacy and acp', () => {

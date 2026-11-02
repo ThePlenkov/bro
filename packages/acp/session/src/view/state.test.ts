@@ -8,15 +8,8 @@
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { Item, ToolItem } from '../tui/model.ts';
-import {
-  applyOps,
-  COLLAPSE_AT,
-  emptyState,
-  moveSelection,
-  toolIds,
-  withMeta,
-} from '../tui/state.ts';
+import type { Item, ToolItem } from '../model/items.ts';
+import { applyOps, COLLAPSE_AT, emptyState, moveSelection, toolIds, withMeta } from './state.ts';
 
 const message = (id: number, text: string): Item => ({ id, kind: 'message', text });
 const tool = (id: number, title: string): Item => ({

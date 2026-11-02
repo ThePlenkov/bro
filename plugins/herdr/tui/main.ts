@@ -27,10 +27,14 @@ import {
   type ArchiveRow,
   eventsFile,
   eventsVerdict,
+  implArg,
+  type PaneImpl,
   type PaneLed,
   parseArchiveRows,
+  pickImpl,
   promptFile,
   readTailSlice,
+  sysCopy,
   TAIL_BYTES,
   tailArchive,
 } from '../../../packages/acp/session/src/index.ts';
@@ -50,8 +54,6 @@ import {
   sessionAgentOf,
 } from '../../../packages/cli/src/commands/session-feed.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
-import { implArg, type PaneImpl, pickImpl } from './impl.ts';
-import { sysCopy } from './view.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise

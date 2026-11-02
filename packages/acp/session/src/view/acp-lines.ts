@@ -11,8 +11,8 @@ import type {
   Item as TheirItem,
   ThoughtItem,
   ToolCallItem,
-} from '../../../../packages/acp/model/src/index.ts';
-import { theme } from '../theme.ts';
+} from '@broject/acp-model';
+import { theme } from './theme.ts';
 
 /** One painted cell — `token` names the semantic role (theme resolves
  *  it), `fill` names a surface role for the cell/row background. */

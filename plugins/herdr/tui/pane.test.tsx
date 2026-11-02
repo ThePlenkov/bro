@@ -17,8 +17,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { CliRenderer, ScrollBoxRenderable } from '@opentui/core';
 import { createMockMouse, createTestRenderer } from '@opentui/core/testing';
+import { SessionModel } from '../../../packages/acp/session/src/index.ts';
 import type { PaneWriter } from './app.tsx';
-import { SessionModel } from './model.ts';
 
 /**
  * Load the pane the way `main.ts` does.
@@ -523,7 +523,7 @@ describe('the Solid session pane', () => {
   });
 
   test('printLines conceals markdown and folds long text', async () => {
-    const { printLines } = await import('./view.ts');
+    const { printLines } = await import('../../../packages/acp/session/src/index.ts');
     const text = ['**bold** and [x](https://u)', '<details>', ...Array(20).fill('l')].join('\n');
     const folded = printLines({
       id: 1,

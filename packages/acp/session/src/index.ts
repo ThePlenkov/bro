@@ -7,4 +7,6 @@
 // reachable only through it.
 
 export * from './archive/index.ts';
+export * from './model/index.ts';
+export * from './view/index.ts';
 export * from './wire/index.ts';
