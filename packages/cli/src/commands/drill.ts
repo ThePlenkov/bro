@@ -368,7 +368,9 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
   if (!known) {
     return
   }
-  for (const arg of argv) {
+  const sep = argv.indexOf('--')
+  const head = sep === -1 ? argv : argv.slice(0, sep)
+  for (const arg of head) {
     // single-dash typos too — `-p 3` silently becoming a title is worse
     // than an error (no drill flag uses one dash; bare "-" stays a title)
     if (arg.length > 1 && arg.startsWith('-') && !known.has(arg)) {
