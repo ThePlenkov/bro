@@ -369,7 +369,7 @@ function ToolCard(props: {
         <text fg={theme.muted} attributes={TextAttributes.DIM} content={tail().tally} />
         <box flexGrow={1} />
         <Show when={md() !== ''}>
-          <FoldBtn open={!props.item.collapsed} onToggle={props.onToggle} />
+          <FoldBtn open={!props.item.collapsed} onToggle={props.onToggle} compact={true} />
         </Show>
       </box>
       {/* pinned open (Enter/c) — the FULL body as real markdown:
@@ -423,7 +423,7 @@ function ToolCard(props: {
       <Show when={!props.item.collapsed && md() !== ''}>
         <box flexDirection="row" flexShrink={0} width="100%">
           <box flexGrow={1} />
-          <FoldBtn open={true} onToggle={props.onToggle} />
+          <FoldBtn open={true} onToggle={props.onToggle} compact={true} />
         </box>
       </Show>
     </box>
@@ -532,7 +532,7 @@ function AcpRunRow(props: {
           content={props.item.arg ?? ''}
         />
         <box flexGrow={1} />
-        <FoldBtn open={props.item.collapsed !== true} onToggle={props.onToggle} />
+        <FoldBtn open={props.item.collapsed !== true} onToggle={props.onToggle} compact={true} />
       </box>
       {/* selection previews: a still-collapsed run shows its members
        *  while it holds the selection (j/k), Enter/c pins it open;
@@ -563,12 +563,20 @@ function AcpRunRow(props: {
  *  surface a foldable row carries: selectable=false keeps it out of
  *  every drag-selection, and its press pin-toggles the row it sits on
  *  (the prompt card's button grammar, generalised). */
-function FoldBtn(props: { open: boolean; onToggle?: () => void }) {
+function FoldBtn(props: { open: boolean; onToggle?: () => void; compact?: boolean }) {
   return (
     <text
       fg={props.open ? theme.muted : theme.accent}
       attributes={props.open ? TextAttributes.DIM : undefined}
-      content={props.open ? '▾ show less ' : '▸ show more '}
+      content={
+        props.compact === true
+          ? props.open
+            ? '▾ '
+            : '▸ '
+          : props.open
+            ? '▾ show less '
+            : '▸ show more '
+      }
       selectable={false}
       onMouseDown={() => props.onToggle?.()}
       flexShrink={0}
@@ -806,6 +814,7 @@ function ItemRow(props: {
                       <FoldBtn
                         open={tool()?.collapsed !== true}
                         onToggle={() => props.onToggleRow?.(props.item.id)}
+                        compact={true}
                       />
                     </Show>
                   </box>
@@ -824,7 +833,11 @@ function ItemRow(props: {
                   <Show when={tool() !== undefined && tool()?.collapsed !== true}>
                     <box flexDirection="row" flexShrink={0} width="100%">
                       <box flexGrow={1} />
-                      <FoldBtn open={true} onToggle={() => props.onToggleRow?.(props.item.id)} />
+                      <FoldBtn
+                        open={true}
+                        onToggle={() => props.onToggleRow?.(props.item.id)}
+                        compact={true}
+                      />
                     </box>
                   </Show>
                 </box>
