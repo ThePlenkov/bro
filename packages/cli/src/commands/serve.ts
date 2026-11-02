@@ -1126,6 +1126,37 @@ export function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
 /** One request's guard → route → send pipeline, lifted out of the
  *  handler closure so each level stays under the SonarCloud
  *  cognitive-complexity ceiling. */
+function rejectForeignHost(req: IncomingMessage, res: ServerResponse, isWebhook: boolean): boolean {
+  if (isWebhook) {
+    return false;
+  }
+  if (!isLoopbackHostHeader(req.headers.host)) {
+    send(res, 403, { error: 'loopback host only' });
+    return true;
+  }
+  return false;
+}
+
+function rejectUntrustedWrite(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  isWebhook: boolean,
+  token: string,
+  statePathHint: string
+): boolean {
+  if (isWebhook || !WRITE_METHODS.has(method)) {
+    return false;
+  }
+  const wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  const refusal = writeGuard(req, token, wantsBody, statePathHint);
+  if (refusal !== undefined) {
+    send(res, refusal.status, refusal.body, refusal);
+    return true;
+  }
+  return false;
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1144,8 +1175,7 @@ async function handleRequest(
     // special: a mis-signed POST is a 401 inside the handler and
     // the 202 body leaks nothing (spec specs/bro-huy5o.7.md).
     const webhookRoute = url.pathname.startsWith('/api/v1/webhooks/');
-    if (!webhookRoute && !isLoopbackHostHeader(req.headers.host)) {
-      send(res, 403, { error: 'loopback host only' });
+    if (rejectForeignHost(req, res, webhookRoute)) {
       return;
     }
     // self-answering routes chain first — each returns true once it
@@ -1154,17 +1184,14 @@ async function handleRequest(
     if (await routeSelfAnswering(req, res, url, deps, token, statePathHint)) {
       return;
     }
-    const wantsBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
-    if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
-      const refusal = writeGuard(req, token, wantsBody, statePathHint);
-      if (refusal !== undefined) {
-        send(res, refusal.status, refusal.body, refusal);
-        return;
-      }
+    const method = req.method ?? 'GET';
+    if (rejectUntrustedWrite(req, res, method, webhookRoute, token, statePathHint)) {
+      return;
     }
+    const wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
     const rawBody = wantsBody ? await readBody(req) : undefined;
     const r = await routeRequest(
-      req.method ?? 'GET',
+      method,
       url.pathname,
       rawBody,
       deps,
@@ -1422,7 +1449,11 @@ async function routeAgentEvents(
  *  dropped rather than letting one slow client grow `bro serve`'s
  *  buffered output without bound. The reconnect lands on a fresh
  *  snapshot, so a dropped follower loses nothing but a retry. */
-const SSE_FOLLOW_BACKLOG = 1_048_576;
+const SSE_FOLLOW_BACKLOG = 2_097_152;
+/** Hard cap on total bytes queued for a follow connection (initial burst
+ *  included). Prevents an unbounded snapshot from pinning memory when a
+ *  reader stalls before any drain. */
+const SSE_FOLLOW_TOTAL_BACKLOG = 8_388_608;
 
 /** Output slices this size pace a big snapshot through the drain loop —
  *  one JSON frame can never single-handedly blow the backlog cap. */
@@ -1513,33 +1544,68 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
   // `res.write` back-pressures, the tail waits for 'drain' instead of
   // inflating res internals. A snapshot then streams at the reader's
   // pace; only a genuinely stuck follower (queue past the cap) drops.
-  const queue: string[] = [];
+  type QFrame = { frame: string; live: boolean };
+  const queue: QFrame[] = [];
   let queued = 0;
+  let liveQueued = 0;
   let waitingDrain = false;
   let endAfterQueue = false;
+  // The initial burst (meta + snapshot + exit for an already-final
+  // terminal) travels synchronously through enqueue() with no drain
+  // opportunity — track live backlog separately from the initial queue.
+  let initial = true;
+  const dropLive = (): void => {
+    // Drop only live frames, preserve initial/snapshot frames in the queue
+    let i = 0;
+    while (i < queue.length) {
+      const item = queue[i]!;
+      if (item.live) {
+        const len = Buffer.byteLength(item.frame);
+        queued -= len;
+        liveQueued -= len;
+        queue.splice(i, 1);
+      } else {
+        i++;
+      }
+    }
+    handle?.stop();
+    // No more live frames will arrive; end the stream once the initial/snapshot
+    // frames flush.
+    endAfterQueue = true;
+    pump();
+  };
   const drop = (): void => {
     queue.length = 0;
     queued = 0;
+    liveQueued = 0;
     handle?.stop();
     res.end();
   };
+  const onDrain = (): void => {
+    waitingDrain = false;
+    pump();
+  };
   const pump = (): void => {
+    if (waitingDrain) {
+      return;
+    }
     while (queue.length > 0 && !gone()) {
       // write() never refuses the frame — `false` is advisory ("over
       // high-water"), so the head is off the queue either way; on false
       // we just stop feeding it more until 'drain'
-      const frame = queue.shift()!;
-      queued -= Buffer.byteLength(frame);
-      if (!res.write(frame)) {
-        if (!waitingDrain) {
-          waitingDrain = true;
-          res.once('drain', () => {
-            waitingDrain = false;
-            pump();
-          });
-        }
+      const item = queue.shift()!;
+      const len = Buffer.byteLength(item.frame);
+      queued -= len;
+      liveQueued -= item.live ? len : 0;
+      if (res.write(item.frame)) {
+        continue;
+      }
+      if (waitingDrain) {
         return;
       }
+      waitingDrain = true;
+      res.once('drain', onDrain);
+      return;
     }
     if (queue.length === 0 && endAfterQueue && !gone()) {
       res.end();
@@ -1549,12 +1615,23 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     if (gone()) {
       return;
     }
-    queued += Buffer.byteLength(frame);
-    queue.push(frame);
-    if (queued > SSE_FOLLOW_BACKLOG) {
+    const len = Buffer.byteLength(frame);
+    const isLive = !initial;
+    if (queued + len > SSE_FOLLOW_TOTAL_BACKLOG) {
       drop();
       return;
     }
+    if (isLive) {
+      if (liveQueued + len > SSE_FOLLOW_BACKLOG) {
+        dropLive();
+        return;
+      }
+    }
+    queued += len;
+    if (isLive) {
+      liveQueued += len;
+    }
+    queue.push({ frame, live: isLive });
     pump();
   };
   const finish = (): void => {
@@ -1609,9 +1686,11 @@ function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string
     // child's 'exit' while 'close' still owes the last piped bytes, and
     // ending here would drop them plus leak the registered listener
     enqueue(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`);
+    initial = false;
     finish();
     return;
   }
+  initial = false;
   res.on('close', () => handle?.stop());
 }
 
