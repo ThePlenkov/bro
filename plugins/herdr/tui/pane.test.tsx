@@ -416,6 +416,38 @@ describe('the Solid session pane', () => {
     }
   });
 
+  test('the `show more` button pin-toggles the prompt card', async () => {
+    const p = await mount();
+    try {
+      p.model.feed({
+        kind: 'prompt',
+        text: Array.from({ length: 20 }, (_, i) => `prompt line ${i}`).join('\n'),
+      });
+      await p.flush();
+      const folded = await p.frame();
+      assert.match(folded, /show more/);
+      assert.doesNotMatch(folded, /prompt line 15/);
+      // click the button itself — its row's right end
+      const y = folded.split('\n').findIndex(l => l.includes('show more'));
+      assert.ok(y >= 0, 'button not in frame');
+      const x = folded.split('\n')[y].indexOf('show more');
+      const mouse = createMockMouse(p.renderer);
+      await mouse.click(x + 2, y, 0);
+      await p.flush();
+      const opened = await p.frame();
+      assert.match(opened, /prompt line 15/);
+      assert.match(opened, /show less/);
+      // and `show less` folds it back
+      const y2 = opened.split('\n').findIndex(l => l.includes('show less'));
+      const x2 = opened.split('\n')[y2].indexOf('show less');
+      await mouse.click(x2 + 2, y2, 0);
+      await p.flush();
+      assert.doesNotMatch(await p.frame(), /prompt line 15/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
   test('j/k scrolls the selected row into view (off-screen foldable)', async () => {
     const p = await mount();
     try {

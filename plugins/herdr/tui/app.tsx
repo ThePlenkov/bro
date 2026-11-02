@@ -76,6 +76,9 @@ export interface PaneWriter {
   select(delta: number): void;
   /** Fold the selected card open or closed. */
   toggle(): void;
+  /** Select + pin-toggle a specific foldable row — the `show more`
+   *  button's gesture; every press elsewhere still belongs to copy. */
+  toggleRow(id: number): void;
   /** Fold EVERY foldable row at once — `a` opens them all, `z`
    *  shuts them all (addendum 27). Marks foldTouched so neither the
    *  auto-fold nor the selection peek overrides the sweep. */
@@ -211,6 +214,19 @@ export function createPane(
         });
         // an open card can outgrow the viewport — keep its head in view
         pane.scrollToRow?.(item.id);
+      },
+      toggleRow(id) {
+        const item = plain.byId[id];
+        if (item === undefined || !isFoldable(item)) return;
+        publish({
+          ...plain,
+          selected: id,
+          byId: {
+            ...plain.byId,
+            [id]: { ...item, collapsed: !item.collapsed, foldTouched: true },
+          },
+        });
+        pane.scrollToRow?.(id);
       },
       toggleAll(open) {
         const byId = { ...plain.byId };
@@ -567,6 +583,9 @@ function PromptRow(props: {
   syntax: SyntaxStyle;
   selected: boolean;
   width: () => number;
+  /** The `▸ show more`/`▾ show less` button's click — the ONLY
+   *  mouse target on the card; the rest of the row stays copy-clean */
+  onToggle?: () => void;
 }) {
   const text = createMemo(() => ('text' in props.item ? mdSource(props.item.text) : ''));
   const lines = createMemo(() => text().split('\n'));
@@ -605,12 +624,24 @@ function PromptRow(props: {
                   maxWidth={props.width() - 2}
                 />
               </Show>
-              <text
-                fg={theme.muted}
-                attributes={TextAttributes.DIM}
-                content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Space expands`}
-                flexShrink={0}
-              />
+              <box flexDirection="row" flexShrink={0} width="100%">
+                <text
+                  fg={theme.muted}
+                  attributes={TextAttributes.DIM}
+                  content={`+${lines().length - Math.min(lines().length, PROMPT_PREVIEW_LINES)} more lines — Space expands`}
+                  flexGrow={1}
+                />
+                {/* the card's one mouse target — selectable=false so
+                 *  a press here can never start a drag-selection;
+                 *  everything else on the card stays copy-clean */}
+                <text
+                  fg={theme.accent}
+                  content="▸ show more "
+                  selectable={false}
+                  onMouseDown={() => props.onToggle?.()}
+                  flexShrink={0}
+                />
+              </box>
             </>
           }
         >
@@ -623,6 +654,19 @@ function PromptRow(props: {
             flexShrink={0}
             maxWidth={props.width() - 2}
           />
+          <Show when={isFoldable(props.item)}>
+            <box flexDirection="row" flexShrink={0} width="100%">
+              <box flexGrow={1} />
+              <text
+                fg={theme.muted}
+                attributes={TextAttributes.DIM}
+                content="▾ show less "
+                selectable={false}
+                onMouseDown={() => props.onToggle?.()}
+                flexShrink={0}
+              />
+            </box>
+          </Show>
         </Show>
       </Show>
       <BarPad />
@@ -651,6 +695,8 @@ function ItemRow(props: {
   width: () => number;
   frame: () => number;
   findTool: (toolCallId: string) => unknown;
+  /** wires a row's `show more` button to the writer's pin-toggle */
+  onToggleRow?: (id: number) => void;
 }) {
   // an activity-run group — the confirmed `▸ N tool calls · …` line;
   // it is a tool-kind item but renders its own collapsed/expanded row
@@ -936,6 +982,7 @@ function ItemRow(props: {
                             syntax={props.syntax}
                             selected={props.selected}
                             width={props.width}
+                            onToggle={() => props.onToggleRow?.(props.item.id)}
                           />
                         </Show>
                       }
@@ -1093,6 +1140,8 @@ function Pane(props: {
   /** mouse-up after a drag-select → OSC52 copy (opencode's
    *  copy-on-select on the renderer's own selection) */
   onCopySelect?: (event: MouseEvent) => void;
+  /** a row's `show more` button — pin-toggles that row's fold */
+  onToggleRow?: (id: number) => void;
 }) {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
@@ -1187,6 +1236,7 @@ function Pane(props: {
                       width={() => Math.max(20, (scroller()?.viewport.width || renderer.width) - 2)}
                       frame={frame}
                       findTool={findTool}
+                      onToggleRow={props.onToggleRow}
                     />
                   </box>
                 );
@@ -1266,6 +1316,7 @@ export async function mountPane(opts: {
           setToast('copied');
           setTimeout(() => setToast(''), 1500);
         }}
+        onToggleRow={id => pane.writer.toggleRow(id)}
       />
     ),
     opts.renderer
