@@ -166,7 +166,9 @@ export function moveSelection(state: PaneState, delta: number): number {
   const first = ids[0];
   if (first === undefined) return -1;
   const current = ids.indexOf(state.selected);
-  if (current === -1) return first;
+  // unseeded: walk from the edge the direction points at —
+  // k starts at the bottom foldable, j at the top one
+  if (current === -1) return delta < 0 ? (ids.at(-1) ?? first) : first;
   const next = Math.min(ids.length - 1, Math.max(0, current + delta));
   return ids[next] ?? first;
 }

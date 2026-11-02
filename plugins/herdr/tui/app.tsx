@@ -40,6 +40,7 @@ import {
   applyOps,
   emptyState,
   moveSelection,
+  toolIds,
   type PaneMeta,
   type PaneState,
   withMeta,
@@ -176,8 +177,27 @@ export function createPane(
         if (selected >= 0) pane.scrollToRow?.(selected);
       },
       toggle() {
-        const item = plain.byId[plain.selected];
-        if (item === undefined || !isFoldable(item)) return;
+        // nothing selected (no j/k yet — and clicks are reserved
+        // for copy): Space/Enter/c falls back to the foldable
+        // nearest the bottom of the feed and selects it, so the
+        // key always does the visible thing the user asked for
+        let item = plain.byId[plain.selected];
+        if (item === undefined || !isFoldable(item)) {
+          const last = toolIds(plain).at(-1);
+          if (last === undefined) return;
+          item = plain.byId[last];
+          if (item === undefined) return;
+          publish({
+            ...plain,
+            selected: last,
+            byId: {
+              ...plain.byId,
+              [last]: { ...item, collapsed: !item.collapsed, foldTouched: true },
+            },
+          });
+          pane.scrollToRow?.(last);
+          return;
+        }
         publish({
           ...plain,
           // foldTouched marks the user's explicit fold — the
