@@ -125,14 +125,20 @@ function feedArchive(impl: PaneImpl, eventsPath: string, rows: ArchiveRow[]): vo
 /** `main.ts <worktree> --dump` — the headless readout. Prints the
  *  model's text projection of the archive tail and exits. */
 async function dump(worktree: string, argv: string[]): Promise<void> {
+  const eventsArg = opt(argv, '--events');
+  const agentArg = opt(argv, '--agent');
   const base = gitCommonDir(worktree) ?? worktree;
   const state = readState(fleetStatusPath(base, worktree));
   const target = resolveTarget(state, worktree, providers(worktree));
+  const eventsPath =
+    eventsArg ??
+    target?.events ??
+    (agentArg !== undefined ? eventsFile(base, agentArg) : undefined);
   const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree, agent: sessionAgentOf(target) });
-  if (target?.events !== undefined) {
-    const tail = tailArchive(target.events);
-    if (tail !== undefined) feedArchive(impl, target.events, tail.rows);
+  impl.setContext?.({ worktree, agent: agentArg ?? sessionAgentOf(target) });
+  if (eventsPath !== undefined) {
+    const tail = tailArchive(eventsPath);
+    if (tail !== undefined) feedArchive(impl, eventsPath, tail.rows);
     impl.beginLive();
   }
   for (const line of impl.dump()) process.stdout.write(`${line}\n`);
