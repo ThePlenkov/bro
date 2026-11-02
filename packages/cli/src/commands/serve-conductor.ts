@@ -2533,13 +2533,17 @@ function pruneChains(
   chains: Map<string, { key: string; consumed: number }>,
   sessions: Map<string, ConvSession>
 ): void {
+  const stale: string[] = [];
+  const alive: string[] = [];
   for (const [id, e] of chains) {
-    if (!sessions.has(e.key)) chains.delete(id);
+    (sessions.has(e.key) ? alive : stale).push(id);
+  }
+  for (const id of stale) {
+    chains.delete(id);
   }
   let overflow = chains.size - CHAIN_CAP;
-  for (const id of chains.keys()) {
-    if (overflow <= 0) break;
-    chains.delete(id);
+  for (let i = 0; i < alive.length && overflow > 0; i++) {
+    chains.delete(alive[i]);
     overflow--;
   }
 }

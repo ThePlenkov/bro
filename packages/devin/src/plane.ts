@@ -88,8 +88,6 @@ function devinSessionDirs(
   } else {
     // Guard/session-cap paths don't know future worker envs; be defensive
     // and scan all plausible lock dirs that workers might use.
-    add(devinLocksDir(bag, process.env));
-    add(devinLocksDir(bag, { ...process.env }));
     // Try without XDG_DATA_HOME to catch HOME-based paths
     add(devinLocksDir(bag, { ...process.env, XDG_DATA_HOME: undefined }));
     // Try without HOME to catch XDG-based paths
