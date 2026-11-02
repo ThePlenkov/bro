@@ -69,10 +69,6 @@ export function releaseSession(pane: string): void {
   release(pane, SESSION_IDENTITY);
 }
 
-/** The display-agent precedence — driver binary first, then the
- *  provider name, then the slug, `session` last. */
-export function sessionAgentOf(
-  t: { agent?: string; session?: { provider?: string }; slug?: string } | undefined
-): string {
-  return t?.agent ?? t?.session?.provider ?? t?.slug ?? 'session';
-}
+/** The display-agent precedence — the fleet module owns it now;
+ *  re-exported under the old name. */
+export { sessionAgentOf } from '@broject/herdr-kit';
