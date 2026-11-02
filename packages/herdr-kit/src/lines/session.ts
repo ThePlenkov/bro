@@ -152,7 +152,10 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     const more = readTailSlice(a.logPath, a.logOffset ?? 0);
     if (more === undefined) return;
     const end = utf8End(more.buf);
-    if (end === 0) return;
+    if (end === 0) {
+      a.logOffset = Math.min(a.logOffset ?? 0, more.size); // truncated — resync to the new EOF
+      return;
+    }
     a.logOffset = (a.logOffset ?? 0) + end;
     for (const line of more.buf.subarray(0, end).toString('utf8').split('\n')) {
       if (line !== '') out(plain(line));
