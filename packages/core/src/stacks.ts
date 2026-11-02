@@ -307,6 +307,24 @@ export function gitStacks(dir: string): StackFacade {
           ])
             .out.split('\n')
             .filter(Boolean)
+          // Re-check for merge commits to close a race where the branch advances
+          // between the initial count and building the pick list.
+          const mergeCountAfter = gitTry([
+            '-C',
+            main.path,
+            'rev-list',
+            '--merges',
+            '--count',
+            `${fork}..${m.branch}`,
+          ]).out.trim()
+          if (mergeCountAfter === '' || Number(mergeCountAfter) > 0) {
+            lines.push(
+              mergeCountAfter === ''
+                ? `  ${m.branch} — could not re-validate merge commits; merge aborted`
+                : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
+            )
+            break
+          }
           let r = { code: 0, out: '', err: '' }
           for (const sha of picks) {
             const p = gitTry(['-C', main.path, 'cherry-pick', sha])
