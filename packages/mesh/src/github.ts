@@ -13,7 +13,7 @@
  * missing labels — `gh issue create --label` hard-fails on a repo
  * that has never carried a mesh issue.
  */
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import {
   envelopeLabels,
   priorityTerm,
@@ -130,14 +130,15 @@ export interface GhResult {
 }
 
 function gh(call: { args: string[]; input?: string }): GhResult {
-  const p = spawnSync('gh', call.args, {
-    // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
+  const opts: SpawnSyncOptions = {
     stdio: [call.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     input: call.input,
     encoding: 'utf8',
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
-  });
+  };
+  // PATH lookup is the contract (same as pull.ts's dolt)
+  const p = spawnSync('gh', call.args, opts); // NOSONAR
   // spawnSync's types swear stdout/stderr are strings; on a spawn
   // error they are null at runtime — widen through unknown so the
   // guard is a real check in both worlds

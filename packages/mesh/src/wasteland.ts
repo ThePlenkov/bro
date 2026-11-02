@@ -13,7 +13,7 @@
  * translation: reputation stamps and the board's own vocabulary
  * (project / type / effort / tags) stay board-local.
  */
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { MESH_VERSION, priorityTerm, type MeshEnvelope, type MeshRef } from './envelope.ts';
 import { formatRigUri, parseRigUri } from './identity.ts';
 
@@ -24,13 +24,14 @@ export interface WlResult {
 }
 
 function wl(call: { args: string[] }): WlResult {
-  const p = spawnSync('wl', call.args, {
-    // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
+  const opts: SpawnSyncOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
-  });
+  };
+  // PATH lookup is the contract (same as pull.ts's dolt)
+  const p = spawnSync('wl', call.args, opts); // NOSONAR
   const stdout: unknown = p.stdout;
   const stderr: unknown = p.stderr;
   const err = (
