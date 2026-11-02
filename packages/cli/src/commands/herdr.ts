@@ -7,7 +7,7 @@
  * session or tails its native log. Never typed by hand — the plugin's
  * panes spawn them.
  */
-import { runStatusView } from './herdr-status-view.ts';
+import { runStatusView } from '@broject/herdr-kit';
 import { runSessionView } from './herdr-session-view.ts';
 
 export async function runHerdrCommand(argv: string[]): Promise<void> {

@@ -99,3 +99,44 @@ export function report(
 export function release(pane: string, id: PaneIdentity): void {
   call(releaseArgs(pane, nextSeq(), id));
 }
+
+/** The session identity's display agent — `bro-session` under the old
+ *  name for the pane-spawn command lines that still read it. */
+export const SESSION_PANE_AGENT = SESSION_IDENTITY.agent;
+
+/** The report-agent argv for one semantic state (session identity). */
+export function sessionReportArgs(pane: string, led: PaneLed, seq: number): string[] {
+  return reportArgs(pane, led, seq, SESSION_IDENTITY);
+}
+
+/** The release argv for pane exit — clears name, state, and any
+ *  resume binding so the shell-return probe isn't left to clean up. */
+export function sessionReleaseArgs(pane: string, seq: number): string[] {
+  return releaseArgs(pane, seq, SESSION_IDENTITY);
+}
+
+/** The display-text argvs — same two-call contract status carries:
+ *  call 1 clears, call 2 lands display-agent + state-label (herdr
+ *  rejects set-and-clear in one call). */
+export function sessionMetaArgs(
+  pane: string,
+  agent: string,
+  led: PaneLed,
+  mode: string,
+  seq: number
+): string[][] {
+  return metaArgs(pane, seq, SESSION_IDENTITY, agent, `${led.state}=${mode}`);
+}
+
+/** Fire the report bundle for one LED move — report-agent plus the
+ *  two metadata calls. `agent` is the display name (driver, provider,
+ *  or slug); `mode` is the label detail. Returns the seq the calls
+ *  carried (a test can seq-account without env). */
+export function reportSession(pane: string, agent: string, led: PaneLed, mode: string): number {
+  return report(pane, agent, led, mode, SESSION_IDENTITY);
+}
+
+/** Release on pane exit — one call, advisory like every report. */
+export function releaseSession(pane: string): void {
+  release(pane, SESSION_IDENTITY);
+}

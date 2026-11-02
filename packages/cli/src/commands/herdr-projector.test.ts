@@ -12,7 +12,7 @@ import {
   pruneFleetStatus,
   readFleetState,
   writeFleetState,
-} from './fleet-state.ts';
+} from '@broject/herdr-kit';
 import {
   type ActEntry,
   gateFrag,
@@ -31,7 +31,7 @@ import {
   workerState,
   workerToken,
 } from './herdr-projector.ts';
-import { PANE_AGENT, PANE_SOURCE } from './herdr-status-view.ts';
+import { STATUS_IDENTITY } from '@broject/herdr-kit';
 
 const H = 3_600_000;
 const M = 60_000;
@@ -506,8 +506,8 @@ describe('statusPaneLive — the backstop push gate', () => {
   const rows: HerdrPaneRow[] = [
     { pane_id: 'w1:p1' },
     { pane_id: 'w1:p2', agent: 'devin' },
-    { pane_id: 'w1:p3', agent: PANE_AGENT },
-    { pane_id: 'w1:p4', agent: PANE_SOURCE },
+    { pane_id: 'w1:p3', agent: STATUS_IDENTITY.agent },
+    { pane_id: 'w1:p4', agent: STATUS_IDENTITY.source },
     { pane_id: 'w1:p5', agent: '' },
   ];
 

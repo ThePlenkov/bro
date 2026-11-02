@@ -8,29 +8,30 @@
  */
 import { mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
+import type { PaneLed } from '@broject/acp-session';
 import { gitCommonDir } from '@broject/core';
 import {
   call,
   metaArgs as kitMetaArgs,
   releaseArgs as kitReleaseArgs,
   reportArgs as kitReportArgs,
-  type PaneLed,
+  nextSeq,
   plain,
   STATUS_IDENTITY,
-} from '@broject/herdr-kit';
-import { type FleetPaneState, fleetStatusPath, nextSeq, parseFleetState } from './fleet-state.ts';
+} from '../client/index.ts';
+import { type FleetPaneState, fleetStatusPath, parseFleetState } from '../fleet/state.ts';
 
-export { PANE_SOURCE, plain } from '@broject/herdr-kit';
+export { plain } from '../client/index.ts';
 export const PANE_AGENT = STATUS_IDENTITY.agent;
 
 /** The report-agent argv for one semantic state (status identity). */
-export function reportArgs(pane: string, led: PaneLed, seq: number): string[] {
+export function statusReportArgs(pane: string, led: PaneLed, seq: number): string[] {
   return kitReportArgs(pane, led, seq, STATUS_IDENTITY);
 }
 
 /** The release argv for pane exit — clears name, state, and any
  *  resume binding so the shell-return probe isn't left to clean up. */
-export function releaseArgs(pane: string, seq: number): string[] {
+export function statusReleaseArgs(pane: string, seq: number): string[] {
   return kitReleaseArgs(pane, seq, STATUS_IDENTITY);
 }
 
@@ -42,7 +43,11 @@ export function releaseArgs(pane: string, seq: number): string[] {
  *  set-and-clear in one call, so clear rides call 1 and the label
  *  lands in call 2. `undefined` state → clear everything back to the
  *  bare `bro-status` binding. */
-export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[][] {
+export function statusMetaArgs(
+  pane: string,
+  s: FleetPaneState | undefined,
+  seq: number
+): string[][] {
   return kitMetaArgs(
     pane,
     seq,
@@ -124,7 +129,7 @@ function armRelease(pane: string): void {
   const release = (): void => {
     if (released) return;
     released = true;
-    call(releaseArgs(pane, nextSeq()));
+    call(statusReleaseArgs(pane, nextSeq()));
   };
   process.on('exit', release);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
@@ -160,8 +165,8 @@ function makeRefresh(ctx: ViewCtx): () => void {
   let lastRaw: string | undefined | null = null;
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();
-    call(reportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
-    for (const a of metaArgs(ctx.pane, s, seq)) call(a);
+    call(statusReportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
+    for (const a of statusMetaArgs(ctx.pane, s, seq)) call(a);
     process.stdout.write(renderView(s, ctx.worktree));
   };
   return () => {

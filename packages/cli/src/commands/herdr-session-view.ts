@@ -6,10 +6,13 @@
  * surface (`runSessionView(argv, opts)` kept for callers/tests).
  */
 import { gitCommonDir } from '@broject/core';
-import { runSessionPane, type SessionPaneCtx } from '@broject/herdr-kit';
+import {
+  fleetStatusPath,
+  runSessionPane,
+  SESSION_PANE_AGENT,
+  type SessionPaneCtx,
+} from '@broject/herdr-kit';
 import { loadBroConfig } from '../plugins.ts';
-import { fleetStatusPath } from './fleet-state.ts';
-import { SESSION_PANE_AGENT } from './session-feed.ts';
 
 /** Resolution vocabulary — moved to @broject/herdr-kit's fleet
  *  module; re-exported so existing call sites keep resolving. */

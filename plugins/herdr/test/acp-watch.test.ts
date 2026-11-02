@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { AcpRenderer } from '../src/acp-render.ts';
+import { AcpRenderer } from '../../../packages/acp/session/src/index.ts';
 import { parseArgs, run, runFixture, Wire } from '../src/acp-watch.ts';
 import { shellWords } from '../src/lib.ts';
 

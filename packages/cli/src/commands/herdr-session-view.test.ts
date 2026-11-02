@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
-import { fleetStatusPath, type FleetPaneState, writeFleetState } from './fleet-state.ts';
+import { fleetStatusPath, type FleetPaneState, writeFleetState } from '@broject/herdr-kit';
 import {
   SESSION_PANE_AGENT,
   sessionAgentOf,
   sessionMetaArgs,
   sessionReleaseArgs,
   sessionReportArgs,
-} from './session-feed.ts';
+} from '@broject/herdr-kit';
 import { resolveTarget, runSessionView, targetKey, viewVerdict } from './herdr-session-view.ts';
 
 const NOW = Date.now();

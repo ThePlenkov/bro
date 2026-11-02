@@ -19,3 +19,36 @@ export function call(args: string[]): void {
     // every report is advisory — a dead socket retires to the watch loop
   }
 }
+
+/** One capturing herdr call — the projector's probe half: same short
+ *  fuse, stdout captured for the `.result` envelope. */
+export function callOut(args: string[]): { code: number; out: string } {
+  try {
+    const r = spawnSync(herdrBin(), args, {
+      encoding: 'utf8',
+      timeout: HERDR_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      env: process.env,
+    });
+    return { code: r.status ?? -1, out: r.stdout ?? '' };
+  } catch {
+    return { code: -1, out: '' };
+  }
+}
+
+/** `herdr <args>` → `.result`, undefined on any failure — reachability
+ *  is the caller's verdict, a bad envelope is just a miss. */
+export function callJson<T>(args: string[]): T | undefined {
+  const r = callOut(args);
+  if (r.code !== 0 || r.out === '') return undefined;
+  try {
+    return (JSON.parse(r.out) as { result: T }).result;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `herdr <args>` succeeded — the write-side verdict. */
+export function callOk(args: string[]): boolean {
+  return callOut(args).code === 0;
+}
