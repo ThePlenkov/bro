@@ -89,11 +89,13 @@ function parseDown(rest: string[]) {
     console.error('error: drill down requires a title')
     process.exit(2)
   }
+  const sep = rest.indexOf('--')
+  const head = sep === -1 ? rest : rest.slice(0, sep)
   return {
     title,
     opts: {
       under: flag(rest, '--under'),
-      ephemeral: rest.includes('--ephemeral'),
+      ephemeral: head.includes('--ephemeral'),
       type: flag(rest, '--type'),
       priority: parsePriority(flag(rest, '--priority')),
       description: flag(rest, '--description'),
@@ -107,12 +109,14 @@ function parseUp(rest: string[]) {
     console.error('error: drill up requires --result — a frame must return a curated finding')
     process.exit(2)
   }
+  const sep = rest.indexOf('--')
+  const head = sep === -1 ? rest : rest.slice(0, sep)
   return {
     id: flag(rest, '--id'),
     result,
     prevent: flagAll(rest, '--prevent'),
     evidence: flagAll(rest, '--evidence'),
-    report: rest.includes('--report'),
+    report: head.includes('--report'),
   }
 }
 
