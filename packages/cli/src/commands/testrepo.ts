@@ -213,7 +213,8 @@ for (let i = 0; i < args.length; i++) {
   if (t === '--json') continue
   if (t.startsWith('--')) {
     const k = t.slice(2)
-    if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
+    const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
   } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
     const k = t.slice(1)
@@ -311,7 +312,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: flags.title || '',
+      title: typeof flags.title === 'string' ? flags.title : (flags.title ? String(flags.title) : ''),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
