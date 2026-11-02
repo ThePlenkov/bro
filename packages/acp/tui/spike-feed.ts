@@ -76,7 +76,7 @@ if (path === undefined) {
   console.error('usage: spike-feed.ts <events.jsonl>');
   process.exit(2);
 }
-const text = readFileSync(path, 'utf8');
+const text = readFileSync(path, 'utf8'); // NOSONAR — argv archive path is this probe's contract
 const rows = parseArchiveRows(text);
 
 let session: Session = reduce(createSession(), {

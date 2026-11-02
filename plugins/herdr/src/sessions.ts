@@ -55,7 +55,7 @@ export function bun(): string | undefined {
   const env = process.env.BUN_BIN_PATH;
   if (env !== undefined) return env === '' ? undefined : env;
   if (probedBun === undefined) {
-    const ok = spawnSync('bun', ['--version'], { stdio: 'ignore' });
+    const ok = spawnSync('bun', ['--version'], { stdio: 'ignore' }); // NOSONAR — PATH lookup is the contract
     probedBun = ok.error === undefined && ok.status === 0 ? 'bun' : null;
   }
   return probedBun ?? undefined;

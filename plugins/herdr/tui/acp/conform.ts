@@ -30,7 +30,7 @@ if (path === undefined) {
   console.error('usage: conform.ts <events.jsonl>');
   process.exit(2);
 }
-const rows = parseArchiveRows(readFileSync(path, 'utf8'));
+const rows = parseArchiveRows(readFileSync(path, 'utf8')); // NOSONAR — argv archive path is this probe's contract
 
 // --- the audit the addendum asks for: archive agent_message_chunks,
 // and the tail AFTER the last tool row (user-reported missing output)
