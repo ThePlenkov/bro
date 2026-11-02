@@ -139,28 +139,19 @@ export function convergeViews(input: {
    *  caller's inline branch — a failed `pane run` falls through to
    *  the caller's own drop-then-open path, not a fresh action. */
   const suppressed = new Set<string>();
-  for (const [id, rec] of Object.entries(input.existing)) {
+  const recAction = (id: string, rec: LiveViewRec): LiveViewAction => {
     const agent = input.live.find(a => a.id === id);
-    const covered = agent?.worktree !== undefined && input.covered.has(agent.worktree);
-    if (agent === undefined) {
-      out.push({ kind: 'retire', id, rec, reason: 'dead' });
-      continue;
+    if (agent === undefined) return { kind: 'retire', id, rec, reason: 'dead' };
+    if (agent.worktree !== undefined && input.covered.has(agent.worktree)) {
+      return { kind: 'retire', id, rec, reason: 'covered' };
     }
-    if (covered) {
-      out.push({ kind: 'retire', id, rec, reason: 'covered' });
-      continue;
-    }
-    if (!input.exists(rec.pane_id)) {
-      out.push({ kind: 'drop', id, rec });
-      continue;
-    }
-    if (input.idle(rec.pane_id)) {
-      out.push({ kind: 'rearm', id, rec });
-      suppressed.add(id);
-      continue;
-    }
-    out.push({ kind: 'keep', id, rec });
-    suppressed.add(id);
+    if (!input.exists(rec.pane_id)) return { kind: 'drop', id, rec };
+    return input.idle(rec.pane_id) ? { kind: 'rearm', id, rec } : { kind: 'keep', id, rec };
+  };
+  for (const [id, rec] of Object.entries(input.existing)) {
+    const action = recAction(id, rec);
+    out.push(action);
+    if (action.kind === 'rearm' || action.kind === 'keep') suppressed.add(id);
   }
   for (const a of input.live) {
     if (a.worktree !== undefined && input.covered.has(a.worktree)) continue;

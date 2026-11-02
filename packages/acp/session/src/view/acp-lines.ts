@@ -234,7 +234,10 @@ const isJsonDocument = (text: string): boolean => {
 
 /** Output that carries nothing — an agent reporting `(no output)` or
  *  whitespace is a silent row, and silent rows never paint. */
-const EMPTY_OUTPUT = /^\s*(?:\(no output\))?\s*$/;
+const EMPTY_OUTPUT = (s: string): boolean => {
+  const t = s.trim();
+  return t === '' || t === '(no output)';
+};
 
 /** The expanded tool body — our card language: numbered diff hunks
  *  with added/removed row fills, the terminal notice, a blank row
@@ -286,7 +289,7 @@ export const acpCardRows = (vi: unknown, width: number): CardLine[] => {
         segments: [{ text: '▸ terminal output unavailable', token: 'arg' }],
       });
     } else if (c.type === 'text') {
-      if (EMPTY_OUTPUT.test(c.text)) continue;
+      if (EMPTY_OUTPUT(c.text)) continue;
       blank();
       for (const l of c.text.split('\n')) {
         if (l === '') continue;

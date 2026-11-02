@@ -207,7 +207,7 @@ export function renderIssueBody(input: { from: string; to: string; body?: string
 export function renderComment(env: MeshEnvelope): string {
   // a literal backtick-fence inside a string field would close the
   //  fence early — the JSON unicode escape restores it on parse
-  return '```json\n' + JSON.stringify(env).replace(/`/g, '\\u0060') + '\n```';
+  return '```json\n' + JSON.stringify(env).replaceAll('`', String.raw`\u0060`) + '\n```';
 }
 
 /** fenced ```json block bodies, in document order — indexOf scanning,

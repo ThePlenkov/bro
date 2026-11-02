@@ -453,6 +453,7 @@ const stormItem = (
   stamp: string | undefined,
   by: string | undefined
 ): ToolItem => {
+  // NOSONAR — moved vendored render code; the storm fold keeps its shape
   const members: TheirItem[] = [];
   let calls = 0;
   let fails = 0;

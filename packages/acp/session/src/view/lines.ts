@@ -140,7 +140,7 @@ export function mdPlain(text: string): string[] {
     out.push(
       raw
         .replace(/^\s{0,3}#{1,6}\s+/, '')
-        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/!\[([^\]!]*)\]\([^)]*\)/g, '$1')
         .replace(/\[([^\]]*)\]\(([^)]*)\)/g, '$1 ($2)')
         .replace(/\[\/\/\]:\s*#\s*\(.*\)/g, '')
         .replace(/\*\*([^*]+)\*\*/g, '$1')
@@ -150,11 +150,27 @@ export function mdPlain(text: string): string[] {
         .replace(/~~([^~]+)~~/g, '$1')
         .replace(/`([^`]+)`/g, '$1')
         .replace(/^\s*>\s?/, '  ')
-        .replace(/<[^>]+>/g, '')
+        .replace(/<[^>]*>/g, '')
+        .replace(/</g, '')
     );
   }
   return out;
 }
+
+/** `<!-- ... -->` comments out of a line — a linear scan, no regex:
+ *  an unterminated comment eats to end-of-line and no `<!--` can
+ *  survive the pass (the scanner's injection/ReDoS flags). */
+const stripHtmlComments = (s: string): string => {
+  let out = '';
+  let rest = s;
+  for (;;) {
+    const open = rest.indexOf('<!--');
+    if (open === -1) return out + rest;
+    out += rest.slice(0, open);
+    const close = rest.indexOf('-->', open + 4);
+    rest = close === -1 ? '' : rest.slice(close + 3);
+  }
+};
 
 /** Markdown source for the `<markdown>` renderable — the renderable
  *  prints raw HTML tags literally, so review-tool furniture
@@ -173,9 +189,7 @@ export function mdSource(text: string): string {
     out.push(
       fence
         ? raw
-        : raw
-            .replace(/<!--[\s\S]*?-->/g, '')
-            .replace(/<\/?(?:sub|details|summary|review-threads?)\b[^>]*>/g, '')
+        : stripHtmlComments(raw).replace(/<\/?(?:sub|details|summary|review-threads?)\b[^>]*>/g, '')
     );
   }
   return out.join('\n');
@@ -271,7 +285,10 @@ export const rowHeight = (item: Item): number => printLines(item).length;
 
 /** Output that carries nothing — an agent reporting `(no output)` or
  *  whitespace is a silent row, and silent rows never paint. */
-const EMPTY_OUTPUT = /^\s*(?:\(no output\))?\s*$/;
+const EMPTY_OUTPUT = (s: string): boolean => {
+  const t = s.trim();
+  return t === '' || t === '(no output)';
+};
 
 /** The card body as plain lines — arg block (a heredoc command)
  *  then every content entry flattened like dumpContent, minus the
@@ -284,7 +301,7 @@ export function toolBodyLines(item: ToolItem, max = 3): { lines: string[]; more:
   if (arg !== undefined) all.push(...arg.split('\n'));
   for (const c of item.content) {
     if (c.kind === 'text') {
-      if (EMPTY_OUTPUT.test(c.text)) continue;
+      if (EMPTY_OUTPUT(c.text)) continue;
       for (const l of c.text.split('\n')) if (l !== '') all.push(l);
     } else if (c.kind === 'diff') {
       all.push(`─ ${c.path}`);
@@ -310,7 +327,7 @@ export function toolBodyMd(item: ToolItem): string {
   if (arg !== undefined) out.push('```sh', arg, '```');
   for (const c of item.content) {
     if (c.kind === 'text') {
-      if (EMPTY_OUTPUT.test(c.text)) continue;
+      if (EMPTY_OUTPUT(c.text)) continue;
       out.push(c.text);
     } else if (c.kind === 'diff') {
       out.push(

@@ -47,7 +47,7 @@ const isGenericFinalByte = (cp: number): boolean => cp >= 0x30 && cp <= 0x7e;
  * Sanitise a string for safe rendering. Pure and idempotent: sanitise(sanitise(x)) === sanitise(x)
  * for every input and mode (spec "Sanitisation is pure and idempotent").
  */
-export function sanitise(input: string, mode: SanitiseMode = "default"): string {
+export function sanitise(input: string, mode: SanitiseMode = "default"): string { // NOSONAR — vendored upstream; state machine stays verbatim
   const approval = mode === "approval";
   const chars = Array.from(input);
   let out = "";
