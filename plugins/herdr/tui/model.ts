@@ -24,7 +24,7 @@ import {
   type ToolContent,
   toolArg,
   toolContent,
-} from '../../../packages/providers/src/acp-render.ts';
+} from '../../../packages/acp/session/src/index.ts';
 import { isJudgeTurn } from './verdict.ts';
 import { fmtUsage, isInternalBy, shortBy, TimeGutter } from './view.ts';
 

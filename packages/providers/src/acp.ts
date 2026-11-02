@@ -41,6 +41,7 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
 import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
 import { otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
@@ -1432,7 +1433,7 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
  *  even ran tools in dogfooding). The preamble states the shapes
  *  mapAnswer validates — field names are the wire's, not aliases. */
 const TYPED_PREAMBLE = [
-  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  `You are a ${JUDGE_PROMPT_MARK}. The user message below is a JSON body {state, questions}.`,
   'Reply with STRICT JSON only — no prose, no markdown fences:',
   '{"answers": {"<question-id>": <answer>, ...}}',
   'Answer shape per question type — copy the question\'s "type":',

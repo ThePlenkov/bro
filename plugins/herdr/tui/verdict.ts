@@ -7,6 +7,8 @@
  *  shape (noul/choice/score — provider-judge's wire contract).
  *  Data-driven: adding a caller is a table row, not a special case. */
 
+import { JUDGE_PROMPT_MARK } from '../../../packages/acp/session/src/index.ts';
+
 export interface VerdictView {
   /** Short badge label — the caller's name (model when the reply
    *  carries it, else the render site supplies provider/`by`). */
@@ -20,8 +22,10 @@ export interface VerdictView {
   fields: [string, string][];
 }
 
-/** The prompt-side marker — acp.ts's TYPED_PREAMBLE first line. */
-export const JUDGE_PROMPT_MARK = 'System One decision endpoint';
+/** The prompt-side marker — acp.ts's TYPED_PREAMBLE first line.
+ *  Lives in acp-session's wire module; providers builds the preamble
+ *  from it and this side detects it — re-exported for local callers. */
+export { JUDGE_PROMPT_MARK };
 
 /** A prompt row marks its turn judge-labelled: the typed preamble
  *  in the body (journaled prompt rows — the reliable signal) or a

@@ -25,7 +25,7 @@ import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { firstLine } from '../../../packages/providers/src/acp-render.ts';
+import { firstLine } from '../../../packages/acp/session/src/index.ts';
 import {
   acpCardRows,
   acpLine,

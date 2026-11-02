@@ -19,7 +19,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { parseArchiveRows } from '../../../../packages/cli/src/commands/session-feed.ts';
-import { chunkText } from '../../../../packages/providers/src/acp-render.ts';
+import { chunkText } from '../../../../packages/acp/session/src/index.ts';
 import { pickImpl } from '../impl.ts';
 import type { Item } from '../model.ts';
 

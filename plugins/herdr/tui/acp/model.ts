@@ -27,7 +27,7 @@ import {
   type SessionUpdateLike,
   type ToolWire,
   toolArg,
-} from '../../../../packages/providers/src/acp-render.ts';
+} from '../../../../packages/acp/session/src/index.ts';
 import type { FoldPolicy, PaneImpl } from '../impl.ts';
 import {
   dumpContent,
