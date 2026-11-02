@@ -341,6 +341,21 @@ function ToolCard(props: {
   const tail = createMemo(() => toolTail(props.item));
   const body = createMemo(() => toolBodyLines(props.item));
   const md = createMemo(() => toolBodyMd(props.item));
+  // the head must END inside the row — an un-budgeted title renders
+  // to the edge and the renderer clips it mid-string (the ragged
+  // `query='   ▸` rows). Truncate with `…` like opencode does so the
+  // row's right edge always lands on the same column as the cards
+  const head = createMemo(() => {
+    // titles can embed newlines (a graphql query is multi-line) —
+    // the row is height=1, so only the first line may exist in it;
+    // the `…` then says the command itself continues, not just that
+    // the row ran out of cells
+    const raw = ` ${props.item.title}${tail().kind}${tail().arg}${tail().tally}`;
+    const first = firstLine(raw);
+    const full = first === raw ? first : `${first}…`;
+    const budget = Math.max(8, props.width() - 2 - (md() !== '' ? 2 : 0) - 1);
+    return full.length > budget ? `${full.slice(0, budget - 1)}…` : full;
+  });
   return (
     <box
       flexDirection="column"
@@ -360,13 +375,7 @@ function ToolCard(props: {
         >
           <Spinner fg={theme.warning} />
         </Show>
-        <text fg={theme.muted} attributes={TextAttributes.DIM} content={` ${props.item.title}`} />
-        <text
-          fg={theme.muted}
-          attributes={TextAttributes.DIM}
-          content={`${tail().kind}${tail().arg}`}
-        />
-        <text fg={theme.muted} attributes={TextAttributes.DIM} content={tail().tally} />
+        <text fg={theme.muted} attributes={TextAttributes.DIM} content={head()} flexShrink={0} />
         <box flexGrow={1} />
         <Show when={md() !== ''}>
           <FoldBtn open={!props.item.collapsed} onToggle={props.onToggle} compact={true} />
