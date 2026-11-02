@@ -384,10 +384,14 @@ interface GoalArgs {
 }
 
 function parseGoalArgs(argv: string[]): GoalArgs {
-  const si = argv.indexOf('--session')
-  const ti = argv.indexOf('--turns')
+  const sep = argv.indexOf('--')
+  const head = sep === -1 ? argv : argv.slice(0, sep)
+  const tail = sep === -1 ? [] : argv.slice(sep + 1)
+
+  const si = head.indexOf('--session')
+  const ti = head.indexOf('--turns')
   const valueOf = (i: number, flag: string): string => {
-    const v = argv[i + 1]
+    const v = head[i + 1]
     if (v === undefined || v.startsWith('--')) {
       console.error(`error: ${flag} requires a value`)
       process.exit(2)
@@ -398,7 +402,7 @@ function parseGoalArgs(argv: string[]): GoalArgs {
   if (ti >= 0) {
     const n = Number(valueOf(ti, '--turns'))
     if (!Number.isInteger(n) || n < 0) {
-      console.error(`error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`)
+      console.error(`error: --turns expects a non-negative integer — got ${JSON.stringify(head[ti + 1])}`)
       process.exit(2)
     }
     turns = n
@@ -407,8 +411,8 @@ function parseGoalArgs(argv: string[]): GoalArgs {
   return {
     session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
     turns,
-    asJson: argv.includes('--json'),
-    positional: argv.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    asJson: head.includes('--json'),
+    positional: tail.length > 0 ? tail : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
   }
 }
 
