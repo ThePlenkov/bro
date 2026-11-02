@@ -278,13 +278,15 @@ function convergeStatuses(
   dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
-/** The session pane arms BEFORE the retire phases on the acp lane
- *  (spec bro-l8wqu): it is the lane's one human-readable pane, and a
- *  workspace whose last pane closes mid-pass is auto-reaped under the
- *  retiring surfaces — the flip order must leave a live pane behind at
- *  every step or the whole workspace vanishes (dogfood finding). Same
- *  managed-record guard as the renderer. */
-function convergeSessionsAcp(
+/** The session pane arms BEFORE the retire phases on every viewable
+ *  worktree (spec bro-l8wqu): it is the one human-readable pane — the
+ *  acp lane's session attach OR any managed worktree with a live
+ *  journal — and a workspace whose last pane closes mid-pass is
+ *  auto-reaped under the retiring surfaces, so the flip order must
+ *  leave a live pane behind at every step or the whole workspace
+ *  vanishes (dogfood finding). Same managed-record guard as the
+ *  renderer. */
+function convergeSessionPanes(
   wsForPath: Map<string, string>,
   ctx: WsCtx,
   liveByTree: Map<string, { id: string; events: string }>,
@@ -305,7 +307,7 @@ function convergeSessionsAcp(
 
 /** Every lane with nothing viewable retires the session pane — a
  *  worker-less arm has nothing to show. The arming already ran
- *  (convergeSessionsAcp); retiring last is the safe direction: on a
+ *  (convergeSessionPanes); retiring last is the safe direction: on a
  *  viewable→empty flip the fallback set armed first, so closing the
  *  session pane never empties the workspace. */
 function convergeSessions(
@@ -410,13 +412,18 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   // lane's attach OR any worktree whose agent journal resolves; every
   // other surface (mirror tail, events renderer, status strip) folds
   // into it on the same predicate
-  const sessionArmed = new Set(liveByTree.keys());
+  const sessionArmed = new Set<string>();
+  // managed trees only — a path outside wsForPath can never arm, so
+  // letting it mark sessionArmed retires the mirror into a gap
   for (const [path, lane] of Object.entries(p.lanes)) {
-    if (lane === 'acp') sessionArmed.add(path);
+    if (lane === 'acp' && wsForPath.has(path)) sessionArmed.add(path);
+  }
+  for (const key of liveByTree.keys()) {
+    if (wsForPath.has(key)) sessionArmed.add(key);
   }
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes
-  convergeSessionsAcp(wsForPath, ctx, liveByTree, sessionArmed);
+  convergeSessionPanes(wsForPath, ctx, liveByTree, sessionArmed);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionArmed);
   markExitedMirrors(p, ctx.state, sessionArmed);
   convergeRenderers(wsForPath, ctx, sessionArmed);
