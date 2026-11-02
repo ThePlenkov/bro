@@ -178,24 +178,25 @@ export function createPane(
       },
       toggle() {
         // nothing selected (no j/k yet — and clicks are reserved
-        // for copy): Space/Enter/c falls back to the foldable
-        // nearest the bottom of the feed and selects it, so the
-        // key always does the visible thing the user asked for
+        // for copy): Space/Enter/c falls back to the FIRST foldable
+        // — the prompt card, the folded row a fresh pane is opened
+        // for — and selects it, so the key always does the visible
+        // thing the user asked for
         let item = plain.byId[plain.selected];
         if (item === undefined || !isFoldable(item)) {
-          const last = toolIds(plain).at(-1);
-          if (last === undefined) return;
-          item = plain.byId[last];
+          const first = toolIds(plain)[0];
+          if (first === undefined) return;
+          item = plain.byId[first];
           if (item === undefined) return;
           publish({
             ...plain,
-            selected: last,
+            selected: first,
             byId: {
               ...plain.byId,
-              [last]: { ...item, collapsed: !item.collapsed, foldTouched: true },
+              [first]: { ...item, collapsed: !item.collapsed, foldTouched: true },
             },
           });
-          pane.scrollToRow?.(last);
+          pane.scrollToRow?.(first);
           return;
         }
         publish({
