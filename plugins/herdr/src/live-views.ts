@@ -16,6 +16,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { convergeViews, liveViewCommand } from '../../../packages/herdr-kit/src/index.ts';
 import {
   agentsJson,
   BRO,
@@ -93,13 +94,14 @@ export function liveAgents(base: string): LiveAgent[] {
 
 /** The pane command — the OpenTUI viewer bound to the archive
  *  directly; the line-mode session-view stays the bun-less fallback
- *  keyed on the agent's worktree. */
+ *  keyed on the agent's worktree. argv building is the kit's. */
 function viewCommand(a: LiveAgent): string {
   const b = existsSync(TUI_MAIN) ? bun() : undefined;
-  if (b !== undefined) {
-    return `${shq(b)} run ${shq(TUI_MAIN)} --events ${shq(a.events)} --agent ${shq(a.id)}`;
-  }
-  return `${shq(BRO)} herdr session-view ${shq(a.worktree ?? '.')}`;
+  return liveViewCommand(
+    a,
+    { ...(b !== undefined ? { bun: b, tui: TUI_MAIN } : {}), bro: BRO },
+    shq
+  );
 }
 
 /** A FRESH workspace for one agent — `🤖 view:<id>`. `workspace
@@ -140,46 +142,61 @@ export function convergeLiveViews(
   if (agents.length === 0 && Object.keys(state.liveViews ?? {}).length === 0) return;
   state.liveViews ??= {};
 
-  // retire: dead agent or its worktree picked up a managed session —
-  // the whole workspace closes, panes with it — but only a workspace
-  // the rec OWNS (workspace create). A foreign or pre-flagless rec
-  // just drops; closing someone else's workspace is never ours to do
-  for (const [id, rec] of Object.entries(state.liveViews)) {
-    const agent = agents.find(a => a.id === id);
-    const covered = agent?.worktree !== undefined && coveredWorktrees.has(agent.worktree);
-    if (agent === undefined || covered) {
-      if (rec.owned === true) herdrTry(['workspace', 'close', rec.workspace]);
-      delete state.liveViews[id];
-      log(
-        `view ${id}: workspace ${rec.workspace} closed (${agent === undefined ? 'agent dead' : 'covered by managed session'})`
-      );
-    }
-  }
-
-  for (const a of agents) {
-    if (a.worktree !== undefined && coveredWorktrees.has(a.worktree)) continue;
-    const rec = state.liveViews[a.id];
-    if (rec !== undefined) {
-      // a live pane that idles means the viewer died — re-arm it
-      if (paneExists(rec.pane_id)) {
-        if (!paneIdle(rec.pane_id)) continue;
-        if (herdrOk(['pane', 'run', rec.pane_id, viewCommand(a)])) continue;
-      }
-      if (rec.owned === true) herdrTry(['workspace', 'close', rec.workspace]);
-      delete state.liveViews[a.id];
-    }
+  // the decision layer is the kit's — retire/drop/rearm/keep/open;
+  // this is the exec half: probes in, herdr calls + state out.
+  /** One open — fresh workspace → first pane → run → record. */
+  const openView = (a: LiveAgent): void => {
     const ws = openViewWorkspace(a);
     if (ws === undefined) {
       log(`view ${a.id}: workspace open failed`);
-      continue;
+      return;
     }
     const paneId = paneList(ws)[0]?.pane_id;
     if (paneId === undefined || !herdrOk(['pane', 'run', paneId, viewCommand(a)])) {
       log(`view ${a.id}: pane run failed in ${ws}`);
-      continue;
+      return;
     }
+    state.liveViews ??= {};
     state.liveViews[a.id] = { workspace: ws, pane_id: paneId, owned: true };
     log(`view ${a.id} → ${ws}: ${a.events}`);
+  };
+  for (const act of convergeViews({
+    live: agents,
+    existing: state.liveViews,
+    covered: coveredWorktrees,
+    exists: paneExists,
+    idle: paneIdle,
+  })) {
+    switch (act.kind) {
+      case 'retire':
+        if (act.rec.owned === true) herdrTry(['workspace', 'close', act.rec.workspace]);
+        delete state.liveViews[act.id];
+        log(
+          `view ${act.id}: workspace ${act.rec.workspace} closed (${act.reason === 'dead' ? 'agent dead' : 'covered by managed session'})`
+        );
+        break;
+      case 'drop':
+        if (act.rec.owned === true) herdrTry(['workspace', 'close', act.rec.workspace]);
+        delete state.liveViews[act.id];
+        break;
+      case 'rearm': {
+        const a = agents.find(x => x.id === act.id);
+        if (a !== undefined && herdrOk(['pane', 'run', act.rec.pane_id, viewCommand(a)])) {
+          break;
+        }
+        // a failed re-arm drops the record and falls through to the
+        // open path — same pass, same agent
+        if (act.rec.owned === true) herdrTry(['workspace', 'close', act.rec.workspace]);
+        delete state.liveViews[act.id];
+        if (a !== undefined) openView(a);
+        break;
+      }
+      case 'keep':
+        break;
+      case 'open':
+        openView(act.agent);
+        break;
+    }
   }
   // the last record retired — drop the empty bucket so the state doc
   // carries no liveViews key at all

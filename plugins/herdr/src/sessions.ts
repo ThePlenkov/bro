@@ -13,17 +13,23 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  boundPaneIds,
+  decideSession,
+  decideSessionRetire,
+  dropOrphanRecords,
+  sessionViewCommand,
+} from '../../../packages/herdr-kit/src/index.ts';
+import {
   BRO,
   BRO_LABELS,
+  boundPaneIds,
   type HerdrPane,
   herdrOk,
   herdrTry,
+  PLUGIN_ROOT,
+  type PluginState,
   paneExists,
   paneIdle,
   paneList,
-  PLUGIN_ROOT,
-  type PluginState,
   SESSION_LABEL,
   shq,
 } from './lib.ts';
@@ -59,8 +65,11 @@ export function bun(): string | undefined {
  *  resolve, the line-mode session-view otherwise. */
 export function sessionCommand(worktreePath: string): string {
   const b = existsSync(TUI_MAIN) ? bun() : undefined;
-  if (b !== undefined) return `${shq(b)} run ${shq(TUI_MAIN)} ${shq(worktreePath)}`;
-  return `${shq(BRO)} herdr session-view ${shq(worktreePath)}`;
+  return sessionViewCommand(
+    worktreePath,
+    { ...(b !== undefined ? { bun: b, tui: TUI_MAIN } : {}), bro: BRO },
+    shq
+  );
 }
 
 /** Label the pane, run session-view into it, record the binding.
@@ -111,42 +120,27 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   armAndReport(ctx, newPane, false);
 }
 
-/** The pane the session role may take: an unbound orphan carrying our
- *  label first, then any idle pane not bound to another bro role and
- *  not wearing any bro-role label. */
-function pickPane(panes: HerdrPane[], bound: Set<string>): { id?: string; adopted: boolean } {
-  const orphan = panes.find(p => p.label === SESSION_LABEL && !bound.has(p.pane_id));
-  if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
-  const free = panes.find(
-    p =>
-      !bound.has(p.pane_id) &&
-      (p.label === undefined || !BRO_LABELS.has(p.label)) &&
-      paneIdle(p.pane_id)
-  );
-  return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
-}
-
-/** One workspace's session-pane convergence: record → re-arm/adopt →
- *  orphan-label → idle pane → split, so exactly one `bro: session`
- *  lives per managed workspace alongside `bro: status`. */
+/** One workspace's session-pane convergence — the decision lives in
+ *  herdr-kit's views module (record → re-arm/adopt → orphan-label →
+ *  idle pane → split); this is the exec half: probe, decide, run. */
 export function ensureSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
-  // a recorded pane that still exists but idles means session-view
-  // died — the pane is a live shell; re-arm it rather than counting
-  // it done
-  if (rec !== undefined && paneExists(rec.pane_id)) {
-    if (!paneIdle(rec.pane_id)) return;
-    armAndReport(ctx, rec.pane_id, true);
-    return;
-  }
-
   const panes = paneList(ctx.ws);
-  const pick = pickPane(panes, boundPaneIds(ctx.state));
-  if (pick.id === undefined) {
+  const act = decideSession({
+    rec,
+    panes,
+    bound: boundPaneIds(ctx.state),
+    sessionLabel: SESSION_LABEL,
+    broLabels: BRO_LABELS,
+    exists: paneExists,
+    idle: paneIdle,
+  });
+  if (act.kind === 'none') return;
+  if (act.kind === 'split') {
     armViaSplit(ctx, panes);
     return;
   }
-  armAndReport(ctx, pick.id, pick.adopted);
+  armAndReport(ctx, act.paneId, act.adopted);
 }
 
 /** Non-acp lanes carry no session pane (spec bro-l8wqu): for a
@@ -155,13 +149,15 @@ export function ensureSession(ctx: RenderCtx): void {
  *  orphan-labeled `bro: session` pane and drop the record. */
 export function retireSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
-  const stale =
-    rec !== undefined && paneExists(rec.pane_id)
-      ? rec.pane_id
-      : paneList(ctx.ws).find(x => x.label === SESSION_LABEL)?.pane_id;
-  if (stale !== undefined) {
-    herdrTry(['pane', 'close', stale]);
-    log(`retire session pane ${stale} — not an acp lane (${ctx.ws})`);
+  const { closeId } = decideSessionRetire({
+    rec,
+    panes: paneList(ctx.ws),
+    sessionLabel: SESSION_LABEL,
+    exists: paneExists,
+  });
+  if (closeId !== undefined) {
+    herdrTry(['pane', 'close', closeId]);
+    log(`retire session pane ${closeId} — not an acp lane (${ctx.ws})`);
   }
   delete ctx.state.sessions[ctx.path];
 }
@@ -171,9 +167,7 @@ export function retireSession(ctx: RenderCtx): void {
  *  the record is ours: a rec pointing at a closed workspace can never
  *  resurrect a pane there. */
 export function dropOrphanSessions(state: PluginState, liveWsIds: Set<string>): void {
-  for (const [path, rec] of Object.entries(state.sessions)) {
-    if (!liveWsIds.has(rec.workspace)) {
-      delete state.sessions[path];
-    }
+  for (const path of dropOrphanRecords(state.sessions, liveWsIds)) {
+    delete state.sessions[path];
   }
 }
