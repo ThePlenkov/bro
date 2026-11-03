@@ -713,18 +713,18 @@ export class AcpImpl implements PaneImpl {
               ? `turn since ${fmtWhen(s.turn.startedAt)}`
               : 'turn',
         };
-      default:
-        return this.lastStopError === true
-          ? { led: { state: 'blocked' }, mode: 'turn error' }
-          : {
-              led: { state: 'idle' },
-              mode:
-                this.lastStopTs !== undefined
-                  ? `since ${fmtWhen(this.lastStopTs)}`
-                  : s.stopReason !== null
-                    ? 'turn complete'
-                    : 'idle',
-            };
+      default: {
+        if (this.lastStopError) {
+          return { led: { state: 'blocked' }, mode: 'turn error' };
+        }
+        let mode = 'idle';
+        if (this.lastStopTs !== undefined) {
+          mode = `since ${fmtWhen(this.lastStopTs)}`;
+        } else if (s.stopReason !== null) {
+          mode = 'turn complete';
+        }
+        return { led: { state: 'idle' }, mode };
+      }
     }
   }
 

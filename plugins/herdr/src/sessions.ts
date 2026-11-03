@@ -16,6 +16,7 @@ import {
   decideSession,
   decideSessionRetire,
   dropOrphanRecords,
+  type SessionRec,
   sessionViewCommand,
 } from '../../../packages/herdr-kit/src/index.ts';
 import {
@@ -143,20 +144,55 @@ function paneLive(ctx: RenderCtx): boolean {
   return r !== undefined && paneExists(r.pane_id);
 }
 
+/** A stale pane the last rebind could not close — retried at the top
+ *  of every pass so it does not linger showing the old archive. */
+function retryClose(ctx: RenderCtx, rec: SessionRec | undefined): void {
+  if (rec?.closePending === undefined) return;
+  if (!paneExists(rec.closePending) || herdrOk(['pane', 'close', rec.closePending])) {
+    const { closePending: _closePending, ...rest } = rec;
+    ctx.state.sessions[ctx.path] = rest;
+  }
+}
+
+/** The binding moved (new agent, or a dead record now resolves) — the
+ *  running pane is pinned to the old archive. Arm the replacement
+ *  FIRST: closing the workspace's last pane before its successor
+ *  exists auto-reaps the whole workspace mid-pass (dogfood reap —
+ *  the same constraint the arm-order follows). */
+function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): boolean {
+  if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
+    return paneLive(ctx); // a failed arm is still backing off — keep the stale pane
+  }
+  const next = splitPane(paneId, ctx);
+  if (next !== undefined && armSession(ctx, next)) {
+    if (!herdrOk(['pane', 'close', paneId])) {
+      // the stale pane survived — remember it so a later pass retries
+      const r = ctx.state.sessions[ctx.path];
+      if (r !== undefined) {
+        ctx.state.sessions[ctx.path] = { ...r, closePending: paneId };
+      }
+    }
+    log(`session pane ${paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
+    return paneLive(ctx);
+  }
+  // no successor landed — keep the stale pane over an empty
+  // workspace; the retry is backed off so a persistent arm
+  // failure does not split+close a fresh pane every pass
+  if (next !== undefined) herdrTry(['pane', 'close', next]);
+  if (rec !== undefined) {
+    ctx.state.sessions[ctx.path] = { ...rec, retryAt: Date.now() + REBIND_BACKOFF_MS };
+  }
+  log(`session pane ${paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
+  return paneLive(ctx);
+}
+
 /** One workspace's session-pane convergence — the decision lives in
  *  herdr-kit's views module (record → re-arm/adopt → orphan-label →
  *  idle pane → split); this is the exec half: probe, decide, run.
  *  Returns whether a live session pane is bound after the pass. */
 export function ensureSession(ctx: RenderCtx): boolean {
   const rec = ctx.state.sessions[ctx.path];
-  // a stale pane the last rebind could not close — retry before any
-  // new decision so it does not linger showing the old archive
-  if (rec?.closePending !== undefined) {
-    if (!paneExists(rec.closePending) || herdrOk(['pane', 'close', rec.closePending])) {
-      const { closePending: _closePending, ...rest } = rec;
-      ctx.state.sessions[ctx.path] = rest;
-    }
-  }
+  retryClose(ctx, rec);
   const panes = paneList(ctx.ws);
   const act = decideSession({
     rec,
@@ -168,46 +204,18 @@ export function ensureSession(ctx: RenderCtx): boolean {
     idle: paneIdle,
     agent: ctx.agent,
   });
-  if (act.kind === 'none') return paneLive(ctx);
-  if (act.kind === 'rebind') {
-    // the binding moved (new agent, or a dead record now resolves) —
-    // the running pane is pinned to the old archive. Arm the
-    // replacement FIRST: closing the workspace's last pane before its
-    // successor exists auto-reaps the whole workspace mid-pass
-    // (dogfood reap — the same constraint the arm-order follows)
-    if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
-      return paneLive(ctx); // a failed arm is still backing off — keep the stale pane
-    }
-    const next = splitPane(act.paneId, ctx);
-    if (next !== undefined && armSession(ctx, next)) {
-      if (!herdrOk(['pane', 'close', act.paneId])) {
-        // the stale pane survived — remember it so a later pass retries
-        const r = ctx.state.sessions[ctx.path];
-        if (r !== undefined) {
-          ctx.state.sessions[ctx.path] = { ...r, closePending: act.paneId };
-        }
-      }
-      log(
-        `session pane ${act.paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`
-      );
-    } else {
-      // no successor landed — keep the stale pane over an empty
-      // workspace; the retry is backed off so a persistent arm
-      // failure does not split+close a fresh pane every pass
-      if (next !== undefined) herdrTry(['pane', 'close', next]);
-      if (rec !== undefined) {
-        ctx.state.sessions[ctx.path] = { ...rec, retryAt: Date.now() + REBIND_BACKOFF_MS };
-      }
-      log(`session pane ${act.paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
-    }
-    return paneLive(ctx);
+  switch (act.kind) {
+    case 'none':
+      return paneLive(ctx);
+    case 'rebind':
+      return rebind(ctx, rec, act.paneId);
+    case 'split':
+      armViaSplit(ctx, panes);
+      return paneLive(ctx);
+    default:
+      armAndReport(ctx, act.paneId, act.adopted);
+      return paneLive(ctx);
   }
-  if (act.kind === 'split') {
-    armViaSplit(ctx, panes);
-    return paneLive(ctx);
-  }
-  armAndReport(ctx, act.paneId, act.adopted);
-  return paneLive(ctx);
 }
 
 /** Lanes with nothing to show carry no session pane (spec

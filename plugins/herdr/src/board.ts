@@ -143,6 +143,23 @@ function lastWrite(reg: AgentEntry): number | undefined {
   return undefined;
 }
 
+/** The `/<cause>` suffix on a dead row — the registry field is
+ *  `unknown` behind the index signature, so only a string joins the
+ *  cell verbatim; anything else serializes instead of printing
+ *  `[object Object]`. */
+function causeSuffix(reg: AgentEntry): string {
+  const c = reg.cause;
+  if (c === undefined) return '';
+  return `/${typeof c === 'string' ? c : JSON.stringify(c)}`;
+}
+
+/** The dead row: `exit N/<cause>` when a status recorded, `dead/<cause>`
+ *  when the pid is simply gone. */
+function deadCell(reg: AgentEntry): string {
+  const suffix = causeSuffix(reg);
+  return typeof reg.exitStatus === 'number' ? `exit ${reg.exitStatus}${suffix}` : `dead${suffix}`;
+}
+
 /** The honest liveness cell — pid-alive-first, then journal
  *  freshness; `exitStatus` is attempt-scoped and goes stale on a
  *  respawn, so a live pid beats it (registry showed exitStatus:1 on
@@ -157,12 +174,7 @@ function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number):
     if (Number.isFinite(spawned) && now - spawned < SESSION_SLOT_TTL_MS) return 'spawn';
   }
   const alive = reg.pid !== undefined && pidAlive(reg.pid, reg.pidStart as string | undefined);
-  if (!alive) {
-    if (typeof reg.exitStatus === 'number') {
-      return `exit ${reg.exitStatus}${reg.cause !== undefined ? `/${reg.cause}` : ''}`;
-    }
-    return `dead${reg.cause !== undefined ? `/${reg.cause}` : ''}`;
-  }
+  if (!alive) return deadCell(reg);
   const last = lastWrite(reg);
   return last !== undefined && now - last <= ACTIVE_MS ? 'working' : 'idle';
 }

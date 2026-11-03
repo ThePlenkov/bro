@@ -317,6 +317,54 @@ function convergeSessionPanes(
   return live;
 }
 
+/** The archive binding per worktree — the LATEST registry record,
+ *  dead included: a crashed agent's journal is still the pane's
+ *  archive, and its record is what lets the pane's worker floor
+ *  read 'blocked' instead of a blind worktree-bound idle. Live
+ *  handle-file agents may have no registry record — they overlay. */
+function archiveBinds(
+  base: string,
+  main: string,
+  liveByTree: Map<string, { id: string; events: string }>
+): Map<string, { id: string; events: string; at: string }> {
+  const bindByTree = new Map<string, { id: string; events: string; at: string }>();
+  for (const e of Object.values(agentsJson(base))) {
+    if (e.worktree === undefined || typeof e.log !== 'string') continue;
+    const events = e.log.replace(/\.log$/, '.events.jsonl');
+    if (!existsSync(events)) continue;
+    const key = isAbsolute(e.worktree) ? e.worktree : resolve(main, e.worktree);
+    const at = typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+    const cur = bindByTree.get(key);
+    if (cur === undefined || at >= cur.at) {
+      bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
+    }
+  }
+  for (const [key, a] of liveByTree) bindByTree.set(key, { ...a, at: '\uffff' });
+  return bindByTree;
+}
+
+/** Where a session pane SHOULD live — the acp lane's attach OR any
+ *  worktree whose agent journal resolves; every other surface (mirror
+ *  tail, events renderer, status strip) folds on this eligibility.
+ *  Managed trees only: a path outside wsForPath can never arm, so
+ *  letting it mark the set retires its mirror into a gap. A live pid
+ *  whose journal is not written yet is likewise not eligible — the
+ *  lane becomes viewable once the archive exists on disk. */
+function sessionEligibility(
+  p: Planes,
+  wsForPath: Map<string, string>,
+  liveByTree: Map<string, { id: string; events: string }>
+): Set<string> {
+  const armed = new Set<string>();
+  for (const [path, lane] of Object.entries(p.lanes)) {
+    if (lane === 'acp' && wsForPath.has(path)) armed.add(path);
+  }
+  for (const [key, a] of liveByTree) {
+    if (wsForPath.has(key) && existsSync(a.events)) armed.add(key);
+  }
+  return armed;
+}
+
 /** Every lane with nothing viewable retires the session pane — a
  *  worker-less arm has nothing to show. The arming already ran
  *  (convergeSessionPanes); retiring last is the safe direction: on a
@@ -425,40 +473,8 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   for (const a of live) {
     if (a.worktree !== undefined) liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
-  // the archive binding — the LATEST registry record per worktree,
-  // dead included: a crashed agent's journal is still the pane's
-  // archive, and its record is what lets the pane's worker floor
-  // read 'blocked' instead of a blind worktree-bound idle
-  const bindByTree = new Map<string, { id: string; events: string; at: string }>();
-  for (const e of Object.values(agentsJson(base))) {
-    if (e.worktree === undefined || typeof e.log !== 'string') continue;
-    const events = e.log.replace(/\.log$/, '.events.jsonl');
-    if (!existsSync(events)) continue;
-    const key = isAbsolute(e.worktree) ? e.worktree : resolve(p.main, e.worktree);
-    const at = typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
-    const cur = bindByTree.get(key);
-    if (cur === undefined || at >= cur.at) {
-      bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
-    }
-  }
-  // a live handle-file agent may have no registry record — overlay
-  for (const [key, a] of liveByTree) bindByTree.set(key, { ...a, at: '\uffff' });
-  // where a session pane lives it is the ONE human pane — the acp
-  // lane's attach OR any worktree whose agent journal resolves; every
-  // other surface (mirror tail, events renderer, status strip) folds
-  // into it on the same predicate
-  const sessionArmed = new Set<string>();
-  // managed trees only — a path outside wsForPath can never arm, so
-  // letting it mark sessionArmed retires the mirror into a gap
-  for (const [path, lane] of Object.entries(p.lanes)) {
-    if (lane === 'acp' && wsForPath.has(path)) sessionArmed.add(path);
-  }
-  for (const [key, a] of liveByTree) {
-    // a live pid whose journal is not written yet must not fold the
-    // fallbacks into a 'waiting for the worker' gap — the lane only
-    // becomes viewable once the archive exists on disk
-    if (wsForPath.has(key) && existsSync(a.events)) sessionArmed.add(key);
-  }
+  const bindByTree = archiveBinds(base, p.main, liveByTree);
+  const sessionArmed = sessionEligibility(p, wsForPath, liveByTree);
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes. The
   // retire set is pane-LIVE, not eligibility: an arm that never
