@@ -143,6 +143,23 @@ describe('renderWatchdogBrief', () => {
   });
 });
 
+/** The shape contract: every host plane is either `unavailable (…)` or a
+ *  populated object — never a half-object. Extracted so the assertions'
+ *  branching stays under CodeScene's per-method ceiling. */
+function assertWellFormed(b: WatchdogBaselines): void {
+  for (const [name, plane] of [
+    ['unit', b.unit],
+    ['disk', b.disk],
+    ['memory', b.memory],
+  ] as const) {
+    assert.ok(plane && typeof plane === 'object', name);
+    assert.ok(
+      'unavailable' in plane || Object.keys(plane).length > 0,
+      `${name}: ${JSON.stringify(plane)}`
+    );
+  }
+}
+
 describe('collectBaselines', () => {
   test('a fresh repo degrades honestly on the planes it cannot measure', () => {
     const { root, main } = initRepo('bro-watchdog-');
@@ -168,17 +185,7 @@ describe('collectBaselines', () => {
       // git works here — a count, never a guess
       assert.ok(!('unavailable' in b.worktrees), JSON.stringify(b.worktrees));
       assert.ok(!('unavailable' in b.worktrees) && b.worktrees.count >= 1);
-      for (const [name, plane] of [
-        ['unit', b.unit],
-        ['disk', b.disk],
-        ['memory', b.memory],
-      ] as const) {
-        assert.ok(plane && typeof plane === 'object', name);
-        assert.ok(
-          'unavailable' in plane || Object.keys(plane).length > 0,
-          `${name}: ${JSON.stringify(plane)}`
-        );
-      }
+      assertWellFormed(b);
       if (!('unavailable' in b.disk)) {
         assert.ok(b.disk.usePercent >= 0 && b.disk.usePercent <= 100);
         assert.equal(b.disk.path, '/tmp');

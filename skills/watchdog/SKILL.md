@@ -19,7 +19,7 @@ tick.
 
 ## Launch
 
-```
+```text
 /bro watchdog          # opencode: runs `bro watchdog`, feeds brief back as the prompt
 bro watchdog --json    # same facts, machine-readable (other clients / tools)
 ```

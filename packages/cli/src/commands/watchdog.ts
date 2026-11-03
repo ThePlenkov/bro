@@ -227,13 +227,16 @@ type SpawnResult = { ok: true; out: string } | { ok: false; why: string };
 
 function spawnOpenPrs(dir: string): SpawnResult {
   try {
-    const r = spawnSync('gh', PR_ARGS, {
-      // NOSONAR — PATH lookup is the contract (same as gh/glab in @broject/core)
-      cwd: dir,
-      encoding: 'utf8',
-      timeout: GH_TIMEOUT_MS,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const r = spawnSync(
+      'gh', // NOSONAR — PATH lookup is the contract (same as gh/glab in @broject/core)
+      PR_ARGS,
+      {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: GH_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
     if (r.error !== undefined) {
       return { ok: false, why: r.error.message };
     }
@@ -299,10 +302,21 @@ function readMemory(): WatchdogMemory | Unavailable {
   if (text === null) {
     return unavailable('no /proc/meminfo (not Linux?)');
   }
+  // meminfo lines are `Key:    <n> kB` — plain string parsing, never a
+  // constructed RegExp: a non-literal pattern is a security finding on
+  // every static engine (Codacy's critical on this PR)
   const kb = (key: string): number | null => {
-    const re = new RegExp(String.raw`^${key}:\s+(\d+) kB`, 'm');
-    const digits = re.exec(text)?.[1];
-    return digits === undefined ? null : Number(digits) * 1024;
+    const prefix = `${key}:`;
+    const line = text.split('\n').find(l => l.startsWith(prefix));
+    if (line === undefined) {
+      return null;
+    }
+    const first = line.slice(prefix.length).trim().split(/\s+/)[0];
+    if (first === undefined) {
+      return null;
+    }
+    const value = Number(first);
+    return Number.isFinite(value) ? value * 1024 : null;
   };
   const missing = 'meminfo missing SwapTotal/SwapFree/MemAvailable';
   const swapTotal = kb('SwapTotal');
