@@ -228,6 +228,7 @@ type SpawnResult = { ok: true; out: string } | { ok: false; why: string };
 function spawnOpenPrs(dir: string): SpawnResult {
   try {
     const r = spawnSync('gh', PR_ARGS, {
+      // NOSONAR — PATH lookup is the contract (same as gh/glab in @broject/core)
       cwd: dir,
       encoding: 'utf8',
       timeout: GH_TIMEOUT_MS,
