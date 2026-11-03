@@ -160,9 +160,13 @@ const ageSec = (mtimeMs: number, now: number): number =>
 const LOG_CHUNK = 64 * 1024;
 const NEEDLE = Buffer.from('ETIMEDOUT');
 
-const countNewlines = (buf: Buffer): number => {
+/** Newlines in `buf[0..end)` (whole buffer by default) — one flat loop,
+ *  so the scan loop never nests a counting loop inside itself (CodeScene
+ *  depth ceiling): the line number of a match at `end` is
+ *  `countNewlines(...) + 1`. */
+const countNewlines = (buf: Buffer, end: number = buf.length): number => {
   let n = 0;
-  for (let i = 0; i < buf.length; i++) {
+  for (let i = 0; i < end; i++) {
     if (buf[i] === 0x0a) {
       n++;
     }
@@ -191,13 +195,7 @@ export function scanLog(readChunk: (buffer: Buffer) => number): {
     const window = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
     const at = window.lastIndexOf(NEEDLE);
     if (at !== -1) {
-      let before = linesBefore - countNewlines(tail);
-      for (let i = 0; i < at; i++) {
-        if (window[i] === 0x0a) {
-          before++;
-        }
-      }
-      etimedout = before + 1;
+      etimedout = linesBefore - countNewlines(tail) + countNewlines(window, at) + 1;
     }
     linesBefore += countNewlines(chunk);
     // concat allocates, so the subarray view below is safe to retain —
