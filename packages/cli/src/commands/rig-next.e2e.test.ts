@@ -47,17 +47,33 @@ describe('bro rig next — the re-entry verb', () => {
   test('open item outside the ready page still steps — deps gate, not page membership', () => {
     const { main, env, db } = e2eRepo('bro-rignext-e2e-', [
       { id: 'd-1', title: 'dep-gated', status: 'open' },
+      { id: 'x-1', title: 'live blocker', status: 'open' },
+      { id: 'x-2', title: 'closed blocker', status: 'closed' },
       { id: 'df-1', title: 'snoozed', status: 'open', defer_until: '2999-01-01' },
       { id: 's-1', title: 'slot', status: 'open', labels: ['gt:slot'] },
       { id: 'b-1', title: 'blocked-status', status: 'blocked' },
+      { id: 'p-1', title: 'past the page', status: 'open' },
     ]);
-    // a 'blocks' edge into d-1 — the fake's `dep list` answers db.deps
-    // verbatim ignoring the queried id, so the edge must be cleared
-    // before the other verdicts are read
+    // the fake's `dep list` hydrates the seeded edges into neighbor
+    // rows like real bd; readyLimit makes the fake paginate like real
+    // bd — p-1 sorts past the cut, so `ready` never names it
     const raw = JSON.parse(readFileSync(db, 'utf8'));
-    raw.deps = [{ issue_id: 'd-1', depends_on_id: 'x-1', type: 'blocks' }];
+    raw.readyLimit = 3;
+    raw.deps = [
+      { issue_id: 'd-1', depends_on_id: 'x-1', type: 'blocks' },
+      { issue_id: 'd-1', depends_on_id: 'x-2', type: 'blocks' },
+    ];
     writeFileSync(db, JSON.stringify(raw));
-    assert.match(rig(main, env, ['next', 'd-1']).stdout, /rig next: blocked d-1 — dep-gated/);
+    assert.match(
+      rig(main, env, ['next', 'd-1']).stdout,
+      /rig next: blocked d-1 — dep-gated by x-1/
+    );
+    // a closed dep alone does not gate — the hydrated status filters
+    raw.deps = [{ issue_id: 'd-1', depends_on_id: 'x-2', type: 'blocks' }];
+    writeFileSync(db, JSON.stringify(raw));
+    assert.match(rig(main, env, ['next', 'd-1']).stdout, /rig next: step d-1/);
+    // out-of-page is not a verdict — the direct read still steps
+    assert.match(rig(main, env, ['next', 'p-1']).stdout, /rig next: step p-1/);
     raw.deps = [];
     writeFileSync(db, JSON.stringify(raw));
     assert.match(rig(main, env, ['next', 'df-1']).stdout, /rig next: blocked df-1 — deferred/);
@@ -91,8 +107,11 @@ describe('bro rig next — the re-entry verb', () => {
       { id: 'r-1', title: 'remote worker', status: 'in_progress', assignee: 'tester' },
       { id: 'g-1', title: 'pr up', status: 'open' },
     ]);
-    // live agent — a real pid the probe can verify
-    const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+    // live agent — a real pid the probe can verify (node keeps a
+    // live handle on every platform; bare `sleep` is not portable)
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], {
+      stdio: 'ignore',
+    });
     assert.ok(sleeper.pid !== undefined, 'sleep process did not start');
     const sleeperPid = sleeper.pid;
     try {

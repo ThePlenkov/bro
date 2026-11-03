@@ -176,7 +176,17 @@ export function rigNext(
   }
   if (row.status === 'in_progress') {
     const actor = bdActor(dir);
-    if (row.assignee === actor) {
+    // own when the assignee is this actor (shared claims comma-join
+    // assignees on some backends) or the step id itself — a spawn's
+    // claimAs worker identity binds the molStep, not the actor
+    const own =
+      row.assignee !== undefined &&
+      (row.assignee === id ||
+        row.assignee
+          .split(',')
+          .map(a => a.trim())
+          .includes(actor));
+    if (own) {
       return { verdict: 'step', id, detail: 'own claim — resume' };
     }
     return { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` };
@@ -187,14 +197,24 @@ export function rigNext(
   // backend's default limit truncates a deep queue and honest beads
   // past the cut read as gated — drive's fixers died on exactly that
   // (spec bro-reufd).
-  if (row.status !== 'open' && row.status !== undefined) {
-    return { verdict: 'blocked', id, detail: `status ${row.status}` };
+  const deferUntil = (row as { defer_until?: unknown }).defer_until;
+  if (typeof deferUntil === 'string' && Date.parse(deferUntil) > Date.now()) {
+    return { verdict: 'blocked', id, detail: `deferred until ${deferUntil}` };
+  }
+  // 'deferred' with a due wake reads open — only ready() undefers
+  // snoozes, and a known id never calls it, so a past-due snooze
+  // parked here forever otherwise. An undefined status proves
+  // nothing — a partial row is not actionable.
+  if (row.status !== 'open' && row.status !== 'deferred') {
+    return { verdict: 'blocked', id, detail: `status ${row.status ?? 'unproven'}` };
   }
   let blockers: TaskRow[];
   try {
+    // 'down' follows id → its deps ('up' would answer dependents);
+    // with rel 'blocked' the down side IS the blocking set
     blockers = store
       .neighbors<TaskRow>(id, { direction: 'down', rel: 'blocked' })
-      .filter(r => r.status !== 'closed');
+      .filter(r => r.status !== 'closed' && r.status !== 'done');
   } catch {
     // fail closed — an unreadable dep read must not read as actionable
     return { verdict: 'blocked', id, detail: 'deps unreadable' };
@@ -203,17 +223,19 @@ export function rigNext(
     return {
       verdict: 'blocked',
       id,
-      detail: `dep-gated by ${blockers.map(r => r.id).join(', ')}`,
+      detail: `dep-gated by ${blockers.map(r => r.id ?? '?').join(', ')}`,
     };
-  }
-  const deferUntil = (row as { defer_until?: unknown }).defer_until;
-  if (typeof deferUntil === 'string' && Date.parse(deferUntil) > Date.now()) {
-    return { verdict: 'blocked', id, detail: `deferred until ${deferUntil}` };
   }
   if (row.labels?.includes('gt:slot')) {
     return { verdict: 'blocked', id, detail: 'coordination slot' };
   }
-  const rank = queueItems(queueScope()).find(q => q.id === id)?.rank;
+  let rank: number | undefined;
+  try {
+    rank = queueItems(queueScope()).find(q => q.id === id)?.rank;
+  } catch {
+    // display-only — a queue read failure must not turn an
+    // actionable bead unreadable
+  }
   return { verdict: 'step', id, detail: rank === undefined ? undefined : `queue rank ${rank}` };
 }
 

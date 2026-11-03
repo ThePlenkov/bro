@@ -281,7 +281,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       (r) => r.status === 'open' && !(r.labels || []).some((l) => ex.includes(l))
     )
     rows.sort((a, b) => (a.priority - b.priority) || String(a.created_at).localeCompare(String(b.created_at)))
-    jsonOut(rows)
+    // real bd truncates a deep queue to its page — tests can opt in
+    // with db.readyLimit to prove callers do not rely on membership
+    const lim = db.readyLimit
+    jsonOut(typeof lim === 'number' ? rows.slice(0, lim) : rows)
     break
   }
   case 'show': {
@@ -431,6 +434,26 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps = db.deps || []
       db.deps.push({ from: pos[2], to: pos[3] })
       save(db)
+      break
+    }
+    if (pos[1] === 'list' && pos.length === 3) {
+      // real bd answers a single-id dep list with hydrated neighbor
+      // rows carrying dependency_type; bare and multi-id queries keep
+      // the raw edge records (wiring asserts read those)
+      const want = pos[2]
+      const rels = flags.t === undefined ? undefined : [].concat(flags.t)
+      const up = Object.keys(flags).includes('direction=up')
+      const out = []
+      for (const e of db.deps || []) {
+        const from = e.issue_id !== undefined ? e.issue_id : e.from
+        const to = e.depends_on_id !== undefined ? e.depends_on_id : e.to
+        const other = up ? (to === want ? from : undefined) : (from === want ? to : undefined)
+        if (other === undefined) continue
+        if (rels !== undefined && !rels.includes(e.type)) continue
+        const r = row(other)
+        if (r !== undefined) out.push({ ...r, dependency_type: e.type })
+      }
+      jsonOut(out)
       break
     }
     jsonOut(db.deps || [])
