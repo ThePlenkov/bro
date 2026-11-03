@@ -1742,17 +1742,22 @@ function prepareSpawn(
     }
     try {
       const reg = readAgentRegistry(dir);
-      const cur = reg[spec.molStep];
-      if (
-        existing === undefined &&
-        cur !== undefined &&
-        cur.agentId === agentId &&
-        cur.backend === backend &&
-        (typeof cur.exitStatus !== 'number' && cur.stopped !== true)
-      ) {
-        // only clean up a freshly written entry with no death recorded
-        delete reg[spec.molStep];
+      if (existing !== undefined) {
+        // on respawn failure, restore prior entry if it was replaced
+        reg[spec.molStep] = existing;
         writeAgentRegistry(dir, reg);
+      } else {
+        const cur = reg[spec.molStep];
+        if (
+          cur !== undefined &&
+          cur.agentId === agentId &&
+          cur.backend === backend &&
+          (typeof cur.exitStatus !== 'number' && cur.stopped !== true)
+        ) {
+          // only clean up a freshly written entry with no death recorded
+          delete reg[spec.molStep];
+          writeAgentRegistry(dir, reg);
+        }
       }
     } catch {
       // best-effort cleanup
@@ -1808,6 +1813,13 @@ function commitSpawn(
   appendPrivateFileSync(stderrLog, '');
   const logFrom = logSizeOrZero(log);
   const stderrFrom = logSizeOrZero(stderrLog);
+  // snapshot prior entry before patching so respawn failures can restore it
+  let priorEntry: AgentRegistryEntry | undefined;
+  try {
+    priorEntry = readAgentRegistry(dir)[spec.molStep];
+  } catch {
+    priorEntry = undefined;
+  }
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1865,7 +1877,7 @@ function commitSpawn(
     // roll back claim bookkeeping if partially applied so we don't orphan
     // an in_progress claim when the spawn fails mid-way
     try {
-      if (!guard.phantom) {
+      if (!guard.phantom && !guard.claimed && priorEntry === undefined) {
         const store = taskStoreAt(spec.beadsDir);
         try {
           if (typeof store.reopen === 'function') {
@@ -1880,15 +1892,20 @@ function commitSpawn(
     }
     try {
       const reg = readAgentRegistry(dir);
-      const cur = reg[spec.molStep];
-      if (
-        cur !== undefined &&
-        cur.agentId === agentId &&
-        cur.runId === runId &&
-        cur.backend === backend
-      ) {
-        delete reg[spec.molStep];
+      if (priorEntry !== undefined) {
+        reg[spec.molStep] = priorEntry;
         writeAgentRegistry(dir, reg);
+      } else {
+        const cur = reg[spec.molStep];
+        if (
+          cur !== undefined &&
+          cur.agentId === agentId &&
+          cur.runId === runId &&
+          cur.backend === backend
+        ) {
+          delete reg[spec.molStep];
+          writeAgentRegistry(dir, reg);
+        }
       }
     } catch {
       // best-effort cleanup
