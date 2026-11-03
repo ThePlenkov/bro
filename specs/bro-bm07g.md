@@ -2,23 +2,25 @@
 
 ## Goal
 
-A user types `/bro` in ANY agent CLI and gets a native command — one name,
-client-native content. Never a 1:1 mirror of `bro` argv: the command is a
-thin pointer to `skills/` + `bro` CLI mechanics, rendered in each client's
-own command format.
+A user types `/bro` in every supported client that has a native command
+surface and gets a client-native command — one name. Never a 1:1 mirror
+of `bro` argv: the command is a thin pointer to `skills/` + `bro` CLI
+mechanics, rendered in each client's own command format.
 
 ## Client surfaces (verified)
 
 - **devin** — skills ARE slash commands (`devin skills` — "slash commands
   and agent-triggered context blobs"). `skills/bro/SKILL.md` at plugin root
   gives `/bro` (frontmatter: `description`, `argument-hint`,
-  `allowed-tools`, optional `subagent: true`). Also readable via
-  `.devin/skills/bro/SKILL.md` for project-local installs.
+  `allowed-tools`, optional `subagent: true`). Root
+  `skills/bro/SKILL.md` is the single portable path — project-local
+  installs read the same file, never a `.devin/skills/` copy.
 - **claude** — plugin commands dir; precedent exists: `commands/models.md`
   (frontmatter `description` + `allowed-tools`, body `!`cmd``). Add
   `commands/bro.md`.
-- **codex** — custom prompts convention (`prompts/bro.md`), wire in
-  `.codex-plugin/` if the manifest supports it.
+- **codex** — no custom prompt surface; `.codex-plugin/plugin.json`
+  resolves `skills` to the repo root, so codex discovers the canonical
+  `skills/bro/SKILL.md` directly. No `prompts/bro.md`.
 - **opencode** — `command/*.md` convention; wire only if an opencode
   manifest/client files already exist in the repo (check `dogfood/` and
   plugin manifests first — do not invent a client block the spec doesn't

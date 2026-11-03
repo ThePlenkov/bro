@@ -1,8 +1,8 @@
 ---
 
 name: bro
-description: "Use when the user invokes /bro — the one dispatcher command every client carries. No arguments orients on `bro status`; `/bro <family> [args]` hands off to the `bro` CLI family and the matching `skills/<name>/SKILL.md`. Requires `bro` (npx -y @broject/bro@0)."
-argument-hint: "[act|debt|work|loop|fleet|next|watch|status|…] [args]"
+description: "Use when the user invokes /bro — the one dispatcher command every client carries. No arguments orients on `bro status --deep`; `/bro <family> [args]` hands off to the `bro` CLI family and the matching `skills/<name>/SKILL.md`. Requires `bro` (npx -y @broject/bro@0.3)."
+argument-hint: "[act|debt|work|loop|fleet|next|watch|drive|status|…] [args]"
 allowed-tools:
 - exec
 
@@ -17,7 +17,7 @@ the policy.
 
 ## No arguments
 
-Run `bro status` and summarize the board — active beads, fleet workers,
+Run `bro status --deep` and summarize the board — active beads, fleet workers,
 drill frame, PR gate. The digest plus the table below is the answer to
 "what does bro see right now".
 
@@ -47,4 +47,4 @@ lists the full surface.
 - **Never re-derive mechanics here.** A family that needs more than its
   row is a skill gap, not a longer prompt — extend `skills/<name>`.
 
-Requires `bro` on PATH or `npx -y @broject/bro@0`.
+Requires `bro` on PATH or `npx -y @broject/bro@0.3`.

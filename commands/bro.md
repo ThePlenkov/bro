@@ -1,14 +1,13 @@
 ---
 description: bro dispatcher — orient on the board, then hand off to the named bro family and its skill
-allowed-tools: Bash(bro *)
+allowed-tools: Bash(bro *), Bash(npx -y @broject/bro@0.3 *)
 ---
 
 <!-- GENERATED from skills/bro/SKILL.md — edit the skill, then `npm run gen:plugins` -->
 
-The user invoked `/bro` with arguments: `$ARGUMENTS`
-
-
 # /bro — the dispatcher
+
+The user invoked `/bro` with arguments: `$ARGUMENTS`
 
 `/bro` is ONE command across clients, not a mirror of `bro` argv: it
 orients, then hands the named family to the CLI and the matching skill.
@@ -17,7 +16,7 @@ the policy.
 
 ## No arguments
 
-Run `bro status` and summarize the board — active beads, fleet workers,
+Run `bro status --deep` and summarize the board — active beads, fleet workers,
 drill frame, PR gate. The digest plus the table below is the answer to
 "what does bro see right now".
 
@@ -47,4 +46,4 @@ lists the full surface.
 - **Never re-derive mechanics here.** A family that needs more than its
   row is a skill gap, not a longer prompt — extend `skills/<name>`.
 
-Requires `bro` on PATH or `npx -y @broject/bro@0`.
+Requires `bro` on PATH or `npx -y @broject/bro@0.3`.
