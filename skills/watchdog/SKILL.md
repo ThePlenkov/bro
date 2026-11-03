@@ -53,7 +53,7 @@ slots). Then:
 
 Compose each tick's prompt from fresh baselines + this skill's rules:
 
-```
+```text
 role: read-only watchdog tick · verdict WAKE|TIMEOUT · full window, ≥5 polls
 context: <baselines from `bro watchdog` / previous tick's plan>
 watch first: <the one metric under pressure this window>
