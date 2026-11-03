@@ -3003,6 +3003,19 @@ async function responses(
   responsesDeliver(res, wire, { rreq, body, out, respId, key, store, chains, live, t0, chained: hit !== undefined, route });
 }
 
+/** Register the chain id of a stored responses turn — the chain rides
+ *  the lane its conversation lives in. */
+function registerChain(
+  chains: Map<string, ChainEntry>,
+  routes: Map<string, ProviderRoute>,
+  d: { store: boolean; respId: string; key: string; consumed: number },
+  lane: string
+): void {
+  if (!d.store) return;
+  chains.set(d.respId, { key: d.key, consumed: d.consumed, lane });
+  pruneChains(chains, routes);
+}
+
 /** Post-turn settlement for /v1/responses — settle the retained
  *  conversation (always: a non-stored chained turn still consumed its
  *  delta in the predecessor's session — skipping it leaves consumed
@@ -3061,10 +3074,7 @@ function responsesDeliver(
       // from the client's view (bro-vfbyc)
       capped.capped || d.live?.capped === true
     );
-    if (d.store) {
-      d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed, lane: d.route.name });
-      pruneChains(d.chains, wire.routes);
-    }
+    registerChain(d.chains, wire.routes, { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed }, d.route.name);
   }
   otelEvent('conductor.turn', {
     backend: d.route.name,
