@@ -25,6 +25,20 @@ const BATCH_CLOSERS: Record<string, string> = {
 const BATCH_FALLBACK =
   "`bro task close <id> --reason '<why>'` — the store is\n  shared, so the verdict reaches the loop.";
 
+/** The merge rule — `loop.autoMerge` arms GitHub's own auto-merge and
+ *  ends the order there: no orchestrator gate, no fix rounds, the PR
+ *  lands when its checks go green. Off keeps the supervisor-driven
+ *  gate (the worker never merges). */
+const mergeRule = (autoMerge: boolean): string =>
+  autoMerge
+    ? `- Arm GitHub auto-merge: \`gh pr merge --auto --squash\` — your job
+  ends once auto-merge is set; the PR lands when its checks go
+  green. Do NOT wait on reviewers.
+`
+    : `- Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
+  review gate. Your job ends once the PR exists.
+`;
+
 /** The work-order prompt written to the fresh worktree — the agent's
  *  whole world is the claimed bead (or the claimed clump, when the
  *  scheduler batched compatible beads — spec bro-nspj7). bro owns the
@@ -36,11 +50,12 @@ export function buildWorkPrompt(
   branch: string,
   prBase?: string,
   stackBottom?: boolean,
-  backend: string = 'beads'
+  backend: string = 'beads',
+  autoMerge = false
 ): string {
   const beads = Array.isArray(bead) ? bead : [bead];
   if (beads.length > 1) {
-    return buildBatchPrompt(beads, branch, prBase, stackBottom, backend);
+    return buildBatchPrompt(beads, branch, prBase, stackBottom, backend, autoMerge);
   }
   const b = beads[0]!;
   const desc = b.description?.trim();
@@ -73,9 +88,7 @@ ${body}# Rules
   fixes ride as follow-up commits on the same branch.
 - Verify like CI before opening the PR — run the repo's real test command.
 - Push, then ${prLine}
-- Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
-  review gate. Your job ends once the PR exists.
-- Report verdicts through the task store: if the task needs no code change
+${mergeRule(autoMerge)}- Report verdicts through the task store: if the task needs no code change
   (already done, invalid, obsolete), run
   ${closer}
 - If you genuinely cannot finish, push what you have and explain the
@@ -99,7 +112,8 @@ function buildBatchPrompt(
   branch: string,
   prBase?: string,
   stackBottom?: boolean,
-  backend: string = 'beads'
+  backend: string = 'beads',
+  autoMerge = false
 ): string {
   const stackWho = stackBottom
     ? "the stack's bottom member; the PR targets the default branch"
@@ -146,9 +160,7 @@ ${sections}
 - Push, then ${prLine}
   The body must end with one \`Closes <id>\` line per resolved bead —
   the merge gate reconciles that list against the commit log.
-- Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
-  review gate. Your job ends once the PR exists.
-- Beads you cannot finish stay open — the run re-queues them after the
+${mergeRule(autoMerge)}- Beads you cannot finish stay open — the run re-queues them after the
   PR lands. Explain the blocker per remaining bead as your final
   message — never leave silent half-state.
 - Close out behind you: run \`bro work prune --loop\` — it retires
