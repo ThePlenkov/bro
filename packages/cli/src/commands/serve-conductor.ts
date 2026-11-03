@@ -1782,8 +1782,8 @@ function laneNamed(wire: WireCtx, name: string | undefined): ProviderRoute | und
  *  default's catalog cannot serve is that lane's own verdict. A
  *  chained /v1/responses request rides its PREDECESSOR's lane — that
  *  chain already lives in one provider's context. */
-function routeOf(wire: WireCtx, model: string | undefined, lane?: string): ProviderRoute {
-  const chained = laneNamed(wire, lane);
+function routeOf(wire: WireCtx, model: string | undefined, chain?: ChainEntry): ProviderRoute {
+  const chained = laneNamed(wire, chain?.lane);
   if (chained !== undefined) return chained;
   const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
   const named = laneNamed(wire, head);
@@ -2955,7 +2955,7 @@ async function responses(
   // the lane — a chained request rides its predecessor's provider (the
   // chain lives in that provider's context); a fresh one rides the
   // provider its model names.
-  const route = routeOf(wire, requestModelOf(body), hit?.lane);
+  const route = routeOf(wire, requestModelOf(body), hit);
   let live: RespLive | undefined;
   let out: TurnOutcome;
   try {
@@ -2997,19 +2997,7 @@ async function responses(
     responsesReplay(res, wire, { rreq, out, respId, key, store, chains, route });
     return;
   }
-  responsesDeliver(res, wire, {
-    rreq,
-    body,
-    out,
-    respId,
-    key,
-    store,
-    chains,
-    live,
-    t0,
-    chained: hit !== undefined,
-    route,
-  });
+  responsesDeliver(res, wire, { rreq, body, out, respId, key, store, chains, live, t0, chained: hit !== undefined, route });
 }
 
 /** Post-turn settlement for /v1/responses — settle the retained
@@ -3071,11 +3059,7 @@ function responsesDeliver(
       capped.capped || d.live?.capped === true
     );
     if (d.store) {
-      d.chains.set(d.respId, {
-        key: d.key,
-        consumed: d.out.conv.consumed,
-        lane: d.route.name,
-      });
+      d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed, lane: d.route.name });
       pruneChains(d.chains, wire.routes);
     }
   }
@@ -3560,20 +3544,7 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, {
-    creq,
-    body,
-    out,
-    key,
-    chatId,
-    created,
-    model,
-    tools,
-    live,
-    stops,
-    t0,
-    route,
-  });
+  chatDeliver(res, { creq, body, out, key, chatId, created, model, tools, live, stops, t0, route });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3680,13 +3651,16 @@ function chatDeliver(
   );
 }
 
+/** One lane's catalog — its rows, or the failure that stopped it. */
+interface LaneCatalog {
+  rows?: CatalogModel[];
+  failure?: string;
+}
+
 /** One lane's catalog rows — its own entry, or the catalog override for
  *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
  *  throw: one provider being down must not blind the other's models. */
-async function laneCatalog(
-  lane: ProviderRoute,
-  wire: WireCtx
-): Promise<{ rows: CatalogModel[]; failure?: string }> {
+async function laneCatalog(lane: ProviderRoute, wire: WireCtx): Promise<LaneCatalog> {
   // the catalog override answers for the default lane only — an
   // exposed lane advertises its own entry's models
   const source =
@@ -3700,29 +3674,25 @@ async function laneCatalog(
   }
 }
 
+/** The union of the lanes' rows — first id wins, so an id two lanes
+ *  advertise is listed once. */
+function mergeCatalogs(lanes: LaneCatalog[]): CatalogModel[] {
+  const byId = new Map<string, CatalogModel>();
+  for (const row of lanes.flatMap(l => l.rows ?? [])) {
+    if (!byId.has(row.id)) byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
 /** The anthropic /v1/models rows — the UNION of every lane's catalog,
  *  through the SAME `bro providers models` surface, so ids arrive
  *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
  *  PARALLEL — a catalog read costs seconds, and a caller waits for the
  *  slowest lane, never for their sum. Every lane down IS a 502. */
 async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
-  const settled = await Promise.all(
-    [...wire.routes.values()].map(lane => laneCatalog(lane, wire))
-  );
-  const rows: CatalogModel[] = [];
-  const seen = new Set<string>();
-  const failures: string[] = [];
-  for (const s of settled) {
-    if (s.failure !== undefined) {
-      failures.push(s.failure);
-      continue;
-    }
-    for (const m of s.rows) {
-      if (seen.has(m.id)) continue;
-      seen.add(m.id);
-      rows.push(m);
-    }
-  }
+  const lanes = await Promise.all([...wire.routes.values()].map(lane => laneCatalog(lane, wire)));
+  const rows = mergeCatalogs(lanes);
+  const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
   if (rows.length === 0 && failures.length > 0) {
     apiError(
       res,
