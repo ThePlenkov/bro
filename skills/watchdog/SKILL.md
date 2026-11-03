@@ -38,8 +38,10 @@ slots). Then:
 - **One tick = one background subagent.** The next tick is placed only
   after the previous one has closed with a verdict — never two in flight.
 - **Window:** ≥10 minutes, ≥5 polls at 60–120 s intervals. The opening
-  snapshot does not count as a poll. Never hang: close the window with a
-  verdict even when nothing happened.
+  snapshot does not count as a poll. An event found before the fifth
+  poll keeps the tick polling until the minimum is met, then closes as
+  WAKE — the minimum is a floor, not a target. Never hang: close the
+  window with a verdict even when nothing happened.
 - **Verdict:** `WAKE` (an event fired) or `TIMEOUT` (window closed clean).
 - **Report shape:** verdict / lane / reason / PR / units / anomalies /
   plan for the next tick. Facts only — every line traceable to command
@@ -57,7 +59,7 @@ Compose each tick's prompt from fresh baselines + this skill's rules:
 role: read-only watchdog tick · verdict WAKE|TIMEOUT · full window, ≥5 polls
 context: <baselines from `bro watchdog` / previous tick's plan>
 watch first: <the one metric under pressure this window>
-stop conditions: (a) escalations (b) events (c) harbinger greenings (d) window end
+stop conditions (after the ≥5-poll minimum): (a) escalations (b) events (c) harbinger greenings (d) window end
 report: WAKE|TIMEOUT / lane / reason / PR / units / anomalies / next-tick plan
 ```
 
@@ -139,6 +141,6 @@ processes or open PRs · anything in another project's tree.
 
 ## Stop conditions
 
-The operator says stop · an open drill frame must be closed with
-`--result` first · a tick never stops the loop itself, and the loop never
-stops on a quiet window.
+The operator says stop · the operator closes an open drill frame with
+`--result` before the loop may end · a tick never stops the loop itself,
+and the loop never stops on a quiet window.

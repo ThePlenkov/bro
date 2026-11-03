@@ -26,10 +26,19 @@
  * /tmp is the operator's/assistant's job, never the watchdog's.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statfsSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statfsSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { gitCommonDir, gitTry, hasHelpFlag, pidAlive, printUsage } from '@broject/core';
-import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
+import { collectLoopRuns, loopRunsDir, type LoopRunView } from './loop-state.ts';
 import { daemonLogPath, readDaemonRecord } from './daemon.ts';
 
 /** The skill this brief points at — the loop protocol lives there, the
@@ -114,8 +123,11 @@ export interface WatchdogBaselines {
   worktrees: WatchdogWorktrees | Unavailable;
   /** Loop run records genuinely in flight — alive AND not stamped with
    *  the loop's own pid (a worker is never the supervisor; records that
-   *  are, are residue of a run that never settled). [] = none in flight. */
-  slots: WatchdogSlot[];
+   *  are, are residue of a run that never settled). `unavailable` when
+   *  the records directory exists but cannot be read — unreadable is NOT
+   *  "none in flight" (CodeRabbit): the brief must not claim a quiet
+   *  lane it could not observe. */
+  slots: WatchdogSlot[] | Unavailable;
   /** Loop run records that are NOT in flight: dead pids plus the
    *  supervisor-stamped ones. Surfaced instead of silently dropped —
    *  residue is a fact about the loop, not noise to hide. */
@@ -137,23 +149,87 @@ const firstLine = (text: string): string => {
 const ageSec = (mtimeMs: number, now: number): number =>
   Math.max(0, Math.round((now - mtimeMs) / 1000));
 
-/** wc -l / grep -n semantics computed in JS — the same numbers a tick's
- *  shell probes produce, so brief and tick never quote divergent baselines.
- *  The line number of the last ETIMEDOUT is the sticky escalation baseline:
- *  a fresh line ABOVE it is what a tick reports. Exported for tests — this
- *  is the arithmetic the whole escalation plane rests on. */
-export function logStats(text: string): { lines: number; etimedout: number | null } {
-  const lines = text.split('\n');
-  const endsWithNewline = lines.at(-1) === '';
-  const count = endsWithNewline ? lines.length - 1 : lines.length;
-  let etimedout: number | null = null;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]?.includes('ETIMEDOUT')) {
-      etimedout = i + 1;
-      break;
+/** Line count + the last-ETIMEDOUT line number over an append-only log,
+ *  scanned in fixed byte chunks: neither loop.out nor daemon.log has a
+ *  size cap, so a full read would scale memory with uptime (CodeRabbit).
+ *  Newlines and the ASCII needle are byte operations — no decoding, no
+ *  UTF-8 boundary hazards (continuation bytes are ≥0x80 and can never be
+ *  0x0A or part of the needle). `lines` is the newline count — exactly
+ *  what `wc -l` reports, including for an unterminated final line.
+ *  The reader is injected so tests drive chunk boundaries directly. */
+const LOG_CHUNK = 64 * 1024;
+const NEEDLE = Buffer.from('ETIMEDOUT');
+
+const countNewlines = (buf: Buffer): number => {
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0a) {
+      n++;
     }
   }
-  return { lines: count, etimedout };
+  return n;
+};
+
+export function scanLog(readChunk: (buffer: Buffer) => number): {
+  lines: number;
+  etimedout: number | null;
+} {
+  const buf = Buffer.allocUnsafe(LOG_CHUNK);
+  const overlap = NEEDLE.length - 1;
+  let linesBefore = 0;
+  let etimedout: number | null = null;
+  let tail = Buffer.alloc(0);
+  for (;;) {
+    const bytes = readChunk(buf);
+    if (bytes <= 0) {
+      break;
+    }
+    const chunk = buf.subarray(0, bytes);
+    // the window carries up to `overlap` bytes of PRIOR data — enough for
+    // a needle to start in any earlier byte and finish in this chunk,
+    // even when chunks are smaller than the needle itself
+    const window = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
+    const at = window.lastIndexOf(NEEDLE);
+    if (at !== -1) {
+      let before = linesBefore - countNewlines(tail);
+      for (let i = 0; i < at; i++) {
+        if (window[i] === 0x0a) {
+          before++;
+        }
+      }
+      etimedout = before + 1;
+    }
+    linesBefore += countNewlines(chunk);
+    // concat allocates, so the subarray view below is safe to retain —
+    // unlike a view into the reused read buffer
+    tail = Buffer.concat([tail, chunk]).subarray(-overlap);
+  }
+  return { lines: linesBefore, etimedout };
+}
+
+/** `scanLog` over a real file — null when it cannot be opened (the
+ *  caller degrades the plane rather than reporting a fabricated zero). */
+function scanLogFile(path: string): { lines: number; etimedout: number | null } | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    let pos = 0;
+    return scanLog(buffer => {
+      try {
+        const n = readSync(fd, buffer, 0, buffer.length, pos);
+        pos += n;
+        return n;
+      } catch {
+        return -1;
+      }
+    });
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const readText = (path: string): string | null => {
@@ -372,11 +448,9 @@ function readLogFacts(
   } catch {
     logAge = null;
   }
-  const text = readText(path);
-  const etimedout = text === null ? null : logStats(text).etimedout;
-  return { logAgeSec: logAge, etimedout };
+  const stats = scanLogFile(path);
+  return { logAgeSec: logAge, etimedout: stats === null ? null : stats.etimedout };
 }
-
 /** The daemon plane: `daemon.json`'s armer (alive?) plus daemon.log's age
  *  and ETIMEDOUT baseline. `daemonLogPath` names where the log WOULD be —
  *  only an existing log (or a record) carries facts, so a box with neither
@@ -404,8 +478,8 @@ function readLoopOut(dir: string, now: number): WatchdogLog | Unavailable {
     return unavailable('no git common dir');
   }
   const path = join(common, 'bro', 'loop.out');
-  const text = readText(path);
-  if (text === null) {
+  const stats = scanLogFile(path);
+  if (stats === null) {
     return unavailable('loop.out unreadable or absent');
   }
   let ageSec_: number | null = null;
@@ -414,7 +488,7 @@ function readLoopOut(dir: string, now: number): WatchdogLog | Unavailable {
   } catch {
     ageSec_ = null;
   }
-  return { ...logStats(text), ageSec: ageSec_ };
+  return { lines: stats.lines, etimedout: stats.etimedout, ageSec: ageSec_ };
 }
 
 /** In-flight vs residue — the slot filter, pure so the phantom-worker
@@ -433,11 +507,36 @@ export function splitSlots(
 }
 
 /** Every baseline, measured now. `now` is injectable so tests pin the
- *  clock; everything else is a plain read. */
+ *  clock; everything else is a plain read. The slots plane degrades in
+ *  three steps: no git common dir → unavailable; no records directory
+ *  yet → an honest empty (nothing has ever run); a directory that
+ *  exists but cannot be read → unavailable (unreadable ≠ none). */
 export function collectBaselines(dir: string, now: number = Date.now()): WatchdogBaselines {
   const unit = readUnit();
   const mainPid = isUnavailable(unit) ? null : unit.mainPid;
-  const { slots, residue } = splitSlots(collectLoopRuns(dir, now), mainPid);
+  const runs = loopRunsDir(dir);
+  let slotsPlane: WatchdogSlot[] | Unavailable;
+  let residue = 0;
+  if (runs === null) {
+    slotsPlane = unavailable('no git common dir');
+  } else if (!existsSync(runs)) {
+    slotsPlane = [];
+  } else {
+    try {
+      readdirSync(runs);
+      const split = splitSlots(collectLoopRuns(dir, now), mainPid);
+      slotsPlane = split.slots.map(r => ({
+        slug: r.slug,
+        beadId: r.beadId,
+        pid: r.pid,
+        state: r.state,
+        silentMs: r.silentMs,
+      }));
+      residue = split.residue;
+    } catch {
+      slotsPlane = unavailable('bro/loop unreadable');
+    }
+  }
   return {
     ts: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     unit,
@@ -447,13 +546,7 @@ export function collectBaselines(dir: string, now: number = Date.now()): Watchdo
     disk: readDisk(),
     memory: readMemory(),
     worktrees: readWorktrees(dir),
-    slots: slots.map(r => ({
-      slug: r.slug,
-      beadId: r.beadId,
-      pid: r.pid,
-      state: r.state,
-      silentMs: r.silentMs,
-    })),
+    slots: slotsPlane,
     residue,
   };
 }
@@ -518,7 +611,10 @@ const formatMemory = (v: WatchdogMemory | Unavailable): string =>
 const formatWorktrees = (v: WatchdogWorktrees | Unavailable): string =>
   isUnavailable(v) ? un(v) : String(v.count);
 
-const formatSlots = (slots: readonly WatchdogSlot[]): string => {
+const formatSlots = (slots: WatchdogSlot[] | Unavailable): string => {
+  if (isUnavailable(slots)) {
+    return un(slots);
+  }
   if (slots.length === 0) {
     return 'none in flight';
   }

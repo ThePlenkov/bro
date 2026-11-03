@@ -2,9 +2,9 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   collectBaselines,
-  logStats,
   parseMeminfo,
   renderWatchdogBrief,
+  scanLog,
   splitSlots,
   type WatchdogBaselines,
 } from './watchdog.ts';
@@ -30,19 +30,47 @@ const full = (over: Partial<WatchdogBaselines> = {}): WatchdogBaselines => ({
   ...over,
 });
 
-describe('logStats', () => {
-  test('wc -l semantics: newline count, trailing newline included', () => {
-    assert.equal(logStats('a\nb\nc\n').lines, 3);
-    assert.equal(logStats('a\nb\nc').lines, 3);
-    assert.equal(logStats('').lines, 0);
+describe('scanLog', () => {
+  /** Feed the scanner fixed-size slices — chunkSize 7 forces the
+   *  ETIMEDOUT needle across read boundaries on purpose. */
+  const scan = (text: string, chunkSize = 7): { lines: number; etimedout: number | null } => {
+    const source = Buffer.from(text);
+    let pos = 0;
+    return scanLog(buffer => {
+      const n = Math.min(chunkSize, source.length - pos);
+      if (n <= 0) {
+        return 0;
+      }
+      source.copy(buffer, 0, pos, pos + n);
+      pos += n;
+      return n;
+    });
+  };
+
+  test('wc -l semantics: newline count, including an unterminated final line', () => {
+    assert.equal(scan('a\nb\nc\n').lines, 3);
+    // wc -l counts newlines, not logical lines — 'a\nb\nc' is 2, and the
+    // contract (doc + skill) promises the number `wc -l` prints
+    assert.equal(scan('a\nb\nc').lines, 2);
+    assert.equal(scan('').lines, 0);
   });
 
   test('the sticky ETIMEDOUT baseline is the LAST match, numbered like grep -n', () => {
-    assert.equal(logStats('a\nb\nboom ETIMEDOUT\nc\n').etimedout, 3);
+    assert.equal(scan('a\nb\nboom ETIMEDOUT\nc\n').etimedout, 3);
     // an append-only log's newest match wins — that is the escalation
     // reference a fresh line must exceed
-    assert.equal(logStats('ETIMEDOUT old\nmid\nETIMEDOUT new\n').etimedout, 3);
-    assert.equal(logStats('nothing to see\n').etimedout, null);
+    assert.equal(scan('ETIMEDOUT old\nmid\nETIMEDOUT new\n').etimedout, 3);
+    assert.equal(scan('nothing to see\n').etimedout, null);
+  });
+
+  test('a needle split across chunk boundaries still resolves to its line', () => {
+    // 6 filler bytes + newline, then the needle — with 7-byte chunks the
+    // match starts in one chunk and finishes in the next
+    const r = scan('xxxxxx\nETIMEDOUT\n');
+    assert.equal(r.etimedout, 2);
+    assert.equal(r.lines, 2);
+    // and one whose match sits right at a later boundary
+    assert.equal(scan('a\nETIMEDOUT\nb\nETIMEDOUT\n', 4).etimedout, 4);
   });
 });
 
