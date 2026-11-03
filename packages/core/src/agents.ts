@@ -69,8 +69,8 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
       // 'billing' only counts beside an account-wall word — a transient
       // billing-service error is a crash, not the quota block that only
       // a manual `bro agents down` lifts
-      /\bbilling\b(?:\s+\S+){0,5}\s+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
-      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b(?:\s+\S+){0,5}\s+\bbilling\b/i,
+      /\bbilling\b(?:\W+\w+){0,5}\W+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
+      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b(?:\W+\w+){0,5}\W+\bbilling\b/i,
       /out of (?:credits?|funds?)/i,
       /spend(?:ing)? limit/i,
       /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
@@ -90,7 +90,7 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
   ],
 ];
 
-const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
+const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000, ms: 1 };
 
 /** Safety margin on FUZZY reset forms (spec bro-9eeld): the quoted clock
  *  mark and the "in N minutes" paraphrase both undershot the real wall
@@ -230,6 +230,9 @@ function relReset(text: string, now: number): string | undefined {
     if (unit.startsWith('hour') || unit.startsWith('hr')) unitKey = 'h';
     else if (unit.startsWith('min')) unitKey = 'm';
     else if (unit.startsWith('sec')) unitKey = 's';
+    // 'ms'/'msec'/'milli…' BEFORE the single-letter 'm' fallback — a
+    // sub-second reset is not a minutes-long block
+    else if (unit.startsWith('ms') || unit.startsWith('milli')) unitKey = 'ms';
     else if (unitKey === 'h' || unitKey === 'm' || unitKey === 's') {
       // ok
     } else {
@@ -237,8 +240,9 @@ function relReset(text: string, now: number): string | undefined {
     }
     ms += num * (UNIT_MS[unitKey] ?? 1_000);
     found = true;
-    // check word boundary
-    if (i < len && /[A-Za-z0-9_]/.test(text[i]!)) {
+    // '_' closes the phrase ('5m_ago' is not a duration); a digit is the
+    // NEXT compact pair ('1h30m'), not a boundary
+    if (i < len && text.charCodeAt(i) === 95) {
       break;
     }
     // continue loop

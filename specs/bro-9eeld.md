@@ -73,9 +73,9 @@ streak is a property of the step's wall history, not of one run.
 next streak and the reset the entry should carry: an instant death makes
 the hold end `max(reported, exitAt) + min(30s · 2^(streak-1), 30m)` —
 the wait added over the provider's word doubles per consecutive instant
-death (30s, 60s, 120s…). A stale/absent reported mark escalates from the
-death itself, and no reported reset stays indefinite — the `bro agents
-down` escape is that wall's contract.
+death (30s, 60s, 120s…). A stale reported mark escalates from the
+death itself; an absent mark stays indefinite — the `bro agents down`
+escape is that wall's contract.
 
 `ensureExitCause` stamps the escalated `resetAt` and `rateStreak` — one
 write covers every consumer unchanged: `agentEntryBlocked` (per-step

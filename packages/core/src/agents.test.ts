@@ -559,6 +559,9 @@ describe('classifyExitCause', () => {
     // errors must not pin the quota block that only `bro agents down` lifts
     assert.equal(classifyExitCause('billing service unavailable — retrying', 1).cause, 'crash');
     assert.equal(classifyExitCause('account suspended — unpaid billing invoice', 1).cause, 'quota');
+    // punctuation-separated wall words still reach billing — a colon is
+    // a separator, not a wall between the keyword and its state
+    assert.equal(classifyExitCause('billing: account disabled', 1).cause, 'quota');
     assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth');
     assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth');
     assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth');
@@ -615,6 +618,16 @@ describe('classifyExitCause', () => {
     assert.equal(
       classifyExitCause('rate limit, resets in 1h 30m', 1, now).resetAt,
       '2026-10-27T18:36:20.000Z'
+    );
+    // compact pairs carry no separator — '1h30m' is 90m, not 1h
+    assert.equal(
+      classifyExitCause('rate limit, try again in 1h30m', 1, now).resetAt,
+      '2026-10-27T18:36:20.000Z'
+    );
+    // 'ms' is milliseconds — a sub-second reset, not minutes
+    assert.equal(
+      classifyExitCause('rate limit, retry in 500ms', 1, now).resetAt,
+      '2026-10-27T17:06:20.500Z'
     );
   });
 
