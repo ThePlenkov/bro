@@ -18,7 +18,7 @@
  * lanes stay the real delivery.
  */
 import type { Connector, ConnectorCtx, TaskFinishReport } from '@broject/core';
-import { call, callJson } from '@broject/herdr-kit';
+import { callAsync, callJsonAsync } from '@broject/herdr-kit';
 import { loadAgentEnv } from '../agent-connectors.ts';
 
 /** `herdr agent get <pane>` → `.result.agent` — only the fields this
@@ -53,36 +53,59 @@ export function reportBackMessage(report: TaskFinishReport): string {
  *  them from config and a live `agent get`; tests inject both. */
 export interface ReportBackDeps {
   bags?: Record<string, Record<string, unknown>>;
-  paneAgent?: () => PaneAgent | undefined;
+  paneAgent?: () => PaneAgent | undefined | Promise<PaneAgent | undefined>;
+}
+
+/** The configured report-back setting — `agents.herdr.reportBack`,
+ *  undefined when the config read fails. Split out so the setting is
+ *  consulted BEFORE any socket call reaches the pane. */
+function reportBackSetting(dir: string, deps: ReportBackDeps): unknown {
+  try {
+    const bags = deps.bags ?? loadAgentEnv(dir).agents;
+    return bags['herdr']?.['reportBack'];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The pane's agent kind — undefined when `agent get` cannot answer. */
+async function paneKind(pane: string, deps: ReportBackDeps): Promise<string | undefined> {
+  const agent = await (
+    deps.paneAgent ?? (() => callJsonAsync<PaneAgent>(['agent', 'get', pane]))
+  )();
+  const kind = agent?.agent;
+  return kind === '' ? undefined : kind;
 }
 
 /** The report-back decision, in order — every gate is a silent skip:
  *  not under herdr, report-back not configured for this kind, pane
- *  agent unreadable. Exported so tests drive the logic without the
- *  connector sweep. */
-export function reportBackArgs(
+ *  agent unreadable. The setting is read before `agent get` so a
+ *  disabled or absent config never touches the socket; `true` needs
+ *  no kind at all — it already enables every agent. Exported so
+ *  tests drive the logic without the connector sweep. */
+export async function reportBackArgs(
   ctx: ConnectorCtx,
   report: TaskFinishReport,
   env: NodeJS.ProcessEnv = process.env,
   deps: ReportBackDeps = {}
-): string[] | undefined {
+): Promise<string[] | undefined> {
   const pane = env.HERDR_PANE_ID;
-  if (pane === undefined || pane === '' || env.HERDR_SOCKET_PATH === undefined) {
+  if (pane === undefined || pane === '') {
     return undefined;
   }
-  let bags = deps.bags;
-  if (bags === undefined) {
-    try {
-      bags = loadAgentEnv(ctx.dir).agents;
-    } catch {
-      return undefined;
-    }
-  }
-  const kind = (deps.paneAgent ?? (() => callJson<PaneAgent>(['agent', 'get', pane])))()?.agent;
-  if (kind === undefined || kind === '') {
+  const socket = env.HERDR_SOCKET_PATH;
+  if (socket === undefined || socket === '') {
     return undefined;
   }
-  if (!reportBackEnabled(bags['herdr']?.['reportBack'], kind)) {
+  const setting = reportBackSetting(ctx.dir, deps);
+  if (setting === true) {
+    return ['agent', 'prompt', pane, reportBackMessage(report)];
+  }
+  if (setting === undefined || setting === false) {
+    return undefined;
+  }
+  const kind = await paneKind(pane, deps);
+  if (kind === undefined || !reportBackEnabled(setting, kind)) {
     return undefined;
   }
   return ['agent', 'prompt', pane, reportBackMessage(report)];
@@ -91,10 +114,10 @@ export function reportBackArgs(
 export const herdrConnector: Connector = {
   name: 'herdr',
   hooks: () => ({
-    taskFinish: (ctx, report) => {
-      const args = reportBackArgs(ctx, report);
+    taskFinish: async (ctx, report) => {
+      const args = await reportBackArgs(ctx, report);
       if (args !== undefined) {
-        call(args);
+        await callAsync(args);
       }
     },
   }),

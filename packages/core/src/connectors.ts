@@ -1230,8 +1230,15 @@ export async function taskFinishProbes(
     connectorHooks(ctx).map(async ({ name, hooks }) => {
       const t0 = Date.now();
       try {
-        await probeWithTimeout(() => hooks.taskFinish?.(ctx, report), undefined);
-        return { connector: name, ms: Date.now() - t0 };
+        const r = await probeWithTimeout<void | typeof PROBE_TIMED_OUT>(
+          () => hooks.taskFinish?.(ctx, report),
+          PROBE_TIMED_OUT
+        );
+        return {
+          connector: name,
+          ms: Date.now() - t0,
+          ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+        };
       } catch {
         return { connector: name, ms: Date.now() - t0, failed: true as const };
       }

@@ -36,6 +36,7 @@
     "stamp",
     "sync",
     "sweep",
+    "exec",
     "---Comms---",
     "notify",
     "sinks",

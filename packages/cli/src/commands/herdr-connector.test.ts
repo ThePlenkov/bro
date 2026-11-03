@@ -44,39 +44,57 @@ describe('reportBackEnabled', () => {
 });
 
 describe('reportBackArgs', () => {
-  test('outside a herdr pane it is a no-op', () => {
-    assert.equal(args({ herdr: { reportBack: true } }, devin, {}), undefined);
+  test('outside a herdr pane it is a no-op', async () => {
+    assert.equal(await args({ herdr: { reportBack: true } }, devin, {}), undefined);
     assert.equal(
-      args({ herdr: { reportBack: true } }, devin, { HERDR_PANE_ID: 'w0:p1' }),
+      await args({ herdr: { reportBack: true } }, devin, { HERDR_PANE_ID: 'w0:p1' }),
+      undefined
+    );
+    assert.equal(
+      await args({ herdr: { reportBack: true } }, devin, {
+        HERDR_PANE_ID: 'w0:p1',
+        HERDR_SOCKET_PATH: '',
+      }),
       undefined
     );
   });
-  test('an enabled kind prompts the pane', () => {
-    const out = args({ herdr: { reportBack: { devin: true } } });
+  test('an enabled kind prompts the pane', async () => {
+    const out = await args({ herdr: { reportBack: { devin: true } } });
     assert.deepEqual(out?.slice(0, 3), ['agent', 'prompt', 'w0:p1']);
     assert.match(out![3]!, /^\[task-result\] `bro exec` npm test — exit 0 \(12\.3s\)/);
     assert.match(out![3]!, /ok 42 tests/);
   });
-  test('a kind the config does not name is skipped', () => {
+  test('a kind the config does not name is skipped', async () => {
     assert.equal(
-      args({ herdr: { reportBack: { devin: true } } }, () => ({ agent: 'opencode' })),
+      await args({ herdr: { reportBack: { devin: true } } }, () => ({ agent: 'opencode' })),
       undefined
     );
-    assert.equal(args({ herdr: {} }), undefined);
-    assert.equal(args({}), undefined);
+    assert.equal(await args({ herdr: {} }), undefined);
+    assert.equal(await args({}), undefined);
   });
-  test('reportBack: true reports any kind', () => {
-    assert.ok(args({ herdr: { reportBack: true } }, () => ({ agent: 'claude' })));
+  test('a disabled config never asks the pane for its agent', async () => {
+    let fetched = 0;
+    const counting = (): PaneAgent | undefined => {
+      fetched += 1;
+      return devin();
+    };
+    assert.equal(await args({ herdr: {} }, counting), undefined);
+    assert.equal(await args({ herdr: { reportBack: false } }, counting), undefined);
+    assert.equal(fetched, 0);
   });
-  test('an unreadable pane agent is skipped', () => {
-    assert.equal(
-      args({ herdr: { reportBack: true } }, () => undefined),
-      undefined
-    );
-    assert.equal(
-      args({ herdr: { reportBack: true } }, () => ({})),
-      undefined
-    );
+  test('reportBack: true reports any kind without an agent get', async () => {
+    let fetched = 0;
+    const out = await args({ herdr: { reportBack: true } }, () => {
+      fetched += 1;
+      return { agent: 'claude' };
+    });
+    assert.ok(out);
+    assert.equal(fetched, 0);
+  });
+  test('an unreadable pane agent is skipped', async () => {
+    const cfg = { herdr: { reportBack: { devin: true } } };
+    assert.equal(await args(cfg, () => undefined), undefined);
+    assert.equal(await args(cfg, () => ({})), undefined);
   });
 });
 
@@ -86,7 +104,7 @@ describe('reportBackMessage', () => {
     assert.match(msg, /signal SIGTERM \(0\.5s\)/);
   });
   test('an empty tail is omitted', () => {
-    const msg = reportBackMessage({ cmd: 'x', exitCode: 1, durationMs: 0 });
+    const msg = reportBackMessage({ cmd: 'x', exitCode: 1, durationMs: 0, tail: '' });
     assert.equal(msg.endsWith('(0.0s)'), true);
   });
 });
