@@ -1739,6 +1739,21 @@ function prepareSpawn(
     if (charged !== undefined) {
       laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
+    try {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[spec.molStep];
+      if (
+        cur !== undefined &&
+        cur.backend === backend &&
+        (typeof cur.exitStatus !== 'number' && cur.stopped !== true)
+      ) {
+        // only clean up a freshly written entry with no death recorded
+        delete reg[spec.molStep];
+        writeAgentRegistry(dir, reg);
+      }
+    } catch {
+      // best-effort cleanup
+    }
     throw err;
   }
 }
@@ -1841,7 +1856,26 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  try {
+    recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  } catch (err) {
+    try {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[spec.molStep];
+      if (
+        cur !== undefined &&
+        cur.agentId === agentId &&
+        cur.runId === runId &&
+        cur.backend === backend
+      ) {
+        delete reg[spec.molStep];
+        writeAgentRegistry(dir, reg);
+      }
+    } catch {
+      // best-effort cleanup
+    }
+    throw err;
+  }
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 
