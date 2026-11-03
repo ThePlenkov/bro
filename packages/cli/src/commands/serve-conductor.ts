@@ -1990,6 +1990,41 @@ function settledStopReason(
   return canonical;
 }
 
+/** The shared acpTurn envelope — the lane's config, its sessions, the
+ *  deadline and the provenance every dialect spells the same way. The
+ *  three dialects differ only in their openStream and their chaining. */
+function laneTurnEnv(
+  route: ProviderRoute,
+  peer: AcpPeer,
+  d: {
+    body: MessagesRequest;
+    key: string | undefined;
+    stopKey: string;
+    parent: OtelCtx | undefined;
+    requestModel: string | undefined;
+    signal: AbortSignal;
+  }
+): TurnEnv {
+  return {
+    body: d.body,
+    msgs: d.body.messages ?? [],
+    prefix: prefixText(d.body),
+    peer,
+    cfg: route.cfg,
+    opts: route.opts,
+    sessions: route.sessions,
+    pendingOpens: route.pendingOpens,
+    key: d.key,
+    stopKey: d.stopKey,
+    parent: d.parent,
+    requestModel: d.requestModel,
+    deadline: Date.now() + route.cfg.timeoutMs,
+    signal: d.signal,
+    by: `conductor:${route.name}`,
+    imageOk: peer.caps?.image === true,
+  };
+}
+
 /** The SSE opener for a streamed Messages turn — a streamed answer
  *  commits to SSE at turn start: headers and message_start leave before
  *  the first delta; a failed turn lands as an in-stream error event, the
@@ -2058,24 +2093,8 @@ async function messages(
     const ac = new AbortController();
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort());
-    const msgs = body.messages ?? [];
     out = await acpTurn({
-      body,
-      msgs,
-      prefix: prefixText(body),
-      peer,
-      cfg: route.cfg,
-      opts: route.opts,
-      sessions: route.sessions,
-      pendingOpens: route.pendingOpens,
-      key,
-      stopKey,
-      parent,
-      requestModel,
-      deadline: Date.now() + route.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${route.name}`,
-      imageOk: peer.caps?.image === true,
+      ...laneTurnEnv(route, peer, { body, key, stopKey, parent, requestModel, signal: ac.signal }),
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
       // as an in-stream error event, the wire's own dead-stream shape.
@@ -2963,26 +2982,10 @@ async function responses(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      body,
-      msgs: body.messages ?? [],
-      prefix: prefixText(body),
-      peer,
-      cfg: route.cfg,
-      opts: route.opts,
-      sessions: route.sessions,
-      pendingOpens: route.pendingOpens,
-      key,
-      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+      ...laneTurnEnv(route, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
-      parent,
-      requestModel: requestModelOf(body),
-      deadline: Date.now() + route.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${route.name}`,
-      imageOk: peer.caps?.image === true,
-      openStream: respStreamOpener(rreq, res, route, {
-        respId,
+      openStream: respStreamOpener(rreq, res, route, {        respId,
         body,
         tools,
         store,
@@ -3507,22 +3510,7 @@ async function chatCompletions(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      body,
-      msgs: body.messages ?? [],
-      prefix: prefixText(body),
-      peer,
-      cfg: route.cfg,
-      opts: route.opts,
-      sessions: route.sessions,
-      pendingOpens: route.pendingOpens,
-      key,
-      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
-      parent,
-      requestModel,
-      deadline: Date.now() + route.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${route.name}`,
-      imageOk: peer.caps?.image === true,
+      ...laneTurnEnv(route, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel, signal: ac.signal }),
       openStream:
         creq.stream === true
           ? () => {
