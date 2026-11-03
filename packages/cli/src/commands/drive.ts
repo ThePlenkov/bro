@@ -2570,8 +2570,15 @@ export function projectorKicker(fire: () => void, kickMs = PROJECTOR_KICK_MS): (
 }
 
 let projectorKickFn: (() => void) | undefined;
+/** Latest daemon ctx — rebound on every kick source call so a standby
+ *  takeover never fires the projector through the first invocation's
+ *  closure. */
+let projectorCtx: Ctx | undefined;
 function kickProjector(ctx: Ctx): void {
-  projectorKickFn ??= projectorKicker(() => herdrProjectorTick(ctx));
+  projectorCtx = ctx;
+  projectorKickFn ??= projectorKicker(() => {
+    if (projectorCtx !== undefined) herdrProjectorTick(projectorCtx);
+  });
   projectorKickFn();
 }
 
@@ -2670,14 +2677,11 @@ interface ProjectorWatchSlot {
 }
 
 let projectorWatchSpec: ProjectorWatchSlot[] | undefined;
-/** The latest Ctx wins — a standby takeover re-binds every kick to the
- *  live daemon invocation instead of the one that armed the watch. */
-let projectorWatchCtx: Ctx | undefined;
 function armProjectorWatches(ctx: Ctx): void {
   if (ctx.everySec === undefined) {
     return;
   }
-  projectorWatchCtx = ctx;
+  projectorCtx = ctx;
   if (projectorWatchSpec === undefined) {
     const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
     projectorWatchSpec = [
@@ -2698,7 +2702,7 @@ function armProjectorWatches(ctx: Ctx): void {
       continue;
     }
     const [w] = projectorWatcher([d], () => {
-      if (projectorWatchCtx !== undefined) kickProjector(projectorWatchCtx);
+      if (projectorCtx !== undefined) kickProjector(projectorCtx);
     });
     if (w !== undefined) {
       const drop = (): void => {

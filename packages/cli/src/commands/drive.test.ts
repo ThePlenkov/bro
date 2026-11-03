@@ -1468,6 +1468,23 @@ describe('projectorWatcher — the write-point fast path (bro-9me97)', () => {
         return n >= 1;
       }, 8000);
       assert.ok(kicked, 'no kick on .exit');
+      // drain before the baseline — an .exit write fires rename AND
+      // change, and a retried poke can still be in flight; snapshot
+      // only once n holds still past the poke cadence or late kicks
+      // land inside the quiet window below
+      // n must hold across fourteen 25ms polls (~350ms, past the
+      // 300ms poke cadence) before it counts as drained
+      let stable = 0;
+      let last = -1;
+      const drained = await waitFor(() => {
+        if (n !== last) {
+          last = n;
+          stable = 0;
+          return false;
+        }
+        return ++stable >= 14;
+      }, 8000);
+      assert.ok(drained, 'kick stream never settled');
       const before = n;
       writeFileSync(join(dir, 'other.log'), 'noise\n');
       writeFileSync(join(dir, 'state.tmp'), 'noise\n');
