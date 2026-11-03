@@ -23,6 +23,7 @@ import { existsSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { type Lane, laneOf } from './lanes.ts';
 import {
+  agentsJson,
   ctxJson,
   gitCommonDir,
   type HerdrWorkspace,
@@ -289,16 +290,17 @@ function convergeStatuses(
 function convergeSessionPanes(
   wsForPath: Map<string, string>,
   ctx: WsCtx,
-  liveByTree: Map<string, { id: string; events: string }>,
+  bindByTree: Map<string, { id: string; events: string }>,
   sessionArmed: Set<string>
 ): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed !== true || rec.ws !== ws) continue;
-    // viewable = the acp lane's session attach OR a live agent whose
-    // events archive resolves — the journal is the truth, not the
-    // provider kind (native workers journal ACP events too).
-    const agent = liveByTree.get(path);
+    // the binding is the worktree's LATEST journal record — dead
+    // included: a crashed worker's archive is still the pane's feed
+    // and its registry entry is what lets the worker floor read
+    // 'blocked' instead of a blind idle
+    const agent = bindByTree.get(path);
     if (sessionArmed.has(path)) {
       ensureSession({ path, ws, state: ctx.state, ...(agent !== undefined ? { agent } : {}) });
     }
@@ -408,6 +410,24 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
     const key = isAbsolute(a.worktree) ? a.worktree : resolve(p.main, a.worktree);
     liveByTree.set(key, { id: a.id, events: a.events });
   }
+  // the archive binding — the LATEST registry record per worktree,
+  // dead included: a crashed agent's journal is still the pane's
+  // archive, and its record is what lets the pane's worker floor
+  // read 'blocked' instead of a blind worktree-bound idle
+  const bindByTree = new Map<string, { id: string; events: string; at: string }>();
+  for (const e of Object.values(agentsJson(base))) {
+    if (e.worktree === undefined || typeof e.log !== 'string') continue;
+    const events = e.log.replace(/\.log$/, '.events.jsonl');
+    if (!existsSync(events)) continue;
+    const key = isAbsolute(e.worktree) ? e.worktree : resolve(p.main, e.worktree);
+    const at = typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+    const cur = bindByTree.get(key);
+    if (cur === undefined || at >= cur.at) {
+      bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
+    }
+  }
+  // a live handle-file agent may have no registry record — overlay
+  for (const [key, a] of liveByTree) bindByTree.set(key, { ...a, at: '\uffff' });
   // where a session pane lives it is the ONE human pane — the acp
   // lane's attach OR any worktree whose agent journal resolves; every
   // other surface (mirror tail, events renderer, status strip) folds
@@ -423,7 +443,7 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   }
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes
-  convergeSessionPanes(wsForPath, ctx, liveByTree, sessionArmed);
+  convergeSessionPanes(wsForPath, ctx, bindByTree, sessionArmed);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionArmed);
   markExitedMirrors(p, ctx.state, sessionArmed);
   convergeRenderers(wsForPath, ctx, sessionArmed);

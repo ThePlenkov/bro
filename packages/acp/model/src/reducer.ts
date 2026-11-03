@@ -777,6 +777,14 @@ export function reduce(
       };
     }
 
+    case "turn_started": {
+      // archive-sourced turn open — no user item, just the lifecycle:
+      // a turn already open keeps its open-request tracking (a dropped
+      // stop must not silently unblock a pending permission)
+      const turn = session.turn ?? emptyTurn(event.at);
+      return { ...withOpenRequests(session, turn), stopReason: null };
+    }
+
     case "prompt_response": {
       const durationMs = session.turn ? Math.max(0, event.at - session.turn.startedAt) : 0;
       const next = endTurn(session, event.at, {

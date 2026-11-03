@@ -53,13 +53,22 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     assert.equal(workerLedState(live, events), 'idle');
     // live pid + missing journal → idle
     assert.equal(workerLedState(live, join(base, 'absent.events.jsonl')), 'idle');
-    // a finished run is never working — whatever the pid says
-    assert.equal(workerLedState({ ...live, exitStatus: 0 }, events), 'idle');
-    assert.equal(workerLedState({ ...live, stopped: true }, events), 'idle');
-    // dead pid → idle
-    assert.equal(workerLedState({ pid: deadPid() }, events), 'idle');
-    // no entry → idle
-    assert.equal(workerLedState(undefined, events), 'idle');
+    utimesSync(events, new Date(), new Date());
+    // a respawned run's exit fields go stale — a live pid + fresh
+    // journal beats them (registry showed exitStatus on a streaming
+    // respawn; the field is attempt-scoped, not current-state)
+    assert.equal(workerLedState({ ...live, exitStatus: 1 }, events), 'working');
+    assert.equal(workerLedState({ ...live, stopped: true }, events), 'working');
+    // a dead pid without a clean exit → blocked (the crash posture)
+    assert.equal(workerLedState({ pid: deadPid() }, events), 'blocked');
+    assert.equal(workerLedState({ pid: deadPid(), exitStatus: 1 }, events), 'blocked');
+    // a dead pid with a clean exit → idle
+    assert.equal(workerLedState({ pid: deadPid(), exitStatus: 0 }, events), 'idle');
+    assert.equal(workerLedState({ pid: deadPid(), stopped: true }, events), 'idle');
+    // no entry → unknown (nothing provable; the archive rides)
+    assert.equal(workerLedState(undefined, events), 'unknown');
+    // an entry that never started → idle
+    assert.equal(workerLedState({}, events), 'idle');
     // live pid, no journal path known → the pid verdict stands
     assert.equal(workerLedState(live, undefined), 'working');
   });

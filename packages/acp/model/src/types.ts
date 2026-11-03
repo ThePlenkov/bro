@@ -327,6 +327,10 @@ export type ModelEvent =
    *  `replay`, so it never reads as activity from another client; the state is unchanged. */
   | { readonly type: "client_notice"; readonly text: string; readonly at: number }
   | { readonly type: "prompt_sent"; readonly text: string; readonly at: number }
+  /** A turn opened without a client prompt — archive replay sees `turn start` markers with no
+   *  prompt text, so `prompt_sent` would fabricate a user message. This carries the lifecycle
+   *  half only: running state and the open turn record. */
+  | { readonly type: "turn_started"; readonly at: number }
   | { readonly type: "prompt_response"; readonly stopReason: StopReason; readonly at: number }
   | { readonly type: "prompt_error"; readonly message: string; readonly at: number }
   | {

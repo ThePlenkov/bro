@@ -149,13 +149,23 @@ export function ensureSession(ctx: RenderCtx): void {
   });
   if (act.kind === 'none') return;
   if (act.kind === 'rebind') {
-    // the worktree got a new live agent — the running pane is pinned
-    // to the dead archive; close it and let this same pass re-arm
-    // through the record-less path below
-    herdrTry(['pane', 'close', act.paneId]);
-    delete ctx.state.sessions[ctx.path];
-    log(`session pane ${act.paneId} → ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
-    ensureSession(ctx);
+    // the binding moved (new agent, or a dead record now resolves) —
+    // the running pane is pinned to the old archive. Arm the
+    // replacement FIRST: closing the workspace's last pane before its
+    // successor exists auto-reaps the whole workspace mid-pass
+    // (dogfood reap — the same constraint the arm-order follows)
+    const next = splitPane(act.paneId, ctx);
+    if (next !== undefined && armSession(ctx, next)) {
+      herdrTry(['pane', 'close', act.paneId]);
+      log(
+        `session pane ${act.paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`
+      );
+    } else {
+      // no successor landed — keep the stale pane over an empty
+      // workspace; the next pass retries the same decision
+      if (next !== undefined) herdrTry(['pane', 'close', next]);
+      log(`session pane ${act.paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
+    }
     return;
   }
   if (act.kind === 'split') {

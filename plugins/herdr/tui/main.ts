@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, statSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import {
@@ -27,6 +27,7 @@ import {
   completePart,
   eventsFile,
   eventsVerdict,
+  fmtWhen,
   implArg,
   type PaneImpl,
   type PaneLed,
@@ -42,6 +43,7 @@ import { serve } from '../../../packages/acp/tui/serve.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import {
   agentEntry,
+  agentKey,
   type FleetPaneState,
   fleetStatusPath,
   release as paneRelease,
@@ -183,6 +185,24 @@ export async function runTui(argv: string[]): Promise<void> {
   const ctxDir = worktree ?? process.cwd();
   const base0 = gitCommonDir(ctxDir) ?? ctxDir;
   const entry = agentEntry(base0, agentArg);
+  /** The worker floor with its reason stamped — a blocked worker
+   *  reports WHEN it exited (the journal's last write), an idle one
+   *  when it went quiet; the verdict reads the message as its mode. */
+  const workerLedOf = (e: typeof entry, events: string | undefined): PaneLed => {
+    const state = workerLedState(e, events);
+    if (state === 'working' || state === 'unknown' || events === undefined) {
+      return { state };
+    }
+    try {
+      const when = fmtWhen(statSync(events).mtimeMs);
+      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+    } catch {
+      return { state };
+    }
+  };
+  /** The display agent — the readable run id (`bro-2bv6q`), not the
+   *  archive stem the argv carries (`native-<hash>`). */
+  const displayAgent = agentKey(base0, agentArg) ?? agentArg;
   const direct: SessionTarget | undefined =
     eventsArg === undefined && agentArg === undefined
       ? undefined
@@ -190,9 +210,9 @@ export async function runTui(argv: string[]): Promise<void> {
           worktree: entry?.worktree ?? ctxDir,
           status: 'live',
           events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
-          agent: agentArg,
+          agent: displayAgent,
           slug: agentArg,
-          workerLed: { state: workerLedState(entry, eventsArg ?? undefined) },
+          workerLed: workerLedOf(entry, eventsArg),
         };
 
   const base = base0;
@@ -200,7 +220,7 @@ export async function runTui(argv: string[]): Promise<void> {
   mkdirSync(dirname(statePath), { recursive: true });
 
   const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: agentArg });
+  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: displayAgent });
 
   // the shell — renderer + JSX preload + mount + keymap — is
   // @broject/acp-tui's serve(); this process stays glue: target
@@ -306,8 +326,15 @@ export async function runTui(argv: string[]): Promise<void> {
   };
 
   /** The resolution poll — read the doc, re-arm the feed when the
-   *  attach identity moves, report the verdict. */
+   *  attach identity moves, report the verdict. The direct binding's
+   *  worker floor is re-probed every pass: a crash mid-turn leaves
+   *  the model 'running' forever, and only the fresh pid check makes
+   *  that read 'blocked' instead of lying working (dogfood finding —
+   *  a crashed agent's pane glowed working while its pid was gone). */
   const refresh = (): void => {
+    if (direct !== undefined) {
+      direct.workerLed = workerLedOf(entry, eventsArg);
+    }
     target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
     const key = targetKey(target);
     if (key !== cur?.key) {

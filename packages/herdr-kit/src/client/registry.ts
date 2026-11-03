@@ -47,6 +47,23 @@ export function agentEntry(base: string, id: string | undefined): AgentEntry | u
   );
 }
 
+/** The registry KEY for an id — the readable run id (`bro-2bv6q`)
+ *  the pane reports as its agent name instead of the archive stem
+ *  (`native-ab656051`, cryptic in the agents view). Same lookup
+ *  contract as agentEntry: key first, then the log stem. */
+export function agentKey(base: string, id: string | undefined): string | undefined {
+  if (id === undefined) return undefined;
+  const reg = agentsJson(base);
+  if (reg[id] !== undefined) return id;
+  return Object.keys(reg).find(
+    k =>
+      reg[k]?.log
+        ?.replace(/\.log$/, '')
+        .split('/')
+        .pop() === id
+  );
+}
+
 /** The pid's /proc start stamp — `comm` may carry spaces and parens,
  *  so the fields read from the LAST `)`. null when unreadable (no
  *  /proc, or the process just exited). */
@@ -79,21 +96,28 @@ export function pidAlive(pid: number, start?: string): boolean {
  *  live pid means it is waiting or done, not working. */
 export const ACTIVE_MS = 15 * 60_000;
 
-/** The worker LED floor for a direct-bound pane — 'working' requires
- *  BOTH an unfinished run (no exitStatus/stopped flag, live pid) AND a
- *  journal still being written. A live pid alone lies: loop records
- *  can point at the long-lived supervisor, and a silent-for-days
- *  journal on a live pid is idle, not working. */
+/** The worker LED floor for a direct-bound pane, pid-first: a dead
+ *  recorded pid is 'blocked' unless the record carries a clean exit
+ *  (`stopped`/`exitStatus 0`) — a crash mid-turn must not pass for
+ *  either working or idle. `exitStatus`/`stopped` are attempt-scoped
+ *  and go stale on a respawn, so they only read when the pid is
+ *  actually gone. On a live pid, 'working' still requires a journal
+ *  being written: loop records can point at the long-lived
+ *  supervisor, and a silent-for-days journal is idle, not working. */
 export function workerLedState(
   entry: AgentEntry | undefined,
   eventsPath: string | undefined,
   now = Date.now()
-): 'working' | 'idle' {
-  if (entry === undefined) return 'idle';
-  if (entry.stopped === true) return 'idle';
-  if (typeof entry.exitStatus === 'number') return 'idle';
-  if (entry.pid === undefined || !pidAlive(entry.pid, entry.pidStart as string | undefined)) {
-    return 'idle';
+): 'working' | 'idle' | 'blocked' | 'unknown' {
+  // no registry record means nothing is provable — 'unknown' lets the
+  // archive's own verdict ride (a direct-bound pane on an
+  // unregistered agent must not be capped by a blind floor)
+  if (entry === undefined) return 'unknown';
+  if (entry.pid === undefined) return 'idle'; // never started — no crash to report
+  const alive = pidAlive(entry.pid, entry.pidStart as string | undefined);
+  if (!alive) {
+    if (entry.stopped === true || entry.exitStatus === 0) return 'idle';
+    return 'blocked';
   }
   if (eventsPath !== undefined) {
     try {

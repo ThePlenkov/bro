@@ -55,4 +55,19 @@ describe('the pane impl seam', () => {
     assert.ok(impl.dump().length > 0);
     assert.equal(impl.drain().length, 0);
   });
+
+  test('an archive turn start drives the acp LED to working', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.beginLive();
+    const on = impl.verdict;
+    assert.equal(on?.led.state, 'working');
+    assert.match(on?.mode ?? '', /^turn since /);
+    // the matching stop idles it again — the lifecycle still closes,
+    // and the footer carries the idle-since clock stamp
+    impl.feed({ kind: 'turn', phase: 'stop', ts: '2026-01-01T00:01:00Z' });
+    const v = impl.verdict;
+    assert.equal(v?.led.state, 'idle');
+    assert.match(v?.mode ?? '', /^since /);
+  });
 });
