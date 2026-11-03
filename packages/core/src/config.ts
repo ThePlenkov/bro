@@ -1630,6 +1630,14 @@ export function loadConfigLayers(
   ];
   const layers: ConfigLayerHit[] = [];
   const broken: string[] = [];
+  // Tests must not leak ambient global config (BRO_TEST / BRO_NO_GLOBAL_CONFIG)
+  if (process.env.BRO_TEST === '1' || process.env.BRO_NO_GLOBAL_CONFIG === '1') {
+    if (only === undefined) {
+      only = ['project', 'local'];
+    } else if (only.includes('global')) {
+      only = only.filter((l) => l !== 'global');
+    }
+  }
   const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
   if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
   if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);
