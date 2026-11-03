@@ -79,6 +79,7 @@ import {
   sessionPlaneForCli,
   sessionQuotaConfig,
   sessionSlotsDir,
+  taskStoreAt,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -1743,6 +1744,7 @@ function prepareSpawn(
       const reg = readAgentRegistry(dir);
       const cur = reg[spec.molStep];
       if (
+        existing === undefined &&
         cur !== undefined &&
         cur.agentId === agentId &&
         cur.backend === backend &&
@@ -1860,6 +1862,22 @@ function commitSpawn(
   try {
     recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
   } catch (err) {
+    // roll back claim bookkeeping if partially applied so we don't orphan
+    // an in_progress claim when the spawn fails mid-way
+    try {
+      if (!guard.phantom) {
+        const store = taskStoreAt(spec.beadsDir);
+        try {
+          if (typeof store.reopen === 'function') {
+            store.reopen(spec.molStep);
+          }
+        } catch {
+          // best-effort rollback
+        }
+      }
+    } catch {
+      // best-effort rollback
+    }
     try {
       const reg = readAgentRegistry(dir);
       const cur = reg[spec.molStep];
