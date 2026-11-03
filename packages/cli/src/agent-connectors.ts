@@ -5502,17 +5502,13 @@ function copilotTerminalPatch(
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
   }
+  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
+  const exitAt = Number.isNaN(stamp) ? Date.now() : stamp;
   const c =
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
-      : classifyExitCause(copilotSessionError(task), 1);
-  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
-  const back = rateDeathBackoff(
-    entry,
-    c.cause,
-    c.resetAt,
-    Number.isNaN(stamp) ? Date.now() : stamp
-  );
+      : classifyExitCause(copilotSessionError(task), 1, exitAt);
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt);
   return {
     exitStatus: 1,
     cause: c.cause,

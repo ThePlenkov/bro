@@ -135,7 +135,15 @@ function relReset(text: string, now: number): string | undefined {
   const len = text.length;
   while (i < len) {
     // skip whitespace (bounded scan to avoid polynomial backtracking)
-    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13 || text.charCodeAt(i) === 12 || text.charCodeAt(i) === 11)) {
+    while (
+      i < len &&
+      (text.charCodeAt(i) === 32 ||
+        text.charCodeAt(i) === 9 ||
+        text.charCodeAt(i) === 10 ||
+        text.charCodeAt(i) === 13 ||
+        text.charCodeAt(i) === 12 ||
+        text.charCodeAt(i) === 11)
+    ) {
       i++;
       if (i - (rel.index + rel[0].length) > 4096) break;
     }
@@ -143,9 +151,16 @@ function relReset(text: string, now: number): string | undefined {
     // optional comma
     if (text.charCodeAt(i) === 44) {
       i++;
-      while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+      const run = i;
+      while (
+        i < len &&
+        (text.charCodeAt(i) === 32 ||
+          text.charCodeAt(i) === 9 ||
+          text.charCodeAt(i) === 10 ||
+          text.charCodeAt(i) === 13)
+      ) {
         i++;
-        if (i - (rel.index + rel[0].length) > 4096) break;
+        if (i - run > 4096) break;
       }
       if (i >= len) break;
     }
@@ -154,15 +169,22 @@ function relReset(text: string, now: number): string | undefined {
       const c0 = text.charCodeAt(i);
       const c1 = text.charCodeAt(i + 1);
       const c2 = text.charCodeAt(i + 2);
-      if (((c0 === 97 || c0 === 65) && (c1 === 110 || c1 === 78) && (c2 === 100 || c2 === 68))) {
+      if ((c0 === 97 || c0 === 65) && (c1 === 110 || c1 === 78) && (c2 === 100 || c2 === 68)) {
         // check word boundary after and
         if (i === 0 || !/[A-Za-z0-9_]/.test(text[i - 1]!)) {
           const afterAnd = i + 3;
           if (afterAnd >= len || !/[A-Za-z0-9_]/.test(text[afterAnd]!)) {
             i = afterAnd;
-            while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+            const run = i;
+            while (
+              i < len &&
+              (text.charCodeAt(i) === 32 ||
+                text.charCodeAt(i) === 9 ||
+                text.charCodeAt(i) === 10 ||
+                text.charCodeAt(i) === 13)
+            ) {
               i++;
-              if (i - (rel.index + rel[0].length) > 4096) break;
+              if (i - run > 4096) break;
             }
             if (i >= len) break;
           }
@@ -181,7 +203,13 @@ function relReset(text: string, now: number): string | undefined {
       digits++;
     }
     // skip whitespace
-    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+    while (
+      i < len &&
+      (text.charCodeAt(i) === 32 ||
+        text.charCodeAt(i) === 9 ||
+        text.charCodeAt(i) === 10 ||
+        text.charCodeAt(i) === 13)
+    ) {
       i++;
     }
     if (i >= len) break;
