@@ -36,7 +36,7 @@ describe('scanLog', () => {
   const scan = (text: string, chunkSize = 7): { lines: number; etimedout: number | null } => {
     const source = Buffer.from(text);
     let pos = 0;
-    return scanLog(buffer => {
+    const result = scanLog(buffer => {
       const n = Math.min(chunkSize, source.length - pos);
       if (n <= 0) {
         return 0;
@@ -45,6 +45,8 @@ describe('scanLog', () => {
       pos += n;
       return n;
     });
+    assert.ok(result, 'a fixture scan never fails — only readers do');
+    return result;
   };
 
   test('wc -l semantics: newline count, including an unterminated final line', () => {
@@ -71,6 +73,23 @@ describe('scanLog', () => {
     assert.equal(r.lines, 2);
     // and one whose match sits right at a later boundary
     assert.equal(scan('a\nETIMEDOUT\nb\nETIMEDOUT\n', 4).etimedout, 4);
+  });
+
+  test('a read failure is not eof — the scan fails instead of reporting a partial count', () => {
+    assert.equal(
+      scanLog(() => -1),
+      null
+    );
+    let calls = 0;
+    const partial = scanLog(buffer => {
+      calls += 1;
+      if (calls === 1) {
+        buffer.write('a\nETIMEDOUT\n');
+        return 11;
+      }
+      return -1;
+    });
+    assert.equal(partial, null);
   });
 });
 
@@ -169,6 +188,17 @@ describe('renderWatchdogBrief', () => {
     assert.match(dirty, /stamped with the loop's own pid/);
     const clean = renderWatchdogBrief(full());
     assert.doesNotMatch(clean, /residue/);
+  });
+
+  test('an unreadable records plane reports residue as unavailable, never a guessed zero', () => {
+    const text = renderWatchdogBrief(
+      full({
+        slots: { unavailable: 'bro/loop unreadable' },
+        residue: { unavailable: 'bro/loop unreadable' },
+      })
+    );
+    assert.match(text, /slots\s+unavailable \(bro\/loop unreadable\)/);
+    assert.match(text, /residue\s+unavailable \(bro\/loop unreadable\)/);
   });
 });
 

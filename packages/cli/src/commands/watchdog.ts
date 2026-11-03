@@ -129,9 +129,11 @@ export interface WatchdogBaselines {
    *  lane it could not observe. */
   slots: WatchdogSlot[] | Unavailable;
   /** Loop run records that are NOT in flight: dead pids plus the
-   *  supervisor-stamped ones. Surfaced instead of silently dropped —
+   *  supervisor-stamped ones. Mirrors the slots plane — when the
+   *  records could not be read, the count is unavailable, never a
+   *  guessed zero (cubic). Surfaced instead of silently dropped:
    *  residue is a fact about the loop, not noise to hide. */
-  residue: number;
+  residue: number | Unavailable;
 }
 
 const unavailable = (why: string): Unavailable => ({ unavailable: why });
@@ -177,7 +179,7 @@ const countNewlines = (buf: Buffer, end: number = buf.length): number => {
 export function scanLog(readChunk: (buffer: Buffer) => number): {
   lines: number;
   etimedout: number | null;
-} {
+} | null {
   const buf = Buffer.allocUnsafe(LOG_CHUNK);
   const overlap = NEEDLE.length - 1;
   let linesBefore = 0;
@@ -185,7 +187,12 @@ export function scanLog(readChunk: (buffer: Buffer) => number): {
   let tail = Buffer.alloc(0);
   for (;;) {
     const bytes = readChunk(buf);
-    if (bytes <= 0) {
+    if (bytes < 0) {
+      // a read failure is NOT eof — returning partial stats would
+      // fabricate a measurement from a log we could not finish reading
+      return null;
+    }
+    if (bytes === 0) {
       break;
     }
     const chunk = buf.subarray(0, bytes);
@@ -506,21 +513,23 @@ export function splitSlots(
 
 /** Every baseline, measured now. `now` is injectable so tests pin the
  *  clock; everything else is a plain read. The slots plane degrades in
- *  three steps: no git common dir → unavailable; no records directory
- *  yet → an honest empty (nothing has ever run); a directory that
- *  exists but cannot be read → unavailable (unreadable ≠ none). */
+ *  three steps: no git common dir → unavailable; a records directory
+ *  that does not exist (ENOENT) → an honest empty (nothing has ever
+ *  run); a directory that exists but cannot be read (EACCES and kin)
+ *  → unavailable (unreadable ≠ none). residue mirrors the slots plane:
+ *  a count of records we could not read is a guess, not a zero. */
 export function collectBaselines(dir: string, now: number = Date.now()): WatchdogBaselines {
   const unit = readUnit();
   const mainPid = isUnavailable(unit) ? null : unit.mainPid;
   const runs = loopRunsDir(dir);
   let slotsPlane: WatchdogSlot[] | Unavailable;
-  let residue = 0;
+  let residuePlane: number | Unavailable;
   if (runs === null) {
     slotsPlane = unavailable('no git common dir');
-  } else if (!existsSync(runs)) {
-    slotsPlane = [];
+    residuePlane = unavailable('no git common dir');
   } else {
     try {
+      // ENOENT = never ran (empty); anything else = could not read
       readdirSync(runs);
       const split = splitSlots(collectLoopRuns(dir, now), mainPid);
       slotsPlane = split.slots.map(r => ({
@@ -530,9 +539,15 @@ export function collectBaselines(dir: string, now: number = Date.now()): Watchdo
         state: r.state,
         silentMs: r.silentMs,
       }));
-      residue = split.residue;
-    } catch {
-      slotsPlane = unavailable('bro/loop unreadable');
+      residuePlane = split.residue;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        slotsPlane = [];
+        residuePlane = 0;
+      } else {
+        slotsPlane = unavailable('bro/loop unreadable');
+        residuePlane = unavailable('bro/loop unreadable');
+      }
     }
   }
   return {
@@ -545,7 +560,7 @@ export function collectBaselines(dir: string, now: number = Date.now()): Watchdo
     memory: readMemory(),
     worktrees: readWorktrees(dir),
     slots: slotsPlane,
-    residue,
+    residue: residuePlane,
   };
 }
 
@@ -624,17 +639,24 @@ const formatSlots = (slots: WatchdogSlot[] | Unavailable): string => {
   return `${slots.length} — ${shown}${more}`;
 };
 
+/** The residue line — unavailable mirrors the slots plane, a positive
+ *  count is reported, zero stays silent. One shallow helper so the
+ *  render never grows a nested ternary. */
+const formatResidue = (residue: number | Unavailable): string | null => {
+  if (isUnavailable(residue)) {
+    return un(residue);
+  }
+  if (residue <= 0) {
+    return null;
+  }
+  return `${residue} loop/ record(s) not in flight (dead pid or stamped with the loop's own pid)`;
+};
+
 /** The brief — also the prompt `/bro` feeds back into the session, so the
  *  launch steps are imperative and the facts are labelled as measurements. */
 export function renderWatchdogBrief(b: WatchdogBaselines): string {
   const row = (label: string, value: string): string => `  ${label.padEnd(10)} ${value}`;
-  const residue =
-    b.residue > 0
-      ? row(
-          'residue',
-          `${b.residue} loop/ record(s) not in flight (dead pid or stamped with the loop's own pid)`
-        )
-      : null;
+  const residue = formatResidue(b.residue);
 
   return [
     'watchdog — infinite read-only orchestration loop over the bro pipeline',
@@ -655,7 +677,7 @@ export function renderWatchdogBrief(b: WatchdogBaselines): string {
     row('memory', formatMemory(b.memory)),
     row('worktrees', formatWorktrees(b.worktrees)),
     row('slots', formatSlots(b.slots)),
-    ...(residue === null ? [] : [residue]),
+    ...(residue === null ? [] : [row('residue', residue)]),
     '',
   ].join('\n');
 }
