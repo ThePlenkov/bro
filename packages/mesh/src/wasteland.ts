@@ -119,13 +119,14 @@ export function projectWanted(input: { row: WantedRow; selfRig?: string }): {
     row.claimed_by !== undefined && row.claimed_by !== '' && claimer === null
       ? [`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`]
       : []
+  const refs = parseEmbeddedRefs(row.description)
   const ctx: BoardCtx = {
     base: {
       v: MESH_VERSION,
       thread: row.id,
       title: row.title,
       body: row.description ?? '',
-      refs: [] as MeshRef[],
+      refs,
       evidence: [] as MeshRef[],
     },
     poster,
@@ -229,17 +230,53 @@ export interface WlTarget {
   id: string
 }
 
+function embedRefs(body: string | undefined, refs: MeshRef[] | undefined): string | undefined {
+  const parts: string[] = []
+  if (body !== undefined && body !== '') {
+    parts.push(body)
+  }
+  if (refs !== undefined && refs.length > 0) {
+    parts.push('')
+    parts.push('<!-- mesh/1 refs -->')
+    for (const r of refs) {
+      parts.push(`mesh:ref:${r.kind}:${r.ref}`)
+    }
+  }
+  if (parts.length === 0) {
+    return undefined
+  }
+  return parts.join('\n')
+}
+
+function parseEmbeddedRefs(text: string | undefined): MeshRef[] {
+  if (typeof text !== 'string' || text === '') {
+    return []
+  }
+  const out: MeshRef[] = []
+  const re = /^mesh:ref:(bead|url|pr):(.*)$/gm
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    const kind = m[1] as MeshRef['kind']
+    const ref = m[2] ?? ''
+    if (ref !== '') {
+      out.push({ kind, ref })
+    }
+  }
+  return out
+}
+
 /** Post a wanted item — `wl post` goes to the fork and proposes
  *  (PR mode); the returned `w-<hash>` is the thread id. */
 export function postWanted(
-  input: { remote: string; title: string; body?: string; priority?: number },
+  input: { remote: string; title: string; body?: string; priority?: number; refs?: MeshRef[] },
 ): { id?: string; error?: string } {
+  const description = embedRefs(input.body, input.refs)
   const args = [
     ...remoteArgs(input.remote),
     'post',
     '--title',
     input.title,
-    ...(input.body !== undefined && input.body !== '' ? ['--description', input.body] : []),
+    ...(description !== undefined && description !== '' ? ['--description', description] : []),
     ...(input.priority === undefined
       ? []
       : ['--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority))))]),
