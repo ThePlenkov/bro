@@ -1769,6 +1769,13 @@ interface ProviderRoute {
   pendingOpens: Set<string>;
 }
 
+/** The lane a name names — a chain's lane, or the provider prefix on a
+ *  requested model. Undefined when no lane carries the name. */
+function laneNamed(wire: WireCtx, name: string | undefined): ProviderRoute | undefined {
+  if (name === undefined) return undefined;
+  return wire.routes.get(name);
+}
+
 /** The lane a request rides — the model's `<provider>/<model>` prefix
  *  when it names an exposed provider, else the default backend. A bare
  *  id (or a prefix naming no lane) rides the default: a model id the
@@ -1776,15 +1783,11 @@ interface ProviderRoute {
  *  chained /v1/responses request rides its PREDECESSOR's lane — that
  *  chain already lives in one provider's context. */
 function routeOf(wire: WireCtx, model: string | undefined, lane?: string): ProviderRoute {
-  if (lane !== undefined) {
-    const chained = wire.routes.get(lane);
-    if (chained !== undefined) return chained;
-  }
+  const chained = laneNamed(wire, lane);
+  if (chained !== undefined) return chained;
   const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
-  if (head !== undefined) {
-    const hit = wire.routes.get(head);
-    if (hit !== undefined) return hit;
-  }
+  const named = laneNamed(wire, head);
+  if (named !== undefined) return named;
   return wire.routes.get(wire.cfg.backend) as ProviderRoute;
 }
 
@@ -1987,6 +1990,46 @@ function settledStopReason(
   return canonical;
 }
 
+/** The SSE opener for a streamed Messages turn — a streamed answer
+ *  commits to SSE at turn start: headers and message_start leave before
+ *  the first delta; a failed turn lands as an in-stream error event, the
+ *  wire's own dead-stream shape. x-accel-buffering:no stops a proxy from
+ *  re-buffering the stream back into one end-of-turn burst (amazon-q
+ *  #566). `set` hands the LiveTurn back so the caller's catch/finish
+ *  paths can reach it. */
+function messagesStreamOpener(
+  res: ServerResponse,
+  route: ProviderRoute,
+  body: MessagesRequest,
+  requestModel: string | undefined,
+  key: string | undefined,
+  stops: StopFilter,
+  set: (live: LiveTurn) => void
+): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
+  if (body.stream === false) return undefined;
+  return inputTokens => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+      // h: pins echo like respond()'s — the internal f:
+      // fingerprint stays server-side
+      ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
+    });
+    const live = new LiveTurn(
+      res,
+      servedModel(requestModel, route.opts, route.cfg, body),
+      inputTokens,
+      stops,
+      route.cfg.keepaliveMs ?? 10_000,
+      body.tool_choice?.type !== 'none'
+    );
+    set(live);
+    return live.onUpdate;
+  };
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2036,33 +2079,12 @@ async function messages(
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
       // as an in-stream error event, the wire's own dead-stream shape.
-      // x-accel-buffering:no stops a proxy from re-buffering the stream
-      // back into one end-of-turn burst (amazon-q #566). The turn layer
-      // fires this only once a real pump is chosen — a replay never
-      // opens the stream, a failed open still answers an HTTP status.
-      openStream:
-        body.stream === false
-          ? undefined
-          : inputTokens => {
-              res.writeHead(200, {
-                'content-type': 'text/event-stream',
-                'cache-control': 'no-cache',
-                connection: 'keep-alive',
-                'x-accel-buffering': 'no',
-                // h: pins echo like respond()'s — the internal f:
-                // fingerprint stays server-side
-                ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
-              });
-              live = new LiveTurn(
-                res,
-                servedModel(requestModel, route.opts, route.cfg, body),
-                inputTokens,
-                stops,
-                route.cfg.keepaliveMs ?? 10_000,
-                body.tool_choice?.type !== 'none'
-              );
-              return live.onUpdate;
-            },
+      // The turn layer fires this only once a real pump is chosen — a
+      // replay never opens the stream, a failed open still answers an
+      // HTTP status.
+      openStream: messagesStreamOpener(res, route, body, requestModel, key, stops, l => {
+        live = l;
+      }),
     });
   } catch (err) {
     turnError(res, err, live, route.name, t0);
@@ -3658,31 +3680,47 @@ function chatDeliver(
   );
 }
 
+/** One lane's catalog rows — its own entry, or the catalog override for
+ *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
+ *  throw: one provider being down must not blind the other's models. */
+async function laneCatalog(
+  lane: ProviderRoute,
+  wire: WireCtx
+): Promise<{ rows: CatalogModel[]; failure?: string }> {
+  // the catalog override answers for the default lane only — an
+  // exposed lane advertises its own entry's models
+  const source =
+    lane.name === wire.cfg.backend && wire.cfg.catalog !== undefined
+      ? wire.cfg.catalog
+      : { name: lane.name, entry: lane.cfg.entry };
+  try {
+    return { rows: await catalogModels(source.name, source.entry, { acp: lane.opts.acp }) };
+  } catch (err) {
+    return { failure: `${lane.name}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 /** The anthropic /v1/models rows — the UNION of every lane's catalog,
  *  through the SAME `bro providers models` surface, so ids arrive
- *  `<entry>/<model>` and re-pin on /v1/messages. A lane whose catalog
- *  cannot be read is skipped, not fatal: one provider being down must
- *  not blind the other's models. Every lane down IS a 502. */
+ *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
+ *  PARALLEL — a catalog read costs seconds, and a caller waits for the
+ *  slowest lane, never for their sum. Every lane down IS a 502. */
 async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+  const settled = await Promise.all(
+    [...wire.routes.values()].map(lane => laneCatalog(lane, wire))
+  );
   const rows: CatalogModel[] = [];
   const seen = new Set<string>();
   const failures: string[] = [];
-  for (const lane of wire.routes.values()) {
-    // the catalog override answers for the DEFAULT lane only — an
-    // exposed lane advertises its own entry's models
-    const source =
-      lane.name === wire.cfg.backend && wire.cfg.catalog !== undefined
-        ? wire.cfg.catalog
-        : { name: lane.name, entry: lane.cfg.entry };
-    try {
-      const list = await catalogModels(source.name, source.entry, { acp: lane.opts.acp });
-      for (const m of list) {
-        if (seen.has(m.id)) continue;
-        seen.add(m.id);
-        rows.push(m);
-      }
-    } catch (err) {
-      failures.push(`${lane.name}: ${err instanceof Error ? err.message : String(err)}`);
+  for (const s of settled) {
+    if (s.failure !== undefined) {
+      failures.push(s.failure);
+      continue;
+    }
+    for (const m of s.rows) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      rows.push(m);
     }
   }
   if (rows.length === 0 && failures.length > 0) {

@@ -2455,6 +2455,12 @@ async function armBusBroker(dir: string, url: string): Promise<BusBroker | undef
   }
 }
 
+/** The lanes the gateway serves — the default backend plus every
+ *  exposed provider, each reachable by its own model prefix. */
+function conductorLanes(cfg: ConductorConfig): string[] {
+  return [cfg.backend, ...Object.keys(cfg.providers ?? {})];
+}
+
 export async function runServeCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'ensure') {
     await cmdEnsure(argv.slice(1));
@@ -2504,10 +2510,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    // every lane the gateway serves — the default backend plus the
-    // exposed providers, each reachable by its own model prefix
-    const lanes = [conductorCfg.backend, ...Object.keys(conductorCfg.providers ?? {})];
-    console.log(`provider: /v1/* → acp conductor (${lanes.join(', ')})`);
+    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }

@@ -745,6 +745,15 @@ sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
  *  `providers` names the OTHER acp entries the gateway exposes: a
  *  request whose model carries one of their names routes there, so one
  *  listener serves every provider's models. */
+/** The exposed provider names — a list of non-blank strings, else
+ *  undefined (the section carries no list). */
+function providerNames(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw
+    .filter((n): n is string => typeof n === 'string' && n.trim() !== '')
+    .map((n) => n.trim());
+}
+
 export const serveSection: ConfigSection<{ backend?: string; providers?: string[] }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -752,11 +761,7 @@ export const serveSection: ConfigSection<{ backend?: string; providers?: string[
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
-  const providers = Array.isArray(obj.providers)
-    ? obj.providers
-        .filter((n): n is string => typeof n === 'string' && n.trim() !== '')
-        .map((n) => n.trim())
-    : undefined;
+  const providers = providerNames(obj.providers);
   // an unset backend reads as an empty bag — same shape as providers:{}
   return {
     ...(backend === undefined ? {} : { backend }),
