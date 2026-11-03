@@ -197,6 +197,9 @@ describe('prompts', () => {
     const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'beads', true);
     assert.match(p, /gh pr merge --auto --squash --delete-branch/);
     assert.doesNotMatch(p, /Do NOT merge/);
+    // mergeRule() ends in a literal newline — the next bullet stays on
+    // its own line (kilo review on #881 claimed a glued concat)
+    assert.match(p, /on reviewers\.\n- Report verdicts/);
     const batch = buildWorkPrompt(
       [bead, { ...bead, id: 'bro-x2' }],
       'loop/bro-x1',
@@ -207,6 +210,7 @@ describe('prompts', () => {
     );
     assert.match(batch, /gh pr merge --auto --squash --delete-branch/);
     assert.doesNotMatch(batch, /Do NOT merge/);
+    assert.match(batch, /on reviewers\.\n- Beads you cannot finish/);
   });
 
   test("work prompt uses the backend's own close verb", () => {

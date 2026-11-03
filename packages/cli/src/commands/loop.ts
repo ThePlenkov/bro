@@ -2243,10 +2243,14 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // post-merge bookkeeping, 'closed'/'park' settle as usual — and
   // the member still parks on the mergeTimeoutMin clock: a PR GitHub
   // never lands (auto-merge unarmed, checks never green) must not
-  // wait forever.
+  // wait forever. pushItem withholds the arm order when
+  // act.requireApproval is set — mirror that predicate here so the
+  // gate keeps supervisor semantics (merge stays approval-gated)
+  // instead of waiting on an auto-merge that was never armed.
+  const autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval;
   const autoMergeTimedOut = Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
-    ctx.cfg.autoMerge && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
+    autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
       ? autoMergeTimedOut
         ? 'park'
         : act.kind === 'merge' || act.kind === 'fix' || act.kind === 'rebase'
