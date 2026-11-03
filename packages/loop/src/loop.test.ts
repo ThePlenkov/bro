@@ -188,6 +188,7 @@ describe('prompts', () => {
     assert.match(p, /respawns are the supervisor's job/);
     const batch = buildWorkPrompt([bead, { ...bead, id: 'bro-x2' }], 'loop/bro-x1');
     assert.match(batch, /bro work prune --loop/);
+    assert.match(batch, /respawns are the supervisor's job/);
   });
 
   test("work prompt uses the backend's own close verb", () => {
