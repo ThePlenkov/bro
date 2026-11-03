@@ -63,7 +63,7 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   acquireAgentRegistryLock,
@@ -132,7 +132,7 @@ import {
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
 import { collectAgents } from './fleet.ts';
-import { projectFleet } from './herdr-projector.ts';
+import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
   driveSection,
   MAX_INTERVAL_SEC,
@@ -2503,6 +2503,9 @@ function herdrProjectorTick(ctx: Ctx): void {
   // the event trigger re-arms lazily here — a broker that came up since
   // the last pass restores event mode without a daemon restart
   void armProjectorEvents(ctx);
+  // and the write points without an envelope get their fs.watch fast
+  // path the same way — armed once, loop mode only
+  armProjectorWatches(ctx);
   try {
     const r = projectFleet(ctx.mainRoot);
     if (r.reachable !== herdrWasReachable) {
@@ -2623,6 +2626,60 @@ async function armProjectorEvents(ctx: Ctx): Promise<void> {
   } finally {
     projectorArming = false;
   }
+}
+
+// --- write-point watches (spec bro-9me97) -------------------------------------
+
+/** Filename-filtered dir watches kicking the projector on the write
+ *  points the bus does not cover: a `.exit` lands the instant a worker
+ *  dies but `agent-exit` only journals at the next harvest;
+ *  `agents.json` mutates outside lifecycle emits; plugin ledgers have
+ *  no bus path at all. Everything funnels into the same coalescing
+ *  kicker, and a missed/overflowed inotify event still has the tick
+ *  behind it — the watch is a fast path, never the only path.
+ *  Exported so tests drive it with injected dirs + kick. */
+export function projectorWatcher(
+  dirs: { dir: string; hit: (name: string) => boolean }[],
+  kick: () => void
+): FSWatcher[] {
+  const out: FSWatcher[] = [];
+  for (const { dir, hit } of dirs) {
+    try {
+      const w = watch(dir, (_e, name) => {
+        if (typeof name === 'string' && hit(name)) {
+          kick();
+        }
+      });
+      // an inotify limit or a dir removed mid-watch degrades to the
+      // tick — never a crash inside the supervisor loop
+      w.on('error', () => {});
+      w.unref?.();
+      out.push(w);
+    } catch {
+      // an absent dir (a ledger root the plugin never created) is a
+      // no-watch, not a failure
+    }
+  }
+  return out;
+}
+
+let projectorWatches: FSWatcher[] | undefined;
+function armProjectorWatches(ctx: Ctx): void {
+  if (projectorWatches !== undefined || ctx.everySec === undefined) {
+    return;
+  }
+  const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
+  projectorWatches = projectorWatcher(
+    [
+      // registry mutations the lifecycle mirror does not emit for
+      { dir: join(common, 'bro'), hit: name => name === 'agents.json' },
+      // death before the harvest — the wrapper's .exit write point
+      { dir: join(common, 'bro', 'agents'), hit: name => name.endsWith('.exit') },
+      // plugin workspace/status bindings — no bus coverage at all
+      ...pluginLedgerDirs().map(dir => ({ dir, hit: (name: string) => name.startsWith('state') })),
+    ],
+    () => kickProjector(ctx)
+  );
 }
 
 /** `<git-common>/bro/drive.lock` — the one-supervisor-per-repo hold

@@ -82,6 +82,29 @@ function mergeLedger(out: PluginLedger, v: PluginLedgerFile): void {
   }
 }
 
+/** Every directory a plugin ledger file can live in — the same list
+ *  `pluginLedger` merges and a projector watch observes, so the two
+ *  can never disagree about where bindings land. */
+export function pluginLedgerDirs(): string[] {
+  const home = process.env.HOME ?? '/tmp';
+  return [
+    ...new Set(
+      [
+        process.env.HERDR_PLUGIN_STATE_DIR,
+        join(home, '.config', 'bro-herdr-plugin'),
+        // herdr's own plugin-state root — host-spawned plugin panes get
+        // HERDR_PLUGIN_STATE_DIR pointing here, the daemon does not
+        join(
+          process.env.XDG_STATE_HOME ?? join(home, '.local', 'state'),
+          'herdr',
+          'plugins',
+          'bro.fleet'
+        ),
+      ].filter((d): d is string => d !== undefined)
+    ),
+  ];
+}
+
 function pluginLedger(ctx: { root: string; common: string | null }): PluginLedger {
   const base = ctx.common ?? ctx.root;
   const real = realpathOrNull(base);
@@ -90,21 +113,7 @@ function pluginLedger(ctx: { root: string; common: string | null }): PluginLedge
       createHash('sha1').update(p).digest('hex').slice(0, 12)
     )
   );
-  const home = process.env.HOME ?? '/tmp';
-  const dirs = new Set(
-    [
-      process.env.HERDR_PLUGIN_STATE_DIR,
-      join(home, '.config', 'bro-herdr-plugin'),
-      // herdr's own plugin-state root — host-spawned plugin panes get
-      // HERDR_PLUGIN_STATE_DIR pointing here, the daemon does not
-      join(
-        process.env.XDG_STATE_HOME ?? join(home, '.local', 'state'),
-        'herdr',
-        'plugins',
-        'bro.fleet'
-      ),
-    ].filter((d): d is string => d !== undefined)
-  );
+  const dirs = pluginLedgerDirs();
   const out: PluginLedger = { workspaces: new Map(), statusPanes: new Map() };
   for (const dir of dirs) {
     for (const scope of scopes) {
