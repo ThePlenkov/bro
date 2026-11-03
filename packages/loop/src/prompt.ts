@@ -31,9 +31,10 @@ const BATCH_FALLBACK =
  *  gate (the worker never merges). */
 const mergeRule = (autoMerge: boolean): string =>
   autoMerge
-    ? `- Arm GitHub auto-merge: \`gh pr merge --auto --squash\` — your job
-  ends once auto-merge is set; the PR lands when its checks go
-  green. Do NOT wait on reviewers.
+    ? `- Arm GitHub auto-merge: \`gh pr merge --auto --squash --delete-branch\`
+  — your job ends once auto-merge is set; the PR lands when its
+  checks go green and the head branch deletes itself. Do NOT wait
+  on reviewers.
 `
     : `- Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
   review gate. Your job ends once the PR exists.
