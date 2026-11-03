@@ -1744,6 +1744,7 @@ function prepareSpawn(
       const cur = reg[spec.molStep];
       if (
         cur !== undefined &&
+        cur.agentId === agentId &&
         cur.backend === backend &&
         (typeof cur.exitStatus !== 'number' && cur.stopped !== true)
       ) {
