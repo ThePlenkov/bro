@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   collectBaselines,
   logStats,
+  parseMeminfo,
   renderWatchdogBrief,
   splitSlots,
   type WatchdogBaselines,
@@ -198,6 +199,19 @@ describe('collectBaselines', () => {
         assert.ok(b.memory.memAvailableBytes >= 0);
       }
     });
+  });
+  test('meminfo parsing refuses malformed values instead of measuring zero', () => {
+    const good = 'SwapTotal:       8192 kB\nSwapFree:  1024 kB\nMemAvailable:  4096 kB\n';
+    assert.deepEqual(parseMeminfo(good), {
+      swapUsedBytes: 7 * 1024 * 1024,
+      memAvailableBytes: 4096 * 1024,
+    });
+    // an empty value is not a zero — cubic caught the parser reading it as one
+    assert.equal(parseMeminfo('SwapTotal:\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
+    // the unit and the digits are part of the measurement
+    assert.equal(parseMeminfo('SwapTotal: 1 gb\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
+    assert.equal(parseMeminfo('SwapTotal: abc kB\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
+    assert.equal(parseMeminfo('SwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
   });
 });
 

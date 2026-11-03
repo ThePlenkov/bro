@@ -294,42 +294,54 @@ function readDisk(path: string = DISK_PATH): WatchdogDisk | Unavailable {
 }
 
 /** /proc/meminfo — the swap/mem plane of the escalation thresholds. Only
- *  Linux carries it; anywhere else the line prints unavailable. Sequential
- *  guards instead of one `||` chain — the chain is what CodeScene counts
- *  as a complex conditional. */
+ *  Linux carries it; anywhere else the line prints unavailable. */
 function readMemory(): WatchdogMemory | Unavailable {
   const text = readText('/proc/meminfo');
   if (text === null) {
     return unavailable('no /proc/meminfo (not Linux?)');
   }
-  // meminfo lines are `Key:    <n> kB` — plain string parsing, never a
-  // constructed RegExp: a non-literal pattern is a security finding on
-  // every static engine (Codacy's critical on this PR)
+  const parsed = parseMeminfo(text);
+  if (parsed === null) {
+    return unavailable('meminfo missing or malformed SwapTotal/SwapFree/MemAvailable');
+  }
+  return parsed;
+}
+
+/** The three keys the escalation thresholds read, or null the moment one
+ *  is missing or malformed — a value that is not `<integer> kB` is not a
+ *  measurement (an empty value would otherwise read as a legitimate
+ *  zero). Plain string parsing, never a constructed RegExp: a non-literal
+ *  pattern is a security finding on every static engine (Codacy's
+ *  critical on this PR). */
+export function parseMeminfo(text: string): WatchdogMemory | null {
   const kb = (key: string): number | null => {
     const prefix = `${key}:`;
     const line = text.split('\n').find(l => l.startsWith(prefix));
     if (line === undefined) {
       return null;
     }
-    const first = line.slice(prefix.length).trim().split(/\s+/)[0];
-    if (first === undefined) {
+    const parts = line.slice(prefix.length).trim().split(/\s+/);
+    const digits = parts[0];
+    const unit = parts[1];
+    if (digits === undefined || unit !== 'kB') {
       return null;
     }
-    const value = Number(first);
-    return Number.isFinite(value) ? value * 1024 : null;
+    if (!/^[0-9]+$/.test(digits)) {
+      return null;
+    }
+    return Number(digits) * 1024;
   };
-  const missing = 'meminfo missing SwapTotal/SwapFree/MemAvailable';
   const swapTotal = kb('SwapTotal');
   if (swapTotal === null) {
-    return unavailable(missing);
+    return null;
   }
   const swapFree = kb('SwapFree');
   if (swapFree === null) {
-    return unavailable(missing);
+    return null;
   }
   const avail = kb('MemAvailable');
   if (avail === null) {
-    return unavailable(missing);
+    return null;
   }
   return { swapUsedBytes: Math.max(0, swapTotal - swapFree), memAvailableBytes: avail };
 }
