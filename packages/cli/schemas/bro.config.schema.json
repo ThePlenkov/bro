@@ -795,6 +795,9 @@
           "type": "number",
           "minimum": 0
         },
+        "autoMerge": {
+          "type": "boolean"
+        },
         "maxItems": {
           "type": "number",
           "minimum": 0

@@ -2235,6 +2235,21 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
   });
+  // loop.autoMerge — GitHub owns the merge once the worker armed
+  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase/
+  // update rounds — threads and behind-base never gate a landing the
+  // merge bot drives. 'land' still runs the post-merge bookkeeping,
+  // 'closed'/'park' settle as usual, and a never-landing PR still
+  // parks on the mergeTimeoutMin clock.
+  const kind =
+    ctx.cfg.autoMerge &&
+    act.kind !== 'land' &&
+    act.kind !== 'closed' &&
+    act.kind !== 'wait' &&
+    act.kind !== 'park'
+      ? 'wait'
+      : act.kind;
+  const parkWhy = act.kind === 'park' ? act.why : 'parked';
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
@@ -2253,7 +2268,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       },
     });
   };
-  switch (act.kind) {
+  switch (kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
       gateRow('green', { action: 'land' });
@@ -2320,11 +2335,11 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'wait':
       return 'kept';
     case 'park':
-      gateRow('parked', { action: 'park', why: act.why });
+      gateRow('parked', { action: 'park', why: parkWhy });
       parkBeads(
         ctx,
         m.beads,
-        `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`
+        `loop: PR ${prRef(ctx, pr)} ${parkWhy} — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
   }
