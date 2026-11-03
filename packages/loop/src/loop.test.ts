@@ -53,6 +53,7 @@ describe('loopSection', () => {
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
+      autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
       worktreeMb: 350,
@@ -73,6 +74,7 @@ describe('loopSection', () => {
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
+      autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
       worktreeMb: 350,
@@ -189,6 +191,22 @@ describe('prompts', () => {
     const batch = buildWorkPrompt([bead, { ...bead, id: 'bro-x2' }], 'loop/bro-x1');
     assert.match(batch, /bro work prune --loop/);
     assert.match(batch, /respawns are the supervisor's job/);
+  });
+
+  test('work prompt arms GitHub auto-merge when loop.autoMerge is set', () => {
+    const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'beads', true);
+    assert.match(p, /gh pr merge --auto/);
+    assert.doesNotMatch(p, /Do NOT merge/);
+    const batch = buildWorkPrompt(
+      [bead, { ...bead, id: 'bro-x2' }],
+      'loop/bro-x1',
+      undefined,
+      undefined,
+      'beads',
+      true
+    );
+    assert.match(batch, /gh pr merge --auto/);
+    assert.doesNotMatch(batch, /Do NOT merge/);
   });
 
   test("work prompt uses the backend's own close verb", () => {
