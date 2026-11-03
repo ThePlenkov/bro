@@ -27,23 +27,41 @@ export {
 } from '@broject/herdr-kit';
 export { SESSION_PANE_AGENT };
 
+/** A flag's VALUE is not a positional — `--events <path>` must not
+ *  turn the archive path into the worktree arg. */
+const VALUE_FLAGS = new Set(['--events', '--agent']);
+
+const opt = (argv: string[], flag: string): string | undefined => {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
+
 /** Arg + environment resolution — `undefined` means "outside herdr,
- *  do nothing"; a missing worktree arg is the only usage error. */
+ *  do nothing"; a missing worktree arg is the only usage error. The
+ *  `--events`/`--agent` pair is the direct archive binding the pane
+ *  builders carry — a native worker's journal resolves without the
+ *  projector ever naming it. */
 function viewContext(argv: string[]): SessionPaneCtx | undefined {
-  const worktree = argv.find(a => !a.startsWith('-'));
+  const worktree = argv.find((a, i) => !a.startsWith('-') && !VALUE_FLAGS.has(argv[i - 1] ?? ''));
   if (worktree === undefined) {
-    console.error('usage: bro herdr session-view <worktree> [--once]');
+    console.error(
+      'usage: bro herdr session-view <worktree> [--once] [--events <path>] [--agent <id>]'
+    );
     process.exit(2);
   }
   if (process.env.HERDR_ENV !== '1') return undefined;
   const pane = process.env.HERDR_PANE_ID;
   if (pane === undefined || pane === '') return undefined;
   const base = gitCommonDir(worktree) ?? worktree;
+  const events = opt(argv, '--events');
+  const agent = opt(argv, '--agent');
   return {
     worktree,
     pane,
     statePath: fleetStatusPath(base, worktree),
     once: argv.includes('--once'),
+    ...(events !== undefined ? { events } : {}),
+    ...(agent !== undefined ? { agent } : {}),
   };
 }
 

@@ -119,12 +119,14 @@ export function workerLedState(
     if (entry.stopped === true || entry.exitStatus === 0) return 'idle';
     return 'blocked';
   }
-  if (eventsPath !== undefined) {
-    try {
-      if (now - statSync(eventsPath).mtimeMs > ACTIVE_MS) return 'idle';
-    } catch {
-      return 'idle';
-    }
+  // a live pid alone is a lie — 'working' needs a journal provably
+  // being written: no path, an unreadable one, or a stale one is
+  // 'idle' (the loop's long-lived supervisor cannot fake it)
+  if (eventsPath === undefined) return 'idle';
+  try {
+    if (now - statSync(eventsPath).mtimeMs > ACTIVE_MS) return 'idle';
+  } catch {
+    return 'idle';
   }
   return 'working';
 }

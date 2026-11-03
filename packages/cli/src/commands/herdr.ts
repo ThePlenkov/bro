@@ -20,6 +20,8 @@ export async function runHerdrCommand(argv: string[]): Promise<void> {
     await runSessionView(rest);
     return;
   }
-  console.error('usage: bro herdr status-view|session-view <worktree> [--once]');
+  console.error(
+    'usage: bro herdr status-view|session-view <worktree> [--once] [--events <path>] [--agent <id>]'
+  );
   process.exit(2);
 }

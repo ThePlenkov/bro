@@ -203,16 +203,21 @@ export async function runTui(argv: string[]): Promise<void> {
   /** The display agent — the readable run id (`bro-2bv6q`), not the
    *  archive stem the argv carries (`native-<hash>`). */
   const displayAgent = agentKey(base0, agentArg) ?? agentArg;
+  // the journal's path resolved ONCE — `--agent` alone still names it
+  // via the registry convention; a bare live pid must never stand in
+  // for a journal the floor cannot read
+  const resolvedEvents =
+    eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined);
   const direct: SessionTarget | undefined =
-    eventsArg === undefined && agentArg === undefined
+    resolvedEvents === undefined && agentArg === undefined
       ? undefined
       : {
           worktree: entry?.worktree ?? ctxDir,
           status: 'live',
-          events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
+          ...(resolvedEvents !== undefined ? { events: resolvedEvents } : {}),
           agent: displayAgent,
           slug: agentArg,
-          workerLed: workerLedOf(entry, eventsArg),
+          workerLed: workerLedOf(entry, resolvedEvents),
         };
 
   const base = base0;
@@ -333,7 +338,9 @@ export async function runTui(argv: string[]): Promise<void> {
    *  a crashed agent's pane glowed working while its pid was gone). */
   const refresh = (): void => {
     if (direct !== undefined) {
-      direct.workerLed = workerLedOf(entry, eventsArg);
+      // re-read the registry too — a respawn swaps the record, and
+      // probing a stale entry's pid reads 'blocked' on a live worker
+      direct.workerLed = workerLedOf(agentEntry(base0, agentArg), resolvedEvents);
     }
     target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
     const key = targetKey(target);

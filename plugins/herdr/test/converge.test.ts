@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -731,6 +732,47 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
     converge(p);
     assert.equal(called('workspace', 'rename').length, 0);
     assert.equal(loadState(scope).workspaces[tree]?.label, '[silent10h·#765 2t] Ship it');
+  });
+});
+
+describe('live views — coverage by the session pane', () => {
+  test('a relative registry worktree still suppresses the second view', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — the repo main
+    // must be a REAL repo for the agents.json seed to be visible
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // the registry may carry a RELATIVE worktree — before the
+    // normalize-once fix the coverage check compared it against the
+    // armed set's absolute paths, never matched, and opened a second
+    // 🤖 view: workspace beside the session pane (PR #876 review)
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': {
+          log: join(repoMain, 'native-1.log'),
+          worktree: relative(repoMain, tree),
+          pid: process.pid,
+        },
+      })
+    );
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the session pane arms bound to the journal directly — the
+    // line-mode command carries --events/--agent too
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /--events .*native-1\.events\.jsonl.* --agent .*native-1/);
+    // coverage sees the same absolute path the armed set carries —
+    // NO second view workspace beside the session pane
+    assert.equal(called('workspace', 'create').length, 0);
+    assert.deepEqual(loadState(stateScope(repoMain)).liveViews, {});
   });
 });
 

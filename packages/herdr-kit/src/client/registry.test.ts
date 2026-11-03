@@ -69,7 +69,8 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     assert.equal(workerLedState(undefined, events), 'unknown');
     // an entry that never started → idle
     assert.equal(workerLedState({}, events), 'idle');
-    // live pid, no journal path known → the pid verdict stands
-    assert.equal(workerLedState(live, undefined), 'working');
+    // live pid, no journal path known → idle: a pid alone proves
+    // nothing — 'working' needs a journal provably being written
+    assert.equal(workerLedState(live, undefined), 'idle');
   });
 });

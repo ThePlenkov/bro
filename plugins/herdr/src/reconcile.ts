@@ -401,14 +401,19 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   // live agents by worktree — the session pane's viewable set AND its
   // direct archive binding; one registry scan feeds both halves
   const live = liveAgents(base);
+  // the status plane keys on absolute paths; a registry worktree may
+  // be relative — normalize the sightings ONCE so liveByTree AND the
+  // live-view coverage check compare the same vocabulary (field bug:
+  // a relative registry path never matched an absolute armed key, so
+  // the same agent got a session pane AND a second 🤖 view: workspace)
+  for (const a of live) {
+    if (a.worktree !== undefined && !isAbsolute(a.worktree)) {
+      a.worktree = resolve(p.main, a.worktree);
+    }
+  }
   const liveByTree = new Map<string, { id: string; events: string }>();
   for (const a of live) {
-    if (a.worktree === undefined) continue;
-    // the status plane keys on absolute paths; a registry worktree may
-    // be relative — normalize to the main checkout the same way
-    // resolveDetail does or the lookup silently never fires
-    const key = isAbsolute(a.worktree) ? a.worktree : resolve(p.main, a.worktree);
-    liveByTree.set(key, { id: a.id, events: a.events });
+    if (a.worktree !== undefined) liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
   // the archive binding — the LATEST registry record per worktree,
   // dead included: a crashed agent's journal is still the pane's
