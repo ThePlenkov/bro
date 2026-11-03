@@ -131,7 +131,7 @@ const ageSec = (mtimeMs: number, now: number): number =>
  *  is the arithmetic the whole escalation plane rests on. */
 export function logStats(text: string): { lines: number; etimedout: number | null } {
   const lines = text.split('\n');
-  const endsWithNewline = lines[lines.length - 1] === '';
+  const endsWithNewline = lines.at(-1) === '';
   const count = endsWithNewline ? lines.length - 1 : lines.length;
   let etimedout: number | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -158,7 +158,10 @@ function readUnit(): WatchdogUnit | Unavailable {
   let stdout: string | null = null;
   try {
     const r = spawnSync(
-      'systemctl',
+      // PATH lookup is the contract — the same stance gh/git take in
+      // @broject/core (a fixed /usr/bin would break nix-style hosts, and
+      // a missing binary degrades the plane below anyway)
+      'systemctl', // NOSONAR — user-installed CLI, PATH lookup intended
       ['--user', 'show', UNIT, '-p', 'ActiveState,MainPID,NRestarts'],
       { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
     );
@@ -201,7 +204,8 @@ function readPrs(dir: string): WatchdogPrs | Unavailable {
     dir
   );
   if (r.code !== 0) {
-    return unavailable(`gh pr list failed: ${firstLine(r.err) || `exit ${r.code}`}`);
+    const why = firstLine(r.err) || `exit ${r.code}`;
+    return unavailable(`gh pr list failed: ${why}`);
   }
   try {
     const rows = JSON.parse(r.out) as Array<{ number?: number; headRefName?: string }>;
@@ -221,7 +225,7 @@ function readDisk(path: string = DISK_PATH): WatchdogDisk | Unavailable {
   try {
     const s = statfsSync(path);
     const total = s.blocks * s.bsize;
-    if (!(total > 0)) {
+    if (total <= 0) {
       return unavailable(`statfs(${path}) reports an empty filesystem`);
     }
     const used = total - s.bfree * s.bsize;
@@ -239,8 +243,9 @@ function readMemory(): WatchdogMemory | Unavailable {
     return unavailable('no /proc/meminfo (not Linux?)');
   }
   const kb = (key: string): number | null => {
-    const m = text.match(new RegExp(`^${key}:\\s+(\\d+) kB`, 'm'));
-    return m && m[1] !== undefined ? Number(m[1]) * 1024 : null;
+    const re = new RegExp(String.raw`^${key}:\s+(\d+) kB`, 'm');
+    const digits = re.exec(text)?.[1];
+    return digits === undefined ? null : Number(digits) * 1024;
   };
   const swapTotal = kb('SwapTotal');
   const swapFree = kb('SwapFree');
@@ -254,7 +259,8 @@ function readMemory(): WatchdogMemory | Unavailable {
 function readWorktrees(dir: string): WatchdogWorktrees | Unavailable {
   const r = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']);
   if (r.code !== 0) {
-    return unavailable(`git worktree list failed: ${firstLine(r.err) || `exit ${r.code}`}`);
+    const why = firstLine(r.err) || `exit ${r.code}`;
+    return unavailable(`git worktree list failed: ${why}`);
   }
   const count = r.out.split('\n').filter(l => l.startsWith('worktree ')).length;
   return { count };
@@ -358,49 +364,76 @@ const secs = (n: number): string => (n >= 90 ? `${Math.round(n / 60)}m` : `${n}s
 
 const un = (v: Unavailable): string => `unavailable (${v.unavailable})`;
 
+/** Per-plane formatters — each one plane, each one shallow, so the brief's
+ *  render is a flat join instead of a ternary pyramid (the complexity
+ *  budget is a review gate, not a suggestion). `unavailable (…)` is what a
+ *  probe that could not measure prints; nothing here invents a value. */
+const formatUnit = (v: WatchdogUnit | Unavailable): string =>
+  isUnavailable(v)
+    ? un(v)
+    : `${v.state} MainPID=${v.mainPid ?? '?'} NRestarts=${v.nRestarts ?? '?'}`;
+
+const describeLiveness = (alive: boolean | null): string => {
+  if (alive === null) {
+    return 'unknown';
+  }
+  return alive ? 'alive' : 'DEAD';
+};
+
+const formatDaemon = (v: WatchdogDaemon | Unavailable): string => {
+  if (isUnavailable(v)) {
+    return un(v);
+  }
+  const head = v.pid === null ? 'no record' : `pid ${v.pid} ${describeLiveness(v.alive)}`;
+  const facts = [
+    v.logAgeSec === null ? 'log n/a' : `log age ${secs(v.logAgeSec)}`,
+    v.etimedout === null ? '' : `ETIMEDOUT ${v.etimedout}`,
+  ].filter(s => s !== '');
+  return [head, ...facts].join(' · ');
+};
+
+const formatLog = (v: WatchdogLog | Unavailable): string => {
+  if (isUnavailable(v)) {
+    return un(v);
+  }
+  const facts = [
+    `${v.lines} lines`,
+    v.ageSec === null ? '' : `age ${secs(v.ageSec)}`,
+    v.etimedout === null ? '' : `ETIMEDOUT ${v.etimedout}`,
+  ].filter(s => s !== '');
+  return facts.join(' · ');
+};
+
+const formatPrs = (v: WatchdogPrs | Unavailable): string =>
+  isUnavailable(v) ? un(v) : `${v.open} open · ours ${v.ours} · foreign ${v.foreign}`;
+
+const formatDisk = (v: WatchdogDisk | Unavailable): string =>
+  isUnavailable(v) ? un(v) : `${v.path} ${v.usePercent}%`;
+
+const formatMemory = (v: WatchdogMemory | Unavailable): string =>
+  isUnavailable(v)
+    ? un(v)
+    : `swap used ${gib(v.swapUsedBytes)} · avail ${gib(v.memAvailableBytes)}`;
+
+const formatWorktrees = (v: WatchdogWorktrees | Unavailable): string =>
+  isUnavailable(v) ? un(v) : String(v.count);
+
+const formatSlots = (slots: readonly WatchdogSlot[]): string => {
+  if (slots.length === 0) {
+    return 'none in flight';
+  }
+  const shown = slots
+    .slice(0, 4)
+    .map(s => `${s.slug} pid=${s.pid ?? '-'} ${s.state}`)
+    .join(' · ');
+  const more = slots.length > 4 ? ' …' : '';
+  return `${slots.length} — ${shown}${more}`;
+};
+
 /** The brief — also the prompt `/bro` feeds back into the session, so the
  *  launch steps are imperative and the facts are labelled as measurements. */
 export function renderWatchdogBrief(b: WatchdogBaselines): string {
   const row = (label: string, value: string): string => `  ${label.padEnd(10)} ${value}`;
-
-  const unit = isUnavailable(b.unit)
-    ? un(b.unit)
-    : `${b.unit.state} MainPID=${b.unit.mainPid ?? '?'} NRestarts=${b.unit.nRestarts ?? '?'}`;
-  const daemon = isUnavailable(b.daemon)
-    ? un(b.daemon)
-    : [
-        b.daemon.pid === null
-          ? 'no record'
-          : `pid ${b.daemon.pid} ${b.daemon.alive ? 'alive' : 'DEAD'}`,
-        b.daemon.logAgeSec === null ? 'log n/a' : `log age ${secs(b.daemon.logAgeSec)}`,
-        b.daemon.etimedout === null ? '' : `ETIMEDOUT ${b.daemon.etimedout}`,
-      ]
-        .filter(s => s !== '')
-        .join(' · ');
-  const loopOut = isUnavailable(b.loopOut)
-    ? un(b.loopOut)
-    : [
-        `${b.loopOut.lines} lines`,
-        b.loopOut.ageSec === null ? '' : `age ${secs(b.loopOut.ageSec)}`,
-        b.loopOut.etimedout === null ? '' : `ETIMEDOUT ${b.loopOut.etimedout}`,
-      ]
-        .filter(s => s !== '')
-        .join(' · ');
-  const prs = isUnavailable(b.prs)
-    ? un(b.prs)
-    : `${b.prs.open} open · ours ${b.prs.ours} · foreign ${b.prs.foreign}`;
-  const disk = isUnavailable(b.disk) ? un(b.disk) : `${b.disk.path} ${b.disk.usePercent}%`;
-  const memory = isUnavailable(b.memory)
-    ? un(b.memory)
-    : `swap used ${gib(b.memory.swapUsedBytes)} · avail ${gib(b.memory.memAvailableBytes)}`;
-  const worktrees = isUnavailable(b.worktrees) ? un(b.worktrees) : String(b.worktrees.count);
-  const slots =
-    b.slots.length === 0
-      ? 'none in flight'
-      : `${b.slots.length} — ${b.slots
-          .slice(0, 4)
-          .map(s => `${s.slug} pid=${s.pid ?? '-'} ${s.state}`)
-          .join(' · ')}${b.slots.length > 4 ? ' …' : ''}`;
   const residue =
     b.residue > 0
       ? row(
@@ -420,14 +453,14 @@ export function renderWatchdogBrief(b: WatchdogBaselines): string {
     '  3. Spawn tick 1; report WAKE events to the operator, keep the chain alive.',
     '',
     `baselines @ ${b.ts}`,
-    row('unit', unit),
-    row('daemon', daemon),
-    row('loop.out', loopOut),
-    row('prs', prs),
-    row('disk', disk),
-    row('memory', memory),
-    row('worktrees', worktrees),
-    row('slots', slots),
+    row('unit', formatUnit(b.unit)),
+    row('daemon', formatDaemon(b.daemon)),
+    row('loop.out', formatLog(b.loopOut)),
+    row('prs', formatPrs(b.prs)),
+    row('disk', formatDisk(b.disk)),
+    row('memory', formatMemory(b.memory)),
+    row('worktrees', formatWorktrees(b.worktrees)),
+    row('slots', formatSlots(b.slots)),
     ...(residue === null ? [] : [residue]),
     '',
   ].join('\n');
