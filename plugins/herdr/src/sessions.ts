@@ -112,28 +112,31 @@ function splitPane(targetId: string, ctx: RenderCtx): string | undefined {
 }
 
 /** Arm `paneId` and report the outcome — '(adopted)' when the pane
- *  already carried our label. */
-function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): void {
+ *  already carried our label. False when `pane run` never landed —
+ *  the caller must not treat the idle shell as a live session pane. */
+function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): boolean {
   if (!armSession(ctx, paneId)) {
     log(`session pane ${paneId} → ${ctx.ws}: pane run failed`);
-    return;
+    return false;
   }
   log(`session pane ${paneId} → ${ctx.ws}${adopted ? ' (adopted)' : ''}`);
+  return true;
 }
 
 /** How long a failed rebind waits before the next attempt — long
  *  enough that a persistent `pane run` failure is not a pane churn. */
 const REBIND_BACKOFF_MS = 60_000;
 
-/** No live pane to take — split beside the first pane, then arm. */
-function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
+/** No live pane to take — split beside the first pane, then arm.
+ *  False when no pane could be split or the arm never landed. */
+function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): boolean {
   const target = panes[0];
   const newPane = target === undefined ? undefined : splitPane(target.pane_id, ctx);
   if (newPane === undefined) {
     log(`session pane for ${ctx.ws}: no pane to arm or split`);
-    return;
+    return false;
   }
-  armAndReport(ctx, newPane, false);
+  return armAndReport(ctx, newPane, false);
 }
 
 /** Is a live session pane bound after the pass — the caller's retire
@@ -144,14 +147,14 @@ function paneLive(ctx: RenderCtx): boolean {
   return r !== undefined && paneExists(r.pane_id);
 }
 
-/** A stale pane the last rebind could not close — retried at the top
- *  of every pass so it does not linger showing the old archive. */
+/** Stale panes the last rebinds could not close — retried at the top
+ *  of every pass so they do not linger showing the old archive. */
 function retryClose(ctx: RenderCtx, rec: SessionRec | undefined): void {
-  if (rec?.closePending === undefined) return;
-  if (!paneExists(rec.closePending) || herdrOk(['pane', 'close', rec.closePending])) {
-    const { closePending: _closePending, ...rest } = rec;
-    ctx.state.sessions[ctx.path] = rest;
-  }
+  const pending = rec?.closePending;
+  if (pending === undefined || pending.length === 0) return;
+  const left = pending.filter(id => paneExists(id) && !herdrOk(['pane', 'close', id]));
+  const { closePending: _closePending, ...rest } = rec;
+  ctx.state.sessions[ctx.path] = left.length === 0 ? rest : { ...rest, closePending: left };
 }
 
 /** The binding moved (new agent, or a dead record now resolves) — the
@@ -166,10 +169,14 @@ function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): bo
   const next = splitPane(paneId, ctx);
   if (next !== undefined && armSession(ctx, next)) {
     if (!herdrOk(['pane', 'close', paneId])) {
-      // the stale pane survived — remember it so a later pass retries
+      // the stale pane survived — remember it so a later pass retries;
+      // each rebind can leave another, so the field is a list
       const r = ctx.state.sessions[ctx.path];
       if (r !== undefined) {
-        ctx.state.sessions[ctx.path] = { ...r, closePending: paneId };
+        ctx.state.sessions[ctx.path] = {
+          ...r,
+          closePending: [...(r.closePending ?? []), paneId],
+        };
       }
     }
     log(`session pane ${paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
@@ -210,11 +217,9 @@ export function ensureSession(ctx: RenderCtx): boolean {
     case 'rebind':
       return rebind(ctx, rec, act.paneId);
     case 'split':
-      armViaSplit(ctx, panes);
-      return paneLive(ctx);
+      return armViaSplit(ctx, panes);
     default:
-      armAndReport(ctx, act.paneId, act.adopted);
-      return paneLive(ctx);
+      return armAndReport(ctx, act.paneId, act.adopted);
   }
 }
 
