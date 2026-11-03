@@ -65,11 +65,15 @@ report: WAKE|TIMEOUT / lane / reason / PR / units / anomalies / next-tick plan
 
 - Facts only from command output produced **inside this window**. A number
   from memory is a fabrication, even if it was true an hour ago.
-- Time from `date -u` or a GitHub `Date:` field. `stat` epoch values are
-  local time (+0100) — subtract the offset before comparing with UTC.
-- **native-ids are reused.** Liveness only via `ps`/`/proc`; the reason for
-  an exit only from the **fresh** `.log`/`.exit` of that run, never an old
-  file that happens to share the id.
+- Time from `date -u` or a GitHub `Date:` field. Human-readable `stat`
+  output (`%y`) is local time (`+0100` here) — convert it before comparing
+  against UTC; epoch numbers (`stat -c %Y`) are already absolute — compare
+  them directly, no offset.
+- **native-ids are reused.** Liveness = the pid **and** that run's
+  recorded `/proc` start time (`pidAlive(pid, pidStart)`) — a bare pid
+  check can be satisfied by a recycled pid. The reason for an exit comes
+  only from the **fresh** `.log`/`.exit` of that run, never an old file
+  that happens to share the id.
 - A failed probe (gh blip, missing shell) → query GraphQL/REST directly or
   mark the fact _unverified_. Never fill a gap with a guess.
 - Degrade honestly: `unavailable (why)` beats a plausible lie.
@@ -80,6 +84,9 @@ Our PRs: `loop/*`, `fix/bro-*`, `stack/*`, `work/bro-*`.
 Everything else — `fix/*` without `bro-`, `herdr/*`, `devin/*`, `feat/*`,
 `docs/*`, dependabot — is foreign: background, never touched.
 Count with `gh pr list --state open --limit 100 --json number,headRefName`.
+That query is a **capped sample**: exactly 100 rows means the baseline is
+truncated — mark it `capped` and treat rises/drops as unreliable until
+the query paginates.
 
 ## Escalations — quote from fresh output, report, never fix
 
@@ -93,15 +100,19 @@ Count with `gh pr list --state open --limit 100 --json number,headRefName`.
 - `/tmp` at/above 85% → report with `df -h /tmp`. **Cleaning is the
   operator's/assistant's job, never the tick's.** Also report the `disk
   below floor` counter — it means loop pushes are held.
-- Swap or Mem crossing threshold → report with `free -h`.
+- Swap used ≥8.5 GiB or Mem used ≥9.5 GiB — host defaults; the tick's
+  prompt restates the exact figures it compares against → report with
+  `free -h`.
 - A `fix-round cap hit` blocker appearing (config pins `act.maxRounds=999`)
   = config not picked up = anomaly report.
 - acp-worker count ≥6.
 
 ## Events — report, don't act
 
-- **PR count drops** = auto-merge fired → re-verify `headRefName`, report,
-  note worktree hygiene (a merged worktree is _reported_, never deleted).
+- **PR count drops** = a PR left the open set — verify it was _merged_
+  (not closed unmerged) and which one (`headRefName`) before calling it
+  auto-merge; report, and note worktree hygiene (a merged worktree is
+  _reported_, never deleted).
 - **PR count rises** = new PR → classify ours/foreign.
 - Thread counts (#816/#801/#725 style baselines) hitting 0 = resolve/merge
   event; growth = report.

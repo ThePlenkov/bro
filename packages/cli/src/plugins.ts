@@ -300,6 +300,17 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]',
     run: runWatchdogCommand,
     skill: 'watchdog',
+    contract: {
+      flags: {
+        '--json':
+          'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
+      },
+      json: 'schemas/cli/watchdog.json',
+      exits: {
+        0: 'brief printed (human or --json)',
+        2: 'unknown flag — usage on stderr',
+      },
+    },
   }),
   definePlugin({
     name: 'fleet',

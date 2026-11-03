@@ -2,6 +2,6 @@ interface:
   display_name: "Bro Watchdog"
   short_description: "Infinite read-only pipeline watchdog — one background tick at a time, chained on the WAKE|TIMEOUT verdict"
   brand_color: "#B35900"
-  default_prompt: "Use $watchdog to start the pipeline watch."
+  default_prompt: "Use $watchdog to get started."
 policy:
   allow_implicit_invocation: true

@@ -144,14 +144,10 @@ describe('renderWatchdogBrief', () => {
 });
 
 describe('collectBaselines', () => {
-  test('a fresh repo measures what exists and degrades honestly on the rest', () => {
+  test('a fresh repo degrades honestly on the planes it cannot measure', () => {
     const { root, main } = initRepo('bro-watchdog-');
     inside(main, root, () => {
       const b = collectBaselines(main, Date.UTC(2026, 10, 3, 10, 42, 1));
-      assert.equal(b.ts, '2026-11-03T10:42:01Z');
-      // git works here — a count, never a guess
-      assert.ok(!('unavailable' in b.worktrees), JSON.stringify(b.worktrees));
-      assert.ok(!('unavailable' in b.worktrees) && b.worktrees.count >= 1);
       // no loop.out, no daemon record in a fresh repo → honest degradation
       assert.ok('unavailable' in b.loopOut, JSON.stringify(b.loopOut));
       assert.ok('unavailable' in b.daemon, JSON.stringify(b.daemon));
@@ -161,7 +157,17 @@ describe('collectBaselines', () => {
       // no loop run records → none in flight, nothing to count as residue
       assert.deepEqual(b.slots, []);
       assert.equal(b.residue, 0);
-      // host planes: well-formed either way, never a half-object
+    });
+  });
+
+  test('host planes are well-formed either way, never half-objects', () => {
+    const { root, main } = initRepo('bro-watchdog-host-');
+    inside(main, root, () => {
+      const b = collectBaselines(main, Date.UTC(2026, 10, 3, 10, 42, 1));
+      assert.equal(b.ts, '2026-11-03T10:42:01Z');
+      // git works here — a count, never a guess
+      assert.ok(!('unavailable' in b.worktrees), JSON.stringify(b.worktrees));
+      assert.ok(!('unavailable' in b.worktrees) && b.worktrees.count >= 1);
       for (const [name, plane] of [
         ['unit', b.unit],
         ['disk', b.disk],

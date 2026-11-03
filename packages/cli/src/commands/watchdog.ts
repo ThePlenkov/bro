@@ -28,7 +28,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statfsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitCommonDir, gitTry, ghTry, hasHelpFlag, pidAlive, printUsage } from '@broject/core';
+import { gitCommonDir, gitTry, hasHelpFlag, pidAlive, printUsage } from '@broject/core';
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
 import { daemonLogPath, readDaemonRecord } from './daemon.ts';
 
@@ -45,6 +45,19 @@ const OURS = /^(loop\/|fix\/bro-|stack\/|work\/bro-)/;
 const UNIT = 'bro-loop';
 const DISK_PATH = '/tmp';
 const PR_LIMIT = 100;
+const PR_ARGS = [
+  'pr',
+  'list',
+  '--state',
+  'open',
+  '--limit',
+  String(PR_LIMIT),
+  '--json',
+  'number,headRefName',
+];
+/** A launcher degrades, it does not hang: gh gets a hard bound of its own
+ *  (the repo-wide `ghTry` has none). */
+const GH_TIMEOUT_MS = 10_000;
 
 export interface Unavailable {
   unavailable: string;
@@ -151,29 +164,32 @@ const readText = (path: string): string | null => {
   }
 };
 
-/** `systemctl --user show bro-loop` — the unit row a tick quotes. Any
- *  spawn failure, timeout or missing key degrades: a box with no systemd
- *  user instance is not a broken watchdog. */
-function readUnit(): WatchdogUnit | Unavailable {
-  let stdout: string | null = null;
+/** `systemctl --user show bro-loop` output, or null when the unit row
+ *  could not be read — spawn and parse live apart so each stays under
+ *  the complexity ceiling (CodeScene), with no compound conditions. */
+function spawnUnitRow(): string | null {
   try {
     const r = spawnSync(
-      // PATH lookup is the contract — the same stance gh/git take in
-      // @broject/core (a fixed /usr/bin would break nix-style hosts, and
-      // a missing binary degrades the plane below anyway)
-      'systemctl', // NOSONAR — user-installed CLI, PATH lookup intended
+      'systemctl', // NOSONAR — user-installed CLI, PATH lookup intended (the same stance gh/git take in @broject/core)
       ['--user', 'show', UNIT, '-p', 'ActiveState,MainPID,NRestarts'],
       { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
     );
-    if (r.error === undefined && r.status === 0 && r.stdout) {
-      stdout = r.stdout;
+    if (r.error !== undefined) {
+      return null;
     }
+    if (r.status !== 0) {
+      return null;
+    }
+    if (!r.stdout) {
+      return null;
+    }
+    return r.stdout;
   } catch {
-    stdout = null;
+    return null;
   }
-  if (stdout === null) {
-    return unavailable('systemctl unavailable');
-  }
+}
+
+function parseUnitRow(stdout: string): WatchdogUnit | Unavailable {
   const kv = new Map(
     stdout.split('\n').map(l => {
       const i = l.indexOf('=');
@@ -195,20 +211,51 @@ function readUnit(): WatchdogUnit | Unavailable {
   };
 }
 
-/** `gh pr list --state open --limit 100 --json …` — the PR-count baseline
- *  (a drop = auto-merge event, a rise = new PR). Non-zero gh or unreadable
- *  JSON degrades rather than lying with a zero. */
+function readUnit(): WatchdogUnit | Unavailable {
+  const stdout = spawnUnitRow();
+  if (stdout === null) {
+    return unavailable('systemctl unavailable');
+  }
+  return parseUnitRow(stdout);
+}
+
+/** `gh pr list --state open --limit 100 --json …` spawn — its own
+ *  `spawnSync` with a hard timeout instead of the repo's `ghTry`: a
+ *  launcher must degrade to `unavailable`, never hang on a stalled
+ *  network (cubic P2). */
+type SpawnResult = { ok: true; out: string } | { ok: false; why: string };
+
+function spawnOpenPrs(dir: string): SpawnResult {
+  try {
+    const r = spawnSync('gh', PR_ARGS, {
+      cwd: dir,
+      encoding: 'utf8',
+      timeout: GH_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (r.error !== undefined) {
+      return { ok: false, why: r.error.message };
+    }
+    if (r.status !== 0) {
+      const why = firstLine(r.stderr ?? '') || `exit ${r.status}`;
+      return { ok: false, why };
+    }
+    if (!r.stdout) {
+      return { ok: false, why: 'empty output' };
+    }
+    return { ok: true, out: r.stdout };
+  } catch (err) {
+    return { ok: false, why: msg(err) };
+  }
+}
+
 function readPrs(dir: string): WatchdogPrs | Unavailable {
-  const r = ghTry(
-    ['pr', 'list', '--state', 'open', '--limit', String(PR_LIMIT), '--json', 'number,headRefName'],
-    dir
-  );
-  if (r.code !== 0) {
-    const why = firstLine(r.err) || `exit ${r.code}`;
-    return unavailable(`gh pr list failed: ${why}`);
+  const spawned = spawnOpenPrs(dir);
+  if (!spawned.ok) {
+    return unavailable(`gh pr list failed: ${spawned.why}`);
   }
   try {
-    const rows = JSON.parse(r.out) as Array<{ number?: number; headRefName?: string }>;
+    const rows = JSON.parse(spawned.out) as Array<{ number?: number; headRefName?: string }>;
     if (!Array.isArray(rows)) {
       return unavailable('gh pr list returned a non-array');
     }
@@ -219,24 +266,33 @@ function readPrs(dir: string): WatchdogPrs | Unavailable {
   }
 }
 
-/** statfs over the watched tmpfs — `df`'s Use% in one syscall. Non-POSIX
- *  or a vanished mount degrades. */
+/** statfs over the watched tmpfs — df's Use% in one syscall. The formula
+ *  is df's own, measured against this box rather than reasoned: on `/`
+ *  (ext4, ~5% reserved) df prints 14%, `(blocks-bfree)/blocks` reads 13
+ *  and the reserved-blocks shortcut `(blocks-bavail)/blocks` reads 18 —
+ *  only `ceil(used / (used + avail))` reproduces 14 (and tmpfs's 72).
+ *  Non-POSIX or a vanished mount degrades. */
 function readDisk(path: string = DISK_PATH): WatchdogDisk | Unavailable {
   try {
     const s = statfsSync(path);
     const total = s.blocks * s.bsize;
-    if (total <= 0) {
+    const used = total - s.bfree * s.bsize;
+    const avail = s.bavail * s.bsize;
+    const denominator = used + avail;
+    if (denominator <= 0) {
       return unavailable(`statfs(${path}) reports an empty filesystem`);
     }
-    const used = total - s.bfree * s.bsize;
-    return { path, usePercent: Math.round((used / total) * 100) };
+    const usePercent = Math.min(100, Math.ceil((used / denominator) * 100));
+    return { path, usePercent };
   } catch (err) {
     return unavailable(`statfs(${path}) failed: ${msg(err)}`);
   }
 }
 
 /** /proc/meminfo — the swap/mem plane of the escalation thresholds. Only
- *  Linux carries it; anywhere else the line prints unavailable. */
+ *  Linux carries it; anywhere else the line prints unavailable. Sequential
+ *  guards instead of one `||` chain — the chain is what CodeScene counts
+ *  as a complex conditional. */
 function readMemory(): WatchdogMemory | Unavailable {
   const text = readText('/proc/meminfo');
   if (text === null) {
@@ -247,11 +303,18 @@ function readMemory(): WatchdogMemory | Unavailable {
     const digits = re.exec(text)?.[1];
     return digits === undefined ? null : Number(digits) * 1024;
   };
+  const missing = 'meminfo missing SwapTotal/SwapFree/MemAvailable';
   const swapTotal = kb('SwapTotal');
+  if (swapTotal === null) {
+    return unavailable(missing);
+  }
   const swapFree = kb('SwapFree');
+  if (swapFree === null) {
+    return unavailable(missing);
+  }
   const avail = kb('MemAvailable');
-  if (swapTotal === null || swapFree === null || avail === null) {
-    return unavailable('meminfo missing SwapTotal/SwapFree/MemAvailable');
+  if (avail === null) {
+    return unavailable(missing);
   }
   return { swapUsedBytes: Math.max(0, swapTotal - swapFree), memAvailableBytes: avail };
 }
@@ -266,10 +329,33 @@ function readWorktrees(dir: string): WatchdogWorktrees | Unavailable {
   return { count };
 }
 
+/** daemon.log's age and ETIMEDOUT baseline — read apart from the record
+ *  so each side stays under the complexity ceiling. */
+function readLogFacts(
+  path: string | null,
+  exists: boolean,
+  now: number
+): { logAgeSec: number | null; etimedout: number | null } {
+  if (path === null || !exists) {
+    return { logAgeSec: null, etimedout: null };
+  }
+  let logAge: number | null = null;
+  try {
+    logAge = ageSec(statSync(path).mtimeMs, now);
+  } catch {
+    logAge = null;
+  }
+  const text = readText(path);
+  const etimedout = text === null ? null : logStats(text).etimedout;
+  return { logAgeSec: logAge, etimedout };
+}
+
 /** The daemon plane: `daemon.json`'s armer (alive?) plus daemon.log's age
  *  and ETIMEDOUT baseline. `daemonLogPath` names where the log WOULD be —
  *  only an existing log (or a record) carries facts, so a box with neither
- *  degrades instead of reporting a row of nulls. */
+ *  degrades instead of reporting a row of nulls. Liveness pairs the pid
+ *  with the record's `/proc` start time: a bare pid check lets a recycled
+ *  pid impersonate the daemon (cubic P1). */
 function readDaemon(dir: string, now: number): WatchdogDaemon | Unavailable {
   const rec = readDaemonRecord(dir);
   const logPath = daemonLogPath(dir);
@@ -277,24 +363,11 @@ function readDaemon(dir: string, now: number): WatchdogDaemon | Unavailable {
   if (rec === null && !logExists) {
     return unavailable('no daemon record and no daemon.log');
   }
-  let logAgeSec: number | null = null;
-  let etimedout: number | null = null;
-  if (logPath !== null && logExists) {
-    try {
-      logAgeSec = ageSec(statSync(logPath).mtimeMs, now);
-    } catch {
-      logAgeSec = null;
-    }
-    const text = readText(logPath);
-    if (text !== null) {
-      etimedout = logStats(text).etimedout;
-    }
-  }
+  const facts = readLogFacts(logPath, logExists, now);
   return {
     pid: rec?.pid ?? null,
-    alive: rec === null ? null : pidAlive(rec.pid),
-    logAgeSec,
-    etimedout,
+    alive: rec === null ? null : pidAlive(rec.pid, rec.pidStart),
+    ...facts,
   };
 }
 
