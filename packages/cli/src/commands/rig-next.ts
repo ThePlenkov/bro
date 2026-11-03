@@ -154,10 +154,11 @@ function claimVerdict(
   const own =
     row.assignee !== undefined &&
     ((row.assignee === id && entry !== undefined) ||
-      row.assignee
-        .split(',')
-        .map(a => a.trim())
-        .includes(actor));
+      (actor !== '' &&
+        row.assignee
+          .split(',')
+          .map(a => a.trim())
+          .includes(actor)));
   return own
     ? { verdict: 'step', id, detail: 'own claim — resume' }
     : { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` };
