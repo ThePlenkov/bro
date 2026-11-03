@@ -2236,20 +2236,30 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     now: Date.now(),
   });
   // loop.autoMerge — GitHub owns the merge once the worker armed
-  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase/
-  // update rounds — threads and behind-base never gate a landing the
-  // merge bot drives. 'land' still runs the post-merge bookkeeping,
-  // 'closed'/'park' settle as usual, and a never-landing PR still
-  // parks on the mergeTimeoutMin clock.
+  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase
+  // rounds — threads never gate a landing the merge bot drives.
+  // 'update' survives: a strict up-to-date repo would stall the
+  // merge bot on a behind-base PR otherwise. 'land' keeps the
+  // post-merge bookkeeping, 'closed'/'park' settle as usual — and
+  // the member still parks on the mergeTimeoutMin clock: a PR GitHub
+  // never lands (auto-merge unarmed, checks never green) must not
+  // wait forever.
+  const autoMergeTimedOut =
+    ctx.cfg.autoMerge && Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
-    ctx.cfg.autoMerge &&
-    act.kind !== 'land' &&
-    act.kind !== 'closed' &&
-    act.kind !== 'wait' &&
-    act.kind !== 'park'
-      ? 'wait'
+    ctx.cfg.autoMerge && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
+      ? autoMergeTimedOut
+        ? 'park'
+        : act.kind === 'merge' || act.kind === 'fix' || act.kind === 'rebase'
+          ? 'wait'
+          : act.kind
       : act.kind;
-  const parkWhy = act.kind === 'park' ? act.why : 'parked';
+  const parkWhy =
+    act.kind === 'park'
+      ? act.why
+      : autoMergeTimedOut
+        ? `auto-merge did not land after ${Math.round(ctx.cfg.mergeTimeoutMin)}m`
+        : 'parked';
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
