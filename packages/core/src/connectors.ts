@@ -116,6 +116,21 @@ export interface PreToolVerdict {
   input?: Record<string, unknown>;
 }
 
+/** What `bro exec` hands the taskFinish probes — one finished shell
+ *  command: the display string, its verdict, wall time, and a bounded
+ *  output tail. Side-effect probes (a pane report-back, a ledger entry)
+ *  consume this; line probes never see it. */
+export interface TaskFinishReport {
+  cmd: string;
+  /** Exit code; null when the child died on a signal. */
+  exitCode: number | null;
+  /** Signal name when exitCode is null. */
+  signal?: string;
+  durationMs: number;
+  /** Interleaved stdout+stderr tail, capped by the caller. */
+  tail?: string;
+}
+
 /** Context a connector contributes to the agent lifecycle — the
  *  per-connector answer to "what does this system know that the session
  *  must see". All probes are fail-open: a wedged system yields no lines,
@@ -145,6 +160,12 @@ export interface ConnectorHooks {
     ctx: ConnectorCtx,
     input: { tool: string; input: Record<string, unknown> }
   ): MaybePromise<PreToolVerdict[]>;
+  /** A `bro exec`-wrapped command finished — side-effect probe for
+   *  systems that report completion to a waiting party (the herdr
+   *  connector prompts the pane; agents without a native task-exit
+   *  wake get one). Not a context probe: returns nothing, the caller
+   *  discards output. */
+  taskFinish?(ctx: ConnectorCtx, report: TaskFinishReport): MaybePromise<void>;
 }
 
 export interface Connector {
@@ -1195,6 +1216,28 @@ export async function promptContextLines(
  *  drains and other per-event probes. */
 export async function postToolLines(ctx: ConnectorCtx, onProbe?: ProbeReporter): Promise<string[]> {
   return (await collectLines(ctx, h => h.postTool?.(ctx), onProbe)).lines;
+}
+
+/** Fire every connector's taskFinish probe — the `bro exec` report-back
+ *  sweep. Side-effect probes, parallel and fail-open like the line
+ *  collectors: one wedged system must not delay the caller's own exit. */
+export async function taskFinishProbes(
+  ctx: ConnectorCtx,
+  report: TaskFinishReport,
+  onProbe?: ProbeReporter
+): Promise<void> {
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now();
+      try {
+        await probeWithTimeout(() => hooks.taskFinish?.(ctx, report), undefined);
+        return { connector: name, ms: Date.now() - t0 };
+      } catch {
+        return { connector: name, ms: Date.now() - t0, failed: true as const };
+      }
+    })
+  );
+  onProbe?.(rows);
 }
 
 /** Collect stop-gate contributions from all connectors — the caller

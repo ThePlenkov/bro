@@ -329,6 +329,7 @@ export {
   sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
@@ -418,6 +419,7 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
