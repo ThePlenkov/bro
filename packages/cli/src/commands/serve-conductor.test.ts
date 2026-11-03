@@ -1843,13 +1843,12 @@ describe('serve /v1/* — one gateway, many providers', () => {
 
   type Fake = ReturnType<typeof fakeAcpAgent>
 
-  /** Two lanes over two agents — the in-process seam resolves by the
-   *  spawn label, which names the lane. */
-  const withGateway = async (
-    fn: (ctx: { dv: Fake; oc: Fake; url: string }) => Promise<void>
-  ): Promise<void> => {
-    const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
-    const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+  /** Boot the gateway over two agents — the in-process seam resolves by
+   *  the spawn label, which names the lane. */
+  const bootGateway = async (
+    dv: Fake,
+    oc: Fake
+  ): Promise<{ url: string; close: () => Promise<void> }> => {
     const { url, close } = await listen(
       deps({
         provider: conductorProxy(MULTI, {
@@ -1857,6 +1856,16 @@ describe('serve /v1/* — one gateway, many providers', () => {
         }),
       })
     )
+    return { url, close }
+  }
+
+  /** Two lanes over two agents. */
+  const withGateway = async (
+    fn: (ctx: { dv: Fake; oc: Fake; url: string }) => Promise<void>
+  ): Promise<void> => {
+    const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+    const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+    const { url, close } = await bootGateway(dv, oc)
     try {
       await fn({ dv, oc, url })
     } finally {
@@ -1899,44 +1908,24 @@ describe('serve /v1/* — one gateway, many providers', () => {
       assert.equal(dv.prompts.length, 0)
     }))
 
-  test('a bare model rides the default lane', () =>
-    withGateway(async ({ dv, oc, url }) => {
-      const r = await post(url, {
-        model: 'swe-x',
-        messages: [{ role: 'user', content: 'x' }],
-        stream: false,
-      })
-      assert.equal(r.status, 200)
-      assert.equal(await textOf(r), 'from devin')
-      assert.equal(dv.prompts.length, 1)
-      assert.equal(oc.prompts.length, 0)
-    }))
+  /** The default lane's own cases — a bare id, a prefix naming no lane
+   *  and the default's own prefix all ride the default lane. */
+  const DEFAULT_CASES: [string, string][] = [
+    ['a bare model', 'swe-x'],
+    ['a prefix naming no lane', 'nope/swe-x'],
+    ["the default lane's own prefix", 'dv-acp/swe-x'],
+  ]
 
-  test('a prefix naming no lane rides the default', () =>
-    withGateway(async ({ dv, oc, url }) => {
-      const r = await post(url, {
-        model: 'nope/swe-x',
-        messages: [{ role: 'user', content: 'x' }],
-        stream: false,
-      })
-      assert.equal(r.status, 200)
-      assert.equal(await textOf(r), 'from devin')
-      assert.equal(dv.prompts.length, 1)
-      assert.equal(oc.prompts.length, 0)
-    }))
-
-  test('the default lane\'s own prefix rides the default lane', () =>
-    withGateway(async ({ dv, oc, url }) => {
-      const r = await post(url, {
-        model: 'dv-acp/swe-x',
-        messages: [{ role: 'user', content: 'x' }],
-        stream: false,
-      })
-      assert.equal(r.status, 200)
-      assert.equal(await textOf(r), 'from devin')
-      assert.equal(dv.prompts.length, 1)
-      assert.equal(oc.prompts.length, 0)
-    }))
+  for (const [what, model] of DEFAULT_CASES) {
+    test(`${what} rides the default lane`, () =>
+      withGateway(async ({ dv, oc, url }) => {
+        const r = await post(url, { model, messages: [{ role: 'user', content: 'x' }], stream: false })
+        assert.equal(r.status, 200)
+        assert.equal(await textOf(r), 'from devin')
+        assert.equal(dv.prompts.length, 1)
+        assert.equal(oc.prompts.length, 0)
+      }))
+  }
 
   test('the same conversation under two providers is TWO sessions', () =>
     withGateway(async ({ dv, oc, url }) => {
@@ -1955,13 +1944,7 @@ describe('serve /v1/* — one gateway, many providers', () => {
     (async () => {
       const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
       const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failPrompt: 'generic' })
-      const { url, close } = await listen(
-        deps({
-          provider: conductorProxy(MULTI, {
-            acp: { peer: by => (by.endsWith('oc-acp') ? oc.app : dv.app) },
-          }),
-        })
-      )
+      const { url, close } = await bootGateway(dv, oc)
       try {
         // the broken lane's catalog still lists its models
         const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
