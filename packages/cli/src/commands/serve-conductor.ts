@@ -1804,7 +1804,13 @@ function routeOf(wire: WireCtx, model: string | undefined, chain?: ChainEntry): 
   const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
   const named = laneNamed(wire, head);
   if (named !== undefined) return named;
-  return wire.routes.get(wire.cfg.backend) as ProviderRoute;
+  const fallback = wire.routes.get(wire.cfg.backend);
+  // the default lane is built unconditionally at proxy construction —
+  // a missing one is a wiring bug, not an unroutable model
+  if (fallback === undefined) {
+    throw new Error(`bro conductor: no lane for default backend '${wire.cfg.backend}'`);
+  }
+  return fallback;
 }
 
 /** `provider/model` ids are a real pin — resolved against the agent's
