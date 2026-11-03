@@ -140,6 +140,48 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
   return undefined;
 }
 
+/** An in_progress claim: own claim resumes, a foreign one blocks.
+ *  Own means the assignee is this actor (shared claims comma-join
+ *  assignees on some backends) or the step id itself WITH a registry
+ *  pin — a spawn's claimAs worker identity binds the molStep, and an
+ *  unregistered claimAs string proves nothing. */
+function claimVerdict(
+  row: TaskRow,
+  id: string,
+  entry: AgentRegistryEntry | undefined,
+  actor: string
+): RigNext {
+  const own =
+    row.assignee !== undefined &&
+    ((row.assignee === id && entry !== undefined) ||
+      row.assignee
+        .split(',')
+        .map(a => a.trim())
+        .includes(actor));
+  return own
+    ? { verdict: 'step', id, detail: 'own claim — resume' }
+    : { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` };
+}
+
+/** The status gate under in_progress — undefined when the row is
+ *  actionable. 'deferred' with a due wake reads open — only ready()
+ *  undefers snoozes and a known id never calls it, so a past-due
+ *  snooze parked here forever otherwise. But the wake must be PROVEN:
+ *  a missing or unparseable defer_until leaves the snooze intact.
+ *  Any other non-open status parks it — an undefined status proves
+ *  nothing either. */
+function statusVerdict(row: TaskRow, id: string, deferAt: number): RigNext | undefined {
+  if (row.status === 'open') {
+    return undefined;
+  }
+  if (row.status === 'deferred') {
+    return Number.isFinite(deferAt)
+      ? undefined
+      : { verdict: 'blocked', id, detail: 'status deferred — wake unproven' };
+  }
+  return { verdict: 'blocked', id, detail: `status ${row.status ?? 'unproven'}` };
+}
+
 /** The verdict for one item — the ladder from spec .5: done → wait →
  *  gate → live-worker wait → foreign-claim blocked → dep-gated
  *  blocked → step. `opts.gate === false` skips the worktree/PR probe —
@@ -177,22 +219,7 @@ export function rigNext(
   if (row.status === 'in_progress') {
     // the pinned store's own claim-actor first — a facade backend can
     // bind a different identity than the local bd chain
-    const actor = store.actor?.() ?? bdActor(dir);
-    // own when the assignee is this actor (shared claims comma-join
-    // assignees on some backends) or the step id itself WITH a
-    // registry pin — a spawn's claimAs worker identity binds the
-    // molStep, and an unregistered claimAs string proves nothing
-    const own =
-      row.assignee !== undefined &&
-      ((row.assignee === id && entry !== undefined) ||
-        row.assignee
-          .split(',')
-          .map(a => a.trim())
-          .includes(actor));
-    if (own) {
-      return { verdict: 'step', id, detail: 'own claim — resume' };
-    }
-    return { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` };
+    return claimVerdict(row, id, entry, store.actor?.() ?? bdActor(dir));
   }
   // open: a known id is judged directly — a non-open status parks it,
   // open 'blocked' deps gate it, a live defer_until or a coordination
@@ -205,18 +232,9 @@ export function rigNext(
   if (deferAt > Date.now()) {
     return { verdict: 'blocked', id, detail: `deferred until ${deferUntil}` };
   }
-  // 'deferred' with a due wake reads open — only ready() undefers
-  // snoozes, and a known id never calls it, so a past-due snooze
-  // parked here forever otherwise. But the wake must be PROVEN: a
-  // missing or unparseable defer_until leaves the snooze intact.
-  // Any other non-open status parks it — an undefined status proves
-  // nothing either.
-  if (row.status === 'deferred') {
-    if (!Number.isFinite(deferAt)) {
-      return { verdict: 'blocked', id, detail: 'status deferred — wake unproven' };
-    }
-  } else if (row.status !== 'open') {
-    return { verdict: 'blocked', id, detail: `status ${row.status ?? 'unproven'}` };
+  const parked = statusVerdict(row, id, deferAt);
+  if (parked !== undefined) {
+    return parked;
   }
   let blockers: TaskRow[];
   try {
