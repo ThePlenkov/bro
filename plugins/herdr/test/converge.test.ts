@@ -776,6 +776,59 @@ describe('live views — coverage by the session pane', () => {
   });
 });
 
+describe('session panes — rebind backoff', () => {
+  test('a failed rebind backs off instead of churning panes each pass', () => {
+    reset({
+      panes: [{ pane_id: 'p1' }],
+      paneIds: ['p1'],
+      failSubcommands: ['pane run'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — a REAL repo main
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // a DIFFERENT live agent resolves for the tree → the recorded
+    // binding is stale and decideSession asks for a rebind
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': { log: join(repoMain, 'native-B.log'), worktree: tree, pid: process.pid },
+      })
+    );
+    const scope = stateScope(repoMain);
+    const s = loadState(scope);
+    s.sessions[tree] = {
+      workspace: 'wOpened',
+      worktree: tree,
+      pane_id: 'p1',
+      agent_id: 'native-A',
+    };
+    saveState(scope, s);
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the arm failed — the stale pane stays, exactly ONE split+close,
+    // and the retry is armed for later
+    assert.equal(called('pane', 'split').length, 1);
+    assert.equal(called('pane', 'close', 'p1').length, 0);
+    const st1 = loadState(scope);
+    assert.equal(st1.sessions[tree]?.pane_id, 'p1');
+    assert.equal(typeof st1.sessions[tree]?.retryAt, 'number');
+    // the very next pass hits the backoff — no second split
+    converge(p);
+    assert.equal(called('pane', 'split').length, 1);
+    // once the window expires the retry lands normally
+    st1.sessions[tree]!.retryAt = 0;
+    saveState(scope, st1);
+    converge(p);
+    assert.equal(called('pane', 'split').length, 2);
+  });
+});
+
 describe('sessionCommand — the pane command (spec bro-q2edc)', () => {
   test('BUN_BIN_PATH set → the OpenTUI app runs in the pane', () => {
     process.env.BUN_BIN_PATH = '/opt/bun/bin/bun';

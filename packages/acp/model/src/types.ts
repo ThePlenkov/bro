@@ -165,6 +165,10 @@ interface TurnRuntime {
    *  `elicitation_opened` and `elicitation_closed` name the same one). */
   readonly openElicitationIds: readonly string[];
   readonly planReportedThisTurn: boolean;
+  /** True for a turn opened by the archive's `turn start` marker —
+   *  observed activity, not this client's own prompt: its items carry
+   *  origin `other`, never `self`. */
+  readonly archive: boolean;
 }
 
 /** One command from the agent's `available_commands_update`, sanitised. */

@@ -45,7 +45,9 @@ import type {
 
 function originFor(session: Session): ItemOrigin {
   if (session.replaying) return "replay";
-  return session.turn === null ? "other" : "self";
+  // an archive-sourced turn is observed activity — "self" is reserved
+  // for turns this client actually prompted
+  return session.turn === null || session.turn.archive ? "other" : "self";
 }
 
 function appendItem(session: Session, item: Item): Session {
@@ -523,13 +525,14 @@ function withOpenRequests(session: Session, turn: NonNullable<Session["turn"]>):
   return { ...session, state: open ? "requires_action" : "running", turn };
 }
 
-function emptyTurn(startedAt: number): NonNullable<Session["turn"]> {
+function emptyTurn(startedAt: number, archive = false): NonNullable<Session["turn"]> {
   return {
     startedAt,
     openPermissionToolCallIds: [],
     openPermissionToolCallId: null,
     openElicitationIds: [],
     planReportedThisTurn: false,
+    archive,
   };
 }
 
@@ -778,10 +781,17 @@ export function reduce(
     }
 
     case "turn_started": {
-      // archive-sourced turn open — no user item, just the lifecycle:
-      // a turn already open keeps its open-request tracking (a dropped
-      // stop must not silently unblock a pending permission)
-      const turn = session.turn ?? emptyTurn(event.at);
+      // archive-sourced turn open — no user item, just the lifecycle.
+      // A turn already open with a pending request keeps its tracking
+      // (a dropped stop must not silently unblock it); with nothing
+      // pending the prior stop was dropped, so the turn re-anchors to
+      // this start — otherwise the next turn_end's duration spans the
+      // dead turn too
+      const prev = session.turn;
+      const pending =
+        prev !== null &&
+        (prev.openPermissionToolCallIds.length > 0 || prev.openElicitationIds.length > 0);
+      const turn = pending ? { ...prev, archive: true } : emptyTurn(event.at, true);
       return { ...withOpenRequests(session, turn), stopReason: null };
     }
 

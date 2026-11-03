@@ -23,6 +23,10 @@ import {
   stateScope,
 } from './lib.ts';
 import { type Planes, readPlanes } from './planes.ts';
+// the board-short timestamp the session pane's footer already owns —
+// one formatter, one contract
+import { fmtWhen } from '../../../packages/acp/session/src/index.ts';
+import { SESSION_SLOT_TTL_MS } from '../../../packages/core/src/index.ts';
 
 const requested = Number(process.env.BRO_BOARD_EVERY_S ?? 15);
 const EVERY_MS = Math.max(3, Number.isFinite(requested) ? requested : 15) * 1000;
@@ -123,29 +127,6 @@ function beadCell(
 }
 
 const ACTIVE_MS = 15 * 60_000;
-const MONTHS = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-] as const;
-
-/** A board-short timestamp: today's stamp is `HH:MM`, an older one
- *  is `02 Nov 14:36` — same contract the session pane's footer uses. */
-function fmtWhen(ms: number): string {
-  const d = new Date(ms);
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  if (d.toDateString() === new Date().toDateString()) return hm;
-  return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${hm}`;
-}
 
 /** The agent's last-output stamp — the events journal's mtime first
  *  (it ticks per session update), the native log's as fallback. */
@@ -168,6 +149,13 @@ function lastWrite(reg: AgentEntry): number | undefined {
  *  a respawned-and-streaming worker). */
 function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number): string {
   if (reg === undefined) return w.state ?? '';
+  if (reg.pid === undefined) {
+    // spawn handoff — the connector patches pid after the attempt
+    // lands; inside the slot window a pid-less row is 'spawn', the
+    // same reading the fleet's own liveness ladder gives it
+    const spawned = typeof reg.spawnedAt === 'string' ? Date.parse(reg.spawnedAt) : Number.NaN;
+    if (Number.isFinite(spawned) && now - spawned < SESSION_SLOT_TTL_MS) return 'spawn';
+  }
   const alive = reg.pid !== undefined && pidAlive(reg.pid, reg.pidStart as string | undefined);
   if (!alive) {
     if (typeof reg.exitStatus === 'number') {

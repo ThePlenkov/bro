@@ -18,6 +18,10 @@ export interface SessionRec {
   worktree: string;
   pane_id: string;
   agent_id?: string;
+  /** Epoch ms before which a failed rebind is not retried — a `pane
+   *  run` that keeps failing must not churn a fresh split+close every
+   *  converge pass. */
+  retryAt?: number;
 }
 
 /** What one ensure-pass should do — the caller executes and records. */

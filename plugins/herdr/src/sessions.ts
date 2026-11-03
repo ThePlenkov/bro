@@ -120,6 +120,10 @@ function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): void {
   log(`session pane ${paneId} → ${ctx.ws}${adopted ? ' (adopted)' : ''}`);
 }
 
+/** How long a failed rebind waits before the next attempt — long
+ *  enough that a persistent `pane run` failure is not a pane churn. */
+const REBIND_BACKOFF_MS = 60_000;
+
 /** No live pane to take — split beside the first pane, then arm. */
 function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   const target = panes[0];
@@ -154,6 +158,9 @@ export function ensureSession(ctx: RenderCtx): void {
     // replacement FIRST: closing the workspace's last pane before its
     // successor exists auto-reaps the whole workspace mid-pass
     // (dogfood reap — the same constraint the arm-order follows)
+    if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
+      return; // a failed arm is still backing off — keep the stale pane
+    }
     const next = splitPane(act.paneId, ctx);
     if (next !== undefined && armSession(ctx, next)) {
       herdrTry(['pane', 'close', act.paneId]);
@@ -162,8 +169,12 @@ export function ensureSession(ctx: RenderCtx): void {
       );
     } else {
       // no successor landed — keep the stale pane over an empty
-      // workspace; the next pass retries the same decision
+      // workspace; the retry is backed off so a persistent arm
+      // failure does not split+close a fresh pane every pass
       if (next !== undefined) herdrTry(['pane', 'close', next]);
+      if (rec !== undefined) {
+        ctx.state.sessions[ctx.path] = { ...rec, retryAt: Date.now() + REBIND_BACKOFF_MS };
+      }
       log(`session pane ${act.paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
     }
     return;

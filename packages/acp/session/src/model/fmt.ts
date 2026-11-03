@@ -16,9 +16,11 @@ export const hhmm = (at: string | undefined): string => {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** A footer/board-short timestamp: today's stamp is `HH:MM`, an older
- *  one is `02 Nov 14:36` — "idle since" reads at a glance either way. */
+ *  one is `02 Nov 14:36` — "idle since" reads at a glance either way.
+ *  A malformed stamp renders '' rather than `NaN:NaN` nonsense. */
 export const fmtWhen = (ts: string | number): string => {
   const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   if (d.toDateString() === new Date().toDateString()) return hm;
   return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${hm}`;
