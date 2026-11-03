@@ -1526,7 +1526,7 @@ function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+): { claimed: boolean; actor: string | undefined; phantom: boolean; previousAssignee?: string } {
   const step = probeStep(spec.beadsDir, spec.molStep);
   if (spec.claimRequired !== true && spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true };
@@ -1551,7 +1551,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     );
   }
-  return { claimed: true, actor, phantom: false };
+  return { claimed: true, actor, phantom: false, previousAssignee: step.assignee };
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -1752,7 +1752,8 @@ function prepareSpawn(
           cur !== undefined &&
           cur.agentId === agentId &&
           cur.backend === backend &&
-          (typeof cur.exitStatus !== 'number' && cur.stopped !== true)
+          typeof cur.exitStatus !== 'number' &&
+          cur.stopped !== true
         ) {
           // only clean up a freshly written entry with no death recorded
           delete reg[spec.molStep];
@@ -1781,7 +1782,12 @@ function commitSpawn(
     sessionQuota?: SessionQuotaLane | undefined;
   },
   agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+  guard: {
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee?: string;
+  }
 ): {
   promptFile: string;
   log: string;
@@ -1877,11 +1883,42 @@ function commitSpawn(
     // roll back claim bookkeeping if partially applied so we don't orphan
     // an in_progress claim when the spawn fails mid-way
     try {
-      if (!guard.phantom && !guard.claimed && priorEntry === undefined) {
+      if (!guard.phantom) {
         const store = taskStoreAt(spec.beadsDir);
         try {
-          if (typeof store.reopen === 'function') {
-            store.reopen(spec.molStep);
+          if (guard.claimed && guard.previousAssignee) {
+            // take over/rebind case — rollback to previous assignee if possible
+            try {
+              if (typeof (store as any).update === 'function') {
+                (store as any).update(spec.molStep, { assignee: guard.previousAssignee });
+              } else if (typeof store.reopen === 'function' && guard.previousAssignee === '') {
+                store.reopen(spec.molStep);
+              }
+            } catch {
+              // fall through to reopen if rollback fails
+              try {
+                if (typeof store.reopen === 'function') {
+                  store.reopen(spec.molStep);
+                }
+              } catch {}
+            }
+          } else if (!guard.claimed && priorEntry === undefined) {
+            // fresh claim
+            if (typeof store.reopen === 'function') {
+              store.reopen(spec.molStep);
+            }
+          } else if (!guard.claimed && priorEntry !== undefined) {
+            // had a prior entry (respawn context) but we did a fresh claim
+            if (typeof store.reopen === 'function') {
+              store.reopen(spec.molStep);
+            }
+          } else if (guard.claimed && !guard.previousAssignee) {
+            // claimed by us but we don't know original assignee; best effort
+            try {
+              if (typeof store.reopen === 'function') {
+                store.reopen(spec.molStep);
+              }
+            } catch {}
           }
         } catch {
           // best-effort rollback
@@ -1937,7 +1974,12 @@ function recordSpawnClaim(
   spec: SpawnSpec,
   agentId: string,
   backend: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
+  guard: {
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee?: string;
+  },
   claimAs: string | undefined,
   attempt: { runId: string; log: string }
 ): void {
