@@ -53,6 +53,9 @@ describe('bro rig next — the re-entry verb', () => {
       { id: 's-1', title: 'slot', status: 'open', labels: ['gt:slot'] },
       { id: 'b-1', title: 'blocked-status', status: 'blocked' },
       { id: 'p-1', title: 'past the page', status: 'open' },
+      { id: 'du-1', title: 'wake due', status: 'deferred', defer_until: '2020-01-01' },
+      { id: 'du-2', title: 'wake unproven', status: 'deferred', defer_until: 'not-a-date' },
+      { id: 'du-3', title: 'wake absent', status: 'deferred' },
     ]);
     // the fake's `dep list` hydrates the seeded edges into neighbor
     // rows like real bd; readyLimit makes the fake paginate like real
@@ -82,6 +85,17 @@ describe('bro rig next — the re-entry verb', () => {
       /rig next: blocked s-1 — coordination slot/
     );
     assert.match(rig(main, env, ['next', 'b-1']).stdout, /rig next: blocked b-1 — status blocked/);
+    // deferred needs a PROVEN due wake — past-due steps, an
+    // unparseable or absent defer_until stays blocked
+    assert.match(rig(main, env, ['next', 'du-1']).stdout, /rig next: step du-1/);
+    assert.match(
+      rig(main, env, ['next', 'du-2']).stdout,
+      /rig next: blocked du-2 — status deferred — wake unproven/
+    );
+    assert.match(
+      rig(main, env, ['next', 'du-3']).stdout,
+      /rig next: blocked du-3 — status deferred — wake unproven/
+    );
   });
 
   test('foreign claim reports blocked; own claim reports step', () => {
@@ -89,6 +103,9 @@ describe('bro rig next — the re-entry verb', () => {
       { id: 'c-1', title: 'theirs', status: 'in_progress', assignee: 'other-actor' },
       { id: 'c-2', title: 'mine', status: 'in_progress', assignee: 'tester' },
       { id: 'c-3', title: 'closed', status: 'closed' },
+      // an assignee equal to the bead id is a claimAs string — only a
+      // registry pin makes it ownable; without one it reads foreign
+      { id: 'c-4', title: 'unregistered claimAs', status: 'in_progress', assignee: 'c-4' },
     ]);
     const blocked = rig(main, env, ['next', 'c-1']);
     assert.equal(blocked.code, 1);
@@ -99,6 +116,9 @@ describe('bro rig next — the re-entry verb', () => {
     const done = rig(main, env, ['next', 'c-3']);
     assert.equal(done.code, 0);
     assert.match(done.stdout, /rig next: done c-3/);
+    const unregistered = rig(main, env, ['next', 'c-4']);
+    assert.equal(unregistered.code, 1);
+    assert.match(unregistered.stdout, /rig next: blocked c-4 — claimed by c-4/);
   });
 
   test('a live registry agent reports wait; an open PR reports gate', () => {

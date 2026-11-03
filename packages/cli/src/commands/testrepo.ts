@@ -432,7 +432,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       const r = row(pos[2])
       if (!r) fail('not found: ' + pos[2])
       db.deps = db.deps || []
-      db.deps.push({ from: pos[2], to: pos[3] })
+      // --type persists with the edge — a hydrated dep list filters
+      // on it, and bd's default is 'blocks'
+      db.deps.push({ from: pos[2], to: pos[3], type: flags.type || 'blocks' })
       save(db)
       break
     }

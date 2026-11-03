@@ -175,13 +175,16 @@ export function rigNext(
     return settled;
   }
   if (row.status === 'in_progress') {
-    const actor = bdActor(dir);
+    // the pinned store's own claim-actor first — a facade backend can
+    // bind a different identity than the local bd chain
+    const actor = store.actor?.() ?? bdActor(dir);
     // own when the assignee is this actor (shared claims comma-join
-    // assignees on some backends) or the step id itself — a spawn's
-    // claimAs worker identity binds the molStep, not the actor
+    // assignees on some backends) or the step id itself WITH a
+    // registry pin — a spawn's claimAs worker identity binds the
+    // molStep, and an unregistered claimAs string proves nothing
     const own =
       row.assignee !== undefined &&
-      (row.assignee === id ||
+      ((row.assignee === id && entry !== undefined) ||
         row.assignee
           .split(',')
           .map(a => a.trim())
@@ -198,14 +201,21 @@ export function rigNext(
   // past the cut read as gated — drive's fixers died on exactly that
   // (spec bro-reufd).
   const deferUntil = (row as { defer_until?: unknown }).defer_until;
-  if (typeof deferUntil === 'string' && Date.parse(deferUntil) > Date.now()) {
+  const deferAt = typeof deferUntil === 'string' ? Date.parse(deferUntil) : NaN;
+  if (deferAt > Date.now()) {
     return { verdict: 'blocked', id, detail: `deferred until ${deferUntil}` };
   }
   // 'deferred' with a due wake reads open — only ready() undefers
   // snoozes, and a known id never calls it, so a past-due snooze
-  // parked here forever otherwise. An undefined status proves
-  // nothing — a partial row is not actionable.
-  if (row.status !== 'open' && row.status !== 'deferred') {
+  // parked here forever otherwise. But the wake must be PROVEN: a
+  // missing or unparseable defer_until leaves the snooze intact.
+  // Any other non-open status parks it — an undefined status proves
+  // nothing either.
+  if (row.status === 'deferred') {
+    if (!Number.isFinite(deferAt)) {
+      return { verdict: 'blocked', id, detail: 'status deferred — wake unproven' };
+    }
+  } else if (row.status !== 'open') {
     return { verdict: 'blocked', id, detail: `status ${row.status ?? 'unproven'}` };
   }
   let blockers: TaskRow[];
