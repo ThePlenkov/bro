@@ -135,11 +135,28 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   armAndReport(ctx, newPane, false);
 }
 
+/** Is a live session pane bound after the pass — the caller's retire
+ *  gate: fallback surfaces fold only where the human pane actually
+ *  exists, not merely where it was eligible to arm. */
+function paneLive(ctx: RenderCtx): boolean {
+  const r = ctx.state.sessions[ctx.path];
+  return r !== undefined && paneExists(r.pane_id);
+}
+
 /** One workspace's session-pane convergence — the decision lives in
  *  herdr-kit's views module (record → re-arm/adopt → orphan-label →
- *  idle pane → split); this is the exec half: probe, decide, run. */
-export function ensureSession(ctx: RenderCtx): void {
+ *  idle pane → split); this is the exec half: probe, decide, run.
+ *  Returns whether a live session pane is bound after the pass. */
+export function ensureSession(ctx: RenderCtx): boolean {
   const rec = ctx.state.sessions[ctx.path];
+  // a stale pane the last rebind could not close — retry before any
+  // new decision so it does not linger showing the old archive
+  if (rec?.closePending !== undefined) {
+    if (!paneExists(rec.closePending) || herdrOk(['pane', 'close', rec.closePending])) {
+      const { closePending: _closePending, ...rest } = rec;
+      ctx.state.sessions[ctx.path] = rest;
+    }
+  }
   const panes = paneList(ctx.ws);
   const act = decideSession({
     rec,
@@ -151,7 +168,7 @@ export function ensureSession(ctx: RenderCtx): void {
     idle: paneIdle,
     agent: ctx.agent,
   });
-  if (act.kind === 'none') return;
+  if (act.kind === 'none') return paneLive(ctx);
   if (act.kind === 'rebind') {
     // the binding moved (new agent, or a dead record now resolves) —
     // the running pane is pinned to the old archive. Arm the
@@ -159,11 +176,17 @@ export function ensureSession(ctx: RenderCtx): void {
     // successor exists auto-reaps the whole workspace mid-pass
     // (dogfood reap — the same constraint the arm-order follows)
     if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
-      return; // a failed arm is still backing off — keep the stale pane
+      return paneLive(ctx); // a failed arm is still backing off — keep the stale pane
     }
     const next = splitPane(act.paneId, ctx);
     if (next !== undefined && armSession(ctx, next)) {
-      herdrTry(['pane', 'close', act.paneId]);
+      if (!herdrOk(['pane', 'close', act.paneId])) {
+        // the stale pane survived — remember it so a later pass retries
+        const r = ctx.state.sessions[ctx.path];
+        if (r !== undefined) {
+          ctx.state.sessions[ctx.path] = { ...r, closePending: act.paneId };
+        }
+      }
       log(
         `session pane ${act.paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`
       );
@@ -177,13 +200,14 @@ export function ensureSession(ctx: RenderCtx): void {
       }
       log(`session pane ${act.paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
     }
-    return;
+    return paneLive(ctx);
   }
   if (act.kind === 'split') {
     armViaSplit(ctx, panes);
-    return;
+    return paneLive(ctx);
   }
   armAndReport(ctx, act.paneId, act.adopted);
+  return paneLive(ctx);
 }
 
 /** Lanes with nothing to show carry no session pane (spec

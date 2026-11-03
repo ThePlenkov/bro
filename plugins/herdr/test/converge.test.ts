@@ -821,11 +821,18 @@ describe('session panes — rebind backoff', () => {
     // the very next pass hits the backoff — no second split
     converge(p);
     assert.equal(called('pane', 'split').length, 1);
-    // once the window expires the retry lands normally
+    // the window expired AND the failure cleared — the retry lands:
+    // a second split, the stale pane closes, the binding rebinds
     st1.sessions[tree]!.retryAt = 0;
     saveState(scope, st1);
+    writeFileSync(SCENARIO, JSON.stringify({ panes: [{ pane_id: 'p1' }], paneIds: ['p1'] }));
     converge(p);
     assert.equal(called('pane', 'split').length, 2);
+    assert.equal(called('pane', 'close', 'p1').length, 1);
+    const st3 = loadState(scope).sessions[tree];
+    assert.equal(st3?.agent_id, 'native-B');
+    assert.notEqual(st3?.pane_id, 'p1');
+    assert.equal(st3?.retryAt, undefined);
   });
 });
 

@@ -128,6 +128,9 @@ function exitCodeOf(entry: AgentEntry, eventsPath: string | undefined): number |
     const v = readFileSync(join(dirname(eventsPath), name), 'utf8')
       .trim()
       .split(/\s+/)[0];
+    // an empty file is a truncated record, not exit 0 — `Number('')`
+    // is 0, so the empty case must bail before the parse
+    if (v === undefined || v === '') return undefined;
     const n = Number(v);
     return Number.isInteger(n) ? n : undefined;
   } catch {
@@ -156,20 +159,21 @@ export function workerLedState(
   if (entry.pid === undefined) return 'idle'; // never started — no crash to report
   const alive = pidAlive(entry.pid, entry.pidStart as string | undefined);
   if (!alive) {
-    if (entry.stopped === true || entry.exitStatus === 0) return 'idle';
-    if (typeof entry.exitStatus === 'number' && entry.exitStatus !== 0) return 'blocked';
-    // no harvested verdict yet — the attempt's own .exit record is
-    // the next source of truth before a dead pid reads 'blocked'
-    const code = exitCodeOf(entry, eventsPath);
-    if (code === 0) return 'idle';
-    return 'blocked';
+    // a recorded exit beats the stopped flag — a `down` on a crashed
+    // worker writes stopped:true while exitStatus keeps the failure
+    const code =
+      typeof entry.exitStatus === 'number' ? entry.exitStatus : exitCodeOf(entry, eventsPath);
+    if (code !== undefined) return code === 0 ? 'idle' : 'blocked';
+    return entry.stopped === true ? 'idle' : 'blocked';
   }
   // a live pid alone is a lie — 'working' needs a journal provably
-  // being written: no path, an unreadable one, or a stale one is
-  // 'idle' (the loop's long-lived supervisor cannot fake it)
+  // being written: no path, an unreadable, empty, or stale one is
+  // 'idle' (the loop's long-lived supervisor cannot fake it, and a
+  // failed first append leaves an empty file with a fresh mtime)
   if (eventsPath === undefined) return 'idle';
   try {
-    if (now - statSync(eventsPath).mtimeMs > ACTIVE_MS) return 'idle';
+    const st = statSync(eventsPath);
+    if (st.size === 0 || now - st.mtimeMs > ACTIVE_MS) return 'idle';
   } catch {
     return 'idle';
   }

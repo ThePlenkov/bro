@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { agentEntry, pidAlive, workerLedState } from './registry.ts';
+import { agentEntry, pidAlive, registryHomeOf, workerLedState } from './registry.ts';
 
 const withBase = (fn: (base: string) => void): void => {
   const base = mkdtempSync(join(tmpdir(), 'reg-'));
@@ -41,6 +41,19 @@ test('agentEntry — registry key first, then the log stem the pane argv carries
   });
 });
 
+test('registryHomeOf — only the <git-common>/bro/agents layout resolves a home', () => {
+  withBase(base => {
+    // a journal under <root>/bro/agents resolves the registry root
+    const events = join(base, 'bro', 'agents', 'native-x.events.jsonl');
+    assert.equal(registryHomeOf(events), base);
+    // a proxy journal under bro/proxy is NOT an agents dir — no home
+    assert.equal(registryHomeOf(join(base, 'bro', 'proxy', 'x.events.jsonl')), undefined);
+    // a bare or shallow filename has no layout to recover
+    assert.equal(registryHomeOf('native-x.events.jsonl'), undefined);
+    assert.equal(registryHomeOf(join(base, 'native-x.events.jsonl')), undefined);
+  });
+});
+
 test('workerLedState — working needs an unfinished run AND a live pid AND a fresh journal', () => {
   withBase(base => {
     const events = join(base, 'native-x.events.jsonl');
@@ -71,6 +84,21 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     assert.equal(workerLedState({ pid: deadPid() }, agentEvents), 'idle');
     writeFileSync(join(base, 'agents', 'native-x.exit'), '1\n');
     assert.equal(workerLedState({ pid: deadPid() }, agentEvents), 'blocked');
+    // an empty .exit is a truncated write, not exit 0 — `Number('')`
+    // would read the crash window as a clean finish
+    writeFileSync(join(base, 'agents', 'native-x.exit'), '');
+    assert.equal(workerLedState({ pid: deadPid() }, agentEvents), 'blocked');
+    // a `down` on a crashed worker writes stopped:true on top of the
+    // failed exitStatus — the recorded failure still reads blocked
+    assert.equal(
+      workerLedState({ pid: deadPid(), exitStatus: 1, stopped: true }, events),
+      'blocked'
+    );
+    // a live pid + a FRESH but EMPTY journal → idle, not working: a
+    // failed first append leaves exactly that file behind
+    writeFileSync(events, '');
+    assert.equal(workerLedState(live, events), 'idle');
+    writeFileSync(events, '{}\n');
     // runId'd entries read the attempt-scoped name
     writeFileSync(join(base, 'agents', 'native-x.ab12cd34.exit'), '0\n');
     rmSync(join(base, 'agents', 'native-x.exit'));

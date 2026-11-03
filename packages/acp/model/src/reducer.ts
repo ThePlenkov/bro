@@ -791,8 +791,13 @@ export function reduce(
       const pending =
         prev !== null &&
         (prev.openPermissionToolCallIds.length > 0 || prev.openElicitationIds.length > 0);
-      const turn = pending ? { ...prev, archive: true } : emptyTurn(event.at, true);
-      return { ...withOpenRequests(session, turn), stopReason: null };
+      if (pending) {
+        return { ...withOpenRequests(session, { ...prev, archive: true }), stopReason: null };
+      }
+      // a fresh archive turn — seal the dropped turn's live run too,
+      // or the next id-less chunk concatenates into a dead turn's item
+      const sealed = finaliseLiveItems(session);
+      return { ...withOpenRequests(sealed, emptyTurn(event.at, true)), stopReason: null };
     }
 
     case "prompt_response": {

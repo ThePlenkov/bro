@@ -22,6 +22,9 @@ export interface SessionRec {
    *  run` that keeps failing must not churn a fresh split+close every
    *  converge pass. */
   retryAt?: number;
+  /** A pane a rebind failed to close — retried each pass so a stale
+   *  archive does not linger beside its replacement. */
+  closePending?: string;
 }
 
 /** What one ensure-pass should do — the caller executes and records. */

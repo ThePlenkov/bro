@@ -462,15 +462,29 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   // journal's own <git-common>/bro/agents location — a '.' worktree
   // (the worktree-less live view) must not blind the worker floor
   const base =
-    gitCommonDir(ctx.worktree) ??
     (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
+    gitCommonDir(ctx.worktree) ??
     ctx.worktree;
-  const eventsPath =
-    ctx.events ?? (ctx.agent !== undefined ? eventsFile(base, ctx.agent) : undefined);
+  /** The bound journal path — `--agent` may carry a registry KEY
+   *  (`bro-2bv6q`) while the journal sits on the archive stem
+   *  (`native-<hash>.events.jsonl`), so resolve through the matched
+   *  entry's log. Probed per call: a late-arriving registry record
+   *  heals the path on the next refresh. */
+  const eventsPathOf = (): string | undefined => {
+    if (ctx.events !== undefined) return ctx.events;
+    if (ctx.agent === undefined) return undefined;
+    const stem =
+      agentEntry(base, ctx.agent)
+        ?.log?.replace(/\.log$/, '')
+        .split('/')
+        .pop() ?? ctx.agent;
+    return eventsFile(base, stem);
+  };
   /** The worker floor with its reason stamped — a blocked worker
    *  reports WHEN it exited (the journal's last write), an idle one
    *  when it went quiet. */
   const workerLedOf = (): PaneLed => {
+    const eventsPath = eventsPathOf();
     const state = workerLedState(agentEntry(base, ctx.agent), eventsPath);
     if (state === 'working' || state === 'unknown' || eventsPath === undefined) {
       return { state };
@@ -482,18 +496,19 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
       return { state };
     }
   };
-  const directTarget = (): SessionTarget | undefined =>
-    bound
-      ? {
-          worktree: ctx.worktree,
-          status: 'live',
-          workerLed: workerLedOf(),
-          ...(eventsPath !== undefined ? { events: eventsPath } : {}),
-          ...(ctx.agent !== undefined
-            ? { agent: agentKey(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
-            : {}),
-        }
-      : undefined;
+  const directTarget = (): SessionTarget | undefined => {
+    if (!bound) return undefined;
+    const eventsPath = eventsPathOf();
+    return {
+      worktree: ctx.worktree,
+      status: 'live',
+      workerLed: workerLedOf(),
+      ...(eventsPath !== undefined ? { events: eventsPath } : {}),
+      ...(ctx.agent !== undefined
+        ? { agent: agentKey(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
+        : {}),
+    };
+  };
 
   /** One refresh — file parse → target resolve → report + attach
    *  moves only when the resolution actually changed. A bound pane

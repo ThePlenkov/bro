@@ -21,9 +21,11 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 export const fmtWhen = (ts: string | number): string => {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  if (d.toDateString() === new Date().toDateString()) return hm;
-  return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${hm}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const yr = d.getFullYear() === now.getFullYear() ? '' : `${d.getFullYear()} `;
+  return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${yr}${hm}`;
 };
 
 /** `at` → the day-change label — `2 Mar` (British, no year: multi-day

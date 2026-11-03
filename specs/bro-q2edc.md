@@ -375,8 +375,9 @@ The seam's currency is the `Op` stream `state.ts` already consumes —
 construction; a third impl registers one factory in `IMPLS` and
 nothing else moves. Selection resolves `--impl <name>` >
 `BRO_TUI_IMPL` > `'acp'` (`pickImpl`/`implArg`), and the `acp`
-factory lazy-imports `acp-model` so Node tests still never touch it
-— only a selected `acp` run loads it. The impl's `fold` reaches the fold as
+factory lazy-imports `acp-model` so a run that never selects `acp`
+never loads it — tests that do select it (`impl.test.ts`) load it
+too. The impl's `fold` reaches the fold as
 `PaneState.foldAll` via `mountPane`/`emptyState` — `legacy` keeps
 the COLLAPSE_AT heuristic, `folded` collapses every card body (the
 vendored view-model's `expanded(item) === false` baseline — the

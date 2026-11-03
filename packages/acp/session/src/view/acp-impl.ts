@@ -578,6 +578,7 @@ export class AcpImpl implements PaneImpl {
    *  verdict mode paints (a silent agent's idle clock starts at its
    *  last closed turn, not at pane open). */
   private lastStopTs: string | undefined;
+  private lastStopError = false;
   /** leader sid → the `origin|error` keys its storm already rowed —
    *  N identical failures print ONE `── turn failed ──` and stay
    *  members (the tally still counts every one). */
@@ -636,6 +637,9 @@ export class AcpImpl implements PaneImpl {
       } else if (row.phase === 'stop') {
         this.judgeNow = false;
         this.lastStopTs = row.ts;
+        // a failed stop row is the archive's 'turn error' — the LED
+        // must not read idle over a crashed turn
+        this.lastStopError = row.error !== undefined && row.error !== '';
       }
     }
     // the arg stash — their items drop rawInput, our header wants it
@@ -704,18 +708,23 @@ export class AcpImpl implements PaneImpl {
       case 'running':
         return {
           led: { state: 'working' },
-          mode: s.turn ? `turn since ${fmtWhen(s.turn.startedAt)}` : 'turn',
+          mode:
+            s.turn !== null && s.turn.startedAt > 0
+              ? `turn since ${fmtWhen(s.turn.startedAt)}`
+              : 'turn',
         };
       default:
-        return {
-          led: { state: 'idle' },
-          mode:
-            this.lastStopTs !== undefined
-              ? `since ${fmtWhen(this.lastStopTs)}`
-              : s.stopReason !== null
-                ? 'turn complete'
-                : 'idle',
-        };
+        return this.lastStopError === true
+          ? { led: { state: 'blocked' }, mode: 'turn error' }
+          : {
+              led: { state: 'idle' },
+              mode:
+                this.lastStopTs !== undefined
+                  ? `since ${fmtWhen(this.lastStopTs)}`
+                  : s.stopReason !== null
+                    ? 'turn complete'
+                    : 'idle',
+            };
     }
   }
 
