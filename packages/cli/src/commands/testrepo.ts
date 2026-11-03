@@ -221,6 +221,8 @@ for (let i = 0; i < args.length; i++) {
     const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
     if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
       flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (valueFlagsShort.has(k)) {
+      fail('create -' + k + ' requires a value')
     } else if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
       flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
     } else {
