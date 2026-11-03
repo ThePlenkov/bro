@@ -2663,23 +2663,52 @@ export function projectorWatcher(
   return out;
 }
 
-let projectorWatches: FSWatcher[] | undefined;
+interface ProjectorWatchSlot {
+  dir: string;
+  hit: (name: string) => boolean;
+  w?: FSWatcher;
+}
+
+let projectorWatchSpec: ProjectorWatchSlot[] | undefined;
+/** The latest Ctx wins — a standby takeover re-binds every kick to the
+ *  live daemon invocation instead of the one that armed the watch. */
+let projectorWatchCtx: Ctx | undefined;
 function armProjectorWatches(ctx: Ctx): void {
-  if (projectorWatches !== undefined || ctx.everySec === undefined) {
+  if (ctx.everySec === undefined) {
     return;
   }
-  const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
-  projectorWatches = projectorWatcher(
-    [
+  projectorWatchCtx = ctx;
+  if (projectorWatchSpec === undefined) {
+    const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
+    projectorWatchSpec = [
       // registry mutations the lifecycle mirror does not emit for
       { dir: join(common, 'bro'), hit: name => name === 'agents.json' },
       // death before the harvest — the wrapper's .exit write point
       { dir: join(common, 'bro', 'agents'), hit: name => name.endsWith('.exit') },
       // plugin workspace/status bindings — no bus coverage at all
       ...pluginLedgerDirs().map(dir => ({ dir, hit: (name: string) => name.startsWith('state') })),
-    ],
-    () => kickProjector(ctx)
-  );
+    ];
+  }
+  // re-attach every slot that is not watched yet — `bro/agents` only
+  // exists after the first native spawn, ledger roots after the first
+  // plugin run; a one-shot arm would leave those points tick-bound
+  // forever (same lazy re-arm shape as armProjectorEvents)
+  for (const d of projectorWatchSpec) {
+    if (d.w !== undefined) {
+      continue;
+    }
+    const [w] = projectorWatcher([d], () => {
+      if (projectorWatchCtx !== undefined) kickProjector(projectorWatchCtx);
+    });
+    if (w !== undefined) {
+      const drop = (): void => {
+        d.w = undefined;
+      };
+      w.on('error', drop);
+      w.on('close', drop);
+      d.w = w;
+    }
+  }
 }
 
 /** `<git-common>/bro/drive.lock` — the one-supervisor-per-repo hold

@@ -1455,11 +1455,18 @@ describe('projectorWatcher — the write-point fast path (bro-9me97)', () => {
     );
     try {
       assert.equal(ws.length, 1);
-      // inotify registration is async — let the watch settle, then
-      // write once and tolerate delivery lag on a loaded box
-      await new Promise(r => setTimeout(r, 150));
-      writeFileSync(join(dir, 'native-x.1.exit'), '1\n');
-      const kicked = await waitFor(() => n >= 1, 6000);
+      // inotify registration lag is unbounded on a loaded runner —
+      // poke at a sane interval until the kick lands rather than
+      // trusting one settle window (a 25ms-cadence storm starves the
+      // loop and delayed the first run's own delivery past timeout)
+      let lastWrite = 0;
+      const kicked = await waitFor(() => {
+        if (n === 0 && Date.now() - lastWrite > 300) {
+          lastWrite = Date.now();
+          writeFileSync(join(dir, 'native-x.1.exit'), '1\n');
+        }
+        return n >= 1;
+      }, 8000);
       assert.ok(kicked, 'no kick on .exit');
       const before = n;
       writeFileSync(join(dir, 'other.log'), 'noise\n');

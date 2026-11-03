@@ -33,14 +33,22 @@ missed/overflowed inotify events. `pluginLedgerDirs()` is exported
 from `@broject/herdr-kit` so the watch and the merge can never
 disagree about where ledgers live.
 
+Arming is per-slot and retried every tick — `bro/agents` only exists
+after the first native spawn and ledger roots after the first plugin
+run, so a dir absent at arm time re-attaches on a later pass rather
+than staying tick-bound forever (same lazy re-arm shape as
+`armProjectorEvents`). The kick closure rides the latest `Ctx`, so a
+standby takeover re-binds kicks to the live daemon invocation.
+
 ## Contract
 
 - A `.exit` appearance re-projects within the kicker window — a dead
   worker's label stops waiting for the harvest pass.
 - A ledger write re-projects the same way — plugin-side binding changes
   stop being tick-bound.
-- A missing dir is a no-watch, not a failure; a watcher error degrades
-  to the tick, never crashes the supervisor loop.
+- A dir absent at arm time is retried every tick until it appears; a
+  watcher error or close drops the slot for re-arm on the next pass —
+  never a crash inside the supervisor loop.
 - `--once` mode arms nothing — a one-off pass is a report, not
   supervision.
 
