@@ -32,15 +32,26 @@ export function rowVerdict(row: ArchiveRow): { led: PaneLed; mode: string } | un
 }
 
 /** The events leg's whole verdict — the worker verdict is the floor
- *  (a blocked worker beats a stale 'working' archive state), the last
- *  row's verdict rides on top, and a fresh archive inherits the
- *  worker's posture (spec bro-l8wqu LED contract). */
+ *  (a blocked or proven-idle worker beats a stale 'working' archive
+ *  state: a crash or silence mid-turn must not pass for live work),
+ *  the last row's verdict rides on top, and a fresh archive inherits
+ *  the worker's posture (spec bro-l8wqu LED contract). */
 export function eventsVerdict(
   workerLed: PaneLed,
   row: { led: PaneLed; mode: string } | undefined
 ): { led: PaneLed; mode: string } {
   if (workerLed.state === 'blocked') {
-    return { led: { state: 'blocked' }, mode: row?.mode ?? 'worker blocked' };
+    // a blocked row keeps its own reason (permission — denied); a
+    // working/idle row's mode must not dress the worker's stop
+    return {
+      led: { state: 'blocked' },
+      mode: row?.led.state === 'blocked' ? row.mode : (workerLed.message ?? 'worker exited'),
+    };
+  }
+  if (workerLed.state === 'idle' && row?.led.state === 'working') {
+    // proven quiet worker + a mid-turn archive — the turn never
+    // closed but the worker is silent or gone; 'idle' is the truth
+    return { led: { state: 'idle' }, mode: workerLed.message ?? 'worker quiet' };
   }
   if (row !== undefined) return { led: row.led, mode: row.mode };
   return {

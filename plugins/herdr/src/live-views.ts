@@ -134,12 +134,15 @@ export function convergeLiveViews /* NOSONAR typescript:S3776 */(
   base: string,
   _main: string,
   state: PluginState,
-  coveredWorktrees: Set<string>
+  coveredWorktrees: Set<string>,
+  agents?: LiveAgent[]
 ): void {
-  const agents = liveAgents(base);
+  // the caller may hand the pass's registry scan in — one read feeds
+  // every converge path, never two snapshots around a transition
+  const live = agents ?? liveAgents(base);
   // no agents and nothing recorded — the pass must leave the state
   // byte-identical (converge tests assert the whole doc)
-  if (agents.length === 0 && Object.keys(state.liveViews ?? {}).length === 0) return;
+  if (live.length === 0 && Object.keys(state.liveViews ?? {}).length === 0) return;
   state.liveViews ??= {};
 
   // the decision layer is the kit's — retire/drop/rearm/keep/open;
@@ -161,7 +164,7 @@ export function convergeLiveViews /* NOSONAR typescript:S3776 */(
     log(`view ${a.id} → ${ws}: ${a.events}`);
   };
   for (const act of convergeViews({
-    live: agents,
+    live,
     existing: state.liveViews,
     covered: coveredWorktrees,
     exists: paneExists,
@@ -180,7 +183,7 @@ export function convergeLiveViews /* NOSONAR typescript:S3776 */(
         delete state.liveViews[act.id];
         break;
       case 'rearm': {
-        const a = agents.find(x => x.id === act.id);
+        const a = live.find(x => x.id === act.id);
         if (a !== undefined && herdrOk(['pane', 'run', act.rec.pane_id, viewCommand(a)])) {
           break;
         }

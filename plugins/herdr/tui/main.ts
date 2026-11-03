@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, statSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import {
@@ -27,6 +27,7 @@ import {
   completePart,
   eventsFile,
   eventsVerdict,
+  fmtWhen,
   implArg,
   type PaneImpl,
   type PaneLed,
@@ -40,19 +41,22 @@ import {
 } from '../../../packages/acp/session/src/index.ts';
 import { serve } from '../../../packages/acp/tui/serve.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
+import { flag } from '../../../packages/cli/src/commands/args.ts';
 import {
   agentEntry,
+  agentKey,
   type FleetPaneState,
   fleetStatusPath,
   release as paneRelease,
   report as paneReport,
   parseFleetState,
-  pidAlive,
+  registryHomeOf,
   resolveTarget,
   SESSION_IDENTITY,
   type SessionTarget,
   sessionAgentOf,
   targetKey,
+  workerLedState,
 } from '../../../packages/herdr-kit/src/index.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
@@ -147,10 +151,7 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
 
 // --- the TUI ---------------------------------------------------------------
 
-const opt = (argv: string[], flag: string): string | undefined => {
-  const i = argv.indexOf(flag);
-  return i >= 0 ? argv[i + 1] : undefined;
-};
+const opt = (argv: string[], name: string): string | undefined => flag(argv, name);
 
 /** Liveness floor for a direct `--agent` target — the archive's own
  *  verdict rides on top (eventsVerdict); pid probing replaces the
@@ -181,20 +182,49 @@ export async function runTui(argv: string[]): Promise<void> {
   // viewer at the archive itself — no fleet-status doc involved
   // (janitor-reaped files were the "waiting for projector" bug).
   const ctxDir = worktree ?? process.cwd();
-  const base0 = gitCommonDir(ctxDir) ?? ctxDir;
+  // The registry home: the worktree's git common dir first. A
+  // worktree-less direct bind (the live view's argv) leaves ctxDir at
+  // the pane's scratch cwd — the journal's own
+  // <git-common>/bro/agents/ location is the next source, or the
+  // floor reads 'unknown' and a stale journal glows working
+  const base0 =
+    gitCommonDir(ctxDir) ??
+    (eventsArg !== undefined ? registryHomeOf(eventsArg) : undefined) ??
+    ctxDir;
   const entry = agentEntry(base0, agentArg);
+  /** The worker floor with its reason stamped — a blocked worker
+   *  reports WHEN it exited (the journal's last write), an idle one
+   *  when it went quiet; the verdict reads the message as its mode. */
+  const workerLedOf = (e: typeof entry, events: string | undefined): PaneLed => {
+    const state = workerLedState(e, events);
+    if (state === 'working' || state === 'unknown' || events === undefined) {
+      return { state };
+    }
+    try {
+      const when = fmtWhen(statSync(events).mtimeMs);
+      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+    } catch {
+      return { state };
+    }
+  };
+  /** The display agent — the readable run id (`bro-2bv6q`), not the
+   *  archive stem the argv carries (`native-<hash>`). */
+  const displayAgent = agentKey(base0, agentArg) ?? agentArg;
+  // the journal's path resolved ONCE — `--agent` alone still names it
+  // via the registry convention; a bare live pid must never stand in
+  // for a journal the floor cannot read
+  const resolvedEvents =
+    eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined);
   const direct: SessionTarget | undefined =
-    eventsArg === undefined && agentArg === undefined
+    resolvedEvents === undefined && agentArg === undefined
       ? undefined
       : {
           worktree: entry?.worktree ?? ctxDir,
           status: 'live',
-          events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
-          agent: agentArg,
+          ...(resolvedEvents !== undefined ? { events: resolvedEvents } : {}),
+          agent: displayAgent,
           slug: agentArg,
-          workerLed: {
-            state: entry?.pid !== undefined && pidAlive(entry.pid) ? 'working' : 'idle',
-          },
+          workerLed: workerLedOf(entry, resolvedEvents),
         };
 
   const base = base0;
@@ -202,7 +232,7 @@ export async function runTui(argv: string[]): Promise<void> {
   mkdirSync(dirname(statePath), { recursive: true });
 
   const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: agentArg });
+  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: displayAgent });
 
   // the shell — renderer + JSX preload + mount + keymap — is
   // @broject/acp-tui's serve(); this process stays glue: target
@@ -308,8 +338,17 @@ export async function runTui(argv: string[]): Promise<void> {
   };
 
   /** The resolution poll — read the doc, re-arm the feed when the
-   *  attach identity moves, report the verdict. */
+   *  attach identity moves, report the verdict. The direct binding's
+   *  worker floor is re-probed every pass: a crash mid-turn leaves
+   *  the model 'running' forever, and only the fresh pid check makes
+   *  that read 'blocked' instead of lying working (dogfood finding —
+   *  a crashed agent's pane glowed working while its pid was gone). */
   const refresh = (): void => {
+    if (direct !== undefined) {
+      // re-read the registry too — a respawn swaps the record, and
+      // probing a stale entry's pid reads 'blocked' on a live worker
+      direct.workerLed = workerLedOf(agentEntry(base0, agentArg), resolvedEvents);
+    }
     target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
     const key = targetKey(target);
     if (key !== cur?.key) {

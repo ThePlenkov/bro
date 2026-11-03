@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -475,7 +476,10 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
   });
 
   test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
-    reset({ panes: [{ pane_id: 'pV' }, { pane_id: 'pX' }], paneIds: ['pV', 'pX'] });
+    reset({
+      panes: [{ pane_id: 'pV', label: 'bro: session' }, { pane_id: 'pX' }],
+      paneIds: ['pV', 'pX'],
+    });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
@@ -728,6 +732,107 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
     converge(p);
     assert.equal(called('workspace', 'rename').length, 0);
     assert.equal(loadState(scope).workspaces[tree]?.label, '[silent10h·#765 2t] Ship it');
+  });
+});
+
+describe('live views — coverage by the session pane', () => {
+  test('a relative registry worktree still suppresses the second view', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — the repo main
+    // must be a REAL repo for the agents.json seed to be visible
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // the registry may carry a RELATIVE worktree — before the
+    // normalize-once fix the coverage check compared it against the
+    // armed set's absolute paths, never matched, and opened a second
+    // 🤖 view: workspace beside the session pane (PR #876 review)
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': {
+          log: join(repoMain, 'native-1.log'),
+          worktree: relative(repoMain, tree),
+          pid: process.pid,
+        },
+      })
+    );
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the session pane arms bound to the journal directly — the
+    // line-mode command carries --events/--agent too
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /--events .*native-1\.events\.jsonl.* --agent .*native-1/);
+    // coverage sees the same absolute path the armed set carries —
+    // NO second view workspace beside the session pane
+    assert.equal(called('workspace', 'create').length, 0);
+    assert.deepEqual(loadState(stateScope(repoMain)).liveViews, {});
+  });
+});
+
+describe('session panes — rebind backoff', () => {
+  test('a failed rebind backs off instead of churning panes each pass', () => {
+    reset({
+      panes: [{ pane_id: 'p1' }],
+      paneIds: ['p1'],
+      failSubcommands: ['pane run'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — a REAL repo main
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // a DIFFERENT live agent resolves for the tree → the recorded
+    // binding is stale and decideSession asks for a rebind
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': { log: join(repoMain, 'native-B.log'), worktree: tree, pid: process.pid },
+      })
+    );
+    const scope = stateScope(repoMain);
+    const s = loadState(scope);
+    s.sessions[tree] = {
+      workspace: 'wOpened',
+      worktree: tree,
+      pane_id: 'p1',
+      agent_id: 'native-A',
+    };
+    saveState(scope, s);
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the arm failed — the stale pane stays, exactly ONE split+close,
+    // and the retry is armed for later
+    assert.equal(called('pane', 'split').length, 1);
+    assert.equal(called('pane', 'close', 'p1').length, 0);
+    const st1 = loadState(scope);
+    assert.equal(st1.sessions[tree]?.pane_id, 'p1');
+    assert.equal(typeof st1.sessions[tree]?.retryAt, 'number');
+    // the very next pass hits the backoff — no second split
+    converge(p);
+    assert.equal(called('pane', 'split').length, 1);
+    // the window expired AND the failure cleared — the retry lands:
+    // a second split, the stale pane closes, the binding rebinds
+    st1.sessions[tree]!.retryAt = 0;
+    saveState(scope, st1);
+    writeFileSync(SCENARIO, JSON.stringify({ panes: [{ pane_id: 'p1' }], paneIds: ['p1'] }));
+    converge(p);
+    assert.equal(called('pane', 'split').length, 2);
+    assert.equal(called('pane', 'close', 'p1').length, 1);
+    const st3 = loadState(scope).sessions[tree];
+    assert.equal(st3?.agent_id, 'native-B');
+    assert.notEqual(st3?.pane_id, 'p1');
+    assert.equal(st3?.retryAt, undefined);
   });
 });
 

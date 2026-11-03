@@ -22,7 +22,10 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
-import { agentsJson as kitAgentsJson } from '../../../packages/herdr-kit/src/index.ts';
+import {
+  agentsJson as kitAgentsJson,
+  type SessionRec,
+} from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
@@ -484,8 +487,9 @@ export interface PluginState {
   /** worktree path → the status-pane record (one per managed ws). */
   statuses: Record<string, StatusPaneRec>;
   /** worktree path → the session-pane record (one per managed ws —
-   *  spec bro-nwl5g's `bro herdr session-view` renderer). */
-  sessions: Record<string, StatusPaneRec>;
+   *  spec bro-nwl5g's `bro herdr session-view` renderer; carries the
+   *  bound agent's id so a new worker rebinds the pane). */
+  sessions: Record<string, SessionRec>;
   /** agentId → the plugin-owned live view (addendum 17) — an agent
    *  outside armed worktrees gets its own `🤖 view:<id>` workspace. */
   liveViews?: Record<string, { workspace: string; pane_id: string; owned?: boolean }>;

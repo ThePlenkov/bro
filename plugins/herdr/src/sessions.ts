@@ -16,6 +16,7 @@ import {
   decideSession,
   decideSessionRetire,
   dropOrphanRecords,
+  type SessionRec,
   sessionViewCommand,
 } from '../../../packages/herdr-kit/src/index.ts';
 import {
@@ -62,13 +63,19 @@ export function bun(): string | undefined {
 }
 
 /** The pane command — the OpenTUI app when its entrypoint + runtime
- *  resolve, the line-mode session-view otherwise. */
-export function sessionCommand(worktreePath: string): string {
+ *  resolve, the line-mode session-view otherwise. A resolved agent
+ *  binds the archive directly (`--events`/`--agent`): the worktree→
+ *  projector→journal path breaks on lanes the doc never marks acp. */
+export function sessionCommand(
+  worktreePath: string,
+  agent?: { id: string; events: string }
+): string {
   const b = existsSync(TUI_MAIN) ? bun() : undefined;
   return sessionViewCommand(
     worktreePath,
     { ...(b !== undefined ? { bun: b, tui: TUI_MAIN } : {}), bro: BRO },
-    shq
+    shq,
+    agent
   );
 }
 
@@ -77,8 +84,13 @@ export function sessionCommand(worktreePath: string): string {
  *  the same path. */
 function armSession(ctx: RenderCtx, paneId: string): boolean {
   herdrTry(['pane', 'rename', paneId, SESSION_LABEL]);
-  if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path)])) return false;
-  ctx.state.sessions[ctx.path] = { workspace: ctx.ws, worktree: ctx.path, pane_id: paneId };
+  if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path, ctx.agent)])) return false;
+  ctx.state.sessions[ctx.path] = {
+    workspace: ctx.ws,
+    worktree: ctx.path,
+    pane_id: paneId,
+    agent_id: ctx.agent?.id,
+  };
   return true;
 }
 
@@ -100,31 +112,94 @@ function splitPane(targetId: string, ctx: RenderCtx): string | undefined {
 }
 
 /** Arm `paneId` and report the outcome — '(adopted)' when the pane
- *  already carried our label. */
-function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): void {
+ *  already carried our label. False when `pane run` never landed —
+ *  the caller must not treat the idle shell as a live session pane. */
+function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): boolean {
   if (!armSession(ctx, paneId)) {
     log(`session pane ${paneId} → ${ctx.ws}: pane run failed`);
-    return;
+    return false;
   }
   log(`session pane ${paneId} → ${ctx.ws}${adopted ? ' (adopted)' : ''}`);
+  return true;
 }
 
-/** No live pane to take — split beside the first pane, then arm. */
-function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
+/** How long a failed rebind waits before the next attempt — long
+ *  enough that a persistent `pane run` failure is not a pane churn. */
+const REBIND_BACKOFF_MS = 60_000;
+
+/** No live pane to take — split beside the first pane, then arm.
+ *  False when no pane could be split or the arm never landed. */
+function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): boolean {
   const target = panes[0];
   const newPane = target === undefined ? undefined : splitPane(target.pane_id, ctx);
   if (newPane === undefined) {
     log(`session pane for ${ctx.ws}: no pane to arm or split`);
-    return;
+    return false;
   }
-  armAndReport(ctx, newPane, false);
+  return armAndReport(ctx, newPane, false);
+}
+
+/** Is a live session pane bound after the pass — the caller's retire
+ *  gate: fallback surfaces fold only where the human pane actually
+ *  exists, not merely where it was eligible to arm. */
+function paneLive(ctx: RenderCtx): boolean {
+  const r = ctx.state.sessions[ctx.path];
+  return r !== undefined && paneExists(r.pane_id);
+}
+
+/** Stale panes the last rebinds could not close — retried at the top
+ *  of every pass so they do not linger showing the old archive. */
+function retryClose(ctx: RenderCtx, rec: SessionRec | undefined): void {
+  const pending = rec?.closePending;
+  if (pending === undefined || pending.length === 0) return;
+  const left = pending.filter(id => paneExists(id) && !herdrOk(['pane', 'close', id]));
+  const { closePending: _closePending, ...rest } = rec;
+  ctx.state.sessions[ctx.path] = left.length === 0 ? rest : { ...rest, closePending: left };
+}
+
+/** The binding moved (new agent, or a dead record now resolves) — the
+ *  running pane is pinned to the old archive. Arm the replacement
+ *  FIRST: closing the workspace's last pane before its successor
+ *  exists auto-reaps the whole workspace mid-pass (dogfood reap —
+ *  the same constraint the arm-order follows). */
+function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): boolean {
+  if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
+    return paneLive(ctx); // a failed arm is still backing off — keep the stale pane
+  }
+  const next = splitPane(paneId, ctx);
+  if (next !== undefined && armSession(ctx, next)) {
+    if (!herdrOk(['pane', 'close', paneId])) {
+      // the stale pane survived — remember it so a later pass retries;
+      // each rebind can leave another, so the field is a list
+      const r = ctx.state.sessions[ctx.path];
+      if (r !== undefined) {
+        ctx.state.sessions[ctx.path] = {
+          ...r,
+          closePending: [...(r.closePending ?? []), paneId],
+        };
+      }
+    }
+    log(`session pane ${paneId} → ${next} ${ctx.ws}: rebound to ${ctx.agent?.id ?? 'worktree'}`);
+    return paneLive(ctx);
+  }
+  // no successor landed — keep the stale pane over an empty
+  // workspace; the retry is backed off so a persistent arm
+  // failure does not split+close a fresh pane every pass
+  if (next !== undefined) herdrTry(['pane', 'close', next]);
+  if (rec !== undefined) {
+    ctx.state.sessions[ctx.path] = { ...rec, retryAt: Date.now() + REBIND_BACKOFF_MS };
+  }
+  log(`session pane ${paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
+  return paneLive(ctx);
 }
 
 /** One workspace's session-pane convergence — the decision lives in
  *  herdr-kit's views module (record → re-arm/adopt → orphan-label →
- *  idle pane → split); this is the exec half: probe, decide, run. */
-export function ensureSession(ctx: RenderCtx): void {
+ *  idle pane → split); this is the exec half: probe, decide, run.
+ *  Returns whether a live session pane is bound after the pass. */
+export function ensureSession(ctx: RenderCtx): boolean {
   const rec = ctx.state.sessions[ctx.path];
+  retryClose(ctx, rec);
   const panes = paneList(ctx.ws);
   const act = decideSession({
     rec,
@@ -134,19 +209,24 @@ export function ensureSession(ctx: RenderCtx): void {
     broLabels: BRO_LABELS,
     exists: paneExists,
     idle: paneIdle,
+    agent: ctx.agent,
   });
-  if (act.kind === 'none') return;
-  if (act.kind === 'split') {
-    armViaSplit(ctx, panes);
-    return;
+  switch (act.kind) {
+    case 'none':
+      return paneLive(ctx);
+    case 'rebind':
+      return rebind(ctx, rec, act.paneId);
+    case 'split':
+      return armViaSplit(ctx, panes);
+    default:
+      return armAndReport(ctx, act.paneId, act.adopted);
   }
-  armAndReport(ctx, act.paneId, act.adopted);
 }
 
-/** Non-acp lanes carry no session pane (spec bro-l8wqu): for a
- *  non-acp worker the view only duplicated the mirror, and a
- *  worker-less arm has nothing to show. Close the recorded or
- *  orphan-labeled `bro: session` pane and drop the record. */
+/** Lanes with nothing to show carry no session pane (spec
+ *  bro-l8wqu): no acp session, no live agent journal — a worker-less
+ *  arm renders `waiting for projector` forever. Close the recorded
+ *  or orphan-labeled `bro: session` pane and drop the record. */
 export function retireSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
   const { closeId } = decideSessionRetire({
@@ -157,7 +237,7 @@ export function retireSession(ctx: RenderCtx): void {
   });
   if (closeId !== undefined) {
     herdrTry(['pane', 'close', closeId]);
-    log(`retire session pane ${closeId} — not an acp lane (${ctx.ws})`);
+    log(`retire session pane ${closeId} — no resolvable session (${ctx.ws})`);
   }
   delete ctx.state.sessions[ctx.path];
 }

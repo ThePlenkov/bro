@@ -93,13 +93,13 @@ export function implArg(argv: readonly string[]): string | undefined {
   return eq?.slice('--impl='.length);
 }
 
-/** Resolve the impl: `--impl` argv > `BRO_TUI_IMPL` env > 'legacy'.
+/** Resolve the impl: `--impl` argv > `BRO_TUI_IMPL` env > 'acp'.
  *  Unknown names fail loud — a typo must not silently run legacy. */
 export async function pickImpl(
   name: string | undefined,
   env: Record<string, string | undefined> = process.env
 ): Promise<PaneImpl> {
-  const pick = name ?? env.BRO_TUI_IMPL ?? 'legacy';
+  const pick = name ?? env.BRO_TUI_IMPL ?? 'acp';
   const factory = IMPLS[pick];
   if (factory === undefined) {
     throw new Error(`unknown --impl '${pick}' (known: ${IMPL_NAMES.join(', ')})`);

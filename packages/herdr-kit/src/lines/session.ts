@@ -5,11 +5,13 @@
  * lane's live wire) → acp session/load attach → native log tail →
  * nothing. Readonly by construction.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, statSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import {
   type ArchiveRow,
   completePart,
+  eventsFile,
+  fmtWhen,
   PERMISSION_FALLBACK,
   parseArchiveRows,
   readTailSlice,
@@ -18,7 +20,7 @@ import {
   tailWindow,
   utf8End,
 } from '@broject/acp-session';
-import type { ProviderEntry } from '@broject/core';
+import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
   AcpSessionViewResult,
@@ -26,11 +28,15 @@ import type {
   SessionUpdateLike,
 } from '@broject/providers';
 import {
+  agentEntry,
+  agentKey,
   type PaneLed,
   release as paneRelease,
+  registryHomeOf,
   report as paneReport,
   plain,
   SESSION_IDENTITY,
+  workerLedState,
 } from '../client/index.ts';
 import {
   type AttachState,
@@ -45,12 +51,17 @@ import {
 } from '../fleet/index.ts';
 
 /** Everything one live pane needs — resolved by the caller (argv/env
- *  checks live outside the kit). */
+ *  checks live outside the kit). `events`/`agent` are the direct
+ *  archive binding — present, they resolve the target themselves and
+ *  the fleet doc is never read (a native worker's journal the doc
+ *  never names still renders). */
 export interface SessionPaneCtx {
   worktree: string;
   pane: string;
   statePath: string;
   once: boolean;
+  events?: string;
+  agent?: string;
 }
 
 // --- the view -------------------------------------------------------------------
@@ -441,15 +452,79 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     if (t.status !== '') dim(`── ${t.status} ──`);
   };
 
+  // the direct archive binding — `--events`/`--agent` resolve the
+  // target themselves, the fleet doc is never consulted. The worker
+  // floor re-probes registry + journal on EVERY refresh: a crash
+  // mid-turn must read 'blocked' and a silent-for-days journal
+  // 'idle', not a working lie frozen at arm time.
+  const bound = ctx.events !== undefined || ctx.agent !== undefined;
+  // the registry home: the worktree's git common dir, else the bound
+  // journal's own <git-common>/bro/agents location — a '.' worktree
+  // (the worktree-less live view) must not blind the worker floor
+  const base =
+    (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
+    gitCommonDir(ctx.worktree) ??
+    ctx.worktree;
+  /** The bound journal path — `--agent` may carry a registry KEY
+   *  (`bro-2bv6q`) while the journal sits on the archive stem
+   *  (`native-<hash>.events.jsonl`), so resolve through the matched
+   *  entry's log. Probed per call: a late-arriving registry record
+   *  heals the path on the next refresh. */
+  const eventsPathOf = (): string | undefined => {
+    if (ctx.events !== undefined) return ctx.events;
+    if (ctx.agent === undefined) return undefined;
+    const stem =
+      agentEntry(base, ctx.agent)
+        ?.log?.replace(/\.log$/, '')
+        .split('/')
+        .pop() ?? ctx.agent;
+    return eventsFile(base, stem);
+  };
+  /** The worker floor with its reason stamped — a blocked worker
+   *  reports WHEN it exited (the journal's last write), an idle one
+   *  when it went quiet. */
+  const workerLedOf = (): PaneLed => {
+    const eventsPath = eventsPathOf();
+    const state = workerLedState(agentEntry(base, ctx.agent), eventsPath);
+    if (state === 'working' || state === 'unknown' || eventsPath === undefined) {
+      return { state };
+    }
+    try {
+      const when = fmtWhen(statSync(eventsPath).mtimeMs);
+      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+    } catch {
+      return { state };
+    }
+  };
+  const directTarget = (): SessionTarget | undefined => {
+    if (!bound) return undefined;
+    const eventsPath = eventsPathOf();
+    return {
+      worktree: ctx.worktree,
+      status: 'live',
+      workerLed: workerLedOf(),
+      ...(eventsPath !== undefined ? { events: eventsPath } : {}),
+      ...(ctx.agent !== undefined
+        ? { agent: agentKey(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
+        : {}),
+    };
+  };
+
   /** One refresh — file parse → target resolve → report + attach
-   *  moves only when the resolution actually changed. */
+   *  moves only when the resolution actually changed. A bound pane
+   *  skips the doc read entirely but still re-probes the worker
+   *  floor — directTarget() rebuilds it, pid and journal fresh. */
   const refresh = (): void => {
-    const raw = readRaw(ctx.statePath);
-    const t = resolveTarget(
-      raw === undefined ? undefined : parseFleetState(raw),
-      ctx.worktree,
-      providers()
-    );
+    const t =
+      directTarget() ??
+      (() => {
+        const raw = readRaw(ctx.statePath);
+        return resolveTarget(
+          raw === undefined ? undefined : parseFleetState(raw),
+          ctx.worktree,
+          providers()
+        );
+      })();
     foldStatus(t);
     const key = targetKey(t);
     if (cur === undefined || key !== cur.key) {
