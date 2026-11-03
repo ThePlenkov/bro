@@ -195,7 +195,7 @@ describe('prompts', () => {
 
   test('work prompt arms GitHub auto-merge when loop.autoMerge is set', () => {
     const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'beads', true);
-    assert.match(p, /gh pr merge --auto --squash/);
+    assert.match(p, /gh pr merge --auto --squash --delete-branch/);
     assert.doesNotMatch(p, /Do NOT merge/);
     const batch = buildWorkPrompt(
       [bead, { ...bead, id: 'bro-x2' }],
@@ -205,7 +205,7 @@ describe('prompts', () => {
       'beads',
       true
     );
-    assert.match(batch, /gh pr merge --auto --squash/);
+    assert.match(batch, /gh pr merge --auto --squash --delete-branch/);
     assert.doesNotMatch(batch, /Do NOT merge/);
   });
 
