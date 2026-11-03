@@ -115,7 +115,7 @@ export async function runExecCommand(argv: string[]): Promise<void> {
   const cmd = args.join(' ');
   const tail = makeTail(TAIL_BYTES);
   const t0 = Date.now();
-  const child = spawn('sh', ['-c', cmd], { stdio: ['inherit', 'pipe', 'pipe'] });
+  const child = spawn('sh', ['-c', cmd], { stdio: ['inherit', 'pipe', 'pipe'] }); // NOSONAR — running the caller's line under the ambient PATH shell is the command's contract
   forwardOutput(child.stdout, process.stdout, tail);
   forwardOutput(child.stderr, process.stderr, tail);
   const unforward = forwardSignals(child);

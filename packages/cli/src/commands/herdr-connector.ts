@@ -30,14 +30,21 @@ export interface PaneAgent {
 
 /** `agents.herdr.reportBack` — `true` enables every agent kind, a
  *  `{ <kind>: true }` map opts kinds in one at a time. */
+function asPlainRecord(v: unknown): Record<string, unknown> | undefined {
+  if (typeof v !== 'object' || v === null) {
+    return undefined;
+  }
+  if (Array.isArray(v)) {
+    return undefined;
+  }
+  return v as Record<string, unknown>;
+}
+
 export function reportBackEnabled(reportBack: unknown, kind: string): boolean {
   if (reportBack === true) {
     return true;
   }
-  if (typeof reportBack === 'object' && reportBack !== null && !Array.isArray(reportBack)) {
-    return (reportBack as Record<string, unknown>)[kind] === true;
-  }
-  return false;
+  return asPlainRecord(reportBack)?.[kind] === true;
 }
 
 /** One-line digest of a finished command — the prompt payload. */
