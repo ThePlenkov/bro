@@ -21,7 +21,8 @@ export async function runHerdrCommand(argv: string[]): Promise<void> {
     return;
   }
   console.error(
-    'usage: bro herdr status-view|session-view <worktree> [--once] [--events <path>] [--agent <id>]'
+    'usage: bro herdr status-view <worktree> [--once]\n' +
+      '       bro herdr session-view <worktree> [--once] [--events <path>] [--agent <id>]'
   );
   process.exit(2);
 }

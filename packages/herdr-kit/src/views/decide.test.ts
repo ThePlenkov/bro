@@ -234,7 +234,7 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
   );
   assert.equal(
     sessionViewCommand('/t', { bro: 'bro' }, q, { id: 'n1', events: '/e.jsonl' }),
-    "'bro' herdr session-view '/t'"
+    "'bro' herdr session-view '/t' --events '/e.jsonl' --agent 'n1'"
   );
   assert.equal(
     liveViewCommand(
@@ -246,6 +246,6 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
   );
   assert.equal(
     liveViewCommand({ events: '/e.jsonl', id: 'n1' }, { bro: 'bro' }, q),
-    "'bro' herdr session-view '.'"
+    "'bro' herdr session-view '.' --events '/e.jsonl' --agent 'n1'"
   );
 });

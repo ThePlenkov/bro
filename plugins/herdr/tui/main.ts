@@ -41,6 +41,7 @@ import {
 } from '../../../packages/acp/session/src/index.ts';
 import { serve } from '../../../packages/acp/tui/serve.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
+import { flag } from '../../../packages/cli/src/commands/args.ts';
 import {
   agentEntry,
   agentKey,
@@ -49,6 +50,7 @@ import {
   release as paneRelease,
   report as paneReport,
   parseFleetState,
+  registryHomeOf,
   resolveTarget,
   SESSION_IDENTITY,
   type SessionTarget,
@@ -149,10 +151,7 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
 
 // --- the TUI ---------------------------------------------------------------
 
-const opt = (argv: string[], flag: string): string | undefined => {
-  const i = argv.indexOf(flag);
-  return i >= 0 ? argv[i + 1] : undefined;
-};
+const opt = (argv: string[], name: string): string | undefined => flag(argv, name);
 
 /** Liveness floor for a direct `--agent` target — the archive's own
  *  verdict rides on top (eventsVerdict); pid probing replaces the
@@ -183,7 +182,15 @@ export async function runTui(argv: string[]): Promise<void> {
   // viewer at the archive itself — no fleet-status doc involved
   // (janitor-reaped files were the "waiting for projector" bug).
   const ctxDir = worktree ?? process.cwd();
-  const base0 = gitCommonDir(ctxDir) ?? ctxDir;
+  // The registry home: the worktree's git common dir first. A
+  // worktree-less direct bind (the live view's argv) leaves ctxDir at
+  // the pane's scratch cwd — the journal's own
+  // <git-common>/bro/agents/ location is the next source, or the
+  // floor reads 'unknown' and a stale journal glows working
+  const base0 =
+    gitCommonDir(ctxDir) ??
+    (eventsArg !== undefined ? registryHomeOf(eventsArg) : undefined) ??
+    ctxDir;
   const entry = agentEntry(base0, agentArg);
   /** The worker floor with its reason stamped — a blocked worker
    *  reports WHEN it exited (the journal's last write), an idle one

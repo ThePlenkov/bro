@@ -511,9 +511,12 @@ describe('runSessionView --once', () => {
     const text = f.stdout();
     assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
     const calls = callsOf(f.log);
-    const report = calls.find(c => c[1] === 'report-agent' && c.includes('--state'));
-    // the floor is 'unknown' — no registry entry is provable, the
-    // archive's own verdict (turn stopped → idle) rides on top
+    const reports = calls.filter(c => c[1] === 'report-agent' && c.includes('--state'));
+    // the FINAL report is the verdict — the first fires before the
+    // archive drains and would read 'idle' even on an empty journal;
+    // the floor is 'unknown' (no registry entry), so the archive's
+    // own verdict (turn stopped → idle) is what rides on top
+    const report = reports.at(-1);
     assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
     const meta = calls.find(c => c.includes('--display-agent'));
     assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');

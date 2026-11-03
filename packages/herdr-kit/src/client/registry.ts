@@ -96,6 +96,17 @@ export function pidAlive(pid: number, start?: string): boolean {
  *  live pid means it is waiting or done, not working. */
 export const ACTIVE_MS = 15 * 60_000;
 
+/** The registry's git common dir recovered from a journal's own
+ *  location — `<git-common>/bro/agents/<id>.events.jsonl` walks up
+ *  three. Any other layout yields undefined (the caller's fallback
+ *  stands), never a wrong home — the worktree-less direct bind's
+ *  scratch cwd must not blind the worker floor. */
+export function registryHomeOf(eventsPath: string): string | undefined {
+  const agents = dirname(eventsPath);
+  const bro = dirname(agents);
+  return basename(agents) === 'agents' && basename(bro) === 'bro' ? dirname(bro) : undefined;
+}
+
 /** The attempt's `.exit` record — `<agentId>.<runId>.exit` (or the
  *  legacy `<agentId>.exit`) beside the journal. The worker publishes
  *  it before the registry harvest lands, so a clean finish reads

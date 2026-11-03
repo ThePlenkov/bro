@@ -32,6 +32,7 @@ import {
   agentKey,
   type PaneLed,
   release as paneRelease,
+  registryHomeOf,
   report as paneReport,
   plain,
   SESSION_IDENTITY,
@@ -457,7 +458,13 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   // mid-turn must read 'blocked' and a silent-for-days journal
   // 'idle', not a working lie frozen at arm time.
   const bound = ctx.events !== undefined || ctx.agent !== undefined;
-  const base = gitCommonDir(ctx.worktree) ?? ctx.worktree;
+  // the registry home: the worktree's git common dir, else the bound
+  // journal's own <git-common>/bro/agents location — a '.' worktree
+  // (the worktree-less live view) must not blind the worker floor
+  const base =
+    gitCommonDir(ctx.worktree) ??
+    (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
+    ctx.worktree;
   const eventsPath =
     ctx.events ?? (ctx.agent !== undefined ? eventsFile(base, ctx.agent) : undefined);
   /** The worker floor with its reason stamped — a blocked worker
