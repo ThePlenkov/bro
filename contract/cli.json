@@ -7,7 +7,7 @@
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "stack"]
+      "members": ["convoy", "next", "loop", "watchdog", "stack"]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -168,6 +168,17 @@
       "hidden": false,
       "skill": "loop",
       "configKey": "loop",
+      "plan": false,
+      "external": false
+    },
+    "watchdog": {
+      "name": "watchdog",
+      "group": "flow",
+      "summary": "Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]",
+      "spellings": ["watchdog", "flow watchdog"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "watchdog",
       "plan": false,
       "external": false
     },

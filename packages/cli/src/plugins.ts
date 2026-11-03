@@ -110,6 +110,7 @@ import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
 import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
+import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
 import { runStatusCommand } from './commands/status.ts';
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
@@ -289,6 +290,16 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    // The loop's supervisor, not a second runner: this verb prints the
+    // launch brief + tick-0 baselines and points at the skill that owns
+    // the tick protocol — the loop itself stays model work.
+    name: 'watchdog',
+    group: 'flow',
+    summary: 'Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]',
+    run: runWatchdogCommand,
+    skill: 'watchdog',
   }),
   definePlugin({
     name: 'fleet',

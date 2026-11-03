@@ -4,6 +4,7 @@
     "convoy",
     "next",
     "loop",
+    "watchdog",
     "stack",
     "---Fleet---",
     "fleet",
