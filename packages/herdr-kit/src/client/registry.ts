@@ -2,7 +2,7 @@
  *  agents.json` registry readers every pane-side process shares.
  *  Converged from the plugin's lib.ts and tui/main.ts twins. */
 import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 /** One `bro/agents.json` entry — the registry's per-agent record. */
 export interface AgentEntry {
@@ -96,14 +96,43 @@ export function pidAlive(pid: number, start?: string): boolean {
  *  live pid means it is waiting or done, not working. */
 export const ACTIVE_MS = 15 * 60_000;
 
+/** The attempt's `.exit` record — `<agentId>.<runId>.exit` (or the
+ *  legacy `<agentId>.exit`) beside the journal. The worker publishes
+ *  it before the registry harvest lands, so a clean finish reads
+ *  here while `exitStatus` is still unwritten — without it a dead
+ *  pid + missing field is indistinguishable from a crash. First
+ *  whitespace token is the code; absent/unreadable → undefined. */
+function exitCodeOf(entry: AgentEntry, eventsPath: string | undefined): number | undefined {
+  if (eventsPath === undefined) return undefined;
+  const agentId =
+    typeof entry.agentId === 'string' && basename(entry.agentId) === entry.agentId
+      ? entry.agentId
+      : basename(eventsPath).replace(/\.events\.jsonl$/, '');
+  const runId =
+    typeof entry.runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.runId)
+      ? entry.runId
+      : undefined;
+  const name = runId === undefined ? `${agentId}.exit` : `${agentId}.${runId}.exit`;
+  try {
+    const v = readFileSync(join(dirname(eventsPath), name), 'utf8')
+      .trim()
+      .split(/\s+/)[0];
+    const n = Number(v);
+    return Number.isInteger(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The worker LED floor for a direct-bound pane, pid-first: a dead
- *  recorded pid is 'blocked' unless the record carries a clean exit
- *  (`stopped`/`exitStatus 0`) — a crash mid-turn must not pass for
- *  either working or idle. `exitStatus`/`stopped` are attempt-scoped
- *  and go stale on a respawn, so they only read when the pid is
- *  actually gone. On a live pid, 'working' still requires a journal
- *  being written: loop records can point at the long-lived
- *  supervisor, and a silent-for-days journal is idle, not working. */
+ *  recorded pid is 'blocked' unless a clean exit is proven —
+ *  `stopped`/`exitStatus 0` in the registry, or the attempt's own
+ *  `.exit 0` beside the journal (published before the harvest).
+ *  `exitStatus`/`stopped` are attempt-scoped and go stale on a
+ *  respawn, so they only read when the pid is actually gone. On a
+ *  live pid, 'working' still requires a journal being written: loop
+ *  records can point at the long-lived supervisor, and a
+ *  silent-for-days journal is idle, not working. */
 export function workerLedState(
   entry: AgentEntry | undefined,
   eventsPath: string | undefined,
@@ -117,6 +146,11 @@ export function workerLedState(
   const alive = pidAlive(entry.pid, entry.pidStart as string | undefined);
   if (!alive) {
     if (entry.stopped === true || entry.exitStatus === 0) return 'idle';
+    if (typeof entry.exitStatus === 'number' && entry.exitStatus !== 0) return 'blocked';
+    // no harvested verdict yet — the attempt's own .exit record is
+    // the next source of truth before a dead pid reads 'blocked'
+    const code = exitCodeOf(entry, eventsPath);
+    if (code === 0) return 'idle';
     return 'blocked';
   }
   // a live pid alone is a lie — 'working' needs a journal provably

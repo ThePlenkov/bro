@@ -62,6 +62,19 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     // a dead pid without a clean exit → blocked (the crash posture)
     assert.equal(workerLedState({ pid: deadPid() }, events), 'blocked');
     assert.equal(workerLedState({ pid: deadPid(), exitStatus: 1 }, events), 'blocked');
+    // but the attempt's own .exit is proof before the registry
+    // harvest lands — a clean finish must not read red
+    mkdirSync(join(base, 'agents'), { recursive: true });
+    const agentEvents = join(base, 'agents', 'native-x.events.jsonl');
+    writeFileSync(agentEvents, '{}\n');
+    writeFileSync(join(base, 'agents', 'native-x.exit'), '0\n');
+    assert.equal(workerLedState({ pid: deadPid() }, agentEvents), 'idle');
+    writeFileSync(join(base, 'agents', 'native-x.exit'), '1\n');
+    assert.equal(workerLedState({ pid: deadPid() }, agentEvents), 'blocked');
+    // runId'd entries read the attempt-scoped name
+    writeFileSync(join(base, 'agents', 'native-x.ab12cd34.exit'), '0\n');
+    rmSync(join(base, 'agents', 'native-x.exit'));
+    assert.equal(workerLedState({ pid: deadPid(), runId: 'ab12cd34' }, agentEvents), 'idle');
     // a dead pid with a clean exit → idle
     assert.equal(workerLedState({ pid: deadPid(), exitStatus: 0 }, events), 'idle');
     assert.equal(workerLedState({ pid: deadPid(), stopped: true }, events), 'idle');
