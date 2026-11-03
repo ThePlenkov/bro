@@ -216,9 +216,16 @@ for (let i = 0; i < args.length; i++) {
     const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
     if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
-  } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+  } else if (/^-\\w$/.test(t)) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else {
+      flags[k] = true
+    }
   } else pos.push(t)
 }
 // real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
@@ -312,7 +319,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: typeof flags.title === 'string' ? flags.title : (flags.title ? String(flags.title) : ''),
+      title: typeof flags.title === 'string' ? flags.title : (flags.title === true ? fail('create --title requires a value') : (flags.title ? String(flags.title) : '')),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
