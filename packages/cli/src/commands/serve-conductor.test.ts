@@ -1570,6 +1570,17 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     assert.doesNotMatch(prompt, /client says otherwise/)
   })
 
+  test('a client-sent systemTurns array with no system turn is dropped too', async () => {
+    // no lift happens here — the wire-sent field must still die
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'ping' }],
+      systemTurns: ['client says otherwise'],
+      stream: false,
+    })
+    assert.doesNotMatch(prompt, /client says otherwise/)
+  })
+
   test("a request carrying only a role:'system' turn answers 400", async () => {
     await expectShape400([{ role: 'system', content: 'ctx' }])
   })
@@ -1587,6 +1598,11 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     await expectShape400([
       { role: 'user', content: 'x' },
       { role: 'system', content: [null] },
+    ])
+    // a text block whose text is not a string would join to silence
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'text', text: null }] },
     ])
     // the nested values a block's renderer touches count too
     await expectShape400([

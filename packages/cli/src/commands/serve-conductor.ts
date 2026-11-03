@@ -337,7 +337,10 @@ function serTurn(m: ClientMessage): string {
  *  stayed would ride the transcript as a user turn. */
 function liftSystemTurns(body: MessagesRequest): MessagesRequest {
   const system = (body.messages ?? []).filter(m => m.role === 'system');
-  if (system.length === 0) return body;
+  // nothing to lift — but a wire-sent `systemTurns` must still die
+  // here: `prefixText` reads the field, and a body passed through
+  // unchanged would let the client dictate the system slot
+  if (system.length === 0) return { ...body, systemTurns: undefined };
   return {
     ...body,
     messages: (body.messages ?? []).filter(m => m.role !== 'system'),
@@ -1833,25 +1836,27 @@ function settleConv(
   wire.sessions.set(key, conv);
 }
 
-/** One turn the wire cannot carry — a role the transcript has no voice
- *  for, or content that is neither text nor blocks. A `role:'system'`
- *  turn IS legal: it is context, and the lift moves it to the system
- *  slot instead of the conversation. */
-/** One content block the renderer cannot read. A `null` block (or a
- *  primitive) throws inside `blockText` instead of answering 400, and
- *  the values a block's renderer TOUCHES are checked too: a
- *  tool_result's content must be a string or an array of objects —
- *  `.map(c => c.text)` on a null entry throws the same way (cubic,
- *  PR #888). */
+/** One content block the renderer cannot read. A `null` block throws
+ *  inside `blockText`, a primitive mis-renders as its `[undefined]`
+ *  marker, and a text block whose `text` is not a string collapses to
+ *  silence through join — broken input the gate answers 400. The
+ *  values a block's renderer TOUCHES are checked too: a tool_result's
+ *  content must be a string or an array of objects — `.map(c => c.text)`
+ *  on a null entry throws the same way (cubic, PR #888). */
 const badBlock = (b: unknown): boolean => {
   if (b === null || typeof b !== 'object') return true;
-  const blk = b as { type?: unknown; content?: unknown };
+  const blk = b as { type?: unknown; content?: unknown; text?: unknown };
+  if (blk.type === 'text') return typeof blk.text !== 'string';
   if (blk.type !== 'tool_result' || blk.content === undefined) return false;
   if (typeof blk.content === 'string') return false;
   if (!Array.isArray(blk.content)) return true;
   return blk.content.some(c => c === null || typeof c !== 'object');
 };
 
+/** One turn the wire cannot carry — a role the transcript has no voice
+ *  for, or content that is neither text nor blocks. A `role:'system'`
+ *  turn IS legal: it is context, and the lift moves it to the system
+ *  slot instead of the conversation. */
 const badTurn = (m: unknown): boolean => {
   if (m === null || typeof m !== 'object') return true;
   const msg = m as ClientMessage;
