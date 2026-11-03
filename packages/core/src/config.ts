@@ -737,6 +737,27 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
+/** The exposed provider names — a list of non-blank strings, else
+ *  undefined (the section carries no list). A value that is not a
+ *  list, or an entry that is not a name, is a diagnostic — the lane
+ *  it names would silently disappear otherwise. */
+function providerNames(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.error('bro.config: serve.providers must be an array of provider names — section dropped');
+    return undefined;
+  }
+  const names: string[] = [];
+  for (const n of raw) {
+    if (typeof n !== 'string' || n.trim() === '') {
+      console.error('bro.config: serve.providers entries must be non-empty strings — entry dropped');
+      continue;
+    }
+    names.push(n.trim());
+  }
+  return names;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -745,15 +766,6 @@ sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
  *  `providers` names the OTHER acp entries the gateway exposes: a
  *  request whose model carries one of their names routes there, so one
  *  listener serves every provider's models. */
-/** The exposed provider names — a list of non-blank strings, else
- *  undefined (the section carries no list). */
-function providerNames(raw: unknown): string[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  return raw
-    .filter((n): n is string => typeof n === 'string' && n.trim() !== '')
-    .map((n) => n.trim());
-}
-
 export const serveSection: ConfigSection<{ backend?: string; providers?: string[] }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;

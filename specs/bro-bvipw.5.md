@@ -97,14 +97,21 @@ gets its own agent and the label it resolves against is the lane's own
   to THAT provider; a bare model and an unknown prefix ride the default;
   the same conversation under two providers is TWO sessions; one lane
   down still serves the other — the dead lane fails on its own verdict
-  (529, unavailable) while the healthy lane answers.
+  (529, unavailable) while the healthy lane answers; a terminal reads
+  back whichever lane spawned it — the `/api/v1/terminals` plane's
+  registry probes every live lane's for the id.
 - `conductorConfig` gains: `serve.providers` exposes the other acp
   entries; the backend is never re-exposed; an exposed non-acp entry is a
-  loud error.
+  loud error; an injected registry does not read the file layer's
+  `serve.providers`; a lane name carrying a slash is a loud error (the
+  router reads the first path segment, so such a lane would be
+  advertised and never reachable).
 - Live, one listener on the operator's port: `GET /v1/models` answers 542
   rows (122 `devin-acp/*`, 420 `opencode-iceman/*`); a real
-  `claude -p --model devin/swe-2-max` and a real
+  `claude -p --model devin-acp/swe-2-high` (the prefix that NAMES the
+  lane) and a real
   `claude -p --model opencode-iceman/opencode-go/iceman-contributor-free`
   both answer `pong`, and the serve journal records
   `conductor.turn backend devin-acp` and
-  `conductor.turn backend opencode-iceman` respectively.
+  `conductor.turn backend opencode-iceman` respectively. A bare id —
+  the operator's own `devin/swe-2-max` — rides the default lane.

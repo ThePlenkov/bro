@@ -116,6 +116,20 @@ function requireAcpEntry(backend: string, providers: Record<string, ProviderEntr
   return entry;
 }
 
+/** A served provider's NAME is a model prefix — the first path segment
+ *  of the id a client asks for. The router reads that segment, so a
+ *  name carrying a slash can never be matched: the lane would be
+ *  advertised and unreachable. A name that cannot be routed is a
+ *  loud config error, never a silent drop. */
+function requireLaneName(name: string): string {
+  if (name.includes('/')) {
+    throw new Error(
+      `provider '${name}' — a served provider name is a model prefix and cannot contain '/'`
+    );
+  }
+  return name;
+}
+
 /** The model pin — env wins over the entry's own model; the client's
  *  requested id is never trusted (provenance maps to served). */
 function resolveModel(env: NodeJS.ProcessEnv, entry: AcpEntry): string | undefined {
@@ -169,11 +183,13 @@ export function conductorConfig(
   const registry = providers ?? ((cfg.providers ?? {}) as Record<string, ProviderEntry>);
   const entry = requireAcpEntry(backend, registry);
   // the gateway's other providers — each one an acp entry of its own,
-  // named so a request can route to it by model
+  // named so a request can route to it by model. An injected registry
+  // owns the whole name space: the file layer's serve.providers must
+  // not leak a name it does not define, exactly like serve.backend.
   const exposed: Record<string, AcpEntry> = {};
-  for (const name of cfg.serve.providers ?? []) {
+  for (const name of providers === undefined ? (cfg.serve.providers ?? []) : []) {
     if (name === backend) continue;
-    exposed[name] = requireAcpEntry(name, registry);
+    exposed[requireLaneName(name)] = requireAcpEntry(name, registry);
   }
   return {
     backend,
@@ -2985,7 +3001,8 @@ async function responses(
       ...laneTurnEnv(route, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
-      openStream: respStreamOpener(rreq, res, route, {        respId,
+      openStream: respStreamOpener(rreq, res, route, {
+        respId,
         body,
         tools,
         store,
@@ -3691,7 +3708,9 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const lanes = await Promise.all([...wire.routes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
-  if (rows.length === 0 && failures.length > 0) {
+  // 502 only when EVERY lane failed — a healthy lane that advertises
+  // nothing is an empty catalog, not an outage
+  if (failures.length > 0 && failures.length === lanes.length) {
     apiError(
       res,
       502,
@@ -3718,6 +3737,15 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   );
 }
 
+/** The terminal registry the /api/v1/terminals plane reads — one
+ *  conductor's own registry, or EVERY lane's at once: under a
+ *  multi-provider gateway a terminal lives under whichever provider
+ *  served the turn that spawned it. */
+export interface TerminalRegistry {
+  snapshot: AcpTerminals['snapshot'];
+  follow: AcpTerminals['follow'];
+}
+
 /** The conductor's `(req, res)` handler PLUS the live link's terminal
  *  registry — the /api/v1/terminals surface reads through it
  *  (bro-eua0d). `terminals()` is undefined until the first link is
@@ -3728,8 +3756,34 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
  *  live devin session. */
 export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
-  terminals(): AcpTerminals | undefined;
+  terminals(): TerminalRegistry | undefined;
   dispose(): void;
+}
+
+/** A terminal created by one provider must be readable whichever
+ *  provider served the turn that spawned it — the id is looked up
+ *  lane by lane and a registry that does not know it is simply not
+ *  the owner. One live lane answers with its own registry unchanged. */
+function laneTerminals(lanes: Map<string, ProviderRoute>): TerminalRegistry | undefined {
+  const regs = [...lanes.values()]
+    .map(lane => lane.pool.live()?.terminals)
+    .filter((t): t is AcpTerminals => t !== undefined);
+  if (regs.length === 0) return undefined;
+  if (regs.length === 1) return regs[0];
+  const resolve = <T>(fn: (reg: AcpTerminals) => T): T => {
+    for (const reg of regs) {
+      try {
+        return fn(reg);
+      } catch {
+        // not this lane's terminal — the next one may know it
+      }
+    }
+    throw new Error('Unknown terminal');
+  };
+  return {
+    snapshot: id => resolve(reg => reg.snapshot(id)),
+    follow: (id, listener) => resolve(reg => reg.follow(id, listener)),
+  };
 }
 
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
@@ -3825,15 +3879,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   };
   const wire: WireCtx = { cfg, opts: wireOpts, link, routes: lanes };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
-    terminals: (): AcpTerminals | undefined => {
-      // the /api/v1/terminals plane reads one provider's registry —
-      // the default lane's, then any lane that has a live peer
-      for (const lane of lanes.values()) {
-        const found = lane.pool.live()?.terminals;
-        if (found !== undefined) return found;
-      }
-      return undefined;
-    },
+    terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
       // — aborting rejects its init and frees the deadline timer
