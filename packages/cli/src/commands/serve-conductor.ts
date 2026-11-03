@@ -49,14 +49,18 @@ import type {
   ProviderWireOpts,
 } from '@broject/providers';
 import { peerAttrs } from './peer.ts';
-import { catalogModels } from './providers.ts';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { catalogModels, type CatalogModel } from './providers.ts';
+import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
 export interface ConductorConfig {
   backend: string;
   entry: AcpEntry;
+  /** The OTHER acp entries the gateway exposes — name → entry. A
+   *  request whose model carries one of their names routes there, so
+   *  one listener serves every provider's models. */
+  providers?: Record<string, AcpEntry>;
   /** The /v1/models source — defaults to the backend itself; a
    *  BRO_PROVIDER_CATALOG pin points at a different providers entry
    *  (a tool-less backend advertises nothing, the catalog still can). */
@@ -164,9 +168,17 @@ export function conductorConfig(
   }
   const registry = providers ?? ((cfg.providers ?? {}) as Record<string, ProviderEntry>);
   const entry = requireAcpEntry(backend, registry);
+  // the gateway's other providers — each one an acp entry of its own,
+  // named so a request can route to it by model
+  const exposed: Record<string, AcpEntry> = {};
+  for (const name of cfg.serve.providers ?? []) {
+    if (name === backend) continue;
+    exposed[name] = requireAcpEntry(name, registry);
+  }
   return {
     backend,
     entry,
+    providers: exposed,
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
@@ -1733,13 +1745,47 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
 }
 
 /** The wire surface `messages` needs — one listener's cfg, provider
- *  opts, link factory, and the session maps it owns. */
+ *  opts, link factory, and the provider lanes it routes across. */
 interface WireCtx {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
-  link: (parent?: OtelCtx) => Promise<AcpPeer>;
+  link: (provider: string, parent?: OtelCtx) => Promise<AcpPeer>;
+  /** Every provider lane the gateway serves — the default backend plus
+   *  the exposed ones, each with its own acp pool. */
+  routes: Map<string, ProviderRoute>;
+}
+
+/** One provider's lane — its entry, its model pin, its acp pool, and
+ *  the conversations it carries. A request rides ONE lane: the one its
+ *  model's provider prefix names, else the default backend. Sessions
+ *  are per lane: the same conversation key under two providers is two
+ *  conversations, each held in its own provider's context. */
+interface ProviderRoute {
+  name: string;
+  cfg: ConductorConfig;
+  opts: ProviderWireOpts;
+  pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
   pendingOpens: Set<string>;
+}
+
+/** The lane a request rides — the model's `<provider>/<model>` prefix
+ *  when it names an exposed provider, else the default backend. A bare
+ *  id (or a prefix naming no lane) rides the default: a model id the
+ *  default's catalog cannot serve is that lane's own verdict. A
+ *  chained /v1/responses request rides its PREDECESSOR's lane — that
+ *  chain already lives in one provider's context. */
+function routeOf(wire: WireCtx, model: string | undefined, lane?: string): ProviderRoute {
+  if (lane !== undefined) {
+    const chained = wire.routes.get(lane);
+    if (chained !== undefined) return chained;
+  }
+  const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
+  if (head !== undefined) {
+    const hit = wire.routes.get(head);
+    if (hit !== undefined) return hit;
+  }
+  return wire.routes.get(wire.cfg.backend) as ProviderRoute;
 }
 
 /** `provider/model` ids are a real pin — resolved against the agent's
@@ -1800,7 +1846,7 @@ function turnError(
  *  every hit: insertion order is the LRU order sweepSessions' overflow
  *  eviction relies on. */
 function settleConv(
-  wire: WireCtx,
+  sessions: Map<string, ConvSession>,
   key: string | undefined,
   conv: ConvSession,
   body: MessagesRequest,
@@ -1832,8 +1878,8 @@ function settleConv(
   conv.busy = false;
   conv.lastReply = view;
   if (key === undefined) return;
-  wire.sessions.delete(key);
-  wire.sessions.set(key, conv);
+  sessions.delete(key);
+  sessions.set(key, conv);
 }
 
 /** One content block the renderer cannot read. A `null` block throws
@@ -1957,33 +2003,35 @@ async function messages(
   // the buffered leg cuts the settled text post-hoc. Either way the
   // recorded reply is `stops.emitted` — exactly what the client saw.
   const stops = new StopFilter(stopSeqs);
+  // the lane this request rides — the model's provider prefix names it
+  const requestModel = requestModelOf(body);
+  const route = routeOf(wire, requestModel);
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(route.name, parent);
     const ac = new AbortController();
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort());
     const msgs = body.messages ?? [];
-    const requestModel = requestModelOf(body);
     out = await acpTurn({
       body,
       msgs,
       prefix: prefixText(body),
       peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
+      cfg: route.cfg,
+      opts: route.opts,
+      sessions: route.sessions,
+      pendingOpens: route.pendingOpens,
       key,
       stopKey,
       parent,
       requestModel,
-      deadline: Date.now() + wire.cfg.timeoutMs,
+      deadline: Date.now() + route.cfg.timeoutMs,
       signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
+      by: `conductor:${route.name}`,
       imageOk: peer.caps?.image === true,
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
@@ -2007,17 +2055,17 @@ async function messages(
               });
               live = new LiveTurn(
                 res,
-                servedModel(requestModel, wire.opts, wire.cfg, body),
+                servedModel(requestModel, route.opts, route.cfg, body),
                 inputTokens,
                 stops,
-                wire.cfg.keepaliveMs ?? 10_000,
+                route.cfg.keepaliveMs ?? 10_000,
                 body.tool_choice?.type !== 'none'
               );
               return live.onUpdate;
             },
     });
   } catch (err) {
-    turnError(res, err, live, wire.cfg.backend, t0);
+    turnError(res, err, live, route.name, t0);
     return;
   }
   // a resend that carried nothing new — replay the recorded reply,
@@ -2054,10 +2102,10 @@ async function messages(
   if (out.conv !== undefined) {
     // a stop hit swallowed post-marker output the session still holds —
     // the conversation diverged from the client's view (bro-vfbyc)
-    settleConv(wire, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
+    settleConv(route.sessions, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
   }
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    backend: route.name,
     model: reply.model,
     stop_reason: view.stopReason,
     stream: body.stream !== false,
@@ -2609,12 +2657,22 @@ const blocksTokens = (blocks: OutBlock[]): number =>
  *  the sessions map; entries pointing at dead sessions prune away. */
 const CHAIN_CAP = 256;
 
+/** One /v1/responses chain entry — the conv key, the consumed count it
+ *  was recorded at, and the LANE it lives in. A chain is held in one
+ *  provider's context, so its continuation rides that provider, not
+ *  whichever one the request's model happens to name. */
+interface ChainEntry {
+  key: string;
+  consumed: number;
+  lane: string;
+}
+
 function pruneChains(
-  chains: Map<string, { key: string; consumed: number }>,
-  sessions: Map<string, ConvSession>
+  chains: Map<string, ChainEntry>,
+  routes: Map<string, ProviderRoute>
 ): void {
   for (const [id, e] of chains) {
-    if (!sessions.has(e.key)) chains.delete(id);
+    if (routes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
   }
   let overflow = chains.size - CHAIN_CAP;
   for (const id of chains.keys()) {
@@ -2729,9 +2787,9 @@ const respShape = (r: ResponsesRequest): string | undefined =>
       : undefined;
 
 /** The model label a recorded reply or the wire config resolves to. */
-function respModel(wire: WireCtx, body: MessagesRequest, recorded?: string): string {
+function respModel(route: ProviderRoute, body: MessagesRequest, recorded?: string): string {
   if (recorded !== undefined && recorded !== '') return recorded;
-  return servedModel(undefined, wire.opts, wire.cfg, body);
+  return servedModel(undefined, route.opts, route.cfg, body);
 }
 
 /** Replay branch — a resend carried nothing new; answer the recorded
@@ -2744,19 +2802,20 @@ interface RespReplayCtx {
   respId: string;
   key: string | undefined;
   store: boolean;
-  chains: Map<string, { key: string; consumed: number }>;
+  chains: Map<string, ChainEntry>;
+  route: ProviderRoute;
 }
 
 function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx): void {
-  const { rreq, out, respId, key, store, chains } = ctx;
+  const { rreq, out, respId, key, store, chains, route } = ctx;
   const lr = out.conv?.lastReply;
   const capped = capBlocks(lr?.blocks ?? [], capCharsOf(rreq.max_output_tokens));
   const blocks = capped.blocks;
-  const model = respModel(wire, {}, lr?.model);
+  const model = respModel(route, {}, lr?.model);
   const status = capped.capped ? 'incomplete' : respStatus(lr?.stopReason ?? '');
   if (store && out.conv !== undefined && key !== undefined) {
-    chains.set(respId, { key, consumed: out.conv.consumed });
-    pruneChains(chains, wire.sessions);
+    chains.set(respId, { key, consumed: out.conv.consumed, lane: route.name });
+    pruneChains(chains, wire.routes);
   }
   if (rreq.stream === true) {
     sseHead(res);
@@ -2819,7 +2878,7 @@ function respConvKey(
 function respStreamOpener(
   rreq: ResponsesRequest,
   res: ServerResponse,
-  wire: WireCtx,
+  route: ProviderRoute,
   d: {
     respId: string;
     body: MessagesRequest;
@@ -2834,7 +2893,7 @@ function respStreamOpener(
     const live = new RespLive(
       res,
       d.respId,
-      servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
+      servedModel(requestModelOf(d.body), route.opts, route.cfg, d.body),
       inputTokens,
       d.store,
       d.tools,
@@ -2849,7 +2908,7 @@ async function responses(
   req: IncomingMessage,
   res: ServerResponse,
   wire: WireCtx,
-  chains: Map<string, { key: string; consumed: number }>,
+  chains: Map<string, ChainEntry>,
   parent: OtelCtx | undefined
 ): Promise<void> {
   const parsed = await parseDialect<ResponsesRequest>(req, res, respShape, responsesToBody);
@@ -2871,10 +2930,14 @@ async function responses(
   }
   const key = respConvKey(req, rreq, body, hit, store);
   const tools = body.tool_choice?.type !== 'none';
+  // the lane — a chained request rides its predecessor's provider (the
+  // chain lives in that provider's context); a fresh one rides the
+  // provider its model names.
+  const route = routeOf(wire, requestModelOf(body), hit?.lane);
   let live: RespLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(route.name, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
@@ -2882,21 +2945,21 @@ async function responses(
       msgs: body.messages ?? [],
       prefix: prefixText(body),
       peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
+      cfg: route.cfg,
+      opts: route.opts,
+      sessions: route.sessions,
+      pendingOpens: route.pendingOpens,
       key,
       stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
       parent,
       requestModel: requestModelOf(body),
-      deadline: Date.now() + wire.cfg.timeoutMs,
+      deadline: Date.now() + route.cfg.timeoutMs,
       signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
+      by: `conductor:${route.name}`,
       imageOk: peer.caps?.image === true,
-      openStream: respStreamOpener(rreq, res, wire, {
+      openStream: respStreamOpener(rreq, res, route, {
         respId,
         body,
         tools,
@@ -2909,7 +2972,7 @@ async function responses(
     return;
   }
   if (out.replay === true) {
-    responsesReplay(res, wire, { rreq, out, respId, key, store, chains });
+    responsesReplay(res, wire, { rreq, out, respId, key, store, chains, route });
     return;
   }
   responsesDeliver(res, wire, {
@@ -2923,6 +2986,7 @@ async function responses(
     live,
     t0,
     chained: hit !== undefined,
+    route,
   });
 }
 
@@ -2941,10 +3005,11 @@ function responsesDeliver(
     respId: string;
     key: string | undefined;
     store: boolean;
-    chains: Map<string, { key: string; consumed: number }>;
+    chains: Map<string, ChainEntry>;
     live: RespLive | undefined;
     t0: number;
     chained: boolean;
+    route: ProviderRoute;
   }
 ): void {
   const reply = d.out.reply as PooledReply;
@@ -2964,7 +3029,7 @@ function responsesDeliver(
   const status = respStatus(wireReason);
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
-      wire,
+      d.route.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -2984,12 +3049,16 @@ function responsesDeliver(
       capped.capped || d.live?.capped === true
     );
     if (d.store) {
-      d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed });
-      pruneChains(d.chains, wire.sessions);
+      d.chains.set(d.respId, {
+        key: d.key,
+        consumed: d.out.conv.consumed,
+        lane: d.route.name,
+      });
+      pruneChains(d.chains, wire.routes);
     }
   }
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    backend: d.route.name,
     dialect: 'responses',
     model: reply.model,
     stop_reason: wireReason,
@@ -3009,7 +3078,7 @@ function responsesDeliver(
     JSON.stringify(
       respEnvelope(
         d.respId,
-        servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
+        servedModel(requestModelOf(d.body), d.route.opts, d.route.cfg, d.body),
         status,
         blocksToOutput(outBlocks),
         d.store,
@@ -3416,7 +3485,10 @@ async function chatCompletions(
   const key = conversationKey(req, body);
   const chatId = `chatcmpl-${randomBytes(12).toString('hex')}`;
   const created = Math.floor(Date.now() / 1000);
-  const model = servedModel(requestModelOf(body), wire.opts, wire.cfg, body);
+  // the lane this request rides — the model's provider prefix names it
+  const requestModel = requestModelOf(body);
+  const route = routeOf(wire, requestModel);
+  const model = servedModel(requestModel, route.opts, route.cfg, body);
   const tools = body.tool_choice?.type !== 'none';
   // one filter per turn — the streamed leg feeds it delta-by-delta,
   // the buffered leg cuts the settled text post-hoc; the recorded
@@ -3425,7 +3497,7 @@ async function chatCompletions(
   let live: ChatLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(route.name, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
@@ -3433,17 +3505,17 @@ async function chatCompletions(
       msgs: body.messages ?? [],
       prefix: prefixText(body),
       peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
+      cfg: route.cfg,
+      opts: route.opts,
+      sessions: route.sessions,
+      pendingOpens: route.pendingOpens,
       key,
       stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
       parent,
-      requestModel: requestModelOf(body),
-      deadline: Date.now() + wire.cfg.timeoutMs,
+      requestModel,
+      deadline: Date.now() + route.cfg.timeoutMs,
       signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
+      by: `conductor:${route.name}`,
       imageOk: peer.caps?.image === true,
       openStream:
         creq.stream === true
@@ -3466,7 +3538,20 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, wire, { creq, body, out, key, chatId, created, model, tools, live, stops, t0 });
+  chatDeliver(res, {
+    creq,
+    body,
+    out,
+    key,
+    chatId,
+    created,
+    model,
+    tools,
+    live,
+    stops,
+    t0,
+    route,
+  });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3475,7 +3560,6 @@ async function chatCompletions(
  *  buffered completion. */
 function chatDeliver(
   res: ServerResponse,
-  wire: WireCtx,
   d: {
     creq: ChatRequest;
     body: MessagesRequest;
@@ -3488,6 +3572,7 @@ function chatDeliver(
     live: ChatLive | undefined;
     stops: StopFilter;
     t0: number;
+    route: ProviderRoute;
   }
 ): void {
   const o = chatOutcome(d.out, d.tools);
@@ -3512,7 +3597,7 @@ function chatDeliver(
       : o.outTokens;
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
-      wire,
+      d.route.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -3536,7 +3621,7 @@ function chatDeliver(
     total_tokens: o.inputTokens + outTokens,
   };
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    backend: d.route.name,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
     stop_reason: stopReason,
@@ -3573,42 +3658,58 @@ function chatDeliver(
   );
 }
 
-/** The anthropic /v1/models rows — the configured catalog source
- *  (`BRO_PROVIDER_CATALOG`, else the backend itself) through the SAME
- *  `bro providers models` surface, so ids arrive `<entry>/<model>` and
- *  re-pin on /v1/messages. */
-async function models(
-  res: ServerResponse,
-  cfg: ConductorConfig,
-  opts: ProviderWireOpts
-): Promise<void> {
-  try {
-    const source = cfg.catalog ?? { name: cfg.backend, entry: cfg.entry };
-    const list = await catalogModels(source.name, source.entry, { acp: opts.acp });
-    const data = list.map(m => ({
-      type: 'model',
-      id: m.id,
-      display_name: m.name ?? m.id,
-      created_at: '2025-01-01T00:00:00Z',
-    }));
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        object: 'list',
-        data,
-        has_more: false,
-        first_id: data[0]?.id ?? null,
-        last_id: data[data.length - 1]?.id ?? null,
-      })
-    );
-  } catch (err) {
+/** The anthropic /v1/models rows — the UNION of every lane's catalog,
+ *  through the SAME `bro providers models` surface, so ids arrive
+ *  `<entry>/<model>` and re-pin on /v1/messages. A lane whose catalog
+ *  cannot be read is skipped, not fatal: one provider being down must
+ *  not blind the other's models. Every lane down IS a 502. */
+async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+  const rows: CatalogModel[] = [];
+  const seen = new Set<string>();
+  const failures: string[] = [];
+  for (const lane of wire.routes.values()) {
+    // the catalog override answers for the DEFAULT lane only — an
+    // exposed lane advertises its own entry's models
+    const source =
+      lane.name === wire.cfg.backend && wire.cfg.catalog !== undefined
+        ? wire.cfg.catalog
+        : { name: lane.name, entry: lane.cfg.entry };
+    try {
+      const list = await catalogModels(source.name, source.entry, { acp: lane.opts.acp });
+      for (const m of list) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        rows.push(m);
+      }
+    } catch (err) {
+      failures.push(`${lane.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (rows.length === 0 && failures.length > 0) {
     apiError(
       res,
       502,
       'api_error',
-      `bro conductor: ${err instanceof Error ? err.message : String(err)}`
+      `bro conductor: ${failures.join('; ')}`
     );
+    return;
   }
+  const data = rows.map(m => ({
+    type: 'model',
+    id: m.id,
+    display_name: m.name ?? m.id,
+    created_at: '2025-01-01T00:00:00Z',
+  }));
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(
+    JSON.stringify({
+      object: 'list',
+      data,
+      has_more: false,
+      first_id: data[0]?.id ?? null,
+      last_id: data[data.length - 1]?.id ?? null,
+    })
+  );
 }
 
 /** The conductor's `(req, res)` handler PLUS the live link's terminal
@@ -3643,34 +3744,96 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   // model pin and session reuse without an OTLP collector
   const common = gitCommonDir(cfg.cwd);
   if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'));
-  // warm pool: one acp child serves every /v1/messages turn — spawn +
-  // initialize is paid once per listener; session/new per request is
-  // cheap and concurrent sessions multiplex on the same connection.
-  // A dead transport drops the link so the next request respawns.
-  const pool = acpLinkPool(`conductor:${cfg.backend}`, cfg.entry, wireOpts, cfg.timeoutMs);
-  // retained conversations — one acp session per client conversation
-  // (x-bro-session pin or history fingerprint). Transport death kills
-  // every session it carried, so the death hook drops the map.
-  const sessions = new Map<string, ConvSession>();
-  pool.onDeath(() => dropSessions(sessions));
-  // keys whose first session/new is in flight — a concurrent same-key
-  // request must not open a twin (the loser would leak unmapped)
-  const pendingOpens = new Set<string>();
+  // one lane per served provider — the default backend plus every
+  // exposed one. Each lane owns its acp pool, its model pin and its
+  // conversations: a request rides exactly one lane, chosen by the
+  // provider prefix on the requested model.
+  const lanes = new Map<string, ProviderRoute>();
+  // the in-process seam resolves PER LANE — a gateway hands each
+  // provider its own agent, and the spawn label names the lane.
+  const lanePeer = (name: string): AgentApp | undefined => {
+    const peer = wireOpts.acp?.peer;
+    if (peer === undefined) return undefined;
+    return typeof peer === 'function' ? peer(`conductor:${name}`) : peer;
+  };
+  const addLane = (
+    name: string,
+    entry: AcpEntry,
+    laneCfg: ConductorConfig,
+    laneOpts: ProviderWireOpts
+  ): void => {
+    // warm pool: one acp child serves every turn of its lane — spawn +
+    // initialize is paid once per provider per listener; session/new
+    // per request is cheap and concurrent sessions multiplex on the
+    // same connection. A dead transport drops the link so the next
+    // request respawns.
+    const pool = acpLinkPool(`conductor:${name}`, entry, laneOpts, laneCfg.timeoutMs);
+    // retained conversations — one acp session per client conversation
+    // (x-bro-session pin or history fingerprint). Transport death kills
+    // every session it carried, so the death hook drops the map.
+    const sessions = new Map<string, ConvSession>();
+    pool.onDeath(() => dropSessions(sessions));
+    lanes.set(name, {
+      name,
+      cfg: laneCfg,
+      opts: laneOpts,
+      pool,
+      sessions,
+      // keys whose first session/new is in flight — a concurrent
+      // same-key request must not open a twin (the loser would leak
+      // unmapped)
+      pendingOpens: new Set<string>(),
+    });
+  };
+  addLane(
+    cfg.backend,
+    cfg.entry,
+    cfg,
+    { ...wireOpts, acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) } }
+  );
+  for (const [name, entry] of Object.entries(cfg.providers ?? {})) {
+    // an exposed lane serves ITS entry's own model — the default's env
+    // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
+    // every provider sharing the listener.
+    addLane(
+      name,
+      entry,
+      { ...cfg, backend: name, entry, model: entry.model, providers: undefined },
+      {
+        ...wireOpts,
+        model: entry.model,
+        acp: { ...wireOpts.acp, peer: lanePeer(name) },
+      }
+    );
+  }
   // /v1/responses chain ledger: response id → the conv key + the
   // consumed count it was recorded at. The count is what makes a
   // previous_response_id a real predecessor: a session that moved
-  // past it means the caller branched — rejected, not resumed.
-  const chains = new Map<string, { key: string; consumed: number }>();
-  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent);
-  const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens };
-  return Object.assign(conductorDispatch(wire, chains, cfg, wireOpts), {
-    terminals: () => pool.live()?.terminals,
+  // past it means the caller branched — rejected, not resumed. The
+  // lane rides along: a chain lives in one provider's context.
+  const chains = new Map<string, ChainEntry>();
+  const link = async (provider: string, parent?: OtelCtx): Promise<AcpPeer> => {
+    const lane = lanes.get(provider);
+    if (lane === undefined) throw new Error(`bro conductor: no provider lane '${provider}'`);
+    return lane.pool.link(parent);
+  };
+  const wire: WireCtx = { cfg, opts: wireOpts, link, routes: lanes };
+  return Object.assign(conductorDispatch(wire, chains, cfg), {
+    terminals: (): AcpTerminals | undefined => {
+      // the /api/v1/terminals plane reads one provider's registry —
+      // the default lane's, then any lane that has a live peer
+      for (const lane of lanes.values()) {
+        const found = lane.pool.live()?.terminals;
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    },
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
       // — aborting rejects its init and frees the deadline timer
       // that would otherwise pin the loop past server close
       poolAbort.abort();
-      pool.dispose();
+      for (const lane of lanes.values()) lane.pool.dispose();
     },
   });
 }
@@ -3680,9 +3843,8 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
  *  IS the allowlist guard it wants to see. */
 function conductorDispatch(
   wire: WireCtx,
-  chains: Map<string, { key: string; consumed: number }>,
-  cfg: ConductorConfig,
-  wireOpts: ProviderWireOpts
+  chains: Map<string, ChainEntry>,
+  cfg: ConductorConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? '/').split('?')[0];
@@ -3702,7 +3864,7 @@ function conductorDispatch(
         await countTokens(req, res);
         return;
       case 'GET /v1/models':
-        await models(res, cfg, wireOpts);
+        await models(res, wire);
         return;
       default:
         apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`);

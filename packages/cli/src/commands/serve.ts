@@ -2504,7 +2504,10 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`);
+    // every lane the gateway serves — the default backend plus the
+    // exposed providers, each reachable by its own model prefix
+    const lanes = [conductorCfg.backend, ...Object.keys(conductorCfg.providers ?? {})];
+    console.log(`provider: /v1/* → acp conductor (${lanes.join(', ')})`);
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }
