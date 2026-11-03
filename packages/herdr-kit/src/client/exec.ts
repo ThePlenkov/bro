@@ -54,9 +54,15 @@ export function callOk(args: string[]): boolean {
   return callOut(args).code === 0;
 }
 
+/** Bytes — the async capture path's ceiling: `.result` envelopes are
+ *  small, and a noisy child must not eat memory inside the fuse. */
+const OUT_CAP_BYTES = 1024 * 1024;
+
 /** Async twin of `callOut` — same short fuse through a real child,
  *  for callers whose own event loop must not block (a connector probe
- *  inside a timeout race: a spawnSync there is unpreemptable). */
+ *  inside a timeout race: a spawnSync there is unpreemptable). Output
+ *  decodes as utf8 per chunk boundary — a multibyte character split
+ *  across chunks arrives whole, capped at OUT_CAP_BYTES. */
 export function callOutAsync(args: string[]): Promise<{ code: number; out: string }> {
   return new Promise(resolve => {
     let out = '';
@@ -75,8 +81,9 @@ export function callOutAsync(args: string[]): Promise<{ code: number; out: strin
         p.kill('SIGKILL');
         finish(-1);
       }, HERDR_TIMEOUT_MS);
-      p.stdout?.on('data', (c: Buffer) => {
-        out += c.toString('utf8');
+      p.stdout?.setEncoding('utf8');
+      p.stdout?.on('data', (c: string) => {
+        if (out.length < OUT_CAP_BYTES) out += c;
       });
       p.on('error', () => {
         clearTimeout(timer);
@@ -92,9 +99,34 @@ export function callOutAsync(args: string[]): Promise<{ code: number; out: strin
   });
 }
 
-/** Async twin of `call` — fire-and-forget without blocking the loop. */
-export async function callAsync(args: string[]): Promise<void> {
-  await callOutAsync(args);
+/** Async twin of `call` — fire-and-forget without blocking the loop
+ *  and without capturing output nobody reads. */
+export function callAsync(args: string[]): Promise<void> {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      const p = spawn(herdrBin(), args, { stdio: 'ignore', env: process.env });
+      const timer = setTimeout(() => {
+        p.kill('SIGKILL');
+        finish();
+      }, HERDR_TIMEOUT_MS);
+      p.on('error', () => {
+        clearTimeout(timer);
+        finish();
+      });
+      p.on('close', () => {
+        clearTimeout(timer);
+        finish();
+      });
+    } catch {
+      finish();
+    }
+  });
 }
 
 /** Async twin of `callJson` — `.result` or undefined on any failure. */

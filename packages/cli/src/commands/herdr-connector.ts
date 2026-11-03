@@ -77,6 +77,16 @@ async function paneKind(pane: string, deps: ReportBackDeps): Promise<string | un
   return kind === '' ? undefined : kind;
 }
 
+/** The env gate — this pane's id when HERDR_PANE_ID and a non-empty
+ *  HERDR_SOCKET_PATH are both set, else undefined (the no-op world). */
+function herdrPane(env: NodeJS.ProcessEnv): string | undefined {
+  const pane = env.HERDR_PANE_ID;
+  const socket = env.HERDR_SOCKET_PATH;
+  return pane === undefined || pane === '' || socket === undefined || socket === ''
+    ? undefined
+    : pane;
+}
+
 /** The report-back decision, in order — every gate is a silent skip:
  *  not under herdr, report-back not configured for this kind, pane
  *  agent unreadable. The setting is read before `agent get` so a
@@ -89,12 +99,8 @@ export async function reportBackArgs(
   env: NodeJS.ProcessEnv = process.env,
   deps: ReportBackDeps = {}
 ): Promise<string[] | undefined> {
-  const pane = env.HERDR_PANE_ID;
-  if (pane === undefined || pane === '') {
-    return undefined;
-  }
-  const socket = env.HERDR_SOCKET_PATH;
-  if (socket === undefined || socket === '') {
+  const pane = herdrPane(env);
+  if (pane === undefined) {
     return undefined;
   }
   const setting = reportBackSetting(ctx.dir, deps);
@@ -105,10 +111,9 @@ export async function reportBackArgs(
     return undefined;
   }
   const kind = await paneKind(pane, deps);
-  if (kind === undefined || !reportBackEnabled(setting, kind)) {
-    return undefined;
-  }
-  return ['agent', 'prompt', pane, reportBackMessage(report)];
+  return kind !== undefined && reportBackEnabled(setting, kind)
+    ? ['agent', 'prompt', pane, reportBackMessage(report)]
+    : undefined;
 }
 
 export const herdrConnector: Connector = {
