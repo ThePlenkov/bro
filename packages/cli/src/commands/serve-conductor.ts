@@ -1837,14 +1837,29 @@ function settleConv(
  *  for, or content that is neither text nor blocks. A `role:'system'`
  *  turn IS legal: it is context, and the lift moves it to the system
  *  slot instead of the conversation. */
-const badTurn = (m: unknown): boolean =>
-  m === null ||
-  typeof m !== 'object' ||
-  ((m as ClientMessage).role !== 'user' &&
-    (m as ClientMessage).role !== 'assistant' &&
-    (m as ClientMessage).role !== 'system') ||
-  (typeof (m as ClientMessage).content !== 'string' &&
-    !Array.isArray((m as ClientMessage).content));
+/** One content block the renderer cannot read. A `null` block (or a
+ *  primitive) throws inside `blockText` instead of answering 400, and
+ *  the values a block's renderer TOUCHES are checked too: a
+ *  tool_result's content must be a string or an array of objects —
+ *  `.map(c => c.text)` on a null entry throws the same way (cubic,
+ *  PR #888). */
+const badBlock = (b: unknown): boolean => {
+  if (b === null || typeof b !== 'object') return true;
+  const blk = b as { type?: unknown; content?: unknown };
+  if (blk.type !== 'tool_result' || blk.content === undefined) return false;
+  if (typeof blk.content === 'string') return false;
+  if (!Array.isArray(blk.content)) return true;
+  return blk.content.some(c => c === null || typeof c !== 'object');
+};
+
+const badTurn = (m: unknown): boolean => {
+  if (m === null || typeof m !== 'object') return true;
+  const msg = m as ClientMessage;
+  if (msg.role !== 'user' && msg.role !== 'assistant' && msg.role !== 'system') return true;
+  if (typeof msg.content === 'string') return false;
+  if (!Array.isArray(msg.content)) return true;
+  return msg.content.some(badBlock);
+};
 
 /** The messages shape gate — the canonical body, or undefined when the
  *  array is missing, empty, or holds a turn the wire cannot carry.

@@ -1582,6 +1582,23 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     await expectShape400([{ role: 'tool', content: 'x' }])
   })
 
+  test('a block the renderer cannot read answers 400, not a 500', async () => {
+    // a null block throws inside blockText — the shape gate owns it
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [null] },
+    ])
+    // the nested values a block's renderer touches count too
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: [null] }] },
+    ])
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: 5 }] },
+    ])
+  })
+
   test('a rate-limited backend answers 429 + Retry-After', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' })
     const { r, close } = await postMessages(fake)
