@@ -1757,7 +1757,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     slot?.base,
     slot?.bottom,
     ctx.backend,
-    ctx.cfg.autoMerge
+    ctx.cfg.autoMerge && !ctx.act.requireApproval
   );
   ctx.stage = 'prompt write';
   try {
@@ -2244,8 +2244,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // the member still parks on the mergeTimeoutMin clock: a PR GitHub
   // never lands (auto-merge unarmed, checks never green) must not
   // wait forever.
-  const autoMergeTimedOut =
-    ctx.cfg.autoMerge && Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
+  const autoMergeTimedOut = Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
   const kind =
     ctx.cfg.autoMerge && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
       ? autoMergeTimedOut
