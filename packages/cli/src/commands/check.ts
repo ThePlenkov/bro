@@ -18,7 +18,7 @@
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process'
-import { accessSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { accessSync, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
@@ -276,7 +276,7 @@ function spawnTarget(bin: SverkaBin): { file: string; args: string[] } {
   return bin
 }
 
-function spawnRun(bin: SverkaBin, root: string, args: string[], env?: Record<string, string>) {
+function spawnRun(bin: SverkaBin, root: string, args: string[], env: Record<string, string> = {}) {
   const target = spawnTarget(bin)
   return spawnSync(target.file, [...target.args, ...args], {
     cwd: root,
@@ -284,7 +284,7 @@ function spawnRun(bin: SverkaBin, root: string, args: string[], env?: Record<str
     // step stdout/stderr ride inside the JSON payload — headroom for
     // chatty checks
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, NO_COLOR: '1', ...(env ?? {}) },
+    env: { ...process.env, NO_COLOR: '1', ...env },
   })
 }
 
@@ -326,8 +326,8 @@ function isSafeReportPath(root: string, file: string): boolean {
     const rel = relative(runsDir, resolvedFile)
     const parts = rel.split(sep).filter((p) => p !== '' && p !== '.')
     let cur = runsDir
-    for (let i = 0; i < parts.length; i += 1) {
-      cur = join(cur, parts[i]!)
+    for (const part of parts) {
+      cur = join(cur, part)
       try {
         const st = lstatSync(cur)
         if (st.isSymbolicLink()) {
@@ -371,6 +371,47 @@ function isValidStep(s: unknown): s is SverkaStep {
   )
 }
 
+function readCandidateReport(
+  root: string,
+  id: string
+): { data: SverkaRunData; durationMs?: number } | undefined {
+  const runsDir = join(root, '.sverka', 'runs')
+  const file = join(runsDir, id, 'report.json')
+  try {
+    if (!isSafeReportPath(root, file)) {
+      return undefined
+    }
+  } catch {
+    return undefined
+  }
+  let parsed: { schema?: string; data?: unknown; durationMs?: number }
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+      schema?: string
+      data?: unknown
+      durationMs?: number
+    }
+  } catch {
+    return undefined
+  }
+  if (parsed.schema !== 'sverka.run/v1') {
+    return undefined
+  }
+  if (parsed.data === null || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
+    return undefined
+  }
+  const data = parsed.data as SverkaRunData
+  if (data.steps !== undefined) {
+    if (!Array.isArray(data.steps) || !data.steps.every(isValidStep)) {
+      return undefined
+    }
+  }
+  return {
+    data,
+    ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
+  }
+}
+
 function readRunReport(
   root: string,
   runId?: string
@@ -379,40 +420,9 @@ function readRunReport(
   if (runId) candidates.push(runId)
   for (const id of candidates) {
     if (!id) continue
-    const runsDir = join(root, '.sverka', 'runs')
-    const candidateDir = join(runsDir, id)
-    const file = join(candidateDir, 'report.json')
-    try {
-      if (!isSafeReportPath(root, file)) {
-        continue
-      }
-    } catch {
-      continue
-    }
-    try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
-        schema?: string
-        data?: unknown
-        durationMs?: number
-      }
-      if (parsed.schema !== 'sverka.run/v1') {
-        continue
-      }
-      if (parsed.data === null || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
-        continue
-      }
-      const data = parsed.data as SverkaRunData
-      if (data.steps !== undefined) {
-        if (!Array.isArray(data.steps) || !data.steps.every(isValidStep)) {
-          continue
-        }
-      }
-      return {
-        data,
-        ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
-      }
-    } catch {
-      continue
+    const recovered = readCandidateReport(root, id)
+    if (recovered) {
+      return recovered
     }
   }
   return undefined
