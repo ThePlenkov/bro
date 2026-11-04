@@ -201,6 +201,7 @@ import {
   type EventsStreamBus,
 } from '../planes/stream.ts';
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
+import { isProviderPath } from './serve-surfaces.ts';
 import {
   conductorConfig,
   conductorProxy,
@@ -1266,7 +1267,7 @@ async function routeProvider(
   token: string,
   statePathHint: string
 ): Promise<boolean> {
-  if (!pathname.startsWith('/v1/')) {
+  if (!isProviderPath(pathname)) {
     return false;
   }
   const wantsBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
@@ -2521,9 +2522,11 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
+    console.log(
+      `provider: /v1/*, /anthropic/v1/*, /openai/v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`
+    );
   } else if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
+    console.log(`provider: /v1/*, /anthropic/v1/*, /openai/v1/* → ${providerCfg.upstream}`);
   }
   // the session token — the "local session context" made concrete.
   // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
