@@ -284,6 +284,38 @@ function cursorHooksJson() {
   return `${JSON.stringify(body, null, 2)}\n`;
 }
 
+/** Devin's hook manifest is generated, not hand-written: the event map,
+ * matchers, timeouts, and the bounded fallback live here so check:plugins
+ * detects any drift instead of linting a JSON file. The command calls
+ * `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` directly — the shared launcher owns
+ * root resolution AND the watchdog. The fallback (P unset, e.g. an older
+ * client that never exported the root var) is a `bro hooks` bounded by a
+ * sleep/kill watcher pair — portable where GNU `timeout` is absent
+ * (stock macOS), never able to outlive the hook budget. */
+function devinHooksJson() {
+  // the fallback's 8s kill budget — well under the 10s minimum hook timeout
+  const cmd = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `( bro hooks ${event} & c=$!; ` +
+    `( sleep 8; kill "$c" 2>/dev/null ) & w=$!; ` +
+    `wait "$c" 2>/dev/null; kill "$w" 2>/dev/null ) || true; fi; exit 0`;
+  const hook = (event, timeout, matcher = '') => ({
+    matcher,
+    hooks: [{ type: 'command', command: cmd(event), timeout }],
+  });
+  const body = {
+    SessionStart: [hook('session-start', 20)],
+    PostCompaction: [hook('post-compaction', 20)],
+    UserPromptSubmit: [hook('prompt-submit', 15)],
+    PostToolUse: [hook('post-tool', 10, '^exec$')],
+    Stop: [hook('stop', 25)],
+    PermissionRequest: [hook('permission', 10, '^exec$')],
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
+}
+
 function opencodeReadme() {
   return `# bro — opencode plugin
 
@@ -595,7 +627,7 @@ const ADAPTERS = {
   },
   'plugins/devin/bro': {
     'plugin.json': 'plugin.json',
-    'hooks.json': 'hooks.json',
+    'hooks.json': [devinHooksJson()],
   },
   'plugins/claude/bro': {
     // hand-written (Claude event names). Not hooks/hooks.json: that path
@@ -658,32 +690,10 @@ function emit(path, content) {
   writeFileSync(p, content);
 }
 
-// devin hooks.json contract: one direct `${DEVIN_PLUGIN_ROOT}/hooks/run.sh`
-// call per event — the shared launcher owns root resolution AND the
-// watchdog. The old inline preamble resolved P through a three-var chain
-// and fell back to a bare `bro hooks` with NO watchdog: an empty P sent
-// every hook down the unbounded path and the host killed it at the hook
-// budget. Lint the contract here, next to the emit that copies it into
-// plugins/devin/bro — a client-plugin rule lives with the plugin
-// machinery, not in a package test.
-{
-  const body = existsSync(join(ROOT, 'hooks.json'))
-    ? readFileSync(join(ROOT, 'hooks.json'), 'utf8')
-    : '';
-  // unbounded `bro hooks` is the kill pattern; `timeout N bro hooks`
-  // is the bounded fallback for a hook env without DEVIN_PLUGIN_ROOT —
-  // strip the bounded forms before testing for the bare call
-  const stripped = body.replace(/timeout \d+ bro hooks/g, '');
-  const thin =
-    /\$\{DEVIN_PLUGIN_ROOT\}/.test(body) &&
-    /hooks\/run\.sh/.test(body) &&
-    !/CLAUDE_PLUGIN_ROOT|npx|bro hooks/.test(stripped);
-  if (!thin) {
-    drift.push(
-      'hooks.json (devin hook contract — direct run.sh call, no env chain, no unbounded bro fallback)'
-    );
-  }
-}
+// the devin hook manifest is generated like every other artifact — the
+// root file and the adapter copy both emit from devinHooksJson(), so a
+// hand-edit to either surfaces as drift here, not as a separate lint
+emit('hooks.json', devinHooksJson());
 
 // keep every `@broject/bro@…` npx pin equal to plugin.json's version
 for (const src of VERSIONED_SOURCES) {
