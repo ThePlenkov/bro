@@ -1689,7 +1689,12 @@ function execNudges(cmd: string): string[] {
 
 function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string): string[] {
   const lines: string[] = [];
-  lines.push(...armingLinesForOutcome(outcome, cmd, sessionId));
+  if (outcome !== false) {
+    lines.push(...armPostTool(cmd, sessionId));
+  }
+  if (outcome === true) {
+    lines.push(...execNudges(cmd));
+  }
   return lines;
 }
 
