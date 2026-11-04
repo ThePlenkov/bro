@@ -670,9 +670,14 @@ function emit(path, content) {
   const body = existsSync(join(ROOT, 'hooks.json'))
     ? readFileSync(join(ROOT, 'hooks.json'), 'utf8')
     : '';
+  // unbounded `bro hooks` is the kill pattern; `timeout N bro hooks`
+  // is the bounded fallback for a hook env without DEVIN_PLUGIN_ROOT —
+  // strip the bounded forms before testing for the bare call
+  const stripped = body.replace(/timeout \d+ bro hooks/g, '');
   const thin =
-    /\$\{DEVIN_PLUGIN_ROOT\}\/hooks\/run\.sh/.test(body) &&
-    !/CLAUDE_PLUGIN_ROOT|command -v bro|npx/.test(body);
+    /\$\{DEVIN_PLUGIN_ROOT\}/.test(body) &&
+    /hooks\/run\.sh/.test(body) &&
+    !/CLAUDE_PLUGIN_ROOT|npx|bro hooks/.test(stripped);
   if (!thin) {
     drift.push(
       'hooks.json (devin hook contract — direct run.sh call, no env chain, no unbounded bro fallback)'

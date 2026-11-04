@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" session-start || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks session-start || true; fi; exit 0",
           "timeout": 20
         }
       ]
@@ -17,7 +17,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" post-compaction || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-compaction || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks post-compaction || true; fi; exit 0",
           "timeout": 20
         }
       ]
@@ -29,7 +29,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" prompt-submit || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" prompt-submit || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks prompt-submit || true; fi; exit 0",
           "timeout": 15
         }
       ]
@@ -41,7 +41,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-tool || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks post-tool || true; fi; exit 0",
           "timeout": 10
         }
       ]
@@ -53,7 +53,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" stop || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" stop || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks stop || true; fi; exit 0",
           "timeout": 25
         }
       ]
@@ -65,7 +65,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "\"${DEVIN_PLUGIN_ROOT}/hooks/run.sh\" permission || true",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT}\"; if [ -x \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" permission || true; elif command -v timeout >/dev/null 2>&1 && command -v bro >/dev/null 2>&1; then timeout 8 bro hooks permission || true; fi; exit 0",
           "timeout": 10
         }
       ]
