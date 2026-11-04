@@ -183,7 +183,7 @@ next stage reads:
   `rate_limited` re-enters `route` rather than parking on the same
   chain entry: the route stage honors
   `fleet.routing.<class>.onWall` — `fallthrough` dispatches the next
-  provider in the chain, `wait` answers `queue`→`park`.
+  provider in the chain, `park` answers `queue`→`park`.
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
   complexity verdict: `complex` required, `cheap` skips to merge.
