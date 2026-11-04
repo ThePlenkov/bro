@@ -81,14 +81,21 @@ import {
   unrefPendingChildren,
   withFileLock,
 } from '@broject/core';
-import type { ConnectorCtx, ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core';
+import type {
+  ConnectorCtx,
+  GateContribution,
+  GuardEvent,
+  ProbeReporter,
+  ProbeResult,
+  ProbeTiming,
+} from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
-import type { GuardEvent } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import type { InstallResult } from './githooks.ts';
+import { cliVersion } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { emitRefGuard } from './refguard.ts';
@@ -421,7 +428,12 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd);
+  if (/^\s*(bro|bd)(\s|$)/.test(cmd)) {
+    return true;
+  }
+  return /^\s*(?:bro|npx(?:(?!\s+--package\b)(?:\s+--?[\w-]+(?:=\S+)?))*(?:\s+--?[\w-]+(?:=\S+)?)?\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(\s|$)/.test(
+    cmd
+  );
 }
 
 // --- session arming -----------------------------------------------------------
@@ -973,8 +985,8 @@ let perfBuf: PerfRow[] | null = null;
  *  when rows arrive, so span duration ≈ probe duration (spec
  *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
-  let span: { end: (attrs?: Record<string, unknown>, status?: 'error' | 'ok') => void } | undefined;
-  void lazyOtelSpan().then(otelSpan => {
+  let span: any | undefined;
+  void lazyOtelSpan().then((otelSpan: any) => {
     try {
       span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
     } catch {
@@ -1257,6 +1269,41 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  mid-write sees a stale stamp or a stale extra file, both of which
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
+const DEFAULT_GUARD_EVENTS: readonly string[] = [
+  'session-start',
+  'prompt-submit',
+  'post-tool',
+  'stop',
+];
+
+function guardEventsFromCore(): readonly string[] {
+  try {
+    const core = require('@broject/core');
+    const events = core?.GUARD_EVENTS;
+    if (Array.isArray(events)) {
+      return events as readonly string[];
+    }
+  } catch {
+    // fall through
+  }
+  return DEFAULT_GUARD_EVENTS;
+}
+
+function pruneStaleGuardEvents(gdir: string, coverageEvents: readonly string[]): void {
+  for (const ev of guardEventsFromCore()) {
+    if (!coverageEvents.includes(ev)) {
+      try {
+        rmSync(join(gdir, ev), { force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (!coverageEvents.includes('.trace')) {
+    // handled separately
+  }
+}
+
 export function recordGuardEvents(
   coverage: GuardRun['coverage'],
   repoDir: string = process.cwd()
@@ -1286,35 +1333,7 @@ export function recordGuardEvents(
     const tmp = join(gdir, `.stamp-${process.pid}`);
     writeFileSync(tmp, body);
     renameSync(tmp, join(gdir, '.stamp'));
-    try {
-      const core = require('@broject/core');
-      const GUARD_EVENTS = core?.GUARD_EVENTS ?? [
-        'session-start',
-        'prompt-submit',
-        'post-tool',
-        'stop',
-      ];
-      for (const ev of GUARD_EVENTS) {
-        if (!coverage.events.includes(ev)) {
-          try {
-            rmSync(join(gdir, ev), { force: true });
-          } catch {
-            // ignore
-          }
-        }
-      }
-    } catch {
-      const GUARD_EVENTS = ['session-start', 'prompt-submit', 'post-tool', 'stop'];
-      for (const ev of GUARD_EVENTS) {
-        if (!coverage.events.includes(ev)) {
-          try {
-            rmSync(join(gdir, ev), { force: true });
-          } catch {
-            // ignore
-          }
-        }
-      }
-    }
+    pruneStaleGuardEvents(gdir, coverage.events);
     if (!coverage.trace) {
       try {
         rmSync(join(gdir, '.trace'), { force: true });
@@ -1357,7 +1376,13 @@ async function guardLines(
       // guard's deterministic clauses pass. mode:'off' abstains here;
       // mode:'shadow' decides + journals kind:'guard' verdicts
       judge: () => {
-        if (!judgeConfigMod || !judgeFacadeMod || !appendRowMod) {
+        if (!judgeConfigMod) {
+          return undefined;
+        }
+        if (!judgeFacadeMod) {
+          return undefined;
+        }
+        if (!appendRowMod) {
           return undefined;
         }
         try {
@@ -1405,16 +1430,12 @@ function cachedGoalLines(dir: string, sessionId: string): string[] {
   if (hit && now - hit.ts < GOAL_CACHE_TTL_MS) {
     return hit.lines;
   }
-  try {
-    void lazyGoal()
-      .then(m => {
-        const lines = m.goalContextLines(dir, sessionId);
-        goalCache.set(key, { ts: Date.now(), lines });
-      })
-      .catch(() => {});
-  } catch {
-    // ignore
-  }
+  void lazyGoal()
+    .then(m => {
+      const lines = m.goalContextLines(dir, sessionId);
+      goalCache.set(key, { ts: Date.now(), lines });
+    })
+    .catch(() => {});
   // return cached or empty on first call
   return hit?.lines ?? [];
 }
@@ -1426,16 +1447,12 @@ function cachedHeartbeatLine(dir: string): string | null {
   if (hit && now - hit.ts < HB_CACHE_TTL_MS) {
     return hit.line;
   }
-  try {
-    void lazyHeartbeat()
-      .then(m => {
-        const line = m.heartbeatLine(dir);
-        hbCache.set(key, { ts: Date.now(), line });
-      })
-      .catch(() => {});
-  } catch {
-    // ignore
-  }
+  void lazyHeartbeat()
+    .then(m => {
+      const line = m.heartbeatLine(dir);
+      hbCache.set(key, { ts: Date.now(), line });
+    })
+    .catch(() => {});
   return hit?.line ?? null;
 }
 
@@ -1486,6 +1503,26 @@ async function rehydrateLines(
  *  every probe, marker read, trace tail, and cache key resolves inside
  *  it. Fail-open identical to the hook: a dir outside a bro-enabled
  *  repo yields `lines: []`. */
+async function previousTraceTail(
+  dir: string,
+  sessionId: string
+): Promise<{ entries: any[]; raw: string }> {
+  let tail: { entries: any[]; raw: string } = { entries: [], raw: '' };
+  try {
+    const learn = await lazyLearn().catch(() => null);
+    if (!learn) {
+      return tail;
+    }
+    const hooks = learn.hooksDir(dir);
+    const prev =
+      hooks !== null && sessionId !== '' ? learn.previousTraceFile(hooks, sessionId) : null;
+    tail = prev !== null ? learn.readTraceTail(prev) : { entries: [], raw: '' };
+  } catch {
+    // ignore
+  }
+  return tail;
+}
+
 export async function collectSessionContext(
   dir: string,
   sessionId: string,
@@ -1506,20 +1543,7 @@ export async function collectSessionContext(
     // haystack is the same session-context text + previous-session trace
     // tail the learn connector assembles
     guardLines(dir, 'session-start', sessionId, async () => {
-      let hooks: string | null = null;
-      let prev: string | null = null;
-      let tail: { entries: any[]; raw: string } = { entries: [], raw: '' };
-      try {
-        const learn = await lazyLearn().catch(() => null);
-        if (learn) {
-          hooks = learn.hooksDir(dir);
-          prev =
-            hooks !== null && sessionId !== '' ? learn.previousTraceFile(hooks, sessionId) : null;
-          tail = prev !== null ? learn.readTraceTail(prev) : { entries: [], raw: '' };
-        }
-      } catch {
-        // ignore
-      }
+      const tail = await previousTraceTail(dir, sessionId);
       let trace: any[] = [];
       try {
         const learn = await lazyLearn().catch(() => null);
@@ -1662,6 +1686,12 @@ function execNudges(cmd: string): string[] {
   }
 }
 
+function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string): string[] {
+  const lines: string[] = [];
+  lines.push(...armingLinesForOutcome(outcome, cmd, sessionId));
+  return lines;
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   const lines: string[] = [];
@@ -1679,12 +1709,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // failure. A host that cannot observe outcomes (Codex PostToolUse
   // fires on non-zero exits) over-approximates: a false arm costs one
   // probe that finds nothing, a missed arm loses the gate entirely.
-  if (outcome !== false) {
-    lines.push(...armPostTool(cmd, sessionId));
-  }
-  if (outcome === true) {
-    lines.push(...execNudges(cmd));
-  }
+  lines.push(...armingLinesForOutcome(outcome, cmd, sessionId));
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
   // the same journaled tail — one parallel flight with the probes
@@ -1766,6 +1791,29 @@ async function emitStopGate(input: HookInput): Promise<void> {
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
+function processGateContributions(
+  contributions: GateContribution[],
+  armed: Set<string>
+): { blocked: boolean; gateHints: string[] } {
+  const gateHints: string[] = [];
+  for (const c of contributions) {
+    if (!armed.has(c.aspect)) {
+      if (c.passive) {
+        gateHints.push(c.passive);
+      }
+      continue;
+    }
+    if (c.block) {
+      return { blocked: true, gateHints: [] };
+    }
+    const hint = c.armedHint ?? c.passive;
+    if (hint) {
+      gateHints.push(hint);
+    }
+  }
+  return { blocked: false, gateHints };
+}
+
 async function emitStopGateBody(
   sessionId: string,
   goalP: Promise<string[]>,
@@ -1801,22 +1849,13 @@ async function emitStopGateBody(
       return { text: tail.raw, trace };
     }),
   ]);
-  const gateHints: string[] = [];
-  for (const c of contributions) {
-    if (!armed.has(c.aspect)) {
-      if (c.passive) {
-        gateHints.push(c.passive);
-      }
-      continue;
+  const { blocked, gateHints } = processGateContributions(contributions, armed);
+  if (blocked) {
+    const blocker = contributions.find(c => c.block && armed.has(c.aspect));
+    if (blocker?.block) {
+      emit({ decision: 'block', reason: blocker.block });
     }
-    if (c.block) {
-      emit({ decision: 'block', reason: c.block });
-      return;
-    }
-    const hint = c.armedHint ?? c.passive;
-    if (hint) {
-      gateHints.push(hint);
-    }
+    return;
   }
   // any Stop context re-wakes the host as a new turn — repeating an
   // unchanged gate hint every stop turns an idle wait into a loop
@@ -1981,19 +2020,15 @@ function runCommitHookCommand(event: 'install' | 'uninstall'): void {
 }
 
 function runPrepareCommitMsg(argv: string[]): void {
-  try {
-    void lazyGithooks()
-      .then(m => {
-        try {
-          m.emitCommitTrailers(argv.slice(1));
-        } catch {
-          // fail-open
-        }
-      })
-      .catch(() => {});
-  } catch {
-    // fail-open — provenance must never block a commit
-  }
+  void lazyGithooks()
+    .then(m => {
+      try {
+        m.emitCommitTrailers(argv.slice(1));
+      } catch {
+        // fail-open
+      }
+    })
+    .catch(() => {});
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -2195,22 +2230,24 @@ function runPerf(argv: string[]): void {
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
  *  block a merge (the catch covers a throw before the worker's own). */
-const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
-  'post-merge': emitPostMerge,
-  'post-merge-run': runPostMergeRefresh,
-};
-
 function runPostMergeEvent(event: string | undefined): boolean {
-  const run = POST_MERGE_EVENTS[event ?? ''];
-  if (run === undefined) {
-    return false;
+  if (event === 'post-merge') {
+    try {
+      emitPostMerge(process.cwd());
+    } catch {
+      // fail-open
+    }
+    return true;
   }
-  try {
-    run(process.cwd());
-  } catch {
-    // fail-open
+  if (event === 'post-merge-run') {
+    try {
+      runPostMergeRefresh(process.cwd());
+    } catch {
+      // fail-open
+    }
+    return true;
   }
-  return true;
+  return false;
 }
 
 /** Write the host-derived outcome into `tool_response.success` for the
@@ -2270,6 +2307,58 @@ function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
   return false;
 }
 
+function detectHookClients(raw: unknown): { cursor: boolean; codex: boolean } {
+  const cursor = isCursorHookPayload(raw);
+  const codex =
+    !cursor &&
+    typeof raw === 'object' &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    typeof (raw as { turn_id?: unknown }).turn_id === 'string';
+  return { cursor, codex };
+}
+
+function prepareHookInput(
+  event: string,
+  raw: unknown,
+  cursorClient: boolean
+): { root: string; input: HookInput } {
+  const root = hookProjectDir(raw);
+  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw);
+  input = normalizeToolOutcome(event, input, raw);
+  return { root, input };
+}
+
+async function dispatchWithSpan(
+  event: string,
+  raw: unknown,
+  input: HookInput,
+  spanState: { evSpan: any; evSpanEnded: boolean; evSpanError: any }
+): Promise<void> {
+  try {
+    await dispatchHook(event, raw, input);
+    try {
+      spanState.evSpan?.end();
+    } catch {
+      // ignore
+    }
+    spanState.evSpanEnded = true;
+  } catch (e) {
+    try {
+      spanState.evSpan?.end({}, 'error');
+    } catch {
+      // ignore
+    }
+    if (!spanState.evSpan) {
+      spanState.evSpanError = { attrs: {}, status: 'error' };
+    }
+    spanState.evSpanEnded = true;
+    // hooks fail open — a bro bug must never break the session.
+    console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`);
+    answerCursorPermission(event, input);
+  }
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
@@ -2288,19 +2377,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // stdin before the opt-in check: Cursor's project dir is on the
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw();
-  cursorClient = isCursorHookPayload(raw);
-  codexClient =
-    !cursorClient &&
-    typeof raw === 'object' &&
-    raw !== null &&
-    !Array.isArray(raw) &&
-    typeof (raw as { turn_id?: unknown }).turn_id === 'string';
-  const root = hookProjectDir(raw);
-  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw);
+  const clients = detectHookClients(raw);
+  cursorClient = clients.cursor;
+  codexClient = clients.codex;
   // the post-tool outcome normalizes at this edge — hosts encode
   // success differently (a boolean field, split event names, or not at
   // all), and policy below must not know which host sent the payload
-  input = normalizeToolOutcome(event, input, raw);
+  const { root, input } = prepareHookInput(event, raw, cursorClient);
   // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
   // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
   // gate for a human session that isn't there, so every event is pure
@@ -2331,67 +2414,38 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     process.stdout.write('', () => process.exit(0));
   }, hookDeadlineMs());
   deadlineTimer.unref();
-  let evSpan:
-    | { end: (attrs?: Record<string, unknown>, status?: 'error' | 'ok') => void }
-    | undefined;
-  let evSpanEnded = false;
-  let evSpanError: { attrs?: Record<string, unknown>; status?: 'error' | 'ok' } | undefined;
-  void lazyOtelSpan().then(otelSpan => {
+  const spanState = {
+    evSpan: undefined as any,
+    evSpanEnded: false,
+    evSpanError: undefined as
+      | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
+      | undefined,
+  };
+  void lazyOtelSpan().then((otelSpan: any) => {
     try {
       const span = otelSpan('hook.event', {
         'hook.event': event,
         'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
       });
-      if (evSpanEnded) {
+      if (spanState.evSpanEnded) {
         try {
-          span.end(evSpanError?.attrs, evSpanError?.status);
+          span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
         } catch {
           // ignore
         }
         return;
       }
-      evSpan = span;
+      spanState.evSpan = span;
     } catch {
-      evSpan = undefined;
+      spanState.evSpan = undefined;
     }
   });
-  try {
-    await dispatchHook(event, raw, input);
-    try {
-      if (evSpan) {
-        evSpan.end();
-        evSpanEnded = true;
-      } else {
-        evSpanEnded = true;
-      }
-    } catch {
-      // ignore
-    }
-  } catch (e) {
-    try {
-      if (evSpan) {
-        evSpan.end({}, 'error');
-        evSpanEnded = true;
-      } else {
-        evSpanEnded = true;
-        evSpanError = { attrs: {}, status: 'error' };
-      }
-    } catch {
-      // ignore
-    }
-    // hooks fail open — a bro bug must never break the session.
-    // A permission hook that already answered returned above; this
-    // covers a throw before that answer. The marker line is the
-    // watchdog signal (the latency bench counts it) — exit stays 0.
-    console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`);
-    answerCursorPermission(event, input);
-  } finally {
-    clearTimeout(deadlineTimer);
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-    flushPerf(sessionId, event, t0);
-    // A probe that raced past its budget leaves its bd/gh child running —
-    // unref the stragglers so the hook exits with the answer it sent,
-    // not when the last subprocess closes.
-    unrefPendingChildren();
-  }
+  await dispatchWithSpan(event, raw, input, spanState);
+  clearTimeout(deadlineTimer);
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+  flushPerf(sessionId, event, t0);
+  // A probe that raced past its budget leaves its bd/gh child running —
+  // unref the stragglers so the hook exits with the answer it sent,
+  // not when the last subprocess closes.
+  unrefPendingChildren();
 }

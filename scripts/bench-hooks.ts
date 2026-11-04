@@ -125,16 +125,18 @@ function argValue(argv: string[], flag: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-function parseArgs(argv: string[]): Options {
-  const runs = Number(argValue(argv, '--runs') ?? 20);
-  const warmup = Number(argValue(argv, '--warmup') ?? 1);
-  const rawLanes = argValue(argv, '--lanes')?.split(',') ?? [...LANES];
-
-  if (!Number.isFinite(runs) || runs < 3 || !Number.isFinite(warmup) || warmup < 0) {
-    console.error('bench-hooks: need --runs ≥3 and --warmup ≥0');
+function validateRuns(runs: number, warmup: number): void {
+  if (!Number.isFinite(runs) || runs < 3) {
+    console.error('bench-hooks: need --runs ≥3');
     process.exit(2);
   }
+  if (!Number.isFinite(warmup) || warmup < 0) {
+    console.error('bench-hooks: need --warmup ≥0');
+    process.exit(2);
+  }
+}
 
+function validateLanes(rawLanes: string[]): void {
   const laneSet = new Set<string>(LANES);
   const bad = rawLanes.filter(l => !laneSet.has(l));
   if (bad.length > 0) {
@@ -143,6 +145,15 @@ function parseArgs(argv: string[]): Options {
     );
     process.exit(2);
   }
+}
+
+function parseArgs(argv: string[]): Options {
+  const runs = Number(argValue(argv, '--runs') ?? 20);
+  const warmup = Number(argValue(argv, '--warmup') ?? 1);
+  const rawLanes = argValue(argv, '--lanes')?.split(',') ?? [...LANES];
+
+  validateRuns(runs, warmup);
+  validateLanes(rawLanes);
   return {
     runs,
     warmup,
@@ -259,6 +270,12 @@ function countSampleError(row: string, i: number, a: Attempt, prior: number): nu
 
 /** A row's `errors` counts measured runs only — warmup failures are
  *  logged but never gated: a discarded sample must not decide CI. */
+function logWarmupFailure(lane: string, event: string, a: Attempt): void {
+  if (!a.ok) {
+    console.error(`bench-hooks: ${lane}:${event} warmup failed — ${a.detail}`);
+  }
+}
+
 function benchRow(
   lane: Lane,
   event: string,
@@ -279,9 +296,7 @@ function benchRow(
       break;
     }
     if (i < opts.warmup) {
-      if (!a.ok) {
-        console.error(`bench-hooks: ${lane}:${event} warmup failed — ${a.detail}`);
-      }
+      logWarmupFailure(lane, event, a);
       continue;
     }
     if (a.ok) {
@@ -335,6 +350,7 @@ function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opt
   let sha = '';
   try {
     sha = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      // NOSONAR — PATH lookup is the contract
       cwd: ROOT,
       encoding: 'utf8',
     }).stdout.trim();
@@ -369,6 +385,43 @@ function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opt
  *  ANY measured row with errors fails — a broken hook is a failure
  *  whether or not it carries a latency budget. Verdicts go to stderr
  *  under --json so stdout stays parseable. Returns true on failure. */
+function checkBudgetRow(
+  key: string,
+  r: Row | undefined,
+  cap: number,
+  say: (line: string) => void
+): boolean {
+  if (r === undefined) {
+    say(`budget ${key}: no row measured`);
+    return true;
+  }
+  if (r.errors > 0) {
+    say(`OVER ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
+    return true;
+  }
+  if (r.p50 > cap) {
+    say(`OVER ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
+    return true;
+  }
+  say(`ok   ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
+  return false;
+}
+
+function checkUnbudgetedRows(
+  rows: Map<string, Row>,
+  budget: Record<string, number>,
+  say: (line: string) => void
+): boolean {
+  let failed = false;
+  for (const [key, r] of rows) {
+    if (r.errors > 0 && !(key in budget)) {
+      say(`ERR  ${key} errors=${r.errors} — unbudgeted row with failures`);
+      failed = true;
+    }
+  }
+  return failed;
+}
+
 function enforce(rows: Map<string, Row>, budget: Record<string, number>, asJson: boolean): boolean {
   const say = (line: string): void => {
     if (asJson) {
@@ -379,30 +432,12 @@ function enforce(rows: Map<string, Row>, budget: Record<string, number>, asJson:
   };
   let failed = false;
   for (const [key, cap] of Object.entries(budget)) {
-    const r = rows.get(key);
-    if (r === undefined) {
-      say(`budget ${key}: no row measured`);
-      failed = true;
-      continue;
-    }
-    if (r.p50 > cap || r.errors > 0) {
+    if (checkBudgetRow(key, rows.get(key), cap, say)) {
       failed = true;
     }
-    if (r.errors > 0) {
-      say(`OVER ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
-      continue;
-    }
-    if (r.p50 > cap) {
-      say(`OVER ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
-      continue;
-    }
-    say(`ok   ${key} p50=${r.p50}ms budget=${cap}ms errors=${r.errors}`);
   }
-  for (const [key, r] of rows) {
-    if (r.errors > 0 && !(key in budget)) {
-      say(`ERR  ${key} errors=${r.errors} — unbudgeted row with failures`);
-      failed = true;
-    }
+  if (checkUnbudgetedRows(rows, budget, say)) {
+    failed = true;
   }
   return failed;
 }
