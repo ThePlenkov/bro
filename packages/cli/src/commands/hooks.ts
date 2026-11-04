@@ -80,13 +80,11 @@ import {
   stopGateContributions,
   unrefPendingChildren,
   withFileLock,
-} from '@broject/core';
-import type {
-  ConnectorCtx,
-  GateContribution,
-  ProbeReporter,
-  ProbeResult,
-  ProbeTiming,
+  type ConnectorCtx,
+  type GateContribution,
+  type ProbeReporter,
+  type ProbeResult,
+  type ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
 import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard';
