@@ -637,11 +637,11 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
       resume: last.stage,
     });
   }
-  const recheck = run.engines.get(stage.engine)?.recheck;
-  if (recheck === undefined) {
+  const handler = run.engines.get(stage.engine);
+  if (handler?.recheck === undefined) {
     return refire(run, stage, last, to);
   }
-  const r = await recheck(stageCall(run, stage, to));
+  const r = await handler.recheck(stageCall(run, stage, to));
   if (r === 'pending') {
     return { halt: result(run, 'park', last.stage, { detail: 'side effect still in flight' }) };
   }

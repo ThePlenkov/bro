@@ -98,6 +98,19 @@ describe('journal storage', () => {
     assert.equal(rows[0].seq, 2);
   });
 
+  test('rows with non-positive seq or attempt are dropped — budgets start at 1', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    writeFileSync(
+      file,
+      [row({ seq: 0 }), row({ seq: 3, attempt: -1 }), row({ seq: 2 })]
+        .map(r => `${JSON.stringify(r)}\n`)
+        .join('')
+    );
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].seq, 2);
+  });
+
   test('a row missing `formula_sha` is dropped — a missing hash would crash the drift check', () => {
     const file = join(tmp(), 'r1.journal.jsonl');
     const noSha = { ...row({ seq: 5 }) };
@@ -146,6 +159,11 @@ describe('pipelineJournalPath / openPipelineJournal', () => {
 
   test('openPipelineJournal is null outside a repo', () => {
     assert.equal(openPipelineJournal({ dir: tmp(), runId: 'r1' }), null);
+  });
+
+  test('a bare `.journal.jsonl` name has no run id — empty stem is not an id', () => {
+    const file = join(tmp(), '.journal.jsonl');
+    assert.equal(fileJournal(file).runId, undefined);
   });
 
   test('a journal never double-reads its own appends', () => {

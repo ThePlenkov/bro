@@ -128,10 +128,11 @@ export function fileJournal(file: string): PipelineJournal {
   const all = readJournalFile(file);
   const sep = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
   const base = file.slice(sep + 1);
+  const stem = base.endsWith(JOURNAL_SUFFIX)
+    ? base.slice(0, base.length - JOURNAL_SUFFIX.length)
+    : undefined;
   return {
-    runId: base.endsWith(JOURNAL_SUFFIX)
-      ? base.slice(0, base.length - JOURNAL_SUFFIX.length)
-      : undefined,
+    runId: stem === '' ? undefined : stem, // '.journal.jsonl' alone has no run id
     append(row: JournalRow): void {
       appendJournalRow(file, row);
       all.push(row);
@@ -186,10 +187,15 @@ export function appendJournalRow(file: string, row: JournalRow): void {
 
 const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
+/** Attempts and seqs start at 1 — a negative would resume into
+ *  attempt 0 and quietly extend the retry budget. */
+const posInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) > 0;
+
 /** Fields a parsed line must carry to count as a row — a torn-but-
  *  valid tail like `{"run_id":"x"}` fails this and is dropped rather
  *  than misread downstream. Strings must be non-empty, counters real
- *  integers (a missing `attempt` would NaN the runner's budgets). */
+ *  positive integers (a missing `attempt` would NaN the runner's
+ *  budgets; a negative would extend them). */
 const REQUIRED_STRINGS = ['run_id', 'item', 'stage', 'intent', 'ts'] as const;
 const REQUIRED_INTS = ['seq', 'attempt'] as const;
 
@@ -197,7 +203,7 @@ function isJournalRow(v: unknown): v is JournalRow {
   if (!isRecord(v)) {
     return false;
   }
-  const ints = REQUIRED_INTS.every(k => Number.isInteger(v[k]));
+  const ints = REQUIRED_INTS.every(k => posInt(v[k]));
   const strings = REQUIRED_STRINGS.every(k => nonEmpty(v[k]));
   // formula_sha must be PRESENT (a missing field would crash the
   // drift check's .slice) but may be the empty string (runs started
