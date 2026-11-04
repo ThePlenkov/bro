@@ -12,53 +12,9 @@ import {
   parsePipelineFormula,
   transitionFor,
 } from './formula.ts';
+import { SPEC_FORMULA } from './spec-formula.fixture.ts';
 
 const parseFormula = (toml: string) => parsePipelineFormula(parse(toml));
-
-/** the spec's own example — this is also the spec-conformance test */
-const SPEC_FORMULA = `
-version = 1
-
-[[stages]]
-name = "classify"
-engine = "judge"
-verdicts = ["solo", "clump", "duplicate", "defer"]
-
-[[stages]]
-name = "route"
-engine = "judge"
-verdicts = ["spawn", "queue", "defer"]
-
-[[stages]]
-name = "work"
-engine = "fleet"
-verdicts = ["done", "rate_limited", "crash", "stopped"]
-
-[[stages]]
-name = "review"
-engine = "judge"
-gate_on = "complexity == complex"
-verdicts = ["push", "fix", "abandon"]
-
-[[stages]]
-name = "merge"
-engine = "act-gate"
-verdicts = ["landed", "blocked", "dropped"]
-
-[[stages]]
-name = "capture"
-engine = "learn"
-mode = "always-capture"
-verdicts = ["captured"]
-
-[transitions]
-classify = { solo = "route", clump = "route", duplicate = "close", defer = "park" }
-route    = { spawn = "work", queue = "park", defer = "park" }
-work     = { done = "review", rate_limited = "route", crash = "retry", stopped = "abandon" }
-review   = { skip = "merge", push = "merge", fix = "work", abandon = "abandon" }
-merge    = { landed = "capture", blocked = "retry", dropped = "close" }
-capture  = { captured = "end" }
-`;
 
 /** one-stage formula shell for negative cases */
 const oneStage = (stageBody: string, transitions: string) => `

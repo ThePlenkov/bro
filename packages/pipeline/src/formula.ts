@@ -31,8 +31,8 @@
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { parse } from 'smol-toml';
 import { checkPlanVersion } from '@broject/core';
+import { parse } from 'smol-toml';
 
 export const PIPELINE_KIND = 'pipeline';
 
