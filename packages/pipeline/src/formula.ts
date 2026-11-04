@@ -95,10 +95,10 @@ const STAGE_KEYS = new Set(['name', 'engine', 'verdicts', 'gate_on', 'mode']);
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** The validation context — carries the error sink so every field
- *  validator stays a two-argument function instead of threading
- *  (where, errors) primitives through each call. `fail` returns
- *  undefined so field validators can `return c.fail(msg)` inline. */
+/** The validation context — carries the error sink so field
+ *  validators take `(raw, at, c)` and stay free of a threaded
+ *  `errors` array. `fail` returns undefined so field validators
+ *  can `return c.fail(msg)` inline. */
 class Checks {
   constructor(readonly errors: string[]) {}
   fail(msg: string): undefined {
