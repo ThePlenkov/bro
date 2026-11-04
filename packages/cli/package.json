@@ -75,6 +75,7 @@
   },
   "dependencies": {
     "@broject/bro-pack": "^0.3.0",
+    "@broject/brouter": "^0.3.0",
     "@broject/devin": "^0.3.0",
     "@broject/mcp": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",

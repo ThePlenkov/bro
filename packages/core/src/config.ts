@@ -861,21 +861,75 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
  *  an array of entry names (the route IS the entry) or a map of route →
  *  entry, so the public name can be chosen independently of the
  *  entry's own name (spec bro-jxw7p). */
+/** One thin client's own knobs — where `bro router client` writes the
+ *  model block, and which binary the launch stage execs.
+ *
+ *  The client reads its settings at START, so the order matters: the
+ *  router must be up (the catalog is the truth) and the settings must
+ *  carry the block BEFORE the client starts. This config says where
+ *  that block lands — the machine-local path, not a committed one. */
+export interface ServeClientConfig {
+  /** the settings FILE the model block is merged into */
+  settingsPath?: string;
+  /** the client binary the launch stage execs */
+  command?: string;
+}
+
+/** The client configs, keyed by client name (`claude-code`). */
+export type ServeClients = Record<string, ServeClientConfig>;
+
+/** The client configs — a malformed entry drops ITS OWN fields, never
+ *  the whole section (same discipline as the lane limits). */
+function serveClients(raw: unknown): ServeClients | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error(
+      'bro.config: serve.client must be an object of client → config — section dropped'
+    );
+    return undefined;
+  }
+  const out: ServeClients = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (name === '__proto__') continue;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
+      continue;
+    }
+    const bag = value as Record<string, unknown>;
+    const settingsPath =
+      typeof bag.settingsPath === 'string' && bag.settingsPath.trim() !== ''
+        ? bag.settingsPath.trim()
+        : undefined;
+    const command =
+      typeof bag.command === 'string' && bag.command.trim() !== '' ? bag.command.trim() : undefined;
+    const cfg: ServeClientConfig = {
+      ...(settingsPath === undefined ? {} : { settingsPath }),
+      ...(command === undefined ? {} : { command }),
+    };
+    if (Object.keys(cfg).length > 0) out[name] = cfg;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
+  client?: ServeClients;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;
+    client?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
   const providers = providerRoutes(obj.providers);
+  const client = serveClients(obj.client);
   // an unset backend reads as an empty bag — same shape as providers:{}
   return {
     ...(backend === undefined ? {} : { backend }),
     ...(providers === undefined ? {} : { providers }),
+    ...(client === undefined ? {} : { client }),
   };
 };
 
@@ -891,6 +945,12 @@ serveSection.jsonSchema = js.obj({
     patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
     additionalProperties: false,
   }),
+  client: js.map(
+    js.obj({
+      settingsPath: js.str,
+      command: js.str,
+    })
+  ),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection

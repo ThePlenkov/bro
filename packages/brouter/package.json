@@ -1,0 +1,51 @@
+{
+  "name": "@broject/brouter",
+  "version": "0.3.0",
+  "type": "module",
+  "bin": {
+    "brouter": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@broject/core": "^0.3.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/brouter"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "brouter — the model router: the served catalog, the client adapters that render it in each client's own vocabulary, and the protocol clients",
+  "keywords": [
+    "router",
+    "models",
+    "acp",
+    "gateway",
+    "client",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}
