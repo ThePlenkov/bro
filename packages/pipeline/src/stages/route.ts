@@ -41,11 +41,12 @@ import type {
   ProviderEntry,
   ProviderWall,
   ResolvedClass,
+  RoutingClass,
   RoutingTable,
   TaskRow,
 } from '@broject/core';
 import { CLASS_LABEL_PREFIX, resolveStepClass } from '@broject/core';
-import { journalRecords } from '../journal.ts';
+import { journalRecords, type JournalRow } from '../journal.ts';
 import type { EngineHandler, EngineResult, StageCall } from '../runner.ts';
 
 /** `orch` — the orchestration lane the spec declares (acp session /
@@ -370,7 +371,7 @@ const loadFor = (deps: RouteDeps): RouteLoad | undefined => {
  *  occupancy cap is not: a spawn verdict into a full lane would land
  *  on the same refusal the cap exists to pre-empt. */
 const saturated = (load: RouteLoad | undefined): boolean =>
-  load !== undefined && load.cap !== undefined && load.cap > 0 && load.live >= load.cap;
+  load?.cap !== undefined && load.cap > 0 && load.live >= load.cap;
 
 // --- chain dispatch ---------------------------------------------------------------
 
@@ -420,6 +421,41 @@ function dispatch(resolved: ResolvedClass, start: number, walled: Set<string>): 
 const routePayloadOf = (v: unknown): RoutePayload | undefined =>
   isRecord(v) && typeof v.class === 'string' ? (v as unknown as RoutePayload) : undefined;
 
+/** The journal evidence for a wall re-entry — the last settled route
+ *  payload for THIS stage plus whether a settled `rate_limited` on a
+ *  spawn intent followed it with no settled route between. Pending
+ *  intents aren't evidence — incl. the live one. */
+const wallEvidence = (
+  rows: JournalRow[],
+  stageName: string
+): { prev: RoutePayload; died: boolean } | undefined => {
+  let prev: RoutePayload | undefined;
+  let died = false;
+  for (const r of rows) {
+    if (r.verdict === undefined) {
+      continue;
+    }
+    if (r.stage === stageName && r.admit !== true) {
+      prev = routePayloadOf(r.payload);
+      died = false;
+      continue;
+    }
+    if (r.intent === 'spawn' && r.verdict === 'rate_limited') {
+      died = true;
+    }
+  }
+  return prev === undefined ? undefined : { prev, died };
+};
+
+/** The chain slot the death landed on — the journaled provider/model
+ *  pair names it (the pair IS the slot: a model pin applies only to
+ *  its own provider); drift out of the table reads as "the head was
+ *  tried" so dispatch starts past index 0. */
+const chainSlot = (row: RoutingClass, prev: RoutePayload): number => {
+  const idx = row.chain.findIndex(e => e.provider === prev.provider && e.model === prev.model);
+  return idx === -1 ? 0 : idx;
+};
+
 /** Did THIS wake come back through `work.rate_limited`? The journal is
  *  the authority: the last settled record for THIS stage followed by a
  *  settled `rate_limited` on a spawn intent — with no settled route in
@@ -429,43 +465,28 @@ const routePayloadOf = (v: unknown): RoutePayload | undefined =>
  *  limited` verdict is the wall signature.) An admission REFUSAL with
  *  a rate_limited verdict counts too — the wall is real even though
  *  the spawn never fired. A queue-parked route that simply woke shows
- *  no death and takes the fresh path, same as a first route. */
+ *  no death and takes the fresh path, same as a first route — and so
+ *  does a journaled class that drifted out of the routing table (the
+ *  anchor is gone; resolveStepClass would only throw on it). */
 function wallHit(call: StageCall, routing: RoutingTable): WallHit | undefined {
-  const records = journalRecords(
-    call.journal.rows().filter(r => r.run_id === call.runId && r.item === call.item)
+  const ev = wallEvidence(
+    journalRecords(
+      call.journal.rows().filter(r => r.run_id === call.runId && r.item === call.item)
+    ),
+    call.stage.name
   );
-  let prev: RoutePayload | undefined;
-  let diedOnWall = false;
-  for (const r of records) {
-    if (r.verdict === undefined) {
-      continue; // pending intents aren't evidence — incl. the live one
-    }
-    if (r.stage === call.stage.name && r.admit !== true) {
-      prev = routePayloadOf(r.payload);
-      diedOnWall = false;
-      continue;
-    }
-    if (r.intent === 'spawn' && r.verdict === 'rate_limited') {
-      diedOnWall = true;
-    }
-  }
-  if (prev === undefined || !diedOnWall) {
+  if (ev === undefined || !ev.died) {
     return undefined;
   }
-  // the chain slot the death landed on — the journaled provider/model
-  // pair names it (the pair IS the slot: a model pin applies only to
-  // its own provider); drift out of the table reads as "the head was
-  // tried" so dispatch starts past index 0
-  const row = Object.hasOwn(routing, prev.class) ? routing[prev.class] : undefined;
-  const idx =
-    row === undefined
-      ? -1
-      : row.chain.findIndex(e => e.provider === prev.provider && e.model === prev.model);
+  const row = Object.hasOwn(routing, ev.prev.class) ? routing[ev.prev.class] : undefined;
+  if (row === undefined) {
+    return undefined;
+  }
   return {
-    prev,
-    chainIndex: idx === -1 ? 0 : idx,
+    prev: ev.prev,
+    chainIndex: chainSlot(row, ev.prev),
     wall: {
-      provider: typeof prev.provider === 'string' ? prev.provider : '',
+      provider: typeof ev.prev.provider === 'string' ? ev.prev.provider : '',
       cause: 'rate_limited',
     },
   };
@@ -516,7 +537,9 @@ function payloadOf(cx: Cx, resolved: ResolvedClass): RoutePayload {
  *  Precedence is decisive-first: an affirmed operator defer outranks
  *  everything (the lane still resolves so the payload records where
  *  the item WOULD run), then the deterministic parks (walls,
- *  saturation), then the judged timing, then spawn. */
+ *  saturation), then the judged timing, then spawn. The dispatch runs
+ *  BEFORE the verdicts split precisely so defer/queue payloads carry
+ *  the resolved slot — the pin is what a wake re-dispatches. */
 function freshVerdict(cx: Cx): EngineResult {
   const resolved = resolveStepClass(cx.deps.routing, cx.deps.providers, {
     class: classOf(cx),
@@ -527,13 +550,13 @@ function freshVerdict(cx: Cx): EngineResult {
     tagClass(cx.deps, cx.itemId, resolved.class);
     return { verdict, payload: p };
   };
+  const d = dispatch(resolved, 0, cx.walled);
+  p.provider = d.provider;
+  p.model = d.model;
   if (deferred(cx)) {
     p.timing = 'queue';
     return done('defer');
   }
-  const d = dispatch(resolved, 0, cx.walled);
-  p.provider = d.provider;
-  p.model = d.model;
   if (d.verdict === 'queue') {
     p.timing = 'queue';
     p.reason = d.reason;
@@ -552,18 +575,25 @@ function freshVerdict(cx: Cx): EngineResult {
   return done('spawn');
 }
 
+/** The wall path's inputs — one bag keeps the helper under the arg
+ *  ceiling (same Checks-pattern as the fresh path's Cx). */
+interface WallCx {
+  deps: RouteDeps;
+  item: TaskRow;
+  hit: WallHit;
+  load: RouteLoad | undefined;
+  walled: Set<string>;
+}
+
 /** The wall path — no decide: the journaled routing fields stand and
- *  `onWall` answers the wall. `park` queues on the spot; `fallthrough`
+ *  `onWall` answers the wall. `park` queues on the spot keeping the
+ *  died-on provider/model pair — the slot the payload records as
+ *  where the item WOULD run once the wall lifts; `fallthrough`
  *  dispatches the next un-walled entry (chain-spent parks). The
  *  `class:` label is re-asserted — the class never changed, but a
  *  stale pin from another writer still gets replaced. */
-function wallVerdict(
-  deps: RouteDeps,
-  item: TaskRow,
-  hit: WallHit,
-  load: RouteLoad | undefined,
-  walled: Set<string>
-): EngineResult {
+function wallVerdict(cx: WallCx): EngineResult {
+  const { deps, item, hit, load, walled } = cx;
   const resolved = resolveStepClass(deps.routing, deps.providers, {
     class: hit.prev.class,
     priority: item.priority,
@@ -586,6 +616,12 @@ function wallVerdict(
   // queue→park")
   if (resolved.onWall === 'park') {
     p.reason = QUEUE_REASONS.onwall;
+    if (typeof hit.prev.provider === 'string') {
+      p.provider = hit.prev.provider;
+      if (typeof hit.prev.model === 'string') {
+        p.model = hit.prev.model;
+      }
+    }
     return done('queue');
   }
   const d = dispatch(resolved, hit.chainIndex + 1, walled);
@@ -627,7 +663,7 @@ export function routeStage(deps: RouteDeps): EngineHandler {
       const walled = new Set(walls.map(w => w.provider));
       const hit = wallHit(call, deps.routing);
       if (hit !== undefined) {
-        return wallVerdict(deps, item, hit, load, walled);
+        return wallVerdict({ deps, item, hit, load, walled });
       }
       const res = await deps.judge.decide(stateFor(item, load, walls), routeQuestions(deps));
       const cx: Cx = {

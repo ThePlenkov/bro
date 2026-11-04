@@ -283,8 +283,9 @@ orch: foreground, timing: now}`.
 - Invocation: `routeStage(deps).invoke(call)` inside
   `runPipeline(formula, 'bro-7d5nb.4', opts)` — the stage engine this
   item ships, bound beside classify into the runner's `judge` slot via
-  `stageDispatch({ classify, route })` (one engine slot, multiplexed
-  on `call.stage.name` — the friction noted in Run 3 carried forward).
+  `stageDispatch({ classify, route }, DEFAULT_ADMIT_INTENTS)` (one
+  engine slot, multiplexed on `call.stage.name` — the friction noted
+  in Run 3 carried forward).
 - Spec reference: §typed stage outputs (`{class, kind, orch, timing,
   provider?, model?}`), §stage semantics (`queue` parks until capacity,
   `defer` is an operator verdict, occupancy plane feeds the load
@@ -319,10 +320,11 @@ orch: foreground, timing: now}`.
     fired). A queue-parked route that simply woke shows no death and
     takes the fresh decide path.
   - The wall path is DETERMINISTIC — no decide: `onWall` is the
-    class's declared answer (`park` → `queue` reason `onwall`;
+    class's effective answer (`park` → `queue` reason `onwall`;
     `fallthrough` → next un-walled chain entry, `chain-spent` parks
     when exhausted). The journaled routing fields (class/kind/orch)
-    stand; only provider/model move. Judge cost on a wall: zero.
+    stand; the wall recomputes timing/reason and may replace
+    provider/model. Judge cost on a wall: zero.
   - `dispatch` unifies fresh and wall paths: `start` is the chain
     index to try first — 0 fresh, one past the died-on provider on a
     wall. The provider/model PAIR names the slot (a model pin
@@ -338,8 +340,10 @@ orch: foreground, timing: now}`.
     is skipped and kind defaults. Orch defaults `exec` — the lane
     with the fewest prerequisites (no session attach, no pane).
   - `queue`/`defer` payloads still carry the resolved provider/model
-    and the `class:` label lands on every verdict — the pin records
-    where the item WOULD run, and the wake re-dispatches it.
+    when a chain slot resolved — a spent chain parks with none, an
+    onwall park keeps the died-on slot it waits out — and, when labels
+    are enabled, the `class:` label lands on every verdict. The pin
+    records where the item WOULD run, and the wake re-dispatches it.
   - `reason` on queue verdicts discriminates the park input:
     `saturated` (occupancy guard), `timing` (judge said queue),
     `onwall` (class policy parked the wall), `chain-spent`

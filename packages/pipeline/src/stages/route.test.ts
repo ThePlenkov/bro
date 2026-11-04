@@ -13,7 +13,13 @@ import type {
 import { CLASS_LABEL_PREFIX } from '@broject/core';
 import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal, type JournalRow, type PipelineJournal } from '../journal.ts';
-import { DEFAULT_ADMIT_INTENTS, runPipeline, type StageCall } from '../runner.ts';
+import {
+  DEFAULT_ADMIT_INTENTS,
+  runPipeline,
+  type EngineHandler,
+  type RunOptions,
+  type StageCall,
+} from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
 import { stageDispatch } from './classify.ts';
 import {
@@ -310,6 +316,8 @@ describe('route — verdicts', () => {
     assert.equal(res.verdict, 'defer');
     assert.equal(p.timing, 'queue');
     assert.equal(p.class, 'feature'); // the judged lane still records where it WOULD run
+    assert.equal(p.provider, 'pa'); // …and so does the resolved slot
+    assert.equal(p.model, 'm1');
     assert.deepEqual(b.added, [[ITEM, `${CLASS_LABEL_PREFIX}feature`]]);
   });
 
@@ -374,6 +382,7 @@ describe('route — wall re-entry (work.rate_limited → route)', () => {
     assert.equal(p.class, 'sweep'); // journaled fields stand
     assert.equal(p.kind, 'devin');
     assert.equal(p.orch, 'acp');
+    assert.equal(p.provider, 'pb'); // the died-on slot the park waits out
     assert.deepEqual(p.wall, { provider: 'pb', cause: 'rate_limited' });
     assert.equal(j.calls.length, 0); // deterministic — no decide on a wall
     assert.deepEqual(b.added, [[ITEM, `${CLASS_LABEL_PREFIX}sweep`]]);
@@ -432,6 +441,19 @@ describe('route — wall re-entry (work.rate_limited → route)', () => {
     assert.equal(res.verdict, 'spawn');
     assert.equal(j.calls.length, 1); // fresh decide fired
   });
+
+  test('a journaled class that drifted out of the table is no anchor — fresh decide, no throw', async () => {
+    const j = judge({ class: choice('default'), timing: choice('now') });
+    const res = await invoke(
+      j,
+      backlog([row(ITEM)]),
+      {},
+      wallJournal({ ...prevSpawn, class: 'ghost-lane' })
+    );
+    assert.equal(res.verdict, 'spawn');
+    assert.equal((res.payload as RoutePayload).class, 'default');
+    assert.equal(j.calls.length, 1);
+  });
 });
 
 describe('route — labels + edges', () => {
@@ -455,6 +477,7 @@ describe('route — labels + edges', () => {
     const j = judge({ class: choice('feature') });
     const b = backlog([row(ITEM, { labels: ['class:stale'] })]);
     const res = await invoke(j, b, { labels: false });
+    assert.equal(j.calls.length, 1); // the decide ran — labels gate writes, not routing
     assert.equal(res.verdict, 'spawn');
     assert.deepEqual(b.added, []);
     assert.deepEqual(b.removed, []);
@@ -498,6 +521,27 @@ describe('route — labels + edges', () => {
 });
 
 describe('route inside runPipeline — the full DAG', () => {
+  const soloClassify = () => ({
+    verdict: 'solo',
+    payload: { group: 'solo', complexity: 'cheap', rank: 3 },
+  });
+
+  /** The judge-slot multiplexer for a spec-formula run — emulated
+   *  classify, the real route stage under test, scripted review. */
+  const dagJudge = (route: EngineHandler) =>
+    stageDispatch(
+      { classify: soloClassify, route, review: () => ({ verdict: 'push' }) },
+      DEFAULT_ADMIT_INTENTS
+    );
+
+  const runDag = (engines: RunOptions['engines']) =>
+    runPipeline(FORMULA, ITEM, {
+      formulaSha: SHA,
+      journal: memoryJournal(),
+      admit: () => true,
+      engines,
+    });
+
   test('classify → route(spawn) → work(rate_limited) → route(fallthrough) → work(done) → end', async () => {
     const j = judge({
       class: choice('sweep'),
@@ -510,39 +554,25 @@ describe('route inside runPipeline — the full DAG', () => {
     // the wall goes up when the first spawn dies — before that, the
     // fresh route lands the chain head
     let wallUp = false;
-    const jrn = memoryJournal();
-    const res = await runPipeline(FORMULA, ITEM, {
-      formulaSha: SHA,
-      journal: jrn,
-      admit: () => true,
-      engines: {
-        judge: stageDispatch(
-          {
-            classify: () => ({
-              verdict: 'solo',
-              payload: { group: 'solo', complexity: 'cheap', rank: 3 },
-            }),
-            route: routeStage(
-              deps(j, b, {
-                walls: () => (wallUp ? [{ provider: 'pb', cause: 'rate_limited' as const }] : []),
-              })
-            ),
-            review: () => ({ verdict: 'push' }),
-          },
-          DEFAULT_ADMIT_INTENTS
-        ),
-        fleet: () => {
-          workCalls += 1;
-          // first spawn dies on the wall; the re-routed one lands
-          if (workCalls === 1) {
-            wallUp = true;
-            return { verdict: 'rate_limited' };
-          }
-          return { verdict: 'done' };
-        },
-        'act-gate': () => ({ verdict: 'landed' }),
-        learn: () => ({ verdict: 'captured' }),
+    const res = await runDag({
+      judge: dagJudge(
+        routeStage(
+          deps(j, b, {
+            walls: () => (wallUp ? [{ provider: 'pb', cause: 'rate_limited' as const }] : []),
+          })
+        )
+      ),
+      fleet: () => {
+        workCalls += 1;
+        // first spawn dies on the wall; the re-routed one lands
+        if (workCalls === 1) {
+          wallUp = true;
+          return { verdict: 'rate_limited' };
+        }
+        return { verdict: 'done' };
       },
+      'act-gate': () => ({ verdict: 'landed' }),
+      learn: () => ({ verdict: 'captured' }),
     });
     assert.equal(res.outcome, 'end');
     assert.equal(workCalls, 2);
@@ -558,28 +588,11 @@ describe('route inside runPipeline — the full DAG', () => {
   test('route defer → park; wake re-enters route and routes fresh', async () => {
     const j = judge({ defer: noul(0.9), class: choice('default') });
     const b = backlog([row(ITEM)]);
-    const jrn = memoryJournal();
-    const engines = {
-      judge: stageDispatch(
-        {
-          classify: () => ({
-            verdict: 'solo',
-            payload: { group: 'solo', complexity: 'cheap', rank: 3 },
-          }),
-          route: routeStage(deps(j, b)),
-          review: () => ({ verdict: 'push' }),
-        },
-        DEFAULT_ADMIT_INTENTS
-      ),
+    const res = await runDag({
+      judge: dagJudge(routeStage(deps(j, b))),
       fleet: () => ({ verdict: 'done' }),
       'act-gate': () => ({ verdict: 'landed' }),
       learn: () => ({ verdict: 'captured' }),
-    };
-    const res = await runPipeline(FORMULA, ITEM, {
-      formulaSha: SHA,
-      journal: jrn,
-      admit: () => true,
-      engines,
     });
     assert.equal(res.outcome, 'park');
     assert.equal(res.stage, 'route');
