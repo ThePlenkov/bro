@@ -120,8 +120,56 @@ describe('loadConfig serve.providers', () => {
     assert.deepEqual(cfg.serve.providers, { 'opencode-acp': 'oc-iceman' })
   })
   test('a non-string route value is dropped with a diagnostic', () => {
-    const cfg = load({ serve: { providers: { good: 'oc-iceman', bad: 7 } } })
-    assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { good: 'oc-iceman', bad: 7 } } })
+      assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /serve\.providers route 'bad' must name a provider entry/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a numeric-index route is dropped — it would lose its declared order', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { good: 'oc-iceman', 1: 'other' } } })
+      assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /route '1' is a numeric index/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a route that duplicates another after trimming is dropped', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { 'oc ': 'first', oc: 'second' } } })
+      // the LATER declaration is the one dropped — the first one stands
+      assert.deepEqual(cfg.serve.providers, { oc: 'first' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /duplicates an earlier route after trimming/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('the __proto__ route survives — it is a legal name', () => {
+    // JSON.parse creates '__proto__' as an OWN property — an object
+    // literal would set the prototype instead
+    const providers = JSON.parse('{"__proto__":"oc-iceman"}') as Record<string, string>
+    const cfg = load({ serve: { providers } })
+    // a plain assignment would reach Object.prototype's setter and lose
+    // the lane
+    assert.deepEqual(
+      Object.entries(cfg.serve.providers as Record<string, string>),
+      [['__proto__', 'oc-iceman']]
+    )
   })
   test('a providers value that is neither a list nor a map drops the section', () => {
     const cfg = load({ serve: { providers: 'oc-iceman' } })

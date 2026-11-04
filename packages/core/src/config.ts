@@ -764,6 +764,16 @@ function providerNames(raw: unknown): string[] | undefined {
   return names;
 }
 
+/** An object key that JavaScript orders FIRST — the integer indexes.
+ *  A route named like one cannot keep its declared position: the JSON
+ *  object's own iteration puts it ahead of its siblings, so "the first
+ *  declared route" would name a different lane than the operator
+ *  wrote. */
+export function isIntegerIndexKey(name: string): boolean {
+  const n = Number(name);
+  return Number.isInteger(n) && n >= 0 && n < 4_294_967_295 && String(n) === name;
+}
+
 /** The exposed providers, in either spelling — the array of entry names
  *  (route ≡ entry) or the map of route → entry (the public name is
  *  chosen). A malformed value is a diagnostic, not a silent drop: a lane
@@ -775,8 +785,15 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
   if (typeof raw === 'object' && raw !== null) {
     const routes: Record<string, string> = {};
     for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
-      if (route.trim() === '') {
+      const name = route.trim();
+      if (name === '') {
         console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
+        continue;
+      }
+      if (isIntegerIndexKey(name)) {
+        console.error(
+          `bro.config: serve.providers route '${name}' is a numeric index — it would lose its declared order — entry dropped`
+        );
         continue;
       }
       if (typeof entry !== 'string' || entry.trim() === '') {
@@ -785,7 +802,20 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
         );
         continue;
       }
-      routes[route.trim()] = entry.trim();
+      if (Object.hasOwn(routes, name)) {
+        console.error(
+          `bro.config: serve.providers route '${route}' duplicates an earlier route after trimming — entry dropped`
+        );
+        continue;
+      }
+      // '__proto__' is a legal route name — a plain assignment would
+      // reach Object.prototype's setter and lose the lane
+      Object.defineProperty(routes, name, {
+        value: entry.trim(),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return routes;
   }
@@ -823,7 +853,13 @@ export const serveSection: ConfigSection<{ backend?: string; providers?: ServePr
 
 serveSection.jsonSchema = js.obj({
   backend: js.str,
-  providers: js.oneOf(js.strList, js.map(js.str)),
+  providers: js.oneOf(js.strList, {
+    // the KEY is a route name — it must carry a non-blank character, or
+    // the loader would drop it and the schema would accept it
+    type: 'object',
+    patternProperties: { [String.raw`\S`]: js.str },
+    additionalProperties: false,
+  }),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection

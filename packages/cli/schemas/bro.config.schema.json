@@ -1469,11 +1469,14 @@
             },
             {
               "type": "object",
-              "additionalProperties": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              }
+              "patternProperties": {
+                "\\S": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "additionalProperties": false
             }
           ]
         }

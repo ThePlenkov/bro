@@ -71,6 +71,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
   js,
   loadConfig,
   loadConfigLayers,

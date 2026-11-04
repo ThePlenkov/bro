@@ -372,6 +372,19 @@ describe('conductorConfig', () => {
     assert.throws(() => conductorConfig({}, dir), /type 'cli' — the conductor needs an 'acp' entry/)
   })
 
+  test('a route named like a numeric index is a loud error', () => {
+    // an integer index keeps no declared order — the route table's
+    // "first declared route" would name a different lane
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: ['1'] },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        1: { type: 'acp', command: 'oc acp' },
+      }
+    )
+    assert.throws(() => conductorConfig({}, dir), /numeric index/)
+  })
+
   test('an entry with no declared route is not exposed at all', () => {
     // the map form owns the public names — an entry nobody routes to is
     // not a lane

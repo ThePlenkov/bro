@@ -24,7 +24,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { gitCommonDir, loadConfig } from '@broject/core';
+import { gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
 import type { ProviderEntry } from '@broject/core';
 import {
   acpOpen,
@@ -162,6 +162,15 @@ function requireLaneName(name: string): string {
   if (name.includes('/')) {
     throw new Error(
       `provider '${name}' — a served provider name is a model prefix and cannot contain '/'`
+    );
+  }
+  // a numeric index keeps no declared order — the JSON object's own
+  // iteration puts it ahead of its siblings, so "the first declared
+  // route" would name a different lane than the operator wrote
+  if (isIntegerIndexKey(name)) {
+    throw new Error(
+      `provider '${name}' — a served provider name cannot be a numeric index ` +
+        `(it would lose its declared order)`
     );
   }
   return name;

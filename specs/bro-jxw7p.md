@@ -237,8 +237,16 @@ Three things the design above left open, decided while building it:
   first DECLARED route for an entry", so the declaration ORDER matters —
   a `Record` cannot promise an order across numeric-looking keys. The
   binding carries a `declared` flag: the default lane's own key is
-  routable but never declared, so a declared alias takes over the
-  advertisement and the implicit key never does.
+  routable but never DECLARED, so a declared alias takes over the
+  advertisement and the implicit key never does. An operator who
+  declares the default's own key explicitly (`{"devin-acp": "devin-acp"}`)
+  names that same entry, so the advertisement does not change — the
+  flag only marks "the operator wrote this one".
+- **A route name cannot be a numeric index.** `{"1": …, "0": …}` would
+  lose its declared order — JavaScript's own iteration puts integer
+  indexes first — so "the first declared route" would name a different
+  lane than the operator wrote. Such a route is a loud error (and the
+  loader drops it with a diagnostic).
 - **A config with no routes means the ARRAY form.** `routeBindings()`
   falls back to "every exposed entry under its own name, the default
   lane under its own key" — a config built before the route table
@@ -265,7 +273,9 @@ Three things the design above left open, decided while building it:
   chained `/v1/responses` request.
 - `config.test.ts` — `serve.providers` accepts the list and the map; a
   non-string route value is dropped with a diagnostic; a value that is
-  neither drops the section.
+  neither drops the section; a numeric-index route, a whitespace-only
+  route, a route that duplicates another after trimming, and the
+  `__proto__` route are all handled without losing a lane.
 - A route naming no lane still rides the default lane (no 400 for a model
   the gateway simply does not route).
 - Live, one listener: `GET /v1/models` answers the union of the lanes'
