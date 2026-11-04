@@ -197,6 +197,13 @@ function parseStage(raw: unknown, i: number, c: Checks): PipelineStage | undefin
 const covered = (s: PipelineStage): string[] =>
   s.gate_on ? [...s.verdicts, SKIP_VERDICT] : s.verdicts;
 
+/** Transition-validation context — stage names + the error sink, so
+ *  the helpers stay under the 4-arg ceiling. */
+interface TCtx {
+  names: Set<string>;
+  c: Checks;
+}
+
 function validTarget(target: unknown, names: Set<string>): target is string {
   return (
     typeof target === 'string' &&
@@ -204,33 +211,80 @@ function validTarget(target: unknown, names: Set<string>): target is string {
   );
 }
 
+/** One verdict→target pair — the mapped target, or fail() with
+ *  undefined. Sequential guards, no nesting. */
+function mapVerdict(
+  ctx: TCtx,
+  stage: PipelineStage,
+  [verdict, target]: [string, unknown],
+  allowed: string[]
+): string | undefined {
+  if (!allowed.includes(verdict)) {
+    return ctx.c.fail(
+      `transitions.${stage.name}.${verdict}: not a declared verdict of "${stage.name}"`
+    );
+  }
+  if (!validTarget(target, ctx.names)) {
+    return ctx.c.fail(
+      `transitions.${stage.name}.${verdict}: target ${JSON.stringify(target)} is not a stage or terminal action (${TERMINAL_ACTIONS.join('|')})`
+    );
+  }
+  return target;
+}
+
+function requireCoverage(map: Record<string, string>, stage: PipelineStage, c: Checks): void {
+  for (const v of covered(stage)) {
+    if (!Object.hasOwn(map, v)) {
+      c.fail(`transitions.${stage.name}: verdict "${v}" has no transition`);
+    }
+  }
+}
+
 function transitionEntry(
   stage: PipelineStage,
   vmap: Record<string, unknown>,
-  names: Set<string>,
-  c: Checks
+  ctx: TCtx
 ): Record<string, string> {
   // null prototype — a verdict literally named "__proto__" lands as
   // data, not the prototype setter
   const map: Record<string, string> = Object.create(null);
   const allowed = covered(stage);
-  for (const [verdict, target] of Object.entries(vmap)) {
-    if (!allowed.includes(verdict)) {
-      c.fail(`transitions.${stage.name}.${verdict}: not a declared verdict of "${stage.name}"`);
-    } else if (!validTarget(target, names)) {
-      c.fail(
-        `transitions.${stage.name}.${verdict}: target ${JSON.stringify(target)} is not a stage or terminal action (${TERMINAL_ACTIONS.join('|')})`
-      );
-    } else {
-      map[verdict] = target;
-    }
+  for (const entry of Object.entries(vmap)) {
+    const t = mapVerdict(ctx, stage, entry, allowed);
+    if (t !== undefined) map[entry[0]] = t;
   }
-  for (const v of allowed) {
-    if (!Object.hasOwn(map, v)) {
-      c.fail(`transitions.${stage.name}: verdict "${v}" has no transition`);
-    }
-  }
+  requireCoverage(map, stage, ctx.c);
   return map;
+}
+
+function tableRow(
+  ctx: TCtx,
+  byName: Map<string, PipelineStage>,
+  stage: string,
+  vmap: unknown
+): Record<string, string> | undefined {
+  const decl = byName.get(stage);
+  if (!decl) {
+    return ctx.c.fail(`transitions.${stage}: no such stage`);
+  }
+  if (!isRecord(vmap)) {
+    return ctx.c.fail(`transitions.${stage}: must be a verdict→target table`);
+  }
+  return transitionEntry(decl, vmap, ctx);
+}
+
+// a stage emitting verdicts with no transitions table entry dead-ends —
+// hasOwn, not `in`: prototype keys like `toString` are not entries
+function requireTableEntries(
+  transitions: Record<string, Record<string, string>>,
+  stages: PipelineStage[],
+  c: Checks
+): void {
+  for (const s of stages) {
+    if (!Object.hasOwn(transitions, s.name)) {
+      c.fail(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
+    }
+  }
 }
 
 function transitionTable(
@@ -239,29 +293,17 @@ function transitionTable(
   c: Checks
 ): Record<string, Record<string, string>> {
   const transitions: Record<string, Record<string, string>> = Object.create(null);
-  const names = new Set(stages.map(s => s.name));
   const byName = new Map(stages.map(s => [s.name, s]));
+  const ctx: TCtx = { names: new Set(stages.map(s => s.name)), c };
   if (raw !== undefined && !isRecord(raw)) {
     c.fail('transitions: must be a TOML table');
     return transitions;
   }
   for (const [stage, vmap] of Object.entries(raw ?? {})) {
-    const decl = byName.get(stage);
-    if (!decl) {
-      c.fail(`transitions.${stage}: no such stage`);
-    } else if (!isRecord(vmap)) {
-      c.fail(`transitions.${stage}: must be a verdict→target table`);
-    } else {
-      transitions[stage] = transitionEntry(decl, vmap, names, c);
-    }
+    const row = tableRow(ctx, byName, stage, vmap);
+    if (row) transitions[stage] = row;
   }
-  // a stage emitting verdicts with no transitions table entry dead-ends —
-  // hasOwn, not `in`: prototype keys like `toString` are not entries
-  for (const s of stages) {
-    if (!Object.hasOwn(transitions, s.name)) {
-      c.fail(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
-    }
-  }
+  requireTableEntries(transitions, stages, c);
   return transitions;
 }
 
