@@ -96,7 +96,7 @@ defer = "park"
 
 [transitions.work]
 done = "review"
-rate_limited = "park"
+rate_limited = "route"       # re-enter routing — honors onWall chain
 crash = "retry"
 stopped = "abandon"
 
@@ -104,7 +104,7 @@ stopped = "abandon"
 skip = "merge"               # gate_on failed → bypass target
 push = "merge"
 fix = "work"
-abandon = "close"
+abandon = "abandon"          # review-abandon IS terminal failure
 
 [transitions.merge]
 landed = "capture"
@@ -115,11 +115,20 @@ dropped = "close"
 captured = "end"
 ```
 
-### Gates and the `skip` verdict
+### Gates and the `skip` verdict — fail closed
 
-`gate_on` is evaluated against the pipeline context built from earlier
-stage payloads. When the gate fails, the runner does NOT invoke the
-engine — it synthesizes a `skip` verdict and follows that transition.
+`gate_on` evaluates against the pipeline context built from earlier
+stage payloads, with THREE outcomes — never a silent bypass:
+
+- **pass** — predicate true → the engine runs.
+- **fail** — the field exists, is well-typed, and does not match → the
+  runner synthesizes `skip` and follows that transition (no engine
+  invoked).
+- **indeterminate** — the field is ABSENT or malformed (a stage that
+  should have produced `complexity` didn't) → `park` with a journal
+  alert. A broken context never falls through to `skip`: the review
+  gate cannot fail open.
+
 `skip` is an implicit verdict: required in the transitions table for
 every stage with `gate_on`, forbidden on ungated stages. This keeps
 cheap-class bypass paths explicit — `done` still routes to `review`,
@@ -171,6 +180,10 @@ next stage reads:
   until capacity opens; `defer` is an operator verdict.
 - **work** — spawn via facade → registry pins {pid, prompt, exit};
   `resolveWorktree` reuses recorded checkouts (resume semantics).
+  `rate_limited` re-enters `route` rather than parking on the same
+  chain entry: the route stage honors
+  `fleet.routing.<class>.onWall` — `fallthrough` dispatches the next
+  provider in the chain, `wait` answers `queue`→`park`.
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
   complexity verdict: `complex` required, `cheap` skips to merge.
