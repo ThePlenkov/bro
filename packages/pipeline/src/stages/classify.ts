@@ -175,17 +175,23 @@ const peerText = (p: TaskRow): string =>
     .join(' — ');
 
 /** The clump ids already claimed on peer labels — `clump` choices the
- *  judge can join without minting a new group. */
+ *  judge can join without minting a new group. Ids colliding with the
+ *  `solo`/`new` sentinels are skipped: a `clump:solo` label is a name
+ *  some other scheme wrote, never this stage's sentinel — letting it
+ *  into the criteria would make the sentinel ambiguous. */
 function existingClumps(peers: TaskRow[]): string[] {
   const ids = new Set<string>();
   for (const p of peers) {
     for (const l of p.labels ?? []) {
       if (l.startsWith(CLUMP_LABEL_PREFIX) && l.length > CLUMP_LABEL_PREFIX.length) {
-        ids.add(l.slice(CLUMP_LABEL_PREFIX.length));
+        const id = l.slice(CLUMP_LABEL_PREFIX.length);
+        if (id !== NO_CLUMP && id !== NEW_CLUMP) {
+          ids.add(id);
+        }
       }
     }
   }
-  return [...ids].sort();
+  return [...ids].sort((a, b) => a.localeCompare(b));
 }
 
 /** Semantic dedup — a `choice` over the peer ids (+`none`): the judge
@@ -392,12 +398,12 @@ function payloadOf(cx: Cx, v: Classification): ClassifyPayload {
 
 /** The one label this verdict writes on the item — undefined for
  *  solo/defer (they mark the bead nowhere). */
-const itemLabel = (v: Classification): string | undefined =>
-  v.group === 'duplicate'
-    ? `${DUP_LABEL_PREFIX}${v.dupOf}`
-    : v.group === 'clump'
-      ? `${CLUMP_LABEL_PREFIX}${v.clumpId}`
-      : undefined;
+function itemLabel(v: Classification): string | undefined {
+  if (v.group === 'duplicate') {
+    return `${DUP_LABEL_PREFIX}${v.dupOf}`;
+  }
+  return v.group === 'clump' ? `${CLUMP_LABEL_PREFIX}${v.clumpId}` : undefined;
+}
 
 const classifyMark = (l: string): boolean =>
   l.startsWith(DUP_LABEL_PREFIX) || l.startsWith(CLUMP_LABEL_PREFIX);

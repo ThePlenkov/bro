@@ -203,6 +203,17 @@ describe('classify — clump', () => {
     assert.ok(Object.hasOwn(criteria.criteria, 'new'));
     assert.ok(Object.hasOwn(criteria.criteria, 'solo'));
   });
+
+  test('clump:solo / clump:new labels never collide with the sentinels', async () => {
+    const j = judge({ clump: choice('solo') });
+    const b = backlog([row(ITEM), row('bro-bb2', { labels: ['clump:new', 'clump:solo'] })]);
+    await invoke(j, b);
+    const criteria = j.calls[0].questions.clump;
+    assert.equal(criteria?.type, 'choice');
+    // exactly the two sentinels — a foreign 'new'/'solo' name is never
+    // offered as a joinable group (the sentinel owns the key)
+    assert.deepEqual(Object.keys(criteria.criteria).sort(), ['new', 'solo']);
+  });
 });
 
 describe('classify — solo', () => {
@@ -302,12 +313,15 @@ describe('classify — seams + edges', () => {
 describe('taskBacklog — prod seam over TaskStore', () => {
   const store = {
     rows: [] as TaskRow[],
+    /** the ready queue is a SUBSET of open rows — membership lives in
+     *  readyIds, so the mock can't fake it with a status filter */
+    readyIds: new Set<string>(),
     updates: [] as [string, Record<string, string | number>][],
     get(id: string) {
       return this.rows.find(r => r.id === id);
     },
     ready() {
-      return this.rows.filter(r => r.status === 'open');
+      return this.rows.filter(r => this.readyIds.has(r.id));
     },
     list(f?: { status?: string }) {
       return this.rows.filter(r => f?.status === undefined || r.status === f.status);
@@ -329,17 +343,22 @@ describe('taskBacklog — prod seam over TaskStore', () => {
     ]);
   });
 
-  test('peers = ready ∪ open ∪ in_progress, deduped, item excluded', () => {
+  test('peers: ready queue first, then open ∪ in_progress — deduped, item excluded', () => {
     store.rows = [
       row(ITEM),
-      row('a', { status: 'open' }),
+      row('c', { status: 'open' }), // open, NOT in the ready queue
+      row('a', { status: 'open' }), // ready — listed after 'c', so order proves the tier
       row('b', { status: 'in_progress' }),
-      row('c', { status: 'open' }),
       row('d', { status: 'closed' }),
     ];
+    store.readyIds = new Set(['a']);
     const b = taskBacklog(store as never);
-    const ids = b.peers(row(ITEM)).map(r => r.id);
-    assert.deepEqual(ids.sort(), ['a', 'b', 'c']);
+    // 'a' leads (ready tier) though 'c' precedes it in the open listing;
+    // 'a' is not re-emitted by the open tier (dedup); 'd' is closed — out
+    assert.deepEqual(
+      b.peers(row(ITEM)).map(r => r.id),
+      ['a', 'c', 'b']
+    );
   });
 });
 
