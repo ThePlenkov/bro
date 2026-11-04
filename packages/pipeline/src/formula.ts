@@ -12,18 +12,16 @@
  *   engine = "judge"
  *   verdicts = ["solo", "clump", "duplicate", "defer"]
  *
- *   [[stages]]
- *   name = "review"
- *   engine = "judge"
- *   gate_on = "complexity == complex"   # skips unless payload matches
- *   verdicts = ["push", "fix", "abandon"]
- *
  *   [transitions]                  # root table — verdict → next stage
- *   classify = { solo = "route", duplicate = "close", defer = "park" }
- *   review   = { push = "merge", fix = "work", abandon = "close" }
+ *   classify = { solo = "route", clump = "route", duplicate = "close",
+ *                defer = "park" }
+ *   review   = { skip = "merge", push = "merge", fix = "work",
+ *                abandon = "close" }
  *
- * Every declared verdict of a transitioned stage needs a target; a
- * target is another stage name or a terminal action.
+ * Every declared verdict needs a target; a target is another stage
+ * name or a terminal action. A stage with `gate_on` also gets the
+ * implicit `skip` verdict — synthesized when the gate fails, required
+ * in its transition map, forbidden elsewhere.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -46,9 +44,15 @@ export type StageEngine = (typeof STAGE_ENGINES)[number];
  *  terminal-success; `park` suspends the item until capacity/operator;
  *  `retry` re-runs the same stage (bounded by the runner's attempt
  *  budget); `close` drops the item as settled; `abandon` drops it as
- *  failed. */
+ *  failed. These names are reserved — a stage cannot take one. */
 export const TERMINAL_ACTIONS = ['end', 'park', 'retry', 'close', 'abandon'] as const;
 export type TerminalAction = (typeof TERMINAL_ACTIONS)[number];
+
+/** The verdict the runner synthesizes when a stage's `gate_on`
+ *  predicate fails — the engine is not invoked. Implicit member of a
+ *  gated stage's enum; reserved in `verdicts`, required in
+ *  `transitions` for gated stages, forbidden elsewhere. */
+export const SKIP_VERDICT = 'skip';
 
 /** A stage gate predicate — `gate_on = "complexity == complex"` gates
  *  the stage on a field of the current pipeline context (produced by
@@ -118,6 +122,10 @@ function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | 
     errors.push(`${where}.name: required non-empty string`);
     return undefined;
   }
+  if ((TERMINAL_ACTIONS as readonly string[]).includes(name)) {
+    errors.push(`${where}.name: "${name}" is a reserved terminal action, not a stage name`);
+    return undefined;
+  }
   const engine = raw.engine;
   if (typeof engine !== 'string' || !(STAGE_ENGINES as readonly string[]).includes(engine)) {
     errors.push(
@@ -134,9 +142,9 @@ function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | 
     errors.push(`${where} ("${name}").verdicts: required non-empty string array`);
     return undefined;
   }
-  if ((verdicts as string[]).includes('skip')) {
+  if ((verdicts as string[]).includes(SKIP_VERDICT)) {
     errors.push(
-      `${where} ("${name}").verdicts: "skip" is reserved — the runner synthesizes it on gate_on failure`
+      `${where} ("${name}").verdicts: "${SKIP_VERDICT}" is reserved — the runner synthesizes it on gate_on failure`
     );
     return undefined;
   }
@@ -152,6 +160,80 @@ function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | 
     gate_on: parseGateOn(raw.gate_on, `${where} ("${name}")`, errors),
     mode: mode as string | undefined,
   };
+}
+
+/** The verdict set a stage's transition map must cover — declared
+ *  verdicts plus `skip` when the stage is gated. */
+function allowedVerdicts(stage: PipelineStage): string[] {
+  return stage.gate_on ? [...stage.verdicts, SKIP_VERDICT] : stage.verdicts;
+}
+
+function validateTransitionEntry(
+  stage: PipelineStage,
+  vmap: Record<string, unknown>,
+  names: Set<string>,
+  errors: string[]
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  const allowed = allowedVerdicts(stage);
+  for (const [verdict, target] of Object.entries(vmap)) {
+    if (!allowed.includes(verdict)) {
+      errors.push(
+        `transitions.${stage.name}.${verdict}: not a declared verdict of "${stage.name}"`
+      );
+      continue;
+    }
+    if (
+      typeof target !== 'string' ||
+      (!names.has(target) && !(TERMINAL_ACTIONS as readonly string[]).includes(target))
+    ) {
+      errors.push(
+        `transitions.${stage.name}.${verdict}: target ${JSON.stringify(target)} is not a stage or terminal action (${TERMINAL_ACTIONS.join('|')})`
+      );
+      continue;
+    }
+    map[verdict] = target;
+  }
+  for (const v of allowed) {
+    if (!Object.hasOwn(map, v)) {
+      errors.push(`transitions.${stage.name}: verdict "${v}" has no transition`);
+    }
+  }
+  return map;
+}
+
+function validateTransitions(
+  raw: unknown,
+  stages: PipelineStage[],
+  errors: string[]
+): Record<string, Record<string, string>> {
+  const transitions: Record<string, Record<string, string>> = {};
+  const names = new Set(stages.map(s => s.name));
+  const byName = new Map(stages.map(s => [s.name, s]));
+  if (raw !== undefined && !isRecord(raw)) {
+    errors.push('transitions: must be a TOML table');
+    return transitions;
+  }
+  for (const [stage, vmap] of Object.entries(raw ?? {})) {
+    const decl = byName.get(stage);
+    if (!decl) {
+      errors.push(`transitions.${stage}: no such stage`);
+      continue;
+    }
+    if (!isRecord(vmap)) {
+      errors.push(`transitions.${stage}: must be a verdict→target table`);
+      continue;
+    }
+    transitions[stage] = validateTransitionEntry(decl, vmap, names, errors);
+  }
+  // a stage emitting verdicts with no transitions table entry dead-ends —
+  // hasOwn, not `in`: prototype keys like `toString` are not entries
+  for (const s of stages) {
+    if (!Object.hasOwn(transitions, s.name)) {
+      errors.push(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
+    }
+  }
+  return transitions;
 }
 
 /** Validate an already-parsed formula document — the plugin planSchema.
@@ -180,61 +262,13 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
       if (s) stages.push(s);
     });
   }
-  const names = new Set(stages.map(s => s.name));
   stages.forEach((s, i) => {
     if (stages.findIndex(o => o.name === s.name) !== i) {
       errors.push(`stages[${i}]: duplicate stage name "${s.name}"`);
     }
   });
 
-  const transitions: Record<string, Record<string, string>> = {};
-  if (doc.transitions !== undefined && !isRecord(doc.transitions)) {
-    errors.push('transitions: must be a TOML table');
-  } else if (isRecord(doc.transitions)) {
-    for (const [stage, vmap] of Object.entries(doc.transitions)) {
-      if (!names.has(stage)) {
-        errors.push(`transitions.${stage}: no such stage`);
-        continue;
-      }
-      if (!isRecord(vmap)) {
-        errors.push(`transitions.${stage}: must be a verdict→target table`);
-        continue;
-      }
-      const decl = stages.find(s => s.name === stage)!;
-      // `skip` is the runner-synthesized verdict of a failed gate_on —
-      // an implicit member of a gated stage's enum, required in its map
-      const allowed = decl.gate_on ? [...decl.verdicts, 'skip'] : decl.verdicts;
-      const map: Record<string, string> = {};
-      for (const [verdict, target] of Object.entries(vmap)) {
-        if (!allowed.includes(verdict)) {
-          errors.push(`transitions.${stage}.${verdict}: not a declared verdict of "${stage}"`);
-          continue;
-        }
-        if (
-          typeof target !== 'string' ||
-          (!names.has(target) && !(TERMINAL_ACTIONS as readonly string[]).includes(target))
-        ) {
-          errors.push(
-            `transitions.${stage}.${verdict}: target ${JSON.stringify(target)} is not a stage or terminal action (${TERMINAL_ACTIONS.join('|')})`
-          );
-          continue;
-        }
-        map[verdict] = target;
-      }
-      for (const v of allowed) {
-        if (!(v in map)) {
-          errors.push(`transitions.${stage}: verdict "${v}" has no transition`);
-        }
-      }
-      transitions[stage] = map;
-    }
-  }
-  // a stage emitting verdicts with no transitions table entry dead-ends
-  for (const s of stages) {
-    if (!(s.name in transitions)) {
-      errors.push(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
-    }
-  }
+  const transitions = validateTransitions(doc.transitions, stages, errors);
 
   if (errors.length > 0) {
     throw new Error(`${source}: invalid pipeline formula\n  ${errors.join('\n  ')}`);
@@ -247,32 +281,33 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
   };
 }
 
-/** The formula's identity — sha256 over the raw file bytes, no
+/** The formula's identity — sha256 over the raw bytes, no
  *  canonicalization: byte-different files are different versions. */
-export function formulaSha(text: string | Buffer): string {
-  return createHash('sha256').update(text).digest('hex');
+export function formulaSha(bytes: string | Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
-/** Read + TOML-parse + validate a formula file. Returns the formula and
- *  its content sha — the pair a run stamps into the journal/registry. */
+/** Read + TOML-parse + validate a formula file. The sha stamps the RAW
+ *  bytes — invalid UTF-8 sequences stay distinct identities instead of
+ *  collapsing to U+FFFD; the text is decoded separately for parsing. */
 export function loadPipelineFormula(file: string): {
   formula: PipelineFormula;
   sha: string;
 } {
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = readFileSync(file, 'utf8');
+    bytes = readFileSync(file);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`${file}: cannot read formula — ${msg}`);
   }
   let doc: unknown;
   try {
-    doc = parse(text);
+    doc = parse(bytes.toString('utf8'));
   } catch (err) {
     throw new Error(`${file}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`);
   }
-  return { formula: parsePipelineFormula(doc, file), sha: formulaSha(text) };
+  return { formula: parsePipelineFormula(doc, file), sha: formulaSha(bytes) };
 }
 
 /** Where a verdict takes the run — a stage name or a terminal action.
@@ -283,7 +318,8 @@ export function transitionFor(
   stage: string,
   verdict: string
 ): string | undefined {
-  return formula.transitions[stage]?.[verdict];
+  const map = Object.hasOwn(formula.transitions, stage) ? formula.transitions[stage] : undefined;
+  return map && Object.hasOwn(map, verdict) ? map[verdict] : undefined;
 }
 
 export function isTerminalAction(t: string): t is TerminalAction {

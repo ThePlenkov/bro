@@ -6,6 +6,7 @@ export {
   parsePipelineFormula,
   PIPELINE_KIND,
   PIPELINE_VERSION,
+  SKIP_VERDICT,
   STAGE_ENGINES,
   TERMINAL_ACTIONS,
   transitionFor,

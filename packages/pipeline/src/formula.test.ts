@@ -234,6 +234,44 @@ a = { ok = "end" }
     );
   });
 
+  test('stage named after a terminal action fails — ambiguous targets', () => {
+    assert.throws(
+      () =>
+        parseFormula(`
+[[stages]]
+name = "park"
+engine = "judge"
+verdicts = ["ok"]
+
+[transitions]
+park = { ok = "end" }
+`),
+      /"park" is a reserved terminal action/
+    );
+  });
+
+  test('prototype-named stage still needs its transitions entry', () => {
+    // `toString` passes `in` checks on plain objects — hasOwn is the guard
+    assert.throws(
+      () =>
+        parseFormula(`
+[[stages]]
+name = "toString"
+engine = "judge"
+verdicts = ["ok"]
+
+[[stages]]
+name = "b"
+engine = "judge"
+verdicts = ["ok"]
+
+[transitions]
+b = { ok = "end" }
+`),
+      /stage "toString" has no entry/
+    );
+  });
+
   test('duplicate stage names fail', () => {
     assert.throws(
       () =>
@@ -272,10 +310,21 @@ a = { ok = "end" }
 
 describe('formulaSha', () => {
   test('sha256 over raw bytes — formatting is identity', () => {
-    const a = formulaSha('x = 1\n');
+    // pinned digest: catches a hash-algorithm regression
+    assert.equal(
+      formulaSha('x = 1\n'),
+      '9e26bf369911c45c243c684147b23fc9e1dcfcf257d299a1c632016a6fcd33f4'
+    );
     const b = formulaSha('x = 1\n# comment\n');
-    assert.equal(a.length, 64);
-    assert.notEqual(a, b); // a comment IS a version delta
+    assert.notEqual(formulaSha('x = 1\n'), b); // a comment IS a version delta
+  });
+
+  test('raw bytes hash — invalid UTF-8 stays a distinct identity', () => {
+    const bytes = Buffer.from([0x78, 0x20, 0x3d, 0x20, 0x31, 0xff, 0x0a]); // 'x = 1\xff\n'
+    const sha = formulaSha(bytes);
+    assert.equal(sha, '7ba66a0528cbab29a35563dfedf5fe3c244cea588545a47be93987e2f42e532d');
+    // decoded text collapses 0xff to U+FFFD — a different input
+    assert.notEqual(sha, formulaSha(bytes.toString('utf8')));
   });
 });
 
@@ -290,6 +339,9 @@ describe('loadPipelineFormula', () => {
   });
 
   test('unreadable file errors with the path', () => {
-    assert.throws(() => loadPipelineFormula('/nonexistent/f.toml'), /cannot read formula/);
+    assert.throws(
+      () => loadPipelineFormula('/nonexistent/f.toml'),
+      /\/nonexistent\/f\.toml: cannot read formula/
+    );
   });
 });
