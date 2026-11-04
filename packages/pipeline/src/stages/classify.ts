@@ -530,28 +530,20 @@ const titleTokens = (s: string | undefined): Set<string> =>
       .filter(t => t.length >= 4)
   );
 
+/** |A ∩ B| over a set — shared labels/tokens counted without
+ *  embedding a loop in the scorer. */
+const countShared = (xs: readonly string[], set: Set<string>): number =>
+  xs.reduce((n, x) => (set.has(x) ? n + 1 : n), 0);
+
 /** How relevant a peer is to THIS item's classification — the signal
  *  the candidate cap should keep. Shared parent (one epic's siblings
  *  clump) outranks shared labels (same surface) outranks title-token
  *  overlap (likely duplicates read alike). */
 function affinity(item: TaskRow, p: TaskRow): number {
-  let s = 0;
-  if (item.parent !== undefined && item.parent === p.parent) {
-    s += 4;
-  }
-  const il = new Set(item.labels ?? []);
-  for (const l of p.labels ?? []) {
-    if (il.has(l)) {
-      s += 2;
-    }
-  }
-  const it = titleTokens(item.title);
-  for (const t of titleTokens(p.title)) {
-    if (it.has(t)) {
-      s += 1;
-    }
-  }
-  return s;
+  const parent = item.parent !== undefined && item.parent === p.parent ? 4 : 0;
+  const labels = countShared(p.labels ?? [], new Set(item.labels ?? []));
+  const tokens = countShared([...titleTokens(p.title)], titleTokens(item.title));
+  return parent + 2 * labels + tokens;
 }
 
 /**
