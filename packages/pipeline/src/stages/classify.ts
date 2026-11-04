@@ -60,14 +60,22 @@ export const DEFAULT_MAX_PEERS = 8;
 export const DEFAULT_PEER_LIMIT = 16;
 /** Defer reason codes the `defer_reason` choice declares — the answer
  *  is an enum, never prose. */
-export const DEFER_REASONS = ['blocked', 'not-ready', 'wrong-time', 'needs-info', 'other'] as const;
+export const DEFER_REASONS = [
+  'blocked',
+  'not-ready',
+  'wrong-time',
+  'needs-info',
+  'other',
+  'unspecified',
+] as const;
 export type DeferReason = (typeof DEFER_REASONS)[number];
 
 /** noul ≥ this means the judge affirms the yes/no question. */
 const AFFIRM = 0.5;
-/** rank emitted when the judge gives no confident rank — spec's
- *  neutral position (runs 1+ used low ints for first-in-line). */
-const DEFAULT_RANK = 1;
+/** rank emitted when the judge gives no confident rank — the 1..5
+ *  midpoint, so an uncertain item queues in the middle instead of
+ *  jumping first-in-line on silence. */
+const DEFAULT_RANK = 3;
 /** rank score scale — criteria low→high; emitted rank inverts it
  *  (highest precedence = rank 1). */
 const RANK_LEVELS = [
@@ -360,16 +368,19 @@ function clumpOf(cx: Cx): Pick<Classification, 'group' | 'clumpId' | 'mates'> {
     return { group: 'solo', mates: [] };
   }
   const mates = mateIds(cx);
-  if (pick === NEW_CLUMP && mates.length === 0) {
+  if (pick === NEW_CLUMP) {
     // A 'new' clump needs at least one affirmed mate — otherwise the
     // item stands alone and minting a self-named clump label lies.
+    return mates.length === 0
+      ? { group: 'solo', mates: [] }
+      : { group: 'clump', clumpId: cx.itemId, mates };
+  }
+  // Any other value must name an OFFERED existing clump — a confident
+  // answer outside the criteria is malformed, not a new group.
+  if (!existingClumps(cx.peers).includes(pick)) {
     return { group: 'solo', mates: [] };
   }
-  return {
-    group: 'clump',
-    clumpId: pick === NEW_CLUMP ? cx.itemId : pick,
-    mates,
-  };
+  return { group: 'clump', clumpId: pick, mates };
 }
 
 /** Answers → verdict. Precedence is decisive-first: duplicate (a
@@ -523,11 +534,14 @@ export function classifyStage(deps: ClassifyDeps): EngineHandler {
  * fail-closed no-hook park only sees `recheck === undefined`, and this
  * wrapper always binds one). Spawn-like intents get 'pending' — park,
  * never a blind respawn; read intents keep undefined, the bounded
- * re-fire judge stages want. (Custom `admitIntents` beyond
- * DEFAULT_ADMIT_INTENTS aren't visible here — bind a recheck hook for
- * non-standard spawn-like stages.)
+ * re-fire judge stages want. `admitIntents` is the RUN's configured
+ * spawn-like set — pass the same value the runner gets so custom
+ * intent policy isn't silently reverted to the default here.
  */
-export function stageDispatch(bindings: Record<string, EngineFn | EngineHandler>): EngineHandler {
+export function stageDispatch(
+  bindings: Record<string, EngineFn | EngineHandler>,
+  admitIntents: readonly string[] = DEFAULT_ADMIT_INTENTS
+): EngineHandler {
   const map = new Map<string, EngineHandler>();
   for (const [stage, h] of Object.entries(bindings)) {
     map.set(stage, typeof h === 'function' ? { invoke: h } : h);
@@ -547,7 +561,7 @@ export function stageDispatch(bindings: Record<string, EngineFn | EngineHandler>
         return h.recheck(call);
       }
       const intent = STAGE_INTENTS[call.stage.engine] ?? call.stage.engine;
-      return DEFAULT_ADMIT_INTENTS.includes(intent) ? 'pending' : undefined;
+      return admitIntents.includes(intent) ? 'pending' : undefined;
     },
   };
 }

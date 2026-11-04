@@ -78,6 +78,9 @@ const judge = (answers: Record<string, JudgeAnswer>, lowConfidence: string[] = [
 interface BacklogSpy extends ClassifyBacklog {
   added: [string, string][];
   removed: [string, string][];
+  /** one ordered op log — '+' add / '-' remove — so tests can assert
+   *  removals precede adds (the remove-then-add contract). */
+  events: string[];
   peersAsked: number;
 }
 
@@ -87,6 +90,7 @@ const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
   const spy: BacklogSpy = {
     added: [],
     removed: [],
+    events: [],
     peersAsked: 0,
     item: id => rows.find(r => r.id === id),
     peers: () => {
@@ -97,11 +101,13 @@ const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
     // mirroring a real store (tagMates checks labels post-snapshot)
     addLabel: (id, l) => {
       spy.added.push([id, l]);
+      spy.events.push(`+${id}:${l}`);
       const r = rows.find(x => x.id === id);
       if (r !== undefined) r.labels = [...(r.labels ?? []), l];
     },
     removeLabel: (id, l) => {
       spy.removed.push([id, l]);
+      spy.events.push(`-${id}:${l}`);
       const r = rows.find(x => x.id === id);
       if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
     },
@@ -132,7 +138,7 @@ describe('classify — dedup', () => {
     assert.equal(p.group, 'duplicate');
     assert.equal(p.dupOf, 'bro-bb2');
     assert.equal(p.complexity, 'complex'); // unanswered → conservative
-    assert.equal(p.rank, 1);
+    assert.equal(p.rank, 3); // unanswered → midpoint, not first-in-line
     assert.deepEqual(b.added, [[ITEM, `${DUP_LABEL_PREFIX}bro-bb2`]]);
     assert.deepEqual(b.removed, []);
   });
@@ -309,14 +315,21 @@ describe('classify — seams + edges', () => {
       [ITEM, `${CLUMP_LABEL_PREFIX}${ITEM}`],
       ['bro-bb2', `${CLUMP_LABEL_PREFIX}${ITEM}`],
     ]);
+    // one ordered log proves removals land BEFORE the adds — the
+    // remove-then-add contract separate added/removed lists can't show
+    assert.deepEqual(
+      b.events.map(e => e[0]),
+      ['-', '-', '+', '+']
+    );
   });
 
-  test('labels: false → decide still runs, nothing is written', async () => {
+  test('labels: false → decide still runs, nothing is written or removed', async () => {
     const j = judge({ dup_of: choice('bro-bb2') });
-    const b = backlog([row(ITEM), row('bro-bb2')]);
+    const b = backlog([row(ITEM, { labels: ['dup:stale'] }), row('bro-bb2')]);
     const res = await invoke(j, b, { labels: false });
     assert.equal(res.verdict, 'duplicate');
     assert.deepEqual(b.added, []);
+    assert.deepEqual(b.removed, []); // stale marks stay when labels are off
   });
 
   test('peers are capped for the decide — criteria stay bounded', async () => {
@@ -431,31 +444,42 @@ describe('stageDispatch — one judge slot, many stages', () => {
     // spawn intent: 'pending' parks — never a blind respawn through
     // the always-bound wrapper
     assert.equal(await h.recheck?.(spawnCall), 'pending');
+    // the run's configured admit set is honored, not just the default —
+    // declare 'judge' spawn-like and its recheck parks too
+    const custom = stageDispatch({ classify: () => ({ verdict: 'solo' }) }, ['judge']);
+    assert.equal(await custom.recheck?.(judgeCall), 'pending');
   });
 });
 
 describe('classify inside runPipeline — the payload feeds the gate', () => {
-  test('cheap item: real classify engine → review stage synthesizes skip', async () => {
+  test('cheap item: real classify engine → review.gate_on skips review', async () => {
     const j = judge({ clump: choice('solo'), complexity: choice('cheap') });
     const b = backlog([row(ITEM)]);
-    const journal = memoryJournal();
+    let reviewCalls = 0;
     const res = await runPipeline(FORMULA, ITEM, {
       formulaSha: SHA,
-      journal,
+      journal: memoryJournal(),
       admit: () => true,
       engines: {
         judge: stageDispatch({
           classify: classifyStage({ judge: j.facade, backlog: b }),
-          route: () => ({ verdict: 'queue' }), // cheap → park before work
+          route: () => ({ verdict: 'spawn' }),
+          review: () => {
+            reviewCalls += 1;
+            return { verdict: 'push' };
+          },
         }),
+        fleet: () => ({ verdict: 'done' }),
+        'act-gate': () => ({ verdict: 'landed' }),
+        learn: () => ({ verdict: 'captured' }),
       },
     });
-    assert.equal(res.outcome, 'park');
-    assert.equal(res.stage, 'route');
+    assert.equal(res.outcome, 'end'); // full run — merge → capture
     const p = res.ctx.classify as ClassifyPayload;
     assert.equal(p.group, 'solo');
-    assert.equal(p.complexity, 'cheap'); // flat merge feeds review.gate_on
-    assert.equal(res.ctx.complexity, 'cheap');
+    assert.equal(p.complexity, 'cheap');
+    assert.equal(res.ctx.complexity, 'cheap'); // flat merge fed the gate
+    assert.equal(reviewCalls, 0); // gate_on failed → synthesized skip, review never ran
     assert.equal(j.calls.length, 1); // one decide for the whole classification
   });
 });

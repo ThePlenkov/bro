@@ -203,12 +203,14 @@ ts-package, orch: foreground, timing: now}`.
 clumpId: bro-7d5nb.3, rank: 2}` — the engine is real
     code now; the passage itself is emulated (no `bro pipeline` CLI
     yet): fakes replay it in `stages/classify.test.ts`, including one
-    end-to-end `runPipeline` case proving `ctx.complexity` feeds the
-    review gate.
+    end-to-end `runPipeline` case that drives classify → route → work →
+    review and proves `ctx.complexity` is evaluated by `review.gate_on`
+    (cheap → the gate synthesizes `skip`; the review engine never
+    runs).
   - route → `spawn` — `{class: interactive, kind: ts-package,
 orch: foreground, timing: now}`.
   - work → `done` — `stages/classify.ts` + `stages/classify.test.ts`
-    - index wiring, 20 stage tests green (104 package total).
+    - index wiring, 25 stage tests green (108 package total).
   - review → in flight at log time — act gate + CodeScene stand in
     (same standing-in as Runs 1–2).
   - merge / capture → pending.
@@ -218,7 +220,9 @@ orch: foreground, timing: now}`.
     text. Every classify datum is therefore a typed question: `dup_of`
     is a `choice` over the peer ids (+`none`), clump-mates are
     per-peer `noul`s, `defer_reason` is a `choice` over declared
-    reason codes (a defer payload carries an enum, never prose).
+    reason codes (a defer payload carries an enum, never prose;
+    `unspecified` is a declared code — the fallback when the judge
+    affirms defer without naming a reason).
   - The verdict is DERIVED, never asked: no "pick your verdict"
     question exists — `duplicate` = confident dup_of ≠ none,
     `defer` = affirmed defer noul, else the `clump` choice
@@ -237,9 +241,11 @@ orch: foreground, timing: now}`.
     Existing `clump:<id>` labels on peers become joinable choices;
     the judge never invents an id.
   - Labels are REPLACEMENTS on the item (stale `dup:`/`clump:` marks
-    removed first — re-classification can't double-tag) and
-    first-writer-wins on mates (a labeled peer is not retagged — one
-    bead, one clump).
+    removed first — re-classification can't double-tag). Mates are
+    re-read through the seam immediately before tagging, so a label
+    landing mid-run is honored — a best-effort single-clump guard,
+    not a cross-process atomic claim (the store seam has no
+    conditional write).
   - `bd` has no `dup` dep type, so `dup:<id>` is a label like
     `clump:<id>` — consistent with the spec's "lands as bead labels".
   - `taskBacklog` peers = ready ∪ open ∪ in_progress — dedup must
@@ -256,13 +262,15 @@ orch: foreground, timing: now}`.
      earlier; equal ranks fall back to LIFO."
   2. **The peer candidate set is unspecified.** "Reads bead + repo
      signals" doesn't say which beads the judge sees. This run feeds
-     ready ∪ open ∪ in_progress, affinity-ranked (parent > shared
-     labels > title-token overlap) so the cap cuts the least-relevant
-     tail rather than the dedup signal, bounded at the decide's
-     criteria limit (8). Proposed wording: "classify's peer set is a
-     bounded, affinity-ranked candidate list the intake plane scopes
-     (ready ∪ open ∪ in_progress); the engine caps what one decide
-     carries."
+     ready ∪ open ∪ in_progress, weighted-affinity ranked (a shared
+     parent weighs most, shared labels next, title-token overlap
+     least — additive scores, not strict tiers, so several weak
+     signals can outrank one strong one) so the cap cuts the
+     least-relevant tail rather than the dedup signal, bounded at the
+     decide's criteria limit (8). Proposed wording: "classify's peer
+     set is a bounded, affinity-scored candidate list the intake
+     plane scopes (ready ∪ open ∪ in_progress); the engine caps what
+     one decide carries."
 - Friction: the `judge` engine slot is shared by three stages, so a
   formula can't bind classify alone without `stageDispatch` — worth
   noting for .4: the route stage binds the same multiplexer.
