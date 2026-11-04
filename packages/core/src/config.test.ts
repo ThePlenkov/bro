@@ -159,17 +159,36 @@ describe('loadConfig serve.providers', () => {
       console.error = original
     }
   })
-  test('the __proto__ route survives — it is a legal name', () => {
+  test('the __proto__ route is refused — it is a reserved key', () => {
     // JSON.parse creates '__proto__' as an OWN property — an object
     // literal would set the prototype instead
     const providers = JSON.parse('{"__proto__":"oc-iceman"}') as Record<string, string>
-    const cfg = load({ serve: { providers } })
-    // a plain assignment would reach Object.prototype's setter and lose
-    // the lane
-    assert.deepEqual(
-      Object.entries(cfg.serve.providers as Record<string, string>),
-      [['__proto__', 'oc-iceman']]
-    )
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers } })
+      // '__proto__' is a setter on Object.prototype, not a mergeable
+      // key — the config layer refuses it everywhere else too
+      assert.deepEqual(cfg.serve.providers, {})
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /route '__proto__' is a reserved key/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a provider named __proto__ is refused — it is a reserved key', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ providers: JSON.parse('{"__proto__":{"type":"acp","command":"x"}}') })
+      assert.deepEqual(Object.keys(cfg.providers ?? {}), [])
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /providers\.__proto__ is a reserved key/)
+    } finally {
+      console.error = original
+    }
   })
   test('a providers value that is neither a list nor a map drops the section', () => {
     const cfg = load({ serve: { providers: 'oc-iceman' } })

@@ -1470,7 +1470,7 @@
             {
               "type": "object",
               "patternProperties": {
-                "^[^\\/]*[^\\s\\/][^\\/]*$": {
+                "^(?!__proto__$)[^\\/]*[^\\s\\/][^\\/]*$": {
                   "type": "string",
                   "minLength": 1,
                   "pattern": "\\S"

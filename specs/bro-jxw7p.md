@@ -96,6 +96,12 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
 3. **A route carries no slash.** `requireLaneName` already says so: the
    router reads the FIRST path segment, so a route with a slash would be
    advertised and unreachable. The rule applies to the map's keys too.
+   A route name is also not `__proto__`: that key is a setter on
+   `Object.prototype`, not a mergeable key — the config layer already
+   refuses it everywhere else (the layer merge skips it, a mesh alias
+   skips it), and a route named that could not survive a layered merge
+   anyway. The loader drops it with a diagnostic and the schema rejects
+   it; the same goes for a provider entry named `__proto__`.
 4. **An exposed route must resolve to an acp entry.** `requireAcpEntry`
    already says so, loudly, naming the type. The map form inherits it.
 5. **One lane per entry, one ACP child per entry.** The pool
@@ -283,7 +289,8 @@ Three things the design above left open, decided while building it:
   non-string route value is dropped with a diagnostic; a value that is
   neither drops the section; a numeric-index route, a whitespace-only
   route, a route that duplicates another after trimming, and the
-  `__proto__` route are all handled without losing a lane.
+  reserved `__proto__` route are all refused with a diagnostic instead
+  of losing a lane.
 - A route naming no lane still rides the default lane (no 400 for a model
   the gateway simply does not route).
 - Live, one listener: `GET /v1/models` answers the union of the lanes'

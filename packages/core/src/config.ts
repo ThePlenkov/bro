@@ -381,6 +381,15 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = ra
     if (trimmed === '') {
       continue;
     }
+    // '__proto__' is a setter on Object.prototype, not an own-property
+    // write — a provider named that would mutate the map instead of
+    // naming an entry (the mesh section refuses it the same way)
+    if (trimmed === '__proto__') {
+      console.error(
+        'bro.config: providers.__proto__ is a reserved key — entry dropped'
+      );
+      continue;
+    }
     const entry = parseProviderEntry(trimmed, v);
     if (entry !== null) {
       out[trimmed] = entry;
@@ -802,14 +811,17 @@ function declareRoute(route: string, entry: unknown, routes: Record<string, stri
     );
     return;
   }
-  // '__proto__' is a legal route name — a plain assignment would reach
-  // Object.prototype's setter and lose the lane
-  Object.defineProperty(routes, name, {
-    value: entry.trim(),
-    enumerable: true,
-    configurable: true,
-    writable: true,
-  });
+  if (name === '__proto__') {
+    // '__proto__' is a setter on Object.prototype, not a mergeable key —
+    // the config layer refuses it everywhere else (the layer merge skips
+    // it, a mesh alias skips it), so a route named that could not survive
+    // a layered merge anyway
+    console.error(
+      `bro.config: serve.providers route '${name}' is a reserved key — entry dropped`
+    );
+    return;
+  }
+  routes[name] = entry.trim();
 }
 
 /** The exposed providers, in either spelling — the array of entry names
@@ -866,7 +878,7 @@ serveSection.jsonSchema = js.obj({
     // The array form's names are ENTRY keys, which may carry a slash —
     // only the map's keys are routes.
     type: 'object',
-    patternProperties: { [String.raw`^[^\/]*[^\s\/][^\/]*$`]: js.str },
+    patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
     additionalProperties: false,
   }),
 });

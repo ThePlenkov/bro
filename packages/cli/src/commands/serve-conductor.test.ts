@@ -385,7 +385,7 @@ describe('conductorConfig', () => {
     assert.throws(() => conductorConfig({}, dir), /numeric index/)
   })
 
-  test('an entry named __proto__ is exposed — it is a legal name', () => {
+  test('an entry named __proto__ is refused — it is a reserved key', () => {
     // raw JSON: an object literal would set the prototype instead of
     // naming an entry
     const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
@@ -395,11 +395,11 @@ describe('conductorConfig', () => {
         '"providers":{"dv-acp":{"type":"acp","command":"dv acp"},' +
         '"__proto__":{"type":"acp","command":"oc acp"}}}'
     )
-    const cfg = conductorConfig({}, dir)
-    // a plain assignment would reach Object.prototype's setter and lose
-    // the lane
-    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['__proto__'])
-    assert.equal(cfg?.providers?.['__proto__']?.command, 'oc acp')
+    // '__proto__' is a setter on Object.prototype, not a mergeable key —
+    // the config layer refuses it everywhere else too, so the route
+    // names an entry that does not exist: a loud error, never a lane
+    // that silently lost its entry
+    assert.throws(() => conductorConfig({}, dir), /providers\.__proto__/)
   })
 
   test('an entry with no declared route is not exposed at all', () => {
