@@ -29,11 +29,12 @@ cli entry that a suffix would have to disambiguate from `opencode-iceman`.
 
 Two facts about the id shape are already settled and must not change:
 
-- The part after the slash is the AGENT'S OWN model id, verbatim.
-  `providerBare` (`packages/providers/src/acp.ts:99`) strips exactly one
-  leading segment, and the remainder must match a catalog leaf of that lane's
-  agent (`resolveModelPin`), else `AcpConfigError`. Opencode's leaves are
-  themselves namespaced (`opencode/glm-5.3-flash-free`,
+- The part after the slash is the AGENT'S OWN model id. `providerBare`
+  (`packages/providers/src/acp.ts:99`) strips exactly one leading segment —
+  the one the router matched — and the remainder is resolved against THAT
+  lane's agent catalog (exact leaf, unique family prefix, composite
+  `<base>-<level>`, or the spawn-level pin the session reports). Opencode's
+  leaves are themselves namespaced (`opencode/glm-5.3-flash-free`,
   `opencode-go/gpt-5.6-luna`, `vercel/…`), so the remainder can contain
   slashes.
 - The router's fallback is the DEFAULT lane: a bare id, or a prefix naming no
@@ -103,26 +104,55 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
    entry share them: the second route must not spawn a second agent, and both
    routes must see the SAME conversation — one provider, one context.
 6. **The primary route is what the catalog advertises.** A lane's primary
-   route is the first declared route for its entry, else the entry key. The
-   `/v1/models` rows carry the primary route; other routes stay routable but
-   unadvertised. The catalog never lists one lane's models twice.
-7. **The journal names the route, the pool names the entry.** `conductor.*`
-   rows carry the ROUTE the request came in on — that is the public identity
-   an operator reads. The pool's label stays the entry key, so the seam
+   route is the first DECLARED route for its entry. The `/v1/models` rows
+   carry the primary route; other routes stay routable but unadvertised. The
+   catalog never lists one lane's models twice. In the ARRAY form the
+   declaration IS the entry key (route ≡ entry), so the primary route is
+   that key; in the MAP form the entry key is never a fallback — an entry
+   with no declared route has no primary route and no advertised rows.
+7. **The journal names the route that ANSWERED, the pool names the entry.**
+   `conductor.*` rows carry the route the request was served under — that is
+   the public identity an operator reads. For a CHAINED `/v1/responses`
+   request that is the PREDECESSOR's route, not the incoming model's prefix:
+   a chain already lives in one provider's context, so the answer belongs to
+   the lane that holds it. The pool's label stays the entry key, so the seam
    resolves one agent per entry.
+8. **A route that names no lane rides the DEFAULT lane.** A bare id, or a
+   prefix no lane answers to, is the default lane's verdict — that lane's own
+   catalog, or its own error. This is today's behaviour and it stays: the
+   gateway must not 400 a client for a model it simply does not route. The
+   rule is explicit here so no implementor reads the fallback as a config
+   error.
 
 ### The id contract (unchanged)
 
-| requested model | lane | reaches the agent as |
+| requested model | lane | resolves against that lane's catalog as |
 | --- | --- | --- |
 | `opencode-acp/opencode/glm-5.3-flash-free` | the `opencode-acp` route | `opencode/glm-5.3-flash-free` |
 | `devin-acp/swe-2-high` | the default lane | `swe-2-high` |
 | `devin/swe-2-max` | the default lane (its own key, or its alias) | `swe-2-max` |
 | `swe-2-high` (bare) | the default lane | `swe-2-high` |
 | `unknown-route/x` | the default lane | `x` — the lane's own verdict |
+| a chained `/v1/responses` id | the PREDECESSOR's lane | the predecessor's route, whatever the id asks for |
 
-Only the FIRST segment is bro-side routing. The rest is the agent's own id,
-compared verbatim against that lane's catalog.
+Only the FIRST segment is bro-side routing: `providerBare`
+(`packages/providers/src/acp.ts:99`) strips exactly one leading segment, and
+that segment is what the router matched. The remainder is the agent's own id
+and is resolved by the agent's catalog, NOT compared verbatim:
+
+1. **exact leaf** — a catalog leaf whose value equals the remainder, or whose
+   display name matches it case-insensitively (`resolveModelPin`);
+2. **family shorthand** — exactly one leaf whose value starts with
+   `<remainder>-`; more than one is an ambiguity error naming the offers;
+3. **composite level** — `<base>-<level>`, where `<level>` names a
+   `thought_level` leaf (devin's `swe-2-max` is model `swe-2-high` at level
+   `max`, never its own catalog id);
+4. **spawn-level pin** — the provider command's own `--model`, which the
+   session reports back verbatim.
+
+A `[<size>]` suffix is a client-side context opt-in and strips before the
+lookup. Anything the catalog does not admit is a loud `AcpConfigError`
+naming the catalog — never a silent fallback to another model.
 
 ### The reserved shape: native lanes
 
@@ -132,10 +162,17 @@ constrains the design above only in that a lane must be transport-agnostic.
 Today a serve is one of two mutually exclusive modes (`packages/cli/src/commands/serve.ts:2516-2522`):
 
 - `serve.backend` names an **acp** entry → the conductor answers `/v1/*`;
-- otherwise → the **byte proxy** answers `/v1/*`, forwarding to
-  `BRO_PROVIDER_UPSTREAM` with the client's session token swapped for the
-  real credential. That proxy is Anthropic-Messages-shaped and byte
-  transparent; it is env-driven, single-upstream, and does no model routing.
+- NO `serve.backend` is configured → the **byte proxy** answers `/v1/*`,
+  forwarding to `BRO_PROVIDER_UPSTREAM` with the client's session token
+  swapped for the real credential. That proxy is Anthropic-Messages-shaped
+  and byte transparent; it is env-driven, single-upstream, and does no model
+  routing.
+
+A CONFIGURED `serve.backend` naming a non-acp entry is a loud startup error
+(`requireAcpEntry`), not a fall-through to the proxy: the operator named a
+backend, and naming one that cannot converse must not silently become a
+different transport. The proxy is the fallback for a serve with NO backend —
+not a third option for a misconfigured one.
 
 So a native (non-acp) provider cannot sit beside an acp one in one listener
 today, and `serve.providers` accepts acp entries only. The end state:
@@ -172,7 +209,8 @@ The design lands in pieces, each its own PR; the alias mechanism first.
       plus any declared route for it.
 - [ ] `packages/cli/src/commands/serve-conductor.ts` — the lane's pool,
       seam label and session map move to the ENTRY; routes share them. The
-      journal's `backend` field becomes the route.
+      journal's `backend` field becomes the route that ANSWERED — the
+      predecessor's route for a chained `/v1/responses` request.
 - [ ] `packages/cli/src/commands/serve-conductor.ts` — the `/v1/models`
       catalog advertises each lane under its primary route only.
 - [ ] `packages/cli/src/commands/serve.ts` — the startup line lists the
@@ -193,7 +231,11 @@ The design lands in pieces, each its own PR; the alias mechanism first.
   spawned once.
 - The catalog lists a lane's models under its primary route only — no
   duplicate rows when a lane has two routes.
-- The journal's `backend` field carries the route the request came in on.
+- The journal's `backend` field carries the route that answered: the
+  requested route for a plain turn, the PREDECESSOR's route for a chained
+  `/v1/responses` request.
+- A route naming no lane still rides the default lane (no 400 for a model
+  the gateway simply does not route).
 - Live, one listener: `GET /v1/models` answers the union of the lanes'
   catalogs under their routes; a real `claude -p --model opencode-acp/…` and
   a real `claude -p --model devin-acp/…` both answer, and the journal records
