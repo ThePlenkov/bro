@@ -759,13 +759,15 @@ describe('serve /v1/* — the conductor plane', () => {
     // where the model comes from — the gateway must not double the prefix.
     // a name whose slash is NOT a provider ("Claude Opus 4 / 1M") still
     // needs one, and a model id carrying its own provider names the row.
-    const cases: [string, string, string][] = [
-      ['vercel/anthropic/claude-opus-5', 'vercel/Claude Opus 5', 'vercel/Claude Opus 5'],
-      ['claude-opus-5-5-medium', 'Claude Opus/fast', 'dv-acp/Claude Opus/fast'],
-      ['anthropic/claude-opus-5', 'Claude Opus 5', 'anthropic/Claude Opus 5'],
-      ['swe-x', 'SWE X', 'dv-acp/SWE X'],
+    // the second line answers the same question for a picker that shows
+    // the origin: the lane plus the agent's provider chain, no model leaf.
+    const cases: [string, string, string, string][] = [
+      ['vercel/anthropic/claude-opus-5', 'vercel/Claude Opus 5', 'vercel/Claude Opus 5', 'dv-acp/vercel/anthropic'],
+      ['claude-opus-5-5-medium', 'Claude Opus/fast', 'dv-acp/Claude Opus/fast', 'dv-acp'],
+      ['anthropic/claude-opus-5', 'Claude Opus 5', 'anthropic/Claude Opus 5', 'dv-acp/anthropic'],
+      ['swe-x', 'SWE X', 'dv-acp/SWE X', 'dv-acp'],
     ]
-    for (const [value, name, expected] of cases) {
+    for (const [value, name, expected, described] of cases) {
       const named: SessionConfigOption = {
         ...MODEL_OPTION,
         options: [{ value, name }],
@@ -778,8 +780,12 @@ describe('serve /v1/* — the conductor plane', () => {
         const r = await fetch(`${url}/v1/models`, { headers: auth })
         const body = await r.json()
         assert.deepEqual(
-          body.data.map((m: { id: string; display_name: string }) => [m.id, m.display_name]),
-          [[`dv-acp/${value}`, expected]],
+          body.data.map((m: { id: string; display_name: string; description: string }) => [
+            m.id,
+            m.display_name,
+            m.description,
+          ]),
+          [[`dv-acp/${value}`, expected, described]],
           `${value} → ${expected}`
         )
       } finally {

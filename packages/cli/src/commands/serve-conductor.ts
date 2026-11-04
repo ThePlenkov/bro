@@ -3920,7 +3920,8 @@ function mergeCatalogs(lanes: LaneCatalog[]): RoutedModel[] {
  *  An agent may name its models "vercel/Claude Opus 5.5" (the upstream
  *  provider rides along in the name); one that names them bare ("Claude
  *  Opus 5.5") leaves two lanes' rows looking identical in a client
- *  picker — the reader cannot tell which provider a row came from. A
+ *  picker — the reader cannot tell which provider a row came from.
+ *
  *  A name qualifies ITSELF when its first segment mirrors the model id's
  *  first segment ("vercel/…" over "vercel/anthropic/…"). A name whose
  *  slash is not that ("Claude Opus 4 / 1M") does not — the model id's own
@@ -3948,6 +3949,22 @@ function displayName(m: RoutedModel): string {
 function firstSegment(id: string): string {
   const cut = id.indexOf('/');
   return cut <= 0 ? id : id.slice(0, cut);
+}
+
+/** The row's SECOND line — the path that serves it: the lane's prefix and
+ *  the agent's own provider chain, without the model leaf. A client picker
+ *  renders it as the row's origin ("devin-acp", "opencode-acp/vercel/anthropic")
+ *  — the answer to "which provider serves this model?" without making the
+ *  human read the id. Everything but the leaf IS the provider chain: an
+ *  agent's model id is `<provider>/<model>`, so the leaf is the model. */
+function providerPath(m: RoutedModel): string {
+  const prefix = m.prefix;
+  if (prefix === undefined) return '';
+  const modelId = m.modelId;
+  if (modelId === undefined) return prefix;
+  const cut = modelId.lastIndexOf('/');
+  const chain = cut <= 0 ? '' : modelId.slice(0, cut);
+  return chain.length > 0 ? `${prefix}/${chain}` : prefix;
 }
 
 /** The anthropic /v1/models rows — the UNION of every lane's catalog,
@@ -3982,6 +3999,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     type: 'model',
     id: m.id,
     display_name: displayName(m),
+    description: providerPath(m),
     created_at: '2025-01-01T00:00:00Z',
   }));
   // a lane that FAILED is not silently absent from the union: the
