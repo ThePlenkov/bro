@@ -109,7 +109,11 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
    catalog never lists one lane's models twice. In the ARRAY form the
    declaration IS the entry key (route ≡ entry), so the primary route is
    that key; in the MAP form the entry key is never a fallback — an entry
-   with no declared route has no primary route and no advertised rows.
+   with no declared route has no primary route and no advertised rows. The
+   DEFAULT lane is the one entry whose key is routable without a
+   declaration, so its `serve.backend` key IS its primary route when no
+   route is declared for it: `devin-acp/…` keeps being advertised exactly as
+   it is today, and a declared alias takes over the advertisement.
 7. **The journal names the route that ANSWERED, the pool names the entry.**
    `conductor.*` rows carry the route the request was served under — that is
    the public identity an operator reads. For a CHAINED `/v1/responses`
@@ -150,8 +154,10 @@ and is resolved by the agent's catalog, NOT compared verbatim:
 4. **spawn-level pin** — the provider command's own `--model`, which the
    session reports back verbatim.
 
-A `[<size>]` suffix is a client-side context opt-in and strips before the
-lookup. Anything the catalog does not admit is a loud `AcpConfigError`
+A `[<size>]` suffix is a client-side context opt-in. The RAW id is tried
+against the catalog first — an agent may advertise `model[1m]` as its own
+option value — and the base id, suffix stripped, is tried only on a miss.
+Anything the catalog does not admit is a loud `AcpConfigError`
 naming the catalog — never a silent fallback to another model.
 
 ### The reserved shape: native lanes
