@@ -81,7 +81,7 @@ export function skillFolderHash(dir: string): string | null {
       } else if (entry.isFile()) {
         try {
           files.push({
-            relativePath: relative(dir, full).split('\\').join('/'),
+            relativePath: relative(dir, full).replaceAll('\\', '/'),
             content: readFileSync(full),
           })
         } catch {

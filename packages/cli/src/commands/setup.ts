@@ -395,7 +395,7 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
     execFileSync(
       'npx',
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-      { cwd: dir, stdio: 'pipe' }
+      { cwd: dir, stdio: 'pipe' } // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
     )
   } catch {
     // one unreachable upstream does not stop the rest
