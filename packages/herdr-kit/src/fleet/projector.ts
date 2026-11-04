@@ -5,7 +5,7 @@
  *  beads, proc probes, config) are injected by the caller — this
  *  module only ever talks to herdr and the fleet-state dir. */
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { PaneLed } from '@broject/acp-session';
 import { callJson, callOk, nextSeq, STATUS_IDENTITY } from '../client/index.ts';
@@ -52,9 +52,11 @@ function realpathOrNull(p: string): string | null {
 interface PluginLedger {
   /** worktree path → the plugin's workspace binding + ownership flag. */
   workspaces: Map<string, { ws?: string; managed?: boolean }>;
-  /** workspace id → the `bro: status` pane the plugin spawned there —
-   *  the backstop push's only destination (spec bro-idsat). */
-  statusPanes: Map<string, string>;
+  /** workspace id → `bro: status` pane candidates, newest first —
+   *  the backstop push tries each until a live pane answers, so a
+   *  newer stale binding's dead `pane_id` falls back to an older live
+   *  one instead of clobbering (spec bro-idsat). */
+  statusPanes: Map<string, string[]>;
 }
 
 /** The plugin's ownership ledger — `managed: true` marks workspaces a
@@ -71,20 +73,36 @@ interface PluginLedgerFile {
   statuses?: Record<string, { pane_id?: string; workspace?: string }>;
 }
 
-/** Merge one parsed state file into the ledger — last write wins per
- *  workspace key and per status-pane binding. */
-function mergeLedger(out: PluginLedger, v: PluginLedgerFile): void {
-  for (const [k, r] of Object.entries(v.workspaces ?? {})) out.workspaces.set(k, r);
-  for (const r of Object.values(v.statuses ?? {})) {
-    if (r.workspace !== undefined && r.pane_id !== undefined) {
-      out.statusPanes.set(r.workspace, r.pane_id);
-    }
-  }
+/** One record candidate, scored for the pick: `live` means its bound
+ *  workspace id exists in herdr right now — a stale file's dead
+ *  binding can never outrank a live one, mtime only breaks ties. */
+interface Scored<T> {
+  rec: T;
+  mtime: number;
+  live: boolean;
+  /** collection order — on equal liveness+mtime the later-scanned
+   *  candidate wins, matching the old same-dir scoped-wins rule. */
+  order: number;
 }
 
-/** Every directory a plugin ledger file can live in — the same list
- *  `pluginLedger` merges and a projector watch observes, so the two
- *  can never disagree about where bindings land. */
+/** The winning record for one key: any live-ws candidate beats every
+ *  dead one; among candidates of one liveness class the newest file
+ *  wins (collection order preserves the old same-dir scoped-wins
+ *  behaviour on an mtime tie). */
+function pickLive<T>(cands: Scored<T>[]): T | undefined {
+  let best: Scored<T> | undefined;
+  for (const c of cands) {
+    if (
+      best === undefined ||
+      (c.live && !best.live) ||
+      (c.live === best.live && c.mtime >= best.mtime)
+    ) {
+      best = c;
+    }
+  }
+  return best?.rec;
+}
+
 export function pluginLedgerDirs(): string[] {
   const home = process.env.HOME ?? '/tmp';
   return [
@@ -105,7 +123,10 @@ export function pluginLedgerDirs(): string[] {
   ];
 }
 
-function pluginLedger(ctx: { root: string; common: string | null }): PluginLedger {
+function pluginLedger(
+  ctx: { root: string; common: string | null },
+  liveWs: { has(id: string): boolean }
+): PluginLedger {
   const base = ctx.common ?? ctx.root;
   const real = realpathOrNull(base);
   const scopes = new Set(
@@ -114,19 +135,82 @@ function pluginLedger(ctx: { root: string; common: string | null }): PluginLedge
     )
   );
   const dirs = pluginLedgerDirs();
-  const out: PluginLedger = { workspaces: new Map(), statusPanes: new Map() };
+  // Gather every candidate record per key, then pick one: a
+  // herdr-hosted plugin pane and a daemon-side run write different
+  // state dirs, and after a herdr restart the stale file's dead ws
+  // bindings must not clobber the live writer's fresh ones — a
+  // record wins only when its bound workspace id is alive, so even a
+  // NEWER file re-saved with a dead ws loses. openSync+fstatSync+
+  // readFileSync(fd) couples each candidate's content to the mtime of
+  // that same file generation — a stat-then-read race can never pair
+  // fresh bytes with a stale rank.
+  type WsRec = { ws?: string; managed?: boolean };
+  type StRec = { pane_id?: string; workspace?: string };
+  const wsCands = new Map<string, Scored<WsRec>[]>();
+  const stCands = new Map<string, Scored<StRec>[]>();
+  let seq = 0;
+  const add = <T>(
+    map: Map<string, Scored<T>[]>,
+    key: string,
+    c: Omit<Scored<T>, 'order'>
+  ): void => {
+    const arr = map.get(key) ?? [];
+    arr.push({ ...c, order: seq++ });
+    map.set(key, arr);
+  };
   for (const dir of dirs) {
     for (const scope of scopes) {
-      // unscoped `state.json` is the legacy name — read first so a
-      // same-dir scoped file always wins on a shared worktree key
       for (const file of ['state.json', `state-${scope}.json`]) {
+        const p = join(dir, file);
+        let fd: number | undefined;
         try {
-          mergeLedger(out, JSON.parse(readFileSync(join(dir, file), 'utf8')));
+          fd = openSync(p, 'r');
+          const mtime = fstatSync(fd).mtimeMs;
+          const parsed = JSON.parse(readFileSync(fd, 'utf8')) as PluginLedgerFile;
+          for (const [path, rec] of Object.entries(parsed.workspaces ?? {})) {
+            add(wsCands, path, {
+              rec,
+              mtime,
+              live: rec.ws !== undefined && liveWs.has(rec.ws),
+            });
+          }
+          for (const r of Object.values(parsed.statuses ?? {})) {
+            // an incomplete status row (no pane_id) is never a
+            // candidate — a newer half-written sibling must not hide
+            // an older valid binding
+            if (r.workspace !== undefined && r.pane_id !== undefined) {
+              add(stCands, r.workspace, { rec: r, mtime, live: liveWs.has(r.workspace) });
+            }
+          }
         } catch {
-          // no ledger at this candidate — the others still apply
+          // missing file or unreadable JSON at this candidate — the
+          // others still apply
+        } finally {
+          if (fd !== undefined) {
+            try {
+              closeSync(fd);
+            } catch {
+              // a close failure leaves nothing actionable behind
+            }
+          }
         }
       }
     }
+  }
+  const out: PluginLedger = { workspaces: new Map(), statusPanes: new Map() };
+  for (const [path, c] of wsCands) {
+    const w = pickLive(c);
+    if (w !== undefined) out.workspaces.set(path, w);
+  }
+  for (const [ws, c] of stCands) {
+    // every candidate shares the key's ws, so `live` is one class —
+    // order is live-first then newest; the push walks the list until
+    // a pane row actually answers
+    const ordered = [...c]
+      .sort((a, b) => Number(b.live) - Number(a.live) || b.mtime - a.mtime || b.order - a.order)
+      .map(x => x.rec.pane_id)
+      .filter((p): p is string => p !== undefined);
+    if (ordered.length > 0) out.statusPanes.set(ws, ordered);
   }
   return out;
 }
@@ -155,7 +239,9 @@ interface WsTarget {
   tree: HerdrWorktree;
   wsId: string;
   live: HerdrWorkspace;
-  statusPane?: string;
+  /** status-pane candidates newest-first — the push walks them until
+   *  a pane row answers live (a dead recorded pane falls back). */
+  statusPanes?: string[];
 }
 
 /** The managed∩open set — workspaces the plugin opened AND still owns;
@@ -173,8 +259,8 @@ function managedTargets(
     if (live === undefined) continue;
     const rec = ledger.workspaces.get(tree.path);
     if (rec?.managed !== true || rec.ws !== wsId) continue;
-    const statusPane = ledger.statusPanes.get(wsId);
-    out.push({ tree, wsId, live, ...(statusPane !== undefined ? { statusPane } : {}) });
+    const statusPanes = ledger.statusPanes.get(wsId);
+    out.push({ tree, wsId, live, ...(statusPanes !== undefined ? { statusPanes } : {}) });
   }
   return out;
 }
@@ -208,7 +294,7 @@ export function runFleetPass<P extends { beads: { id: string }[] }>(
     };
   }
   const wsById = new Map(wsList.workspaces.map(w => [w.workspace_id, w]));
-  const targets = managedTargets(trees.worktrees, pluginLedger(ctx), wsById);
+  const targets = managedTargets(trees.worktrees, pluginLedger(ctx, wsById), wsById);
   // state files live under the common dir the pane resolves identically
   // (gitCommonDir(worktree) ?? worktree) — prune has the same base
   const statusBase = ctx.common ?? ctx.root;
@@ -410,10 +496,14 @@ function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } 
     // an unwritable state dir skips the file, never the pass
   }
   let leds = 0;
-  if (j.ws.statusPane !== undefined) {
+  if (j.ws.statusPanes !== undefined) {
     const rows = paneRows(j.ws.wsId);
-    if (rows !== undefined && statusPaneLive(rows, j.ws.statusPane)) {
-      leds = callOk(backstopArgs(j.ws.statusPane, led, nextSeq(j.now))) ? 1 : 0;
+    // walk the candidates newest-first — a dead recorded pane falls
+    // back to an older live binding instead of killing the push
+    const pane =
+      rows === undefined ? undefined : j.ws.statusPanes.find(p => statusPaneLive(rows, p));
+    if (pane !== undefined) {
+      leds = callOk(backstopArgs(pane, led, nextSeq(j.now))) ? 1 : 0;
     }
   }
   return { files, leds, path };
