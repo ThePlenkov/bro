@@ -276,6 +276,36 @@ function bounded(name: string, v: number | undefined, dflt: number): number {
   return n;
 }
 
+/** The journal this run writes — injected wins (it IS the resume
+ *  identity), else opts.journal, else the file journal under the
+ *  git-common dir. None → loud failure, never a stateless run. */
+function journalFor(
+  opts: RunOptions,
+  journal: PipelineJournal | undefined,
+  runId: string
+): PipelineJournal {
+  const j =
+    journal ?? opts.journal ?? (opts.dir ? openPipelineJournal({ dir: opts.dir, runId }) : null);
+  if (j === null) {
+    throw new Error(
+      'pipeline run needs a journal — pass opts.journal, or opts.dir inside a git repo'
+    );
+  }
+  return j;
+}
+
+/** EngineMap → handler map: a bare function is an invoke-only
+ *  handler, an object carries invoke + optional recheck. */
+function engineMapFor(engines: EngineMap): Map<string, EngineHandler> {
+  const map = new Map<string, EngineHandler>();
+  for (const [name, e] of Object.entries(engines)) {
+    if (e !== undefined) {
+      map.set(name, typeof e === 'function' ? { invoke: e } : e);
+    }
+  }
+  return map;
+}
+
 function initRun(
   formula: PipelineFormula,
   item: string,
@@ -291,27 +321,14 @@ function initRun(
     );
   }
   const runId = runIdFor(opts, journal);
-  const j =
-    journal ?? opts.journal ?? (opts.dir ? openPipelineJournal({ dir: opts.dir, runId }) : null);
-  if (j === null) {
-    throw new Error(
-      'pipeline run needs a journal — pass opts.journal, or opts.dir inside a git repo'
-    );
-  }
-  const engines = new Map<string, EngineHandler>();
-  for (const [name, e] of Object.entries(opts.engines)) {
-    if (e !== undefined) {
-      engines.set(name, typeof e === 'function' ? { invoke: e } : e);
-    }
-  }
   return {
     formula,
     item,
     runId,
     sha: opts.formulaSha,
     dir: opts.dir,
-    journal: j,
-    engines,
+    journal: journalFor(opts, journal, runId),
+    engines: engineMapFor(opts.engines),
     admit: opts.admit,
     admitIntents: opts.admitIntents ?? [...DEFAULT_ADMIT_INTENTS],
     maxAttempts: bounded('maxAttempts', opts.maxAttempts, DEFAULT_MAX_ATTEMPTS),
@@ -846,19 +863,16 @@ function replayCtx(run: Run, records: JournalRow[]): void {
 async function begin(run: Run): Promise<RunResult> {
   // run_id ↔ item is 1:1 — rows for this run id belonging to another
   // item mean a corrupt/mixed journal namespace; refuse to resume or
-  // replay any of it.
+  // replay any of it. And park WITHOUT a row: an alert appended under
+  // the shared run id would itself be a foreign row for the original
+  // item — the poison would lock BOTH items out of resume forever.
   const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
   if (foreign) {
     const entry = entryStage(run.formula).name;
-    return alertStep(
-      run,
-      { stage: entry, attempt: 1 },
-      {
-        alert: PARK_ALERTS.itemMismatch,
-        detail: `journal rows for run ${run.runId} belong to another item`,
-        resume: entry,
-      }
-    ).halt;
+    return result(run, 'park', entry, {
+      alert: PARK_ALERTS.itemMismatch,
+      detail: `journal rows for run ${run.runId} belong to another item`,
+    });
   }
   const records = recordsOf(run);
   run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);

@@ -777,6 +777,10 @@ describe('bounded drives and journal isolation', () => {
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.itemMismatch);
     assert.equal(e.judge.calls.length, 0); // nothing replayed or re-fired
+    // and NO alert row under the shared run id — an appended poison
+    // row would itself be foreign to the original item and lock both
+    // out of resume forever
+    assert.equal(j.rows().length, 1);
   });
 
   test('a hostile __proto__ payload key lands as inert data, never a setter', async () => {
