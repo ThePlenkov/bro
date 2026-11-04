@@ -14,6 +14,8 @@
  * (one parser, one set of mistakes).
  */
 import { flag, hasHelpFlag, positionals, printUsage } from '@broject/core';
+import { runAsk } from './ask.ts';
+import { runAcpFacade } from './acp.ts';
 import { runClient, runModels } from './commands.ts';
 import { readRouterEndpoint } from './gateway.ts';
 import { configuredProviders } from './providers.ts';
@@ -21,6 +23,9 @@ import { CLIENTS } from './registry.ts';
 
 const USAGE = `usage:
   brouter providers [--json]                     the configured providers
+  brouter ask [--provider <name>] [--model <id>] [--timeout <ms>] [--json] <question…>
+                                                    ask an acp agent
+  brouter acp [--provider <name>] [--model <id>]  the acp endpoint (stdio)
   brouter models [--json]                        the served catalog
   brouter clients [--json]                        the client adapters
   brouter client <id> [--write] [--settings P] [--wire] [--json]
@@ -28,7 +33,14 @@ const USAGE = `usage:
 `;
 
 const BOOL_FLAGS = new Set(['--write', '--wire', '--json']);
-const VALUE_FLAGS = new Set(['--settings', '--url', '--token']);
+const VALUE_FLAGS = new Set([
+  '--settings',
+  '--url',
+  '--token',
+  '--provider',
+  '--model',
+  '--timeout',
+]);
 
 function die(message: string): never {
   console.error(`brouter: ${message}`);
@@ -65,6 +77,47 @@ function cmdProviders(argv: string[]): void {
     const models = p.models === undefined ? '' : `\t${p.models} model(s)`;
     console.log(`${p.name}\t${p.type}\t${p.target ?? ''}${model}${models}`);
   }
+}
+
+async function cmdAsk(argv: string[]): Promise<void> {
+  const pos = positionals(argv, VALUE_FLAGS, { boolFlags: BOOL_FLAGS });
+  // pos[0] is the command word; the rest is the question
+  const question = pos.slice(1).join(' ').trim();
+  if (question === '') {
+    console.error('error: brouter ask needs a question');
+    printUsage(USAGE, 2);
+  }
+  const provider = flag(argv, '--provider');
+  const model = flag(argv, '--model');
+  const timeout = flag(argv, '--timeout');
+  const outcome = await runAsk(
+    {
+      ...(provider === undefined ? {} : { provider }),
+      question,
+      ...(model === undefined ? {} : { model }),
+      ...(timeout === undefined ? {} : { timeoutMs: Number(timeout) }),
+    },
+    process.cwd()
+  );
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(outcome, null, 2));
+    return;
+  }
+  console.log(outcome.text);
+}
+
+async function cmdAcp(argv: string[]): Promise<void> {
+  const provider = flag(argv, '--provider');
+  const model = flag(argv, '--model');
+  const timeout = flag(argv, '--timeout');
+  await runAcpFacade(
+    {
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      ...(timeout === undefined ? {} : { timeoutMs: Number(timeout) }),
+    },
+    process.cwd()
+  );
 }
 
 async function cmdModels(argv: string[]): Promise<void> {
@@ -138,6 +191,12 @@ async function main(): Promise<void> {
   switch (command) {
     case 'providers':
       cmdProviders(argv);
+      return;
+    case 'ask':
+      await cmdAsk(argv);
+      return;
+    case 'acp':
+      await cmdAcp(argv);
       return;
     case 'models':
       await cmdModels(argv);

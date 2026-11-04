@@ -17,6 +17,7 @@ export {
   acpPooledTurn,
   acpSessionRetain,
   acpWorkerArgv,
+  promptText,
   isSystemoneFamily,
 } from './acp.ts';
 export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts';
