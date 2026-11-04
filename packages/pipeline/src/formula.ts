@@ -12,6 +12,12 @@
  *   engine = "judge"
  *   verdicts = ["solo", "clump", "duplicate", "defer"]
  *
+ *   [[stages]]
+ *   name = "review"
+ *   engine = "judge"
+ *   gate_on = "complexity == complex"
+ *   verdicts = ["push", "fix", "abandon"]
+ *
  *   [transitions]                  # root table — verdict → next stage
  *   classify = { solo = "route", clump = "route", duplicate = "close",
  *                defer = "park" }
@@ -106,6 +112,46 @@ function parseGateOn(raw: unknown, where: string, errors: string[]): GateOn | un
   return { field: m[1], op: m[2] as '==' | '!=', value: m[3] };
 }
 
+function stageName(raw: unknown, where: string, errors: string[]): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    errors.push(`${where}.name: required non-empty string`);
+    return undefined;
+  }
+  if ((TERMINAL_ACTIONS as readonly string[]).includes(raw)) {
+    errors.push(`${where}.name: "${raw}" is a reserved terminal action, not a stage name`);
+    return undefined;
+  }
+  return raw;
+}
+
+function stageEngine(raw: unknown, where: string, errors: string[]): StageEngine | undefined {
+  if (typeof raw !== 'string' || !(STAGE_ENGINES as readonly string[]).includes(raw)) {
+    errors.push(
+      `${where}.engine: expected one of ${STAGE_ENGINES.join('|')}, got ${JSON.stringify(raw)}`
+    );
+    return undefined;
+  }
+  return raw as StageEngine;
+}
+
+function stageVerdicts(raw: unknown, where: string, errors: string[]): string[] | undefined {
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some(v => typeof v !== 'string' || v.length === 0)
+  ) {
+    errors.push(`${where}.verdicts: required non-empty string array`);
+    return undefined;
+  }
+  if ((raw as string[]).includes(SKIP_VERDICT)) {
+    errors.push(
+      `${where}.verdicts: "${SKIP_VERDICT}" is reserved — the runner synthesizes it on gate_on failure`
+    );
+    return undefined;
+  }
+  return raw as string[];
+}
+
 function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | undefined {
   const where = `stages[${i}]`;
   if (!isRecord(raw)) {
@@ -117,47 +163,22 @@ function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | 
       errors.push(`${where}: unknown key "${key}"`);
     }
   }
-  const name = raw.name;
-  if (typeof name !== 'string' || name.length === 0) {
-    errors.push(`${where}.name: required non-empty string`);
-    return undefined;
-  }
-  if ((TERMINAL_ACTIONS as readonly string[]).includes(name)) {
-    errors.push(`${where}.name: "${name}" is a reserved terminal action, not a stage name`);
-    return undefined;
-  }
-  const engine = raw.engine;
-  if (typeof engine !== 'string' || !(STAGE_ENGINES as readonly string[]).includes(engine)) {
-    errors.push(
-      `${where} ("${name}").engine: expected one of ${STAGE_ENGINES.join('|')}, got ${JSON.stringify(engine)}`
-    );
-    return undefined;
-  }
-  const verdicts = raw.verdicts;
-  if (
-    !Array.isArray(verdicts) ||
-    verdicts.length === 0 ||
-    verdicts.some(v => typeof v !== 'string' || v.length === 0)
-  ) {
-    errors.push(`${where} ("${name}").verdicts: required non-empty string array`);
-    return undefined;
-  }
-  if ((verdicts as string[]).includes(SKIP_VERDICT)) {
-    errors.push(
-      `${where} ("${name}").verdicts: "${SKIP_VERDICT}" is reserved — the runner synthesizes it on gate_on failure`
-    );
-    return undefined;
-  }
+  const name = stageName(raw.name, where, errors);
+  if (name === undefined) return undefined;
+  const at = `${where} ("${name}")`;
+  const engine = stageEngine(raw.engine, at, errors);
+  const verdicts = stageVerdicts(raw.verdicts, at, errors);
+  if (engine === undefined || verdicts === undefined) return undefined;
   const mode = raw.mode;
   if (mode !== undefined && typeof mode !== 'string') {
-    errors.push(`${where} ("${name}").mode: must be a string`);
+    errors.push(`${at}.mode: must be a string`);
     return undefined;
   }
   return {
     name,
-    engine: engine as StageEngine,
-    verdicts: verdicts as string[],
-    gate_on: parseGateOn(raw.gate_on, `${where} ("${name}")`, errors),
+    engine,
+    verdicts,
+    gate_on: parseGateOn(raw.gate_on, at, errors),
     mode: mode as string | undefined,
   };
 }
@@ -174,7 +195,9 @@ function validateTransitionEntry(
   names: Set<string>,
   errors: string[]
 ): Record<string, string> {
-  const map: Record<string, string> = {};
+  // null prototype — a verdict literally named "__proto__" must land as
+  // data, not hit the prototype setter
+  const map: Record<string, string> = Object.create(null);
   const allowed = allowedVerdicts(stage);
   for (const [verdict, target] of Object.entries(vmap)) {
     if (!allowed.includes(verdict)) {
@@ -207,7 +230,7 @@ function validateTransitions(
   stages: PipelineStage[],
   errors: string[]
 ): Record<string, Record<string, string>> {
-  const transitions: Record<string, Record<string, string>> = {};
+  const transitions: Record<string, Record<string, string>> = Object.create(null);
   const names = new Set(stages.map(s => s.name));
   const byName = new Map(stages.map(s => [s.name, s]));
   if (raw !== undefined && !isRecord(raw)) {

@@ -60,6 +60,17 @@ merge    = { landed = "capture", blocked = "retry", dropped = "close" }
 capture  = { captured = "end" }
 `;
 
+/** one-stage formula shell for negative cases */
+const oneStage = (stageBody: string, transitions: string) => `
+[[stages]]
+${stageBody}
+
+[transitions]
+${transitions}
+`;
+
+const A = 'name = "a"\nengine = "judge"\nverdicts = ["ok"]';
+
 describe('parsePipelineFormula', () => {
   test('parses the spec formula — 6 stages, gate_on, full transitions', () => {
     const f = parseFormula(SPEC_FORMULA);
@@ -83,229 +94,103 @@ describe('parsePipelineFormula', () => {
     assert.equal(entryStage(f).name, 'classify');
   });
 
-  test('missing transition for a declared verdict fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok", "bad"]
-
-[transitions]
-a = { ok = "end" }
-`),
-      /verdict "bad" has no transition/
+  test('a verdict literally named __proto__ lands as data, not a setter', () => {
+    const f = parseFormula(
+      oneStage(
+        'name = "a"\nengine = "judge"\nverdicts = ["ok", "__proto__"]',
+        'a = { ok = "end", "__proto__" = "park" }'
+      )
     );
+    assert.equal(transitionFor(f, 'a', '__proto__'), 'park');
+    assert.equal(transitionFor(f, 'a', 'ok'), 'end');
   });
+});
 
-  test('stage with no transitions entry fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok"]
-
-[[stages]]
-name = "b"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "b" }
-`),
-      /stage "b" has no entry/
-    );
-  });
-
-  test('transition to undeclared stage or bogus action fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "nowhere" }
-`),
-      /not a stage or terminal action/
-    );
-  });
-
-  test('transition keyed by undeclared verdict fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end", bogus = "end" }
-`),
-      /not a declared verdict/
-    );
-  });
-
-  test('unknown engine fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "temporal"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end" }
-`),
-      /expected one of judge\|fleet\|act-gate\|learn/
-    );
-  });
-
-  test('gated stage without a skip transition fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-gate_on = "complexity == complex"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end" }
-`),
-      /verdict "skip" has no transition/
-    );
-  });
-
-  test('skip transition on an ungated stage fails', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end", skip = "end" }
-`),
-      /not a declared verdict/
-    );
-  });
-
-  test('"skip" as a declared verdict fails — reserved', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok", "skip"]
-
-[transitions]
-a = { ok = "end", skip = "end" }
-`),
-      /"skip" is reserved/
-    );
-  });
-
-  test('unparseable gate_on fails with a helpful message', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-gate_on = "complexity > 3"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end" }
-`),
-      /gate_on: cannot parse/
-    );
-  });
-
-  test('stage named after a terminal action fails — ambiguous targets', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "park"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-park = { ok = "end" }
-`),
-      /"park" is a reserved terminal action/
-    );
-  });
-
-  test('prototype-named stage still needs its transitions entry', () => {
-    // `toString` passes `in` checks on plain objects — hasOwn is the guard
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "toString"
-engine = "judge"
-verdicts = ["ok"]
-
-[[stages]]
-name = "b"
-engine = "judge"
-verdicts = ["ok"]
-
-[transitions]
-b = { ok = "end" }
-`),
-      /stage "toString" has no entry/
-    );
-  });
-
-  test('duplicate stage names fail', () => {
-    assert.throws(
-      () =>
-        parseFormula(`
-[[stages]]
-name = "a"
-engine = "judge"
-verdicts = ["ok"]
-
-[[stages]]
-name = "a"
-engine = "fleet"
-verdicts = ["ok"]
-
-[transitions]
-a = { ok = "end" }
-`),
-      /duplicate stage name "a"/
-    );
-  });
-
-  test('kind must be pipeline when present', () => {
-    assert.throws(
-      () => parseFormula(`kind = "convoy"\n${SPEC_FORMULA}`),
-      /kind: expected "pipeline"/
-    );
-  });
-
-  test('version pin above latest is rejected', () => {
-    assert.throws(
-      () => parseFormula(`version = 99\n${SPEC_FORMULA.replace('version = 1\n', '')}`),
-      /newer than this bro understands/
-    );
-  });
+describe('invalid formulas — table of rejections', () => {
+  const bad: [string, string, RegExp][] = [
+    [
+      'missing transition for a declared verdict',
+      oneStage('name = "a"\nengine = "judge"\nverdicts = ["ok", "bad"]', 'a = { ok = "end" }'),
+      /verdict "bad" has no transition/,
+    ],
+    [
+      'stage with no transitions entry',
+      `${oneStage(A, 'a = { ok = "b" }')}\n[[stages]]\nname = "b"\nengine = "judge"\nverdicts = ["ok"]`,
+      /stage "b" has no entry/,
+    ],
+    [
+      'transition to undeclared stage or bogus action',
+      oneStage(A, 'a = { ok = "nowhere" }'),
+      /not a stage or terminal action/,
+    ],
+    [
+      'transition keyed by undeclared verdict',
+      oneStage(A, 'a = { ok = "end", bogus = "end" }'),
+      /not a declared verdict/,
+    ],
+    [
+      'unknown engine',
+      oneStage('name = "a"\nengine = "temporal"\nverdicts = ["ok"]', 'a = { ok = "end" }'),
+      /expected one of judge\|fleet\|act-gate\|learn/,
+    ],
+    [
+      'gated stage without a skip transition',
+      oneStage(
+        'name = "a"\nengine = "judge"\ngate_on = "complexity == complex"\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /verdict "skip" has no transition/,
+    ],
+    [
+      'skip transition on an ungated stage',
+      oneStage(A, 'a = { ok = "end", skip = "end" }'),
+      /not a declared verdict/,
+    ],
+    [
+      '"skip" as a declared verdict — reserved',
+      oneStage(
+        'name = "a"\nengine = "judge"\nverdicts = ["ok", "skip"]',
+        'a = { ok = "end", skip = "end" }'
+      ),
+      /"skip" is reserved/,
+    ],
+    [
+      'unparseable gate_on',
+      oneStage(
+        'name = "a"\nengine = "judge"\ngate_on = "complexity > 3"\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /gate_on: cannot parse/,
+    ],
+    [
+      'stage named after a terminal action — ambiguous targets',
+      oneStage('name = "park"\nengine = "judge"\nverdicts = ["ok"]', 'park = { ok = "end" }'),
+      /"park" is a reserved terminal action/,
+    ],
+    [
+      'prototype-named stage still needs its transitions entry',
+      `${oneStage('name = "toString"\nengine = "judge"\nverdicts = ["ok"]', 'b = { ok = "end" }')}\n[[stages]]\nname = "b"\nengine = "judge"\nverdicts = ["ok"]`,
+      /stage "toString" has no entry|no such stage/,
+    ],
+    [
+      'duplicate stage names',
+      `${oneStage(A, 'a = { ok = "end" }')}\n[[stages]]\nname = "a"\nengine = "fleet"\nverdicts = ["ok"]`,
+      /duplicate stage name "a"/,
+    ],
+    [
+      'kind must be pipeline when present',
+      `kind = "convoy"\n${SPEC_FORMULA}`,
+      /kind: expected "pipeline"/,
+    ],
+    [
+      'version pin above latest is rejected',
+      `version = 99\n${SPEC_FORMULA.replace('version = 1\n', '')}`,
+      /newer than this bro understands/,
+    ],
+  ];
+  for (const [name, toml, re] of bad) {
+    test(name, () => assert.throws(() => parseFormula(toml), re));
+  }
 });
 
 describe('formulaSha', () => {
