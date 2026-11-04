@@ -112,7 +112,9 @@ async function providerModels(
         // sync spawn would stall the event loop; the timeout matches the
         // acp catalog's bound, or the caller's own deadline when it has one
         const budget =
-          opts.deadline === undefined ? 30_000 : Math.max(1, opts.deadline - Date.now());
+          opts.deadline === undefined
+            ? 30_000
+            : Math.min(2_147_483_647, Math.max(1, opts.deadline - Date.now()));
         const exec =
           opts.exec ??
           (async (cmd: string) =>

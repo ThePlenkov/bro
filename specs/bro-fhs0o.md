@@ -55,21 +55,33 @@ reads response metadata. A lane that merely advertises NOTHING is not a
 failure and says nothing — the distinction the union already draws between
 "empty" and "down" stays.
 
+When EVERY lane failed, the gateway is down and the answer is a 502. The
+same header rides that 502: a client must not have to parse the error body
+to learn which lane died and why. The body keeps the Anthropic error shape
+(`{"type":"error","error":{…}}`); the header carries the lane detail.
+
 Header values must be latin-1 clean, so the text is sanitized: anything
 outside the printable ASCII range becomes `?`. A diagnostic must never be
-able to break the response it rides in.
+able to break the response it rides in. The value is also CAPPED (4096
+characters): an agent that answers with a 50KB stack trace must not push
+the response past a client's header limit — undici rejects a response whose
+headers exceed 16KB, which would turn a degraded catalog into an unreadable
+one.
 
 ## Plan
 
 - [x] `packages/cli/src/commands/providers.ts` — `catalogModels` takes an
       optional `deadline`; the acp branch passes it to `acpModels`, the cli
-      branch spends it as the exec timeout.
+      branch spends it as the exec timeout (clamped to Node's 32-bit timer
+      ceiling, so an oversized budget cannot become a 1ms timeout).
 - [x] `packages/cli/src/commands/serve-conductor.ts` — `laneCatalog` reads
       under `Date.now() + lane.cfg.timeoutMs`; `models()` carries the
-      failures in `x-bro-lane-error`.
+      failures in `x-bro-lane-error` on BOTH the 200 and the 502, capped at
+      4096 characters.
 - [x] `packages/providers/src/testkit.ts` — the fake agent gains
       `delayNewMs`, a slow `session/new`, so a test can watch a budget
-      bound a read.
+      bound a read, and `failNewMessage`, a long diagnostic, so a test can
+      watch the header survive one.
 
 ## Verify
 
@@ -82,5 +94,10 @@ able to break the response it rides in.
   budget ends the read on the lane's deadline (well before the agent
   answers, and long before the 30s constant), and the timed-out lane rides
   the header.
+- `serve-conductor.test.ts` — a 50KB failure diagnostic is capped: the
+  header stays under 4096 characters and the healthy lane's rows still
+  arrive.
+- `serve-conductor.test.ts` — every lane down answers 502, and the header
+  names each dead lane.
 - The CLI suites exercise `@broject/providers` through its BUILD — a
   change to the provider layer needs a rebuild before the CLI tests see it.

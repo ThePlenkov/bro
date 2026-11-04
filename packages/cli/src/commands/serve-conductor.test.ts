@@ -2062,10 +2062,53 @@ describe('serve /v1/* — one gateway, many providers', () => {
         const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
         const elapsed = Date.now() - t0
         assert.equal(m.status, 200)
-        assert.ok(elapsed < 2_000, `the read took ${elapsed}ms — the lane budget did not bound it`)
+        assert.ok(
+          elapsed < 750,
+          `the read took ${elapsed}ms — the lane budget did not bound it`
+        )
         const header = m.headers.get('x-bro-lane-error')
         assert.ok(header !== null, 'the timed-out lane must ride the response')
         assert.match(header, /dv-acp/)
+      } finally {
+        await close()
+      }
+    })())
+
+  test("a lane's failure text is CAPPED — a long diagnostic cannot blow the header", () =>
+    (async () => {
+      // the oc lane's session/new fails with a 50KB diagnostic — a stack
+      // trace, a banner, whatever the agent said
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNewMessage: 'x'.repeat(50_000) })
+      const { url, close } = await bootGateway(dv, oc)
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+        assert.equal(m.status, 200)
+        const header = m.headers.get('x-bro-lane-error')
+        assert.ok(header !== null, 'the failed lane must ride the response')
+        assert.ok(header.length <= 4096, `the header is ${header.length} chars — it must be capped`)
+        // and the healthy lane's rows still arrive
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id)
+        assert.ok(ids.includes('dv-acp/swe-x'), `ids: ${ids.join(', ')}`)
+      } finally {
+        await close()
+      }
+    })())
+
+  test('every lane down answers 502 — and says WHICH lane, in the header', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION], failNew: 'auth' })
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNew: 'auth' })
+      const { url, close } = await bootGateway(dv, oc)
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+        assert.equal(m.status, 502)
+        // the same signal rides the failure — a client must not have to
+        // parse the body to learn which lane died
+        const header = m.headers.get('x-bro-lane-error')
+        assert.ok(header !== null, 'the 502 must carry the lane failure')
+        assert.match(header, /dv-acp/)
+        assert.match(header, /oc-acp/)
       } finally {
         await close()
       }

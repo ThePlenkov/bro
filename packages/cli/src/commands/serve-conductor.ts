@@ -3710,11 +3710,14 @@ async function laneCatalog(lane: ProviderRoute, wire: WireCtx): Promise<LaneCata
   }
 }
 
-/** A header value must be latin-1 clean — a lane's failure text carries
- *  whatever the agent said. Non-printables and non-ascii become '?', so a
- *  diagnostic can never break the response it rides in. */
+/** A header value must be latin-1 clean AND bounded — a lane's failure
+ *  text carries whatever the agent said. Non-printables and non-ascii
+ *  become '?', and the whole value is capped, so a long diagnostic can
+ *  neither break the response it rides in nor push it past a client's
+ *  header limit (undici rejects a response whose headers exceed 16KB). */
+const HEADER_MAX = 4096;
 function headerSafe(text: string): string {
-  return text.replace(/[^\x20-\x7e]/g, '?');
+  return text.replace(/[^\x20-\x7e]/g, '?').slice(0, HEADER_MAX);
 }
 
 /** The union of the lanes' rows — first id wins, so an id two lanes
@@ -3736,9 +3739,15 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const lanes = await Promise.all([...wire.routes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
+  // the degradation rides BOTH answers — a client must read the same
+  // signal whether the catalog is short (200) or the gateway is down
+  // (502). A 502 without it says "down" but not "which lane, why".
+  const laneError =
+    failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
   if (failures.length > 0 && failures.length === lanes.length) {
+    if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
     apiError(
       res,
       502,
@@ -3758,8 +3767,8 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   // catalog can tell it apart from the whole truth. A lane that merely
   // advertises nothing is not a failure and says nothing.
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (failures.length > 0) {
-    headers['x-bro-lane-error'] = headerSafe(failures.join('; '));
+  if (laneError !== undefined) {
+    headers['x-bro-lane-error'] = laneError;
   }
   res.writeHead(200, headers);
   res.end(
