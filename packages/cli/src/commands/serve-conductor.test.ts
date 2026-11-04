@@ -754,26 +754,37 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
-  test('a catalog name that already names its provider keeps it', async () => {
+  test('a catalog name is qualified by the provider that serves it', async () => {
     // an agent that names its models "vercel/Claude Opus 5" already says
-    // where the model comes from — the gateway must not double the prefix
-    const named: SessionConfigOption = {
-      ...MODEL_OPTION,
-      options: [{ value: 'vercel/anthropic/claude-opus-5', name: 'vercel/Claude Opus 5' }],
-    }
-    const fake = fakeAcpAgent({ configOptions: [named] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
-    try {
-      const r = await fetch(`${url}/v1/models`, { headers: auth })
-      const body = await r.json()
-      assert.deepEqual(
-        body.data.map((m: { id: string; display_name: string }) => [m.id, m.display_name]),
-        [['dv-acp/vercel/anthropic/claude-opus-5', 'vercel/Claude Opus 5']]
+    // where the model comes from — the gateway must not double the prefix.
+    // a name whose slash is NOT a provider ("Claude Opus 4 / 1M") still
+    // needs one, and a model id carrying its own provider names the row.
+    const cases: [string, string, string][] = [
+      ['vercel/anthropic/claude-opus-5', 'vercel/Claude Opus 5', 'vercel/Claude Opus 5'],
+      ['claude-opus-5-5-medium', 'Claude Opus/fast', 'dv-acp/Claude Opus/fast'],
+      ['anthropic/claude-opus-5', 'Claude Opus 5', 'anthropic/Claude Opus 5'],
+      ['swe-x', 'SWE X', 'dv-acp/SWE X'],
+    ]
+    for (const [value, name, expected] of cases) {
+      const named: SessionConfigOption = {
+        ...MODEL_OPTION,
+        options: [{ value, name }],
+      }
+      const fake = fakeAcpAgent({ configOptions: [named] })
+      const { url, close } = await listen(
+        deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
       )
-    } finally {
-      await close()
+      try {
+        const r = await fetch(`${url}/v1/models`, { headers: auth })
+        const body = await r.json()
+        assert.deepEqual(
+          body.data.map((m: { id: string; display_name: string }) => [m.id, m.display_name]),
+          [[`dv-acp/${value}`, expected]],
+          `${value} → ${expected}`
+        )
+      } finally {
+        await close()
+      }
     }
   })
 
