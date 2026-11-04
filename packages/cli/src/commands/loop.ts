@@ -48,6 +48,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
   AgentNotFound,
+  agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
   CLASS_LABEL_PREFIX,
@@ -843,6 +844,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
   });
   m.worker = {
     agentId: info.id,
+    runId: info.runId,
     spawnedAt: info.spawnedAt,
     spawnedMs: Date.now(),
     pid: info.pid,
@@ -911,7 +913,7 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
   if (log !== '') {
     const home = dirname(log);
     try {
-      const f = join(home, `${w.agentId}.exit`);
+      const f = join(home, agentExitFileName(w.agentId, w.runId));
       const n = Number(readFileSync(f, 'utf8').trim());
       return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs };
     } catch {
@@ -1636,6 +1638,7 @@ interface GateMember {
  *  one the member is waiting on, and must not inherit this clock. */
 interface WorkerRef {
   agentId: string;
+  runId?: string;
   spawnedAt?: string;
   /** ms stamp at our spawn call — the crash window's start. */
   spawnedMs: number;
@@ -2046,34 +2049,40 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     return leave(m, 'parked');
   }
   if (pr === null) {
-    if (state === 'blocked' || state === 'stopped') {
-      // the wall/stop is the verdict — reopening respawns into it. A
-      // rate_limited death carrying the provider's resetAt snoozes
-      // until the reset — the claim wakes exactly as the wall lifts and
-      // re-claims into a fresh worker (bro-36bhc — the convoy-run wait
-      // contract); a wall with no advertised end (quota, no reset) and
-      // an operator stop keep the flat parkedWakeMin cooldown. The
-      // cause/reset pair resolves AgentInfo-first with the bead's own
-      // registry entry as fallback — the same record the entry's
-      // 'blocked' read came from. A stopped entry still CARRIES the
-      // previous death's cause/resetAt (the stop flag only marks it),
-      // so the reset applies to 'blocked' alone — a manual stop is the
-      // operator's horizon, never the wall's stale one.
-      const entry = entryReset(ctx, m.beads[0]!.id);
-      const cause = info?.cause ?? entry?.cause;
-      const resetAt =
-        state === 'blocked' && cause === 'rate_limited'
+    const entry = entryReset(ctx, m.beads[0]!.id);
+    const cause = info?.cause ?? entry?.cause;
+    // exited deaths can still carry a wall cause (rate_limited whose
+    // resetAt already passed at poll time reads 'exited', not 'blocked');
+    // park those instead of reopening into the same wall (bro-36bhc).
+    const parkIt =
+      state === 'blocked' ||
+      state === 'stopped' ||
+      (state === 'exited' && (cause === 'rate_limited' || cause === 'quota' || cause === 'auth'));
+    if (parkIt) {
+      // reset-aware: only a future reset snoozes to it; a stale/missing
+      // reset takes the flat cooldown so we never wake straight back
+      // into the wall.
+      const rawReset =
+        cause === 'rate_limited' && state !== 'stopped'
           ? (info?.resetAt ?? entry?.resetAt)
+          : undefined;
+      const resetMs =
+        rawReset !== undefined &&
+        Number.isFinite(Date.parse(rawReset)) &&
+        Date.parse(rawReset) > Date.now()
+          ? Date.parse(rawReset)
           : undefined;
       const why =
         state === 'blocked'
-          ? `blocked${cause !== undefined ? ` (${cause})` : ''}${resetAt !== undefined ? ` til ${resetAt}` : ''}`
-          : 'stopped';
+          ? `blocked${cause !== undefined ? ` (${cause})` : ''}${resetMs !== undefined && rawReset !== undefined ? ` til ${rawReset}` : ''}`
+          : state === 'exited'
+            ? `exited${cause !== undefined ? ` (${cause})` : ''}${resetMs !== undefined && rawReset !== undefined ? ` til ${rawReset}` : ''}`
+            : 'stopped';
       parkBeads(
         ctx,
         m.beads,
         `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`,
-        resetAt === undefined ? undefined : Date.parse(resetAt)
+        resetMs
       );
       return leave(m, 'parked');
     }
@@ -2446,6 +2455,40 @@ const LOOP_VALUE_FLAGS = new Set([
   '--model',
 ]);
 const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
+
+/** The wall settle's wait clock (spec bro-36bhc) — pure decision, exported
+ *  for unit tests. A rate_limited death carrying a parseable resetAt waits
+ *  until that reset; a stale reset (provider clock behind the poll) paces
+ *  the wait on an escalating floor (30s doubling to a 15m cap) so a lying
+ *  provider cannot spin the loop back into the burn. Anything else (quota,
+ *  auth, reset-less rate limit, non-rate causes, unparseable reset) is not
+ *  a wait — it parks. */
+export function wallWaitUntil(
+  cause: string | undefined,
+  resetAt: string | undefined,
+  now: number,
+  waits: number = 0
+): number | undefined {
+  if (cause !== 'rate_limited') {
+    return undefined;
+  }
+  const reset = typeof resetAt === 'string' ? Date.parse(resetAt) : Number.NaN;
+  if (Number.isNaN(reset)) {
+    return undefined;
+  }
+  if (reset > now) {
+    return reset;
+  }
+  // stale reset — pace it
+  const n = typeof waits === 'number' && Number.isFinite(waits) ? waits : 0;
+  const exp = Math.max(0, n - 1);
+  let floor = 30_000 * Math.pow(2, exp);
+  const cap = 15 * 60_000;
+  if (floor > cap) {
+    floor = cap;
+  }
+  return now + floor;
+}
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
