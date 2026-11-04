@@ -90,200 +90,206 @@ export interface PipelineFormula {
 }
 
 const TOP_KEYS = new Set(['kind', 'version', 'stages', 'transitions']);
-
 const STAGE_KEYS = new Set(['name', 'engine', 'verdicts', 'gate_on', 'mode']);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function parseGateOn(raw: unknown, where: string, errors: string[]): GateOn | undefined {
+/** The validation context — carries the error sink so every field
+ *  validator stays a two-argument function instead of threading
+ *  (where, errors) primitives through each call. `fail` returns
+ *  undefined so field validators can `return c.fail(msg)` inline. */
+class Checks {
+  constructor(readonly errors: string[]) {}
+  fail(msg: string): undefined {
+    this.errors.push(msg);
+    return undefined;
+  }
+  get failed(): boolean {
+    return this.errors.length > 0;
+  }
+}
+
+function gateOn(raw: unknown, at: string, c: Checks): GateOn | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string') {
-    errors.push(`${where}.gate_on: must be a string like "field == value"`);
-    return undefined;
+    return c.fail(`${at}.gate_on: must be a string like "field == value"`);
   }
   const m = /^([A-Za-z_][\w.]*)\s*(==|!=)\s*([\w.-]+)$/.exec(raw.trim());
   if (!m) {
-    errors.push(
-      `${where}.gate_on: cannot parse ${JSON.stringify(raw)} — expected "field == value" or "field != value"`
+    return c.fail(
+      `${at}.gate_on: cannot parse ${JSON.stringify(raw)} — expected "field == value" or "field != value"`
     );
-    return undefined;
   }
   return { field: m[1], op: m[2] as '==' | '!=', value: m[3] };
 }
 
-function stageName(raw: unknown, where: string, errors: string[]): string | undefined {
+function stageName(raw: unknown, at: string, c: Checks): string | undefined {
   if (typeof raw !== 'string' || raw.length === 0) {
-    errors.push(`${where}.name: required non-empty string`);
-    return undefined;
+    return c.fail(`${at}.name: required non-empty string`);
   }
   if ((TERMINAL_ACTIONS as readonly string[]).includes(raw)) {
-    errors.push(`${where}.name: "${raw}" is a reserved terminal action, not a stage name`);
-    return undefined;
+    return c.fail(`${at}.name: "${raw}" is a reserved terminal action, not a stage name`);
   }
   return raw;
 }
 
-function stageEngine(raw: unknown, where: string, errors: string[]): StageEngine | undefined {
+function stageEngine(raw: unknown, at: string, c: Checks): StageEngine | undefined {
   if (typeof raw !== 'string' || !(STAGE_ENGINES as readonly string[]).includes(raw)) {
-    errors.push(
-      `${where}.engine: expected one of ${STAGE_ENGINES.join('|')}, got ${JSON.stringify(raw)}`
+    return c.fail(
+      `${at}.engine: expected one of ${STAGE_ENGINES.join('|')}, got ${JSON.stringify(raw)}`
     );
-    return undefined;
   }
   return raw as StageEngine;
 }
 
-function stageVerdicts(raw: unknown, where: string, errors: string[]): string[] | undefined {
-  if (
+function verdictList(raw: unknown, at: string, c: Checks): string[] | undefined {
+  const bad =
     !Array.isArray(raw) ||
     raw.length === 0 ||
-    raw.some(v => typeof v !== 'string' || v.length === 0)
-  ) {
-    errors.push(`${where}.verdicts: required non-empty string array`);
-    return undefined;
+    raw.some(v => typeof v !== 'string' || v.length === 0);
+  if (bad) {
+    return c.fail(`${at}.verdicts: required non-empty string array`);
   }
   if ((raw as string[]).includes(SKIP_VERDICT)) {
-    errors.push(
-      `${where}.verdicts: "${SKIP_VERDICT}" is reserved — the runner synthesizes it on gate_on failure`
+    return c.fail(
+      `${at}.verdicts: "${SKIP_VERDICT}" is reserved — the runner synthesizes it on gate_on failure`
     );
-    return undefined;
   }
   return raw as string[];
 }
 
-function parseStage(raw: unknown, i: number, errors: string[]): PipelineStage | undefined {
-  const where = `stages[${i}]`;
-  if (!isRecord(raw)) {
-    errors.push(`${where}: expected a TOML table`);
-    return undefined;
-  }
+function unknownKeys(raw: Record<string, unknown>, at: string, c: Checks): void {
   for (const key of Object.keys(raw)) {
     if (!STAGE_KEYS.has(key)) {
-      errors.push(`${where}: unknown key "${key}"`);
+      c.fail(`${at}: unknown key "${key}"`);
     }
   }
-  const name = stageName(raw.name, where, errors);
+}
+
+function parseStage(raw: unknown, i: number, c: Checks): PipelineStage | undefined {
+  const where = `stages[${i}]`;
+  if (!isRecord(raw)) {
+    return c.fail(`${where}: expected a TOML table`);
+  }
+  unknownKeys(raw, where, c);
+  const name = stageName(raw.name, where, c);
   if (name === undefined) return undefined;
   const at = `${where} ("${name}")`;
-  const engine = stageEngine(raw.engine, at, errors);
-  const verdicts = stageVerdicts(raw.verdicts, at, errors);
-  if (engine === undefined || verdicts === undefined) return undefined;
+  const engine = stageEngine(raw.engine, at, c);
+  const verdicts = verdictList(raw.verdicts, at, c);
   const mode = raw.mode;
   if (mode !== undefined && typeof mode !== 'string') {
-    errors.push(`${at}.mode: must be a string`);
-    return undefined;
+    c.fail(`${at}.mode: must be a string`);
   }
+  if (engine === undefined || verdicts === undefined) return undefined;
   return {
     name,
     engine,
     verdicts,
-    gate_on: parseGateOn(raw.gate_on, at, errors),
+    gate_on: gateOn(raw.gate_on, at, c),
     mode: mode as string | undefined,
   };
 }
 
 /** The verdict set a stage's transition map must cover — declared
  *  verdicts plus `skip` when the stage is gated. */
-function allowedVerdicts(stage: PipelineStage): string[] {
-  return stage.gate_on ? [...stage.verdicts, SKIP_VERDICT] : stage.verdicts;
+const covered = (s: PipelineStage): string[] =>
+  s.gate_on ? [...s.verdicts, SKIP_VERDICT] : s.verdicts;
+
+function validTarget(target: unknown, names: Set<string>): target is string {
+  return (
+    typeof target === 'string' &&
+    (names.has(target) || (TERMINAL_ACTIONS as readonly string[]).includes(target))
+  );
 }
 
-function validateTransitionEntry(
+function transitionEntry(
   stage: PipelineStage,
   vmap: Record<string, unknown>,
   names: Set<string>,
-  errors: string[]
+  c: Checks
 ): Record<string, string> {
-  // null prototype — a verdict literally named "__proto__" must land as
-  // data, not hit the prototype setter
+  // null prototype — a verdict literally named "__proto__" lands as
+  // data, not the prototype setter
   const map: Record<string, string> = Object.create(null);
-  const allowed = allowedVerdicts(stage);
+  const allowed = covered(stage);
   for (const [verdict, target] of Object.entries(vmap)) {
     if (!allowed.includes(verdict)) {
-      errors.push(
-        `transitions.${stage.name}.${verdict}: not a declared verdict of "${stage.name}"`
-      );
-      continue;
-    }
-    if (
-      typeof target !== 'string' ||
-      (!names.has(target) && !(TERMINAL_ACTIONS as readonly string[]).includes(target))
-    ) {
-      errors.push(
+      c.fail(`transitions.${stage.name}.${verdict}: not a declared verdict of "${stage.name}"`);
+    } else if (!validTarget(target, names)) {
+      c.fail(
         `transitions.${stage.name}.${verdict}: target ${JSON.stringify(target)} is not a stage or terminal action (${TERMINAL_ACTIONS.join('|')})`
       );
-      continue;
+    } else {
+      map[verdict] = target;
     }
-    map[verdict] = target;
   }
   for (const v of allowed) {
     if (!Object.hasOwn(map, v)) {
-      errors.push(`transitions.${stage.name}: verdict "${v}" has no transition`);
+      c.fail(`transitions.${stage.name}: verdict "${v}" has no transition`);
     }
   }
   return map;
 }
 
-function validateTransitions(
+function transitionTable(
   raw: unknown,
   stages: PipelineStage[],
-  errors: string[]
+  c: Checks
 ): Record<string, Record<string, string>> {
   const transitions: Record<string, Record<string, string>> = Object.create(null);
   const names = new Set(stages.map(s => s.name));
   const byName = new Map(stages.map(s => [s.name, s]));
   if (raw !== undefined && !isRecord(raw)) {
-    errors.push('transitions: must be a TOML table');
+    c.fail('transitions: must be a TOML table');
     return transitions;
   }
   for (const [stage, vmap] of Object.entries(raw ?? {})) {
     const decl = byName.get(stage);
     if (!decl) {
-      errors.push(`transitions.${stage}: no such stage`);
-      continue;
+      c.fail(`transitions.${stage}: no such stage`);
+    } else if (!isRecord(vmap)) {
+      c.fail(`transitions.${stage}: must be a verdict→target table`);
+    } else {
+      transitions[stage] = transitionEntry(decl, vmap, names, c);
     }
-    if (!isRecord(vmap)) {
-      errors.push(`transitions.${stage}: must be a verdict→target table`);
-      continue;
-    }
-    transitions[stage] = validateTransitionEntry(decl, vmap, names, errors);
   }
   // a stage emitting verdicts with no transitions table entry dead-ends —
   // hasOwn, not `in`: prototype keys like `toString` are not entries
   for (const s of stages) {
     if (!Object.hasOwn(transitions, s.name)) {
-      errors.push(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
+      c.fail(`transitions: stage "${s.name}" has no entry — every verdict needs a target`);
     }
   }
   return transitions;
 }
 
-function validateEnvelope(doc: Record<string, unknown>, errors: string[]): void {
+function envelope(doc: Record<string, unknown>, c: Checks): void {
   for (const key of Object.keys(doc)) {
     if (!TOP_KEYS.has(key)) {
-      errors.push(`unknown top-level key "${key}"`);
+      c.fail(`unknown top-level key "${key}"`);
     }
   }
   if (doc.kind !== undefined && doc.kind !== PIPELINE_KIND) {
-    errors.push(`kind: expected "${PIPELINE_KIND}", got ${JSON.stringify(doc.kind)}`);
+    c.fail(`kind: expected "${PIPELINE_KIND}", got ${JSON.stringify(doc.kind)}`);
   }
-  checkPlanVersion(doc.version, PIPELINE_KIND, PIPELINE_VERSION, errors);
+  checkPlanVersion(doc.version, PIPELINE_KIND, PIPELINE_VERSION, c.errors as string[]);
 }
 
-function parseStages(raw: unknown, errors: string[]): PipelineStage[] {
+function stageList(raw: unknown, c: Checks): PipelineStage[] {
   const stages: PipelineStage[] = [];
   if (!Array.isArray(raw) || raw.length === 0) {
-    errors.push('stages: at least one [[stages]] entry is required');
+    c.fail('stages: at least one [[stages]] entry is required');
     return stages;
   }
   raw.forEach((r, i) => {
-    const s = parseStage(r, i, errors);
+    const s = parseStage(r, i, c);
     if (s) stages.push(s);
   });
   stages.forEach((s, i) => {
     if (stages.findIndex(o => o.name === s.name) !== i) {
-      errors.push(`stages[${i}]: duplicate stage name "${s.name}"`);
+      c.fail(`stages[${i}]: duplicate stage name "${s.name}"`);
     }
   });
   return stages;
@@ -296,11 +302,11 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
     throw new Error(`${source}: expected a TOML table`);
   }
   const errors: string[] = [];
-  validateEnvelope(doc, errors);
-  const stages = parseStages(doc.stages, errors);
-  const transitions = validateTransitions(doc.transitions, stages, errors);
-
-  if (errors.length > 0) {
+  const c = new Checks(errors);
+  envelope(doc, c);
+  const stages = stageList(doc.stages, c);
+  const transitions = transitionTable(doc.transitions, stages, c);
+  if (c.failed) {
     throw new Error(`${source}: invalid pipeline formula\n  ${errors.join('\n  ')}`);
   }
   return {
