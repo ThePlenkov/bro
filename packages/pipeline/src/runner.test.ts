@@ -311,6 +311,35 @@ describe('scoped-fix mode — review.fix → work', () => {
     assert.equal(fleet.calls[2].notes, 'round 1');
     assert.equal(fleet.calls[2].attempt, 2);
   });
+
+  test('an attempts-exhausted park during scoped fix keeps its scope on wake', async () => {
+    const j = memoryJournal('r9');
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'fix', payload: { notes: 'round 1' } },
+    ]);
+    const fleet = spy([
+      { verdict: 'done' },
+      { verdict: 'crash' },
+      { verdict: 'crash' },
+      { verdict: 'crash' },
+    ]);
+    const parked = await run({ judge: judge.fn, fleet: fleet.fn }, { runId: 'r9' }, j);
+    assert.equal(parked.outcome, 'park');
+    assert.equal(parked.alert, PARK_ALERTS.attemptsExhausted);
+    // wake: the scoped fix re-enters work with round+notes, fresh attempts
+    const fleet2 = spy([{ verdict: 'stopped' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: { judge: judge.fn, fleet: fleet2.fn },
+      formulaSha: SHA,
+      admit: () => true,
+    });
+    assert.equal(res.outcome, 'abandon');
+    assert.equal(fleet2.calls[0].fixRound, 1);
+    assert.equal(fleet2.calls[0].notes, 'round 1');
+    assert.equal(fleet2.calls[0].attempt, 1);
+  });
 });
 
 describe('the admit seam — spawn idempotence', () => {
@@ -477,6 +506,30 @@ describe('resume — the write-ahead contract', () => {
     assert.equal(res2.outcome, 'park');
     assert.equal(res2.alert, PARK_ALERTS.recheckUnavailable);
     assert.equal(fl.calls.length, 1); // never blindly re-fired
+    // the pending intent stays the resume anchor — no alert row was
+    // appended (a `resume` stage on one would invokeStage and spawn
+    // again on the next wake — the blind re-fire this park prevents)
+    assert.equal(records(j2).at(-1)?.verdict, undefined);
+    assert.equal(records(j2).at(-1)?.intent, 'spawn');
+    // a second wake before a hook is wired parks the same way — and
+    // the journal grows by nothing
+    const rowsBefore = j2.rows().length;
+    const res3 = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
+      engines: { judge: jg.fn, fleet: { invoke: fl.fn } },
+      formulaSha: SHA,
+    });
+    assert.equal(res3.alert, PARK_ALERTS.recheckUnavailable);
+    assert.equal(j2.rows().length, rowsBefore);
+    // a hook wired since attests and the run continues — no re-spawn
+    const res4 = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
+      engines: {
+        judge: jg.fn,
+        fleet: { invoke: fl.fn, recheck: () => ({ verdict: 'stopped' }) },
+      },
+      formulaSha: SHA,
+    });
+    assert.equal(res4.outcome, 'abandon'); // settled 'stopped' → abandon
+    assert.equal(fl.calls.length, 1); // still never re-invoked
   });
 
   test("recheck undefined on a SPAWN intent re-fires — the hook's 'didn't land' is the attestation", async () => {
@@ -634,6 +687,73 @@ describe('resume — the write-ahead contract', () => {
   });
 });
 
+describe('bounded drives and journal isolation', () => {
+  test('a rate_limited → route → spawn cycle is bounded — parks on the step budget', async () => {
+    const j = memoryJournal();
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'spawn', payload: {} },
+    ]);
+    const fleet = spy([
+      { verdict: 'rate_limited' },
+      { verdict: 'rate_limited' },
+      { verdict: 'rate_limited' },
+      { verdict: 'rate_limited' },
+    ]);
+    const res = await run({ judge: judge.fn, fleet: fleet.fn }, { maxSteps: 6 }, j);
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, PARK_ALERTS.cycleExhausted);
+    // work ran at steps 3 and 5; step 7 hits the budget BEFORE a third
+    // spawn — the cycle is bounded, never infinite
+    assert.equal(fleet.calls.length, 2);
+  });
+
+  test('journal rows for another item under the same run id park — namespace is 1:1', async () => {
+    const j = memoryJournal('rx');
+    j.append({
+      run_id: 'rx',
+      item: 'somebody-else.9',
+      seq: 1,
+      stage: 'classify',
+      intent: 'judge',
+      attempt: 1,
+      verdict: 'solo',
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const e = happyScript();
+    const res = await run(emap(e), {}, j);
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, PARK_ALERTS.itemMismatch);
+    assert.equal(e.judge.calls.length, 0); // nothing replayed or re-fired
+  });
+
+  test('a hostile __proto__ payload key lands as inert data, never a setter', async () => {
+    const judge = spy([
+      {
+        verdict: 'solo',
+        payload: JSON.parse('{"complexity":"complex","__proto__":{"polluted":true}}'),
+      },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'push' },
+    ]);
+    const fleet = spy([{ verdict: 'done', payload: { pr: 1 } }]);
+    const res = await run({
+      judge: judge.fn,
+      fleet: fleet.fn,
+      'act-gate': spy([{ verdict: 'landed' }]).fn,
+      learn: spy([{ verdict: 'captured' }]).fn,
+    });
+    assert.equal(res.outcome, 'end');
+    assert.equal((res.ctx as Record<string, unknown>).polluted, undefined);
+    // own data property, not a prototype override
+    assert.ok(Object.hasOwn(res.ctx, '__proto__'));
+  });
+});
+
 describe('runner invariants', () => {
   test('a missing engine binding parks, never crashes the item', async () => {
     const e = happyScript();
@@ -651,6 +771,9 @@ describe('runner invariants', () => {
 
   test('runPipeline without a journal or git dir fails loud', async () => {
     const e = happyScript();
-    await assert.rejects(runPipeline(FORMULA, 'x', { engines: emap(e) }), /needs a journal/);
+    await assert.rejects(
+      runPipeline(FORMULA, 'x', { engines: emap(e), formulaSha: SHA }),
+      /needs a journal/
+    );
   });
 });

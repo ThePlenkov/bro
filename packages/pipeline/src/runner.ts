@@ -53,6 +53,11 @@ export const DEFAULT_ADMIT_INTENTS = ['spawn'];
 
 /** `pipeline.maxAttempts` — contiguous same-stage retry budget. */
 export const DEFAULT_MAX_ATTEMPTS = 3;
+/** Stage-entry budget for one wake — every stepOnce tick counts.
+ *  Verdict loops (work → rate_limited → route → spawn → work) don't
+ *  consume attempts, so a global step bound is what makes any cycle
+ *  bounded; 32 covers ~3 fix rounds plus retries with headroom. */
+export const DEFAULT_MAX_STEPS = 32;
 
 /** `pipeline.fixRounds` — scoped-fix re-entry budget; default mirrors
  *  the act.maxRounds loop contract (spec §review). */
@@ -73,6 +78,8 @@ export const PARK_ALERTS = {
   formulaDrift: 'formula-drift',
   recheckUnavailable: 'recheck-unavailable',
   admissionUnavailable: 'admission-unavailable',
+  itemMismatch: 'item-mismatch',
+  cycleExhausted: 'cycle-budget-exhausted',
   /** journaled when an operator resumes past a formula-drift alert —
    *  the recorded acknowledgement, not a park */
   driftAcknowledged: 'drift-acknowledged',
@@ -162,18 +169,27 @@ export interface RunOptions {
   engines: EngineMap;
   /** repo dir resolving the file journal via git common dir */
   dir?: string;
-  /** injectable journal — defaults to `openPipelineJournal(dir, runId)` */
+  /** injectable journal — defaults to `openPipelineJournal(dir, runId)`.
+   *  One runner owns a journal file: `fileJournal` reads once at
+   *  construction and mirrors its own appends, so two live runners on
+   *  the same file see disjoint histories and can double side
+   *  effects — resume with a freshly-opened journal, never share. */
   journal?: PipelineJournal;
   /** explicit run id — defaults to a minted one (or the journal's own) */
   runId?: string;
-  /** the formula's content-hash stamped on every journal row */
-  formulaSha?: string;
+  /** the formula's content-hash stamped on every journal row —
+   *  REQUIRED: without it mid-run formula drift can't be detected and
+   *  drift checks silently no-op. `formulaSha(tomlText)` computes it. */
+  formulaSha: string;
   /** go-marker seam — consulted before spawn-like intents */
   admit?: AdmitFn;
   /** which intents count as spawn-like — default ['spawn'] */
   admitIntents?: string[];
   /** contiguous retry budget per stage entry — default 3 */
   maxAttempts?: number;
+  /** stage-entry budget per wake — bounds verdict loops between
+   *  stages (rate_limited re-route cycles never consume attempts) */
+  maxSteps?: number;
   /** scoped-fix re-entry budget — default 3 (act.maxRounds contract) */
   fixRounds?: number;
   /** the verdict name scoped-fix mode binds to — default 'fix' */
@@ -212,6 +228,8 @@ interface Run {
   admit?: AdmitFn;
   admitIntents: string[];
   maxAttempts: number;
+  maxSteps: number;
+  steps: number;
   fixRounds: number;
   fixVerdict: string;
   ctx: PipelineContext;
@@ -227,9 +245,11 @@ const isStageName = (run: Run, name: string): boolean =>
 const intentFor = (stage: PipelineStage): string => STAGE_INTENTS[stage.engine] ?? stage.engine;
 
 /** This run's records only — a shared/injected journal may carry rows
- *  for other run ids; seq order is per-run. */
+ *  for other run ids AND items; seq order is per-run. */
 function recordsOf(run: Run): JournalRow[] {
-  return journalRecords(run.journal.rows().filter(r => r.run_id === run.runId));
+  return journalRecords(
+    run.journal.rows().filter(r => r.run_id === run.runId && r.item === run.item)
+  );
 }
 
 /** The run id: explicit opt wins, else the journal's own (an injected
@@ -262,16 +282,20 @@ function initRun(
     formula,
     item,
     runId,
-    sha: opts.formulaSha ?? '',
+    sha: opts.formulaSha,
     dir: opts.dir,
     journal: j,
     engines,
     admit: opts.admit,
     admitIntents: opts.admitIntents ?? [...DEFAULT_ADMIT_INTENTS],
     maxAttempts: opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    maxSteps: opts.maxSteps ?? DEFAULT_MAX_STEPS,
+    steps: 0,
     fixRounds: opts.fixRounds ?? DEFAULT_FIX_ROUNDS,
     fixVerdict: opts.fixVerdict ?? DEFAULT_FIX_VERDICT,
-    ctx: { ...(opts.ctx ?? {}) },
+    // null-prototype: engine payloads flat-merge onto ctx, and a
+    // hostile `__proto__` key must land as inert data, never a setter
+    ctx: Object.assign(Object.create(null), opts.ctx) as PipelineContext,
     seq: 0,
   };
 }
@@ -316,7 +340,7 @@ function verdictRow(intent: JournalRow, res: EngineResult): JournalRow {
 /** A fail-closed park — journal the alert, then halt. The run's world
  *  may repair (context, notes, wiring); `resume` names the stage a
  *  wake re-enters. */
-function alertStep(run: Run, to: NextStep, a: AlertSpec): Step {
+function alertStep(run: Run, to: NextStep, a: AlertSpec): { halt: RunResult } {
   const row = rowFor(run, to, 'alert');
   row.alert = a.alert;
   if (a.detail !== undefined) row.detail = a.detail;
@@ -576,6 +600,14 @@ async function stepOnce(run: Run, to: NextStep): Promise<Step> {
 async function drive(run: Run, start: NextStep): Promise<RunResult> {
   let to = start;
   for (;;) {
+    run.steps += 1;
+    if (run.steps > run.maxSteps) {
+      return alertStep(run, to, {
+        alert: PARK_ALERTS.cycleExhausted,
+        detail: `>${run.maxSteps} stage entries in one wake — a verdict loop is cycling`,
+        resume: to.stage,
+      }).halt;
+    }
     const step = await stepOnce(run, to);
     if ('halt' in step) {
       return step.halt;
@@ -590,11 +622,17 @@ async function drive(run: Run, start: NextStep): Promise<RunResult> {
  *  attempt. */
 function refire(run: Run, stage: PipelineStage, last: JournalRow, to: NextStep): Step {
   if (run.admitIntents.includes(intentFor(stage))) {
-    return alertStep(run, to, {
-      alert: PARK_ALERTS.recheckUnavailable,
-      detail: `"${stage.engine}" has no recheck hook — a spawn-like intent is never re-fired blind`,
-      resume: last.stage,
-    });
+    // Halt WITHOUT a row — the pending intent stays the resume anchor:
+    // every wake re-checks, and a hook wired since can attest. An
+    // alert row here would resume through the alert branch into
+    // invokeStage and spawn again on the next wake — the blind
+    // re-fire this park exists to prevent.
+    return {
+      halt: result(run, 'park', last.stage, {
+        alert: PARK_ALERTS.recheckUnavailable,
+        detail: `"${stage.engine}" has no recheck hook — a spawn-like intent is never re-fired blind`,
+      }),
+    };
   }
   return refireAttempt(run, last, to);
 }
@@ -704,7 +742,17 @@ async function resumeStep(
     if (last.alert === PARK_ALERTS.formulaDrift) {
       driftAck(run, last);
     }
-    return { go: { stage: last.resume ?? last.stage, attempt: 1 } };
+    // fresh attempt series on wake — the fix scope the alert row
+    // journaled rides along (an attempts-exhausted scoped-fix park
+    // must not lose its round+notes)
+    return {
+      go: {
+        stage: last.resume ?? last.stage,
+        attempt: 1,
+        fixRound: last.fix_round,
+        notes: last.notes,
+      },
+    };
   }
   if (pending !== undefined) {
     return recheckStep(run, pending, to);
@@ -734,6 +782,22 @@ function replayCtx(run: Run, records: JournalRow[]): void {
 /** The shared entry: reconstruct journal state, then drive — fresh at
  *  the entry stage, or from wherever the journal last settled. */
 async function begin(run: Run): Promise<RunResult> {
+  // run_id ↔ item is 1:1 — rows for this run id belonging to another
+  // item mean a corrupt/mixed journal namespace; refuse to resume or
+  // replay any of it.
+  const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
+  if (foreign) {
+    const entry = entryStage(run.formula).name;
+    return alertStep(
+      run,
+      { stage: entry, attempt: 1 },
+      {
+        alert: PARK_ALERTS.itemMismatch,
+        detail: `journal rows for run ${run.runId} belong to another item`,
+        resume: entry,
+      }
+    ).halt;
+  }
   const records = recordsOf(run);
   run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
   replayCtx(run, records);

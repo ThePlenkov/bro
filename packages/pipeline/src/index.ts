@@ -48,6 +48,7 @@ export {
   DEFAULT_FIX_ROUNDS,
   DEFAULT_FIX_VERDICT,
   DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_MAX_STEPS,
   PARK_ALERTS,
   resumePipeline,
   runPipeline,
