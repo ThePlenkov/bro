@@ -4,7 +4,7 @@ import { parse } from 'smol-toml';
 import type { DecideResult, JudgeAnswer, JudgeFacade, JudgeQuestion, TaskRow } from '@broject/core';
 import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal } from '../journal.ts';
-import { runPipeline, type StageCall } from '../runner.ts';
+import { DEFAULT_ADMIT_INTENTS, runPipeline, type StageCall } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
 import {
   classifyStage,
@@ -423,7 +423,10 @@ describe('stageDispatch — one judge slot, many stages', () => {
   test('dispatches on stage name; unbound stage throws loud', async () => {
     const j = judge({ clump: choice('solo') });
     const b = backlog([row(ITEM)]);
-    const h = stageDispatch({ classify: classifyStage({ judge: j.facade, backlog: b }) });
+    const h = stageDispatch(
+      { classify: classifyStage({ judge: j.facade, backlog: b }) },
+      DEFAULT_ADMIT_INTENTS
+    );
     const res = await h.invoke(call());
     assert.equal(res.verdict, 'solo');
     const routeCall = { ...call(), stage: FORMULA.stages[1] };
@@ -431,10 +434,13 @@ describe('stageDispatch — one judge slot, many stages', () => {
   });
 
   test('missing recheck hook: read intent → "didn\'t land", spawn-like → pending park', async () => {
-    const h = stageDispatch({
-      classify: () => ({ verdict: 'solo' }),
-      work: () => ({ verdict: 'done' }),
-    });
+    const h = stageDispatch(
+      {
+        classify: () => ({ verdict: 'solo' }),
+        work: () => ({ verdict: 'done' }),
+      },
+      DEFAULT_ADMIT_INTENTS
+    );
     const workStage = FORMULA.stages.find(s => s.engine === 'fleet');
     assert.ok(workStage !== undefined);
     const judgeCall = { ...call(), stage: FORMULA.stages[0] };
@@ -461,14 +467,17 @@ describe('classify inside runPipeline — the payload feeds the gate', () => {
       journal: memoryJournal(),
       admit: () => true,
       engines: {
-        judge: stageDispatch({
-          classify: classifyStage({ judge: j.facade, backlog: b }),
-          route: () => ({ verdict: 'spawn' }),
-          review: () => {
-            reviewCalls += 1;
-            return { verdict: 'push' };
+        judge: stageDispatch(
+          {
+            classify: classifyStage({ judge: j.facade, backlog: b }),
+            route: () => ({ verdict: 'spawn' }),
+            review: () => {
+              reviewCalls += 1;
+              return { verdict: 'push' };
+            },
           },
-        }),
+          DEFAULT_ADMIT_INTENTS
+        ),
         fleet: () => ({ verdict: 'done' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: () => ({ verdict: 'captured' }),

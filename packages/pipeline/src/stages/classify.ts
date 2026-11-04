@@ -444,7 +444,9 @@ const classifyMark = (l: string): boolean =>
  *  own label lands (skipped when already present). */
 function retagItem(cx: Cx, tag: string | undefined): void {
   const b = cx.deps.backlog;
-  const labels = cx.item.labels ?? [];
+  // Re-read through the seam — same stale-snapshot guard as tagMates:
+  // a label landing mid-run must be seen, not clobbered.
+  const labels = b.item(cx.itemId)?.labels ?? [];
   for (const l of labels) {
     if (classifyMark(l) && l !== tag) {
       b.removeLabel(cx.itemId, l);
@@ -456,8 +458,10 @@ function retagItem(cx: Cx, tag: string | undefined): void {
 }
 
 /** Clump-mates get the group label only when they carry none — an
- *  existing membership wins over a second tag (first-writer keeps
- *  each bead single-clumped). */
+ *  existing membership wins over a second tag. Best-effort, same
+ *  process only: the check and `addLabel` are separate seam calls and
+ *  the store has no conditional write, so concurrent runs can still
+ *  land two `clump:` labels on one mate. */
 function tagMates(cx: Cx, tag: string, mates: string[]): void {
   for (const id of mates) {
     // Re-read through the seam — cx.peers is a snapshot from invoke's
@@ -534,13 +538,15 @@ export function classifyStage(deps: ClassifyDeps): EngineHandler {
  * fail-closed no-hook park only sees `recheck === undefined`, and this
  * wrapper always binds one). Spawn-like intents get 'pending' — park,
  * never a blind respawn; read intents keep undefined, the bounded
- * re-fire judge stages want. `admitIntents` is the RUN's configured
- * spawn-like set — pass the same value the runner gets so custom
- * intent policy isn't silently reverted to the default here.
+ * re-fire judge stages want. `admitIntents` is REQUIRED and must be
+ * the same set the run's `admit` option got — a judge stage declared
+ * spawn-like by run policy must park here too, which only the
+ * caller-passed set can express (defaulting to DEFAULT_ADMIT_INTENTS
+ * would silently revert a custom policy).
  */
 export function stageDispatch(
   bindings: Record<string, EngineFn | EngineHandler>,
-  admitIntents: readonly string[] = DEFAULT_ADMIT_INTENTS
+  admitIntents: readonly string[]
 ): EngineHandler {
   const map = new Map<string, EngineHandler>();
   for (const [stage, h] of Object.entries(bindings)) {
@@ -572,7 +578,7 @@ const titleTokens = (s: string | undefined): Set<string> =>
   new Set(
     (s ?? '')
       .toLowerCase()
-      .split(/[^a-z0-9]+/)
+      .split(/[^\p{L}\p{N}]+/u)
       .filter(t => t.length >= 4)
   );
 
@@ -605,6 +611,9 @@ function affinity(item: TaskRow, p: TaskRow): number {
  */
 export function taskBacklog(store: TaskStore, opts: { limit?: number } = {}): ClassifyBacklog {
   const limit = opts.limit ?? DEFAULT_PEER_LIMIT;
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error(`taskBacklog: limit must be a non-negative integer, got ${limit}`);
+  }
   const peers = (item: TaskRow): TaskRow[] => {
     const seen = new Set<string>([item.id]);
     const out: TaskRow[] = [];
