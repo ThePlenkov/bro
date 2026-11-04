@@ -320,7 +320,7 @@ export function isPathInUse(path: string, procDir: string = '/proc'): boolean {
   const candidate = canonicalPath(path);
   let pids: string[];
   try {
-    pids = readdirSync(procDir).filter((p: string) => /^\\d+$/.test(p));
+    pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
   } catch {
     return true;
   }
