@@ -7,6 +7,7 @@ import {
   type EngineFn,
   type EngineMap,
   type EngineResult,
+  JOURNAL_EVENTS,
   PARK_ALERTS,
   type RecheckFn,
   type RunOptions,
@@ -666,7 +667,7 @@ describe('resume — the write-ahead contract', () => {
       engines: { judge: judge2.fn },
       formulaSha: 'new-sha',
     });
-    const ack = records(j).find(r => r.alert === PARK_ALERTS.driftAcknowledged);
+    const ack = records(j).find(r => r.alert === JOURNAL_EVENTS.driftAcknowledged);
     assert.ok(ack !== undefined);
     assert.equal(ack.formula_sha, 'new-sha');
     assert.equal(res.outcome, 'park'); // re-entered route → queue → parks clean

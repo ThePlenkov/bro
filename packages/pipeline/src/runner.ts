@@ -80,11 +80,18 @@ export const PARK_ALERTS = {
   admissionUnavailable: 'admission-unavailable',
   itemMismatch: 'item-mismatch',
   cycleExhausted: 'cycle-budget-exhausted',
+} as const;
+export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
+
+/** Journal events stamped on alert rows that are NOT fail-closed
+ *  parks — durable markers a `ParkAlert` union must not absorb, so
+ *  callers can rely on `PARK_ALERTS` meaning "this row parked". */
+export const JOURNAL_EVENTS = {
   /** journaled when an operator resumes past a formula-drift alert —
    *  the recorded acknowledgement, not a park */
   driftAcknowledged: 'drift-acknowledged',
 } as const;
-export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
+export type JournalEvent = (typeof JOURNAL_EVENTS)[keyof typeof JOURNAL_EVENTS];
 
 /** The accumulated pipeline context — payloads merge flat AND under
  *  their stage name, so `complexity` and `classify.complexity` both
@@ -712,7 +719,7 @@ function drifted(run: Run, last: JournalRow): boolean {
  *  without re-acking. */
 function driftAck(run: Run, last: JournalRow): void {
   const row = rowFor(run, { stage: last.resume ?? last.stage, attempt: 1 }, 'alert');
-  row.alert = PARK_ALERTS.driftAcknowledged;
+  row.alert = JOURNAL_EVENTS.driftAcknowledged;
   row.detail = `operator resumed past formula-drift alert seq=${last.seq}`;
   row.resume = last.resume ?? last.stage;
   run.journal.append(row);

@@ -184,8 +184,9 @@ code — each became a spec fix and a review-thread resolution on
 - Stage: **runner-backed, library-only** — `.2` delivers the
   stage-runner + write-ahead journal: intents journal before every
   side effect, verdicts complete the same seq, gates evaluate against
-  replayed context, resume re-checks pending intents instead of
-  re-firing. The item's own pass through the pipeline is still
+  replayed context, resume re-checks pending intents, then settles,
+  parks, or boundedly re-fires on a "didn't land" attestation. The
+  item's own pass through the pipeline is still
   hand-emulated (a `bro pipeline` CLI doesn't exist yet); merge is in
   flight and capture remains pending at log time.
 - Scripted: yes at the library level — the fake-engine suite replays
