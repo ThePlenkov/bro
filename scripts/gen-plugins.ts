@@ -658,6 +658,28 @@ function emit(path, content) {
   writeFileSync(p, content);
 }
 
+// devin hooks.json contract: one direct `${DEVIN_PLUGIN_ROOT}/hooks/run.sh`
+// call per event — the shared launcher owns root resolution AND the
+// watchdog. The old inline preamble resolved P through a three-var chain
+// and fell back to a bare `bro hooks` with NO watchdog: an empty P sent
+// every hook down the unbounded path and the host killed it at the hook
+// budget. Lint the contract here, next to the emit that copies it into
+// plugins/devin/bro — a client-plugin rule lives with the plugin
+// machinery, not in a package test.
+{
+  const body = existsSync(join(ROOT, 'hooks.json'))
+    ? readFileSync(join(ROOT, 'hooks.json'), 'utf8')
+    : '';
+  const thin =
+    /\$\{DEVIN_PLUGIN_ROOT\}\/hooks\/run\.sh/.test(body) &&
+    !/CLAUDE_PLUGIN_ROOT|command -v bro|npx/.test(body);
+  if (!thin) {
+    drift.push(
+      'hooks.json (devin hook contract — direct run.sh call, no env chain, no unbounded bro fallback)'
+    );
+  }
+}
+
 // keep every `@broject/bro@…` npx pin equal to plugin.json's version
 for (const src of VERSIONED_SOURCES) {
   const p = join(ROOT, src);
