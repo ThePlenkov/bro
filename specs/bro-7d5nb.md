@@ -50,83 +50,155 @@ Two formula kinds, both TOML, both content-hash versioned:
 
 ```toml
 version = 1
+
 [[stages]]
 name = "classify"          # G1: dedup, group, rank (judge)
 engine = "judge"
 verdicts = ["solo", "clump", "duplicate", "defer"]
+
 [[stages]]
 name = "route"             # G2: agent/model/orchestrator/now|queue
 engine = "judge"
 verdicts = ["spawn", "queue", "defer"]
+
 [[stages]]
 name = "work"              # spawn via fleet facade → exit taxonomy
 engine = "fleet"
+verdicts = ["done", "rate_limited", "crash", "stopped"]
+
 [[stages]]
 name = "review"            # G3: internal review — risk-gated
 engine = "judge"
 gate_on = "complexity == complex"   # cheap-class items skip
 verdicts = ["push", "fix", "abandon"]
+
+[[stages]]
+name = "merge"             # act gate — threads/CI/reviewers settle
+engine = "act-gate"
+verdicts = ["landed", "blocked", "dropped"]
+
 [[stages]]
 name = "capture"           # G4: self-learn + plan next tasks
 engine = "learn"
 mode = "always-capture"    # per-item cheap; batch retro is separate
-transitions = { solo = "route", clump = "route", duplicate = "close",
-  defer = "park", spawn = "work", queue = "park", fix = "work",
-  abandon = "close", done = "capture" }
+verdicts = ["captured"]
+
+[transitions]
+classify = { solo = "route", clump = "route", duplicate = "close",
+             defer = "park" }
+route    = { spawn = "work", queue = "park", defer = "park" }
+work     = { done = "review", rate_limited = "park",
+             crash = "retry", stopped = "abandon" }
+review   = { push = "merge", fix = "work", abandon = "close" }
+merge    = { landed = "capture", blocked = "retry",
+             dropped = "close" }
+capture  = { captured = "end" }
 ```
+
+### Typed stage outputs
+
+Verdicts are enum tags; every engine also emits a typed payload the
+next stage reads:
+
+- **classify** → `{ group: solo|clump|duplicate|defer,
+  complexity: cheap|complex, rank: int }`. `complexity` is the typed
+  field `review.gate_on` consumes — the gate is decided by classify's
+  payload, not by re-judging.
+- **route** → `{ class, kind, orch: acp|foreground|exec,
+  timing: now|queue, provider?, model? }` — provider/model are
+  resolved through `fleet.routing.<class>.chain` and `brouter`, never
+  named by core.
+- **work** → the registry exit taxonomy verbatim
+  (`done|rate_limited|crash|stopped`); the verdict is a mapping, not
+  a new enum.
+- **review** → `{ verdict: push|fix|abandon, notes }` — the internal
+  review pass on the worktree diff via `routing.review.chain`.
+- **merge** → the act gate's settle state (`landed|blocked|dropped`).
+- **capture** → `{ lessons: int, followups: [beadId] }`.
 
 ### Stage semantics
 
 - **classify** — judge reads bead + repo signals; emits group/dedup/
-  rank. LIFO remains tie-breaker INSIDE a group. Output lands as bead
-  labels/claims, never in the prompt.
-- **route** — judge emits `{class, provider_kind, model_hint,
-  orchestrator: acp|foreground|exec, now|queue}`; occupancy plane
-  (`fleetOccupancyFor`) feeds the load signal. The verdict resolves
-  through `fleet.routing.<class>.chain` — core never names a provider.
+  rank/complexity. LIFO remains tie-breaker INSIDE a group. Output
+  lands as bead labels/claims, never in the prompt.
+- **route** — judge emits `{class,kind,orch,timing}`; occupancy plane
+  (`fleetOccupancyFor`) feeds the load signal. `queue` parks the item
+  until capacity opens; `defer` is an operator verdict.
 - **work** — spawn via facade → registry pins {pid, prompt, exit};
   `resolveWorktree` reuses recorded checkouts (resume semantics).
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
-  complexity verdict: `complex` required, `cheap` skips to merge gate.
+  complexity verdict: `complex` required, `cheap` skips to merge.
+- **merge** — the existing act gate: threads/CI/reviewers settle;
+  `blocked` retries bounded by fix-rounds, `dropped` is terminal.
 - **capture** — `self learn capture` on land (cheap, per-item);
   heavyweight session retro runs batched off-path.
 
+### Write-ahead journal (resume correctness)
+
+A stage's side effects are never the resume point. The runner
+journals **intent** — `{run, step, stage, verdict?, attempt}` —
+BEFORE emitting the side effect; the verdict field fills in after.
+On resume: an intent row with no verdict means "side effect may or
+may not have landed" — the runner re-checks the world (registry
+admission/go markers for spawns, act markers for merges) rather than
+blindly repeating. Spawn idempotence rides the existing registry
+go-stamp protocol (an unadmitted survivor can never double a
+respawn); the runner's retry is a fresh admission attempt against
+that same marker, not a second spawn.
+
+### formula identity
+
+`formula_sha = sha256(<raw file bytes>)`. No canonicalization: two
+byte-different files are two versions — formatting churn producing a
+new sha is the honest answer (a comment IS a formula-version delta
+worth tracing). The sha stamps registry entries and trailers.
+
 ### Traceability
 
-Stamps written BY THE DRIVER (agent cannot forge its own provenance):
+Provenance stamps are **driver-attested hints, not self-certifying
+facts**: a commit trailer naming a run proves nothing by itself —
+anyone can write one. The authoritative trace is the keyed lookup:
+`bro trace` resolves the chain and VERIFIES each hop against the
+registry record.
 
 - spawn → registry entry: `formula`, `formula_sha`, `session_id`,
   `pipeline_stage` (extends existing provider/backend/sessionKind)
-- commit → trailers: `BRO-Run: <agentId>`, `BRO-Formula: <id>@<sha>`,
+- commit → trailers written by the DRIVER's commit path (the
+  `BRO_*` env seam `prepare-commit-msg` already consumes — the
+  driver sets them, a worker could fake them, and `bro trace`
+  treats mismatch as forged-by-absence: trailer↔registry mismatch
+  is reported, never silently trusted):
+  `BRO-Run: <agentId>`, `BRO-Formula: <id>@<sha>`,
   `BRO-Session: <id>`
 - PR → body footer: run/formula/session line
-- `bro trace <commit|pr|branch>` — resolves the chain backwards
-  (branch→worktree→registry→agent→provider/model→formula@sha→mol step)
+- `bro trace <commit|pr|branch>` — resolves
+  branch→worktree→registry→agent→provider/model→formula@sha→mol
+  step; reports VERIFIED on registry match, FORGED/MISSING on
+  mismatch or absence
 
 ### Interpreter
 
 A thin stage-runner in core: reads the formula, invokes engines per
-stage (judge / fleet / learn), journals each verdict, transitions per
-the table. Resume = last journaled stage, not replay. Crash → the
-registry's `.exit` taxonomy classifies the in-flight worker; the
-runner resumes at the verdict it never wrote.
+stage (judge / fleet / act-gate / learn), journals each intent+
+verdict, transitions per the root table. Resume = last journaled
+stage; a verdict-less intent re-checks the world first (see
+write-ahead journal).
 
 ## Steps (epic children)
 
-1. Pipeline formula schema + validator (`packages/convoy` or new
-   `packages/pipeline`): TOML shape, verdict types, transition table,
-   content hash.
-2. Stage-runner core + journal: verdict records, transitions, resume
-   semantics over registry+dolt.
-3. G1 classify stage: judge dedup/group/rank → bead labels.
-4. G2 route stage: judge → class/kind/orchestrator/now-queue →
-   `class:` label + routing resolution.
+1. Pipeline formula schema + validator (`packages/pipeline`): TOML
+   shape, typed verdicts, root transitions table, `formulaSha`.
+2. Stage-runner core + journal: write-ahead records, transitions,
+   resume semantics over registry+dolt.
+3. G1 classify stage: judge dedup/group/rank/complexity → labels.
+4. G2 route stage: judge → class/kind/orch/timing → `class:` label +
+   routing resolution.
 5. G3 review stage: `routing.review.chain` config + risk-gated
    internal review on worktree diff.
 6. G4 capture stage: self-learn call on land + batched retro hook.
 7. Trace stamps: registry fields, commit trailers, PR footer,
-   `bro trace` resolver.
+   `bro trace` resolver with verify/mismatch verdicts.
 
 ## Non-goals
 
@@ -139,6 +211,8 @@ runner resumes at the verdict it never wrote.
 
 - Prompt audit: no stage/gate/routing vocabulary in worker prompts.
 - `bro trace` on a produced PR prints agent, model, session,
-  formula@sha, mol step.
-- Kill a runner mid-stage → resume continues at last journaled stage.
+  formula@sha, mol step — VERIFIED against registry.
+- Kill a runner mid-stage → resume continues at last journaled
+  intent; a verdict-less intent re-checks the world, never re-fires
+  a side effect blindly.
 - cheap-class item skips internal review; complex-class gets one.
