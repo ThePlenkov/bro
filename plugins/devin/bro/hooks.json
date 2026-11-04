@@ -41,7 +41,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "P=\"${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then _f=$(mktemp); cat > \"$_f\"; (\"$P/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & else if command -v bro >/dev/null 2>&1; then _f=$(mktemp); cat > \"$_f\"; (bro hooks post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & fi; fi; exit 0",
+          "command": "P=\"${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then cat > \"$_f\"; (\"$P/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & else \"$P/hooks/run.sh\" post-tool || true; fi; elif command -v bro >/dev/null 2>&1; then if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then cat > \"$_f\"; (bro hooks post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & else bro hooks post-tool || true; fi; fi; exit 0",
           "timeout": 10
         }
       ]

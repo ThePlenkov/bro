@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "_f=$(mktemp); cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") &",
+            "command": "if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & else \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true; fi",
             "timeout": 10
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "_f=$(mktemp); cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") &",
+            "command": "if _f=$(mktemp 2>/dev/null) && [ -n \"$_f\" ]; then cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") & else \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true; fi",
             "timeout": 10
           }
         ]
