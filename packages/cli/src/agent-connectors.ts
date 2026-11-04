@@ -79,6 +79,7 @@ import {
   sessionPlaneForCli,
   sessionQuotaConfig,
   sessionSlotsDir,
+  taskStoreAt,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -1525,7 +1526,7 @@ function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+): { claimed: boolean; actor: string | undefined; phantom: boolean; previousAssignee?: string } {
   const step = probeStep(spec.beadsDir, spec.molStep);
   if (spec.claimRequired !== true && spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true };
@@ -1550,7 +1551,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     );
   }
-  return { claimed: true, actor, phantom: false };
+  return { claimed: true, actor, phantom: false, previousAssignee: step.assignee };
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -1739,6 +1740,29 @@ function prepareSpawn(
     if (charged !== undefined) {
       laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
+    try {
+      const reg = readAgentRegistry(dir);
+      if (existing !== undefined) {
+        // on respawn failure, restore prior entry if it was replaced
+        reg[spec.molStep] = existing;
+        writeAgentRegistry(dir, reg);
+      } else {
+        const cur = reg[spec.molStep];
+        if (
+          cur !== undefined &&
+          cur.agentId === agentId &&
+          cur.backend === backend &&
+          typeof cur.exitStatus !== 'number' &&
+          cur.stopped !== true
+        ) {
+          // only clean up a freshly written entry with no death recorded
+          delete reg[spec.molStep];
+          writeAgentRegistry(dir, reg);
+        }
+      }
+    } catch {
+      // best-effort cleanup
+    }
     throw err;
   }
 }
@@ -1758,7 +1782,12 @@ function commitSpawn(
     sessionQuota?: SessionQuotaLane | undefined;
   },
   agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+  guard: {
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee?: string;
+  }
 ): {
   promptFile: string;
   log: string;
@@ -1790,6 +1819,13 @@ function commitSpawn(
   appendPrivateFileSync(stderrLog, '');
   const logFrom = logSizeOrZero(log);
   const stderrFrom = logSizeOrZero(stderrLog);
+  // snapshot prior entry before patching so respawn failures can restore it
+  let priorEntry: AgentRegistryEntry | undefined;
+  try {
+    priorEntry = readAgentRegistry(dir)[spec.molStep];
+  } catch {
+    priorEntry = undefined;
+  }
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1841,7 +1877,78 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  try {
+    recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  } catch (err) {
+    // roll back claim bookkeeping if partially applied so we don't orphan
+    // an in_progress claim when the spawn fails mid-way
+    try {
+      if (!guard.phantom) {
+        const store = taskStoreAt(spec.beadsDir);
+        try {
+          if (guard.claimed && guard.previousAssignee) {
+            // take over/rebind case — rollback to previous assignee if possible
+            try {
+              if (typeof (store as any).update === 'function') {
+                (store as any).update(spec.molStep, { assignee: guard.previousAssignee });
+              } else if (typeof store.reopen === 'function' && guard.previousAssignee === '') {
+                store.reopen(spec.molStep);
+              }
+            } catch {
+              // fall through to reopen if rollback fails
+              try {
+                if (typeof store.reopen === 'function') {
+                  store.reopen(spec.molStep);
+                }
+              } catch {}
+            }
+          } else if (!guard.claimed && priorEntry === undefined) {
+            // fresh claim
+            if (typeof store.reopen === 'function') {
+              store.reopen(spec.molStep);
+            }
+          } else if (!guard.claimed && priorEntry !== undefined) {
+            // had a prior entry (respawn context) but we did a fresh claim
+            if (typeof store.reopen === 'function') {
+              store.reopen(spec.molStep);
+            }
+          } else if (guard.claimed && !guard.previousAssignee) {
+            // claimed by us but we don't know original assignee; best effort
+            try {
+              if (typeof store.reopen === 'function') {
+                store.reopen(spec.molStep);
+              }
+            } catch {}
+          }
+        } catch {
+          // best-effort rollback
+        }
+      }
+    } catch {
+      // best-effort rollback
+    }
+    try {
+      const reg = readAgentRegistry(dir);
+      if (priorEntry !== undefined) {
+        reg[spec.molStep] = priorEntry;
+        writeAgentRegistry(dir, reg);
+      } else {
+        const cur = reg[spec.molStep];
+        if (
+          cur !== undefined &&
+          cur.agentId === agentId &&
+          cur.runId === runId &&
+          cur.backend === backend
+        ) {
+          delete reg[spec.molStep];
+          writeAgentRegistry(dir, reg);
+        }
+      }
+    } catch {
+      // best-effort cleanup
+    }
+    throw err;
+  }
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 
@@ -1867,7 +1974,12 @@ function recordSpawnClaim(
   spec: SpawnSpec,
   agentId: string,
   backend: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
+  guard: {
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee?: string;
+  },
   claimAs: string | undefined,
   attempt: { runId: string; log: string }
 ): void {
