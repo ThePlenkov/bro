@@ -33,6 +33,7 @@ import {
   notify,
   paneIdle,
   PLUGIN_ID,
+  PLUGIN_ROOT,
   type PluginState,
   repoDir,
   type StatusWorktree,
@@ -549,10 +550,17 @@ function ensureSyncLoop(): void {
   } catch {
     // no file — nobody is mid-open either
   }
-  // the loop is confirmed dead: every 'bro sync' pane is a husk —
-  // close them or the successor piles up next to bare shells
+  // the loop is confirmed dead: every 'bro sync' pane rooted at THIS
+  // plugin is a husk — close them or the successor piles up next to
+  // bare shells. cwd scoping keeps another repository's sync pane
+  // (same label, different checkout) out of the sweep
   for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
-    if (p.label === SYNC_LABEL && p.pane_id !== undefined && paneIdle(p.pane_id)) {
+    if (
+      p.label === SYNC_LABEL &&
+      p.pane_id !== undefined &&
+      p.cwd === PLUGIN_ROOT &&
+      paneIdle(p.pane_id)
+    ) {
       herdrTry(['pane', 'close', p.pane_id]);
     }
   }
