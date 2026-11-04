@@ -64,6 +64,16 @@ export function agentKey(base: string, id: string | undefined): string | undefin
   );
 }
 
+/** The pane's display agent — the TRUE agent name, the registry
+ *  entry's provider (`opencode-iceman`, `devin`, `omp-minimax`) the
+ *  in-render labels already print. The readable run id falls back
+ *  when the spawn carried no provider; the archive stem
+ *  (`native-<hash>`) is never the surface. */
+export function displayAgentOf(base: string, id: string | undefined): string | undefined {
+  if (id === undefined) return undefined;
+  return agentEntry(base, id)?.provider ?? agentKey(base, id) ?? id;
+}
+
 /** The pid's /proc start stamp — `comm` may carry spaces and parens,
  *  so the fields read from the LAST `)`. null when unreadable (no
  *  /proc, or the process just exited). */
