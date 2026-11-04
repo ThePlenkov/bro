@@ -83,17 +83,62 @@ engine = "learn"
 mode = "always-capture"    # per-item cheap; batch retro is separate
 verdicts = ["captured"]
 
-[transitions]
-classify = { solo = "route", clump = "route", duplicate = "close",
-             defer = "park" }
-route    = { spawn = "work", queue = "park", defer = "park" }
-work     = { done = "review", rate_limited = "park",
-             crash = "retry", stopped = "abandon" }
-review   = { push = "merge", fix = "work", abandon = "close" }
-merge    = { landed = "capture", blocked = "retry",
-             dropped = "close" }
-capture  = { captured = "end" }
+[transitions.classify]
+solo = "route"
+clump = "route"
+duplicate = "close"
+defer = "park"
+
+[transitions.route]
+spawn = "work"
+queue = "park"
+defer = "park"
+
+[transitions.work]
+done = "review"
+rate_limited = "park"
+crash = "retry"
+stopped = "abandon"
+
+[transitions.review]
+skip = "merge"               # gate_on failed → bypass target
+push = "merge"
+fix = "work"
+abandon = "close"
+
+[transitions.merge]
+landed = "capture"
+blocked = "retry"
+dropped = "close"
+
+[transitions.capture]
+captured = "end"
 ```
+
+### Gates and the `skip` verdict
+
+`gate_on` is evaluated against the pipeline context built from earlier
+stage payloads. When the gate fails, the runner does NOT invoke the
+engine — it synthesizes a `skip` verdict and follows that transition.
+`skip` is an implicit verdict: required in the transitions table for
+every stage with `gate_on`, forbidden on ungated stages. This keeps
+cheap-class bypass paths explicit — `done` still routes to `review`,
+and `review`'s `skip` takes the cheap item to `merge` without running
+the engine.
+
+### Terminal actions
+
+A transition target is a stage name or one of five runner actions —
+declared here, not stages:
+
+- `end` — terminal success; the run is complete, journal closes.
+- `park` — suspend: item leaves the active set until capacity or an
+  operator wakes it (resume re-enters at the same stage).
+- `retry` — re-run the SAME stage, bounded by the runner's attempt
+  budget (config `pipeline.maxAttempts`, default 3); budget exhaustion
+  falls to `park`.
+- `close` — terminal settle without failure (duplicate, dropped PR).
+- `abandon` — terminal failure.
 
 ### Typed stage outputs
 
