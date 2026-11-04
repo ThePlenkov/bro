@@ -16,9 +16,11 @@
 import { flag, hasHelpFlag, positionals, printUsage } from '@broject/core';
 import { runClient, runModels } from './commands.ts';
 import { readRouterEndpoint } from './gateway.ts';
+import { configuredProviders } from './providers.ts';
 import { CLIENTS } from './registry.ts';
 
 const USAGE = `usage:
+  brouter providers [--json]                     the configured providers
   brouter models [--json]                        the served catalog
   brouter clients [--json]                        the client adapters
   brouter client <id> [--write] [--settings P] [--wire] [--json]
@@ -46,6 +48,23 @@ function endpointOf(argv: string[]): { url: string; token: string } {
     die('no router found — start one (bro serve) or pass --url and --token');
   }
   return found;
+}
+
+function cmdProviders(argv: string[]): void {
+  const providers = configuredProviders(process.cwd());
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(providers, null, 2));
+    return;
+  }
+  if (providers.length === 0) {
+    console.log('no providers configured — add providers.<name> to bro.config.json');
+    return;
+  }
+  for (const p of providers) {
+    const model = p.model === undefined ? '' : `\t${p.model}`;
+    const models = p.models === undefined ? '' : `\t${p.models} model(s)`;
+    console.log(`${p.name}\t${p.type}\t${p.target ?? ''}${model}${models}`);
+  }
 }
 
 async function cmdModels(argv: string[]): Promise<void> {
@@ -117,6 +136,9 @@ async function main(): Promise<void> {
   }
   const command = positionals(argv, VALUE_FLAGS, { boolFlags: BOOL_FLAGS })[0];
   switch (command) {
+    case 'providers':
+      cmdProviders(argv);
+      return;
     case 'models':
       await cmdModels(argv);
       return;
