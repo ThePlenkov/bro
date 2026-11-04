@@ -67,8 +67,9 @@ export function agentKey(base: string, id: string | undefined): string | undefin
 /** The pane's display agent — the TRUE agent name, the registry
  *  entry's provider (`opencode-iceman`, `devin`, `omp-minimax`) the
  *  in-render labels already print. The readable run id falls back
- *  when the spawn carried no provider; the archive stem
- *  (`native-<hash>`) is never the surface. */
+ *  when the spawn carried no provider; a registry-known agent's
+ *  archive stem (`native-<hash>`) is never the surface — only an id
+ *  the registry has never seen returns verbatim. */
 export function displayAgentOf(base: string, id: string | undefined): string | undefined {
   if (id === undefined) return undefined;
   // `||` — an empty-string provider is as absent as a missing one

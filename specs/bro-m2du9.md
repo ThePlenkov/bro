@@ -18,8 +18,10 @@ resolves the display name with the same lookup contract as
 1. `entry.provider` — the true agent name — wins.
 2. The readable run id (`agentKey`) falls back when the spawn carried
    no provider.
-3. The raw argv id is the last resort — the archive stem
-   (`native-<hash>`) is never the surface.
+3. The raw argv id is the last resort, returned unchanged when the
+   registry cannot resolve it. The archive stem (`native-<hash>`) is
+   never the surface for a registry-known agent — only an id the
+   registry has never seen can surface verbatim.
 
 `tui/main.ts` swaps its inline `agentKey ?? agentArg` pick for the kit
 helper — one resolution path, unit-testable.
