@@ -668,8 +668,18 @@ export const PLUGINS: BroPlugin[] = [
           flags: { '--json': 'machine-readable report' },
           exits: { 0: 'would-be record printed', 2: 'missing hook name' },
         },
-        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
-        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
       },
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },
@@ -959,11 +969,7 @@ function hasPluginPairedFields(o: unknown): boolean {
 }
 
 function isPlugin(p: unknown): p is BroPlugin {
-  return (
-    hasPluginRequiredShape(p) &&
-    hasPluginOptionalFields(p) &&
-    hasPluginPairedFields(p)
-  );
+  return hasPluginRequiredShape(p) && hasPluginOptionalFields(p) && hasPluginPairedFields(p);
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
@@ -1095,15 +1101,7 @@ function hasValidConnectorFlags(c: unknown): boolean {
   if (c.optInFacades === undefined) {
     return true;
   }
-  if (!Array.isArray(c.optInFacades)) {
-    return false;
-  }
-  for (const f of c.optInFacades) {
-    if (!(typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap))) {
-      return false;
-    }
-  }
-  return true;
+  return Array.isArray(c.optInFacades) && c.optInFacades.every(f => isValidFacadeKey(f));
 }
 
 function isConnector(c: unknown): boolean {

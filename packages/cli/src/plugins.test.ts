@@ -23,6 +23,28 @@ process.on('exit', () => {
   else process.env.XDG_CONFIG_HOME = prevXdg;
 });
 
+function repoWith(pluginSource: string | null, plugins: unknown): string {
+  const dir = tmpDir('bro-ext-');
+  writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ plugins }));
+  if (pluginSource !== null) {
+    writeFileSync(join(dir, 'my.ts'), pluginSource);
+  }
+  return dir;
+}
+
+function unload(loaded: { name: string }[]): void {
+  for (const p of loaded) {
+    const i = PLUGINS.findIndex(x => x.name === p.name);
+    if (i >= 0) PLUGINS.splice(i, 1);
+  }
+}
+
+async function expectRejected(source: string): Promise<void> {
+  const dir = repoWith(source, ['./my.ts']);
+  const loaded = await loadExternalPlugins(dir);
+  assert.equal(loaded.length, 0);
+}
+
 describe('plugin registry', () => {
   test('names are unique', () => {
     const names = PLUGINS.map(p => p.name);
@@ -196,22 +218,6 @@ describe('assertMutableConfig', () => {
 });
 
 describe('loadExternalPlugins', () => {
-  function repoWith(pluginSource: string | null, plugins: unknown): string {
-    const dir = tmpDir('bro-ext-');
-    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ plugins }));
-    if (pluginSource !== null) {
-      writeFileSync(join(dir, 'my.ts'), pluginSource);
-    }
-    return dir;
-  }
-
-  function unload(loaded: { name: string }[]): void {
-    for (const p of loaded) {
-      const i = PLUGINS.findIndex(x => x.name === p.name);
-      if (i >= 0) PLUGINS.splice(i, 1);
-    }
-  }
-
   test('a .ts default-export plugin registers and is marked external', async () => {
     const dir = repoWith(
       `export default { name: 'hello', summary: 'test plugin', run: () => {} }`,
@@ -256,21 +262,15 @@ describe('loadExternalPlugins', () => {
   });
 
   test('wrong-typed optional fields reject the export', async () => {
-    const dir = repoWith(
-      `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`,
-      ['./my.ts']
+    await expectRejected(
+      `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`
     );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
   });
 
   test('a non-string deprecated field rejects the export', async () => {
-    const dir = repoWith(
-      `export default { name: 'badd', summary: 'x', run: () => {}, deprecated: true }`,
-      ['./my.ts']
+    await expectRejected(
+      `export default { name: 'badd', summary: 'x', run: () => {}, deprecated: true }`
     );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
   });
 
   test('a string deprecated field registers and survives on the plugin', async () => {
@@ -417,77 +417,39 @@ describe('bro run — plan routing', () => {
   });
 });
 
-
 describe('external plugin/connector validation', () => {
-  function repoWith(pluginSource: string | null, plugins: unknown): string {
-    const dir = tmpDir('bro-ext-val-');
-    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ plugins }));
-    if (pluginSource !== null) {
-      writeFileSync(join(dir, 'my.ts'), pluginSource);
-    }
-    return dir;
-  }
-
-  function unload(loaded: { name: string }[]): void {
-    for (const p of loaded) {
-      const i = PLUGINS.findIndex(x => x.name === p.name);
-      if (i >= 0) PLUGINS.splice(i, 1);
-    }
-  }
-
-  test('malformed connector matchDir is rejected', async () => {
-    const dir = repoWith(
+  const rejectionCases: Array<[string, string]> = [
+    [
+      'malformed connector matchDir is rejected',
       `export default { name: 'bad1', summary: 'x', run: () => {}, connectors: [{ name: 'c1', matchDir: 1 }] }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
-
-  test('malformed connector optInFacades rejected', async () => {
-    const dir = repoWith(
+    ],
+    [
+      'malformed connector optInFacades rejected',
       `export default { name: 'bad2', summary: 'x', run: () => {}, connectors: [{ name: 'c2', optInFacades: 4 }] }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
-
-  test('connector with invalid optInFacades element rejected', async () => {
-    const dir = repoWith(
+    ],
+    [
+      'connector with invalid optInFacades element rejected',
       `export default { name: 'bad3', summary: 'x', run: () => {}, connectors: [{ name: 'c3', optInFacades: ['badfac'] }] }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
-
-  test('argvPrefix elements must be strings', async () => {
-    const dir = repoWith(
+    ],
+    [
+      'argvPrefix elements must be strings',
       `export default { name: 'bad4', summary: 'x', run: () => {}, argvPrefix: ['ok', 123] }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
-
-  test('planSchema without runPlan rejected', async () => {
-    const dir = repoWith(
+    ],
+    [
+      'planSchema without runPlan rejected',
       `export default { name: 'bad5', summary: 'x', run: () => {}, planSchema: () => ({}) }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
-
-  test('runPlan without planSchema rejected', async () => {
-    const dir = repoWith(
+    ],
+    [
+      'runPlan without planSchema rejected',
       `export default { name: 'bad6', summary: 'x', run: () => {}, runPlan: () => {} }`,
-      ['./my.ts']
-    );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
-  });
+    ],
+  ];
+
+  for (const [title, source] of rejectionCases) {
+    test(title, async () => {
+      await expectRejected(source);
+    });
+  }
 
   test('valid plugin with valid connectors still registers', async () => {
     const dir = repoWith(
