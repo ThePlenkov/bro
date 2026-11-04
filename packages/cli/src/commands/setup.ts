@@ -16,7 +16,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig } from '@broject/core'
+import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig, type LockedSkill, type SkillDrift } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -388,6 +388,43 @@ function checkPrereqs(needBeads: boolean): void {
  * skipped with a line saying so, and one unreachable upstream does not stop
  * the rest.
  */
+function installOneLockedSkill(dir: string, skill: LockedSkill): void {
+  // `npx skills add` owns the fetch, the symlink and the lockfile
+  // update; bro only decides what to ask for.
+  try {
+    execFileSync(
+      'npx',
+      ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
+      { cwd: dir, stdio: 'pipe' }
+    )
+  } catch {
+    // one unreachable upstream does not stop the rest
+    console.error(`  ${skill.name}: could not fetch from ${skill.source}`)
+  }
+}
+
+function installLockedSkills(dir: string, locked: Map<string, LockedSkill>): void {
+  if (!hasBin('npx')) {
+    console.error('  npx not on PATH — skipping the locked skills')
+    return
+  }
+  for (const skill of locked.values()) {
+    installOneLockedSkill(dir, skill)
+  }
+}
+
+function reportSkillDrift(locked: Map<string, LockedSkill>, drift: SkillDrift[]): void {
+  if (drift.length === 0) {
+    console.error(`  ${locked.size} locked skill(s) match the lock`)
+    return
+  }
+  for (const d of drift) {
+    console.error(
+      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
+    )
+  }
+}
+
 function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): void {
   const locked = readSkillLock(dir)
   if (locked.size === 0) {
@@ -397,41 +434,15 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   const skillsDir = join(dir, '.agents', 'skills')
 
   if (!checkOnly && !dryRun) {
-    if (!hasBin('npx')) {
-      console.error('  npx not on PATH — skipping the locked skills')
-      return
-    }
-    for (const skill of locked.values()) {
-      // `npx skills add` owns the fetch, the symlink and the lockfile
-      // update; bro only decides what to ask for.
-      try {
-        execFileSync(
-          'npx',
-          ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-          { cwd: dir, stdio: 'pipe' }
-        )
-      } catch {
-        // one unreachable upstream does not stop the rest
-        console.error(`  ${skill.name}: could not fetch from ${skill.source}`)
-      }
-    }
+    installLockedSkills(dir, locked)
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
   // `npx skills add` rewrites the lockfile with the freshly fetched hash,
   // so re-reading it would make that new hash the expected value and
   // silently advance the lock instead of reporting drift.
-  const current = locked
-  const drift = checkSkillLock(current, skillsDir)
-  if (drift.length === 0) {
-    console.error(`  ${current.size} locked skill(s) match the lock`)
-    return
-  }
-  for (const d of drift) {
-    console.error(
-      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
-    )
-  }
+  const drift = checkSkillLock(locked, skillsDir)
+  reportSkillDrift(locked, drift)
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
