@@ -268,10 +268,10 @@ const runIdFor = (opts: RunOptions, journal?: PipelineJournal): string =>
 /** A bound must be a positive integer — NaN/0/negative silently
  *  disables the budget (n > NaN is always false), and a bound that
  *  can't trip is the same defect class as no bound. */
-function bounded(name: string, v: number | undefined, dflt: number): number {
+function bounded(name: string, v: number | undefined, dflt: number, min = 1): number {
   const n = v ?? dflt;
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`pipeline run: ${name} must be a positive integer, got ${v}`);
+  if (!Number.isInteger(n) || n < min) {
+    throw new Error(`pipeline run: ${name} must be an integer ≥ ${min}, got ${v}`);
   }
   return n;
 }
@@ -334,7 +334,9 @@ function initRun(
     maxAttempts: bounded('maxAttempts', opts.maxAttempts, DEFAULT_MAX_ATTEMPTS),
     maxSteps: bounded('maxSteps', opts.maxSteps, DEFAULT_MAX_STEPS),
     steps: 0,
-    fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS),
+    // 0 IS a valid fix budget — 'no scoped-fix rounds' parks on the
+    // first fix verdict via the normal exhaustion path
+    fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS, 0),
     fixVerdict: opts.fixVerdict ?? DEFAULT_FIX_VERDICT,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
@@ -489,11 +491,18 @@ async function sideEffect(
 function absorb(run: Run, stage: string, payload: unknown): void {
   // Reflect.set, not bracket writes — on the null-prototype ctx both
   // land as inert own properties, and the static-analysis-clean form
-  // says so to the scanner too
-  Reflect.set(run.ctx, stage, payload);
+  // says so to the scanner too. A frozen ctx (an engine breached the
+  // shared-state contract) makes Reflect.set return false — fail
+  // loud rather than continue with the verdict payload missing.
+  const set = (key: string, value: unknown): void => {
+    if (!Reflect.set(run.ctx, key, value)) {
+      throw new TypeError(`pipeline context is not writable (absorb ${stage}.${key})`);
+    }
+  };
+  set(stage, payload);
   if (isRecord(payload)) {
     for (const [k, v] of Object.entries(payload)) {
-      Reflect.set(run.ctx, k, v);
+      set(k, v);
     }
   }
 }

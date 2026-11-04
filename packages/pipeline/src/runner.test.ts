@@ -843,7 +843,7 @@ describe('runner invariants', () => {
           formulaSha: SHA,
           ...opts,
         }),
-        /must be a positive integer/
+        /must be an integer/
       );
     }
   });
@@ -857,5 +857,25 @@ describe('runner invariants', () => {
       }),
       /needs opts\.formulaSha/
     );
+  });
+
+  test('fixRounds: 0 is a valid budget — the first fix verdict parks exhausted', async () => {
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'fix', payload: { notes: 'scope' } },
+    ]);
+    const fleet = spy([{ verdict: 'done' }]);
+    const res = await run({ judge: judge.fn, fleet: fleet.fn }, { fixRounds: 0 });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, PARK_ALERTS.fixRoundsExhausted);
+  });
+
+  test('an engine that freezes the shared ctx crashes the run loud — no silent absorb', async () => {
+    const judge: EngineFn = async call => {
+      Object.freeze(call.ctx); // breach the shared-state contract
+      return { verdict: 'solo' };
+    };
+    await assert.rejects(run({ judge }), /context is not writable/);
   });
 });
