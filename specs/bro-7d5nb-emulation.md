@@ -25,16 +25,16 @@ the (future) journal — same data, human-written.
 - Input: bead `bro-7d5nb.1` (epic child, needs: [] → ready),
   spec formula, repo `/home/pepl/projects/bro`.
 - Expected by spec: classify emits {group, complexity, rank} → route
-  emits {class, kind, orchestrator, timing} → work emits an exit-taxonomy
+  emits {class, kind, orch, timing} → work emits an exit-taxonomy
   verdict → review fires iff complexity==complex → merge emits
   landed|blocked|dropped → capture emits captured.
 - Actual action and result:
   - classify → `solo` — schema work shares no surface with other
     open items; payload `{group: solo, complexity: complex,
-    rank: <epic-first>}`.
-  - route → `{class: interactive, kind: ts-package, orchestrator:
-    foreground (this session), timing: now}` — interactive lane, not
-    fleet: capacity stayed with the human session.
+    rank: 1}` (epic-first child of bro-7d5nb).
+  - route → `spawn` — payload `{class: interactive, kind:
+    ts-package, orch: foreground, timing: now}` — interactive lane,
+    not fleet: capacity stayed with the human session.
   - work → `done` — `packages/pipeline` shipped (parsePipelineFormula,
     formulaSha, loadPipelineFormula, transitionFor), 20 tests,
     [PR #900](https://github.com/ThePlenkov/bro/pull/900).
@@ -62,10 +62,13 @@ the (future) journal — same data, human-written.
      the same cleanup path; `landed` is landed regardless of who
      pushed the button."
   3. **Reviewer waves are not rounds.** The spec's `fix` transition
-     loops work→review…work→review; reality delivered N independent
-     thread waves on one push. The journal should record one entry
-     per wave (verdict fix → re-push), which the spec already allows
-     — noted as interpretation, no wording change needed.
+     loops review→work→review — a work-stage re-entry per wave.
+     Reality delivered N independent thread waves, each settled by a
+     scoped fix-push on the same worktree, not a fresh spawn.
+     Proposed wording: "a `fix` verdict's re-entry into `work` MAY
+     be journaled as a wave entry — scoped fix, same worktree —
+     rather than a full stage re-run; the transition stays
+     `review.fix → work`."
 - Friction: the formula's `review` stage conflates "internal review
   model" (spec) with "act gate threads" (reality). Emulating the
   internal reviewer manually is exactly the act-gate loop — the
@@ -98,8 +101,9 @@ code — each became a spec fix and a review-thread resolution on
 
 ## Graduation
 
-- Stage: **manual** — every stage executed by hand under the
-  formula's contract; verdicts journaled here.
+- Stage: **manual** — stages through merge were executed by hand
+  under the formula's contract; merge is in flight and capture
+  remains pending at log time.
 - Scripted: not yet — worth it when ≥2 items run concurrently.
 - Real: `.1` delivers the schema half of the runner; `.2` delivers
   runner+journal — after that, logged runs replay as golden tests.
