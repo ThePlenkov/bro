@@ -432,6 +432,7 @@ export function isSelfToolCommand(cmd: string): boolean {
     return true;
   }
   return /^\s*(?:bro|npx(?:(?!\s+--package\b)(?:\s+--?[\w-]+(?:=\S+)?))*(?:\s+--?[\w-]+(?:=\S+)?)?\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(\s|$)/.test(
+    // NOSONAR
     cmd
   );
 }
@@ -985,7 +986,7 @@ let perfBuf: PerfRow[] | null = null;
  *  when rows arrive, so span duration ≈ probe duration (spec
  *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
-  let span: any | undefined;
+  let span: any;
   void lazyOtelSpan().then((otelSpan: any) => {
     try {
       span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });

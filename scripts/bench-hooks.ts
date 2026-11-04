@@ -422,14 +422,11 @@ function checkUnbudgetedRows(
   return failed;
 }
 
-function enforce(rows: Map<string, Row>, budget: Record<string, number>, asJson: boolean): boolean {
-  const say = (line: string): void => {
-    if (asJson) {
-      console.error(line);
-    } else {
-      console.log(line);
-    }
-  };
+function enforce(
+  rows: Map<string, Row>,
+  budget: Record<string, number>,
+  say: (line: string) => void
+): boolean {
   let failed = false;
   for (const [key, cap] of Object.entries(budget)) {
     if (checkBudgetRow(key, rows.get(key), cap, say)) {
@@ -452,7 +449,14 @@ function main(): void {
   const { cwd, env } = buildFixture();
   const rows = runBench(opts, cwd, env);
   writeReport(rows, budget, opts);
-  if (opts.enforce && enforce(rows, budget, opts.asJson)) {
+  const say = opts.asJson
+    ? (line: string): void => {
+        console.error(line);
+      }
+    : (line: string): void => {
+        console.log(line);
+      };
+  if (opts.enforce && enforce(rows, budget, say)) {
     process.exit(1);
   }
 }
