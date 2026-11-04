@@ -100,19 +100,7 @@ function glabActor(dir: string): string {
 }
 
 async function glabActorAsync(dir: string): Promise<string> {
-  let a = actorCache.get(dir)
-  if (a === undefined || a === '') {
-    try {
-      const u = await glabJsonAsync<{ username?: string }>(['api', 'user'], gopts(dir))
-      a = u.username ?? ''
-      if (a !== '') {
-        actorCache.set(dir, a)
-      }
-    } catch {
-      a = ''
-    }
-  }
-  return a
+  return glabActor(dir)
 }
 
 function labelsOf(i: GitLabIssue): string[] {
@@ -443,7 +431,7 @@ function updateSync(dir: string, id: string, patch: Record<string, string | numb
     }
   }
   if (args.length > 4) { // has some params beyond the base 4
-    const r = glab(args, gopts(dir))
+    const r = glabTry(args, gopts(dir))
     if (r.code !== 0) {
       throw new Error(`gitlab tasks: failed to update ${id}`)
     }
@@ -644,34 +632,11 @@ export function gitlabTasks(dir: string): TaskStore {
 }
 
 export function gitlabTasksAsync(dir: string): TaskStoreAsync {
+  const sync = gitlabTasks(dir)
   return {
-    list: async (f = {}) => {
-      const base = resolveProjectPath(dir)
-      const issues = await queryIssuesAsync(dir, statesFor(f), fetchCap(f))
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
-      return applyFilter(rows, f)
-    },
-    ready: async (f = {}) => {
-      const base = resolveProjectPath(dir)
-      const issues = await queryIssuesAsync(dir, ['opened'], QUERY_CAP)
-      const rows = issues.map((i) => toRow(i, resolveProjectPath(dir), base)).map(pub)
-      let q = rows.filter((r) => r.status !== 'closed')
-      if ((f.labels?.length ?? 0) > 0) {
-        for (const l of f.labels!) q = q.filter((r) => r.labels?.includes(l))
-      }
-      if ((f.excludeLabels?.length ?? 0) > 0) {
-        for (const l of f.excludeLabels!) q = q.filter((r) => !(r.labels ?? []).includes(l))
-      }
-      if (f.type !== undefined) q = q.filter((r) => r.issue_type === f.type)
-      q = readyOf(q, f)
-      return q
-    },
-    get: async (id) => {
-      const ref = parseIssueRef(dir, id)
-      const base = resolveProjectPath(dir)
-      const i = await getIssueAsync(dir, ref)
-      return i === undefined ? undefined : toRow(i, ref.projectPath, base)
-    },
+    list: async (f = {}) => sync.list(f),
+    ready: async (f = {}) => sync.ready(f),
+    get: async (id) => sync.get(id) as never,
     children: async () => {
       throw new Error('gitlab tasks: children not supported')
     },
@@ -681,6 +646,6 @@ export function gitlabTasksAsync(dir: string): TaskStoreAsync {
     neighbors: async () => {
       throw new Error('gitlab tasks: neighbors not supported')
     },
-    actor: () => glabActorAsync(dir),
+    actor: async () => sync.actor(),
   }
 }
