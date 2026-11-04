@@ -57,6 +57,7 @@ test('displayAgentOf — provider wins over the run id, stem is the last resort 
       },
       'bro-2bv6q': { agentId: 'native-ab656051', log: '/x/native-ab656051.log', provider: 'devin' },
       'bro-nopro': { agentId: 'native-00000000', log: '/x/native-00000000.log' },
+      'bro-empty': { agentId: 'native-11111111', log: '/x/native-11111111.log', provider: '' },
     });
     // the true agent name — provider — even resolving via the archive stem
     assert.equal(displayAgentOf(base, 'native-87a699fc'), 'opencode-iceman');
@@ -64,6 +65,8 @@ test('displayAgentOf — provider wins over the run id, stem is the last resort 
     // a provider-less entry falls back to the readable run id
     assert.equal(displayAgentOf(base, 'bro-nopro'), 'bro-nopro');
     assert.equal(displayAgentOf(base, 'native-00000000'), 'bro-nopro');
+    // an empty-string provider is as absent as a missing one
+    assert.equal(displayAgentOf(base, 'bro-empty'), 'bro-empty');
     // an unknown id keeps the argv value — the caller's surface stands
     assert.equal(displayAgentOf(base, 'native-lost'), 'native-lost');
     assert.equal(displayAgentOf(base, undefined), undefined);

@@ -71,7 +71,8 @@ export function agentKey(base: string, id: string | undefined): string | undefin
  *  (`native-<hash>`) is never the surface. */
 export function displayAgentOf(base: string, id: string | undefined): string | undefined {
   if (id === undefined) return undefined;
-  return agentEntry(base, id)?.provider ?? agentKey(base, id) ?? id;
+  // `||` — an empty-string provider is as absent as a missing one
+  return agentEntry(base, id)?.provider || agentKey(base, id) || id;
 }
 
 /** The pid's /proc start stamp — `comm` may carry spaces and parens,
