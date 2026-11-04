@@ -441,7 +441,10 @@ const classifyMark = (l: string): boolean =>
 
 /** The item is RELABELED — stale `dup:`/`clump:` marks are removed
  *  first so re-classification never double-tags, then the verdict's
- *  own label lands (skipped when already present). */
+ *  own label lands (skipped when already present). Best-effort: the
+ *  seam has no conditional/transactional write, so two classifiers
+ *  racing one item can still interleave — one run per item is the
+ *  pipeline's execution shape, atomic claim is a store-seam gap. */
 function retagItem(cx: Cx, tag: string | undefined): void {
   const b = cx.deps.backlog;
   // Re-read through the seam — same stale-snapshot guard as tagMates:
@@ -579,7 +582,8 @@ const titleTokens = (s: string | undefined): Set<string> =>
     (s ?? '')
       .toLowerCase()
       .split(/[^\p{L}\p{N}]+/u)
-      .filter(t => t.length >= 4)
+      // code points, not UTF-16 units — astral letters count once
+      .filter(t => [...t].length >= 4)
   );
 
 /** |A ∩ B| over a set — shared labels/tokens counted without
@@ -615,6 +619,9 @@ export function taskBacklog(store: TaskStore, opts: { limit?: number } = {}): Cl
     throw new Error(`taskBacklog: limit must be a non-negative integer, got ${limit}`);
   }
   const peers = (item: TaskRow): TaskRow[] => {
+    if (limit === 0) {
+      return []; // a zero cap never touches the store
+    }
     const seen = new Set<string>([item.id]);
     const out: TaskRow[] = [];
     const push = (rows: TaskRow[]): void => {
