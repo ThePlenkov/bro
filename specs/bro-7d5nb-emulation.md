@@ -31,9 +31,9 @@ the (future) journal — same data, human-written.
 - Actual action and result:
   - classify → `solo` — schema work shares no surface with other
     open items; payload `{group: solo, complexity: complex,
-    rank: 1}` (epic-first child of bro-7d5nb).
+rank: 1}` (epic-first child of bro-7d5nb).
   - route → `spawn` — payload `{class: interactive, kind:
-    ts-package, orch: foreground, timing: now}` — interactive lane,
+ts-package, orch: foreground, timing: now}` — interactive lane,
     not fleet: capacity stayed with the human session.
   - work → `done` — `packages/pipeline` shipped (parsePipelineFormula,
     formulaSha, loadPipelineFormula, transitionFor), 20 tests,
@@ -116,9 +116,9 @@ code — each became a spec fix and a review-thread resolution on
 - Actual action and result:
   - classify → `solo` — interpreter work, disjoint from .3–.7's
     stage/engine beads; payload `{group: solo, complexity: complex,
-    rank: 2}`.
+rank: 2}`.
   - route → `spawn` — payload `{class: interactive, kind:
-    ts-package, orch: foreground, timing: now}`.
+ts-package, orch: foreground, timing: now}`.
   - work → `done` — `journal.ts` (JSONL write-ahead journal under
     `<git-common>/bro/pipeline/`) + `runner.ts` (gate/transition/
     resume engine with injectable `engines` map, `admit` go-marker

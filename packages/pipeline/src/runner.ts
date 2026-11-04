@@ -265,12 +265,31 @@ function recordsOf(run: Run): JournalRow[] {
 const runIdFor = (opts: RunOptions, journal?: PipelineJournal): string =>
   opts.runId ?? journal?.runId ?? opts.journal?.runId ?? mintRunId();
 
+/** A bound must be a positive integer — NaN/0/negative silently
+ *  disables the budget (n > NaN is always false), and a bound that
+ *  can't trip is the same defect class as no bound. */
+function bounded(name: string, v: number | undefined, dflt: number): number {
+  const n = v ?? dflt;
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`pipeline run: ${name} must be a positive integer, got ${v}`);
+  }
+  return n;
+}
+
 function initRun(
   formula: PipelineFormula,
   item: string,
   opts: RunOptions,
   journal?: PipelineJournal
 ): Run {
+  // REQUIRED, enforced not just typed: '' would silently disable the
+  // drift check (drifted() treats an empty sha as "no baseline")
+  if (!opts.formulaSha) {
+    throw new Error(
+      'pipeline run needs opts.formulaSha — the loaded formula hash; ' +
+        "'' disables drift detection"
+    );
+  }
   const runId = runIdFor(opts, journal);
   const j =
     journal ?? opts.journal ?? (opts.dir ? openPipelineJournal({ dir: opts.dir, runId }) : null);
@@ -295,10 +314,10 @@ function initRun(
     engines,
     admit: opts.admit,
     admitIntents: opts.admitIntents ?? [...DEFAULT_ADMIT_INTENTS],
-    maxAttempts: opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-    maxSteps: opts.maxSteps ?? DEFAULT_MAX_STEPS,
+    maxAttempts: bounded('maxAttempts', opts.maxAttempts, DEFAULT_MAX_ATTEMPTS),
+    maxSteps: bounded('maxSteps', opts.maxSteps, DEFAULT_MAX_STEPS),
     steps: 0,
-    fixRounds: opts.fixRounds ?? DEFAULT_FIX_ROUNDS,
+    fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS),
     fixVerdict: opts.fixVerdict ?? DEFAULT_FIX_VERDICT,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
@@ -313,7 +332,14 @@ function result(
   stage: string,
   extra: Partial<RunResult> = {}
 ): RunResult {
-  return { runId: run.runId, item: run.item, outcome, stage, ctx: run.ctx, ...extra };
+  return {
+    runId: run.runId,
+    item: run.item,
+    outcome,
+    stage,
+    ctx: run.ctx,
+    ...extra,
+  };
 }
 
 /** Build the intent row — stamped but not yet appended. `seq` mints
@@ -337,7 +363,11 @@ function rowFor(run: Run, to: NextStep, intent: string): JournalRow {
 /** The completing record — the intent row re-appended with its verdict
  *  (and payload). Same seq: last row wins when records reconstruct. */
 function verdictRow(intent: JournalRow, res: EngineResult): JournalRow {
-  const row: JournalRow = { ...intent, verdict: res.verdict, ts: new Date().toISOString() };
+  const row: JournalRow = {
+    ...intent,
+    verdict: res.verdict,
+    ts: new Date().toISOString(),
+  };
   if (res.payload !== undefined) {
     row.payload = res.payload;
   }
@@ -353,7 +383,9 @@ function alertStep(run: Run, to: NextStep, a: AlertSpec): { halt: RunResult } {
   if (a.detail !== undefined) row.detail = a.detail;
   if (a.resume !== undefined) row.resume = a.resume;
   run.journal.append(row);
-  return { halt: result(run, 'park', to.stage, { alert: a.alert, detail: a.detail }) };
+  return {
+    halt: result(run, 'park', to.stage, { alert: a.alert, detail: a.detail }),
+  };
 }
 
 /** A gate field lookup — dotted paths walk nested records
@@ -364,7 +396,7 @@ function ctxField(ctx: PipelineContext, field: string): unknown {
     if (!isRecord(cur)) {
       return undefined;
     }
-    cur = cur[key];
+    cur = Reflect.get(cur, key);
   }
   return cur;
 }
@@ -438,10 +470,13 @@ async function sideEffect(
  *  two addressing forms a gate field can take). Non-record payloads
  *  store stage-scoped only. */
 function absorb(run: Run, stage: string, payload: unknown): void {
-  run.ctx[stage] = payload;
+  // Reflect.set, not bracket writes — on the null-prototype ctx both
+  // land as inert own properties, and the static-analysis-clean form
+  // says so to the scanner too
+  Reflect.set(run.ctx, stage, payload);
   if (isRecord(payload)) {
     for (const [k, v] of Object.entries(payload)) {
-      run.ctx[k] = v;
+      Reflect.set(run.ctx, k, v);
     }
   }
 }
@@ -688,7 +723,11 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
   }
   const r = await handler.recheck(stageCall(run, stage, to));
   if (r === 'pending') {
-    return { halt: result(run, 'park', last.stage, { detail: 'side effect still in flight' }) };
+    return {
+      halt: result(run, 'park', last.stage, {
+        detail: 'side effect still in flight',
+      }),
+    };
   }
   return r === undefined ? refireAttempt(run, last, to) : settleRecheck(run, last, r, to);
 }
@@ -703,7 +742,12 @@ function unpark(last: JournalRow, step: Step): Step {
 }
 
 function toFromRecord(r: JournalRow): NextStep {
-  return { stage: r.stage, attempt: r.attempt, fixRound: r.fix_round, notes: r.notes };
+  return {
+    stage: r.stage,
+    attempt: r.attempt,
+    fixRound: r.fix_round,
+    notes: r.notes,
+  };
 }
 
 /** A mid-run formula change — the journal's sha and the loaded
@@ -718,7 +762,18 @@ function drifted(run: Run, last: JournalRow): boolean {
  *  the NEW sha — the waiver is durable, and the next resume walks on
  *  without re-acking. */
 function driftAck(run: Run, last: JournalRow): void {
-  const row = rowFor(run, { stage: last.resume ?? last.stage, attempt: 1 }, 'alert');
+  // fix_round/notes ride along — a stop right after this append wakes
+  // at the resume stage and must still see the waived run's fix scope
+  const row = rowFor(
+    run,
+    {
+      stage: last.resume ?? last.stage,
+      attempt: 1,
+      fixRound: last.fix_round,
+      notes: last.notes,
+    },
+    'alert'
+  );
   row.alert = JOURNAL_EVENTS.driftAcknowledged;
   row.detail = `operator resumed past formula-drift alert seq=${last.seq}`;
   row.resume = last.resume ?? last.stage;

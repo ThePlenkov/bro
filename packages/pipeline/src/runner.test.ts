@@ -47,7 +47,12 @@ const happyScript = (complexity = 'complex') => ({
     { verdict: 'solo', payload: { group: 'solo', complexity, rank: 1 } },
     {
       verdict: 'spawn',
-      payload: { class: 'interactive', kind: 'ts', orch: 'foreground', timing: 'now' },
+      payload: {
+        class: 'interactive',
+        kind: 'ts',
+        orch: 'foreground',
+        timing: 'now',
+      },
     },
     { verdict: 'push', payload: { notes: 'looks good' } },
   ]),
@@ -469,7 +474,10 @@ describe('resume — the write-ahead contract', () => {
     await assert.rejects(run(engines, { runId: 'r1' }, j), /runner killed/);
     const before = j.rows().length;
     const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
-      engines: { ...engines, fleet: { invoke: fleet.fn, recheck: () => 'pending' as const } },
+      engines: {
+        ...engines,
+        fleet: { invoke: fleet.fn, recheck: () => 'pending' as const },
+      },
       formulaSha: SHA,
     });
     assert.equal(res.outcome, 'park');
@@ -545,7 +553,10 @@ describe('resume — the write-ahead contract', () => {
     // restart even though 'work' is a spawn-intent stage
     const fl2 = spy([{ verdict: 'stopped' }]);
     const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
-      engines: { judge: jg.fn, fleet: { invoke: fl2.fn, recheck: () => undefined } },
+      engines: {
+        judge: jg.fn,
+        fleet: { invoke: fl2.fn, recheck: () => undefined },
+      },
       formulaSha: SHA,
       admit: () => true, // the re-fired spawn still goes through the go-marker seam
     });
@@ -565,7 +576,10 @@ describe('resume — the write-ahead contract', () => {
       { judge: judge1.fn, fleet: spy([]).fn },
       {
         runId: 'ra',
-        admit: () => ({ verdict: 'rate_limited', payload: { stale: 'REFUSAL' } }),
+        admit: () => ({
+          verdict: 'rate_limited',
+          payload: { stale: 'REFUSAL' },
+        }),
       },
       j
     );
@@ -674,6 +688,39 @@ describe('resume — the write-ahead contract', () => {
     assert.equal(res.alert, undefined);
   });
 
+  test('the drift acknowledgement keeps the waived alert fix scope', async () => {
+    const j = memoryJournal('rd');
+    // a formula-drift alert parked mid scoped-fix — journaled under
+    // the sha the operator now resumes with
+    j.append({
+      run_id: 'rd',
+      item: 'bro-7d5nb.2',
+      seq: 1,
+      stage: 'work',
+      intent: 'alert',
+      attempt: 1,
+      fix_round: 1,
+      notes: 'fix the thing',
+      alert: PARK_ALERTS.formulaDrift,
+      resume: 'work',
+      formula_sha: 'new-sha',
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const fleet = spy([{ verdict: 'stopped' }]); // work → abandon, terminal
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: { fleet: fleet.fn },
+      formulaSha: 'new-sha',
+      admit: () => true, // work's spawn intent needs the go-marker seam
+    });
+    const ack = records(j).find(r => r.alert === JOURNAL_EVENTS.driftAcknowledged);
+    assert.equal(ack?.fix_round, 1); // the waived scope rides the ack row
+    assert.equal(ack?.notes, 'fix the thing');
+    // and the wake itself re-enters work under the same scope
+    assert.equal(fleet.calls[0]?.fixRound, 1);
+    assert.equal(fleet.calls[0]?.notes, 'fix the thing');
+    assert.equal(res.outcome, 'abandon');
+  });
+
   test('merge.blocked retries to exhaustion, then parks', async () => {
     const j = memoryJournal('r5');
     const e = happyScript();
@@ -775,6 +822,36 @@ describe('runner invariants', () => {
     await assert.rejects(
       runPipeline(FORMULA, 'x', { engines: emap(e), formulaSha: SHA }),
       /needs a journal/
+    );
+  });
+
+  test('a non-positive-integer bound throws — a bound that cannot trip is no bound', async () => {
+    for (const opts of [
+      { maxSteps: NaN },
+      { maxSteps: 0 },
+      { maxAttempts: -1 },
+      { fixRounds: 1.5 },
+    ]) {
+      await assert.rejects(
+        runPipeline(FORMULA, 'x', {
+          engines: {},
+          journal: memoryJournal(),
+          formulaSha: SHA,
+          ...opts,
+        }),
+        /must be a positive integer/
+      );
+    }
+  });
+
+  test("an empty formulaSha throws — '' would silently disable drift detection", async () => {
+    await assert.rejects(
+      runPipeline(FORMULA, 'x', {
+        engines: {},
+        journal: memoryJournal(),
+        formulaSha: '',
+      }),
+      /needs opts\.formulaSha/
     );
   });
 });
