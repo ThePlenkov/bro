@@ -57,7 +57,7 @@ function procIsAgentCmd(dir: string): boolean {
  *  inherits them, so a detached tool shell counts even after a setsid
  *  broke the ancestry chain. NUL-anchored for /proc; on macOS ps output
  *  is whitespace-delimited, so also allow whitespace boundaries. */
-const AGENT_ENV_RE = /(?:^|\0|\s|=)(?:BRO_AGENT_ID|AI_AGENT)=/;
+const AGENT_ENV_RE = /(?:^|\0)(?:BRO_AGENT_ID|AI_AGENT)=/;
 
 function readProcText(dir: string, file: string): string {
   if (process.platform === 'linux') {

@@ -59,7 +59,7 @@ function peerInodeDarwin(remotePort: number, localPort: number): string | undefi
       const arrowIdx = afterTcp.indexOf('->')
       if (arrowIdx === -1) continue
       const left = afterTcp.slice(0, arrowIdx).trim()
-      const right = afterTcp.slice(arrowIdx + 2).trim()
+      const right = afterTcp.slice(arrowIdx + 2).replace(/\s*\(.*\)\s*$/, '').trim()
       // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
       // Anchor ports to word boundaries to avoid substring matches
       const leftEndsWithRemote = new RegExp(`:${remotePort}$|[^0-9]${remotePort}$`).test(left) || left.endsWith(`:${remotePort}`)

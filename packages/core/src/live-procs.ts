@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { Socket } from 'node:net';
 
 const live = new Set<ChildProcess>();
@@ -126,7 +127,7 @@ export interface ProcRow {
 
 /** Parents an orphaned process lands on: pid 1, the WSL /init
  *  subreaper, or a systemd instance — never a live supervisor. */
-const ORPHAN_PARENT_COMMS = new Set(['init', 'systemd', 'launchd']);
+const ORPHAN_PARENT_COMMS = new Set(['init', 'systemd']);
 
 /** A legit bd call lasts seconds; a minute-old orphan holds the
  *  embedded noms LOCK past every caller's timeout — debris. */
@@ -157,7 +158,6 @@ export function pickOrphanProcs(
 /** Read the rows pickOrphanProcs needs out of /proc — linux-only;
  *  anything else returns []. Races are the norm: a pid vanishing
  *  mid-scan just drops out. */
-import { execFileSync } from 'node:child_process';
 
 export function readProcRows(procDir = '/proc'): ProcRow[] {
   if (process.platform === 'linux') {
@@ -204,7 +204,7 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
   }
   if (process.platform === 'darwin') {
     try {
-      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000 })
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' } })
       const lines = out.split('\n').filter(Boolean)
       const rows: ProcRow[] = []
       const pids: number[] = []
@@ -268,7 +268,8 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
           for (const l of pout.split('\n').filter(Boolean)) {
             const t = l.trim().split(/\s+/)
             if (t.length >= 2) {
-              parentComms.set(Number(t[0]), t.slice(1).join(' ') || null)
+              const pc = t.slice(1).join(' ')
+              parentComms.set(Number(t[0]), (pc.includes('/') ? (pc.split('/').pop() ?? pc) : pc) || null)
             }
           }
         }
@@ -288,13 +289,13 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         let comm = ''
         // Try to find a parseable lstart starting at index 2
         for (let start = 2; start <= parts.length - 1; start++) {
-          for (let len = 4; len <= 6 && start + len <= parts.length; len++) {
+          for (let len = 5; len >= 4 && start + len <= parts.length; len--) {
             const candidate = parts.slice(start, start + len).join(' ')
             const parsed = Date.parse(candidate)
             if (!isNaN(parsed)) {
               lstart = candidate
-              const commStartIdx = trimmed.indexOf(lstart) + lstart.length
-              comm = trimmed.slice(commStartIdx).trim()
+              const match = new RegExp(parts.slice(start, start + len).join('\\s+')).exec(trimmed)
+              comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
               break
             }
           }
@@ -302,13 +303,13 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         }
         if (lstart === '' || comm === '') {
           // Fallback: try from index 2 with len 4 or 5
-          for (let len = 4; len <= 5 && 2 + len <= parts.length; len++) {
+          for (let len = 5; len >= 4 && 2 + len <= parts.length; len--) {
             const candidate = parts.slice(2, 2 + len).join(' ')
             const parsed = Date.parse(candidate)
             if (!isNaN(parsed)) {
               lstart = candidate
-              const commStartIdx = trimmed.indexOf(lstart) + lstart.length
-              comm = trimmed.slice(commStartIdx).trim()
+              const match = new RegExp(parts.slice(2, 2 + len).join('\\s+')).exec(trimmed)
+              comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
               break
             }
           }
@@ -334,7 +335,8 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
           if (parentComm === null) {
             try {
               const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 })
-              parentComm = pout.trim() || null
+              const pc2 = pout.trim()
+              parentComm = (pc2.includes('/') ? (pc2.split('/').pop() ?? pc2) : pc2) || null
             } catch {
               parentComm = null
             }
@@ -354,7 +356,8 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
             cwd = null
           }
         }
-        rows.push({ pid, comm, ppid, parentComm, cwd, startMs })
+        const commBase = comm.includes('/') ? (comm.split('/').pop() ?? comm) : comm
+        rows.push({ pid, comm: commBase, ppid, parentComm, cwd, startMs })
       }
       return rows
     } catch {

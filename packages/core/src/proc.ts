@@ -31,7 +31,8 @@ export function procStat(
       const line = lines[0]
       const trimmed = line.trim()
       // Strip the whole state token (may include modifiers like +, L, s) before parsing lstart
-      const start = trimmed.replace(/^\S+\s+/, '').trim()
+      const startMatch = trimmed.match(/^\S+\s+(.+)$/s)
+      const start = startMatch ? startMatch[1].trim() : ''
       if (start !== '') {
         const st = trimmed.match(/^(\S+)/)?.[1] ?? ''
         // Return just lstart as start; pid is already tracked separately by the caller
@@ -118,7 +119,7 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   // If stored as "<pid> <start>" match suffix
   const parts = pidStart.trim().split(/\s+/)
   if (parts.length >= 2) {
-    const startOnly = parts.slice(1).join(' ')
+    const startOnly = pidStart.trim().replace(/^\S+\s+/, '')
     if (startOnly === st.start || st.start === startOnly) {
       return true
     }
@@ -143,8 +144,8 @@ export function handleOwner(text: string): { pid: number; start?: string } | nul
   if (parts.length < 2) {
     return { pid }
   }
-  // start may contain spaces (e.g. BSD/macOS lstart)
-  const start = s.slice(s.indexOf(parts[1])).trim()
+  // start may contain spaces (e.g. BSD/macOS lstart); slice after the pid token
+  const start = s.slice(parts[0].length).trim()
   return start === '' ? { pid } : { pid, start }
 }
 
@@ -157,13 +158,13 @@ export function markerOwner(
   firstLine: string | undefined
 ): { pid: number; start: string } | null {
   const s = (firstLine ?? '').trim()
-  const parts = s.split(/\s+/)
-  const pid = Number(parts[1])
-  if (!Number.isInteger(pid) || pid <= 0 || parts.length < 3) {
+  const match = /^\S+\s+(\S+)\s+(.+)$/.exec(s)
+  if (match === null) {
     return null
   }
-  const start = s.slice(s.indexOf(parts[2])).trim()
-  return start !== '' ? { pid, start } : null
+  const pid = Number(match[1])
+  const start = (match[2] ?? '').trim()
+  return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null
 }
 
 /** Is this marker's owning session alive? A recorded owner decides by
