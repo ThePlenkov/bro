@@ -475,7 +475,7 @@ function wallHit(call: StageCall, routing: RoutingTable): WallHit | undefined {
     ),
     call.stage.name
   );
-  if (ev === undefined || !ev.died) {
+  if (!ev?.died) {
     return undefined;
   }
   const row = Object.hasOwn(routing, ev.prev.class) ? routing[ev.prev.class] : undefined;
