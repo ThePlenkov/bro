@@ -158,12 +158,15 @@ export function markerOwner(
   firstLine: string | undefined
 ): { pid: number; start: string } | null {
   const s = (firstLine ?? '').trim()
-  const match = /^\S+\s+(\S+)\s+(.+)$/.exec(s)
-  if (match === null) {
-    return null
-  }
-  const pid = Number(match[1])
-  const start = (match[2] ?? '').trim()
+  // Parse positionally to avoid regex backtracking (CodeQL polynomial regex).
+  const firstSpace = s.indexOf(' ')
+  if (firstSpace === -1) return null
+  const rest = s.slice(firstSpace + 1).trimStart()
+  const secondSpace = rest.indexOf(' ')
+  if (secondSpace === -1) return null
+  const pidStr = rest.slice(0, secondSpace).trim()
+  const start = rest.slice(secondSpace + 1).trim()
+  const pid = Number(pidStr)
   return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null
 }
 
