@@ -28,6 +28,7 @@ import {
 } from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
+export const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? 'bro.fleet';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 // The plugin and the CLI ship from one repo — prefer the checkout's own
 // build over a possibly stale `bro` on PATH (a linked dev worktree must

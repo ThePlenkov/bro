@@ -35,3 +35,11 @@ loop alive skipped the open (no duplicate). The pid file lands in
   run to recover; a pane-lifetime watchdog would be herdr-side).
 - Herdr auto-spawning `[[panes]]` at server start — a herdr feature request,
   not bro-side.
+
+Round 2 (six review threads): the pid probe now also guards the spawn
+window — a fresh pid file without a live pid is an open-in-flight
+marker (`OPEN_GRACE_MS`), so overlapping ensures cannot each open a
+pane. Before opening, every `bro sync`-labeled pane that reads idle is
+closed — `pane open` replaces nothing, so husks are swept instead of
+piling up. The open call targets `HERDR_PLUGIN_ID` (`PLUGIN_ID` in
+lib.ts) instead of a hardcoded `bro.fleet`.
