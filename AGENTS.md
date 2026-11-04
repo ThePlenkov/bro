@@ -97,13 +97,16 @@ Developing bro itself: see CONTRIBUTING.md.
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
 - **Auto-merge is armed at PR creation** — `gh pr merge --auto
-  --squash` right after `gh pr create`, every PR. GitHub's auto-merge
-  fires when required checks pass; the act gate remains the review
-  loop (threads, CI, reviewers) that drives fixes until then —
-  `bro review act wait <PR>` still carries `--cleanup` and `--bead`
-  for post-merge retirement. Auto-merge and the act watcher are
-  complementary: whichever sees green first merges; the watcher
-  finishes the cleanup work either way.
+  --squash` right after `gh pr create`, every PR: it lands the merge
+  once GitHub's required checks pass. What auto-merge does NOT see:
+  unresolved review threads — the act gate owns that loop
+  (`bro review act` drives fixes/resolves per thread until the gate
+  is green). `bro review act wait <PR> --detach --cleanup --bead`
+  carries the post-merge retirement and is the watcher of record:
+  default `--timeout 45` minutes and it does NOT re-arm itself — a
+  dead or timed-out watcher is resurrected by `bro review act rearm`.
+  Auto-merge and the act watcher are complementary: whichever sees
+  green first merges; the watcher finishes cleanup either way.
 - **One executor per unit of work** — an interactive session (opencode,
   claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
