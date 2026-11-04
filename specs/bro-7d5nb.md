@@ -190,8 +190,12 @@ next stage reads:
   `fix` re-enters `work` in scoped-fix mode — the work stage runs
   against the SAME worktree with the review's `notes` payload as
   its scope input (a fix round), never a re-run of the original
-  task. Each wave of findings is one scoped-fix re-entry; `push`
-  proceeds to merge.
+  task. `notes` is required non-empty on `fix` — an absent or
+  malformed payload fails closed: `park` with a journal alert, no
+  scopeless re-entry. Each wave of findings is one scoped-fix
+  re-entry, bounded by `pipeline.fixRounds` (default
+  `act.maxRounds`, the loop contract); exhaustion `park`s the
+  item rather than looping. `push` proceeds to merge.
 - **merge** — the existing act gate: threads/CI/reviewers settle;
   `blocked` retries bounded by fix-rounds, `dropped` is terminal.
 - **capture** — `self learn capture` on land (cheap, per-item);
