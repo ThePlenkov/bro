@@ -2730,3 +2730,235 @@ describe('the catalog cache — one provider read, not one per request', () => {
     }
   });
 });
+
+describe('the native conversation identity + the lane admission', () => {
+  /** The Messages API's own conversation identifier: `metadata.user_id`.
+   *  Claude Code carries its session id in it, so it is the one signal
+   *  that says "the same conversation" without the gateway guessing. */
+  const post = (url: string, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ stream: false, ...body }),
+    });
+
+  /** a gate the test opens — the fake agent holds the turn open until
+   *  the test releases it */
+  let release!: () => void;
+  const held = (): Promise<void> =>
+    new Promise<void>(resolve => {
+      release = resolve;
+    });
+
+  const withConductor = async (
+    fakeOpts: Parameters<typeof fakeAcpAgent>[0],
+    cfg: ConductorConfig,
+    fn: (ctx: { fake: ReturnType<typeof fakeAcpAgent>; url: string }) => Promise<void>
+  ): Promise<void> => {
+    const fake = fakeAcpAgent(fakeOpts);
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    );
+    try {
+      await fn({ fake, url });
+    } finally {
+      await close();
+    }
+  };
+
+  /** the lane's own limit: ONE live session, no queue */
+  const LIMITED: ConductorConfig = {
+    ...CFG,
+    limits: { 'dv-acp': { maxSessions: 1, maxQueue: 0 } },
+  };
+
+  /** wait until the fake agent has seen N prompts */
+  const untilPrompts = async (fake: ReturnType<typeof fakeAcpAgent>, n: number): Promise<void> => {
+    for (let i = 0; i < 200 && fake.prompts.length < n; i++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+
+  test('metadata.user_id keys the conversation — the next turn continues the same session', () =>
+    withConductor({ replyText: 'r1', configOptions: [MODEL_OPTION] }, CFG, async ({ fake, url }) => {
+      const t1 = await post(url, {
+        messages: [{ role: 'user', content: 'first' }],
+        metadata: { user_id: 'sess-1' },
+      });
+      assert.equal(t1.status, 200);
+      const t2 = await post(url, {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'r1' },
+          { role: 'user', content: 'second' },
+        ],
+        metadata: { user_id: 'sess-1' },
+      });
+      assert.equal(t2.status, 200);
+      // ONE session/new carried both turns — the conversation continued
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 2);
+      // turn 2 saw only its delta — the prior turns are session context
+      assert.match(fake.prompts[1] ?? '', /second/);
+      assert.doesNotMatch(fake.prompts[1] ?? '', /first/);
+    }));
+
+  test('a client that rewrites its LATER turn keeps the session (claude-code does)', () =>
+    withConductor({ replyText: 'r1', configOptions: [MODEL_OPTION] }, CFG, async ({ fake, url }) => {
+      // turn 1 — the prompt plus the hook output the client appended
+      assert.equal(
+        (
+          await post(url, {
+            messages: [
+              { role: 'user', content: 'first' },
+              { role: 'user', content: 'hook output v1' },
+            ],
+            metadata: { user_id: 'sess-2' },
+          })
+        ).status,
+        200
+      );
+      // turn 2 — the client REWROTE its last turn (claude-code appends
+      // the hook output and the system reminders to it)
+      assert.equal(
+        (
+          await post(url, {
+            messages: [
+              { role: 'user', content: 'first' },
+              { role: 'user', content: 'hook output v2 CHANGED' },
+              { role: 'assistant', content: 'r1' },
+              { role: 'user', content: 'second' },
+            ],
+            metadata: { user_id: 'sess-2' },
+          })
+        ).status,
+        200
+      );
+      // the session SURVIVED the rewrite — one session/new, and the
+      // delta carried only the new turn
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 2);
+      assert.match(fake.prompts[1] ?? '', /second/);
+      assert.doesNotMatch(fake.prompts[1] ?? '', /hook output/);
+    }));
+
+  test('a rewritten FIRST turn forks the conversation — a new session', () =>
+    withConductor({ replyText: 'r1', configOptions: [MODEL_OPTION] }, CFG, async ({ fake, url }) => {
+      assert.equal(
+        (
+          await post(url, {
+            messages: [{ role: 'user', content: 'first' }],
+            metadata: { user_id: 'sess-3' },
+          })
+        ).status,
+        200
+      );
+      assert.equal(
+        (
+          await post(url, {
+            messages: [
+              { role: 'user', content: 'EDITED' },
+              { role: 'assistant', content: 'r1' },
+              { role: 'user', content: 'second' },
+            ],
+            metadata: { user_id: 'sess-3' },
+          })
+        ).status,
+        200
+      );
+      // the conversation's start changed — it is a DIFFERENT conversation
+      assert.equal(fake.sessions.length, 2);
+    }));
+
+  test('two concurrent requests on ONE conversation queue — no twin session', () =>
+    withConductor(
+      { replyText: 'r1', configOptions: [MODEL_OPTION], holdPromptUntil: held() },
+      CFG,
+      async ({ fake, url }) => {
+        const first = post(url, {
+          messages: [{ role: 'user', content: 'first' }],
+          metadata: { user_id: 'sess-4' },
+        });
+        await untilPrompts(fake, 1);
+        const second = post(url, {
+          messages: [
+            { role: 'user', content: 'first' },
+            { role: 'assistant', content: 'r1' },
+            { role: 'user', content: 'second' },
+          ],
+          metadata: { user_id: 'sess-4' },
+        });
+        release();
+        const [r1, r2] = await Promise.all([first, second]);
+        assert.equal(r1.status, 200);
+        assert.equal(r2.status, 200);
+        // ONE session for the conversation — the second request waited
+        // for the first turn and CONTINUED it
+        assert.equal(fake.sessions.length, 1);
+        assert.equal(fake.prompts.length, 2);
+        assert.match(fake.prompts[1] ?? '', /second/);
+        assert.doesNotMatch(fake.prompts[1] ?? '', /first/);
+      }
+    ));
+
+  test('the lane refuses a session past the provider\'s parallel limit — 429 + a wait', () =>
+    withConductor(
+      { replyText: 'r1', configOptions: [MODEL_OPTION], holdPromptUntil: held() },
+      LIMITED,
+      async ({ fake, url }) => {
+        const first = post(url, {
+          messages: [{ role: 'user', content: 'a' }],
+          metadata: { user_id: 'u1' },
+        });
+        await untilPrompts(fake, 1);
+        // a SECOND conversation while the lane's only session is busy
+        try {
+          const second = await post(url, {
+            messages: [{ role: 'user', content: 'b' }],
+            metadata: { user_id: 'u2' },
+          });
+          assert.equal(second.status, 429);
+          // the refusal names the wait the client should honour
+          assert.equal(second.headers.get('retry-after'), '1');
+        } finally {
+          release();
+        }
+        assert.equal((await first).status, 200);
+      }
+    ));
+
+  test('the request budget refuses with the bucket\'s real wait', () =>
+    withConductor(
+      { replyText: 'r1', configOptions: [MODEL_OPTION] },
+      { ...CFG, limits: { 'dv-acp': { requestsPerHour: 1 } } },
+      async ({ fake, url }) => {
+        // the bucket lives in the host state dir — a test pins its own
+        const prevXdg = process.env.XDG_STATE_HOME;
+        const dir = mkdtempSync(join(tmpdir(), 'bro-gate-'));
+        process.env.XDG_STATE_HOME = dir;
+        try {
+          assert.equal(
+            (
+              await post(url, {
+                messages: [{ role: 'user', content: 'a' }],
+                metadata: { user_id: 'b1' },
+              })
+            ).status,
+            200
+          );
+          // the budget is spent — the next request never reaches the agent
+          const second = await post(url, {
+            messages: [{ role: 'user', content: 'b' }],
+            metadata: { user_id: 'b2' },
+          });
+          assert.equal(second.status, 429);
+          const retry = Number(second.headers.get('retry-after'));
+          assert.ok(retry > 0, `retry-after: ${retry}`);
+          assert.equal(fake.prompts.length, 1);
+        } finally {
+          if (prevXdg === undefined) delete process.env.XDG_STATE_HOME;
+          else process.env.XDG_STATE_HOME = prevXdg;
+        }
+      }
+    ));
+});

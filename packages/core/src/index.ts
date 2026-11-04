@@ -93,7 +93,14 @@ export {
   sweepSection,
   syncSection,
 } from './config.ts';
-export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts';
+export type {
+  IgnoreCheckEntry,
+  IgnoreCheckRule,
+  ServeLaneLimits,
+  ServeLimits,
+  SinkDef,
+  SinkType,
+} from './config.ts';
 export {
   API_WIRES,
   cliCommandModel,

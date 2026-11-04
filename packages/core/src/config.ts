@@ -850,6 +850,84 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
   return routes;
 }
 
+/** One lane's admission limits — what the gateway may spend on a
+ *  provider before it must pace itself (spec bro-9j4kt).
+ *
+ *  `maxConcurrent` is how many turns may be IN FLIGHT on the lane at
+ *  once: the provider's own parallel-session wall is the thing a burst
+ *  of client requests walks into. `maxQueue` is how many requests may
+ *  WAIT for a slot — a burst is smoothed into a paced stream instead of
+ *  a wall of refusals. `requestsPerHour`/`burst` are the request
+ *  budget: a token bucket SHARED with the fleet (the same host ledger),
+ *  so the gateway and the batch workers draw one account's budget.
+ *
+ *  Every knob is optional and ABSENT means unbounded: the honest
+ *  limits are the operator's, not a guessed default. */
+export interface ServeLaneLimits {
+  /** how many live acp sessions the lane may hold */
+  maxSessions?: number;
+  /** how many requests may wait for a slot */
+  maxQueue?: number;
+  /** the request budget per hour */
+  requestsPerHour?: number;
+  /** the bucket's burst capacity (defaults to the hourly budget) */
+  burst?: number;
+  /** the bucket's lane half — two entries on one account draw one
+   *  budget when they name the same lane */
+  lane?: string;
+}
+
+/** The lane limits, keyed by ENTRY (the provider's config name) — the
+ *  limit belongs to the ACCOUNT, not to the URL it is reached under.
+ *  A route's own name is accepted as a fallback, so an operator can
+ *  write either name. */
+export type ServeLimits = Record<string, ServeLaneLimits>;
+
+/** A positive integer field — absent or wrong reads as undefined (the
+ *  knob stays unbounded). A malformed value is a config bug: it says
+ *  loudly and the field drops, rather than silently reading as zero. */
+function positiveInt(raw: Record<string, unknown>, field: string): number | undefined {
+  const value = raw[field];
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  console.error(`bro.config: serve.limits.${field} must be a positive integer — field dropped`);
+  return undefined;
+}
+
+/** The lane limits of every configured lane — a malformed entry drops
+ *  ITS OWN fields, never the whole section. */
+function serveLimits(raw: unknown): ServeLimits | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: serve.limits must be an object of lane → limits — section dropped');
+    return undefined;
+  }
+  const out: ServeLimits = {};
+  for (const [entry, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (entry === '__proto__') continue;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      console.error(`bro.config: serve.limits.${entry} must be an object — lane dropped`);
+      continue;
+    }
+    const bag = value as Record<string, unknown>;
+    const limits: ServeLaneLimits = {
+      ...(positiveInt(bag, 'maxSessions') === undefined
+        ? {}
+        : { maxSessions: positiveInt(bag, 'maxSessions') }),
+      ...(positiveInt(bag, 'maxQueue') === undefined ? {} : { maxQueue: positiveInt(bag, 'maxQueue') }),
+      ...(positiveInt(bag, 'requestsPerHour') === undefined
+        ? {}
+        : { requestsPerHour: positiveInt(bag, 'requestsPerHour') }),
+      ...(positiveInt(bag, 'burst') === undefined ? {} : { burst: positiveInt(bag, 'burst') }),
+      ...(typeof bag.lane === 'string' && bag.lane.trim() !== ''
+        ? { lane: bag.lane.trim() }
+        : {}),
+    };
+    if (Object.keys(limits).length > 0) out[entry] = limits;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -861,18 +939,25 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
  *  an array of entry names (the route IS the entry) or a map of route →
  *  entry, so the public name can be chosen independently of the
  *  entry's own name (spec bro-jxw7p). */
-export const serveSection: ConfigSection<{ backend?: string; providers?: ServeProviders }> = raw => {
+export const serveSection: ConfigSection<{
+  backend?: string;
+  providers?: ServeProviders;
+  limits?: ServeLimits;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;
+    limits?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
   const providers = providerRoutes(obj.providers);
+  const limits = serveLimits(obj.limits);
   // an unset backend reads as an empty bag — same shape as providers:{}
   return {
     ...(backend === undefined ? {} : { backend }),
     ...(providers === undefined ? {} : { providers }),
+    ...(limits === undefined ? {} : { limits }),
   };
 };
 
@@ -888,6 +973,15 @@ serveSection.jsonSchema = js.obj({
     patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
     additionalProperties: false,
   }),
+  limits: js.map(
+    js.obj({
+      maxSessions: js.num(),
+      maxQueue: js.num(),
+      requestsPerHour: js.num(),
+      burst: js.num(),
+      lane: js.str,
+    })
+  ),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1352,7 +1446,7 @@ export interface BroConfig {
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. */
-  serve: { backend?: string; providers?: ServeProviders };
+  serve: { backend?: string; providers?: ServeProviders; limits?: ServeLimits };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;
