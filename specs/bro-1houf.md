@@ -23,7 +23,7 @@ That is not a hypothetical. Drill `bro-gblja` (2026-10-28) audited every
 walls:
 
 | Call site | Marked? | Verdict |
-|---|---|---|
+| --- | --- | --- |
 | delegate.ts, drive.ts, loop pins | `env[BRO_BATCH]` | correct — fleet |
 | convoy-run.ts runner spawns | nothing | **bug** — fleet fan-out, fixed in [#757](https://github.com/ThePlenkov/bro/pull/757) |
 | dogfood.ts:505 + :602 (runner, analyst) | nothing | **bug** — fleet work, still unmarked (bead bro-42rfh) |
