@@ -204,6 +204,12 @@ interface MessagesRequest {
   model?: string;
   system?: string | { text?: string }[];
   messages?: { role?: string; content?: string | InBlock[] }[];
+  /** `role:'system'` turns lifted out of `messages` — context the client
+   *  sent INSIDE the conversation, not a speaker (claude 2.1.309 sends
+   *  its environment block that way). The chat and responses dialects
+   *  already claim those roles for the system slot; the messages gate
+   *  does the same instead of 400-ing on a shape the client sends. */
+  systemTurns?: string[];
   tools?: { name?: string; description?: string; input_schema?: unknown }[];
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
@@ -303,13 +309,43 @@ const stopKeyOf = (seqs: string[]): string => JSON.stringify(seqs);
 
 type ClientMessage = NonNullable<MessagesRequest['messages']>[number];
 
+/** One turn's text — its blocks rendered in order (an image collapses
+ *  to its `[image]` marker). Shared by the turn serialization and the
+ *  system-slot lift, so both read a turn the same way. */
+function turnText(m: ClientMessage): string {
+  return typeof m.content === 'string' ? m.content : (m.content ?? []).map(blockText).join('');
+}
+
 /** One message's canonical serialization — shared by serializeRequest
  *  (the cold prompt) and the conversation-fingerprint hashes, so a
  *  resent byte-identical turn always matches. */
 function serTurn(m: ClientMessage): string {
-  const text =
-    typeof m.content === 'string' ? m.content : (m.content ?? []).map(blockText).join('');
+  const text = turnText(m);
   return `<turn role="${turnRole(m)}">${text}</turn>`;
+}
+
+/** A `role:'system'` turn is context, not a speaker — claude 2.1.309
+ *  sends its environment block that way. The chat and responses
+ *  dialects already claim those roles for the system slot (never a
+ *  downgraded user turn); the messages gate does the same, so the
+ *  transcript keeps its documented shape: `<system>` block, tool
+ *  contract, then `<turn role="user|assistant">` segments.
+ *
+ *  The lifted turns come from the MESSAGES only — `systemTurns` is the
+ *  conductor's own field, never something the wire may dictate. Every
+ *  system turn leaves the conversation, even an empty one: a turn that
+ *  stayed would ride the transcript as a user turn. */
+function liftSystemTurns(body: MessagesRequest): MessagesRequest {
+  const system = (body.messages ?? []).filter(m => m.role === 'system');
+  // nothing to lift — but a wire-sent `systemTurns` must still die
+  // here: `prefixText` reads the field, and a body passed through
+  // unchanged would let the client dictate the system slot
+  if (system.length === 0) return { ...body, systemTurns: undefined };
+  return {
+    ...body,
+    messages: (body.messages ?? []).filter(m => m.role !== 'system'),
+    systemTurns: system.map(turnText),
+  };
 }
 
 /** system + tools — the transcript prefix shared by serializeRequest
@@ -322,6 +358,12 @@ function prefixText(body: MessagesRequest): string {
       : (body.system ?? []).map(s => s.text ?? '').join('');
   if (system !== '') {
     parts.push(`<system>\n${system}\n</system>`);
+  }
+  // the lifted `role:'system'` turns join ONE block — the agent can
+  // tell the client's standing context from the top-level system field
+  const lifted = Array.isArray(body.systemTurns) ? body.systemTurns.join('\n\n') : '';
+  if (lifted !== '') {
+    parts.push(`<system>\n${lifted}\n</system>`);
   }
   if (body.tools !== undefined && body.tools.length > 0 && body.tool_choice?.type !== 'none') {
     parts.push(toolContract(body.tools, body.tool_choice));
@@ -1794,6 +1836,53 @@ function settleConv(
   wire.sessions.set(key, conv);
 }
 
+/** One content block the renderer cannot read. A `null` block throws
+ *  inside `blockText`, a primitive mis-renders as its `[undefined]`
+ *  marker, and a text block whose `text` is not a string collapses to
+ *  silence through join — broken input the gate answers 400. The
+ *  values a block's renderer TOUCHES are checked too: a tool_result's
+ *  content must be a string or an array of objects — `.map(c => c.text)`
+ *  on a null entry throws the same way (cubic, PR #888). */
+const badBlock = (b: unknown): boolean => {
+  if (b === null || typeof b !== 'object') return true;
+  const blk = b as { type?: unknown; content?: unknown; text?: unknown };
+  // a block with no type string is not an unknown block — it is no
+  // block at all; `[undefined]` is a marker for a real type, not this
+  if (typeof blk.type !== 'string') return true;
+  if (blk.type === 'text') return typeof blk.text !== 'string';
+  if (blk.type !== 'tool_result' || blk.content === undefined) return false;
+  if (typeof blk.content === 'string') return false;
+  if (!Array.isArray(blk.content)) return true;
+  return blk.content.some(c => c === null || typeof c !== 'object');
+};
+
+/** One turn the wire cannot carry — a role the transcript has no voice
+ *  for, or content that is neither text nor blocks. A `role:'system'`
+ *  turn IS legal: it is context, and the lift moves it to the system
+ *  slot instead of the conversation. */
+const badTurn = (m: unknown): boolean => {
+  if (m === null || typeof m !== 'object') return true;
+  const msg = m as ClientMessage;
+  if (msg.role !== 'user' && msg.role !== 'assistant' && msg.role !== 'system') return true;
+  if (typeof msg.content === 'string') return false;
+  if (!Array.isArray(msg.content)) return true;
+  return msg.content.some(badBlock);
+};
+
+/** The messages shape gate — the canonical body, or undefined when the
+ *  array is missing, empty, or holds a turn the wire cannot carry.
+ *  A conversation needs a USER turn to answer: a system turn is
+ *  context, and an assistant-only request has nothing to reply to. */
+function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
+  if (!Array.isArray(body.messages) || body.messages.length === 0) return undefined;
+  if (body.messages.some(badTurn)) return undefined;
+  const canonical = liftSystemTurns(body);
+  const turns = canonical.messages ?? [];
+  if (turns.length === 0) return undefined;
+  if (!turns.some(m => m.role === 'user')) return undefined;
+  return canonical;
+}
+
 /** Request validation → 4xx answers. Returns the parsed body, or
  *  undefined once the error was written. */
 async function parseMessagesBody(
@@ -1815,22 +1904,17 @@ async function parseMessagesBody(
     apiError(res, 400, 'invalid_request_error', 'request body must be a JSON object');
     return undefined;
   }
-  const badTurn = (m: unknown): boolean =>
-    m === null ||
-    typeof m !== 'object' ||
-    ((m as ClientMessage).role !== 'user' && (m as ClientMessage).role !== 'assistant') ||
-    (typeof (m as ClientMessage).content !== 'string' &&
-      !Array.isArray((m as ClientMessage).content));
-  if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.some(badTurn)) {
+  const canonical = canonicalMessages(body);
+  if (canonical === undefined) {
     apiError(
       res,
       400,
       'invalid_request_error',
-      'messages: a non-empty array of {role: user|assistant, content} turns is required'
+      'messages: a non-empty array of {role: user|assistant|system, content} turns with at least one user turn is required'
     );
     return undefined;
   }
-  if (stopSeqsOf(body) === undefined) {
+  if (stopSeqsOf(canonical) === undefined) {
     apiError(
       res,
       400,
@@ -1839,7 +1923,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return body;
+  return canonical;
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop

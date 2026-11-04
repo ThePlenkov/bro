@@ -1476,6 +1476,150 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     }
   })
 
+  // claude 2.1.309 sends its environment block as a `role:'system'`
+  // turn INSIDE messages — the gate used to 400 on it, so every turn
+  // of a current claude-code died before the agent was reached.
+  /** The prompt the conductor handed the agent for a request carrying a
+   *  `role:'system'` turn — the turn must answer, not 400. */
+  async function systemTurnPrompt(body: unknown): Promise<string> {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const { r, close } = await postMessages(fake, body)
+    try {
+      assert.equal(r.status, 200)
+      return fake.prompts[0] ?? ''
+    } finally {
+      await close()
+    }
+  }
+
+  /** The shape gate's 400 — a system-only request and an unknown role
+   *  answer the same way. */
+  async function expectShape400(messages: unknown[]): Promise<void> {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const { r, close } = await postMessages(fake, { model: 'x', messages, stream: false })
+    try {
+      assert.equal(r.status, 400)
+      const body = await r.json()
+      assert.equal(body.error.type, 'invalid_request_error')
+    } finally {
+      await close()
+    }
+  }
+
+  test("a role:'system' turn rides the system slot, not a user turn", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: [{ type: 'text', text: '# Environment\ncwd /tmp' }] },
+      ],
+      stream: false,
+    })
+    // the system turn's text is context — it sits in a <system> block
+    assert.match(prompt, /<system>\n# Environment\ncwd \/tmp\n<\/system>/)
+    // and never rides the conversation as a user turn
+    assert.doesNotMatch(prompt, /<turn role="user"># Environment/)
+    assert.match(prompt, /<turn role="user">ping<\/turn>/)
+  })
+
+  test("a role:'system' turn with a non-text block keeps the block visible", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'ctx' },
+            { type: 'tool_addition', tool: { type: 'tool_reference', name: 'advisor' } },
+          ],
+        },
+      ],
+      stream: false,
+    })
+    // an unknown block is a marker, never a silent drop
+    assert.match(prompt, /\[tool_addition\]/)
+  })
+
+  test("an empty role:'system' turn still leaves the conversation", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: '' },
+      ],
+      stream: false,
+    })
+    // a system turn that stayed would ride the transcript as a user turn
+    assert.doesNotMatch(prompt, /<turn role="user">\s*<\/turn>/)
+    assert.match(prompt, /<turn role="user">ping<\/turn>/)
+  })
+
+  test('a client-sent systemTurns field is ignored', async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: [{ type: 'text', text: 'real context' }] },
+      ],
+      // the conductor's own field — the wire never dictates it
+      systemTurns: 'client says otherwise',
+      stream: false,
+    })
+    assert.match(prompt, /<system>\nreal context\n<\/system>/)
+    assert.doesNotMatch(prompt, /client says otherwise/)
+  })
+
+  test('a client-sent systemTurns array with no system turn is dropped too', async () => {
+    // no lift happens here — the wire-sent field must still die
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'ping' }],
+      systemTurns: ['client says otherwise'],
+      stream: false,
+    })
+    assert.doesNotMatch(prompt, /client says otherwise/)
+  })
+
+  test("a request carrying only a role:'system' turn answers 400", async () => {
+    await expectShape400([{ role: 'system', content: 'ctx' }])
+  })
+
+  test('an assistant-only request answers 400 — no user turn to answer', async () => {
+    await expectShape400([{ role: 'assistant', content: 'x' }])
+  })
+
+  test('an unknown role still answers 400 invalid_request_error', async () => {
+    await expectShape400([{ role: 'tool', content: 'x' }])
+  })
+
+  test('a block the renderer cannot read answers 400, not a 500', async () => {
+    // a null block throws inside blockText — the shape gate owns it
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [null] },
+    ])
+    // a text block whose text is not a string would join to silence
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'text', text: null }] },
+    ])
+    // a block with no type at all — `[undefined]` is not a marker to send
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{}] },
+    ])
+    // the nested values a block's renderer touches count too
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: [null] }] },
+    ])
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: 5 }] },
+    ])
+  })
+
   test('a rate-limited backend answers 429 + Retry-After', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' })
     const { r, close } = await postMessages(fake)
