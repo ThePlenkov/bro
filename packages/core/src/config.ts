@@ -737,22 +737,51 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
+/** The exposed provider names — a list of non-blank strings, else
+ *  undefined (the section carries no list). A value that is not a
+ *  list, or an entry that is not a name, is a diagnostic — the lane
+ *  it names would silently disappear otherwise. */
+function providerNames(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.error('bro.config: serve.providers must be an array of provider names — section dropped');
+    return undefined;
+  }
+  const names: string[] = [];
+  for (const n of raw) {
+    if (typeof n !== 'string' || n.trim() === '') {
+      console.error('bro.config: serve.providers entries must be non-empty strings — entry dropped');
+      continue;
+    }
+    names.push(n.trim());
+  }
+  return names;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
- *  (apiKeyHelper children do not inherit settings.env). */
-export const serveSection: ConfigSection<{ backend?: string }> = raw => {
+ *  (apiKeyHelper children do not inherit settings.env).
+ *  `providers` names the OTHER acp entries the gateway exposes: a
+ *  request whose model carries one of their names routes there, so one
+ *  listener serves every provider's models. */
+export const serveSection: ConfigSection<{ backend?: string; providers?: string[] }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
+    providers?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
+  const providers = providerNames(obj.providers);
   // an unset backend reads as an empty bag — same shape as providers:{}
-  return backend === undefined ? {} : { backend };
+  return {
+    ...(backend === undefined ? {} : { backend }),
+    ...(providers === undefined ? {} : { providers }),
+  };
 };
 
-serveSection.jsonSchema = js.obj({ backend: js.str });
+serveSection.jsonSchema = js.obj({ backend: js.str, providers: js.strList });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -1216,7 +1245,7 @@ export interface BroConfig {
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. */
-  serve: { backend?: string };
+  serve: { backend?: string; providers?: string[] };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;

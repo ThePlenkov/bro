@@ -438,6 +438,18 @@ async function acpOp(
   }
 }
 
+/** The in-process agent this op talks to — the seam names it outright
+ *  or resolves it per spawn label, so a multi-provider gateway hands
+ *  each lane its own agent. */
+function seamPeer(
+  opts: ProviderWireOpts,
+  by: string
+): import('@agentclientprotocol/sdk').AgentApp | undefined {
+  const peer = opts.acp?.peer;
+  if (peer === undefined) return undefined;
+  return typeof peer === 'function' ? peer(by) : peer;
+}
+
 /** One connected ACP operation — `opts.acp.peer` is the in-process
  *  test seam; production execs the tokenized `entry.command` argv
  *  (profile as a separate arg — no shell) and kills the child when
@@ -453,7 +465,7 @@ async function withAcp<T>(
   const app = terminals.register(
     client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
   );
-  const peer = opts.acp?.peer;
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   let spawnError: string | undefined;
@@ -933,7 +945,7 @@ export async function acpOpen(
   }
   const terminals = new AcpTerminals();
   const app = pooledClientApp(opts, terminals);
-  const peer = opts.acp?.peer;
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   // spawn's 'error' event is async — the getter reads it whenever the

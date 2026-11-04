@@ -1456,6 +1456,14 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
         }
       },
       "additionalProperties": false

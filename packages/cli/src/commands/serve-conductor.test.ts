@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { agent, type SessionConfigOption, type SessionUpdate, type StopReason } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
+import type { AcpTerminals } from '@broject/providers'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
@@ -193,6 +194,71 @@ describe('conductorConfig', () => {
         ),
       /providers\.nope is not configured/
     )
+  })
+  test('serve.providers exposes the OTHER acp entries as routes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc-acp', 'dv-acp'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' },
+          'oc-acp': { type: 'acp', command: 'oc acp', model: 'gpt-5' },
+        },
+      })
+    )
+    const cfg = conductorConfig({}, dir)
+    assert.equal(cfg?.backend, 'dv-acp')
+    // the backend is never re-exposed as its own route
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-acp'])
+    assert.equal(cfg?.providers?.['oc-acp']?.model, 'gpt-5')
+  })
+  test('an injected registry does not read the file layer\'s serve.providers', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc-acp'] },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      })
+    )
+    // the injected registry owns the whole name space — the file's
+    // oc-acp must not leak into it, and must not throw for a name the
+    // injected registry does not define
+    const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, dir, {
+      'dv-acp': { type: 'acp' as const, command: 'dv acp' },
+    })
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), [])
+  })
+  test('a served provider name carrying a slash is a loud error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc/one'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp' },
+          'oc/one': { type: 'acp', command: 'oc acp' },
+        },
+      })
+    )
+    // the router reads the FIRST path segment — a name with a slash
+    // would be advertised and never reachable
+    assert.throws(() => conductorConfig({}, dir), /cannot contain/)
+  })
+  test('an exposed provider that is not acp is a loud error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['cli1'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp' },
+          cli1: { type: 'cli', command: 'x run' },
+        },
+      })
+    )
+    assert.throws(() => conductorConfig({}, dir), /type 'cli' — the conductor needs an 'acp' entry/)
   })
 })
 
@@ -1061,20 +1127,22 @@ describe('serve /v1/* — the conductor plane', () => {
       const reg = proxy.terminals()
       assert.ok(reg, 'the pooled acp link carries its terminal registry')
       // the registry is the live one — an agent terminal/create call
-      // over the link lands in it
-      const { terminalId } = await reg.create({
+      // over the link lands in it (one live lane answers with its own
+      // AcpTerminals; the plane-facing type only carries snapshot+follow)
+      const live = reg as AcpTerminals
+      const { terminalId } = await live.create({
         params: { command: 'sh', args: ['-c', 'echo via-conductor'], env: [] },
       } as never)
       for (let i = 0; i < 100; i++) {
-        const snap = await reg.output({ params: { terminalId } } as never)
+        const snap = await live.output({ params: { terminalId } } as never)
         if (snap.output.includes('via-conductor')) {
           break
         }
         await new Promise((r2) => setTimeout(r2, 10))
       }
-      const snap = await reg.output({ params: { terminalId } } as never)
+      const snap = await live.output({ params: { terminalId } } as never)
       assert.match(snap.output, /via-conductor/)
-      await reg.release({ params: { terminalId } } as never)
+      await live.release({ params: { terminalId } } as never)
     } finally {
       await close()
     }
@@ -1780,4 +1848,229 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       await close()
     }
   })
+})
+
+describe('serve /v1/* — one gateway, many providers', () => {
+  const DV_OPTION: SessionConfigOption = {
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue: 'swe-x',
+    options: [{ value: 'swe-x', name: 'SWE X' }],
+  }
+  const OC_OPTION: SessionConfigOption = {
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue: 'gpt-5',
+    options: [{ value: 'gpt-5', name: 'GPT 5' }],
+  }
+
+  /** The gateway's default lane plus one exposed lane — the listener
+   *  serves both providers' models. */
+  const MULTI: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-acp': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+  }
+
+  type Fake = ReturnType<typeof fakeAcpAgent>
+
+  /** Boot the gateway over two agents — the in-process seam resolves by
+   *  the spawn label, which names the lane. */
+  const bootGateway = async (
+    dv: Fake,
+    oc: Fake
+  ): Promise<{ url: string; close: () => Promise<void> }> => {
+    const { url, close } = await listen(
+      deps({
+        provider: conductorProxy(MULTI, {
+          acp: { peer: by => (by.endsWith('oc-acp') ? oc.app : dv.app) },
+        }),
+      })
+    )
+    return { url, close }
+  }
+
+  /** Two lanes over two agents. */
+  const withGateway = async (
+    fn: (ctx: { dv: Fake; oc: Fake; url: string }) => Promise<void>
+  ): Promise<void> => {
+    const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+    const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+    const { url, close } = await bootGateway(dv, oc)
+    try {
+      await fn({ dv, oc, url })
+    } finally {
+      await close()
+    }
+  }
+
+  const post = (url: string, body: unknown): Promise<Response> =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  const textOf = async (r: Response): Promise<string> => {
+    const body = (await r.json()) as { content?: { type: string; text?: string }[] }
+    return body.content?.find(c => c.type === 'text')?.text ?? ''
+  }
+
+  test('/v1/models lists EVERY lane\'s models', () =>
+    withGateway(async ({ url }) => {
+      const r = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+      assert.equal(r.status, 200)
+      const body = (await r.json()) as { data: { id: string }[] }
+      const ids = body.data.map(m => m.id)
+      assert.ok(ids.includes('dv-acp/swe-x'), `ids: ${ids.join(', ')}`)
+      assert.ok(ids.includes('oc-acp/gpt-5'), `ids: ${ids.join(', ')}`)
+    }))
+
+  test('a model prefix routes the turn to THAT provider', () =>
+    withGateway(async ({ dv, oc, url }) => {
+      const r = await post(url, {
+        model: 'oc-acp/gpt-5',
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      })
+      assert.equal(r.status, 200)
+      assert.equal(await textOf(r), 'from opencode')
+      assert.equal(oc.prompts.length, 1)
+      assert.equal(dv.prompts.length, 0)
+    }))
+
+  /** The default lane's own cases — a bare id, a prefix naming no lane
+   *  and the default's own prefix all ride the default lane. */
+  const DEFAULT_CASES: [string, string][] = [
+    ['a bare model', 'swe-x'],
+    ['a prefix naming no lane', 'nope/swe-x'],
+    ["the default lane's own prefix", 'dv-acp/swe-x'],
+  ]
+
+  for (const [what, model] of DEFAULT_CASES) {
+    test(`${what} rides the default lane`, () =>
+      withGateway(async ({ dv, oc, url }) => {
+        const r = await post(url, { model, messages: [{ role: 'user', content: 'x' }], stream: false })
+        assert.equal(r.status, 200)
+        assert.equal(await textOf(r), 'from devin')
+        assert.equal(dv.prompts.length, 1)
+        assert.equal(oc.prompts.length, 0)
+      }))
+  }
+
+  test('the same conversation under two providers is TWO sessions', () =>
+    withGateway(async ({ dv, oc, url }) => {
+      const history = [{ role: 'user', content: 'same' }]
+      await post(url, { model: 'dv-acp/swe-x', messages: history, stream: false })
+      await post(url, { model: 'oc-acp/gpt-5', messages: history, stream: false })
+      // one session/new per lane — a conversation never crosses providers
+      assert.equal(dv.sessions.length, 1)
+      assert.equal(oc.sessions.length, 1)
+      // and neither lane replayed the other's turn
+      assert.equal(dv.prompts.length, 1)
+      assert.equal(oc.prompts.length, 1)
+    }))
+
+  test('a healthy lane with an empty catalog is not an outage', () =>
+    (async () => {
+      // the broken lane's catalog fails; the healthy one advertises
+      // nothing — an empty catalog is not an outage
+      const dv = fakeAcpAgent({ replyText: 'from devin' })
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNew: 'auth' })
+      const { url, close } = await bootGateway(dv, oc)
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+        assert.equal(m.status, 200)
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id)
+        assert.deepEqual(ids, [])
+      } finally {
+        await close()
+      }
+    })())
+
+  test('one lane down still serves the other — a dead provider is not a dead gateway', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failPrompt: 'generic' })
+      const { url, close } = await bootGateway(dv, oc)
+      try {
+        // the broken lane's catalog still lists its models
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+        assert.equal(m.status, 200)
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id)
+        assert.ok(ids.includes('oc-acp/gpt-5'), `ids: ${ids.join(', ')}`)
+        // the healthy lane answers
+        const ok = await post(url, {
+          model: 'dv-acp/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        assert.equal(ok.status, 200)
+        assert.equal(await textOf(ok), 'from devin')
+        // the broken lane fails its own turn, on its own verdict — the
+        // acp layer calls a dead provider unavailable, so the wire
+        // answers 529 (retryable), not 500
+        const bad = await post(url, {
+          model: 'oc-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        assert.equal(bad.status, 529)
+      } finally {
+        await close()
+      }
+    })())
+
+  test('a terminal reads back whichever lane spawned it', () =>
+    (async () => {
+      let ocTid = ''
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({
+        replyText: 'from opencode',
+        configOptions: [OC_OPTION],
+        probeClient: async (client, sessionId) => {
+          const created = await client.request('terminal/create', {
+            sessionId,
+            command: 'sh',
+            args: ['-c', 'echo oc-term'],
+          })
+          await client.request('terminal/wait_for_exit', {
+            sessionId,
+            terminalId: created.terminalId,
+          })
+          ocTid = created.terminalId
+        },
+      })
+      const proxy = conductorProxy(MULTI, {
+        acp: { peer: by => (by.endsWith('oc-acp') ? oc.app : dv.app) },
+      })
+      const { url, close } = await listen(deps({ provider: proxy }))
+      try {
+        // both lanes live — the registry probes each one
+        await post(url, {
+          model: 'dv-acp/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        const r = await post(url, {
+          model: 'oc-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        assert.equal(r.status, 200)
+        assert.ok(ocTid, 'the oc lane spawned a terminal mid-turn')
+        const reg = proxy.terminals()
+        assert.ok(reg, 'both lanes carry live registries')
+        // not the default lane's terminal — the lookup crosses to oc's
+        assert.match(reg.snapshot(ocTid).output, /oc-term/)
+        assert.throws(() => reg.snapshot('nope' as typeof ocTid), /Unknown terminal/)
+      } finally {
+        await close()
+      }
+    })())
 })

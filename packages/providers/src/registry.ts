@@ -71,7 +71,13 @@ export interface AcpClientBridge {
  *  tool_call, plan — while the call still resolves the whole turn;
  *  absent sink = the original whole-turn contract. */
 export interface AcpSeam {
-  peer?: import('@agentclientprotocol/sdk').AgentApp
+  /** The in-process agent to talk to — the test seam production never
+   *  takes. A resolver receives the spawn label (`by`) and returns the
+   *  agent: a multi-provider gateway hands each lane its own agent,
+   *  and the lane's name is in the label. */
+  peer?:
+    | import('@agentclientprotocol/sdk').AgentApp
+    | ((by: string) => import('@agentclientprotocol/sdk').AgentApp)
   cwd?: string
   onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void
   /** Teardown signal for `acpOpen` — aborting it while the handshake

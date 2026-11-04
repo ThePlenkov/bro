@@ -201,7 +201,12 @@ import {
   type EventsStreamBus,
 } from '../planes/stream.ts';
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
-import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts';
+import {
+  conductorConfig,
+  conductorProxy,
+  type ConductorConfig,
+  type TerminalRegistry,
+} from './serve-conductor.ts';
 import type { ExitCode } from '@broject/core';
 import type { AcpTerminals, TerminalFollow } from '@broject/providers';
 import { acpTransport } from './serve-acp.ts';
@@ -489,9 +494,10 @@ export interface ServeDeps {
     dispose?: () => void;
   };
   /** `/api/v1/terminals/<id>/output` — the conductor's live acp
-   *  terminal registry (bro-eua0d). Absent → the route 404s like any
-   *  unwired plane (no conductor, no agent shells to read). */
-  terminals?: () => AcpTerminals | undefined;
+   *  terminal registry (bro-eua0d), one registry or every lane's at
+   *  once under a multi-provider gateway. Absent → the route 404s
+   *  like any unwired plane (no conductor, no agent shells to read). */
+  terminals?: () => TerminalRegistry | undefined;
   /** `/api/v1/acp` native ACP transport (bro-ymbq1) — Streamable HTTP,
    *  raw-stream like /v1/*; absent means no acp backend wired. Sync:
    *  the SDK's node adapter owns its async internally. `dispose` is the
@@ -1537,7 +1543,7 @@ async function routeTerminalOutput(
  *  stays under the complexity cap. Headers precede `reg.follow()` so a
  *  synchronous `exit` can never end a headerless response; the snapshot
  *  then streams through the drain-fed queue at the reader's pace. */
-function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string): void {
+function followTerminalOutput(res: ServerResponse, reg: TerminalRegistry, id: string): void {
   let handle: TerminalFollow | undefined;
   const gone = (): boolean => res.writableEnded || res.destroyed;
   // Outbound frames park in `queue`, not the socket's own buffer — when
@@ -2455,6 +2461,12 @@ async function armBusBroker(dir: string, url: string): Promise<BusBroker | undef
   }
 }
 
+/** The lanes the gateway serves — the default backend plus every
+ *  exposed provider, each reachable by its own model prefix. */
+function conductorLanes(cfg: ConductorConfig): string[] {
+  return [cfg.backend, ...Object.keys(cfg.providers ?? {})];
+}
+
 export async function runServeCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'ensure') {
     await cmdEnsure(argv.slice(1));
@@ -2504,7 +2516,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`);
+    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }
