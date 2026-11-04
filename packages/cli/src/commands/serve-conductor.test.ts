@@ -1604,6 +1604,11 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       { role: 'user', content: 'x' },
       { role: 'system', content: [{ type: 'text', text: null }] },
     ])
+    // a block with no type at all — `[undefined]` is not a marker to send
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{}] },
+    ])
     // the nested values a block's renderer touches count too
     await expectShape400([
       { role: 'user', content: 'x' },

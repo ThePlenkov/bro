@@ -1846,6 +1846,9 @@ function settleConv(
 const badBlock = (b: unknown): boolean => {
   if (b === null || typeof b !== 'object') return true;
   const blk = b as { type?: unknown; content?: unknown; text?: unknown };
+  // a block with no type string is not an unknown block — it is no
+  // block at all; `[undefined]` is a marker for a real type, not this
+  if (typeof blk.type !== 'string') return true;
   if (blk.type === 'text') return typeof blk.text !== 'string';
   if (blk.type !== 'tool_result' || blk.content === undefined) return false;
   if (typeof blk.content === 'string') return false;
