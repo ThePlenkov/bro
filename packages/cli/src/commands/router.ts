@@ -14,13 +14,14 @@
  * published `{url, token}` — so a dead listener is an error instead of
  * a read that never answers.
  */
-import { runClient, runModels, type ClientOutcome } from '@broject/brouter';
+import { configuredProviders, runClient, runModels, type ClientOutcome } from '@broject/brouter';
 import { hasHelpFlag, printUsage } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { liveServeState } from './serve.ts';
 
 const USAGE = `usage:
+  bro router providers [--json]                    the configured providers
   bro router models [--json]                       the served catalog
   bro router clients [--json]                       the client adapters
   bro router client <id> [--write] [--settings P] [--wire] [--json]
@@ -101,6 +102,23 @@ export async function runRouterCommand(argv: string[]): Promise<void> {
   const rest = argv.slice(1);
   if (command === 'client') {
     await cmdRouterClient(rest);
+    return;
+  }
+  if (command === 'providers') {
+    const providers = configuredProviders(process.cwd());
+    if (rest.includes('--json')) {
+      console.log(JSON.stringify(providers, null, 2));
+      return;
+    }
+    if (providers.length === 0) {
+      console.log('no providers configured — add providers.<name> to bro.config.json');
+      return;
+    }
+    for (const p of providers) {
+      const model = p.model === undefined ? '' : `\t${p.model}`;
+      const models = p.models === undefined ? '' : `\t${p.models} model(s)`;
+      console.log(`${p.name}\t${p.type}\t${p.target ?? ''}${model}${models}`);
+    }
     return;
   }
   if (command === 'models') {

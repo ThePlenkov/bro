@@ -10,6 +10,7 @@ import { modelFamily, modelSource, servedModels } from './catalog.ts';
 import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
 import { clientById, clientIds } from './registry.ts';
+import { configuredProviders } from './providers.ts';
 import { expandHome, readSettings, writeSettings } from './settings.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-test-'));
@@ -203,4 +204,30 @@ test('an unknown client is an error naming the known ones', async () => {
       ),
     /unknown client "nope" — known: claude-code/
   );
+});
+
+test('the provider inventory reads the configured entries', () => {
+  const dir = join(scratch, 'providers-repo');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'bro.config.json'),
+    JSON.stringify({
+      providers: {
+        'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-high' },
+        orcarouter: {
+          type: 'api',
+          baseUrl: 'https://api.orcarouter.ai',
+          apiKeyEnv: 'ORAROUTER_KEY',
+          models: { 'typesafe/jev-1.13': 'systemone' },
+        },
+      },
+    })
+  );
+  const rows = configuredProviders(dir);
+  const devin = rows.find(r => r.name === 'devin-acp');
+  assert.equal(devin?.type, 'acp');
+  assert.equal(devin?.target, 'devin acp --model swe-2-high');
+  const api = rows.find(r => r.name === 'orcarouter');
+  assert.equal(api?.type, 'api');
+  assert.equal(api?.models, 1);
 });
