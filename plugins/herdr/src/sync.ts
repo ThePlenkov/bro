@@ -7,7 +7,8 @@
  * spawn a tail child. Interval: BRO_SYNC_EVERY_S env or 30s.
  */
 
-import { ctxJson, repoDir } from './lib.ts';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { ctxJson, repoDir, STATE_DIR, stateScope, syncPidPath } from './lib.ts';
 import { converge } from './reconcile.ts';
 import { type EventSource, LiveSource, PollSource } from './sources.ts';
 
@@ -15,6 +16,12 @@ const requested = Number(process.env.BRO_SYNC_EVERY_S ?? 30);
 const EVERY_MS = Math.max(5, Number.isFinite(requested) ? requested : 30) * 1000;
 
 const repo = repoDir(ctxJson());
+
+// publish our pid — the ensure-probe in reconcile.ts reads this file,
+// so a launcher that rewrites argv (absolute path, non-node runtime)
+// still counts as a live loop instead of a missing one
+mkdirSync(STATE_DIR, { recursive: true });
+writeFileSync(syncPidPath(stateScope(repo)), `${process.pid}\n`);
 const source: EventSource =
   process.env.BRO_SYNC_SOURCE === 'poll'
     ? new PollSource(repo, EVERY_MS)

@@ -19,22 +19,27 @@
  * the snapshot it produced. bro state is never written — the only
  * mutations are herdr CLI calls and the plugin's own state file.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { type Lane, laneOf } from './lanes.ts';
 import {
   agentsJson,
   ctxJson,
   gitCommonDir,
+  type HerdrPane,
   type HerdrWorkspace,
   herdrTry,
   loadState,
   notify,
+  paneIdle,
+  PLUGIN_ID,
+  PLUGIN_ROOT,
   type PluginState,
   repoDir,
   type StatusWorktree,
   saveState,
   stateScope,
+  syncPidPath,
   type WorkspaceRec,
   withStateLock,
   worktreeGone,
@@ -507,8 +512,67 @@ export function reconcile(): ConvergeResult {
   return converge(readPlanes(repoDir(ctxJson())));
 }
 
+/** The label the sync pane carries — `pane open` replaces nothing, so
+ *  a dead loop's husk is swept before its successor opens or every
+ *  recovery accumulates another bare-shell pane. */
+const SYNC_LABEL = 'bro sync';
+
+/** A fresh pid file with no live pid means another ensure already
+ *  fired `pane open` and the spawn is still landing — check→open is
+ *  never atomic, so the file doubles as the in-flight marker that
+ *  keeps overlapping ensures (startup hook + manual action) from each
+ *  opening a pane. */
+const OPEN_GRACE_MS = 60_000;
+
+/** The sync pane is the converge daemon, but the manifest's `[[panes]]`
+ *  entry is only a template — herdr materializes it solely via `plugin
+ *  pane open`, and nothing re-opens it after a server restart
+ *  (bro-m8hew: a reboot left every session pane on a bare shell with
+ *  no loop to re-arm them). The startup hook and the `sync` action
+ *  both land here, so both restore it. `plugin pane open` has no
+ *  dedup — the probe is the idempotence: sync.ts writes its own pid
+ *  to a scoped file at start, so a live loop proves itself regardless
+ *  of how its argv was launched; a dead pane's bare shell leaves a
+ *  stale pid that fails the liveness check and gets replaced. */
+function ensureSyncLoop(): void {
+  const pidFile = syncPidPath(stateScope(repoDir(ctxJson())));
+  try {
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      process.kill(pid, 0);
+      return;
+    }
+  } catch {
+    // unreadable or absent pid file — the mtime check below decides
+  }
+  try {
+    if (Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS) return;
+  } catch {
+    // no file — nobody is mid-open either
+  }
+  // the loop is confirmed dead: every 'bro sync' pane rooted at THIS
+  // plugin is a husk — close them or the successor piles up next to
+  // bare shells. cwd scoping keeps another repository's sync pane
+  // (same label, different checkout) out of the sweep
+  for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
+    if (p.label === SYNC_LABEL && p.pane_id !== undefined && p.cwd === PLUGIN_ROOT && paneIdle(p.pane_id)) {
+      herdrTry(['pane', 'close', p.pane_id]);
+    }
+  }
+  const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
+  if (out !== undefined) {
+    try {
+      writeFileSync(pidFile, 'pending\n');
+    } catch {
+      // the in-flight marker is advisory — the next ensure just retries
+    }
+  }
+  log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
+}
+
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
+    ensureSyncLoop();
     const r = reconcile();
     log(
       `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.statuses} statuses, ${r.reaped} reaped`

@@ -28,6 +28,7 @@ import {
 } from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
+export const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? 'bro.fleet';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 // The plugin and the CLI ship from one repo — prefer the checkout's own
 // build over a possibly stale `bro` on PATH (a linked dev worktree must
@@ -509,6 +510,16 @@ export function stateScope(repo: string): string {
 
 function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
+}
+
+/** The sync loop publishes its pid here so the startup/action path
+ *  probes liveness on a number it wrote itself — never argv matching:
+ *  a launcher that rewrites argv (absolute path, a non-node runtime)
+ *  slips a literal `pgrep` and a live pane would be re-opened every
+ *  pass. Scoped like the state file so repos never see each other's
+ *  loop pid. */
+export function syncPidPath(scope: string): string {
+  return join(STATE_DIR, `sync-${scope}.pid`);
 }
 
 export function loadState(scope: string): PluginState {
