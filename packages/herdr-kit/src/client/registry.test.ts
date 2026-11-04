@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { agentEntry, pidAlive, registryHomeOf, workerLedState } from './registry.ts';
+import {
+  agentEntry,
+  displayAgentOf,
+  pidAlive,
+  registryHomeOf,
+  workerLedState,
+} from './registry.ts';
 
 const withBase = (fn: (base: string) => void): void => {
   const base = mkdtempSync(join(tmpdir(), 'reg-'));
@@ -38,6 +44,35 @@ test('agentEntry — registry key first, then the log stem the pane argv carries
     assert.equal(agentEntry(base, 'native-ab656051')?.agentId, 'native-ab656051');
     assert.equal(agentEntry(base, 'native-nope'), undefined);
     assert.equal(agentEntry(base, undefined), undefined);
+  });
+});
+
+test('displayAgentOf — provider wins over the run id, stem is the last resort (bro-m2du9)', () => {
+  withBase(base => {
+    seedReg(base, {
+      'bro-vp8ma': {
+        agentId: 'native-87a699fc',
+        log: '/x/native-87a699fc.log',
+        provider: 'opencode-iceman',
+      },
+      'bro-2bv6q': { agentId: 'native-ab656051', log: '/x/native-ab656051.log', provider: 'devin' },
+      'bro-nopro': { agentId: 'native-00000000', log: '/x/native-00000000.log' },
+      'bro-empty': { agentId: 'native-11111111', log: '/x/native-11111111.log', provider: '' },
+      'bro-nonst': { agentId: 'native-22222222', log: '/x/native-22222222.log', provider: 42 },
+    });
+    // the true agent name — provider — even resolving via the archive stem
+    assert.equal(displayAgentOf(base, 'native-87a699fc'), 'opencode-iceman');
+    assert.equal(displayAgentOf(base, 'bro-2bv6q'), 'devin');
+    // a provider-less entry falls back to the readable run id
+    assert.equal(displayAgentOf(base, 'bro-nopro'), 'bro-nopro');
+    assert.equal(displayAgentOf(base, 'native-00000000'), 'bro-nopro');
+    // an empty-string provider is as absent as a missing one
+    assert.equal(displayAgentOf(base, 'bro-empty'), 'bro-empty');
+    // a non-string provider at the JSON boundary is not a display name
+    assert.equal(displayAgentOf(base, 'bro-nonst'), 'bro-nonst');
+    // an unknown id keeps the argv value — the caller's surface stands
+    assert.equal(displayAgentOf(base, 'native-lost'), 'native-lost');
+    assert.equal(displayAgentOf(base, undefined), undefined);
   });
 });
 
