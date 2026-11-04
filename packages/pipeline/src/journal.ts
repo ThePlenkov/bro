@@ -71,6 +71,13 @@ export interface PipelineJournal {
   rows(): JournalRow[];
 }
 
+/** Where a run's journal lives — a repo dir + the run id naming the
+ *  file inside it. */
+export interface JournalLocator {
+  dir: string;
+  runId: string;
+}
+
 /** Run ids name a file — bound them to a path-safe token (the default
  *  `mintRunId` hex always passes). */
 const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
@@ -78,35 +85,34 @@ const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
 /** `<git-common>/bro/pipeline/<run_id>.journal.jsonl` — null outside a
  *  repo. An unsafe run id throws: a journal that could escape its dir
  *  is invalid input, not absence. */
-export function pipelineJournalPath(dir: string, runId: string): string | null {
-  if (!RUN_ID_RE.test(runId)) {
-    throw new Error(`pipeline journal: unsafe run id ${JSON.stringify(runId)}`);
+export function pipelineJournalPath(loc: JournalLocator): string | null {
+  if (!RUN_ID_RE.test(loc.runId)) {
+    throw new Error(`pipeline journal: unsafe run id ${JSON.stringify(loc.runId)}`);
   }
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'pipeline', `${runId}.journal.jsonl`);
+  const common = gitCommonDir(loc.dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'pipeline', `${loc.runId}.journal.jsonl`);
 }
 
-/** The durable journal for `runId` under `dir`'s git common dir —
+/** The durable journal for a run under `loc.dir`'s git common dir —
  *  null outside a repo (callers without a git dir have no durable
  *  plane; {@link memoryJournal} is the opt-in non-durable form). */
-export function openPipelineJournal(dir: string, runId: string): PipelineJournal | null {
-  const file = pipelineJournalPath(dir, runId);
-  return file === null ? null : fileJournal(file, runId);
+export function openPipelineJournal(loc: JournalLocator): PipelineJournal | null {
+  const file = pipelineJournalPath(loc);
+  return file === null ? null : fileJournal(file);
 }
 
-/** The run id a journal file name carries — `<run>.journal.jsonl`. */
-function runIdFromPath(file: string): string | undefined {
-  return /([^/\\]+)\.journal\.jsonl$/.exec(file)?.[1];
-}
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** A file-backed journal. The file is read once at construction —
- *  one runner owns a journal file, so reads-after-append come from the
- *  object's own mirror and can never double-count its own lines; a
- *  resume constructs a fresh journal and re-reads. */
-export function fileJournal(file: string, runId = runIdFromPath(file)): PipelineJournal {
+/** A file-backed journal — `runId` derives from the `<run>.journal.
+ *  jsonl` name. The file is read once at construction: one runner owns
+ *  a journal file, so reads-after-append come from the object's own
+ *  mirror and never double-count its own lines; a resume constructs a
+ *  fresh journal and re-reads. */
+export function fileJournal(file: string): PipelineJournal {
   const all = readJournalFile(file);
   return {
-    runId,
+    runId: /([^/\\]+)\.journal\.jsonl$/.exec(file)?.[1],
     append(row: JournalRow): void {
       appendJournalRow(file, row);
       all.push(row);
@@ -139,25 +145,18 @@ export function appendJournalRow(file: string, row: JournalRow): void {
   appendFileSync(file, `${JSON.stringify(row)}\n`);
 }
 
-/** Minimal shape a parsed line must carry to count as a row — a
- *  torn-but-valid tail like `{"run_id":"x"}` fails this and is dropped
- *  rather than misread downstream. */
+const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
+
+/** Fields a parsed line must carry to count as a row — a torn-but-
+ *  valid tail like `{"run_id":"x"}` fails this and is dropped rather
+ *  than misread downstream. */
+const REQUIRED_FIELDS = ['run_id', 'item', 'stage', 'intent', 'ts'] as const;
+
 function isJournalRow(v: unknown): v is JournalRow {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+  if (!isRecord(v)) {
     return false;
   }
-  const r = v as JournalRow;
-  return (
-    typeof r.run_id === 'string' &&
-    r.run_id !== '' &&
-    typeof r.item === 'string' &&
-    Number.isInteger(r.seq) &&
-    typeof r.stage === 'string' &&
-    r.stage !== '' &&
-    typeof r.intent === 'string' &&
-    r.intent !== '' &&
-    typeof r.ts === 'string'
-  );
+  return Number.isInteger(v.seq) && REQUIRED_FIELDS.every(k => nonEmpty(v[k]));
 }
 
 /** The whole journal file, malformed lines dropped — a torn last line

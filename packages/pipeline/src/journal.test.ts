@@ -70,36 +70,36 @@ describe('pipelineJournalPath / openPipelineJournal', () => {
   test('anchors under the git common dir — <common>/bro/pipeline/<run>.journal.jsonl', () => {
     const dir = tmp();
     testRepoInit(dir);
-    const path = pipelineJournalPath(dir, 'r1');
+    const path = pipelineJournalPath({ dir, runId: 'r1' });
     assert.ok(path !== null);
     assert.ok(path.endsWith(join('.git', 'bro', 'pipeline', 'r1.journal.jsonl')));
   });
 
   test('null outside a repo; unsafe run ids throw', () => {
     const dir = tmp();
-    assert.equal(pipelineJournalPath(dir, 'r1'), null);
-    assert.throws(() => pipelineJournalPath(dir, '../escape'), /unsafe run id/);
+    assert.equal(pipelineJournalPath({ dir, runId: 'r1' }), null);
+    assert.throws(() => pipelineJournalPath({ dir, runId: '../escape' }), /unsafe run id/);
   });
 
   test('openPipelineJournal persists across instances — the resume shape', () => {
     const dir = tmp();
     testRepoInit(dir);
-    const j1 = openPipelineJournal(dir, 'r1');
+    const j1 = openPipelineJournal({ dir, runId: 'r1' });
     assert.ok(j1 !== null);
     assert.equal(j1.runId, 'r1');
     j1.append(row());
-    const j2 = openPipelineJournal(dir, 'r1');
+    const j2 = openPipelineJournal({ dir, runId: 'r1' });
     assert.ok(j2 !== null);
     assert.equal(j2.rows().length, 1);
   });
 
   test('openPipelineJournal is null outside a repo', () => {
-    assert.equal(openPipelineJournal(tmp(), 'r1'), null);
+    assert.equal(openPipelineJournal({ dir: tmp(), runId: 'r1' }), null);
   });
 
   test('a journal never double-reads its own appends', () => {
     const file = join(tmp(), 'r1.journal.jsonl');
-    const j = fileJournal(file, 'r1');
+    const j = fileJournal(file);
     j.append(row());
     assert.equal(j.rows().length, 1);
     j.append(row({ seq: 2 }));

@@ -227,7 +227,8 @@ function initRun(
   journal?: PipelineJournal
 ): Run {
   const runId = opts.runId ?? journal?.runId ?? mintRunId();
-  const j = journal ?? opts.journal ?? (opts.dir ? openPipelineJournal(opts.dir, runId) : null);
+  const j =
+    journal ?? opts.journal ?? (opts.dir ? openPipelineJournal({ dir: opts.dir, runId }) : null);
   if (j === null) {
     throw new Error(
       'pipeline run needs a journal — pass opts.journal, or opts.dir inside a git repo'
@@ -329,10 +330,17 @@ function evaluateGate(g: GateOn | undefined, ctx: PipelineContext): GateOutcome 
     return 'pass';
   }
   const v = ctxField(ctx, g.field);
-  if (v === undefined || (typeof v === 'object' && v !== null)) {
+  if (v === undefined || v === null) {
     return 'indeterminate';
   }
-  return (String(v) === g.value) === (g.op === '==') ? 'pass' : 'fail';
+  if (typeof v === 'object') {
+    return 'indeterminate'; // objects/arrays can't answer a scalar gate
+  }
+  const same = String(v) === g.value;
+  if (g.op === '==') {
+    return same ? 'pass' : 'fail';
+  }
+  return same ? 'fail' : 'pass';
 }
 
 function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
@@ -434,6 +442,14 @@ function retryStep(run: Run, to: NextStep): Step {
   return { go: { stage: to.stage, attempt: to.attempt + 1 } };
 }
 
+/** Terminal targets that map 1:1 to a run outcome — `park` and `retry`
+ *  are the only actions with their own mechanics. */
+const TERMINAL_OUTCOMES: ReadonlyMap<string, RunOutcome> = new Map([
+  ['end', 'end'],
+  ['close', 'close'],
+  ['abandon', 'abandon'],
+]);
+
 /** Where a verdict takes the run — stage re-entry, retry, park, or a
  *  terminal outcome. `out` is the just-settled verdict+payload; `to`
  *  is the invocation that produced it. */
@@ -455,8 +471,9 @@ function transitionStep(run: Run, out: EngineResult, to: NextStep): Step {
   if (target === 'park') {
     return { halt: result(run, 'park', to.stage, { verdict: out.verdict }) };
   }
-  if (target === 'end' || target === 'close' || target === 'abandon') {
-    return { halt: result(run, target, to.stage, { verdict: out.verdict }) };
+  const outcome = TERMINAL_OUTCOMES.get(target);
+  if (outcome !== undefined) {
+    return { halt: result(run, outcome, to.stage, { verdict: out.verdict }) };
   }
   return alertStep(run, to, {
     alert: PARK_ALERTS.missingTransition,

@@ -18,7 +18,7 @@ export {
   TERMINAL_ACTIONS,
   transitionFor,
 } from './formula.ts';
-export type { JournalRow, PipelineJournal } from './journal.ts';
+export type { JournalLocator, JournalRow, PipelineJournal } from './journal.ts';
 export {
   appendJournalRow,
   fileJournal,
