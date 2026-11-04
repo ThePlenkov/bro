@@ -49,7 +49,7 @@ the (future) journal — same data, human-written.
   - capture → pending merge.
 - Spec gaps:
   1. **Required-but-absent checks.** `merge` verdict `blocked` is
-     spec'd, but the *reason taxonomy* isn't: act's gate said OK while
+     spec'd, but the _reason taxonomy_ isn't: act's gate said OK while
      GitHub's ruleset blocked on a required check that never reported.
      Proposed wording: "the merge stage's gate evaluates BOTH reported
      check state and ruleset-required contexts absent from the
@@ -99,11 +99,73 @@ code — each became a spec fix and a review-thread resolution on
 - Trailers presented as authoritative. → driver-attested hints;
   registry lookup is the authority.
 
-## Graduation
+## Run 2: bro-7d5nb.2 — stage-runner core + write-ahead journal (S2)
 
-- Stage: **manual** — stages through merge were executed by hand
-  under the formula's contract; merge is in flight and capture
-  remains pending at log time.
-- Scripted: not yet — worth it when ≥2 items run concurrently.
-- Real: `.1` delivers the schema half of the runner; `.2` delivers
-  runner+journal — after that, logged runs replay as golden tests.
+- Invocation: `bro pipeline run --formula <spec-formula> --item
+  bro-7d5nb.2` (the runner itself ships in this item — the passage is
+  still hand-emulated, this time by the item's own machinery: the fake-
+  engine tests replay this same trajectory).
+- Spec reference: §write-ahead journal, §terminal actions, §gates and
+  the `skip` verdict, §review scoped-fix mode.
+- Input: bead `bro-7d5nb.2` (epic child, needs: [.1] → ready),
+  spec formula, repo `/home/pepl/projects/bro`.
+- Expected by spec: intent journaled BEFORE each side effect; verdict
+  completes the record; a verdict-less intent re-checks, never
+  re-fires; gate indeterminate fails closed; fix requires notes.
+- Actual action and result:
+  - classify → `solo` — interpreter work, disjoint from .3–.7's
+    stage/engine beads; payload `{group: solo, complexity: complex,
+    rank: 2}`.
+  - route → `spawn` — payload `{class: interactive, kind:
+    ts-package, orch: foreground, timing: now}`.
+  - work → `done` — `journal.ts` (JSONL write-ahead journal under
+    `<git-common>/bro/pipeline/`) + `runner.ts` (gate/transition/
+    resume engine with injectable `engines` map, `admit` go-marker
+    seam, `recheck` hook), 59 package tests green.
+  - review → in flight at log time — act gate + CodeScene gate stand
+    in for the formula's internal review stage (same standing-in as
+    Run 1).
+  - merge / capture → pending.
+- Design decisions worth recording (spec-consistent, underdetermined
+  by the spec):
+  - The journal record is one line per `seq`; completing a verdict
+    re-appends the SAME seq with verdict+payload — last row per seq
+    wins on read. "Intent without verdict" and "completed record" are
+    the same shape, which keeps the file's grammar at two verbs
+    (append, read) instead of update-in-place.
+  - Alert rows carry `resume` — the stage a wake re-enters. Gate-
+    indeterminate resumes AT the gated stage; fix-notes-missing
+    resumes at the source stage (re-judge); attempts-exhausted
+    resumes at the same stage with a fresh attempt series.
+  - `recheck` returns EngineResult|'pending'|undefined — 'pending'
+    parks WITHOUT a new journal row, so the pending intent stays the
+    resume anchor across wakes (an alert row would have overwritten
+    the resume point).
+  - Spawn-like intents (`intent = 'spawn'` for engine `fleet`) are
+    the only ones `admit` gates by default, and the only ones a
+    missing `recheck` refuses to re-fire — judge/learn side effects
+    are read-shaped, re-firing them is safe; a blind re-spawn is not.
+  - `runPipeline` over a non-empty journal IS a resume — one
+    `begin()` engine serves both exports; the journal is the state.
+  - `formula_sha` drift mid-run fails closed (park + alert) — a
+    changed formula is an operator decision.
+- Spec gaps hit:
+  1. **Recheck verdict source.** The spec says a verdict-less intent
+     "re-checks the world" but not WHO answers. A spawn's go-marker
+     proves admission, not outcome — the verdict still has to come
+     from the engine (exit taxonomy read). Proposed wording: "`admit`
+     attests whether the side effect was admitted; `recheck` attests
+     the outcome — a landed-but-unverdicted spawn is 'pending', not
+     done."
+  2. **Park-resume double-read.** Spec says park's resume "re-enters
+     at the same stage" — but an ALERT park (gate-indeterminate,
+     missing notes) has no verdict to re-enter from; the alert row
+     must carry the resume stage itself. The `resume` field on alert
+     rows is this run's answer.
+- Friction: none beyond Run 1's standing note — the internal-review
+  stage is still stood-in by the act gate, so `review.fix` waves
+  arrive as act threads, not engine verdicts.
+- Golden case: **yes** — the runner tests replay the spec formula's
+  full DAG (skip-gate, fix-scope, retry-budget, crash-resume) with
+  scripted engines; later stage beads (.3–.6) only supply real
+  engines behind the same `EngineMap` seam.

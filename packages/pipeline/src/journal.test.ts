@@ -1,0 +1,160 @@
+import assert from 'node:assert/strict';
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, test } from 'node:test';
+import { testRepoInit } from '@broject/core';
+import {
+  appendJournalRow,
+  fileJournal,
+  type JournalRow,
+  journalRecords,
+  memoryJournal,
+  openPipelineJournal,
+  pendingRecord,
+  pipelineJournalPath,
+  readJournalFile,
+} from './journal.ts';
+
+const row = (over: Partial<JournalRow> = {}): JournalRow => ({
+  run_id: 'r1',
+  item: 'bro-x.1',
+  seq: 1,
+  stage: 'work',
+  intent: 'spawn',
+  attempt: 1,
+  formula_sha: 'abc',
+  ts: '2026-01-01T00:00:00.000Z',
+  ...over,
+});
+
+const tmp = () => mkdtempSync(join(tmpdir(), 'pipeline-journal-'));
+
+describe('journal storage', () => {
+  test('append + read round-trips rows', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    appendJournalRow(file, row());
+    appendJournalRow(file, row({ seq: 2, verdict: 'done' }));
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].verdict, 'done');
+    assert.equal(rows[0].run_id, 'r1');
+  });
+
+  test('a torn last line is dropped, not poison', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    appendJournalRow(file, row());
+    appendFileSync(file, '{"run_id":"r1","seq":');
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].seq, 1);
+  });
+
+  test('a valid-JSON line missing row fields is dropped', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    writeFileSync(
+      file,
+      `${JSON.stringify({ run_id: 'r1', seq: 9 })}\n${JSON.stringify(row({ seq: 2 }))}\n`
+    );
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].seq, 2);
+  });
+
+  test('missing file reads as empty', () => {
+    assert.deepEqual(readJournalFile(join(tmp(), 'nope.jsonl')), []);
+  });
+});
+
+describe('pipelineJournalPath / openPipelineJournal', () => {
+  test('anchors under the git common dir — <common>/bro/pipeline/<run>.journal.jsonl', () => {
+    const dir = tmp();
+    testRepoInit(dir);
+    const path = pipelineJournalPath(dir, 'r1');
+    assert.ok(path !== null);
+    assert.ok(path.endsWith(join('.git', 'bro', 'pipeline', 'r1.journal.jsonl')));
+  });
+
+  test('null outside a repo; unsafe run ids throw', () => {
+    const dir = tmp();
+    assert.equal(pipelineJournalPath(dir, 'r1'), null);
+    assert.throws(() => pipelineJournalPath(dir, '../escape'), /unsafe run id/);
+  });
+
+  test('openPipelineJournal persists across instances — the resume shape', () => {
+    const dir = tmp();
+    testRepoInit(dir);
+    const j1 = openPipelineJournal(dir, 'r1');
+    assert.ok(j1 !== null);
+    assert.equal(j1.runId, 'r1');
+    j1.append(row());
+    const j2 = openPipelineJournal(dir, 'r1');
+    assert.ok(j2 !== null);
+    assert.equal(j2.rows().length, 1);
+  });
+
+  test('openPipelineJournal is null outside a repo', () => {
+    assert.equal(openPipelineJournal(tmp(), 'r1'), null);
+  });
+
+  test('a journal never double-reads its own appends', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    const j = fileJournal(file, 'r1');
+    j.append(row());
+    assert.equal(j.rows().length, 1);
+    j.append(row({ seq: 2 }));
+    assert.equal(j.rows().length, 2);
+    // bytes actually landed — a second instance reads them back
+    assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 2);
+  });
+});
+
+describe('journalRecords — last row per seq wins', () => {
+  test('an intent completed by its verdict is ONE record', () => {
+    const intent = row({ seq: 3 });
+    const rows = journalRecords([intent, { ...intent, verdict: 'done' }]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].verdict, 'done');
+  });
+
+  test('records come back seq-ordered whatever the write order', () => {
+    const rows = journalRecords([row({ seq: 5 }), row({ seq: 2 }), row({ seq: 5, verdict: 'x' })]);
+    assert.deepEqual(
+      rows.map(r => r.seq),
+      [2, 5]
+    );
+  });
+});
+
+describe('pendingRecord — the resume contract', () => {
+  test('a trailing verdict-less intent is pending', () => {
+    const records = journalRecords([row({ seq: 1, verdict: 'done' }), row({ seq: 2 })]);
+    assert.equal(pendingRecord(records)?.seq, 2);
+  });
+
+  test('a completed last record is not pending', () => {
+    const records = journalRecords([row({ seq: 1 }), row({ seq: 1, verdict: 'done' })]);
+    assert.equal(pendingRecord(records), undefined);
+  });
+
+  test('an alert last record is not pending — it parks instead', () => {
+    const records = journalRecords([row({ seq: 1, intent: 'alert', alert: 'gate-indeterminate' })]);
+    assert.equal(pendingRecord(records), undefined);
+  });
+
+  test('an earlier verdict-less intent is crash history, not the resume point', () => {
+    const records = journalRecords([row({ seq: 1 }), row({ seq: 2, verdict: 'done' })]);
+    assert.equal(pendingRecord(records), undefined);
+    assert.equal(records[0].verdict, undefined); // the artifact stays in the journal
+  });
+});
+
+describe('memoryJournal', () => {
+  test('append + rows for in-memory runs', () => {
+    const j = memoryJournal('r9');
+    j.append(row({ run_id: 'r9' }));
+    assert.equal(j.runId, 'r9');
+    assert.equal(j.rows().length, 1);
+    assert.equal(j.rows()[0].run_id, 'r9');
+  });
+});
