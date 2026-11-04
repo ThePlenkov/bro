@@ -101,12 +101,15 @@ Developing bro itself: see CONTRIBUTING.md.
   once GitHub's required checks pass. What auto-merge does NOT see:
   unresolved review threads — the act gate owns that loop
   (`bro review act` drives fixes/resolves per thread until the gate
-  is green). `bro review act wait <PR> --detach --cleanup --bead`
-  carries the post-merge retirement and is the watcher of record:
-  default `--timeout 45` minutes and it does NOT re-arm itself — a
-  dead or timed-out watcher is resurrected by `bro review act rearm`.
-  Auto-merge and the act watcher are complementary: whichever sees
-  green first merges; the watcher finishes cleanup either way.
+  is green). `bro review act wait <PR> --merge --cleanup --bead <id>
+  --detach` is the watcher of record: default `--timeout 45` minutes,
+  it does NOT re-arm itself — `bro review act rearm` resurrects a dead
+  watcher only (a timed-out one has already dropped its marker; arm a
+  fresh `act wait`). Auto-merge and the watcher are complementary:
+  whichever sees green first merges. When the watcher merges it runs
+  the post-merge cleanup itself; when GitHub auto-merge wins, cleanup
+  is NOT guaranteed — branch deletion and bead closure fall to
+  `bro review drive` or the operator.
 - **One executor per unit of work** — an interactive session (opencode,
   claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
