@@ -3689,10 +3689,35 @@ async function laneCatalog(lane: ProviderRoute, wire: WireCtx): Promise<LaneCata
       ? wire.cfg.catalog
       : { name: lane.name, entry: lane.cfg.entry };
   try {
-    return { rows: await catalogModels(source.name, source.entry, { acp: lane.opts.acp }) };
+    // the LANE's budget bounds its own catalog read — the operator's
+    // timeout, not a constant baked into the provider layer. A cold acp
+    // spawn that enumerates a multi-upstream agent's catalog can outrun
+    // 30s, and a lane that fails its read must fail with its own budget,
+    // not with a stranger's.
+    return {
+      rows: await catalogModels(source.name, source.entry, {
+        acp: lane.opts.acp,
+        deadline: Date.now() + lane.cfg.timeoutMs,
+      }),
+    };
   } catch (err) {
-    return { failure: `${lane.name}: ${err instanceof Error ? err.message : String(err)}` };
+    // the lane names itself — the acp layer's messages already carry the
+    // spawn label ('broken-acp: cannot exec …'), so a prefix that repeats
+    // it would read twice
+    const why = err instanceof Error ? err.message : String(err);
+    const named = why.startsWith(`${lane.name}: `);
+    return { failure: named ? why : `${lane.name}: ${why}` };
   }
+}
+
+/** A header value must be latin-1 clean AND bounded — a lane's failure
+ *  text carries whatever the agent said. Non-printables and non-ascii
+ *  become '?', and the whole value is capped, so a long diagnostic can
+ *  neither break the response it rides in nor push it past a client's
+ *  header limit (undici rejects a response whose headers exceed 16KB). */
+const HEADER_MAX = 4096;
+function headerSafe(text: string): string {
+  return text.replace(/[^\x20-\x7e]/g, '?').slice(0, HEADER_MAX);
 }
 
 /** The union of the lanes' rows — first id wins, so an id two lanes
@@ -3714,9 +3739,15 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const lanes = await Promise.all([...wire.routes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
+  // the degradation rides BOTH answers — a client must read the same
+  // signal whether the catalog is short (200) or the gateway is down
+  // (502). A 502 without it says "down" but not "which lane, why".
+  const laneError =
+    failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
   if (failures.length > 0 && failures.length === lanes.length) {
+    if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
     apiError(
       res,
       502,
@@ -3731,7 +3762,15 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     display_name: m.name ?? m.id,
     created_at: '2025-01-01T00:00:00Z',
   }));
-  res.writeHead(200, { 'content-type': 'application/json' });
+  // a lane that FAILED is not silently absent from the union: the
+  // degradation rides the response, so a client reading a shorter
+  // catalog can tell it apart from the whole truth. A lane that merely
+  // advertises nothing is not a failure and says nothing.
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (laneError !== undefined) {
+    headers['x-bro-lane-error'] = laneError;
+  }
+  res.writeHead(200, headers);
   res.end(
     JSON.stringify({
       object: 'list',
