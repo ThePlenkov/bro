@@ -74,3 +74,20 @@ export {
   stageDispatch,
   taskBacklog,
 } from './stages/classify.ts';
+export type {
+  QueueReason,
+  RouteBacklog,
+  RouteDeps,
+  RouteLoad,
+  RouteOrch,
+  RoutePayload,
+  RouteTiming,
+} from './stages/route.ts';
+export {
+  DEFAULT_ROUTE_KIND,
+  DEFAULT_ROUTE_ORCH,
+  ORCH_MODES,
+  QUEUE_REASONS,
+  ROUTE_TIMINGS,
+  routeStage,
+} from './stages/route.ts';
