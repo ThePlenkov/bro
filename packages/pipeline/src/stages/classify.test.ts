@@ -93,11 +93,17 @@ const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
       spy.peersAsked += 1;
       return peers ?? rows.filter(r => r.id !== ITEM);
     },
+    // writes mutate the row — the seam's re-read sees current labels,
+    // mirroring a real store (tagMates checks labels post-snapshot)
     addLabel: (id, l) => {
       spy.added.push([id, l]);
+      const r = rows.find(x => x.id === id);
+      if (r !== undefined) r.labels = [...(r.labels ?? []), l];
     },
     removeLabel: (id, l) => {
       spy.removed.push([id, l]);
+      const r = rows.find(x => x.id === id);
+      if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
     },
   };
   return spy;
@@ -204,6 +210,15 @@ describe('classify — clump', () => {
     assert.ok(Object.hasOwn(criteria.criteria, 'solo'));
   });
 
+  test('clump "new" with NO affirmed mate is solo — never a one-bead group', async () => {
+    const j = judge({ clump: choice('new'), 'mate_bro-bb2': noul(0.1) });
+    const b = backlog([row(ITEM), row('bro-bb2')]);
+    const res = await invoke(j, b);
+    assert.equal(res.verdict, 'solo');
+    assert.equal((res.payload as ClassifyPayload).group, 'solo');
+    assert.deepEqual(b.added, []); // no self-named clump label
+  });
+
   test('clump:solo / clump:new labels never collide with the sentinels', async () => {
     const j = judge({ clump: choice('solo') });
     const b = backlog([row(ITEM), row('bro-bb2', { labels: ['clump:new', 'clump:solo'] })]);
@@ -280,14 +295,20 @@ describe('classify — seams + edges', () => {
   });
 
   test('re-classification removes stale dup:/clump: marks before writing', async () => {
-    const j = judge({ clump: choice('new') });
-    const b = backlog([row(ITEM, { labels: ['dup:bro-old', 'keep-me', 'clump:old'] })]);
+    const j = judge({ clump: choice('new'), 'mate_bro-bb2': noul(0.9) });
+    const b = backlog([
+      row(ITEM, { labels: ['dup:bro-old', 'keep-me', 'clump:old'] }),
+      row('bro-bb2'),
+    ]);
     await invoke(j, b);
     assert.deepEqual(b.removed, [
       [ITEM, 'dup:bro-old'],
       [ITEM, 'clump:old'],
     ]);
-    assert.deepEqual(b.added, [[ITEM, `${CLUMP_LABEL_PREFIX}${ITEM}`]]);
+    assert.deepEqual(b.added, [
+      [ITEM, `${CLUMP_LABEL_PREFIX}${ITEM}`],
+      ['bro-bb2', `${CLUMP_LABEL_PREFIX}${ITEM}`],
+    ]);
   });
 
   test('labels: false → decide still runs, nothing is written', async () => {
@@ -394,6 +415,22 @@ describe('stageDispatch — one judge slot, many stages', () => {
     assert.equal(res.verdict, 'solo');
     const routeCall = { ...call(), stage: FORMULA.stages[1] };
     await assert.rejects(async () => h.invoke(routeCall), /no engine bound for stage "route"/);
+  });
+
+  test('missing recheck hook: read intent → "didn\'t land", spawn-like → pending park', async () => {
+    const h = stageDispatch({
+      classify: () => ({ verdict: 'solo' }),
+      work: () => ({ verdict: 'done' }),
+    });
+    const workStage = FORMULA.stages.find(s => s.engine === 'fleet');
+    assert.ok(workStage !== undefined);
+    const judgeCall = { ...call(), stage: FORMULA.stages[0] };
+    const spawnCall = { ...call(), stage: workStage };
+    // judge intent: undefined attests "didn't land" → bounded re-fire
+    assert.equal(await h.recheck?.(judgeCall), undefined);
+    // spawn intent: 'pending' parks — never a blind respawn through
+    // the always-bound wrapper
+    assert.equal(await h.recheck?.(spawnCall), 'pending');
   });
 });
 

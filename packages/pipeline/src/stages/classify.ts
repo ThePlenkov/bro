@@ -39,7 +39,14 @@ import type {
   TaskRow,
   TaskStore,
 } from '@broject/core';
-import type { EngineFn, EngineHandler, EngineResult, StageCall } from '../runner.ts';
+import {
+  DEFAULT_ADMIT_INTENTS,
+  STAGE_INTENTS,
+  type EngineFn,
+  type EngineHandler,
+  type EngineResult,
+  type StageCall,
+} from '../runner.ts';
 
 /** Label a duplicate carries — `dup:<id>` names the peer it duplicates. */
 export const DUP_LABEL_PREFIX = 'dup:';
@@ -352,10 +359,16 @@ function clumpOf(cx: Cx): Pick<Classification, 'group' | 'clumpId' | 'mates'> {
   if (pick === undefined || pick === NO_CLUMP) {
     return { group: 'solo', mates: [] };
   }
+  const mates = mateIds(cx);
+  if (pick === NEW_CLUMP && mates.length === 0) {
+    // A 'new' clump needs at least one affirmed mate — otherwise the
+    // item stands alone and minting a self-named clump label lies.
+    return { group: 'solo', mates: [] };
+  }
   return {
     group: 'clump',
     clumpId: pick === NEW_CLUMP ? cx.itemId : pick,
-    mates: mateIds(cx),
+    mates,
   };
 }
 
@@ -436,7 +449,10 @@ function retagItem(cx: Cx, tag: string | undefined): void {
  *  each bead single-clumped). */
 function tagMates(cx: Cx, tag: string, mates: string[]): void {
   for (const id of mates) {
-    const mate = cx.peers.find(p => p.id === id);
+    // Re-read through the seam — cx.peers is a snapshot from invoke's
+    // start and a concurrent run's write must not be clobbered on a
+    // stale label check.
+    const mate = cx.deps.backlog.item(id);
     const clumped = mate?.labels?.some(l => l.startsWith(CLUMP_LABEL_PREFIX)) ?? false;
     if (mate !== undefined && !clumped) {
       cx.deps.backlog.addLabel(id, tag);
@@ -474,6 +490,9 @@ export function classifyStage(deps: ClassifyDeps): EngineHandler {
         throw new Error(`classify: item "${call.item}" is not in the backlog`);
       }
       const maxPeers = deps.maxPeers ?? DEFAULT_MAX_PEERS;
+      if (!Number.isInteger(maxPeers) || maxPeers < 0) {
+        throw new Error(`classify: maxPeers must be a non-negative integer, got ${maxPeers}`);
+      }
       const peers = deps.backlog
         .peers(item)
         .filter(p => p.id !== item.id)
@@ -496,11 +515,17 @@ export function classifyStage(deps: ClassifyDeps): EngineHandler {
  *   engines: { judge: stageDispatch({ classify: classifyStage(deps),
  *                                    route: routeStage(deps) }) }
  *
- * An unbound stage throws loudly at invoke — a misbound engine map is
- * a wiring bug, never a silent wrong-stage verdict. `recheck`
- * forwards to the stage's own hook (absent = the runner's "didn't
- * land" attestation — safe for judge intents, which are read-shaped
- * plus idempotent label writes).
+ * An unbound stage throws loudly — a misbound engine map is a wiring
+ * bug, never a silent wrong-stage verdict. `recheck` forwards to the
+ * stage's own hook; when the bound stage has none, the wrapper cannot
+ * just return undefined — that attests "didn't land", which re-fires
+ * ANY pending intent including spawn-like ones (the runner's
+ * fail-closed no-hook park only sees `recheck === undefined`, and this
+ * wrapper always binds one). Spawn-like intents get 'pending' — park,
+ * never a blind respawn; read intents keep undefined, the bounded
+ * re-fire judge stages want. (Custom `admitIntents` beyond
+ * DEFAULT_ADMIT_INTENTS aren't visible here — bind a recheck hook for
+ * non-standard spawn-like stages.)
  */
 export function stageDispatch(bindings: Record<string, EngineFn | EngineHandler>): EngineHandler {
   const map = new Map<string, EngineHandler>();
@@ -516,7 +541,14 @@ export function stageDispatch(bindings: Record<string, EngineFn | EngineHandler>
   };
   return {
     invoke: call => bound(call).invoke(call),
-    recheck: call => map.get(call.stage.name)?.recheck?.(call),
+    recheck: call => {
+      const h = bound(call);
+      if (h.recheck !== undefined) {
+        return h.recheck(call);
+      }
+      const intent = STAGE_INTENTS[call.stage.engine] ?? call.stage.engine;
+      return DEFAULT_ADMIT_INTENTS.includes(intent) ? 'pending' : undefined;
+    },
   };
 }
 
