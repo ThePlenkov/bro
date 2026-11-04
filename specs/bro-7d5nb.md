@@ -187,6 +187,11 @@ next stage reads:
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
   complexity verdict: `complex` required, `cheap` skips to merge.
+  `fix` re-enters `work` in scoped-fix mode — the work stage runs
+  against the SAME worktree with the review's `notes` payload as
+  its scope input (a fix round), never a re-run of the original
+  task. Each wave of findings is one scoped-fix re-entry; `push`
+  proceeds to merge.
 - **merge** — the existing act gate: threads/CI/reviewers settle;
   `blocked` retries bounded by fix-rounds, `dropped` is terminal.
 - **capture** — `self learn capture` on land (cheap, per-item);
