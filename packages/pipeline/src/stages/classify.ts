@@ -174,20 +174,27 @@ const peerText = (p: TaskRow): string =>
     .filter(s => s !== '')
     .join(' — ');
 
+/** `clump:<id>` → the joinable id, or undefined — ids colliding with
+ *  the `solo`/`new` sentinels are skipped: a `clump:solo` label is a
+ *  name some other scheme wrote, never this stage's sentinel, and
+ *  letting it into the criteria would make the sentinel ambiguous. */
+const clumpIdOf = (l: string): string | undefined => {
+  if (!l.startsWith(CLUMP_LABEL_PREFIX)) {
+    return undefined;
+  }
+  const id = l.slice(CLUMP_LABEL_PREFIX.length);
+  return id !== '' && id !== NO_CLUMP && id !== NEW_CLUMP ? id : undefined;
+};
+
 /** The clump ids already claimed on peer labels — `clump` choices the
- *  judge can join without minting a new group. Ids colliding with the
- *  `solo`/`new` sentinels are skipped: a `clump:solo` label is a name
- *  some other scheme wrote, never this stage's sentinel — letting it
- *  into the criteria would make the sentinel ambiguous. */
+ *  judge can join without minting a new group. */
 function existingClumps(peers: TaskRow[]): string[] {
   const ids = new Set<string>();
   for (const p of peers) {
     for (const l of p.labels ?? []) {
-      if (l.startsWith(CLUMP_LABEL_PREFIX) && l.length > CLUMP_LABEL_PREFIX.length) {
-        const id = l.slice(CLUMP_LABEL_PREFIX.length);
-        if (id !== NO_CLUMP && id !== NEW_CLUMP) {
-          ids.add(id);
-        }
+      const id = clumpIdOf(l);
+      if (id !== undefined) {
+        ids.add(id);
       }
     }
   }
