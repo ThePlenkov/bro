@@ -203,43 +203,69 @@ the byte proxy's virtue is that it owns no protocol at all.
 
 ## Plan
 
-The design lands in pieces, each its own PR; the alias mechanism first.
+The alias mechanism lands as ONE PR: the pieces are interdependent — a
+route table without per-entry lanes would answer a route with a second
+agent, and a per-entry lane without the primary-route rule would
+advertise the same models twice. The native-lane vision stays reserved
+here until a PR proposes its transport.
 
-- [ ] `packages/core/src/config.ts` — `serveSection` accepts
-      `string[] | Record<string, string>`; `providerNames` yields the route
-      → entry pairs; the emitted schema follows.
-- [ ] `packages/cli/src/commands/serve-conductor.ts` — `ConductorConfig`
-      carries routes (name → entry) beside the backend; `conductorConfig`
-      builds the route table, rejecting a duplicate route, a slash in a
-      route, and a non-acp entry; the default lane answers to its own key
-      plus any declared route for it.
-- [ ] `packages/cli/src/commands/serve-conductor.ts` — the lane's pool,
+- [x] `packages/core/src/config.ts` — `serveSection` accepts
+      `string[] | Record<string, string>`; `providerRoutes` yields the
+      route → entry pairs (and drops a malformed one with a diagnostic);
+      the emitted schema follows.
+- [x] `packages/cli/src/commands/serve-conductor.ts` — `ConductorConfig`
+      carries `routes` (a `RouteBinding` list) beside the backend;
+      `conductorConfig` builds the route table, rejecting a duplicate
+      route, a slash in a route, and a non-acp entry; the default lane
+      answers to its own key plus any declared route for it.
+- [x] `packages/cli/src/commands/serve-conductor.ts` — the lane's pool,
       seam label and session map move to the ENTRY; routes share them. The
       journal's `backend` field becomes the route that ANSWERED — the
       predecessor's route for a chained `/v1/responses` request.
-- [ ] `packages/cli/src/commands/serve-conductor.ts` — the `/v1/models`
+- [x] `packages/cli/src/commands/serve-conductor.ts` — the `/v1/models`
       catalog advertises each lane under its primary route only.
-- [ ] `packages/cli/src/commands/serve.ts` — the startup line lists the
+- [x] `packages/cli/src/commands/serve.ts` — the startup line lists the
       routes, not the entry keys.
-- [ ] `specs/bro-jxw7p.md` — the native-lane vision stays reserved here
+- [x] `specs/bro-jxw7p.md` — the native-lane vision stays reserved here
       until a PR proposes its transport.
+
+### What the implementation added
+
+Three things the design above left open, decided while building it:
+
+- **The route table is a LIST, not a map.** The primary route is "the
+  first DECLARED route for an entry", so the declaration ORDER matters —
+  a `Record` cannot promise an order across numeric-looking keys. The
+  binding carries a `declared` flag: the default lane's own key is
+  routable but never declared, so a declared alias takes over the
+  advertisement and the implicit key never does.
+- **A config with no routes means the ARRAY form.** `routeBindings()`
+  falls back to "every exposed entry under its own name, the default
+  lane under its own key" — a config built before the route table
+  existed behaves exactly as it did.
+- **The chain remembers the ROUTE, not just the lane.** A chained
+  `/v1/responses` request is journaled under the route the predecessor
+  answered under, so the journal reads as the operator wrote it — the
+  predecessor's route, whatever the incoming model's prefix asks for.
 
 ## Verify
 
-- `serve-conductor.test.ts` — the array form behaves exactly as before (a
-  route IS the entry key); the map form routes `opencode-acp/…` to the
-  `opencode-iceman` entry; the entry key of an exposed lane is NOT routable;
-  the default lane answers to its own key AND to a declared alias; two
-  entries under one route is a loud error; a route with a slash is a loud
-  error; a map value naming a non-acp entry is a loud error.
-- Two routes for ONE entry share the ACP pool and the session map — the same
-  conversation key under both routes is ONE conversation, and the agent is
-  spawned once.
-- The catalog lists a lane's models under its primary route only — no
-  duplicate rows when a lane has two routes.
-- The journal's `backend` field carries the route that answered: the
-  requested route for a plain turn, the PREDECESSOR's route for a chained
-  `/v1/responses` request.
+- `serve-conductor.test.ts` (config) — the array form behaves exactly as
+  before (a route IS the entry key); the map form routes `opencode-acp/…`
+  to the `opencode-iceman` entry; the entry key of an exposed lane is NOT
+  routable; the default lane answers to its own key AND to a declared
+  alias; two entries under one route is a loud error; a route with a slash
+  is a loud error; a map value naming a non-acp entry is a loud error; an
+  entry with no declared route is not exposed at all.
+- `serve-conductor.test.ts` (runtime) — a declared route reaches its entry
+  while the entry key rides the default lane; two routes over ONE entry
+  share the agent and the conversation (ONE `session/new`); the catalog
+  lists a lane's models under its primary route only; the journal's
+  `backend` carries the route that answered — the predecessor's for a
+  chained `/v1/responses` request.
+- `config.test.ts` — `serve.providers` accepts the list and the map; a
+  non-string route value is dropped with a diagnostic; a value that is
+  neither drops the section.
 - A route naming no lane still rides the default lane (no 400 for a model
   the gateway simply does not route).
 - Live, one listener: `GET /v1/models` answers the union of the lanes'

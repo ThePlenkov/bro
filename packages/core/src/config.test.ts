@@ -110,6 +110,25 @@ describe('loadConfig stores', () => {
   })
 })
 
+describe('loadConfig serve.providers', () => {
+  test('the array form keeps the entry names', () => {
+    const cfg = load({ serve: { providers: ['a', 'b'] } })
+    assert.deepEqual(cfg.serve.providers, ['a', 'b'])
+  })
+  test('the map form declares a route per entry', () => {
+    const cfg = load({ serve: { providers: { 'opencode-acp': 'oc-iceman' } } })
+    assert.deepEqual(cfg.serve.providers, { 'opencode-acp': 'oc-iceman' })
+  })
+  test('a non-string route value is dropped with a diagnostic', () => {
+    const cfg = load({ serve: { providers: { good: 'oc-iceman', bad: 7 } } })
+    assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+  })
+  test('a providers value that is neither a list nor a map drops the section', () => {
+    const cfg = load({ serve: { providers: 'oc-iceman' } })
+    assert.equal(cfg.serve.providers, undefined)
+  })
+})
+
 describe('loadConfig pack', () => {
   test('absent pack → undefined, not a default leak', () => {
     assert.equal(load().pack, undefined)

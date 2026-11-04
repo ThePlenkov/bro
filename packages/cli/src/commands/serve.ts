@@ -204,6 +204,7 @@ import { providerConfig, providerProxy, type ProviderConfig } from './serve-prov
 import {
   conductorConfig,
   conductorProxy,
+  routeBindings,
   type ConductorConfig,
   type TerminalRegistry,
 } from './serve-conductor.ts';
@@ -2463,8 +2464,12 @@ async function armBusBroker(dir: string, url: string): Promise<BusBroker | undef
 
 /** The lanes the gateway serves — the default backend plus every
  *  exposed provider, each reachable by its own model prefix. */
+/** The routes the gateway answers to — the PUBLIC names a client asks
+ *  for, not the private entry keys. The default lane's own key comes
+ *  first, then the declared routes; a lane reached by two routes lists
+ *  both (spec bro-jxw7p). */
 function conductorLanes(cfg: ConductorConfig): string[] {
-  return [cfg.backend, ...Object.keys(cfg.providers ?? {})];
+  return routeBindings(cfg).map(binding => binding.name);
 }
 
 export async function runServeCommand(argv: string[]): Promise<void> {

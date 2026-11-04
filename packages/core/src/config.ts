@@ -737,6 +737,12 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
+/** The exposed providers — the ROUTES the gateway answers to. Two
+ *  spellings: an array of entry names (route ≡ entry, today's form) or a
+ *  map of route → entry name (the public name is chosen; the entry keeps
+ *  its own). */
+export type ServeProviders = string[] | Record<string, string>;
+
 /** The exposed provider names — a list of non-blank strings, else
  *  undefined (the section carries no list). A value that is not a
  *  list, or an entry that is not a name, is a diagnostic — the lane
@@ -758,6 +764,37 @@ function providerNames(raw: unknown): string[] | undefined {
   return names;
 }
 
+/** The exposed providers, in either spelling — the array of entry names
+ *  (route ≡ entry) or the map of route → entry (the public name is
+ *  chosen). A malformed value is a diagnostic, not a silent drop: a lane
+ *  that vanished leaves the operator with a gateway that answers fewer
+ *  models than they declared. */
+function providerRoutes(raw: unknown): ServeProviders | undefined {
+  if (raw === undefined) return undefined;
+  if (Array.isArray(raw)) return providerNames(raw);
+  if (typeof raw === 'object' && raw !== null) {
+    const routes: Record<string, string> = {};
+    for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (route.trim() === '') {
+        console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
+        continue;
+      }
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        console.error(
+          `bro.config: serve.providers route '${route}' must name a provider entry — entry dropped`
+        );
+        continue;
+      }
+      routes[route.trim()] = entry.trim();
+    }
+    return routes;
+  }
+  console.error(
+    'bro.config: serve.providers must be an array of provider names or a route→entry map — section dropped'
+  );
+  return undefined;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -765,15 +802,18 @@ function providerNames(raw: unknown): string[] | undefined {
  *  (apiKeyHelper children do not inherit settings.env).
  *  `providers` names the OTHER acp entries the gateway exposes: a
  *  request whose model carries one of their names routes there, so one
- *  listener serves every provider's models. */
-export const serveSection: ConfigSection<{ backend?: string; providers?: string[] }> = raw => {
+ *  listener serves every provider's models. It accepts two spellings —
+ *  an array of entry names (the route IS the entry) or a map of route →
+ *  entry, so the public name can be chosen independently of the
+ *  entry's own name (spec bro-jxw7p). */
+export const serveSection: ConfigSection<{ backend?: string; providers?: ServeProviders }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
-  const providers = providerNames(obj.providers);
+  const providers = providerRoutes(obj.providers);
   // an unset backend reads as an empty bag — same shape as providers:{}
   return {
     ...(backend === undefined ? {} : { backend }),
@@ -781,7 +821,10 @@ export const serveSection: ConfigSection<{ backend?: string; providers?: string[
   };
 };
 
-serveSection.jsonSchema = js.obj({ backend: js.str, providers: js.strList });
+serveSection.jsonSchema = js.obj({
+  backend: js.str,
+  providers: js.oneOf(js.strList, js.map(js.str)),
+});
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -1245,7 +1288,7 @@ export interface BroConfig {
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. */
-  serve: { backend?: string; providers?: string[] };
+  serve: { backend?: string; providers?: ServeProviders };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;

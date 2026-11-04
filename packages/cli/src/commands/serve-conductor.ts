@@ -54,13 +54,34 @@ import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
+/** One PUBLIC route — the name a client asks for, and the ENTRY it
+ *  reaches. A route is the first segment of a requested model id; the
+ *  entry is the private config name of the provider's configuration.
+ *  The two are separate things: the route names a DESTINATION, the
+ *  entry names a CONFIGURATION (spec bro-jxw7p). */
+export interface RouteBinding {
+  /** The route name — the first segment of a requested model id. */
+  name: string;
+  /** The ENTRY key — the private config name this route reaches. */
+  entry: string;
+  /** The route was DECLARED by the operator. The default lane's own key
+   *  is routable without a declaration — so a declared alias takes over
+   *  the advertisement and the implicit key never does. */
+  declared: boolean;
+}
+
 export interface ConductorConfig {
   backend: string;
   entry: AcpEntry;
-  /** The OTHER acp entries the gateway exposes — name → entry. A
-   *  request whose model carries one of their names routes there, so
+  /** The OTHER acp entries the gateway exposes — ENTRY key → entry. A
+   *  request whose model carries one of their ROUTES routes there, so
    *  one listener serves every provider's models. */
   providers?: Record<string, AcpEntry>;
+  /** The PUBLIC routes the gateway answers to, in order — the default
+   *  lane's own key first, then the declared routes. Several routes may
+   *  name one entry: that entry keeps ONE lane (one agent, one set of
+   *  conversations) under every name it answers to. */
+  routes?: RouteBinding[];
   /** The /v1/models source — defaults to the backend itself; a
    *  BRO_PROVIDER_CATALOG pin points at a different providers entry
    *  (a tool-less backend advertises nothing, the catalog still can). */
@@ -75,6 +96,22 @@ export interface ConductorConfig {
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+}
+
+/** The routes a config answers to — the config's own table, or the
+ *  ARRAY form's implicit one: every exposed entry under its own name,
+ *  the default lane under its own key. A config that declares no routes
+ *  behaves exactly as it did before the route table existed. */
+export function routeBindings(cfg: ConductorConfig): RouteBinding[] {
+  if (cfg.routes !== undefined) return cfg.routes;
+  return [
+    { name: cfg.backend, entry: cfg.backend, declared: false },
+    ...Object.keys(cfg.providers ?? {}).map(entry => ({
+      name: entry,
+      entry,
+      declared: true,
+    })),
+  ];
 }
 
 /** A positive-int env pin, else the fallback — 0, negative and NaN are
@@ -186,15 +223,62 @@ export function conductorConfig(
   // named so a request can route to it by model. An injected registry
   // owns the whole name space: the file layer's serve.providers must
   // not leak a name it does not define, exactly like serve.backend.
+  const declared = providers === undefined ? (cfg.serve.providers ?? []) : [];
+  // the ROUTE table — the public name a client asks for, beside the
+  // private name of the entry it reaches. Two spellings declare the
+  // same thing: an array of entry names (route ≡ entry) or a map of
+  // route → entry (the public name is chosen).
+  const bindings: RouteBinding[] = [
+    // the default lane's own key is routable WITHOUT a declaration — the
+    // one exception, so `devin-acp/…` keeps working whatever the
+    // operator declared.
+    { name: backend, entry: backend, declared: false },
+  ];
+  const byRoute = new Map<string, RouteBinding>([[backend, bindings[0]!]]);
+  const bind = (route: string, entryKey: string): void => {
+    requireLaneName(route);
+    const prior = byRoute.get(route);
+    if (prior !== undefined) {
+      if (prior.entry !== entryKey) {
+        throw new Error(
+          `provider route '${route}' names two entries ('${prior.entry}' and '${entryKey}') — ` +
+            `a route must name exactly one provider`
+        );
+      }
+      // the same route reaching the same entry — the declaration just
+      // makes it DECLARED, so it takes over the advertisement
+      prior.declared = true;
+      return;
+    }
+    const binding: RouteBinding = { name: route, entry: entryKey, declared: true };
+    byRoute.set(route, binding);
+    bindings.push(binding);
+  };
+  // the exposed LANES — the entries the declared routes reach, minus the
+  // default's own. A lane is per ENTRY: two routes naming one entry
+  // share its agent, its pool and its conversations.
   const exposed: Record<string, AcpEntry> = {};
-  for (const name of providers === undefined ? (cfg.serve.providers ?? []) : []) {
-    if (name === backend) continue;
-    exposed[requireLaneName(name)] = requireAcpEntry(name, registry);
+  const entries = new Set<string>();
+  if (Array.isArray(declared)) {
+    for (const name of declared) {
+      bind(name, name);
+      entries.add(name);
+    }
+  } else {
+    for (const [route, entryKey] of Object.entries(declared)) {
+      bind(route, entryKey);
+      entries.add(entryKey);
+    }
+  }
+  for (const entryKey of entries) {
+    if (entryKey === backend) continue;
+    exposed[entryKey] = requireAcpEntry(entryKey, registry);
   }
   return {
     backend,
     entry,
     providers: exposed,
+    routes: bindings,
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
@@ -1765,19 +1849,34 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
 interface WireCtx {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
-  link: (provider: string, parent?: OtelCtx) => Promise<AcpPeer>;
-  /** Every provider lane the gateway serves — the default backend plus
-   *  the exposed ones, each with its own acp pool. */
-  routes: Map<string, ProviderRoute>;
+  /** The link factory — keyed by the ENTRY, so one agent serves every
+   *  route that reaches its entry. */
+  link: (entry: string, parent?: OtelCtx) => Promise<AcpPeer>;
+  /** Every provider lane the gateway serves — keyed by its ENTRY. The
+   *  default backend plus the exposed ones, each with its own acp pool. */
+  lanes: Map<string, ProviderLane>;
+  /** The PUBLIC routes — route name → entry key. The router's table. */
+  routes: Map<string, string>;
 }
 
-/** One provider's lane — its entry, its model pin, its acp pool, and
- *  the conversations it carries. A request rides ONE lane: the one its
- *  model's provider prefix names, else the default backend. Sessions
- *  are per lane: the same conversation key under two providers is two
- *  conversations, each held in its own provider's context. */
-interface ProviderRoute {
-  name: string;
+/** One provider's LANE — the runtime carrier of an ENTRY: its model pin,
+ *  its acp pool, and the conversations it carries. A request rides ONE
+ *  lane: the one its model's route names, else the default backend.
+ *  Sessions are per lane: the same conversation key under two providers
+ *  is two conversations, each held in its own provider's context.
+ *
+ *  A lane is per ENTRY, never per route: two routes naming one entry
+ *  share this lane — one agent, one pool, one set of conversations
+ *  (spec bro-jxw7p). */
+interface ProviderLane {
+  /** The ENTRY key — the private config name. The pool, the spawn label
+   *  and the session map live under it. */
+  entry: string;
+  /** The PUBLIC routes that reach this lane. */
+  routes: string[];
+  /** The route the catalog advertises this lane under — the first
+   *  DECLARED route for its entry. */
+  primary: string;
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
   pool: AcpLinkPool;
@@ -1785,32 +1884,46 @@ interface ProviderRoute {
   pendingOpens: Set<string>;
 }
 
-/** The lane a name names — a chain's lane, or the provider prefix on a
- *  requested model. Undefined when no lane carries the name. */
-function laneNamed(wire: WireCtx, name: string | undefined): ProviderRoute | undefined {
-  if (name === undefined) return undefined;
-  return wire.routes.get(name);
+/** A routing decision — the LANE that serves the request and the ROUTE
+ *  it answers under. The route is the public identity an operator reads
+ *  in the journal; the lane owns the agent and the conversation. */
+interface Routing {
+  lane: ProviderLane;
+  route: string;
 }
 
-/** The lane a request rides — the model's `<provider>/<model>` prefix
- *  when it names an exposed provider, else the default backend. A bare
- *  id (or a prefix naming no lane) rides the default: a model id the
- *  default's catalog cannot serve is that lane's own verdict. A
- *  chained /v1/responses request rides its PREDECESSOR's lane — that
- *  chain already lives in one provider's context. */
-function routeOf(wire: WireCtx, model: string | undefined, chain?: ChainEntry): ProviderRoute {
-  const chained = laneNamed(wire, chain?.lane);
-  if (chained !== undefined) return chained;
+/** The lane a name names — a chain's lane, or the provider prefix on a
+ *  requested model. Undefined when no lane carries the name. */
+function laneNamed(wire: WireCtx, name: string | undefined): ProviderLane | undefined {
+  if (name === undefined) return undefined;
+  const entry = wire.routes.get(name);
+  return entry === undefined ? undefined : wire.lanes.get(entry);
+}
+
+/** The lane a request rides — the model's `<route>/<model>` prefix when
+ *  it names a route, else the default backend. A bare id (or a prefix
+ *  naming no route) rides the default: a model id the default's catalog
+ *  cannot serve is that lane's own verdict — the gateway must not 400 a
+ *  client for a model it simply does not route. A chained /v1/responses
+ *  request rides its PREDECESSOR's lane — that chain already lives in
+ *  one provider's context — and answers under the route the predecessor
+ *  answered under, not under the incoming model's prefix. */
+function routeOf(wire: WireCtx, model: string | undefined, chain?: ChainEntry): Routing {
+  const chained = chain === undefined ? undefined : wire.lanes.get(chain.lane);
+  if (chained !== undefined && chain !== undefined) {
+    return { lane: chained, route: chain.route };
+  }
   const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
   const named = laneNamed(wire, head);
-  if (named !== undefined) return named;
-  const fallback = wire.routes.get(wire.cfg.backend);
+  if (named !== undefined) return { lane: named, route: head as string };
+  const fallback = wire.lanes.get(wire.cfg.backend);
   // the default lane is built unconditionally at proxy construction —
   // a missing one is a wiring bug, not an unroutable model
   if (fallback === undefined) {
     throw new Error(`bro conductor: no lane for default backend '${wire.cfg.backend}'`);
   }
-  return fallback;
+  // nothing matched: the default lane answers under its ADVERTISED route
+  return { lane: fallback, route: fallback.primary };
 }
 
 /** `provider/model` ids are a real pin — resolved against the agent's
@@ -2016,7 +2129,7 @@ function settledStopReason(
  *  deadline and the provenance every dialect spells the same way. The
  *  three dialects differ only in their openStream and their chaining. */
 function laneTurnEnv(
-  route: ProviderRoute,
+  lane: ProviderLane,
   peer: AcpPeer,
   d: {
     body: MessagesRequest;
@@ -2032,17 +2145,19 @@ function laneTurnEnv(
     msgs: d.body.messages ?? [],
     prefix: prefixText(d.body),
     peer,
-    cfg: route.cfg,
-    opts: route.opts,
-    sessions: route.sessions,
-    pendingOpens: route.pendingOpens,
+    cfg: lane.cfg,
+    opts: lane.opts,
+    sessions: lane.sessions,
+    pendingOpens: lane.pendingOpens,
     key: d.key,
     stopKey: d.stopKey,
     parent: d.parent,
     requestModel: d.requestModel,
-    deadline: Date.now() + route.cfg.timeoutMs,
+    deadline: Date.now() + lane.cfg.timeoutMs,
     signal: d.signal,
-    by: `conductor:${route.name}`,
+    // the spawn label names the ENTRY — two routes reaching one entry
+    // share the agent, so they share the label too
+    by: `conductor:${lane.entry}`,
     imageOk: peer.caps?.image === true,
   };
 }
@@ -2056,7 +2171,7 @@ function laneTurnEnv(
  *  paths can reach it. */
 function messagesStreamOpener(
   res: ServerResponse,
-  route: ProviderRoute,
+  lane: ProviderLane,
   body: MessagesRequest,
   requestModel: string | undefined,
   key: string | undefined,
@@ -2076,10 +2191,10 @@ function messagesStreamOpener(
     });
     const live = new LiveTurn(
       res,
-      servedModel(requestModel, route.opts, route.cfg, body),
+      servedModel(requestModel, lane.opts, lane.cfg, body),
       inputTokens,
       stops,
-      route.cfg.keepaliveMs ?? 10_000,
+      lane.cfg.keepaliveMs ?? 10_000,
       body.tool_choice?.type !== 'none'
     );
     set(live);
@@ -2103,32 +2218,34 @@ async function messages(
   // the buffered leg cuts the settled text post-hoc. Either way the
   // recorded reply is `stops.emitted` — exactly what the client saw.
   const stops = new StopFilter(stopSeqs);
-  // the lane this request rides — the model's provider prefix names it
+  // the lane this request rides — the model's route prefix names it —
+  // and the route it answers under (the public identity the journal
+  // records)
   const requestModel = requestModelOf(body);
-  const route = routeOf(wire, requestModel);
+  const { lane, route } = routeOf(wire, requestModel);
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(route.name, parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(route, peer, { body, key, stopKey, parent, requestModel, signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, { body, key, stopKey, parent, requestModel, signal: ac.signal }),
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
       // as an in-stream error event, the wire's own dead-stream shape.
       // The turn layer fires this only once a real pump is chosen — a
       // replay never opens the stream, a failed open still answers an
       // HTTP status.
-      openStream: messagesStreamOpener(res, route, body, requestModel, key, stops, l => {
+      openStream: messagesStreamOpener(res, lane, body, requestModel, key, stops, l => {
         live = l;
       }),
     });
   } catch (err) {
-    turnError(res, err, live, route.name, t0);
+    turnError(res, err, live, route, t0);
     return;
   }
   // a resend that carried nothing new — replay the recorded reply,
@@ -2165,10 +2282,11 @@ async function messages(
   if (out.conv !== undefined) {
     // a stop hit swallowed post-marker output the session still holds —
     // the conversation diverged from the client's view (bro-vfbyc)
-    settleConv(route.sessions, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
+    settleConv(lane.sessions, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
   }
   otelEvent('conductor.turn', {
-    backend: route.name,
+    // the ROUTE that answered — the public identity an operator reads
+    backend: route,
     model: reply.model,
     stop_reason: view.stopReason,
     stream: body.stream !== false,
@@ -2727,15 +2845,20 @@ const CHAIN_CAP = 256;
 interface ChainEntry {
   key: string;
   consumed: number;
+  /** The lane's ENTRY key — the chain lives in that lane's context. */
   lane: string;
+  /** The route the PREDECESSOR answered under — the public identity the
+   *  journal records for the chained turn, whatever the incoming
+   *  model's prefix asks for. */
+  route: string;
 }
 
 function pruneChains(
   chains: Map<string, ChainEntry>,
-  routes: Map<string, ProviderRoute>
+  lanes: Map<string, ProviderLane>
 ): void {
   for (const [id, e] of chains) {
-    if (routes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
+    if (lanes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
   }
   let overflow = chains.size - CHAIN_CAP;
   for (const id of chains.keys()) {
@@ -2850,9 +2973,9 @@ const respShape = (r: ResponsesRequest): string | undefined =>
       : undefined;
 
 /** The model label a recorded reply or the wire config resolves to. */
-function respModel(route: ProviderRoute, body: MessagesRequest, recorded?: string): string {
+function respModel(lane: ProviderLane, body: MessagesRequest, recorded?: string): string {
   if (recorded !== undefined && recorded !== '') return recorded;
-  return servedModel(undefined, route.opts, route.cfg, body);
+  return servedModel(undefined, lane.opts, lane.cfg, body);
 }
 
 /** Replay branch — a resend carried nothing new; answer the recorded
@@ -2866,19 +2989,21 @@ interface RespReplayCtx {
   key: string | undefined;
   store: boolean;
   chains: Map<string, ChainEntry>;
-  route: ProviderRoute;
+  lane: ProviderLane;
+  /** The route the turn ANSWERED under — the journal's public identity. */
+  route: string;
 }
 
 function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx): void {
-  const { rreq, out, respId, key, store, chains, route } = ctx;
+  const { rreq, out, respId, key, store, chains, lane, route } = ctx;
   const lr = out.conv?.lastReply;
   const capped = capBlocks(lr?.blocks ?? [], capCharsOf(rreq.max_output_tokens));
   const blocks = capped.blocks;
-  const model = respModel(route, {}, lr?.model);
+  const model = respModel(lane, {}, lr?.model);
   const status = capped.capped ? 'incomplete' : respStatus(lr?.stopReason ?? '');
   if (store && out.conv !== undefined && key !== undefined) {
-    chains.set(respId, { key, consumed: out.conv.consumed, lane: route.name });
-    pruneChains(chains, wire.routes);
+    chains.set(respId, { key, consumed: out.conv.consumed, lane: lane.entry, route });
+    pruneChains(chains, wire.lanes);
   }
   if (rreq.stream === true) {
     sseHead(res);
@@ -2941,7 +3066,7 @@ function respConvKey(
 function respStreamOpener(
   rreq: ResponsesRequest,
   res: ServerResponse,
-  route: ProviderRoute,
+  lane: ProviderLane,
   d: {
     respId: string;
     body: MessagesRequest;
@@ -2956,7 +3081,7 @@ function respStreamOpener(
     const live = new RespLive(
       res,
       d.respId,
-      servedModel(requestModelOf(d.body), route.opts, route.cfg, d.body),
+      servedModel(requestModelOf(d.body), lane.opts, lane.cfg, d.body),
       inputTokens,
       d.store,
       d.tools,
@@ -2994,20 +3119,21 @@ async function responses(
   const key = respConvKey(req, rreq, body, hit, store);
   const tools = body.tool_choice?.type !== 'none';
   // the lane — a chained request rides its predecessor's provider (the
-  // chain lives in that provider's context); a fresh one rides the
-  // provider its model names.
-  const route = routeOf(wire, requestModelOf(body), hit);
+  // chain lives in that provider's context) and answers under the route
+  // the predecessor answered under; a fresh one rides the provider its
+  // model names.
+  const { lane, route } = routeOf(wire, requestModelOf(body), hit);
   let live: RespLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(route.name, parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(route, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
-      openStream: respStreamOpener(rreq, res, route, {
+      openStream: respStreamOpener(rreq, res, lane, {
         respId,
         body,
         tools,
@@ -3020,23 +3146,37 @@ async function responses(
     return;
   }
   if (out.replay === true) {
-    responsesReplay(res, wire, { rreq, out, respId, key, store, chains, route });
+    responsesReplay(res, wire, { rreq, out, respId, key, store, chains, lane, route });
     return;
   }
-  responsesDeliver(res, wire, { rreq, body, out, respId, key, store, chains, live, t0, chained: hit !== undefined, route });
+  responsesDeliver(res, wire, {
+    rreq,
+    body,
+    out,
+    respId,
+    key,
+    store,
+    chains,
+    live,
+    t0,
+    chained: hit !== undefined,
+    lane,
+    route,
+  });
 }
 
 /** Register the chain id of a stored responses turn — the chain rides
  *  the lane its conversation lives in. */
 function registerChain(
   chains: Map<string, ChainEntry>,
-  routes: Map<string, ProviderRoute>,
+  lanes: Map<string, ProviderLane>,
   d: { store: boolean; respId: string; key: string; consumed: number },
-  lane: string
+  lane: string,
+  route: string
 ): void {
   if (!d.store) return;
-  chains.set(d.respId, { key: d.key, consumed: d.consumed, lane });
-  pruneChains(chains, routes);
+  chains.set(d.respId, { key: d.key, consumed: d.consumed, lane, route });
+  pruneChains(chains, lanes);
 }
 
 /** Post-turn settlement for /v1/responses — settle the retained
@@ -3058,7 +3198,10 @@ function responsesDeliver(
     live: RespLive | undefined;
     t0: number;
     chained: boolean;
-    route: ProviderRoute;
+    lane: ProviderLane;
+    /** The route the turn ANSWERED under — the predecessor's for a
+     *  chained request. */
+    route: string;
   }
 ): void {
   const reply = d.out.reply as PooledReply;
@@ -3078,7 +3221,7 @@ function responsesDeliver(
   const status = respStatus(wireReason);
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
-      d.route.sessions,
+      d.lane.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -3097,10 +3240,17 @@ function responsesDeliver(
       // from the client's view (bro-vfbyc)
       capped.capped || d.live?.capped === true
     );
-    registerChain(d.chains, wire.routes, { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed }, d.route.name);
+    registerChain(
+      d.chains,
+      wire.lanes,
+      { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed },
+      d.lane.entry,
+      d.route
+    );
   }
   otelEvent('conductor.turn', {
-    backend: d.route.name,
+    // the ROUTE that answered — for a chained turn the predecessor's
+    backend: d.route,
     dialect: 'responses',
     model: reply.model,
     stop_reason: wireReason,
@@ -3120,7 +3270,7 @@ function responsesDeliver(
     JSON.stringify(
       respEnvelope(
         d.respId,
-        servedModel(requestModelOf(d.body), d.route.opts, d.route.cfg, d.body),
+        servedModel(requestModelOf(d.body), d.lane.opts, d.lane.cfg, d.body),
         status,
         blocksToOutput(outBlocks),
         d.store,
@@ -3527,10 +3677,12 @@ async function chatCompletions(
   const key = conversationKey(req, body);
   const chatId = `chatcmpl-${randomBytes(12).toString('hex')}`;
   const created = Math.floor(Date.now() / 1000);
-  // the lane this request rides — the model's provider prefix names it
+  // the lane this request rides — the model's route prefix names it —
+  // and the route it answers under (the public identity the journal
+  // records)
   const requestModel = requestModelOf(body);
-  const route = routeOf(wire, requestModel);
-  const model = servedModel(requestModel, route.opts, route.cfg, body);
+  const { lane, route } = routeOf(wire, requestModel);
+  const model = servedModel(requestModel, lane.opts, lane.cfg, body);
   const tools = body.tool_choice?.type !== 'none';
   // one filter per turn — the streamed leg feeds it delta-by-delta,
   // the buffered leg cuts the settled text post-hoc; the recorded
@@ -3539,11 +3691,11 @@ async function chatCompletions(
   let live: ChatLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(route.name, parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(route, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel, signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel, signal: ac.signal }),
       openStream:
         creq.stream === true
           ? () => {
@@ -3565,7 +3717,7 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, { creq, body, out, key, chatId, created, model, tools, live, stops, t0, route });
+  chatDeliver(res, { creq, body, out, key, chatId, created, model, tools, live, stops, t0, lane, route });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3586,7 +3738,9 @@ function chatDeliver(
     live: ChatLive | undefined;
     stops: StopFilter;
     t0: number;
-    route: ProviderRoute;
+    lane: ProviderLane;
+    /** The route the turn ANSWERED under — the journal's public identity. */
+    route: string;
   }
 ): void {
   const o = chatOutcome(d.out, d.tools);
@@ -3611,7 +3765,7 @@ function chatDeliver(
       : o.outTokens;
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
-      d.route.sessions,
+      d.lane.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -3635,7 +3789,8 @@ function chatDeliver(
     total_tokens: o.inputTokens + outTokens,
   };
   otelEvent('conductor.turn', {
-    backend: d.route.name,
+    // the ROUTE that answered — the public identity an operator reads
+    backend: d.route,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
     stop_reason: stopReason,
@@ -3681,13 +3836,15 @@ interface LaneCatalog {
 /** One lane's catalog rows — its own entry, or the catalog override for
  *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
  *  throw: one provider being down must not blind the other's models. */
-async function laneCatalog(lane: ProviderRoute, wire: WireCtx): Promise<LaneCatalog> {
+async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatalog> {
   // the catalog override answers for the default lane only — an
-  // exposed lane advertises its own entry's models
+  // exposed lane advertises its own entry's models. The rows carry the
+  // lane's PRIMARY route: a lane with two routes is advertised once, so
+  // the catalog never lists its models twice (spec bro-jxw7p).
   const source =
-    lane.name === wire.cfg.backend && wire.cfg.catalog !== undefined
+    lane.entry === wire.cfg.backend && wire.cfg.catalog !== undefined
       ? wire.cfg.catalog
-      : { name: lane.name, entry: lane.cfg.entry };
+      : { name: lane.primary, entry: lane.cfg.entry };
   try {
     // the LANE's budget bounds its own catalog read — the operator's
     // timeout, not a constant baked into the provider layer. A cold acp
@@ -3701,12 +3858,13 @@ async function laneCatalog(lane: ProviderRoute, wire: WireCtx): Promise<LaneCata
       }),
     };
   } catch (err) {
-    // the lane names itself — the acp layer's messages already carry the
-    // spawn label ('broken-acp: cannot exec …'), so a prefix that repeats
-    // it would read twice
+    // the lane names itself — by its ADVERTISED route, the public name a
+    // client asked for. The acp layer's messages already carry the spawn
+    // label ('broken-acp: cannot exec …'), so a prefix that repeats it
+    // would read twice
     const why = err instanceof Error ? err.message : String(err);
-    const named = why.startsWith(`${lane.name}: `);
-    return { failure: named ? why : `${lane.name}: ${why}` };
+    const named = why.startsWith(`${lane.primary}: `);
+    return { failure: named ? why : `${lane.primary}: ${why}` };
   }
 }
 
@@ -3736,7 +3894,9 @@ function mergeCatalogs(lanes: LaneCatalog[]): CatalogModel[] {
  *  PARALLEL — a catalog read costs seconds, and a caller waits for the
  *  slowest lane, never for their sum. Every lane down IS a 502. */
 async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
-  const lanes = await Promise.all([...wire.routes.values()].map(lane => laneCatalog(lane, wire)));
+  // the LANES, not the routes: a lane reached by two routes is read once
+  // and advertised once, under its primary route
+  const lanes = await Promise.all([...wire.lanes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
   // the degradation rides BOTH answers — a client must read the same
@@ -3809,7 +3969,7 @@ export interface ConductorProxy {
  *  provider served the turn that spawned it — the id is looked up
  *  lane by lane and a registry that does not know it is simply not
  *  the owner. One live lane answers with its own registry unchanged. */
-function laneTerminals(lanes: Map<string, ProviderRoute>): TerminalRegistry | undefined {
+function laneTerminals(lanes: Map<string, ProviderLane>): TerminalRegistry | undefined {
   const regs = [...lanes.values()]
     .map(lane => lane.pool.live()?.terminals)
     .filter((t): t is AcpTerminals => t !== undefined);
@@ -3849,21 +4009,38 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   // model pin and session reuse without an OTLP collector
   const common = gitCommonDir(cfg.cwd);
   if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'));
-  // one lane per served provider — the default backend plus every
-  // exposed one. Each lane owns its acp pool, its model pin and its
-  // conversations: a request rides exactly one lane, chosen by the
-  // provider prefix on the requested model.
-  const lanes = new Map<string, ProviderRoute>();
-  // the in-process seam resolves PER LANE — a gateway hands each
-  // provider its own agent, and the spawn label names the lane.
-  const lanePeer = (name: string): AgentApp | undefined => {
+  // one lane per served ENTRY — the default backend plus every exposed
+  // one. Each lane owns its acp pool, its model pin and its
+  // conversations: a request rides exactly one lane, chosen by the route
+  // on the requested model. The lane is per ENTRY, never per route — two
+  // routes naming one entry share the agent, the pool and the
+  // conversations (spec bro-jxw7p).
+  const lanes = new Map<string, ProviderLane>();
+  // the ROUTE table — the public name a client asks for, beside the
+  // entry it reaches
+  const bindings = routeBindings(cfg);
+  const routes = new Map<string, string>();
+  for (const binding of bindings) routes.set(binding.name, binding.entry);
+  // the in-process seam resolves PER ENTRY — a gateway hands each entry
+  // its own agent, and the spawn label names the entry.
+  const lanePeer = (entry: string): AgentApp | undefined => {
     const peer = wireOpts.acp?.peer;
     if (peer === undefined) return undefined;
-    return typeof peer === 'function' ? peer(`conductor:${name}`) : peer;
+    return typeof peer === 'function' ? peer(`conductor:${entry}`) : peer;
+  };
+  // the routes that reach one entry, and the one it advertises: the
+  // first DECLARED route for it — the default lane's own key when
+  // nothing was declared for it, so `devin-acp/…` keeps being
+  // advertised exactly as it is today.
+  const routesOf = (entry: string): string[] =>
+    bindings.filter(b => b.entry === entry).map(b => b.name);
+  const primaryOf = (entry: string): string => {
+    const declared = bindings.find(b => b.entry === entry && b.declared);
+    return declared?.name ?? entry;
   };
   const addLane = (
-    name: string,
-    entry: AcpEntry,
+    entry: string,
+    entryCfg: AcpEntry,
     laneCfg: ConductorConfig,
     laneOpts: ProviderWireOpts
   ): void => {
@@ -3871,15 +4048,18 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // initialize is paid once per provider per listener; session/new
     // per request is cheap and concurrent sessions multiplex on the
     // same connection. A dead transport drops the link so the next
-    // request respawns.
-    const pool = acpLinkPool(`conductor:${name}`, entry, laneOpts, laneCfg.timeoutMs);
+    // request respawns. The pool belongs to the ENTRY, so two routes
+    // over one entry share the agent.
+    const pool = acpLinkPool(`conductor:${entry}`, entryCfg, laneOpts, laneCfg.timeoutMs);
     // retained conversations — one acp session per client conversation
     // (x-bro-session pin or history fingerprint). Transport death kills
     // every session it carried, so the death hook drops the map.
     const sessions = new Map<string, ConvSession>();
     pool.onDeath(() => dropSessions(sessions));
-    lanes.set(name, {
-      name,
+    lanes.set(entry, {
+      entry,
+      routes: routesOf(entry),
+      primary: primaryOf(entry),
       cfg: laneCfg,
       opts: laneOpts,
       pool,
@@ -3896,18 +4076,18 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     cfg,
     { ...wireOpts, acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) } }
   );
-  for (const [name, entry] of Object.entries(cfg.providers ?? {})) {
+  for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
     // every provider sharing the listener.
     addLane(
-      name,
       entry,
-      { ...cfg, backend: name, entry, model: entry.model, providers: undefined },
+      entryCfg,
+      { ...cfg, backend: entry, entry: entryCfg, model: entryCfg.model, providers: undefined, routes: undefined },
       {
         ...wireOpts,
-        model: entry.model,
-        acp: { ...wireOpts.acp, peer: lanePeer(name) },
+        model: entryCfg.model,
+        acp: { ...wireOpts.acp, peer: lanePeer(entry) },
       }
     );
   }
@@ -3917,12 +4097,12 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   // past it means the caller branched — rejected, not resumed. The
   // lane rides along: a chain lives in one provider's context.
   const chains = new Map<string, ChainEntry>();
-  const link = async (provider: string, parent?: OtelCtx): Promise<AcpPeer> => {
-    const lane = lanes.get(provider);
-    if (lane === undefined) throw new Error(`bro conductor: no provider lane '${provider}'`);
+  const link = async (entry: string, parent?: OtelCtx): Promise<AcpPeer> => {
+    const lane = lanes.get(entry);
+    if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
     return lane.pool.link(parent);
   };
-  const wire: WireCtx = { cfg, opts: wireOpts, link, routes: lanes };
+  const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
     terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
     dispose: (): void => {

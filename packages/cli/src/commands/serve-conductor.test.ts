@@ -2,12 +2,12 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { agent, type SessionConfigOption, type SessionUpdate, type StopReason } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
-import type { AcpTerminals } from '@broject/providers'
+import { otelJournal, type AcpTerminals } from '@broject/providers'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
@@ -259,6 +259,136 @@ describe('conductorConfig', () => {
       })
     )
     assert.throws(() => conductorConfig({}, dir), /type 'cli' — the conductor needs an 'acp' entry/)
+  })
+
+  // --- the route table (spec bro-jxw7p) ---------------------------------
+  //
+  // The map form declares a PUBLIC route per entry: the route is what a
+  // client asks for, the entry keeps its own private name.
+
+  const mapDir = (serve: unknown, providers: unknown): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ serve, providers })
+    )
+    return dir
+  }
+
+  test('the map form declares a ROUTE per entry — the entry keeps its own name', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' },
+        'oc-iceman': { type: 'acp', command: 'oc acp', model: 'gpt-5' },
+      }
+    )
+    const cfg = conductorConfig({}, dir)
+    assert.equal(cfg?.backend, 'dv-acp')
+    // the exposed ENTRY keeps its own name…
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-iceman'])
+    assert.equal(cfg?.providers?.['oc-iceman']?.model, 'gpt-5')
+    // …and the ROUTE reaches it
+    const routes = cfg?.routes ?? []
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['opencode-acp', 'oc-iceman'],
+      ]
+    )
+    // the default lane's own key is routable but never DECLARED — a
+    // declared alias takes over the advertisement
+    assert.equal(routes[0]?.declared, false)
+    assert.equal(routes[1]?.declared, true)
+  })
+
+  test('the array form still means route ≡ entry', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: ['oc-acp'] },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-acp': { type: 'acp', command: 'oc acp' },
+      }
+    )
+    const routes = conductorConfig({}, dir)?.routes ?? []
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['oc-acp', 'oc-acp'],
+      ]
+    )
+  })
+
+  test('the default lane answers to its own key AND to a declared alias', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { devin: 'dv-acp' } },
+      { 'dv-acp': { type: 'acp', command: 'dv acp' } }
+    )
+    const routes = conductorConfig({}, dir)?.routes ?? []
+    // both names reach the SAME entry — one lane, one agent
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['devin', 'dv-acp'],
+      ]
+    )
+  })
+
+  test('two entries under one route is a loud error', () => {
+    // the route 'dv-acp' is the default lane's own key AND a declared
+    // route for another entry — the router would have no honest answer
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'dv-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+      }
+    )
+    assert.throws(() => conductorConfig({}, dir), /names two entries/)
+  })
+
+  test('a route carrying a slash is a loud error', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'oc/one': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+      }
+    )
+    assert.throws(() => conductorConfig({}, dir), /cannot contain/)
+  })
+
+  test('a route naming a non-acp entry is a loud error', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'cli1' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        cli1: { type: 'cli', command: 'x run' },
+      }
+    )
+    assert.throws(() => conductorConfig({}, dir), /type 'cli' — the conductor needs an 'acp' entry/)
+  })
+
+  test('an entry with no declared route is not exposed at all', () => {
+    // the map form owns the public names — an entry nobody routes to is
+    // not a lane
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+        'idle-acp': { type: 'acp', command: 'idle acp' },
+      }
+    )
+    const cfg = conductorConfig({}, dir)
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-iceman'])
+    assert.equal(
+      (cfg?.routes ?? []).some(r => r.entry === 'idle-acp'),
+      false
+    )
   })
 })
 
@@ -1877,6 +2007,32 @@ describe('serve /v1/* — one gateway, many providers', () => {
     },
   }
 
+  /** The same gateway under a CHOSEN route — the entry keeps its own
+   *  name ('oc-iceman'), the client asks for 'opencode-acp'. */
+  const ALIAS: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-iceman': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+    routes: [
+      { name: 'dv-acp', entry: 'dv-acp', declared: false },
+      { name: 'opencode-acp', entry: 'oc-iceman', declared: true },
+    ],
+  }
+
+  /** One entry under TWO routes — the same provider, two names. */
+  const TWO_ROUTES: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-iceman': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+    routes: [
+      { name: 'dv-acp', entry: 'dv-acp', declared: false },
+      { name: 'opencode-acp', entry: 'oc-iceman', declared: true },
+      { name: 'oc-alias', entry: 'oc-iceman', declared: true },
+    ],
+  }
+
   type Fake = ReturnType<typeof fakeAcpAgent>
 
   /** Boot the gateway over two agents — the in-process seam resolves by
@@ -1884,12 +2040,15 @@ describe('serve /v1/* — one gateway, many providers', () => {
   const bootGateway = async (
     dv: Fake,
     oc: Fake,
-    cfg: ConductorConfig = MULTI
+    cfg: ConductorConfig = MULTI,
+    /** The exposed entry's key — the spawn label names the ENTRY, so
+     *  the seam resolves the agent by it. */
+    ocEntry = 'oc-acp'
   ): Promise<{ url: string; close: () => Promise<void> }> => {
     const { url, close } = await listen(
       deps({
         provider: conductorProxy(cfg, {
-          acp: { peer: by => (by.endsWith('oc-acp') ? oc.app : dv.app) },
+          acp: { peer: by => (by.endsWith(ocEntry) ? oc.app : dv.app) },
         }),
       })
     )
@@ -2111,6 +2270,163 @@ describe('serve /v1/* — one gateway, many providers', () => {
         assert.match(header, /oc-acp/)
       } finally {
         await close()
+      }
+    })())
+
+  test('a declared ROUTE reaches its entry — the entry key is not routable', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+      const { url, close } = await bootGateway(dv, oc, ALIAS, 'oc-iceman')
+      try {
+        // the ROUTE reaches the entry
+        const routed = await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        assert.equal(routed.status, 200)
+        assert.equal(await textOf(routed), 'from opencode')
+        // the ENTRY's own name is not a route — it rides the default
+        // lane, so it answers with the DEFAULT's models
+        const unrouted = await post(url, {
+          model: 'oc-iceman/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        assert.equal(unrouted.status, 200)
+        assert.equal(await textOf(unrouted), 'from devin')
+        assert.equal(oc.prompts.length, 1)
+      } finally {
+        await close()
+      }
+    })())
+
+  test('the catalog advertises a lane under its PRIMARY route only', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman')
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } })
+        assert.equal(m.status, 200)
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id)
+        // the lane's models are listed ONCE, under its primary route
+        assert.ok(ids.includes('opencode-acp/gpt-5'), `ids: ${ids.join(', ')}`)
+        assert.equal(ids.includes('oc-alias/gpt-5'), false)
+        assert.equal(ids.includes('oc-iceman/gpt-5'), false)
+        assert.equal(ids.filter(id => id.endsWith('/gpt-5')).length, 1)
+      } finally {
+        await close()
+      }
+    })())
+
+  test('two routes over ONE entry share the agent and the conversation', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman')
+      try {
+        const first = await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'one' }],
+          stream: false,
+        })
+        assert.equal(first.status, 200)
+        // the same conversation under the ALIAS — the second hop grows
+        // the history, so the lane must CONTINUE the session the first
+        // hop opened
+        const second = await post(url, {
+          model: 'oc-alias/gpt-5',
+          messages: [
+            { role: 'user', content: 'one' },
+            { role: 'user', content: 'two' },
+          ],
+          stream: false,
+        })
+        assert.equal(second.status, 200)
+        // ONE session/new — the alias is the same provider, so the same
+        // agent and the same conversation, not a twin
+        assert.equal(oc.sessions.length, 1)
+        assert.equal(oc.prompts.length, 2)
+      } finally {
+        await close()
+      }
+    })())
+
+  test('the journal names the ROUTE that answered', () =>
+    (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-journal-'))
+      const journalPath = join(dir, 'turns.jsonl')
+      otelJournal(journalPath)
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+      const { url, close } = await bootGateway(dv, oc, ALIAS, 'oc-iceman')
+      try {
+        await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        })
+        const rows = readFileSync(journalPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(l => JSON.parse(l) as { event: string; backend?: string })
+        const turn = rows.find(r => r.event === 'conductor.turn')
+        // the PUBLIC route, not the private entry key
+        assert.equal(turn?.backend, 'opencode-acp')
+      } finally {
+        await close()
+        otelJournal(undefined)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })())
+
+  test('a chained turn is journaled under the PREDECESSOR\'s route', () =>
+    (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-journal-'))
+      const journalPath = join(dir, 'turns.jsonl')
+      otelJournal(journalPath)
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] })
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] })
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman')
+      try {
+        const first = await fetch(`${url}/v1/responses`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'opencode-acp/gpt-5', input: 'first', stream: false }),
+        })
+        assert.equal(first.status, 200)
+        const id = ((await first.json()) as { id: string }).id
+        // the chain asks under a DIFFERENT route of the same entry —
+        // the chain already lives in the predecessor's context, so the
+        // answer belongs to the lane that holds it
+        const second = await fetch(`${url}/v1/responses`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'oc-alias/gpt-5',
+            input: 'second',
+            previous_response_id: id,
+            stream: false,
+          }),
+        })
+        assert.equal(second.status, 200)
+        const rows = readFileSync(journalPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(l => JSON.parse(l) as { event: string; backend?: string })
+        const turns = rows.filter(r => r.event === 'conductor.turn')
+        assert.equal(turns.length, 2)
+        // both turns name the PREDECESSOR's route
+        assert.deepEqual(
+          turns.map(t => t.backend),
+          ['opencode-acp', 'opencode-acp']
+        )
+      } finally {
+        await close()
+        otelJournal(undefined)
+        rmSync(dir, { recursive: true, force: true })
       }
     })())
 
