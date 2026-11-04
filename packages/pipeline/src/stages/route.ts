@@ -575,6 +575,17 @@ function freshVerdict(cx: Cx): EngineResult {
   return done('spawn');
 }
 
+/** `park` keeps the died-on provider/model pair — the slot the queue
+ *  payload records as where the item WOULD run once the wall lifts. */
+const keepDiedOn = (p: RoutePayload, prev: RoutePayload): void => {
+  if (typeof prev.provider === 'string') {
+    p.provider = prev.provider;
+    if (typeof prev.model === 'string') {
+      p.model = prev.model;
+    }
+  }
+};
+
 /** The wall path's inputs — one bag keeps the helper under the arg
  *  ceiling (same Checks-pattern as the fresh path's Cx). */
 interface WallCx {
@@ -616,12 +627,7 @@ function wallVerdict(cx: WallCx): EngineResult {
   // queue→park")
   if (resolved.onWall === 'park') {
     p.reason = QUEUE_REASONS.onwall;
-    if (typeof hit.prev.provider === 'string') {
-      p.provider = hit.prev.provider;
-      if (typeof hit.prev.model === 'string') {
-        p.model = hit.prev.model;
-      }
-    }
+    keepDiedOn(p, hit.prev);
     return done('queue');
   }
   const d = dispatch(resolved, hit.chainIndex + 1, walled);
