@@ -80,8 +80,10 @@ import {
   stopGateContributions,
   unrefPendingChildren,
   withFileLock,
+  GUARD_EVENTS,
   type ConnectorCtx,
   type GateContribution,
+  type GuardEvent,
   type ProbeReporter,
   type ProbeResult,
   type ProbeTiming,
@@ -98,9 +100,8 @@ import {
   readTraceTail,
   relativize,
   sessionContextText,
+  type MatchContext,
 } from '@broject/learn';
-import type { MatchContext } from '@broject/learn';
-import { GUARD_EVENTS, type GuardEvent } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import {
