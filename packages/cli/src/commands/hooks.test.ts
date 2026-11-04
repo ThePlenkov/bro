@@ -326,6 +326,16 @@ describe('readArmed', () => {
 });
 
 describe('takeStopGateBlock', () => {
+  /** Rewind this session's one-shot marker past the TTL — a session
+   *  that left a week ago and came back. Returns the marker path. */
+  const staleMarker = (main: string, sessionId: string, aspect: string): string => {
+    const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+    const marker = join(common, 'bro', 'hooks', 'hinted', `${sessionId}.stop-gate-block.${aspect}`);
+    const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(marker, weekAgo, weekAgo);
+    return marker;
+  };
+
   test('the hard block goes back once per session and aspect, never as a loop', () => {
     const { root, main } = initRepo('bro-stop-gate-');
     inside(main, root, () => {
@@ -349,10 +359,7 @@ describe('takeStopGateBlock', () => {
     const { root, main } = initRepo('bro-stop-gate-stale-');
     inside(main, root, () => {
       assert.equal(takeStopGateBlock('gate-return', 'work'), true);
-      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
-      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-return.stop-gate-block.work');
-      const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
-      utimesSync(marker, weekAgo, weekAgo);
+      staleMarker(main, 'gate-return', 'work');
       assert.equal(takeStopGateBlock('gate-return', 'work'), true);
       // the re-armed marker is fresh — a repeat still demotes
       assert.equal(takeStopGateBlock('gate-return', 'work'), false);
@@ -363,10 +370,7 @@ describe('takeStopGateBlock', () => {
     const { root, main } = initRepo('bro-stop-gate-race-');
     inside(main, root, () => {
       assert.equal(takeStopGateBlock('gate-race', 'work'), true);
-      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
-      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-race.stop-gate-block.work');
-      const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
-      utimesSync(marker, weekAgo, weekAgo);
+      const marker = staleMarker(main, 'gate-race', 'work');
       // the re-arm steals the stale file aside and removes it — the
       // hinted/ dir must not keep `.stolen.*` residue a later caller
       // could mistake for a marker, nor a stale file to steal twice
