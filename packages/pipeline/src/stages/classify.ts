@@ -580,8 +580,11 @@ export function stageDispatch(
 const titleTokens = (s: string | undefined): Set<string> =>
   new Set(
     (s ?? '')
+      // NFC first — composed and decomposed spellings tokenize alike,
+      // \p{M} keeps stray combining marks inside their token
+      .normalize('NFC')
       .toLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
+      .split(/[^\p{L}\p{N}\p{M}]+/u)
       // code points, not UTF-16 units — astral letters count once
       .filter(t => [...t].length >= 4)
   );
