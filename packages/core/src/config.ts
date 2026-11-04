@@ -443,9 +443,16 @@ const providerCliSchema = js.obj(
   { required: ['type', 'command'] }
 );
 
-providersSection.jsonSchema = js.map(
-  js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema)
-);
+providersSection.jsonSchema = {
+  type: 'object',
+  // '__proto__' is a reserved key — the loader drops it, so the schema
+  // must not accept it either (a config that passes the diagnostics
+  // must survive the load)
+  patternProperties: {
+    [String.raw`^(?!__proto__$)`]: js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
+  },
+  additionalProperties: false,
+};
 
 /** bro.config.json `brouter` section — the model-centric routing
  *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
