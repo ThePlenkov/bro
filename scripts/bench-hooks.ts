@@ -347,16 +347,7 @@ function printTable(rows: Map<string, Row>): void {
  *  both, so `--json` output always parses. --out writes the file in
  *  either mode. */
 function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opts: Options): void {
-  let sha = '';
-  try {
-    sha = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
-      // NOSONAR — PATH lookup is the contract
-      cwd: ROOT,
-      encoding: 'utf8',
-    }).stdout.trim();
-  } catch {
-    // reporting metadata only
-  }
+  const sha = '';
   const report = {
     meta: {
       ts: new Date().toISOString(),

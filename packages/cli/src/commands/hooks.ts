@@ -431,10 +431,10 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/^\s*(bro|bd)(\s|$)/.test(cmd)) {
     return true;
   }
-  return /^\s*(?:bro|npx(?:(?!\s+--package\b)(?:\s+--?[\w-]+(?:=\S+)?))*(?:\s+--?[\w-]+(?:=\S+)?)?\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(\s|$)/.test(
-    // NOSONAR
-    cmd
-  );
+  if (!/^\s*npx\b/.test(cmd)) {
+    return false;
+  }
+  return /\bbro\b/.test(cmd);
 }
 
 // --- session arming -----------------------------------------------------------
