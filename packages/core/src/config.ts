@@ -854,10 +854,13 @@ export const serveSection: ConfigSection<{ backend?: string; providers?: ServePr
 serveSection.jsonSchema = js.obj({
   backend: js.str,
   providers: js.oneOf(js.strList, {
-    // the KEY is a route name — it must carry a non-blank character, or
-    // the loader would drop it and the schema would accept it
+    // the KEY is a ROUTE name — it must carry a non-blank character (or
+    // the loader drops it) and no '/' (a route is a model prefix: the
+    // router reads the first segment, so a slash makes it unreachable).
+    // The array form's names are ENTRY keys, which may carry a slash —
+    // only the map's keys are routes.
     type: 'object',
-    patternProperties: { [String.raw`\S`]: js.str },
+    patternProperties: { [String.raw`^[^\/]*[^\s\/][^\/]*$`]: js.str },
     additionalProperties: false,
   }),
 });

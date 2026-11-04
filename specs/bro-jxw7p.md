@@ -119,8 +119,9 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
    whose catalog answers `/v1/models`, and the rows carry THAT entry's name
    — the uniform catalog vocabulary of bro-wxfls ("rows emit
    `<entry>/<model-id>` ids"). The override picks the SOURCE, not the
-   route: its ids stay re-pinnable, and a client that copies one rides the
-   default lane, which is the backend that runs it.
+   route: its ids keep their source entry's prefix, and a copied id is
+   routed by that prefix like any other — it follows whichever route the
+   prefix names, or the default lane when it names none.
 7. **The journal names the route that ANSWERED, the pool names the entry.**
    `conductor.*` rows carry the route the request was served under — that is
    the public identity an operator reads. For a CHAINED `/v1/responses`

@@ -1470,7 +1470,7 @@
             {
               "type": "object",
               "patternProperties": {
-                "\\S": {
+                "^[^\\/]*[^\\s\\/][^\\/]*$": {
                   "type": "string",
                   "minLength": 1,
                   "pattern": "\\S"
