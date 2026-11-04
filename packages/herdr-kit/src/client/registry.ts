@@ -72,8 +72,10 @@ export function agentKey(base: string, id: string | undefined): string | undefin
  *  the registry has never seen returns verbatim. */
 export function displayAgentOf(base: string, id: string | undefined): string | undefined {
   if (id === undefined) return undefined;
-  // `||` — an empty-string provider is as absent as a missing one
-  return agentEntry(base, id)?.provider || agentKey(base, id) || id;
+  // the registry is an unvalidated JSON boundary — only a non-empty
+  // string provider is a display name; anything else falls through
+  const provider = agentEntry(base, id)?.provider;
+  return (typeof provider === 'string' && provider) || agentKey(base, id) || id;
 }
 
 /** The pid's /proc start stamp — `comm` may carry spaces and parens,
