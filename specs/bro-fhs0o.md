@@ -45,7 +45,7 @@ budget as its spawn timeout instead of its own constant.
 `/v1/models` answers 200 with the rows it could read, and carries the
 failures in a response header:
 
-```
+```text
 x-bro-lane-error: <lane>: <reason>; <lane>: <reason>
 ```
 
