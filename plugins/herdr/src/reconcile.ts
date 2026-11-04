@@ -19,7 +19,7 @@
  * the snapshot it produced. bro state is never written — the only
  * mutations are herdr CLI calls and the plugin's own state file.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { type Lane, laneOf } from './lanes.ts';
 import {
@@ -32,10 +32,10 @@ import {
   notify,
   type PluginState,
   repoDir,
-  run,
   type StatusWorktree,
   saveState,
   stateScope,
+  syncPidPath,
   type WorkspaceRec,
   withStateLock,
   worktreeGone,
@@ -514,11 +514,22 @@ export function reconcile(): ConvergeResult {
  *  (bro-m8hew: a reboot left every session pane on a bare shell with
  *  no loop to re-arm them). The startup hook and the `sync` action
  *  both land here, so both restore it. `plugin pane open` has no
- *  dedup — the pgrep probe is the idempotence: a live `node
- *  src/sync.ts` means the loop is up; a dead pane's bare shell does
- *  not match, so a stranded pane is replaced, not duplicated. */
+ *  dedup — the probe is the idempotence: sync.ts writes its own pid
+ *  to a scoped file at start, so a live loop proves itself regardless
+ *  of how its argv was launched; a dead pane's bare shell leaves a
+ *  stale pid that fails the liveness check and gets replaced. */
 function ensureSyncLoop(): void {
-  if (run('pgrep', ['-f', 'node src/sync.ts']).code === 0) return;
+  let alive = false;
+  try {
+    const pid = Number(readFileSync(syncPidPath(stateScope(repoDir(ctxJson())))), 'utf8');
+    if (Number.isInteger(pid) && pid > 0) {
+      process.kill(pid, 0);
+      alive = true;
+    }
+  } catch {
+    // no pid file yet or a dead pid — fall through to open
+  }
+  if (alive) return;
   const out = herdrTry(['plugin', 'pane', 'open', '--plugin', 'bro.fleet', '--entrypoint', 'sync']);
   log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
 }

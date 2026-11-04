@@ -511,6 +511,16 @@ function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
 }
 
+/** The sync loop publishes its pid here so the startup/action path
+ *  probes liveness on a number it wrote itself — never argv matching:
+ *  a launcher that rewrites argv (absolute path, a non-node runtime)
+ *  slips a literal `pgrep` and a live pane would be re-opened every
+ *  pass. Scoped like the state file so repos never see each other's
+ *  loop pid. */
+export function syncPidPath(scope: string): string {
+  return join(STATE_DIR, `sync-${scope}.pid`);
+}
+
 export function loadState(scope: string): PluginState {
   try {
     const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
