@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "packages/*",
-    "packages/acp/*"
+    "packages/*"
   ],
   "scripts": {
     "build": "node scripts/gen-plugins.ts && nx run-many -t build --exclude=skills-*,plugins-*-skills-*",
