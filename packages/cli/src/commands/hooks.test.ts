@@ -359,21 +359,19 @@ describe('takeStopGateBlock', () => {
     });
   });
 
-  test('a stale marker already stolen aside is not re-stolen — the re-armed marker stands', () => {
+  test('a re-armed stale marker leaves no residue a second steal could re-fire', () => {
     const { root, main } = initRepo('bro-stop-gate-race-');
     inside(main, root, () => {
       assert.equal(takeStopGateBlock('gate-race', 'work'), true);
       const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
       const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-race.stop-gate-block.work');
-      // simulate the re-armer's steal racing a fresh claim: the marker
-      // on disk is fresh, a `.stolen.<pid>` file must not resurrect a
-      // second block
-      writeFileSync(`${marker}.stolen.1`, `${Date.now() - 8 * 24 * 60 * 60 * 1000}\n`);
-      assert.equal(takeStopGateBlock('gate-race', 'work'), false);
-      // a stale marker whose steal lands is replaced, not doubled
       const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
       utimesSync(marker, weekAgo, weekAgo);
+      // the re-arm steals the stale file aside and removes it — the
+      // hinted/ dir must not keep `.stolen.*` residue a later caller
+      // could mistake for a marker, nor a stale file to steal twice
       assert.equal(takeStopGateBlock('gate-race', 'work'), true);
+      assert.deepEqual(readdirSync(dirname(marker)).sort(), ['gate-race.stop-gate-block.work']);
       assert.equal(takeStopGateBlock('gate-race', 'work'), false);
     });
   });

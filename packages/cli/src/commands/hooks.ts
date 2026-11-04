@@ -1729,7 +1729,7 @@ async function emitStopGateBody(
       emit({ decision: 'block', reason: verdict.block });
       return;
     }
-    if (verdict.hint !== undefined) {
+    if (verdict.hint) {
       gateHints.push(verdict.hint);
     }
   }
