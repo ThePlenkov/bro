@@ -774,55 +774,61 @@ export function isIntegerIndexKey(name: string): boolean {
   return Number.isInteger(n) && n >= 0 && n < 4_294_967_295 && String(n) === name;
 }
 
+/** One declared route — its name and the entry it reaches. A malformed
+ *  one is a diagnostic, not a silent drop: a lane that vanished leaves
+ *  the operator with a gateway that answers fewer models than they
+ *  declared. */
+function declareRoute(route: string, entry: unknown, routes: Record<string, string>): void {
+  const name = route.trim();
+  if (name === '') {
+    console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
+    return;
+  }
+  if (isIntegerIndexKey(name)) {
+    console.error(
+      `bro.config: serve.providers route '${name}' is a numeric index — it would lose its declared order — entry dropped`
+    );
+    return;
+  }
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    console.error(
+      `bro.config: serve.providers route '${route}' must name a provider entry — entry dropped`
+    );
+    return;
+  }
+  if (Object.hasOwn(routes, name)) {
+    console.error(
+      `bro.config: serve.providers route '${route}' duplicates an earlier route after trimming — entry dropped`
+    );
+    return;
+  }
+  // '__proto__' is a legal route name — a plain assignment would reach
+  // Object.prototype's setter and lose the lane
+  Object.defineProperty(routes, name, {
+    value: entry.trim(),
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 /** The exposed providers, in either spelling — the array of entry names
  *  (route ≡ entry) or the map of route → entry (the public name is
- *  chosen). A malformed value is a diagnostic, not a silent drop: a lane
- *  that vanished leaves the operator with a gateway that answers fewer
- *  models than they declared. */
+ *  chosen). */
 function providerRoutes(raw: unknown): ServeProviders | undefined {
   if (raw === undefined) return undefined;
   if (Array.isArray(raw)) return providerNames(raw);
-  if (typeof raw === 'object' && raw !== null) {
-    const routes: Record<string, string> = {};
-    for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
-      const name = route.trim();
-      if (name === '') {
-        console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
-        continue;
-      }
-      if (isIntegerIndexKey(name)) {
-        console.error(
-          `bro.config: serve.providers route '${name}' is a numeric index — it would lose its declared order — entry dropped`
-        );
-        continue;
-      }
-      if (typeof entry !== 'string' || entry.trim() === '') {
-        console.error(
-          `bro.config: serve.providers route '${route}' must name a provider entry — entry dropped`
-        );
-        continue;
-      }
-      if (Object.hasOwn(routes, name)) {
-        console.error(
-          `bro.config: serve.providers route '${route}' duplicates an earlier route after trimming — entry dropped`
-        );
-        continue;
-      }
-      // '__proto__' is a legal route name — a plain assignment would
-      // reach Object.prototype's setter and lose the lane
-      Object.defineProperty(routes, name, {
-        value: entry.trim(),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    }
-    return routes;
+  if (typeof raw !== 'object' || raw === null) {
+    console.error(
+      'bro.config: serve.providers must be an array of provider names or a route→entry map — section dropped'
+    );
+    return undefined;
   }
-  console.error(
-    'bro.config: serve.providers must be an array of provider names or a route→entry map — section dropped'
-  );
-  return undefined;
+  const routes: Record<string, string> = {};
+  for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
+    declareRoute(route, entry, routes);
+  }
+  return routes;
 }
 
 /** bro.config.json `serve` section — the facade host's own knobs.
