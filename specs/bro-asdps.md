@@ -2,10 +2,10 @@
 
 ## Problem
 
-`bro act status` (and `bro act threads`) died with a bare `gh api failed: `
-— no reason, no context, exit 0 — on a repo whose open-PR listing is large
-enough. The gate that decides "is this PR done" could not answer, and the
-error named nothing actionable.
+`bro act status` (and `bro act threads`) died with a bare `gh api failed:`
+and nothing after it — no reason, no context, exit 0 — on a repo whose
+open-PR listing is large enough. The gate that decides "is this PR done"
+could not answer, and the error named nothing actionable.
 
 The cause is a two-part interaction:
 
@@ -18,8 +18,8 @@ The cause is a two-part interaction:
 2. **Node caps `spawnSync` output at 1 MiB.** Past the cap the child is
    KILLED with `ENOBUFS`: `proc.status` goes `null`, `proc.stderr` stays
    empty, and `proc.error` holds the only clue. `gh()` read `stderr` alone
-   and swallowed `proc.error`, so the failure rendered as `gh api failed: `
-   — an empty reason.
+   and swallowed `proc.error`, so the failure rendered as `gh api failed:`
+   with nothing after it — an empty reason.
 
 The async twins (`ghAsync`/`ghTryAsync`) stream into a string and never had
 the cap; only the sync path was exposed.
@@ -63,4 +63,4 @@ contract is unchanged: `{ pr, headRef }` rows, most-recently-updated first.
   `--jq` projection (the projection is the contract, not an optimization).
 - Live: `bro act status` with no PR number resolves the repo's most
   recently updated open PR and prints its gate, instead of dying with
-  `gh api failed: `.
+  `gh api failed:` and nothing after it.
