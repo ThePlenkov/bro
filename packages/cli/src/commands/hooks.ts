@@ -55,6 +55,7 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -80,7 +81,13 @@ import {
   unrefPendingChildren,
   withFileLock,
 } from '@broject/core';
-import type { ConnectorCtx, ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core';
+import type {
+  ConnectorCtx,
+  GateContribution,
+  ProbeReporter,
+  ProbeResult,
+  ProbeTiming,
+} from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
 import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
@@ -783,39 +790,80 @@ function stopHintsChanged(sessionId: string, hints: string[]): boolean {
   return hints.length > 0;
 }
 
-/** Gates, not loops — the hard block goes back ONCE per session. The
- *  host drivers hold an in-memory one-shot (`gatedSession`) and a host
- *  that re-enters the same stop says so through `stop_hook_active`, but
- *  a plugin host whose hooks are one process per event (devin's
- *  hooks/run.sh) hands every stop a fresh `stop_hook_active: false` —
- *  and a blocked stop wakes the session as a NEW turn whose stop
- *  re-blocks. That ping-pong is a loop, not a gate: it burned a
- *  session's whole budget in minutes (observed 2026-11-04: 11 blocks
- *  in 5 minutes, one per answered block message). So the one-shot
- *  lives HERE, in a marker beside the hint-dedup ones: the first block
- *  stamps it, later blocks demote to a hint. Same TTL as skillHinted —
- *  a week-old marker is a new session and gets its gate back. The
- *  exclusive create closes the concurrent-stop race: only one caller
- *  gets `true`. Fail-open on an unstampable session (no hooks state
- *  dir): the gate keeps its block — a rig that cannot arm aspects never
- *  reaches the block branch anyway. */
-export function takeStopGateBlock(sessionId: string): boolean {
-  const path = hintedPath(sessionId, 'stop-gate-block');
+/** Gates, not loops — each aspect's hard block goes back ONCE per
+ *  session. The host drivers hold an in-memory one-shot (`gatedSession`)
+ *  and a host that re-enters the same stop says so through
+ *  `stop_hook_active`, but a plugin host whose hooks are one process per
+ *  event (devin's hooks/run.sh) hands every stop a fresh
+ *  `stop_hook_active: false` — and a blocked stop wakes the session as a
+ *  NEW turn whose stop re-blocks. That ping-pong is a loop, not a gate:
+ *  it burned a session's whole budget in minutes (observed 2026-11-04:
+ *  11 blocks in 5 minutes, one per answered block message). So the
+ *  one-shot lives HERE, in a marker beside the hint-dedup ones — and the
+ *  marker is the contract for EVERY host: a `stop_hook_active` stop
+ *  exits before this runs, so flag-correct hosts only reach it where
+ *  their in-memory one-shot demoted anyway, or where the host process
+ *  restarted — precisely the case the flag cannot cover.
+ *
+ *  The marker is keyed per ASPECT (`stop-gate-block.<aspect>`): an early
+ *  spec or claim block must not spend the worktree gate's one shot —
+ *  GATE_PRIORITY says uncommitted work is never shadowed — and loops
+ *  stay bounded because each aspect blocks at most once. The first
+ *  block stamps the marker, later blocks demote to a hint. Same TTL as
+ *  skillHinted — a week-old marker is a new session and gets its gate
+ *  back.
+ *
+ *  Concurrency: every claim goes through the single exclusive create
+ *  (`wx`), which alone arbitrates concurrent stops. The stale-marker
+ *  re-arm cannot delete-then-create — a loser of that race would unlink
+ *  the winner's fresh marker and let both block — so the stale file is
+ *  stolen aside with `renameSync` (one atomic op, one winner) and a
+ *  marker fresher than the one we stat'd is put back (`linkSync` is
+ *  atomic too, and loses cleanly to a marker armed meanwhile). Littered
+ *  `.stolen.*` files expire under the hinted/ sweep's TTL. Fail-open on
+ *  an unstampable session (no hooks state dir): the gate keeps its
+ *  block — a rig that cannot arm aspects never reaches the block branch
+ *  anyway. */
+export function takeStopGateBlock(sessionId: string, aspect: string): boolean {
+  const safeAspect = aspect.replace(/[^\w.-]/g, '_') || 'gate';
+  const path = hintedPath(sessionId, `stop-gate-block.${safeAspect}`);
   if (!path) {
     return true;
   }
+  const now = Date.now();
+  const fresh = (mtimeMs: number): boolean => mtimeMs >= now - MARKER_TTL_MS;
   try {
-    if (statSync(path).mtimeMs >= Date.now() - MARKER_TTL_MS) {
+    if (fresh(statSync(path).mtimeMs)) {
       return false;
     }
-    // a stale marker is a session that left and came back — re-arm
-    rmSync(path, { force: true });
+    // a stale marker is a session that left and came back — re-arm by
+    // stealing it aside; two re-armers cannot both win the rename, the
+    // loser's ENOENT falls through to the exclusive create below
+    const stolen = `${path}.stolen.${process.pid}`;
+    try {
+      renameSync(path, stolen);
+      // the steal took whatever the path held — if a fresher marker
+      // landed between our stat and the rename, restore it and demote:
+      // the block is already spent
+      if (fresh(statSync(stolen).mtimeMs)) {
+        try {
+          linkSync(stolen, path);
+        } catch {
+          // another stop armed the marker while it sat aside
+        }
+        rmSync(stolen, { force: true });
+        return false;
+      }
+      rmSync(stolen, { force: true });
+    } catch {
+      // no steal — another re-armer beat us to the stale marker
+    }
   } catch {
-    // no marker yet — this is the session's first block
+    // no marker yet — this aspect's first block of the session
   }
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${Date.now()}\n`, { flag: 'wx' });
+    writeFileSync(path, `${now}\n`, { flag: 'wx' });
     return true;
   } catch {
     // a concurrent stop took the block, or a stale marker could not be
@@ -1624,6 +1672,25 @@ async function emitStopGate(input: HookInput): Promise<void> {
   await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP]);
 }
 
+/** One contribution's verdict in priority order: an armed block fires
+ *  the session's one-shot for that aspect — a spent marker demotes the
+ *  block to a hint the stop-hint dedup keeps from re-waking the host;
+ *  an armed-but-clean contribution shows its hint; ambient state stays
+ *  passive. */
+function stopGateVerdict(
+  c: GateContribution,
+  armed: Set<string>,
+  sessionId: string
+): { block?: string; hint?: string } {
+  if (!armed.has(c.aspect)) {
+    return { hint: c.passive };
+  }
+  if (c.block) {
+    return takeStopGateBlock(sessionId, c.aspect) ? { block: c.block } : { hint: c.block };
+  }
+  return { hint: c.armedHint ?? c.passive };
+}
+
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
@@ -1657,25 +1724,13 @@ async function emitStopGateBody(
   ]);
   const gateHints: string[] = [];
   for (const c of contributions) {
-    if (!armed.has(c.aspect)) {
-      if (c.passive) {
-        gateHints.push(c.passive);
-      }
-      continue;
-    }
-    if (c.block) {
-      // one block per session (takeStopGateBlock) — a repeat demotes to
-      // a hint the stop-hint dedup below keeps from re-waking the host
-      if (!takeStopGateBlock(sessionId)) {
-        gateHints.push(c.block);
-        continue;
-      }
-      emit({ decision: 'block', reason: c.block });
+    const verdict = stopGateVerdict(c, armed, sessionId);
+    if (verdict.block !== undefined) {
+      emit({ decision: 'block', reason: verdict.block });
       return;
     }
-    const hint = c.armedHint ?? c.passive;
-    if (hint) {
-      gateHints.push(hint);
+    if (verdict.hint !== undefined) {
+      gateHints.push(verdict.hint);
     }
   }
   // any Stop context re-wakes the host as a new turn — repeating an

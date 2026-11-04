@@ -326,29 +326,55 @@ describe('readArmed', () => {
 });
 
 describe('takeStopGateBlock', () => {
-  test('the hard block goes back once per session, never as a loop', () => {
+  test('the hard block goes back once per session and aspect, never as a loop', () => {
     const { root, main } = initRepo('bro-stop-gate-');
     inside(main, root, () => {
-      assert.equal(takeStopGateBlock('gate-once'), true);
+      assert.equal(takeStopGateBlock('gate-once', 'work'), true);
       // a blocked stop wakes the host as a new turn whose stop would
       // block again on the same claim — that is the ping-pong the
       // one-shot exists to stop (gates, not loops)
-      assert.equal(takeStopGateBlock('gate-once'), false);
-      assert.equal(takeStopGateBlock('gate-once'), false);
+      assert.equal(takeStopGateBlock('gate-once', 'work'), false);
+      assert.equal(takeStopGateBlock('gate-once', 'work'), false);
+      // another aspect keeps its own shot — an early spec or claim
+      // block must not spend the worktree gate's block (GATE_PRIORITY
+      // says uncommitted work is never shadowed)
+      assert.equal(takeStopGateBlock('gate-once', 'act'), true);
+      assert.equal(takeStopGateBlock('gate-once', 'act'), false);
       // another session keeps its own gate
-      assert.equal(takeStopGateBlock('gate-other'), true);
+      assert.equal(takeStopGateBlock('gate-other', 'work'), true);
     });
   });
 
   test('a TTL-stale marker is a session that came back — the gate re-arms', () => {
     const { root, main } = initRepo('bro-stop-gate-stale-');
     inside(main, root, () => {
-      assert.equal(takeStopGateBlock('gate-return'), true);
+      assert.equal(takeStopGateBlock('gate-return', 'work'), true);
       const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
-      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-return.stop-gate-block');
+      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-return.stop-gate-block.work');
       const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
       utimesSync(marker, weekAgo, weekAgo);
-      assert.equal(takeStopGateBlock('gate-return'), true);
+      assert.equal(takeStopGateBlock('gate-return', 'work'), true);
+      // the re-armed marker is fresh — a repeat still demotes
+      assert.equal(takeStopGateBlock('gate-return', 'work'), false);
+    });
+  });
+
+  test('a stale marker already stolen aside is not re-stolen — the re-armed marker stands', () => {
+    const { root, main } = initRepo('bro-stop-gate-race-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-race', 'work'), true);
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-race.stop-gate-block.work');
+      // simulate the re-armer's steal racing a fresh claim: the marker
+      // on disk is fresh, a `.stolen.<pid>` file must not resurrect a
+      // second block
+      writeFileSync(`${marker}.stolen.1`, `${Date.now() - 8 * 24 * 60 * 60 * 1000}\n`);
+      assert.equal(takeStopGateBlock('gate-race', 'work'), false);
+      // a stale marker whose steal lands is replaced, not doubled
+      const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+      utimesSync(marker, weekAgo, weekAgo);
+      assert.equal(takeStopGateBlock('gate-race', 'work'), true);
+      assert.equal(takeStopGateBlock('gate-race', 'work'), false);
     });
   });
 });
