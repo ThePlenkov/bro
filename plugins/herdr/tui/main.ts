@@ -44,7 +44,7 @@ import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
 import { flag } from '../../../packages/cli/src/commands/args.ts';
 import {
   agentEntry,
-  agentKey,
+  displayAgentOf,
   type FleetPaneState,
   fleetStatusPath,
   release as paneRelease,
@@ -207,9 +207,9 @@ export async function runTui(argv: string[]): Promise<void> {
       return { state };
     }
   };
-  /** The display agent — the readable run id (`bro-2bv6q`), not the
-   *  archive stem the argv carries (`native-<hash>`). */
-  const displayAgent = agentKey(base0, agentArg) ?? agentArg;
+  /** The display agent — the true agent name (provider), resolved in
+   *  the kit next to agentKey/agentEntry. */
+  const displayAgent = displayAgentOf(base0, agentArg);
   // the journal's path resolved ONCE — `--agent` alone still names it
   // via the registry convention; a bare live pid must never stand in
   // for a journal the floor cannot read
