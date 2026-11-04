@@ -1869,6 +1869,37 @@ interface WireCtx {
   lanes: Map<string, ProviderLane>;
   /** The PUBLIC routes — route name → entry key. The router's table. */
   routes: Map<string, string>;
+  /** The catalog cache — the lanes' rows, read ONCE. */
+  catalog: CatalogCache;
+}
+
+/** The catalog cache — what the gateway serves, read from the providers
+ *  ONCE and kept. A client asking "what models do you serve?" must not
+ *  cost a provider round trip per request: the lanes are enumerated at
+ *  start and on an operator's explicit refresh
+ *  (POST /api/v1/models/reload), never as a side effect of a read. */
+interface CatalogCache {
+  /** the cached rows — undefined until a read lands. An EMPTY array is a
+   *  real answer (a lane that advertises nothing). */
+  rows?: RoutedModel[];
+  /** the lanes that failed at the last read — the degradation rides
+   *  every answer that serves the cached rows. */
+  failures: string[];
+  /** when the cached rows were read. */
+  fetchedAtMs?: number;
+  /** the read in flight — a burst of clients waits on ONE read, never
+   *  one read each. */
+  inflight?: Promise<void>;
+}
+
+/** The catalog's freshness — what a refresh reports. */
+export interface CatalogSnapshot {
+  /** the rows the catalog now holds */
+  models: number;
+  /** when they were read */
+  fetchedAtMs: number;
+  /** the lanes that failed — a partial catalog says which */
+  failures: string[];
 }
 
 /** One provider's LANE — the runtime carrier of an ENTRY: its model pin,
@@ -4002,24 +4033,59 @@ function providerPath(m: RoutedModel): string {
   return chain.length > 0 ? `${prefix}/${chain}` : prefix;
 }
 
-/** The anthropic /v1/models rows — the UNION of every lane's catalog,
- *  through the SAME `bro providers models` surface, so ids arrive
- *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
- *  PARALLEL — a catalog read costs seconds, and a caller waits for the
- *  slowest lane, never for their sum. Every lane down IS a 502. */
-async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+/** Read the lanes' catalogs — the ONE provider round trip the catalog
+ *  costs. The rows land in the cache; a read that found NOTHING usable
+ *  is not cached, so a provider that comes back heals the gateway by
+ *  itself instead of waiting for a reload. */
+async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
   // the LANES, not the routes: a lane reached by two routes is read once
   // and advertised once, under its primary route
   const lanes = await Promise.all([...wire.lanes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
+  const cache = wire.catalog;
+  // every lane failed — the catalog stays EMPTY and the next request
+  // retries, so a provider that comes back heals the gateway by itself
+  cache.rows = failures.length === lanes.length ? undefined : rows;
+  cache.failures = failures;
+  cache.fetchedAtMs = Date.now();
+  return { models: cache.rows?.length ?? 0, fetchedAtMs: cache.fetchedAtMs, failures };
+}
+
+/** The cached rows — read them ONCE if nobody has yet. A burst of
+ *  clients waits on the SAME read; none of them spends its own. */
+async function ensureCatalog(wire: WireCtx): Promise<void> {
+  const cache = wire.catalog;
+  if (cache.rows !== undefined) return;
+  const pending = cache.inflight ?? refreshCatalog(wire).then(() => undefined);
+  cache.inflight = pending;
+  try {
+    await pending;
+  } finally {
+    if (cache.inflight === pending) cache.inflight = undefined;
+  }
+}
+
+/** The anthropic /v1/models rows — the UNION of every lane's catalog,
+ *  through the SAME `bro providers models` surface, so ids arrive
+ *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
+ *  PARALLEL — a catalog read costs seconds, and a caller waits for the
+ *  slowest lane, never for their sum. Every lane down IS a 502.
+ *
+ *  The rows are CACHED: the read happens at start and on an operator's
+ *  explicit reload, never per request — a client asking what the gateway
+ *  serves must not cost a provider round trip. */
+async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+  await ensureCatalog(wire);
+  const rows = wire.catalog.rows ?? [];
+  const failures = wire.catalog.failures;
   // the degradation rides BOTH answers — a client must read the same
   // signal whether the catalog is short (200) or the gateway is down
   // (502). A 502 without it says "down" but not "which lane, why".
   const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
-  if (failures.length > 0 && failures.length === lanes.length) {
+  if (failures.length > 0 && failures.length === wire.lanes.size) {
     if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
@@ -4038,6 +4104,11 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (laneError !== undefined) {
     headers['x-bro-lane-error'] = laneError;
+  }
+  // the catalog's age rides the answer — the rows are cached, not
+  // re-read per request, and a reader can see when they were read
+  if (wire.catalog.fetchedAtMs !== undefined) {
+    headers['x-bro-catalog-fetched-at'] = String(wire.catalog.fetchedAtMs);
   }
   res.writeHead(200, headers);
   res.end(
@@ -4072,6 +4143,14 @@ export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
   terminals(): TerminalRegistry | undefined;
   dispose(): void;
+  /** Re-read the lanes' catalogs — the operator's explicit refresh
+   *  (POST /api/v1/models/reload). The catalog is otherwise read once,
+   *  at start. */
+  reloadCatalog(): Promise<CatalogSnapshot>;
+  /** Warm the catalog in the background — the serve does it at start, so
+   *  the first client read finds the rows already there instead of
+   *  waiting on a cold provider enumeration. */
+  warmCatalog(): void;
 }
 
 /** A terminal created by one provider must be readable whichever
@@ -4216,9 +4295,22 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
     return lane.pool.link(parent);
   };
-  const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };
+  const wire: WireCtx = {
+    cfg,
+    opts: wireOpts,
+    link,
+    lanes,
+    routes,
+    catalog: { failures: [] },
+  };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
     terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
+    reloadCatalog: (): Promise<CatalogSnapshot> => refreshCatalog(wire),
+    // the warm read runs in the background: a failed enumeration leaves
+    // the cache empty and the next client read retries it
+    warmCatalog: (): void => {
+      void refreshCatalog(wire).catch(() => undefined);
+    },
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
       // — aborting rejects its init and frees the deadline timer

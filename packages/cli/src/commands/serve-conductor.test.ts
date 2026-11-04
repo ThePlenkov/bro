@@ -2673,3 +2673,60 @@ describe('the gateway surfaces — one dialect per base path', () => {
     }
   });
 });
+
+describe('the catalog cache — one provider read, not one per request', () => {
+  test('a second read costs no provider round trip', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const first = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(first.status, 200);
+      const read = fake.sessions.length;
+      assert.ok(read > 0, 'the first read enumerates the lanes');
+      // the second read is served from the cache — no lane is asked again
+      const second = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(second.status, 200);
+      assert.equal(fake.sessions.length, read, 'the cache must not re-read the lanes');
+      // and the answer says when the rows were read
+      assert.equal(
+        second.headers.get('x-bro-catalog-fetched-at'),
+        first.headers.get('x-bro-catalog-fetched-at')
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  test('a reload re-reads the lanes', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
+    const { url, close } = await listen(deps({ provider: conductor }));
+    try {
+      await fetch(`${url}/v1/models`, { headers: auth });
+      const read = fake.sessions.length;
+      const snapshot = await conductor.reloadCatalog();
+      assert.equal(snapshot.models, 2);
+      assert.deepEqual(snapshot.failures, []);
+      assert.ok(fake.sessions.length > read, 'the reload reads the lanes again');
+    } finally {
+      await close();
+    }
+  });
+
+  test('the warm read fills the cache before any client asks', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const conductor = conductorProxy(CFG, { acp: { peer: fake.app } });
+    conductor.warmCatalog();
+    const { url, close } = await listen(deps({ provider: conductor }));
+    try {
+      const r = await fetch(`${url}/v1/models`, { headers: auth });
+      assert.equal(r.status, 200);
+      const ids = ((await r.json()) as { data: { id: string }[] }).data.map(x => x.id);
+      assert.deepEqual(ids, ['dv-acp/swe-x', 'dv-acp/swe-y']);
+    } finally {
+      await close();
+    }
+  });
+});
