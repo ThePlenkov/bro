@@ -1536,6 +1536,32 @@
               "additionalProperties": false
             }
           ]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "maxSessions": {
+                "type": "number"
+              },
+              "maxQueue": {
+                "type": "number"
+              },
+              "requestsPerHour": {
+                "type": "number"
+              },
+              "burst": {
+                "type": "number"
+              },
+              "lane": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

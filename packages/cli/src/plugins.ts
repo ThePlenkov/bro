@@ -123,6 +123,7 @@ import { runMeshCommand } from './commands/mesh.ts';
 import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
+import { runRouterCommand } from './commands/router.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
 import { runExecCommand } from './commands/exec.ts';
@@ -805,6 +806,13 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Provider registry — models catalog as <provider>/<model> [name…]',
     run: runProvidersCommand,
     skill: 'providers',
+  }),
+  definePlugin({
+    name: 'router',
+    summary:
+      'The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]',
+    run: runRouterCommand,
+    skill: 'brouter',
   }),
   definePlugin({
     name: 'setup',
