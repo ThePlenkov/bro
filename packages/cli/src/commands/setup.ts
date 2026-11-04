@@ -445,6 +445,65 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   reportSkillDrift(locked, drift)
 }
 
+function installGitHooks(): void {
+  // git hooks ride setup — a repo that opts into bro gets both
+  // without a second step; `bro hooks uninstall` is the opt-out:
+  //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
+  //     machine-made commits
+  //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+  //   post-merge (bro-sovl3): install → build → patch after a merge
+  // Best-effort: a non-git dir just skips.
+  const hook = installCommitHook(process.cwd(), cliVersion())
+  if (hook.state === 'error') {
+    console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
+  } else if (hook.state !== 'already') {
+    console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
+  }
+  const guard = installRefGuardHook(process.cwd(), cliVersion())
+  if (guard.state === 'error') {
+    console.error(`  note: refguard hook not installed — ${guard.err}`)
+  } else if (guard.state !== 'already') {
+    console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
+  }
+  const fresh = installPostMergeHook(process.cwd(), cliVersion())
+  if (fresh.state === 'error') {
+    console.error(`  note: post-merge hook not installed — ${fresh.err}`)
+  } else if (fresh.state !== 'already') {
+    console.error(`  ${fresh.state} post-merge hook (${fresh.path})`)
+  }
+}
+
+interface SetupMutations {
+  beads: boolean
+  skills: boolean
+  pack: string | false
+  personality: string | undefined
+  packDir: string | null
+  wantsBeads: boolean
+}
+
+function runSetupMutations(m: SetupMutations): void {
+  // bd init + formulas land BEFORE the config write — if beads setup fails,
+  // no config claiming store=both is left behind.
+  if (m.wantsBeads) {
+    setupBeads()
+  }
+
+  console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`)
+
+  if (m.skills) {
+    if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
+      console.error('  skills already installed and current')
+    }
+  }
+
+  if (m.packDir !== null) {
+    setupPack(m.packDir, m.pack || loadBroConfig().pack || DEFAULT_PACK, m.wantsBeads)
+  }
+
+  installGitHooks()
+}
+
 export async function runSetupCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     printUsage(
@@ -477,49 +536,7 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   // init, no config write, no skill/pack installs, no hook installs.
   // Only the locked-skill drift check (setupLockedSkills) runs.
   if (!checkOnly && !dryRun) {
-    // bd init + formulas land BEFORE the config write — if beads setup fails,
-    // no config claiming store=both is left behind.
-    if (wantsBeads) {
-      setupBeads()
-    }
-
-    console.error(`  ${writeConfig({ beads, personality })}`)
-
-    if (skills) {
-      if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
-        console.error('  skills already installed and current')
-      }
-    }
-
-    if (packDir !== null) {
-      setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
-    }
-
-    // git hooks ride setup — a repo that opts into bro gets both
-    // without a second step; `bro hooks uninstall` is the opt-out:
-    //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
-    //     machine-made commits
-    //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
-    //   post-merge (bro-sovl3): install → build → patch after a merge
-    // Best-effort: a non-git dir just skips.
-    const hook = installCommitHook(process.cwd(), cliVersion())
-    if (hook.state === 'error') {
-      console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
-    } else if (hook.state !== 'already') {
-      console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
-    }
-    const guard = installRefGuardHook(process.cwd(), cliVersion())
-    if (guard.state === 'error') {
-      console.error(`  note: refguard hook not installed — ${guard.err}`)
-    } else if (guard.state !== 'already') {
-      console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
-    }
-    const fresh = installPostMergeHook(process.cwd(), cliVersion())
-    if (fresh.state === 'error') {
-      console.error(`  note: post-merge hook not installed — ${fresh.err}`)
-    } else if (fresh.state !== 'already') {
-      console.error(`  ${fresh.state} post-merge hook (${fresh.path})`)
-    }
+    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads })
   }
 
   if (lock) {
