@@ -783,6 +783,48 @@ function stopHintsChanged(sessionId: string, hints: string[]): boolean {
   return hints.length > 0;
 }
 
+/** Gates, not loops — the hard block goes back ONCE per session. The
+ *  host drivers hold an in-memory one-shot (`gatedSession`) and a host
+ *  that re-enters the same stop says so through `stop_hook_active`, but
+ *  a plugin host whose hooks are one process per event (devin's
+ *  hooks/run.sh) hands every stop a fresh `stop_hook_active: false` —
+ *  and a blocked stop wakes the session as a NEW turn whose stop
+ *  re-blocks. That ping-pong is a loop, not a gate: it burned a
+ *  session's whole budget in minutes (observed 2026-11-04: 11 blocks
+ *  in 5 minutes, one per answered block message). So the one-shot
+ *  lives HERE, in a marker beside the hint-dedup ones: the first block
+ *  stamps it, later blocks demote to a hint. Same TTL as skillHinted —
+ *  a week-old marker is a new session and gets its gate back. The
+ *  exclusive create closes the concurrent-stop race: only one caller
+ *  gets `true`. Fail-open on an unstampable session (no hooks state
+ *  dir): the gate keeps its block — a rig that cannot arm aspects never
+ *  reaches the block branch anyway. */
+export function takeStopGateBlock(sessionId: string): boolean {
+  const path = hintedPath(sessionId, 'stop-gate-block');
+  if (!path) {
+    return true;
+  }
+  try {
+    if (statSync(path).mtimeMs >= Date.now() - MARKER_TTL_MS) {
+      return false;
+    }
+    // a stale marker is a session that left and came back — re-arm
+    rmSync(path, { force: true });
+  } catch {
+    // no marker yet — this is the session's first block
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${Date.now()}\n`, { flag: 'wx' });
+    return true;
+  } catch {
+    // a concurrent stop took the block, or a stale marker could not be
+    // replaced — demote either way: a gate that cannot remember it
+    // already blocked must never loop
+    return false;
+  }
+}
+
 /** True when this session was already pointed at the skill — a marker
  *  younger than MARKER_TTL_MS counts; older re-hints (a week-old session
  *  is a new session). */
@@ -1622,6 +1664,12 @@ async function emitStopGateBody(
       continue;
     }
     if (c.block) {
+      // one block per session (takeStopGateBlock) — a repeat demotes to
+      // a hint the stop-hint dedup below keeps from re-waking the host
+      if (!takeStopGateBlock(sessionId)) {
+        gateHints.push(c.block);
+        continue;
+      }
       emit({ decision: 'block', reason: c.block });
       return;
     }

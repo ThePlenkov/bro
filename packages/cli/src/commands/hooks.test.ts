@@ -25,6 +25,7 @@ import {
   armDetail,
   otherLiveWork,
   recordGuardEvents,
+  takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
 import { procStat } from '@broject/core';
@@ -321,6 +322,34 @@ describe('classifySkillMutation', () => {
 describe('readArmed', () => {
   test('returns an empty set for a session with no marker', () => {
     assert.equal(readArmed('definitely-no-such-session-id').size, 0);
+  });
+});
+
+describe('takeStopGateBlock', () => {
+  test('the hard block goes back once per session, never as a loop', () => {
+    const { root, main } = initRepo('bro-stop-gate-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-once'), true);
+      // a blocked stop wakes the host as a new turn whose stop would
+      // block again on the same claim — that is the ping-pong the
+      // one-shot exists to stop (gates, not loops)
+      assert.equal(takeStopGateBlock('gate-once'), false);
+      assert.equal(takeStopGateBlock('gate-once'), false);
+      // another session keeps its own gate
+      assert.equal(takeStopGateBlock('gate-other'), true);
+    });
+  });
+
+  test('a TTL-stale marker is a session that came back — the gate re-arms', () => {
+    const { root, main } = initRepo('bro-stop-gate-stale-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-return'), true);
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const marker = join(common, 'bro', 'hooks', 'hinted', 'gate-return.stop-gate-block');
+      const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+      utimesSync(marker, weekAgo, weekAgo);
+      assert.equal(takeStopGateBlock('gate-return'), true);
+    });
   });
 });
 
