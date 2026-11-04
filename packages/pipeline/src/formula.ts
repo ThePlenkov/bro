@@ -259,13 +259,7 @@ function validateTransitions(
   return transitions;
 }
 
-/** Validate an already-parsed formula document — the plugin planSchema.
- *  Throws one error listing every problem. */
-export function parsePipelineFormula(doc: unknown, source = 'formula'): PipelineFormula {
-  const errors: string[] = [];
-  if (!isRecord(doc)) {
-    throw new Error(`${source}: expected a TOML table`);
-  }
+function validateEnvelope(doc: Record<string, unknown>, errors: string[]): void {
   for (const key of Object.keys(doc)) {
     if (!TOP_KEYS.has(key)) {
       errors.push(`unknown top-level key "${key}"`);
@@ -275,22 +269,35 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
     errors.push(`kind: expected "${PIPELINE_KIND}", got ${JSON.stringify(doc.kind)}`);
   }
   checkPlanVersion(doc.version, PIPELINE_KIND, PIPELINE_VERSION, errors);
+}
 
+function parseStages(raw: unknown, errors: string[]): PipelineStage[] {
   const stages: PipelineStage[] = [];
-  if (!Array.isArray(doc.stages) || doc.stages.length === 0) {
+  if (!Array.isArray(raw) || raw.length === 0) {
     errors.push('stages: at least one [[stages]] entry is required');
-  } else {
-    doc.stages.forEach((raw, i) => {
-      const s = parseStage(raw, i, errors);
-      if (s) stages.push(s);
-    });
+    return stages;
   }
+  raw.forEach((r, i) => {
+    const s = parseStage(r, i, errors);
+    if (s) stages.push(s);
+  });
   stages.forEach((s, i) => {
     if (stages.findIndex(o => o.name === s.name) !== i) {
       errors.push(`stages[${i}]: duplicate stage name "${s.name}"`);
     }
   });
+  return stages;
+}
 
+/** Validate an already-parsed formula document — the plugin planSchema.
+ *  Throws one error listing every problem. */
+export function parsePipelineFormula(doc: unknown, source = 'formula'): PipelineFormula {
+  if (!isRecord(doc)) {
+    throw new Error(`${source}: expected a TOML table`);
+  }
+  const errors: string[] = [];
+  validateEnvelope(doc, errors);
+  const stages = parseStages(doc.stages, errors);
   const transitions = validateTransitions(doc.transitions, stages, errors);
 
   if (errors.length > 0) {
