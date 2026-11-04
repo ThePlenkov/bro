@@ -594,7 +594,8 @@ export async function acpConverse(
         signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
@@ -1207,7 +1208,8 @@ export async function acpPooledTurn(
         turn.signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       endSession();
       end({
