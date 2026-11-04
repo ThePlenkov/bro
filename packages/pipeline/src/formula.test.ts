@@ -170,7 +170,7 @@ describe('invalid formulas — table of rejections', () => {
     [
       'prototype-named stage still needs its transitions entry',
       `${oneStage('name = "toString"\nengine = "judge"\nverdicts = ["ok"]', 'b = { ok = "end" }')}\n[[stages]]\nname = "b"\nengine = "judge"\nverdicts = ["ok"]`,
-      /stage "toString" has no entry|no such stage/,
+      /stage "toString" has no entry/,
     ],
     [
       'duplicate stage names',
