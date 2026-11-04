@@ -179,6 +179,92 @@ ts-package, orch: foreground, timing: now}`.
   scripted engines; later stage beads (.3–.6) only supply real
   engines behind the same `EngineMap` seam.
 
+## Run 3: bro-7d5nb.3 — G1 classify stage (S3)
+
+- Invocation: `classifyStage(deps).invoke(call)` inside
+  `runPipeline(formula, 'bro-7d5nb.3', opts)` — the stage engine this
+  item ships, bound into the runner's `judge` slot via
+  `stageDispatch({ classify })` (the runner resolves engines by engine
+  name; classify/route/review all share `judge`, so the handler
+  multiplexes on `call.stage.name`).
+- Spec reference: §typed stage outputs (`{group, complexity, rank}`),
+  §stage semantics (dedup/group/rank/complexity; LIFO tie-breaker
+  inside a group; output lands as bead labels), invariant 1 (no
+  pipeline vocabulary in agent-facing artifacts).
+- Input: bead `bro-7d5nb.3` (epic child, needs: [.2] → ready),
+  spec formula, peers = the ready/open set.
+- Expected by spec: judge reads bead + peers → verdict
+  solo|clump|duplicate|defer + payload → labels through the task-store
+  seam; `complexity` feeds `review.gate_on` verbatim.
+- Actual action and result:
+  - classify → `clump` — this item shares its surface with .4–.6
+    (the other stage-engine beads): same epic, same package, same
+    EngineMap seam. Payload `{group: clump, complexity: complex,
+clumpId: bro-7d5nb.3, rank: 2}` — the engine is real
+    code now; the passage itself is emulated (no `bro pipeline` CLI
+    yet): fakes replay it in `stages/classify.test.ts`, including one
+    end-to-end `runPipeline` case proving `ctx.complexity` feeds the
+    review gate.
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+orch: foreground, timing: now}`.
+  - work → `done` — `stages/classify.ts` + `stages/classify.test.ts`
+    - index wiring, 20 stage tests green (104 package total).
+  - review → in flight at log time — act gate + CodeScene stand in
+    (same standing-in as Runs 1–2).
+  - merge / capture → pending.
+- Design decisions worth recording (spec-consistent, underdetermined
+  by the spec):
+  - The judge's contract speaks choice/score/noul only — no free
+    text. Every classify datum is therefore a typed question: `dup_of`
+    is a `choice` over the peer ids (+`none`), clump-mates are
+    per-peer `noul`s, `defer_reason` is a `choice` over declared
+    reason codes (a defer payload carries an enum, never prose).
+  - The verdict is DERIVED, never asked: no "pick your verdict"
+    question exists — `duplicate` = confident dup_of ≠ none,
+    `defer` = affirmed defer noul, else the `clump` choice
+    (solo/new/existing-id). A single verdict question could disagree
+    with its own evidence; deriving can't.
+  - Precedence is decisive-first: duplicate (terminal close) >
+    defer (park) > clump/solo. A dimmed answer is not honored —
+    `lowConfidence` on a gating question falls back to the safe shape
+    (solo + complex): an uncertain judge never closes or parks
+    someone's work, and `complex` keeps review in the path.
+  - A `new` clump mints its id from the founding member (`clumpId =
+    item.id`) — deterministic, collision-free, self-describing.
+    Existing `clump:<id>` labels on peers become joinable choices;
+    the judge never invents an id.
+  - Labels are REPLACEMENTS on the item (stale `dup:`/`clump:` marks
+    removed first — re-classification can't double-tag) and
+    first-writer-wins on mates (a labeled peer is not retagged — one
+    bead, one clump).
+  - `bd` has no `dup` dep type, so `dup:<id>` is a label like
+    `clump:<id>` — consistent with the spec's "lands as bead labels".
+  - `taskBacklog` peers = ready ∪ open ∪ in_progress — dedup must
+    see claimed work (a dup of an in-flight item is still a dup).
+  - Judge unavailability and a missing item throw: the pending
+    intent is the crash marker; classify's side effects
+    (remove-then-add labels) are idempotent under re-fire.
+- Spec gaps hit:
+  1. **Rank's unit is unspecified.** The spec declares `rank: int`
+     and "LIFO tie-breaker inside a group" but not the scale or
+     direction. This run maps the judge's 5-level precedence score
+     to rank 1..5 (1 = works first). Proposed wording: "rank is a
+     small int ordering the item among its peers — lower works
+     earlier; equal ranks fall back to LIFO."
+  2. **The peer candidate set is unspecified.** "Reads bead + repo
+     signals" doesn't say which beads the judge sees. This run feeds
+     ready ∪ open ∪ in_progress capped at the decide's criteria
+     bound (8) — a bounded view, never the whole backlog. Proposed
+     wording: "classify's peer set is a bounded candidate list the
+     intake plane scopes (ready ∪ open ∪ in_progress); the engine
+     caps what one decide carries."
+- Friction: the `judge` engine slot is shared by three stages, so a
+  formula can't bind classify alone without `stageDispatch` — worth
+  noting for .4: the route stage binds the same multiplexer.
+- Golden case: **partial** — `stages/classify.test.ts` scripts the
+  decide answers; a real-judge replay belongs to the runner-backed
+  graduation when items flow under live engines.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the

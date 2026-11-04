@@ -56,3 +56,21 @@ export {
   runPipeline,
   STAGE_INTENTS,
 } from './runner.ts';
+export type {
+  ClassifyBacklog,
+  ClassifyComplexity,
+  ClassifyDeps,
+  ClassifyGroup,
+  ClassifyPayload,
+  DeferReason,
+} from './stages/classify.ts';
+export {
+  classifyStage,
+  CLUMP_LABEL_PREFIX,
+  DEFAULT_MAX_PEERS,
+  DEFAULT_PEER_LIMIT,
+  DEFER_REASONS,
+  DUP_LABEL_PREFIX,
+  stageDispatch,
+  taskBacklog,
+} from './stages/classify.ts';
