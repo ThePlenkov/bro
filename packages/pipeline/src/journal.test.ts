@@ -50,6 +50,20 @@ describe('journal storage', () => {
     assert.equal(rows[0].seq, 1);
   });
 
+  test('an append after a torn tail lands on a fresh line — the new row survives', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    appendJournalRow(file, row());
+    appendFileSync(file, '{"run_id":"r1","seq":'); // torn tail, no newline
+    appendJournalRow(file, row({ seq: 7 }));
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 2); // torn bytes dropped, BOTH rows survive
+    assert.equal(rows[1].seq, 7);
+  });
+
+  test('a read error that is not ENOENT propagates — an unreadable journal is not an empty run', () => {
+    assert.throws(() => readJournalFile(tmp()), /EISDIR|EPERM|EACCES/);
+  });
+
   test('a valid-JSON line missing row fields is dropped', () => {
     const file = join(tmp(), 'r1.journal.jsonl');
     writeFileSync(
@@ -82,6 +96,20 @@ describe('journal storage', () => {
     const rows = readJournalFile(file);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].seq, 2);
+  });
+
+  test('a row missing `formula_sha` is dropped — a missing hash would crash the drift check', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    const noSha = { ...row({ seq: 5 }) };
+    delete (noSha as Record<string, unknown>).formula_sha;
+    writeFileSync(
+      file,
+      `${JSON.stringify(noSha)}\n${JSON.stringify(row({ seq: 6, formula_sha: '' }))}\n`
+    );
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].seq, 6); // present-but-empty sha is legitimate
+    assert.equal(rows[0].formula_sha, '');
   });
 
   test('missing file reads as empty', () => {

@@ -34,6 +34,7 @@ import {
   journalRecords,
   openPipelineJournal,
   type PipelineJournal,
+  pendingRecord,
 } from './journal.ts';
 
 /** The side-effect word a stage's intent carries — derived from its
@@ -71,6 +72,10 @@ export const PARK_ALERTS = {
   missingTransition: 'missing-transition',
   formulaDrift: 'formula-drift',
   recheckUnavailable: 'recheck-unavailable',
+  admissionUnavailable: 'admission-unavailable',
+  /** journaled when an operator resumes past a formula-drift alert —
+   *  the recorded acknowledgement, not a park */
+  driftAcknowledged: 'drift-acknowledged',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
 
@@ -133,7 +138,10 @@ export type EngineMap = Partial<Record<StageEngine, EngineFn | EngineHandler>>;
  *  spawn-like intent's side effect fires: `true` admits the attempt
  *  and the engine is invoked; an EngineResult means admission itself
  *  produced the verdict (a refusal mapped to `queue`/`rate_limited`)
- *  and the engine is skipped. The pending record completes either way. */
+ *  and the engine is skipped. The seam is NOT optional once a
+ *  spawn-like intent fires: an unbound `admit` fails closed to an
+ *  `admission-unavailable` park rather than spawning without a
+ *  go-marker. */
 export type AdmitFn = (call: StageCall) => MaybePromise<true | EngineResult>;
 
 export type RunOutcome = 'end' | 'park' | 'close' | 'abandon';
@@ -224,13 +232,19 @@ function recordsOf(run: Run): JournalRow[] {
   return journalRecords(run.journal.rows().filter(r => r.run_id === run.runId));
 }
 
+/** The run id: explicit opt wins, else the journal's own (an injected
+ *  journal IS the resume identity — minting over it would restart the
+ *  run and could re-fire spawn-like effects), else a fresh mint. */
+const runIdFor = (opts: RunOptions, journal?: PipelineJournal): string =>
+  opts.runId ?? journal?.runId ?? opts.journal?.runId ?? mintRunId();
+
 function initRun(
   formula: PipelineFormula,
   item: string,
   opts: RunOptions,
   journal?: PipelineJournal
 ): Run {
-  const runId = opts.runId ?? journal?.runId ?? mintRunId();
+  const runId = runIdFor(opts, journal);
   const j =
     journal ?? opts.journal ?? (opts.dir ? openPipelineJournal({ dir: opts.dir, runId }) : null);
   if (j === null) {
@@ -402,11 +416,11 @@ function absorb(run: Run, stage: string, payload: unknown): void {
 }
 
 /** The fix scope — required non-empty, else the re-entry is scopeless
- *  and fails closed. The verdict's own payload wins over the flat
- *  merge (an earlier stage's `notes` can't satisfy it). */
-function notesFor(run: Run, payload: unknown): string | undefined {
-  const v = isRecord(payload) && typeof payload.notes === 'string' ? payload.notes : undefined;
-  const notes = v ?? run.ctx.notes;
+ *  and fails closed. Only THIS verdict's payload counts: a `notes`
+ *  key flat-merged into the context by an earlier stage is stale
+ *  scope, not the fix verdict's consent. */
+function notesFor(payload: unknown): string | undefined {
+  const notes = isRecord(payload) ? payload.notes : undefined;
   return typeof notes === 'string' && notes.trim() !== '' ? notes : undefined;
 }
 
@@ -423,7 +437,7 @@ function reentryStep(run: Run, out: EngineResult, target: string, to: NextStep):
   if (out.verdict !== run.fixVerdict) {
     return { go: { stage: target, attempt: 1 } };
   }
-  const notes = notesFor(run, out.payload);
+  const notes = notesFor(out.payload);
   if (notes === undefined) {
     return alertStep(run, to, {
       alert: PARK_ALERTS.fixNotesMissing,
@@ -443,7 +457,8 @@ function reentryStep(run: Run, out: EngineResult, target: string, to: NextStep):
 }
 
 /** `retry` — re-run the SAME stage, bounded by the attempt budget;
- *  exhaustion falls to park (spec §terminal actions). */
+ *  exhaustion falls to park (spec §terminal actions). The rest of
+ *  `to` carries: a retry during scoped fix keeps its round and notes. */
 function retryStep(run: Run, to: NextStep): Step {
   if (to.attempt >= run.maxAttempts) {
     return alertStep(run, to, {
@@ -452,7 +467,7 @@ function retryStep(run: Run, to: NextStep): Step {
       resume: to.stage,
     });
   }
-  return { go: { stage: to.stage, attempt: to.attempt + 1 } };
+  return { go: { ...to, attempt: to.attempt + 1 } };
 }
 
 /** Terminal targets that map 1:1 to a run outcome — `park` and `retry`
@@ -518,6 +533,13 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
   }
   const intent = rowFor(run, to, intentFor(stage));
   run.journal.append(intent);
+  if (run.admit === undefined && run.admitIntents.includes(intent.intent)) {
+    return alertStep(run, to, {
+      alert: PARK_ALERTS.admissionUnavailable,
+      detail: `"${intent.intent}" is a spawn-like intent and no admit seam is bound — never spawn without a go-marker`,
+      resume: to.stage,
+    });
+  }
   const { res, viaAdmit } = await sideEffect(run, stage, handler, to);
   const done = verdictRow(intent, res);
   if (viaAdmit) {
@@ -589,7 +611,7 @@ function refireAttempt(run: Run, last: JournalRow, to: NextStep): Step {
       resume: last.stage,
     });
   }
-  return { go: { stage: last.stage, attempt: last.attempt + 1 } };
+  return { go: { ...to, stage: last.stage, attempt: last.attempt + 1 } };
 }
 
 /** A recheck verdict settles the pending record — same seq completes
@@ -645,10 +667,31 @@ function drifted(run: Run, last: JournalRow): boolean {
   return run.sha !== '' && last.formula_sha !== '' && last.formula_sha !== run.sha;
 }
 
-/** Where a journaled run continues: alert → the row's resume stage;
- *  verdict-less intent → recheck (never blind re-fire); settled → its
- *  transition (park re-enters, terminal replays as the outcome). */
-async function resumeStep(run: Run, last: JournalRow): Promise<Step> {
+/** The operator-acknowledgement record: resuming PAST a formula-drift
+ *  alert journals `drift-acknowledged`, keyed to the waived alert's
+ *  seq. An alert-type row (never pending, never absorbed) stamped with
+ *  the NEW sha — the waiver is durable, and the next resume walks on
+ *  without re-acking. */
+function driftAck(run: Run, last: JournalRow): void {
+  const row = rowFor(run, { stage: last.resume ?? last.stage, attempt: 1 }, 'alert');
+  row.alert = PARK_ALERTS.driftAcknowledged;
+  row.detail = `operator resumed past formula-drift alert seq=${last.seq}`;
+  row.resume = last.resume ?? last.stage;
+  run.journal.append(row);
+}
+
+/** Where a journaled run continues: drift → park (a formula change is
+ *  an operator decision, never auto-resumed); alert → the row's
+ *  resume stage — a formula-drift alert first journals the operator's
+ *  acknowledgement; pending intent → recheck (never blind re-fire);
+ *  settled → its transition (park re-enters, terminal replays as the
+ *  outcome). `pending` comes from `pendingRecord` — the journal's own
+ *  definition of the actionable verdict-less tail. */
+async function resumeStep(
+  run: Run,
+  last: JournalRow,
+  pending: JournalRow | undefined
+): Promise<Step> {
   const to = toFromRecord(last);
   if (drifted(run, last)) {
     return alertStep(run, to, {
@@ -658,12 +701,18 @@ async function resumeStep(run: Run, last: JournalRow): Promise<Step> {
     });
   }
   if (last.alert !== undefined) {
+    if (last.alert === PARK_ALERTS.formulaDrift) {
+      driftAck(run, last);
+    }
     return { go: { stage: last.resume ?? last.stage, attempt: 1 } };
   }
-  if (last.verdict === undefined) {
-    return recheckStep(run, last, to);
+  if (pending !== undefined) {
+    return recheckStep(run, pending, to);
   }
-  return unpark(last, transitionStep(run, { verdict: last.verdict, payload: last.payload }, to));
+  // pendingRecord already proved the tail is verdict-settled — TS
+  // just can't see through the helper
+  const settled = { verdict: last.verdict as string, payload: last.payload };
+  return unpark(last, transitionStep(run, settled, to));
 }
 
 /** A row that produced real stage output — alerts carry no verdict,
@@ -692,7 +741,7 @@ async function begin(run: Run): Promise<RunResult> {
   if (last === undefined) {
     return drive(run, { stage: entryStage(run.formula).name, attempt: 1 });
   }
-  const step = await resumeStep(run, last);
+  const step = await resumeStep(run, last, pendingRecord(records));
   return 'halt' in step ? step.halt : drive(run, step.go);
 }
 

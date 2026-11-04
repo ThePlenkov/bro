@@ -18,7 +18,15 @@
  * nothing lands in git); plain append is atomic at this size; reads
  * drop malformed lines so a torn tail can't poison the journal.
  */
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
 
@@ -110,25 +118,20 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const JOURNAL_SUFFIX = '.journal.jsonl';
 
-/** The run id a journal file name carries — `<run>.journal.jsonl`.
- *  String ops, no regex: the input is an uncontrolled path. */
-function runIdFromPath(file: string): string | undefined {
-  const sep = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
-  const base = file.slice(sep + 1);
-  return base.endsWith(JOURNAL_SUFFIX)
-    ? base.slice(0, base.length - JOURNAL_SUFFIX.length)
-    : undefined;
-}
-
 /** A file-backed journal — `runId` derives from the `<run>.journal.
- *  jsonl` name. The file is read once at construction: one runner owns
- *  a journal file, so reads-after-append come from the object's own
- *  mirror and never double-count its own lines; a resume constructs a
- *  fresh journal and re-reads. */
+ *  jsonl` name (string ops, no regex: the path is uncontrolled input).
+ *  The file is read once at construction: one runner owns a journal
+ *  file, so reads-after-append come from the object's own mirror and
+ *  never double-count its own lines; a resume constructs a fresh
+ *  journal and re-reads. */
 export function fileJournal(file: string): PipelineJournal {
   const all = readJournalFile(file);
+  const sep = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
+  const base = file.slice(sep + 1);
   return {
-    runId: runIdFromPath(file),
+    runId: base.endsWith(JOURNAL_SUFFIX)
+      ? base.slice(0, base.length - JOURNAL_SUFFIX.length)
+      : undefined,
     append(row: JournalRow): void {
       appendJournalRow(file, row);
       all.push(row);
@@ -155,10 +158,30 @@ export function memoryJournal(runId?: string): PipelineJournal {
 }
 
 /** Plain append is atomic at row size; the journal dir is created on
- *  first write. */
+ *  first write. A file that ends mid-row gets a separator first: a
+ *  killed writer leaves a torn tail, and a naive append would
+ *  concatenate the next row onto it — losing BOTH (the merged line
+ *  parses as garbage and drops). The torn bytes stay torn; the row
+ *  lands on a fresh line. O(1): only the last byte is read. */
 export function appendJournalRow(file: string, row: JournalRow): void {
   mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, `${JSON.stringify(row)}\n`);
+  let sep = '';
+  try {
+    const size = statSync(file).size;
+    if (size > 0) {
+      const fd = openSync(file, 'r');
+      try {
+        const last = Buffer.alloc(1);
+        readSync(fd, last, 0, 1, size - 1);
+        sep = last[0] === 0x0a ? '' : '\n';
+      } finally {
+        closeSync(fd);
+      }
+    }
+  } catch {
+    sep = ''; // absent/unreadable file — nothing to separate from
+  }
+  appendFileSync(file, `${sep}${JSON.stringify(row)}\n`);
 }
 
 const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
@@ -176,7 +199,10 @@ function isJournalRow(v: unknown): v is JournalRow {
   }
   const ints = REQUIRED_INTS.every(k => Number.isInteger(v[k]));
   const strings = REQUIRED_STRINGS.every(k => nonEmpty(v[k]));
-  return ints && strings;
+  // formula_sha must be PRESENT (a missing field would crash the
+  // drift check's .slice) but may be the empty string (runs started
+  // without a sha stamp '').
+  return ints && strings && typeof v.formula_sha === 'string';
 }
 
 /** The whole journal file, malformed lines dropped — a torn last line
@@ -185,8 +211,14 @@ export function readJournalFile(file: string): JournalRow[] {
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
-  } catch {
-    return [];
+  } catch (e) {
+    // Only a missing file means "empty journal" — an unreadable file
+    // that IS present must not masquerade as an empty run (resume
+    // would restart and repeat side effects).
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw e;
   }
   const rows: JournalRow[] = [];
   for (const line of text.split('\n')) {

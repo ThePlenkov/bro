@@ -101,9 +101,10 @@ code — each became a spec fix and a review-thread resolution on
 
 ## Run 2: bro-7d5nb.2 — stage-runner core + write-ahead journal (S2)
 
-- Invocation: `bro pipeline run --formula <spec-formula> --item
-  bro-7d5nb.2` (the runner itself ships in this item — the passage is
-  still hand-emulated, this time by the item's own machinery: the fake-
+- Invocation: `runPipeline(formula, 'bro-7d5nb.2', opts)` /
+  `resumePipeline(formula, 'bro-7d5nb.2', journal)` — the library API
+  this item ships (a `bro pipeline run` CLI still does not exist; the
+  passage is hand-emulated by the item's own machinery: the fake-
   engine tests replay this same trajectory).
 - Spec reference: §write-ahead journal, §terminal actions, §gates and
   the `skip` verdict, §review scoped-fix mode.
@@ -145,6 +146,14 @@ code — each became a spec fix and a review-thread resolution on
     the only ones `admit` gates by default, and the only ones a
     missing `recheck` refuses to re-fire — judge/learn side effects
     are read-shaped, re-firing them is safe; a blind re-spawn is not.
+    The seam is mandatory once a spawn-like intent fires: unbound
+    `admit` fails closed (`admission-unavailable`), and an `admit`-
+    produced refusal verdict journals `admit: true` — its payload is
+    refusal detail, never absorbed into the pipeline context.
+  - `recheck` distinguishes hook-presence from hook-verdict: NO hook
+    fails closed on spawn-like intents, but a hook answering
+    undefined attested "didn't land" and re-fires ANY intent under
+    the attempt budget — hook presence IS the attestation.
   - `runPipeline` over a non-empty journal IS a resume — one
     `begin()` engine serves both exports; the journal is the state.
   - `formula_sha` drift mid-run fails closed (park + alert) — a
@@ -169,3 +178,21 @@ code — each became a spec fix and a review-thread resolution on
   full DAG (skip-gate, fix-scope, retry-budget, crash-resume) with
   scripted engines; later stage beads (.3–.6) only supply real
   engines behind the same `EngineMap` seam.
+
+## Graduation
+
+- Stage: **runner-backed, library-only** — `.2` delivers the
+  stage-runner + write-ahead journal: intents journal before every
+  side effect, verdicts complete the same seq, gates evaluate against
+  replayed context, resume re-checks pending intents instead of
+  re-firing. The item's own pass through the pipeline is still
+  hand-emulated (a `bro pipeline` CLI doesn't exist yet); merge is in
+  flight and capture remains pending at log time.
+- Scripted: yes at the library level — the fake-engine suite replays
+  the spec formula's full DAG as a golden test. Worth promoting to an
+  operator-facing runner when ≥2 items run concurrently under real
+  engines.
+- Real: `.3–.6` bind real engines (classify/route/work/review/
+  merge/capture) behind the `EngineMap` + `admit`/`recheck` seams;
+  `.7` stamps traceability — after that, logged runs replay as
+  golden tests end to end.

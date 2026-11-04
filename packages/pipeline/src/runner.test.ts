@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { type PipelineFormula, SKIP_VERDICT } from './formula.ts';
+import { parse } from 'smol-toml';
+import { parsePipelineFormula, SKIP_VERDICT } from './formula.ts';
 import { type JournalRow, journalRecords, memoryJournal, type PipelineJournal } from './journal.ts';
 import {
   type EngineFn,
@@ -13,35 +14,12 @@ import {
   runPipeline,
   type StageCall,
 } from './runner.ts';
+import { SPEC_FORMULA } from './spec-formula.fixture.ts';
 
-/** The spec's own 6-stage formula (specs/bro-7d5nb.md) — hand-built as
- *  the validated shape so the runner tests exercise the same graph the
- *  parser conformance test parses. */
-const FORMULA: PipelineFormula = {
-  kind: 'pipeline',
-  version: 1,
-  stages: [
-    { name: 'classify', engine: 'judge', verdicts: ['solo', 'clump', 'duplicate', 'defer'] },
-    { name: 'route', engine: 'judge', verdicts: ['spawn', 'queue', 'defer'] },
-    { name: 'work', engine: 'fleet', verdicts: ['done', 'rate_limited', 'crash', 'stopped'] },
-    {
-      name: 'review',
-      engine: 'judge',
-      gate_on: { field: 'complexity', op: '==', value: 'complex' },
-      verdicts: ['push', 'fix', 'abandon'],
-    },
-    { name: 'merge', engine: 'act-gate', verdicts: ['landed', 'blocked', 'dropped'] },
-    { name: 'capture', engine: 'learn', mode: 'always-capture', verdicts: ['captured'] },
-  ],
-  transitions: {
-    classify: { solo: 'route', clump: 'route', duplicate: 'close', defer: 'park' },
-    route: { spawn: 'work', queue: 'park', defer: 'park' },
-    work: { done: 'review', rate_limited: 'route', crash: 'retry', stopped: 'abandon' },
-    review: { skip: 'merge', push: 'merge', fix: 'work', abandon: 'abandon' },
-    merge: { landed: 'capture', blocked: 'retry', dropped: 'close' },
-    capture: { captured: 'end' },
-  },
-};
+/** The spec's own 6-stage formula (specs/bro-7d5nb.md) — derived from
+ *  the SAME TOML fixture the parser conformance test parses, so the
+ *  runner tests always drive the graph the parser actually produces. */
+const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
 
 const SHA = 'deadbeef';
 
@@ -81,8 +59,16 @@ const happyScript = (complexity = 'complex') => ({
 const emap = (e: Record<string, Spy>): EngineMap =>
   Object.fromEntries(Object.entries(e).map(([k, s]) => [k, s.fn])) as EngineMap;
 
+// admit-all by default — spawn-like intents REQUIRE the seam; tests
+// exercising refusals or the unbound-seam park override it.
 const run = (engines: EngineMap, opts: Partial<RunOptions> = {}, journal = memoryJournal()) =>
-  runPipeline(FORMULA, 'bro-7d5nb.2', { engines, journal, formulaSha: SHA, ...opts });
+  runPipeline(FORMULA, 'bro-7d5nb.2', {
+    engines,
+    journal,
+    formulaSha: SHA,
+    admit: () => true,
+    ...opts,
+  });
 
 const records = (j: PipelineJournal): JournalRow[] => journalRecords(j.rows());
 
@@ -191,6 +177,7 @@ describe('terminal actions', () => {
         learn: e.learn.fn,
       },
       formulaSha: SHA,
+      admit: () => true,
     });
     assert.equal(res.outcome, 'end');
     assert.equal(judge2.calls[0].stage.name, 'route'); // re-entered at the parked stage
@@ -295,6 +282,35 @@ describe('scoped-fix mode — review.fix → work', () => {
     assert.equal(fleet.calls.length, 2); // original + one fix round
     assert.equal(fleet.calls[1].fixRound, 1);
   });
+
+  test('a later fix without its own notes does NOT reuse stale ctx.notes — fails closed', async () => {
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'fix', payload: { notes: 'round 1' } }, // flat-merges ctx.notes
+      { verdict: 'fix', payload: {} }, // no notes of its own
+    ]);
+    const fleet = spy([{ verdict: 'done' }, { verdict: 'done' }]);
+    const res = await run({ judge: judge.fn, fleet: fleet.fn });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, PARK_ALERTS.fixNotesMissing);
+    assert.equal(fleet.calls.length, 2); // second fix never re-entered on stale scope
+  });
+
+  test('a retry during scoped fix keeps the round and notes', async () => {
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'fix', payload: { notes: 'round 1' } },
+    ]);
+    const fleet = spy([{ verdict: 'done' }, { verdict: 'crash' }, { verdict: 'stopped' }]);
+    const res = await run({ judge: judge.fn, fleet: fleet.fn });
+    assert.equal(res.outcome, 'abandon'); // stopped → abandon
+    assert.equal(fleet.calls.length, 3); // work, crash-retry, retry
+    assert.equal(fleet.calls[2].fixRound, 1); // scope preserved across the retry
+    assert.equal(fleet.calls[2].notes, 'round 1');
+    assert.equal(fleet.calls[2].attempt, 2);
+  });
 });
 
 describe('the admit seam — spawn idempotence', () => {
@@ -362,6 +378,21 @@ describe('the admit seam — spawn idempotence', () => {
     const reviewCall = judge.calls[3];
     assert.deepEqual(reviewCall.ctx.work, { pr: 42 });
     assert.equal(reviewCall.ctx.stale, undefined);
+  });
+
+  test('a spawn-like intent with NO admit seam bound fails closed — admission-unavailable', async () => {
+    const j = memoryJournal();
+    const e = happyScript();
+    const res = await run(emap(e), { admit: undefined }, j);
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, PARK_ALERTS.admissionUnavailable);
+    assert.equal(e.fleet.calls.length, 0); // never spawned without a go-marker
+    // the intent is journaled (write-ahead), then the alert parks —
+    // the journal shows the blocked spawn attempt
+    const last = records(j).at(-1);
+    assert.equal(last?.alert, PARK_ALERTS.admissionUnavailable);
+    assert.equal(records(j).at(-2)?.intent, 'spawn');
+    assert.equal(records(j).at(-2)?.verdict, undefined);
   });
 });
 
@@ -462,6 +493,7 @@ describe('resume — the write-ahead contract', () => {
     const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
       engines: { judge: jg.fn, fleet: { invoke: fl2.fn, recheck: () => undefined } },
       formulaSha: SHA,
+      admit: () => true, // the re-fired spawn still goes through the go-marker seam
     });
     assert.equal(res.outcome, 'abandon'); // work.stopped → abandon
     assert.equal(fl2.calls.length, 1);
@@ -502,6 +534,54 @@ describe('resume — the write-ahead contract', () => {
     assert.equal(reviewCall.ctx.complexity, 'complex'); // real payloads did
   });
 
+  test('a re-fired intent keeps its journaled fix scope', async () => {
+    const j = memoryJournal('rc');
+    j.append({
+      run_id: 'rc',
+      item: 'bro-7d5nb.2',
+      seq: 1,
+      stage: 'work',
+      intent: 'spawn',
+      attempt: 1,
+      fix_round: 2,
+      notes: 'scope-x',
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const fl = spy([{ verdict: 'stopped' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: { fleet: { invoke: fl.fn, recheck: () => undefined } },
+      formulaSha: SHA,
+      admit: () => true,
+    });
+    assert.equal(res.outcome, 'abandon');
+    assert.equal(fl.calls[0].attempt, 2);
+    assert.equal(fl.calls[0].fixRound, 2); // journaled scope rides the re-fire
+    assert.equal(fl.calls[0].notes, 'scope-x');
+  });
+
+  test('an injected journal supplies the run id — no opts.runId needed', async () => {
+    const j = memoryJournal('rj');
+    j.append({
+      run_id: 'rj',
+      item: 'bro-7d5nb.2',
+      seq: 1,
+      stage: 'classify',
+      intent: 'judge',
+      attempt: 1,
+      verdict: 'duplicate',
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const res = await runPipeline(FORMULA, 'bro-7d5nb.2', {
+      engines: {},
+      journal: j,
+      formulaSha: SHA,
+    });
+    assert.equal(res.runId, 'rj'); // the journal's own run id, not a fresh mint
+    assert.equal(res.outcome, 'close'); // duplicate → close
+  });
+
   test('a formula change mid-run parks — drift never auto-resumes', async () => {
     const j = memoryJournal('r4');
     const e = happyScript();
@@ -516,7 +596,31 @@ describe('resume — the write-ahead contract', () => {
     assert.equal(res.alert, PARK_ALERTS.formulaDrift);
   });
 
-  test('a settled run resumes through its transition — merge.blocked → retry', async () => {
+  test('resuming past a drift alert journals the operator acknowledgement', async () => {
+    const j = memoryJournal('r4b');
+    const e = happyScript();
+    e.judge = spy([{ verdict: 'solo', payload: { complexity: 'complex' } }, { verdict: 'queue' }]);
+    await run(emap(e), { runId: 'r4b' }, j); // parks at route (queue verdict)
+    const drifted = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: emap(e),
+      formulaSha: 'new-sha',
+    });
+    assert.equal(drifted.alert, PARK_ALERTS.formulaDrift);
+    // the operator's decision to continue under the new formula — a
+    // second resume IS the acknowledgement, and it's journaled
+    const judge2 = spy([{ verdict: 'queue' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: { judge: judge2.fn },
+      formulaSha: 'new-sha',
+    });
+    const ack = records(j).find(r => r.alert === PARK_ALERTS.driftAcknowledged);
+    assert.ok(ack !== undefined);
+    assert.equal(ack.formula_sha, 'new-sha');
+    assert.equal(res.outcome, 'park'); // re-entered route → queue → parks clean
+    assert.equal(res.alert, undefined);
+  });
+
+  test('merge.blocked retries to exhaustion, then parks', async () => {
     const j = memoryJournal('r5');
     const e = happyScript();
     e['act-gate'] = spy([{ verdict: 'blocked' }, { verdict: 'blocked' }, { verdict: 'blocked' }]);
