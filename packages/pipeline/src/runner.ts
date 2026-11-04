@@ -108,8 +108,12 @@ export type EngineFn = (call: StageCall) => MaybePromise<EngineResult>;
 /** Resume verdict for a verdict-less intent: an EngineResult settles
  *  the record ("landed, here's the outcome"), 'pending' means the side
  *  effect is still in flight (runner parks WITHOUT a new row — the
- *  pending intent stays the resume anchor), undefined means "didn't
- *  land / can't tell" → the runner re-fires under its attempt budget. */
+ *  pending intent stays the resume anchor), and undefined attests
+ *  "checked, didn't land" → the runner re-fires under its attempt
+ *  budget. An engine that cannot tell must return 'pending', not
+ *  undefined — undefined IS the attestation that re-fires. With NO
+ *  hook bound at all the runner never re-fires a spawn-like intent
+ *  blind (recheck-unavailable park). */
 export type RecheckFn = (call: StageCall) => MaybePromise<EngineResult | 'pending' | undefined>;
 
 /** An engine binding — `invoke` runs the stage; `recheck` is the
@@ -357,6 +361,15 @@ function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
   };
 }
 
+/** A side effect's provenance — `viaAdmit` marks a verdict the
+ *  admission seam produced without invoking the engine. Its payload is
+ *  refusal detail, not stage output, so it is journaled with
+ *  `admit: true` and never absorbed into the pipeline context. */
+interface SideEffect {
+  res: EngineResult;
+  viaAdmit: boolean;
+}
+
 /** The side effect: consult `admit` first for spawn-like intents (the
  *  go-marker seam — an EngineResult back means admission itself
  *  produced the verdict and the engine never runs). */
@@ -365,15 +378,15 @@ async function sideEffect(
   stage: PipelineStage,
   handler: EngineHandler,
   to: NextStep
-): Promise<EngineResult> {
+): Promise<SideEffect> {
   const call = stageCall(run, stage, to);
   if (run.admit !== undefined && run.admitIntents.includes(intentFor(stage))) {
     const admitted = await run.admit(call);
     if (admitted !== true) {
-      return admitted;
+      return { res: admitted, viaAdmit: true };
     }
   }
-  return handler.invoke(call);
+  return { res: await handler.invoke(call), viaAdmit: false };
 }
 
 /** Payload → context: stored under its stage name AND merged flat (the
@@ -505,9 +518,15 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
   }
   const intent = rowFor(run, to, intentFor(stage));
   run.journal.append(intent);
-  const res = await sideEffect(run, stage, handler, to);
-  run.journal.append(verdictRow(intent, res));
-  absorb(run, stage.name, res.payload);
+  const { res, viaAdmit } = await sideEffect(run, stage, handler, to);
+  const done = verdictRow(intent, res);
+  if (viaAdmit) {
+    done.admit = true;
+  }
+  run.journal.append(done);
+  if (!viaAdmit) {
+    absorb(run, stage.name, res.payload);
+  }
   return transitionStep(run, res, to);
 }
 
@@ -543,9 +562,10 @@ async function drive(run: Run, start: NextStep): Promise<RunResult> {
   }
 }
 
-/** Re-fire a verdict-less intent: never for spawn-like intents without
- *  a recheck hook (an unadmitted-marker world cannot be told apart
- *  from a landed one — fail closed), else a fresh bounded attempt. */
+/** Re-fire a verdict-less intent with NO recheck hook bound: never
+ *  for spawn-like intents (an unadmitted-marker world cannot be told
+ *  apart from a landed one — fail closed), else a fresh bounded
+ *  attempt. */
 function refire(run: Run, stage: PipelineStage, last: JournalRow, to: NextStep): Step {
   if (run.admitIntents.includes(intentFor(stage))) {
     return alertStep(run, to, {
@@ -554,6 +574,14 @@ function refire(run: Run, stage: PipelineStage, last: JournalRow, to: NextStep):
       resume: last.stage,
     });
   }
+  return refireAttempt(run, last, to);
+}
+
+/** A bounded re-fire — a fresh intent at attempt+1, parked once the
+ *  attempt budget is spent. Reached by the no-hook path and by a hook
+ *  that attested "didn't land" (any intent kind — the hook IS the
+ *  attestation). */
+function refireAttempt(run: Run, last: JournalRow, to: NextStep): Step {
   if (last.attempt >= run.maxAttempts) {
     return alertStep(run, to, {
       alert: PARK_ALERTS.attemptsExhausted,
@@ -574,7 +602,10 @@ function settleRecheck(run: Run, last: JournalRow, res: EngineResult, to: NextSt
 
 /** The pending-intent path: ask the engine whether its side effect
  *  landed. 'pending' → park WITHOUT a new row — the verdict-less
- *  intent stays the resume anchor and the next wake re-checks again. */
+ *  intent stays the resume anchor and the next wake re-checks again.
+ *  The no-hook branch is the fail-closed one; an existing hook that
+ *  answers undefined attested "didn't land" — re-firing THAT is safe
+ *  for any intent kind. */
 async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<Step> {
   const stage = run.formula.stages.find(s => s.name === last.stage);
   if (stage === undefined) {
@@ -584,11 +615,15 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
       resume: last.stage,
     });
   }
-  const r = await run.engines.get(stage.engine)?.recheck?.(stageCall(run, stage, to));
+  const recheck = run.engines.get(stage.engine)?.recheck;
+  if (recheck === undefined) {
+    return refire(run, stage, last, to);
+  }
+  const r = await recheck(stageCall(run, stage, to));
   if (r === 'pending') {
     return { halt: result(run, 'park', last.stage, { detail: 'side effect still in flight' }) };
   }
-  return r === undefined ? refire(run, stage, last, to) : settleRecheck(run, last, r, to);
+  return r === undefined ? refireAttempt(run, last, to) : settleRecheck(run, last, r, to);
 }
 
 /** Parked runs resume by re-entering the SAME stage (spec §terminal
@@ -631,11 +666,17 @@ async function resumeStep(run: Run, last: JournalRow): Promise<Step> {
   return unpark(last, transitionStep(run, { verdict: last.verdict, payload: last.payload }, to));
 }
 
+/** A row that produced real stage output — alerts carry no verdict,
+ *  admit rows carry refusal detail (not stage output, and skipping
+ *  them here keeps the replayed context identical to the live one). */
+const settledRow = (r: JournalRow): boolean =>
+  r.alert === undefined && r.verdict !== undefined && r.admit !== true;
+
 /** Journaled payloads replay into the context — verdict-settled
  *  records only, in seq order (a pending intent produced nothing). */
 function replayCtx(run: Run, records: JournalRow[]): void {
   for (const r of records) {
-    if (r.alert === undefined && r.verdict !== undefined) {
+    if (settledRow(r)) {
       absorb(run, r.stage, r.payload);
     }
   }

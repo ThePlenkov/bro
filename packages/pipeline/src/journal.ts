@@ -50,6 +50,10 @@ export interface JournalRow {
   fix_round?: number;
   /** the fix scope carried into a scoped re-entry */
   notes?: string;
+  /** the completing verdict came from the `admit` seam, not the
+   *  engine — its payload is refusal detail, not stage output, so it
+   *  never merges into the pipeline context */
+  admit?: true;
   /** fail-closed park tag — presence marks an alert row */
   alert?: string;
   /** alert detail — which field, budget, or engine refused */
@@ -104,6 +108,18 @@ export function openPipelineJournal(loc: JournalLocator): PipelineJournal | null
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+const JOURNAL_SUFFIX = '.journal.jsonl';
+
+/** The run id a journal file name carries — `<run>.journal.jsonl`.
+ *  String ops, no regex: the input is an uncontrolled path. */
+function runIdFromPath(file: string): string | undefined {
+  const sep = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
+  const base = file.slice(sep + 1);
+  return base.endsWith(JOURNAL_SUFFIX)
+    ? base.slice(0, base.length - JOURNAL_SUFFIX.length)
+    : undefined;
+}
+
 /** A file-backed journal — `runId` derives from the `<run>.journal.
  *  jsonl` name. The file is read once at construction: one runner owns
  *  a journal file, so reads-after-append come from the object's own
@@ -112,7 +128,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 export function fileJournal(file: string): PipelineJournal {
   const all = readJournalFile(file);
   return {
-    runId: /([^/\\]+)\.journal\.jsonl$/.exec(file)?.[1],
+    runId: runIdFromPath(file),
     append(row: JournalRow): void {
       appendJournalRow(file, row);
       all.push(row);
@@ -149,14 +165,18 @@ const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
 /** Fields a parsed line must carry to count as a row — a torn-but-
  *  valid tail like `{"run_id":"x"}` fails this and is dropped rather
- *  than misread downstream. */
-const REQUIRED_FIELDS = ['run_id', 'item', 'stage', 'intent', 'ts'] as const;
+ *  than misread downstream. Strings must be non-empty, counters real
+ *  integers (a missing `attempt` would NaN the runner's budgets). */
+const REQUIRED_STRINGS = ['run_id', 'item', 'stage', 'intent', 'ts'] as const;
+const REQUIRED_INTS = ['seq', 'attempt'] as const;
 
 function isJournalRow(v: unknown): v is JournalRow {
   if (!isRecord(v)) {
     return false;
   }
-  return Number.isInteger(v.seq) && REQUIRED_FIELDS.every(k => nonEmpty(v[k]));
+  const ints = REQUIRED_INTS.every(k => Number.isInteger(v[k]));
+  const strings = REQUIRED_STRINGS.every(k => nonEmpty(v[k]));
+  return ints && strings;
 }
 
 /** The whole journal file, malformed lines dropped — a torn last line

@@ -331,6 +331,38 @@ describe('the admit seam — spawn idempotence', () => {
     assert.equal(res.outcome, 'end');
     assert.equal(e.fleet.calls.length, 1);
   });
+
+  test('an admit refusal journals admit:true and its payload never enters ctx', async () => {
+    const j = memoryJournal();
+    const e = happyScript();
+    const judge = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'push' },
+    ]);
+    let consults = 0;
+    const res = await run(
+      { ...emap(e), judge: judge.fn },
+      {
+        admit: () => {
+          consults += 1;
+          return consults === 1 ? { verdict: 'rate_limited', payload: { stale: 'REFUSAL' } } : true;
+        },
+      },
+      j
+    );
+    assert.equal(res.outcome, 'end');
+    const refusal = records(j).find(r => r.admit === true);
+    assert.equal(refusal?.stage, 'work');
+    assert.equal(refusal?.verdict, 'rate_limited');
+    // the refusal's payload is journaled as detail but never absorbed:
+    // the review call sees fleet's real output under ctx.work and no
+    // stray refusal keys in the flat context
+    const reviewCall = judge.calls[3];
+    assert.deepEqual(reviewCall.ctx.work, { pr: 42 });
+    assert.equal(reviewCall.ctx.stale, undefined);
+  });
 });
 
 describe('resume — the write-ahead contract', () => {
@@ -414,6 +446,60 @@ describe('resume — the write-ahead contract', () => {
     assert.equal(res2.outcome, 'park');
     assert.equal(res2.alert, PARK_ALERTS.recheckUnavailable);
     assert.equal(fl.calls.length, 1); // never blindly re-fired
+  });
+
+  test("recheck undefined on a SPAWN intent re-fires — the hook's 'didn't land' is the attestation", async () => {
+    const j2 = memoryJournal('r3b');
+    const jg = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+    ]);
+    const fl = spy([new Error('killed')]);
+    await assert.rejects(run({ judge: jg.fn, fleet: fl.fn }, { runId: 'r3b' }, j2), /killed/);
+    // the hook exists and attests "didn't land" → re-fire is the safe
+    // restart even though 'work' is a spawn-intent stage
+    const fl2 = spy([{ verdict: 'stopped' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
+      engines: { judge: jg.fn, fleet: { invoke: fl2.fn, recheck: () => undefined } },
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'abandon'); // work.stopped → abandon
+    assert.equal(fl2.calls.length, 1);
+    assert.equal(fl2.calls[0].attempt, 2); // re-fired as attempt 2
+  });
+
+  test('admit rows replay without absorbing — resumed ctx matches live ctx', async () => {
+    const j = memoryJournal('ra');
+    const judge1 = spy([
+      { verdict: 'solo', payload: { complexity: 'complex' } },
+      { verdict: 'spawn', payload: {} },
+      { verdict: 'queue', payload: {} },
+    ]);
+    const parked = await run(
+      { judge: judge1.fn, fleet: spy([]).fn },
+      {
+        runId: 'ra',
+        admit: () => ({ verdict: 'rate_limited', payload: { stale: 'REFUSAL' } }),
+      },
+      j
+    );
+    assert.equal(parked.outcome, 'park'); // re-routed → queue → park
+    assert.ok(records(j).some(r => r.admit === true));
+    const judge2 = spy([{ verdict: 'spawn', payload: {} }, { verdict: 'push' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: {
+        judge: judge2.fn,
+        fleet: spy([{ verdict: 'done', payload: { pr: 1 } }]).fn,
+        'act-gate': spy([{ verdict: 'landed' }]).fn,
+        learn: spy([{ verdict: 'captured' }]).fn,
+      },
+      formulaSha: SHA,
+      admit: () => true,
+    });
+    assert.equal(res.outcome, 'end');
+    const reviewCall = judge2.calls[1];
+    assert.equal(reviewCall.ctx.stale, undefined); // refusal detail never replayed
+    assert.equal(reviewCall.ctx.complexity, 'complex'); // real payloads did
   });
 
   test('a formula change mid-run parks — drift never auto-resumes', async () => {

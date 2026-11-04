@@ -61,6 +61,29 @@ describe('journal storage', () => {
     assert.equal(rows[0].seq, 2);
   });
 
+  test('rows with a missing or non-integer `attempt` are dropped — NaN budgets rejected at parse', () => {
+    const file = join(tmp(), 'r1.journal.jsonl');
+    const missingAttempt = {
+      run_id: 'r1',
+      item: 'x',
+      seq: 1,
+      stage: 'work',
+      intent: 'spawn',
+      ts: 't',
+    };
+    const floatAttempt = { ...row({ seq: 3 }), attempt: 1.5 };
+    const stringAttempt = { ...row({ seq: 4 }), attempt: '1' };
+    writeFileSync(
+      file,
+      [missingAttempt, floatAttempt, stringAttempt, row({ seq: 2 })]
+        .map(r => `${JSON.stringify(r)}\n`)
+        .join('')
+    );
+    const rows = readJournalFile(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].seq, 2);
+  });
+
   test('missing file reads as empty', () => {
     assert.deepEqual(readJournalFile(join(tmp(), 'nope.jsonl')), []);
   });
