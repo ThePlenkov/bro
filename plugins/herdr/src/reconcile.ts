@@ -32,6 +32,7 @@ import {
   notify,
   type PluginState,
   repoDir,
+  run,
   type StatusWorktree,
   saveState,
   stateScope,
@@ -507,8 +508,24 @@ export function reconcile(): ConvergeResult {
   return converge(readPlanes(repoDir(ctxJson())));
 }
 
+/** The sync pane is the converge daemon, but the manifest's `[[panes]]`
+ *  entry is only a template — herdr materializes it solely via `plugin
+ *  pane open`, and nothing re-opens it after a server restart
+ *  (bro-m8hew: a reboot left every session pane on a bare shell with
+ *  no loop to re-arm them). The startup hook and the `sync` action
+ *  both land here, so both restore it. `plugin pane open` has no
+ *  dedup — the pgrep probe is the idempotence: a live `node
+ *  src/sync.ts` means the loop is up; a dead pane's bare shell does
+ *  not match, so a stranded pane is replaced, not duplicated. */
+function ensureSyncLoop(): void {
+  if (run('pgrep', ['-f', 'node src/sync.ts']).code === 0) return;
+  const out = herdrTry(['plugin', 'pane', 'open', '--plugin', 'bro.fleet', '--entrypoint', 'sync']);
+  log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
+}
+
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
+    ensureSyncLoop();
     const r = reconcile();
     log(
       `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.statuses} statuses, ${r.reaped} reaped`
