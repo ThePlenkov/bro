@@ -1520,13 +1520,21 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // REST endpoint itself — `gh pr list` has no sort flags and pages
       // by creation time, so its first 500 could miss a freshly updated
       // older PR (the cap then only reorders a stale subset)
-      return ghJson<Array<{ number: number; head?: { ref?: string } }>>(
+      //
+      // `--jq` projects the two fields this reads. The REST pull objects
+      // carry every body and reaction count, so one busy page answered
+      // ~1.9 MB — past Node's spawnSync buffer, which killed the child
+      // and read as a bare 'gh api failed: '. The projection answers
+      // ~3.5 KB for the same page.
+      return ghJson<Array<{ number: number; head?: string }>>(
         [
           'api',
           `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
+          '--jq',
+          '[.[]|{number,head:.head.ref}]',
         ],
         dir
-      ).map((p) => ({ pr: p.number, headRef: p.head?.ref ?? '' }))
+      ).map((p) => ({ pr: p.number, headRef: p.head ?? '' }))
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)

@@ -2,17 +2,37 @@
  * GitHub CLI helpers. `gh` is a hard dependency — bro shells out rather than
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
-import { spawnSync } from 'node:child_process'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { spawnCollect } from './live-procs.ts'
+
+/** Node's `spawnSync` caps a child's output at 1 MiB and KILLS it with
+ *  ENOBUFS past that — `status` goes null, stderr stays empty, and the
+ *  caller cannot tell a killed child from a quiet one. A bulk listing
+ *  crosses that cap easily (the open-PR REST page carries every body),
+ *  so the sync helpers get a real budget: 64 MiB is far past any `gh`
+ *  output and still bounded. The async twins stream into a string and
+ *  never had the cap. */
+const GH_MAX_BUFFER = 64 * 1024 * 1024
+
+/** Why a `gh` call failed — stderr when the CLI spoke, else the spawn
+ *  error (a killed child leaves stderr empty), else the exit code.
+ *  Never empty on a failure: an undiagnosable failure is its own bug. */
+function ghFailure(proc: SpawnSyncReturns<string>): string {
+  const err = (proc.stderr ?? '').trim()
+  if (err !== '') return err
+  if (proc.error !== undefined) return proc.error.message
+  return `exit ${proc.status ?? 'unknown'}`
+}
 
 export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    maxBuffer: GH_MAX_BUFFER,
   })
   if (proc.status !== 0) {
-    throw new Error(`gh ${args[0]} failed: ${(proc.stderr ?? '').trim()}`)
+    throw new Error(`gh ${args[0]} failed: ${ghFailure(proc)}`)
   }
   return proc.stdout ?? ''
 }
@@ -84,8 +104,15 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    maxBuffer: GH_MAX_BUFFER,
   })
-  return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
+  const err = (proc.stderr ?? '').trim()
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    // a silent success stays silent; a silent FAILURE says why
+    err: err !== '' || proc.status === 0 ? err : ghFailure(proc),
+  }
 }
 
 /** Async ghTry — same exit-code contract without the event-loop block.

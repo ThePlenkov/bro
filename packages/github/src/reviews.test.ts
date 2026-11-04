@@ -62,6 +62,7 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac; fi ;;
   "api repos/"* ) case "$2" in
+      *pulls\\?*) echo '[{"number":9,"head":"work/x"},{"number":11,"head":"loop/y"}]' ;;
       *check-runs\\?*) if [ -n "$FAKE_GH_RUNS" ]; then echo "$FAKE_GH_RUNS";
           else echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}'; fi ;;
       *merge-async/*) if [ -n "$FAKE_GH_POLL_ERR" ]; then echo "$FAKE_GH_POLL_ERR" >&2; exit 1; fi
@@ -179,6 +180,23 @@ describe('githubReview', { skip: WIN32 }, () => {
   test('checks returns [] when the host reports no checks', () => {
     withFakeGh({ FAKE_GH_NO_CHECKS: '1' }, () => {
       assert.deepEqual(githubReview().checks(target), [])
+    })
+  })
+
+  test('openPrs reads the NARROW listing gh projects', () => {
+    withFakeGh({}, (log) => {
+      const rows = githubReview().openPrs?.('acme/widgets')
+      assert.deepEqual(rows, [
+        { pr: 9, headRef: 'work/x' },
+        { pr: 11, headRef: 'loop/y' },
+      ])
+      // the projection IS the contract — the full REST pull objects carry
+      // every body, and one busy page of them crosses Node's spawnSync
+      // buffer, which killed the child and read as a bare 'gh api failed'
+      assert.ok(
+        readFileSync(log, 'utf8').includes('--jq [.[]|{number,head:.head.ref}]'),
+        'openPrs must ask gh for the projected listing'
+      )
     })
   })
 
