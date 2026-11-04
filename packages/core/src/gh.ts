@@ -6,21 +6,28 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { spawnCollect } from './live-procs.ts'
 
 /** Node's `spawnSync` caps a child's output at 1 MiB and KILLS it with
- *  ENOBUFS past that — `status` goes null, stderr stays empty, and the
- *  caller cannot tell a killed child from a quiet one. A bulk listing
- *  crosses that cap easily (the open-PR REST page carries every body),
- *  so the sync helpers get a real budget: 64 MiB is far past any `gh`
- *  output and still bounded. The async twins stream into a string and
- *  never had the cap. */
+ *  ENOBUFS past that — `status` goes null, and the caller cannot tell a
+ *  killed child from a quiet one. A bulk listing crosses that cap easily
+ *  (the open-PR REST page carries every body), so the sync helpers get a
+ *  real budget: 64 MiB sits orders of magnitude above the listing sizes
+ *  these calls produce and stays bounded — a `--paginate` listing over a
+ *  very large repo can still exceed it, and then the caller reads the
+ *  ENOBUFS reason instead of silence. The async twins stream into a
+ *  string and never had the cap. */
 const GH_MAX_BUFFER = 64 * 1024 * 1024
 
 /** Why a `gh` call failed — stderr when the CLI spoke, else the spawn
- *  error (a killed child leaves stderr empty), else the exit code.
- *  Never empty on a failure: an undiagnosable failure is its own bug. */
+ *  error (a killed child can leave stderr empty), else a bounded head of
+ *  stdout (some tools print the diagnosis there), else the signal or the
+ *  exit code. Never empty on a failure: an undiagnosable failure is its
+ *  own bug. */
 function ghFailure(proc: SpawnSyncReturns<string>): string {
   const err = (proc.stderr ?? '').trim()
   if (err !== '') return err
   if (proc.error !== undefined) return proc.error.message
+  const out = (proc.stdout ?? '').trim()
+  if (out !== '') return out.length > 200 ? `${out.slice(0, 200)}…` : out
+  if (proc.signal !== null && proc.signal !== undefined) return `signal ${proc.signal}`
   return `exit ${proc.status ?? 'unknown'}`
 }
 

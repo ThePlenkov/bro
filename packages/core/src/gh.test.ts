@@ -62,6 +62,20 @@ describe('gh failure reporting', () => {
     })
   })
 
+  test('a diagnosis on stdout is not lost — some tools print it there', () => {
+    // the fallback order is stderr, spawn error, stdout, signal, exit —
+    // a tool that prints the reason on stdout must keep it
+    withFakeGh("echo 'could not resolve head ref'\nexit 1", () => {
+      assert.equal(ghTry(['stack', 'link', '7']).err, 'could not resolve head ref')
+    })
+  })
+
+  test('a signal-killed child names the signal, not an unknown exit', () => {
+    withFakeGh('kill -TERM $$', () => {
+      assert.equal(ghTry(['pr', 'view', '7']).err, 'signal SIGTERM')
+    })
+  })
+
   test('a listing past 1 MiB is not killed — Node caps spawnSync at 1 MiB', () => {
     // Node's spawnSync default maxBuffer kills the child with ENOBUFS
     // past 1 MiB: status goes null, stderr stays empty, and the caller
