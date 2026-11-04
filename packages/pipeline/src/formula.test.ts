@@ -54,8 +54,8 @@ verdicts = ["captured"]
 [transitions]
 classify = { solo = "route", clump = "route", duplicate = "close", defer = "park" }
 route    = { spawn = "work", queue = "park", defer = "park" }
-work     = { done = "review", rate_limited = "park", crash = "retry", stopped = "abandon" }
-review   = { skip = "merge", push = "merge", fix = "work", abandon = "close" }
+work     = { done = "review", rate_limited = "route", crash = "retry", stopped = "abandon" }
+review   = { skip = "merge", push = "merge", fix = "work", abandon = "abandon" }
 merge    = { landed = "capture", blocked = "retry", dropped = "close" }
 capture  = { captured = "end" }
 `;
