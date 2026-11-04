@@ -6,7 +6,7 @@
  * with local branches. The remote side is opt-in — merge --delete-branch
  * already covers PRs merged through the UI/CLI.
  */
-import { readdirSync, readlinkSync, rmSync, statSync } from 'node:fs';
+import { readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { facadeAuth, git, gitTry, hasHelpFlag, printUsage, reviewHost } from '@broject/core';
@@ -211,15 +211,17 @@ function deleteRemote(branch: string, headOid: string, remoteTip: string | undef
   if (remoteTip === undefined) {
     return;
   }
-  // Re-fetch remote tip right before deletion to avoid TOCTOU if origin advanced
-  gitTry(['fetch', 'origin', branch, '--quiet'], 10_000);
-  const remotes = remoteTips();
-  const currentRemoteTip = remotes.get(branch) ?? remoteTip;
-  if (!tipIsMerged(currentRemoteTip, headOid, isAncestor)) {
+  if (!tipIsMerged(remoteTip, headOid, isAncestor)) {
     console.log(`  keep origin/${branch} (remote tip has commits beyond the merged head)`);
     return;
   }
-  const push = gitTry(['push', 'origin', '--delete', branch]);
+  const push = gitTry([
+    'push',
+    'origin',
+    '--delete',
+    `--force-with-lease=${branch}:${remoteTip}`,
+    branch,
+  ]);
   if (push.code !== 0) {
     console.error(`  error deleting origin/${branch}: ${push.err}`);
     process.exitCode = 1;
@@ -261,66 +263,113 @@ function deleteBranch(
   deleteRemote(branch, headOid, remoteTip);
 }
 
-function isPathInUse(path: string): boolean {
+function isVanished(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+function isPermission(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+export function isPathInUse(path: string, procDir: string = '/proc'): boolean {
   // On Linux, check /proc for open file descriptors and cwd pointing to this path
   if (process.platform !== 'linux') {
     // If we cannot safely verify occupancy, skip deletion to avoid removing active paths
     return true;
   }
+  const candidate = canonicalPath(path);
+  let pids: string[];
   try {
-    const procDir = '/proc';
-    const pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
-    for (const pid of pids) {
-      try {
-        const fdDir = join(procDir, pid, 'fd');
-        const fds = readdirSync(fdDir);
-        for (const fd of fds) {
-          try {
-            const target = readlinkSync(join(fdDir, fd));
-            if (target === path || target.startsWith(path + '/')) {
-              return true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-      } catch {
-        // ignore
+    pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
+  } catch {
+    // Cannot enumerate processes → unverifiable; keep candidate
+    return true;
+  }
+  for (const pid of pids) {
+    const pidDir = join(procDir, pid);
+    // Open file descriptors
+    let fds: string[];
+    try {
+      fds = readdirSync(join(pidDir, 'fd'));
+    } catch (err) {
+      if (isVanished(err)) {
+        continue;
       }
-      // Also check cwd
+      // Permission/other failure → unverifiable; keep candidate
+      return true;
+    }
+    for (const fd of fds) {
       try {
-        const cwd = readlinkSync(join(procDir, pid, 'cwd'));
-        if (cwd === path || cwd.startsWith(path + '/') || path.startsWith(cwd + '/')) {
+        const target = readlinkSync(join(pidDir, 'fd', fd));
+        const resolved = canonicalPath(target);
+        if (resolved === candidate || resolved.startsWith(candidate + '/')) {
           return true;
         }
-      } catch {
-        // ignore
-      }
-      // Also check root (chroot) and exe as additional usage signals
-      try {
-        const root = readlinkSync(join(procDir, pid, 'root'));
-        if (root === path || root.startsWith(path + '/') || path.startsWith(root + '/')) {
+      } catch (err) {
+        if (isVanished(err)) {
+          continue;
+        }
+        if (isPermission(err)) {
           return true;
         }
-      } catch {
-        // ignore
-      }
-      try {
-        const exe = readlinkSync(join(procDir, pid, 'exe'));
-        if (exe === path || exe.startsWith(path + '/')) {
-          return true;
-        }
-      } catch {
-        // ignore
       }
     }
-  } catch {
-    // ignore
+    // cwd
+    try {
+      const cwd = readlinkSync(join(pidDir, 'cwd'));
+      const resolved = canonicalPath(cwd);
+      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
+        return true;
+      }
+    } catch (err) {
+      if (isVanished(err)) {
+        // vanished; not evidence of use
+      } else if (isPermission(err)) {
+        return true;
+      }
+    }
+    // root (chroot)
+    try {
+      const root = readlinkSync(join(pidDir, 'root'));
+      const resolved = canonicalPath(root);
+      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
+        return true;
+      }
+    } catch (err) {
+      if (isVanished(err)) {
+        // ignore
+      } else if (isPermission(err)) {
+        return true;
+      }
+    }
+    // exe
+    try {
+      const exe = readlinkSync(join(pidDir, 'exe'));
+      const resolved = canonicalPath(exe);
+      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
+        return true;
+      }
+    } catch (err) {
+      if (isVanished(err)) {
+        // ignore
+      } else if (isPermission(err)) {
+        return true;
+      }
+    }
   }
   return false;
 }
 
-function cleanupTmpDirs(dryRun: boolean): void {
+export function cleanupTmpDirs(dryRun: boolean): void {
   const tmp = tmpdir();
   let entries: string[];
   try {
@@ -342,8 +391,11 @@ function cleanupTmpDirs(dryRun: boolean): void {
   try {
     currentUid = userInfo().uid;
   } catch {
-    // best effort
+    // cannot determine current uid; keep all candidates
   }
+
+  const inUseMessage =
+    process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use';
 
   let deleted = 0;
   const now = Date.now();
@@ -355,8 +407,10 @@ function cleanupTmpDirs(dryRun: boolean): void {
       if (!st.isDirectory()) {
         continue;
       }
-      // Skip entries not owned by current user
-      if (currentUid !== undefined && st.uid !== currentUid) {
+      // Skip entries not owned by current user. If the current UID cannot be
+      // determined, keep every candidate rather than risk deleting another
+      // user's directory.
+      if (currentUid === undefined || st.uid !== currentUid) {
         continue;
       }
       // Prefer deleting entries that look stale (older than threshold)
@@ -367,7 +421,7 @@ function cleanupTmpDirs(dryRun: boolean): void {
       }
       // Skip if in use by any process
       if (isPathInUse(fullPath)) {
-        console.log(`  keep ${fullPath} (in use)`);
+        console.log(`  keep ${fullPath} (${inUseMessage})`);
         continue;
       }
       if (dryRun) {
@@ -377,7 +431,7 @@ function cleanupTmpDirs(dryRun: boolean): void {
       }
       // Re-check before deletion to reduce race
       if (isPathInUse(fullPath)) {
-        console.log(`  keep ${fullPath} (in use)`);
+        console.log(`  keep ${fullPath} (${inUseMessage})`);
         continue;
       }
       try {
@@ -387,7 +441,7 @@ function cleanupTmpDirs(dryRun: boolean): void {
       } catch (err) {
         // If it failed due to in-use/race, recheck and skip without failing the run
         if (isPathInUse(fullPath)) {
-          console.log(`  keep ${fullPath} (in use)`);
+          console.log(`  keep ${fullPath} (${inUseMessage})`);
           continue;
         }
         console.error(`  error deleting ${fullPath}: ${err instanceof Error ? err.message : err}`);
