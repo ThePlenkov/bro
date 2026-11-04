@@ -80,10 +80,26 @@ an interactive session silently counted and walled as fleet work.
 Omitting the pin is not enough; the prologue must scrub the inherited
 value out of the env the worker actually receives. The env marker stays
 the wire contract — the planes classify a LIVE worker from
-`/proc/<pid>/environ` (spec bro-9h86l) — but its only writer is the
-prologue. `lane` joins the identity pins (`BRO_AGENT_ID`,
-`BRO_BEAD_ID`, `BRO_AGENT_PROVIDER`) in the "the caller describes, the
-prologue pins" tier.
+`/proc/<pid>/environ` (spec bro-9h86l) — but on the `spawnStepAgent`
+facade its only writer is the prologue. The loop's lower-level registry
+spawn path (loop.ts `spawnWorker`, which calls `AgentConnector.spawn`
+directly and writes `BATCH_MARKER_ENV` itself) is the one documented
+exception: it is a registered worker that never rides the facade, and
+its marker write is preserved as-is. A lane-aware migration of that path
+is deferred (see "Scope boundary"). `lane` joins the identity pins
+(`BRO_AGENT_ID`, `BRO_BEAD_ID`, `BRO_AGENT_PROVIDER`) in the "the
+caller describes, the prologue pins" tier.
+
+The scrub must hold in the env the worker actually receives, not only in
+`spec.env`: tmux and Docker re-merge `process.env` after
+`spawnStepAgent` returns, so a batch worker spawning an interactive
+child would still leak `BRO_BATCH` through the ambient bag. The
+prologue therefore either (a) centralizes the finalized worker env so
+connectors stop re-merging `process.env`, or (b) requires every
+connector's merge path to drop `BRO_BATCH` for an interactive spawn. In
+both cases the conflict check below runs in the prologue, before any
+connector merge, and the guarantee is verified against the live worker's
+`/proc/<pid>/environ`, not against `spec.env`.
 
 Conflicts fail loud, they are never silently reclassified:
 
@@ -98,13 +114,18 @@ Conflicts fail loud, they are never silently reclassified:
 Every `spawnStepAgent` call site declares:
 
 - **`lane: 'batch'`** — delegate.ts (delegation), drive.ts (fixers),
-  convoy-run.ts `runnerSpawnReq` (replaces the hand-set pin landed in
-  [#757](https://github.com/ThePlenkov/bro/pull/757)), the loop member
-  pins (loop.ts), and **dogfood.ts runner + analyst** — fleet work
+  convoy-run.ts (the inline spawn closure passed as the `spawn` dep to
+  `runQueue` — this is where the hand-set `BRO_BATCH` pin from
+  [#757](https://github.com/ThePlenkov/bro/pull/757) currently lives;
+  `lane` replaces it), the loop member pins (loop.ts), and
+  **dogfood.ts runner + analyst** — fleet work
   spending the same account budget; this spec resolves bro-42rfh's
   open question as `batch`.
 - **`lane: 'interactive'`** — `bro agents up` / `agents run`
-  (agents.ts), and the serve API handler (serve.ts:1927).
+  (agents.ts). The serve API handler (serve.ts `parseSpawnBody`) is
+  interactive-by-default: an absent `lane` resolves to `'interactive'`,
+  an explicit `'interactive'` or `'batch'` is passed through validated,
+  and any other value is a `400`.
 
 The serve POST body shares the `StepSpawnRequest` shape, so `lane` must
 join `SPAWN_FIELDS` — the body's field allowlist — or the handler would
@@ -129,6 +150,14 @@ hand-rolled nohup), independent of lanes. The lane field cannot and
 should not classify below the facade; the defense there stays the
 existing rule — worker paths go through `spawnStepAgent`, and this spec
 makes that path's lane un-forgettable.
+
+The one deliberate exception is the loop's registry spawn path
+(loop.ts `spawnWorker`): it calls `AgentConnector.spawn` directly but is
+a *registered* worker (claim under the registry lock, `.exit` record in
+`<git-common>/bro/agents/`), and it writes `BATCH_MARKER_ENV` itself.
+It is preserved as-is by this spec; a lane-aware migration of that path
+is deferred, and until then its marker write remains the only
+non-prologue writer (see "The marker is derived").
 
 ### Behavior change
 
