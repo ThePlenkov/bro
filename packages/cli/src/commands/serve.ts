@@ -60,6 +60,11 @@
  *                               Same credential rule as the log route.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
+ *   POST   /api/v1/models/reload
+ *                               re-read the catalog the gateway caches —
+ *                               the read happens at start, this is the
+ *                               operator's refresh. A client reading
+ *                               /v1/models never triggers one.
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
  *                               the drive singleton lock, pending watch
  *                               markers (armed waits: live pid or stale)
@@ -201,6 +206,7 @@ import {
   type EventsStreamBus,
 } from '../planes/stream.ts';
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
+import { isProviderPath } from './serve-surfaces.ts';
 import {
   conductorConfig,
   conductorProxy,
@@ -507,6 +513,10 @@ export interface ServeDeps {
   acp?: ((req: IncomingMessage, res: ServerResponse) => void) & {
     dispose?: () => void;
   };
+  /** `POST /api/v1/models/reload` — re-read the catalog the gateway
+   *  caches (the read happens at start; this is the operator's refresh).
+   *  Absent means no conductor wired. */
+  reloadCatalog?: () => Promise<unknown>;
 }
 
 export interface ServeResponse {
@@ -535,6 +545,7 @@ const ROUTES = [
   'GET /api/v1/events/stream',
   'GET /api/v1/events/asyncapi.json',
   'POST /api/v1/agents',
+  'POST /api/v1/models/reload',
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
   'GET /api/v1/agents/<ref>/events',
@@ -947,10 +958,30 @@ function routeApiBranch(
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps);
   }
+  if (api[0] === 'models' && api[1] === 'reload' && api.length === 2) {
+    return routeModelsReload(method, deps);
+  }
   if (api[0] === 'webhooks') {
     return routeWebhook(method, api, rawBody, deps, headers);
   }
   return NOT_FOUND;
+}
+
+/** `POST /api/v1/models/reload` — the operator's explicit refresh of the
+ *  catalog the gateway caches. The read happens at start; this is the
+ *  second refresh point. A client reading /v1/models never triggers one. */
+function routeModelsReload(
+  method: string,
+  deps: ServeDeps
+): ServeResponse | Promise<ServeResponse> {
+  const reload = deps.reloadCatalog;
+  if (reload === undefined) {
+    return NOT_FOUND;
+  }
+  if (method !== 'POST') {
+    return NOT_ALLOWED;
+  }
+  return reload().then(snapshot => ({ status: 200, body: snapshot }));
 }
 
 /** The `/agents` subtree — list+spawn at the collection, ref ops one
@@ -1266,7 +1297,7 @@ async function routeProvider(
   token: string,
   statePathHint: string
 ): Promise<boolean> {
-  if (!pathname.startsWith('/v1/')) {
+  if (!isProviderPath(pathname)) {
     return false;
   }
   const wantsBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
@@ -1988,6 +2019,10 @@ function realDeps(
   // the conductor's proxy carries the live link's terminal registry —
   // the /api/v1/terminals plane reads through it (bro-eua0d)
   const conductor = conductorCfg !== undefined ? conductorProxy(conductorCfg) : undefined;
+  // the catalog is read ONCE — at start, in the background, so the first
+  // client read finds the rows already there instead of waiting on a
+  // cold provider enumeration (a client's discovery must not race one)
+  conductor?.warmCatalog();
   // /api/v1/acp — the native transport rides the same conductor
   // config: one acp backend, two surfaces (bro-ymbq1)
   const acp = conductorCfg !== undefined ? acpTransport(conductorCfg) : undefined;
@@ -2044,7 +2079,12 @@ function realDeps(
       }),
     },
     ...(conductor !== undefined
-      ? { provider: conductor, terminals: conductor.terminals, acp }
+      ? {
+          provider: conductor,
+          terminals: conductor.terminals,
+          acp,
+          reloadCatalog: conductor.reloadCatalog,
+        }
       : providerCfg !== undefined
         ? { provider: providerProxy(providerCfg) }
         : {}),
@@ -2521,9 +2561,11 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
+    console.log(
+      `provider: /v1/*, /anthropic/v1/*, /openai/v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`
+    );
   } else if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
+    console.log(`provider: /v1/*, /anthropic/v1/*, /openai/v1/* → ${providerCfg.upstream}`);
   }
   // the session token — the "local session context" made concrete.
   // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve

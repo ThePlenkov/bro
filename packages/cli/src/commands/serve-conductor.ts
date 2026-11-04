@@ -37,8 +37,9 @@ import {
   toolPayload,
 } from '@broject/providers';
 import { randomUUID } from 'node:crypto';
-import { reserveSessionStart, sessionCapViews } from '@broject/core';
+import { reserveSessionStart, sessionCapViews, type ServeLaneLimits } from '@broject/core';
 import { conductorSessionRefusal } from './session-cap.ts';
+import { resolveSurface, SURFACE_ENDPOINTS } from './serve-surfaces.ts';
 import type { AcpTerminals, Toolish } from '@broject/providers';
 import type {
   AcpContentBlock,
@@ -50,6 +51,12 @@ import type {
 } from '@broject/providers';
 import { peerAttrs } from './peer.ts';
 import { catalogModels, type CatalogModel } from './providers.ts';
+import {
+  LaneAdmission,
+  RateRefused,
+  type LaneAdmissionLimits,
+  type SessionSlot,
+} from './serve-admission.ts';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -96,6 +103,12 @@ export interface ConductorConfig {
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+  /** The lane limits (spec bro-9j4kt) — `serve.limits.<entry>`: how
+   *  many live acp sessions a lane may hold, how many requests may
+   *  wait for one, and the request budget per hour. Keyed by the
+   *  provider's config name (the entry); a route's own name is
+   *  accepted as a fallback. */
+  limits?: Record<string, ServeLaneLimits>;
 }
 
 /** The routes a config answers to — the config's own table, or the
@@ -296,6 +309,7 @@ export function conductorConfig(
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
+    limits: cfg.serve.limits,
   };
 }
 
@@ -337,6 +351,22 @@ interface MessagesRequest {
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
   stream?: boolean;
+  /** The native conversation identifier (the Messages API's
+   *  `metadata.user_id`). Claude Code carries its session id in it, so
+   *  it is the ONE native signal that says "this is the same
+   *  conversation" — the gateway's key when the client speaks it. */
+  metadata?: { user_id?: string };
+  /** The output budget — the wire's own cap, honored locally (the acp
+   *  agent has no token budget of its own). */
+  max_tokens?: number;
+  /** Sampling knobs the acp agent owns: the gateway has no way to
+   *  pass them through, so they are read and ignored. */
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  /** Extended thinking — the acp agent has no thinking budget, so the
+   *  request's thinking blocks ride the transcript as text. */
+  thinking?: { type?: string; budget_tokens?: number };
 }
 
 // --- translation -----------------------------------------------------
@@ -586,9 +616,15 @@ interface ConvSession {
   /** body.messages count fully accounted for — sent user turns AND
    *  assistant echoes the session already holds. */
   consumed: number;
-  /** sha256 over prefix+turnHashInput(messages[0..consumed-1]) — the
-   *  prefix proof; a changed system/tools fails it and evicts. */
-  historyHash: string;
+  /** sha256 over the conversation's FIRST turn — the birth
+   *  certificate. It is the one part of the client's history a
+   *  conversation never rewrites: claude-code MUTATES its later
+   *  messages between turns (it appends hook output and system
+   *  reminders to the last user turn), so a proof over the whole
+   *  resent history failed on EVERY turn and opened a fresh session
+   *  each time. The first turn is stable; a rewritten one means the
+   *  conversation forked, and the session retires. */
+  firstHash: string;
   /** raw request-model id the session currently runs — a resend that
    *  pins a different model re-pins instead of replaying. */
   requestModel?: string;
@@ -605,6 +641,12 @@ interface ConvSession {
   lastReply: ReplyView;
   busy: boolean;
   lastSeen: number;
+  /** The turn's latch — a request that finds the conversation BUSY
+   *  waits on it instead of opening a twin session. The latch resolves
+   *  when the turn settles and its verdict is written, so the waiter
+   *  never slips into the window between the reply and the record
+   *  (the coderabbit #610 invariant, kept). */
+  latch: ConvLatch;
 }
 
 /** One settled reply as the wire renders it — buffered, streamed, or
@@ -640,19 +682,114 @@ const turnHashInput = (m: ClientMessage): string => {
   return `${serTurn(m)}\x00${imgs}`;
 };
 
-const hashTurns = (prefix: string, msgs: ClientMessage[], n: number, stopKey: string): string =>
-  createHash('sha256')
-    .update(`${prefix}\n${stopKey}\n${msgs.slice(0, n).map(turnHashInput).join('\n')}`)
-    .digest('hex');
+/** The conversation's birth certificate — the hash of its FIRST turn.
+ *  A client prepends turns, never rewrites the start; and the parts it
+ *  DOES rewrite between turns (claude-code appends hook output and
+ *  system reminders to its last user turn) are exactly the parts a
+ *  whole-history proof trips over. */
+const firstTurnHash = (msgs: ClientMessage[]): string => {
+  const first = msgs[0];
+  return first === undefined
+    ? ''
+    : createHash('sha256').update(turnHashInput(first)).digest('hex');
+};
 
 /** Prefix-only digest — chained requests carry no client history to
  *  hash, so the system+tools freshness is proven standalone. */
 const prefixSha = (prefix: string): string => createHash('sha256').update(prefix).digest('hex');
 
-/** Where the conversation id comes from: an explicit `x-bro-session`
- *  wins (clients that can pin); the fingerprint is the birth
- *  certificate — prefix + first turn — stable across the whole
- *  conversation since clients prepend, never rewrite the start. */
+/** A conversation's turn latch — resolved when the turn settles.
+ *
+ *  The latch is RE-ARMED for every turn: a continuation arms a fresh
+ *  one, so the next request waits for THIS turn and not for the
+ *  previous one (an already-resolved promise would let it through). */
+interface ConvLatch {
+  /** the promise the waiters hold */
+  idle: Promise<void>;
+  /** wakes the waiters */
+  wake: () => void;
+  /** arms a fresh wait for the next turn */
+  rearm: () => void;
+}
+
+/** A conversation's turn latch — resolved when the turn settles. */
+function convLatch(): ConvLatch {
+  const latch: ConvLatch = {
+    idle: Promise.resolve(),
+    wake: () => {},
+    rearm: () => {},
+  };
+  const arm = (): void => {
+    latch.idle = new Promise<void>(resolve => {
+      latch.wake = resolve;
+    });
+  };
+  latch.rearm = arm;
+  arm();
+  return latch;
+}
+
+/** Wait for a busy conversation to settle — the turn's own latch,
+ *  bounded by the request's budget and its abort signal. */
+function awaitIdle(
+  conv: ConvSession,
+  opts: { signal: AbortSignal; waitDeadline: number }
+): Promise<void> {
+  const remaining = opts.waitDeadline - Date.now();
+  if (remaining <= 0) {
+    return Promise.reject(
+      new Error("bro conductor: timed out waiting for the conversation's turn")
+    );
+  }
+  return new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined;
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      opts.signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(
+        new Error("bro conductor: the request was cancelled while waiting for the conversation's turn")
+      );
+    };
+    opts.signal.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("bro conductor: timed out waiting for the conversation's turn"));
+    }, remaining);
+    timer.unref?.();
+    conv.latch.idle.then(
+      () => {
+        cleanup();
+        resolve();
+      },
+      () => {
+        cleanup();
+        resolve();
+      }
+    );
+  });
+}
+
+/** Where the conversation id comes from, in the order the native
+ *  contract prefers:
+ *
+ *  1. an explicit `x-bro-session` — a client that can pin, pins;
+ *  2. the NATIVE `metadata.user_id` — the Messages API's own opaque
+ *     conversation identifier. Claude Code carries its session id in it,
+ *     so this is the one signal that says "the same conversation"
+ *     without the gateway guessing. The first user turn rides along as
+ *     the birth certificate, so a client whose `user_id` is constant
+ *     (the documented meaning: an END USER, not a conversation) still
+ *     gets one session per conversation;
+ *  3. the fingerprint — prefix + first turn — for a client that speaks
+ *     neither.
+ *
+ *  The prefix (system + tools) is deliberately NOT part of the native
+ *  key: it is the one part of the request a client legitimately
+ *  rewrites between turns, and a key that moved with it would fork the
+ *  conversation on every turn. */
 function conversationKey(req: IncomingMessage, body: MessagesRequest): string | undefined {
   const hdr = req.headers['x-bro-session'];
   const named = (Array.isArray(hdr) ? hdr[0] : hdr)?.trim();
@@ -665,6 +802,13 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   const first = body.messages?.[0];
   if (first === undefined) {
     return undefined;
+  }
+  const native = body.metadata?.user_id?.trim();
+  if (native !== undefined && native !== '') {
+    const fp = createHash('sha256')
+      .update(`${native}\n${turnHashInput(first)}`)
+      .digest('hex');
+    return `n:${fp}`;
   }
   const fp = createHash('sha256')
     .update(`${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`)
@@ -1560,7 +1704,43 @@ function evict(
   if (key !== undefined) {
     sessions.delete(key);
   }
+  // a retired conversation never settles — release the waiters
+  conv.latch.wake();
   disposeQuiet(conv.live);
+}
+
+/** The coldest IDLE session — the one a new session may take the place
+ *  of. A busy session is mid-turn: its handle must never be dropped
+ *  under it, so it is not a candidate. The map is insertion-ordered and
+ *  hits re-insert, so the coldest is the first idle entry. */
+function evictIdleSession(sessions: Map<string, ConvSession>): boolean {
+  let coldestKey: string | undefined;
+  let coldest: ConvSession | undefined;
+  for (const [k, s] of sessions) {
+    if (s.busy) continue;
+    if (coldest === undefined || s.lastSeen < coldest.lastSeen) {
+      coldestKey = k;
+      coldest = s;
+    }
+  }
+  if (coldestKey === undefined || coldest === undefined) return false;
+  evict(sessions, coldestKey, coldest);
+  return true;
+}
+
+/** A lane's limits by its ROUTE name — the operator may spell the limit
+ *  under the public route instead of the private entry. */
+function routeLimit(
+  cfg: ConductorConfig,
+  routes: string[]
+): LaneAdmissionLimits | undefined {
+  const limits = cfg.limits;
+  if (limits === undefined) return undefined;
+  for (const route of routes) {
+    const found = limits[route];
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 type PooledReply = Awaited<ReturnType<typeof acpPooledTurn>>;
@@ -1584,7 +1764,7 @@ interface TurnEnv {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  pendingOpens: Map<string, Promise<void>>;
   key: string | undefined;
   /** request's stop settings — hashed into the conversation proofs so
    *  changed markers never replay a reply cut under different ones */
@@ -1600,9 +1780,17 @@ interface TurnEnv {
   parent: OtelCtx | undefined;
   requestModel: string | undefined;
   deadline: number;
+  /** the request's ADMISSION budget — the deadline a queued request may
+   *  wait up to. The turn's own deadline starts when the turn starts,
+   *  so a request that waited in the queue still gets its full turn
+   *  window. */
+  waitDeadline: number;
   signal: AbortSignal;
   by: string;
   imageOk: boolean;
+  /** the lane's admission — the session budget and the request budget
+   *  (spec bro-9j4kt) */
+  admission: LaneAdmission;
   /** Called the moment a real turn is chosen (never on replay or a
    *  failed open) — it commits the wire to SSE and hands back the
    *  session-update sink the prompt pump streams deltas into
@@ -1646,6 +1834,9 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
   // the delta only — prior turns live in the session's own context
   const prompt = tailBlocks(tail, env.imageOk);
   const inputTokens = inputTokensOf(prompt);
+  // arm a FRESH latch for this turn: the waiters must wait for THIS
+  // turn, not for the previous one (whose latch is already open)
+  cand.latch.rearm();
   cand.busy = true;
   cand.lastSeen = Date.now();
   try {
@@ -1747,6 +1938,28 @@ async function oneShotTurn(
 }
 
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
+  // the lane's session slot — this turn OPENS a session, so it takes
+  // one from the lane's budget (the provider's parallel-session wall).
+  // A continuation never comes here: it rides the session it holds.
+  const slot = await env.admission.acquireSession({
+    signal: env.signal,
+    waitDeadline: env.waitDeadline,
+  });
+  try {
+    return await openTurn(env, candBusy, slot);
+  } finally {
+    slot.release();
+  }
+}
+
+/** The turn that opens a session — the cap, then the open. */
+async function openTurn(
+  env: TurnEnv,
+  candBusy: boolean,
+  /** the lane's session slot — PROMOTED when the conversation retains
+   *  its session, so the lane's map counts it from then on */
+  slot: SessionSlot
+): Promise<TurnOutcome> {
   // image blocks ride the wire only when the agent advertised the
   // prompt capability — serialize after link() so the negotiated
   // caps are known (bro-7izjx)
@@ -1763,16 +1976,42 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
     return oneShotTurn(env, prompt, inputTokens);
   }
   // mark BEFORE the await — a concurrent first request on the same key
-  // takes the one-shot path instead of opening a twin session whose
-  // loser leaks out of the map (codeant #569)
-  env.pendingOpens.add(key);
+  // WAITS for this open instead of opening a twin session whose loser
+  // leaks out of the map (codeant #569)
+  let releaseOpen!: () => void;
+  const opening = new Promise<void>(resolve => {
+    releaseOpen = resolve;
+  });
+  env.pendingOpens.set(key, opening);
   let live: AcpRetainedSession | undefined;
+  let conv: ConvSession | undefined;
   try {
     live = await acpSessionRetain(env.peer, env.cfg.entry, env.opts, env.deadline, {
       by: env.by,
       requestModel: env.requestModel,
       parent: env.parent,
     });
+    // the conversation is REGISTERED before its first turn runs: a
+    // request that arrives while the turn is in flight finds the
+    // session (busy) and waits on its latch instead of opening a twin.
+    // The latch resolves when the settle writes the verdict.
+    const latch = convLatch();
+    conv = {
+      live,
+      peer: env.peer,
+      consumed: env.msgs.length,
+      firstHash: firstTurnHash(env.msgs),
+      prefixHash: prefixSha(env.prefix),
+      requestModel: env.requestModel,
+      lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
+      busy: true,
+      lastSeen: Date.now(),
+      latch,
+    };
+    env.sessions.set(key, conv);
+    // the session LIVES on: the lane's map counts it now, so the slot
+    // is handed over instead of given back
+    slot.promote();
     const reply = await live.prompt(prompt, env.deadline, {
       signal: env.signal,
       by: env.by,
@@ -1780,17 +2019,6 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       parent: env.parent,
       onUpdate: env.openStream?.(inputTokens),
     });
-    const conv: ConvSession = {
-      live,
-      peer: env.peer,
-      consumed: env.msgs.length,
-      historyHash: hashTurns(env.prefix, env.msgs, env.msgs.length, env.stopKey),
-      prefixHash: prefixSha(env.prefix),
-      requestModel: env.requestModel,
-      lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
-      busy: false,
-      lastSeen: Date.now(),
-    };
     return { reply, reused: false, inputTokens, replay: false, conv };
   } catch (err) {
     // the first turn died — nothing is cached yet but the acp side
@@ -1798,9 +2026,15 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
     if (live !== undefined) {
       disposeQuiet(live);
     }
+    if (conv !== undefined) {
+      // the registered conversation never settles — release the waiters
+      env.sessions.delete(key);
+      conv.latch.wake();
+    }
     throw err;
   } finally {
     env.pendingOpens.delete(key);
+    releaseOpen();
   }
 }
 
@@ -1822,9 +2056,39 @@ function chainWhy(cand: ConvSession | undefined, env: TurnEnv): string | undefin
   return undefined;
 }
 
-/** One request's acp turn — proves a stored conversation (or evicts a
- *  stale one), then routes to continuation/fresh/one-shot. */
+/** The conversation's own turn — one at a time.
+ *
+ *  Two windows, one rule: a request never opens a second session for a
+ *  conversation that is already turning. While the first request is
+ *  OPENING the session there is no conversation to wait on yet, so the
+ *  opener's promise is the wait; once the conversation is registered
+ *  its latch is (the turn settles → the latch opens → the waiter
+ *  continues the same session). */
+async function conversationTurn(env: TurnEnv): Promise<void> {
+  const key = env.key;
+  if (key === undefined) return;
+  const opening = env.pendingOpens.get(key);
+  if (opening !== undefined) {
+    await opening;
+  }
+  const cand = env.sessions.get(key);
+  if (cand?.busy === true) {
+    await awaitIdle(cand, { signal: env.signal, waitDeadline: env.waitDeadline });
+  }
+}
+
+/** One request's acp turn — the budget, the conversation's own lock,
+ *  then the routing to continuation/fresh/one-shot. */
 async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
+  // the request budget: every request spends one token, whether it
+  // continues a conversation or opens one
+  env.admission.charge(env.requestModel ?? '(default)');
+  // the conversation's own turn — one at a time (acpx's per-session
+  // queue). A request that finds the conversation busy (or opening)
+  // WAITS for it and then continues the SAME session; before this it
+  // took the one-shot path and opened a twin — twice the provider load
+  // for one conversation.
+  await conversationTurn(env);
   sweepSessions(env.sessions, Date.now());
   const cand = env.key !== undefined ? env.sessions.get(env.key) : undefined;
   if (env.chained === true) {
@@ -1835,6 +2099,8 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
     if (why !== undefined) {
       throw new ChainBroken(`previous_response_id ${why}`);
     }
+    // the turn's own window starts when the turn starts
+    env.deadline = Date.now() + env.cfg.timeoutMs;
     return continuationTurn(env, cand as ConvSession);
   }
   const usable =
@@ -1842,8 +2108,14 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
     cand.peer === env.peer &&
     !cand.busy &&
     cand.consumed <= env.msgs.length &&
-    hashTurns(env.prefix, env.msgs, cand.consumed, env.stopKey) === cand.historyHash;
+    // the birth certificate: the conversation's first turn must be the
+    // one the session was opened with. The LATER turns are the
+    // client's to rewrite (claude-code appends hook output and system
+    // reminders to its last user turn) — a proof over them would evict
+    // the session on every turn.
+    firstTurnHash(env.msgs) === cand.firstHash;
   if (usable === true) {
+    env.deadline = Date.now() + env.cfg.timeoutMs;
     return continuationTurn(env, cand);
   }
   const candBusy = cand?.busy === true;
@@ -1852,6 +2124,10 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
     // its session is poison for THIS conversation, retire it
     evict(env.sessions, env.key, cand);
   }
+  // the turn opens a session — it takes a slot from the lane's session
+  // budget (the provider's parallel-session wall)
+  // the turn's own window starts when the turn starts
+  env.deadline = Date.now() + env.cfg.timeoutMs;
   return freshTurn(env, candBusy);
 }
 
@@ -1868,6 +2144,37 @@ interface WireCtx {
   lanes: Map<string, ProviderLane>;
   /** The PUBLIC routes — route name → entry key. The router's table. */
   routes: Map<string, string>;
+  /** The catalog cache — the lanes' rows, read ONCE. */
+  catalog: CatalogCache;
+}
+
+/** The catalog cache — what the gateway serves, read from the providers
+ *  ONCE and kept. A client asking "what models do you serve?" must not
+ *  cost a provider round trip per request: the lanes are enumerated at
+ *  start and on an operator's explicit refresh
+ *  (POST /api/v1/models/reload), never as a side effect of a read. */
+interface CatalogCache {
+  /** the cached rows — undefined until a read lands. An EMPTY array is a
+   *  real answer (a lane that advertises nothing). */
+  rows?: RoutedModel[];
+  /** the lanes that failed at the last read — the degradation rides
+   *  every answer that serves the cached rows. */
+  failures: string[];
+  /** when the cached rows were read. */
+  fetchedAtMs?: number;
+  /** the read in flight — a burst of clients waits on ONE read, never
+   *  one read each. */
+  inflight?: Promise<void>;
+}
+
+/** The catalog's freshness — what a refresh reports. */
+export interface CatalogSnapshot {
+  /** the rows the catalog now holds */
+  models: number;
+  /** when they were read */
+  fetchedAtMs: number;
+  /** the lanes that failed — a partial catalog says which */
+  failures: string[];
 }
 
 /** One provider's LANE — the runtime carrier of an ENTRY: its model pin,
@@ -1892,7 +2199,12 @@ interface ProviderLane {
   opts: ProviderWireOpts;
   pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  pendingOpens: Map<string, Promise<void>>;
+  /** The lane's admission — the session budget and the request budget
+   *  (spec bro-9j4kt). */
+  admission: LaneAdmission;
+  /** the lane's limits — the knobs the admission reads */
+  limits: LaneAdmissionLimits | undefined;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -1962,7 +2274,9 @@ function turnError(
 ): void {
   const msg = err instanceof Error ? err.message : String(err);
   const avail = AVAIL.test(msg);
-  const rate = RATE.test(msg);
+  // the gate's own refusal IS a rate limit — the type says so, the
+  // message is only the human-readable half
+  const rate = RATE.test(msg) || err instanceof RateRefused;
   let liveType = 'api_error';
   if (avail) liveType = 'overloaded_error';
   if (rate) liveType = 'rate_limit_error';
@@ -1980,7 +2294,12 @@ function turnError(
   let status = 500;
   if (avail) status = 529;
   if (rate) status = 429;
-  if (rate) res.setHeader('retry-after', '30');
+  // the Retry-After is the WAIT the gate named — a bucket's real refill
+  // time, not a fixed guess the client cannot plan around
+  if (rate) {
+    const refused = err instanceof RateRefused ? err.retryAfterSec : 30;
+    res.setHeader('retry-after', String(refused));
+  }
   otelEvent('conductor.error', {
     backend,
     status,
@@ -2000,7 +2319,6 @@ function settleConv(
   conv: ConvSession,
   body: MessagesRequest,
   view: ReplyView,
-  stopKey: string,
   chained?: boolean,
   divergent?: boolean
 ): void {
@@ -2010,10 +2328,10 @@ function settleConv(
     // cumulative count is bookkeeping only; no client-side history
     // exists to re-hash, so the fingerprint proof can never apply
     conv.consumed += all.length;
-    conv.historyHash = '';
+    conv.firstHash = '';
   } else {
     conv.consumed = all.length;
-    conv.historyHash = hashTurns(prefixText(body), all, all.length, stopKey);
+    conv.firstHash = firstTurnHash(all);
   }
   conv.prefixHash = prefixSha(prefixText(body));
   // a trimmed wire answer diverges the session from the client's view —
@@ -2022,9 +2340,12 @@ function settleConv(
   if (divergent === true) conv.divergent = true;
   // the turn's own settlement releases the session — busy spans prompt
   // AND settle so a same-key request can never slip into the window
-  // where the wire verdict (divergent, historyHash, lastReply) is
+  // where the wire verdict (divergent, firstHash, lastReply) is
   // still unwritten (coderabbit #610)
   conv.busy = false;
+  // the latch opens NOW: the verdict is written, so a request that was
+  // waiting on this conversation may continue it
+  conv.latch.wake();
   conv.lastReply = view;
   if (key === undefined) return;
   sessions.delete(key);
@@ -2165,11 +2486,16 @@ function laneTurnEnv(
     parent: d.parent,
     requestModel: d.requestModel,
     deadline: Date.now() + lane.cfg.timeoutMs,
+    // the admission budget: a request may wait this long for its
+    // conversation's turn or for a session slot; the turn's own window
+    // starts when the turn starts
+    waitDeadline: Date.now() + lane.cfg.timeoutMs,
     signal: d.signal,
     // the spawn label names the ENTRY — two routes reaching one entry
     // share the agent, so they share the label too
     by: `conductor:${lane.entry}`,
     imageOk: peer.caps?.image === true,
+    admission: lane.admission,
   };
 }
 
@@ -2293,7 +2619,15 @@ async function messages(
   if (out.conv !== undefined) {
     // a stop hit swallowed post-marker output the session still holds —
     // the conversation diverged from the client's view (bro-vfbyc)
-    settleConv(lane.sessions, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
+    settleConv(
+      lane.sessions,
+      key,
+      out.conv,
+      body,
+      view,
+      undefined,
+      stops.hit !== undefined
+    );
   }
   otelEvent('conductor.turn', {
     // the ROUTE that answered — the public identity an operator reads
@@ -2805,7 +3139,7 @@ function openaiFailKind(
   if (err instanceof ChainBroken) {
     return { status: 400, stream: 'invalid_request_error', wire: 'invalid_request_error' };
   }
-  if (RATE.test(msg)) {
+  if (RATE.test(msg) || err instanceof RateRefused) {
     return { status: 429, stream: 'rate_limit_error', wire: 'rate_limit_error' };
   }
   if (AVAIL.test(msg)) {
@@ -2827,7 +3161,10 @@ function openaiFail(
     res.end();
     return;
   }
-  if (kind.status === 429) res.setHeader('retry-after', '30');
+  if (kind.status === 429) {
+    const refused = err instanceof RateRefused ? err.retryAfterSec : 30;
+    res.setHeader('retry-after', String(refused));
+  }
   openaiError(res, kind.status, kind.wire, `bro conductor: ${msg}`);
 }
 
@@ -2864,10 +3201,7 @@ interface ChainEntry {
   route: string;
 }
 
-function pruneChains(
-  chains: Map<string, ChainEntry>,
-  lanes: Map<string, ProviderLane>
-): void {
+function pruneChains(chains: Map<string, ChainEntry>, lanes: Map<string, ProviderLane>): void {
   for (const [id, e] of chains) {
     if (lanes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
   }
@@ -3141,7 +3475,14 @@ async function responses(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel: requestModelOf(body),
+        signal: ac.signal,
+      }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
       openStream: respStreamOpener(rreq, res, lane, {
@@ -3245,7 +3586,6 @@ function responsesDeliver(
         stopReason: wireReason,
         inputTokens,
       },
-      stopKeyOf(stopSeqsOf(d.body) ?? []),
       d.chained,
       // a capped answer left hidden text in the session — it diverged
       // from the client's view (bro-vfbyc)
@@ -3706,7 +4046,14 @@ async function chatCompletions(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel, signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel,
+        signal: ac.signal,
+      }),
       openStream:
         creq.stream === true
           ? () => {
@@ -3728,7 +4075,21 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, { creq, body, out, key, chatId, created, model, tools, live, stops, t0, lane, route });
+  chatDeliver(res, {
+    creq,
+    body,
+    out,
+    key,
+    chatId,
+    created,
+    model,
+    tools,
+    live,
+    stops,
+    t0,
+    lane,
+    route,
+  });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3787,7 +4148,6 @@ function chatDeliver(
         stopSequence: d.stops.hit,
         inputTokens: o.inputTokens,
       },
-      stopKeyOf(stopSeqsOf(d.body) ?? []),
       undefined,
       // a cap cut or a swallowed post-stop tail left hidden text in the
       // session — it diverged from the client's view (bro-vfbyc)
@@ -3967,32 +4327,61 @@ function providerPath(m: RoutedModel): string {
   return chain.length > 0 ? `${prefix}/${chain}` : prefix;
 }
 
-/** The anthropic /v1/models rows — the UNION of every lane's catalog,
- *  through the SAME `bro providers models` surface, so ids arrive
- *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
- *  PARALLEL — a catalog read costs seconds, and a caller waits for the
- *  slowest lane, never for their sum. Every lane down IS a 502. */
-async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+/** Read the lanes' catalogs — the ONE provider round trip the catalog
+ *  costs. The rows land in the cache; a read that found NOTHING usable
+ *  is not cached, so a provider that comes back heals the gateway by
+ *  itself instead of waiting for a reload. */
+async function refreshCatalog(wire: WireCtx): Promise<CatalogSnapshot> {
   // the LANES, not the routes: a lane reached by two routes is read once
   // and advertised once, under its primary route
   const lanes = await Promise.all([...wire.lanes.values()].map(lane => laneCatalog(lane, wire)));
   const rows = mergeCatalogs(lanes);
   const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
+  const cache = wire.catalog;
+  // every lane failed — the catalog stays EMPTY and the next request
+  // retries, so a provider that comes back heals the gateway by itself
+  cache.rows = failures.length === lanes.length ? undefined : rows;
+  cache.failures = failures;
+  cache.fetchedAtMs = Date.now();
+  return { models: cache.rows?.length ?? 0, fetchedAtMs: cache.fetchedAtMs, failures };
+}
+
+/** The cached rows — read them ONCE if nobody has yet. A burst of
+ *  clients waits on the SAME read; none of them spends its own. */
+async function ensureCatalog(wire: WireCtx): Promise<void> {
+  const cache = wire.catalog;
+  if (cache.rows !== undefined) return;
+  const pending = cache.inflight ?? refreshCatalog(wire).then(() => undefined);
+  cache.inflight = pending;
+  try {
+    await pending;
+  } finally {
+    if (cache.inflight === pending) cache.inflight = undefined;
+  }
+}
+
+/** The anthropic /v1/models rows — the UNION of every lane's catalog,
+ *  through the SAME `bro providers models` surface, so ids arrive
+ *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
+ *  PARALLEL — a catalog read costs seconds, and a caller waits for the
+ *  slowest lane, never for their sum. Every lane down IS a 502.
+ *
+ *  The rows are CACHED: the read happens at start and on an operator's
+ *  explicit reload, never per request — a client asking what the gateway
+ *  serves must not cost a provider round trip. */
+async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+  await ensureCatalog(wire);
+  const rows = wire.catalog.rows ?? [];
+  const failures = wire.catalog.failures;
   // the degradation rides BOTH answers — a client must read the same
   // signal whether the catalog is short (200) or the gateway is down
   // (502). A 502 without it says "down" but not "which lane, why".
-  const laneError =
-    failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
+  const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
-  if (failures.length > 0 && failures.length === lanes.length) {
+  if (failures.length > 0 && failures.length === wire.lanes.size) {
     if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
-    apiError(
-      res,
-      502,
-      'api_error',
-      `bro conductor: ${failures.join('; ')}`
-    );
+    apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
   const data = rows.map(m => ({
@@ -4009,6 +4398,11 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (laneError !== undefined) {
     headers['x-bro-lane-error'] = laneError;
+  }
+  // the catalog's age rides the answer — the rows are cached, not
+  // re-read per request, and a reader can see when they were read
+  if (wire.catalog.fetchedAtMs !== undefined) {
+    headers['x-bro-catalog-fetched-at'] = String(wire.catalog.fetchedAtMs);
   }
   res.writeHead(200, headers);
   res.end(
@@ -4043,6 +4437,14 @@ export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
   terminals(): TerminalRegistry | undefined;
   dispose(): void;
+  /** Re-read the lanes' catalogs — the operator's explicit refresh
+   *  (POST /api/v1/models/reload). The catalog is otherwise read once,
+   *  at start. */
+  reloadCatalog(): Promise<CatalogSnapshot>;
+  /** Warm the catalog in the background — the serve does it at start, so
+   *  the first client read finds the rows already there instead of
+   *  waiting on a cold provider enumeration. */
+  warmCatalog(): void;
 }
 
 /** A terminal created by one provider must be readable whichever
@@ -4136,6 +4538,20 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // every session it carried, so the death hook drops the map.
     const sessions = new Map<string, ConvSession>();
     pool.onDeath(() => dropSessions(sessions));
+    // the lane's limits — `serve.limits.<entry>`, with a route's own
+    // name as the fallback (the limit belongs to the ACCOUNT, and the
+    // operator may spell it either way)
+    const limits = laneCfg.limits?.[entry] ?? routeLimit(laneCfg, routesOf(entry));
+    // the lane's admission — the session budget, the request budget and
+    // the per-conversation queue. The retained count and the eviction
+    // are the lane's own: an idle session is recycled (LRU) to make room
+    // for a new one, and a busy one never is.
+    const admission = new LaneAdmission(
+      entry,
+      limits,
+      () => sessions.size,
+      () => evictIdleSession(sessions)
+    );
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -4147,15 +4563,15 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // keys whose first session/new is in flight — a concurrent
       // same-key request must not open a twin (the loser would leak
       // unmapped)
-      pendingOpens: new Set<string>(),
+      pendingOpens: new Map<string, Promise<void>>(),
+      admission,
+      limits,
     });
   };
-  addLane(
-    cfg.backend,
-    cfg.entry,
-    cfg,
-    { ...wireOpts, acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) } }
-  );
+  addLane(cfg.backend, cfg.entry, cfg, {
+    ...wireOpts,
+    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+  });
   for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
@@ -4163,7 +4579,14 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     addLane(
       entry,
       entryCfg,
-      { ...cfg, backend: entry, entry: entryCfg, model: entryCfg.model, providers: undefined, routes: undefined },
+      {
+        ...cfg,
+        backend: entry,
+        entry: entryCfg,
+        model: entryCfg.model,
+        providers: undefined,
+        routes: undefined,
+      },
       {
         ...wireOpts,
         model: entryCfg.model,
@@ -4182,9 +4605,22 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
     return lane.pool.link(parent);
   };
-  const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };
+  const wire: WireCtx = {
+    cfg,
+    opts: wireOpts,
+    link,
+    lanes,
+    routes,
+    catalog: { failures: [] },
+  };
   return Object.assign(conductorDispatch(wire, chains, cfg), {
     terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
+    reloadCatalog: (): Promise<CatalogSnapshot> => refreshCatalog(wire),
+    // the warm read runs in the background: a failed enumeration leaves
+    // the cache empty and the next client read retries it
+    warmCatalog: (): void => {
+      void refreshCatalog(wire).catch(() => undefined);
+    },
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
       // — aborting rejects its init and frees the deadline timer
@@ -4197,16 +4633,36 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
 
 /** The `/v1/*` literal dispatch — a Map.get(requestInput)() call reads
  *  to CodeQL as an unvalidated dynamic method call; the fixed case list
- *  IS the allowlist guard it wants to see. */
+ *  IS the allowlist guard it wants to see.
+ *
+ *  The path may carry a surface mount ('/anthropic/v1/messages'): a
+ *  mounted base speaks ONE dialect, and the endpoint list of that
+ *  surface decides what it answers. The flat '/v1/…' address stays the
+ *  legacy path — there the path itself names the dialect. */
 function conductorDispatch(
   wire: WireCtx,
   chains: Map<string, ChainEntry>,
   cfg: ConductorConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const path = (req.url ?? '/').split('?')[0];
+    const raw = (req.url ?? '/').split('?')[0];
     const method = req.method ?? 'GET';
-    const httpSpan = httpTap(req, res, cfg, method, path);
+    const httpSpan = httpTap(req, res, cfg, method, raw);
+    const { surface, path } = resolveSurface(raw);
+    // a mounted base answers its OWN wire only — the anthropic base never
+    // takes a chat completion, the openai base never takes a message
+    if (surface !== undefined && !SURFACE_ENDPOINTS[surface].includes(`${method} ${path}`)) {
+      apiError(
+        res,
+        404,
+        'not_found_error',
+        surface === undefined
+          ? `bro conductor: no route ${method} ${path}`
+          : `bro conductor: the ${surface} surface has no ${method} ${path} — ` +
+              `it serves ${SURFACE_ENDPOINTS[surface].map(e => e.split(' ')[1]).join(', ')}`
+      );
+      return;
+    }
     switch (`${method} ${path}`) {
       case 'POST /v1/messages':
         await messages(req, res, wire, httpSpan.ctx);
