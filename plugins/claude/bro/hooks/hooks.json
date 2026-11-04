@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool >/dev/null 2>&1 &",
+            "command": "_f=$(mktemp); cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") &",
             "timeout": 10
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool >/dev/null 2>&1 &",
+            "command": "_f=$(mktemp); cat > \"$_f\"; (\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post-tool < \"$_f\" >/dev/null 2>&1; rm -f \"$_f\") &",
             "timeout": 10
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pre-tool >/dev/null 2>&1 &",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pre-tool || true",
             "timeout": 10
           }
         ]
