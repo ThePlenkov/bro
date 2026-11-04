@@ -1036,7 +1036,7 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
   {
     name: 'next',
     description: 'bro next actionable work — pick the next ready bead respecting constraints',
-    args: ['next'],
+    args: ['next', '--list'],
   },
   {
     name: 'drill_status',

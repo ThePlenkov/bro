@@ -42,9 +42,6 @@ const MAX_OUTPUT = 1 << 20
 const TOAST_MAX = 3_000
 /** Board refresh cadence — `bro status` is local reads only. */
 const POLL_MS = 15_000
-/** Sidebar rows are narrow — the id already keys the bead, the title
- *  is a reminder, not a document. */
-const TITLE_MAX = 34
 
 const NPX_PIN = '@broject/bro@0.2.5'
 

@@ -417,10 +417,11 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
     }
   }
 
-  // `npx skills` rewrites the lockfile as it installs, so the hashes it
-  // just wrote are the ones to check against — the copy read before the
-  // install is stale by definition. Re-read it.
-  const current = checkOnly || dryRun ? locked : readSkillLock(dir)
+  // Compare against the original committed lock snapshot, not a re-read:
+  // `npx skills add` rewrites the lockfile with the freshly fetched hash,
+  // so re-reading it would make that new hash the expected value and
+  // silently advance the lock instead of reporting drift.
+  const current = locked
   const drift = checkSkillLock(current, skillsDir)
   if (drift.length === 0) {
     console.error(`  ${current.size} locked skill(s) match the lock`)
@@ -461,52 +462,57 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   const packDir = pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK)
   checkPrereqs(wantsBeads)
 
-  // bd init + formulas land BEFORE the config write — if beads setup fails,
-  // no config claiming store=both is left behind.
-  if (wantsBeads) {
-    setupBeads()
-  }
+  // In --check / --dry-run mode we verify without mutating: no beads
+  // init, no config write, no skill/pack installs, no hook installs.
+  // Only the locked-skill drift check (setupLockedSkills) runs.
+  if (!checkOnly && !dryRun) {
+    // bd init + formulas land BEFORE the config write — if beads setup fails,
+    // no config claiming store=both is left behind.
+    if (wantsBeads) {
+      setupBeads()
+    }
 
-  console.error(`  ${writeConfig({ beads, personality })}`)
+    console.error(`  ${writeConfig({ beads, personality })}`)
 
-  if (skills) {
-    if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
-      console.error('  skills already installed and current')
+    if (skills) {
+      if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
+        console.error('  skills already installed and current')
+      }
+    }
+
+    if (packDir !== null) {
+      setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
+    }
+
+    // git hooks ride setup — a repo that opts into bro gets both
+    // without a second step; `bro hooks uninstall` is the opt-out:
+    //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
+    //     machine-made commits
+    //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+    //   post-merge (bro-sovl3): install → build → patch after a merge
+    // Best-effort: a non-git dir just skips.
+    const hook = installCommitHook(process.cwd(), cliVersion())
+    if (hook.state === 'error') {
+      console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
+    } else if (hook.state !== 'already') {
+      console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
+    }
+    const guard = installRefGuardHook(process.cwd(), cliVersion())
+    if (guard.state === 'error') {
+      console.error(`  note: refguard hook not installed — ${guard.err}`)
+    } else if (guard.state !== 'already') {
+      console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
+    }
+    const fresh = installPostMergeHook(process.cwd(), cliVersion())
+    if (fresh.state === 'error') {
+      console.error(`  note: post-merge hook not installed — ${fresh.err}`)
+    } else if (fresh.state !== 'already') {
+      console.error(`  ${fresh.state} post-merge hook (${fresh.path})`)
     }
   }
 
   if (lock) {
     setupLockedSkills(process.cwd(), dryRun, checkOnly)
-  }
-
-  if (packDir !== null) {
-    setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
-  }
-
-  // git hooks ride setup — a repo that opts into bro gets both
-  // without a second step; `bro hooks uninstall` is the opt-out:
-  //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
-  //     machine-made commits
-  //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
-  //   post-merge (bro-sovl3): install → build → patch after a merge
-  // Best-effort: a non-git dir just skips.
-  const hook = installCommitHook(process.cwd(), cliVersion())
-  if (hook.state === 'error') {
-    console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
-  } else if (hook.state !== 'already') {
-    console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
-  }
-  const guard = installRefGuardHook(process.cwd(), cliVersion())
-  if (guard.state === 'error') {
-    console.error(`  note: refguard hook not installed — ${guard.err}`)
-  } else if (guard.state !== 'already') {
-    console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
-  }
-  const fresh = installPostMergeHook(process.cwd(), cliVersion())
-  if (fresh.state === 'error') {
-    console.error(`  note: post-merge hook not installed — ${fresh.err}`)
-  } else if (fresh.state !== 'already') {
-    console.error(`  ${fresh.state} post-merge hook (${fresh.path})`)
   }
 
   console.error('bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.')
