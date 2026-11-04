@@ -3838,9 +3838,21 @@ function chatDeliver(
   );
 }
 
+/** A catalog row plus the PREFIX its id was built with and the model id
+ *  under it. The id's own first segment is not reliably the route — a
+ *  catalog entry's name may carry a slash ('opencode/account') — so the
+ *  lane carries what it advertised, and the label needs the model id to
+ *  tell a provider-qualified name from a bare one. */
+interface RoutedModel extends CatalogModel {
+  /** the prefix the id carries — the catalog entry's own name */
+  prefix?: string;
+  /** the id under that prefix — the agent's own model id */
+  modelId?: string;
+}
+
 /** One lane's catalog — its rows, or the failure that stopped it. */
 interface LaneCatalog {
-  rows?: CatalogModel[];
+  rows?: RoutedModel[];
   failure?: string;
 }
 
@@ -3862,11 +3874,16 @@ async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatal
     // spawn that enumerates a multi-upstream agent's catalog can outrun
     // 30s, and a lane that fails its read must fail with its own budget,
     // not with a stranger's.
+    const rows = await catalogModels(source.name, source.entry, {
+      acp: lane.opts.acp,
+      deadline: Date.now() + lane.cfg.timeoutMs,
+    });
     return {
-      rows: await catalogModels(source.name, source.entry, {
-        acp: lane.opts.acp,
-        deadline: Date.now() + lane.cfg.timeoutMs,
-      }),
+      rows: rows.map(r => ({
+        ...r,
+        prefix: source.name,
+        modelId: r.id.slice(source.name.length + 1),
+      })),
     };
   } catch (err) {
     // the lane names itself — by its ADVERTISED route, the public name a
@@ -3891,12 +3908,46 @@ function headerSafe(text: string): string {
 
 /** The union of the lanes' rows — first id wins, so an id two lanes
  *  advertise is listed once. */
-function mergeCatalogs(lanes: LaneCatalog[]): CatalogModel[] {
-  const byId = new Map<string, CatalogModel>();
+function mergeCatalogs(lanes: LaneCatalog[]): RoutedModel[] {
+  const byId = new Map<string, RoutedModel>();
   for (const row of lanes.flatMap(l => l.rows ?? [])) {
     if (!byId.has(row.id)) byId.set(row.id, row);
   }
   return [...byId.values()];
+}
+
+/** The picker label — the model's own name, qualified by WHO serves it.
+ *  An agent may name its models "vercel/Claude Opus 5.5" (the upstream
+ *  provider rides along in the name); one that names them bare ("Claude
+ *  Opus 5.5") leaves two lanes' rows looking identical in a client
+ *  picker — the reader cannot tell which provider a row came from. A
+ *  A name qualifies ITSELF when its first segment mirrors the model id's
+ *  first segment ("vercel/…" over "vercel/anthropic/…"). A name whose
+ *  slash is not that ("Claude Opus 4 / 1M") does not — the model id's own
+ *  provider names it when it has one, and the lane's prefix names it when
+ *  it does not. The id's first segment is never parsed for the route: a
+ *  catalog entry's name may carry a slash of its own. */
+function displayName(m: RoutedModel): string {
+  // a row with no label of its own shows its id — nothing to qualify
+  if (m.name === undefined) return m.id;
+  const name = m.name;
+  const modelId = m.modelId;
+  const prefix = m.prefix;
+  if (modelId === undefined || prefix === undefined) return name;
+  const own = firstSegment(modelId);
+  const head = firstSegment(name);
+  // the agent already named its provider
+  if (head !== name && head === own) return name;
+  // the model id carries its provider — it names the row better than the lane
+  if (own !== modelId) return `${own}/${name}`;
+  // no provider in the id — the lane's prefix says where the model comes from
+  return `${prefix}/${name}`;
+}
+
+/** The id's first path segment — the whole id when it carries no slash. */
+function firstSegment(id: string): string {
+  const cut = id.indexOf('/');
+  return cut <= 0 ? id : id.slice(0, cut);
 }
 
 /** The anthropic /v1/models rows — the UNION of every lane's catalog,
@@ -3930,7 +3981,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const data = rows.map(m => ({
     type: 'model',
     id: m.id,
-    display_name: m.name ?? m.id,
+    display_name: displayName(m),
     created_at: '2025-01-01T00:00:00Z',
   }));
   // a lane that FAILED is not silently absent from the union: the
