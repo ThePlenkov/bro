@@ -360,6 +360,29 @@ describe('taskBacklog — prod seam over TaskStore', () => {
       ['a', 'c', 'b']
     );
   });
+
+  test('the cap is taken by affinity — a likely duplicate is never crowded out', () => {
+    const item = row(ITEM, { title: 'pipeline dedup gate', parent: 'epic1' });
+    const dup = row('dup', {
+      status: 'in_progress',
+      title: 'pipeline dedup gate',
+      parent: 'epic1',
+    });
+    store.rows = [
+      item,
+      // a full queue of unrelated peers ahead of the duplicate —
+      // position alone would cut it at any cap
+      ...Array.from({ length: 10 }, (_, i) =>
+        row(`u${i}`, { status: 'open', title: `unrelated work ${i}` })
+      ),
+      dup,
+    ];
+    store.readyIds = new Set(['u0']);
+    const b = taskBacklog(store as never, { limit: 5 });
+    const ids = b.peers(item).map(r => r.id);
+    assert.equal(ids[0], 'dup'); // affinity beats queue position
+    assert.equal(ids.length, 5); // still capped
+  });
 });
 
 describe('stageDispatch — one judge slot, many stages', () => {

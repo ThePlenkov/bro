@@ -192,7 +192,7 @@ ts-package, orch: foreground, timing: now}`.
   inside a group; output lands as bead labels), invariant 1 (no
   pipeline vocabulary in agent-facing artifacts).
 - Input: bead `bro-7d5nb.3` (epic child, needs: [.2] → ready),
-  spec formula, peers = the ready/open set.
+  spec formula, peers = the ready ∪ open ∪ in_progress candidate set.
 - Expected by spec: judge reads bead + peers → verdict
   solo|clump|duplicate|defer + payload → labels through the task-store
   seam; `complexity` feeds `review.gate_on` verbatim.
@@ -225,10 +225,13 @@ orch: foreground, timing: now}`.
     (solo/new/existing-id). A single verdict question could disagree
     with its own evidence; deriving can't.
   - Precedence is decisive-first: duplicate (terminal close) >
-    defer (park) > clump/solo. A dimmed answer is not honored —
-    `lowConfidence` on a gating question falls back to the safe shape
-    (solo + complex): an uncertain judge never closes or parks
-    someone's work, and `complex` keeps review in the path.
+    defer (park) > clump/solo. A dimmed answer is dropped FOR THAT
+    question only — `lowConfidence` marks it unanswered and the
+    verdict derives from the rest: a dimmed `clump` reads as solo, a
+    dimmed `dup_of` as not-a-dup, a dimmed `defer` as no-defer —
+    while a confident sibling still stands (dim `dup_of` + confident
+    `clump` ⇒ `clump`). Unanswered `complexity` always reads
+    `complex`, so a dimmed judge never sneaks work past review.
   - A `new` clump mints its id from the founding member (`clumpId =
     item.id`) — deterministic, collision-free, self-describing.
     Existing `clump:<id>` labels on peers become joinable choices;
@@ -253,11 +256,13 @@ orch: foreground, timing: now}`.
      earlier; equal ranks fall back to LIFO."
   2. **The peer candidate set is unspecified.** "Reads bead + repo
      signals" doesn't say which beads the judge sees. This run feeds
-     ready ∪ open ∪ in_progress capped at the decide's criteria
-     bound (8) — a bounded view, never the whole backlog. Proposed
-     wording: "classify's peer set is a bounded candidate list the
-     intake plane scopes (ready ∪ open ∪ in_progress); the engine
-     caps what one decide carries."
+     ready ∪ open ∪ in_progress, affinity-ranked (parent > shared
+     labels > title-token overlap) so the cap cuts the least-relevant
+     tail rather than the dedup signal, bounded at the decide's
+     criteria limit (8). Proposed wording: "classify's peer set is a
+     bounded, affinity-ranked candidate list the intake plane scopes
+     (ready ∪ open ∪ in_progress); the engine caps what one decide
+     carries."
 - Friction: the `judge` engine slot is shared by three stages, so a
   formula can't bind classify alone without `stageDispatch` — worth
   noting for .4: the route stage binds the same multiplexer.

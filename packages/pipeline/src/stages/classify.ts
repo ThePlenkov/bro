@@ -520,13 +520,50 @@ export function stageDispatch(bindings: Record<string, EngineFn | EngineHandler>
   };
 }
 
+/** Significant title tokens — ≥4 chars, the overlap signal affinity
+ *  scores on (short tokens are noise: "the", "a", "fix"). */
+const titleTokens = (s: string | undefined): Set<string> =>
+  new Set(
+    (s ?? '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(t => t.length >= 4)
+  );
+
+/** How relevant a peer is to THIS item's classification — the signal
+ *  the candidate cap should keep. Shared parent (one epic's siblings
+ *  clump) outranks shared labels (same surface) outranks title-token
+ *  overlap (likely duplicates read alike). */
+function affinity(item: TaskRow, p: TaskRow): number {
+  let s = 0;
+  if (item.parent !== undefined && item.parent === p.parent) {
+    s += 4;
+  }
+  const il = new Set(item.labels ?? []);
+  for (const l of p.labels ?? []) {
+    if (il.has(l)) {
+      s += 2;
+    }
+  }
+  const it = titleTokens(item.title);
+  for (const t of titleTokens(p.title)) {
+    if (it.has(t)) {
+      s += 1;
+    }
+  }
+  return s;
+}
+
 /**
  * The prod backlog — the TaskStore-facing ClassifyBacklog. Peers are
- * the intake candidate set: the ready queue first, then open and
- * in-progress rows to the cap — dedup still matters against claimed
- * work (a duplicate of an in-flight item is still a duplicate). Label
- * writes ride `bd update --add-label/--remove-label` through the
- * store's patch map.
+ * the intake candidate set: the ready queue, then open and
+ * in-progress rows to the cap — dedup must see claimed work (a
+ * duplicate of an in-flight item is still a duplicate). The cap is
+ * taken by AFFINITY, not position: an unrelated ready queue must not
+ * crowd a likely duplicate out of the judge's criteria — the sort is
+ * stable, so equal-affinity peers keep their tier order (ready →
+ * open → in_progress). Label writes ride `bd update
+ * --add-label/--remove-label` through the store's patch map.
  */
 export function taskBacklog(store: TaskStore, opts: { limit?: number } = {}): ClassifyBacklog {
   const limit = opts.limit ?? DEFAULT_PEER_LIMIT;
@@ -535,16 +572,20 @@ export function taskBacklog(store: TaskStore, opts: { limit?: number } = {}): Cl
     const out: TaskRow[] = [];
     const push = (rows: TaskRow[]): void => {
       for (const r of rows) {
-        if (out.length < limit && !seen.has(r.id)) {
+        if (!seen.has(r.id)) {
           seen.add(r.id);
           out.push(r);
         }
       }
     };
     push(store.ready());
-    if (out.length < limit) push(store.list({ status: 'open', limit }));
-    if (out.length < limit) push(store.list({ status: 'in_progress', limit }));
-    return out;
+    push(store.list({ status: 'open', limit }));
+    push(store.list({ status: 'in_progress', limit }));
+    return out
+      .map((r, i) => ({ r, i, s: affinity(item, r) }))
+      .sort((a, b) => b.s - a.s || a.i - b.i)
+      .slice(0, limit)
+      .map(e => e.r);
   };
   return {
     item: id => store.get(id),
