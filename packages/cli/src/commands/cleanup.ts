@@ -280,90 +280,54 @@ function canonicalPath(p: string): string {
   }
 }
 
+function linkMatches(linkPath: string, candidate: string): 'use' | 'none' | 'unverifiable' {
+  try {
+    const resolved = canonicalPath(readlinkSync(linkPath));
+    if (resolved === candidate || resolved.startsWith(candidate + '/')) {
+      return 'use';
+    }
+    return 'none';
+  } catch (err) {
+    if (isVanished(err)) return 'none';
+    if (isPermission(err)) return 'unverifiable';
+    return 'none';
+  }
+}
+
+function processUsesPath(pidDir: string, candidate: string): 'use' | 'none' | 'unverifiable' {
+  let fds: string[];
+  try {
+    fds = readdirSync(join(pidDir, 'fd'));
+  } catch (err) {
+    if (isVanished(err)) return 'none';
+    return 'unverifiable';
+  }
+  for (const fd of fds) {
+    const result = linkMatches(join(pidDir, 'fd', fd), candidate);
+    if (result !== 'none') return result;
+  }
+  for (const name of ['cwd', 'root', 'exe']) {
+    const result = linkMatches(join(pidDir, name), candidate);
+    if (result !== 'none') return result;
+  }
+  return 'none';
+}
+
 export function isPathInUse(path: string, procDir: string = '/proc'): boolean {
-  // On Linux, check /proc for open file descriptors and cwd pointing to this path
   if (process.platform !== 'linux') {
-    // If we cannot safely verify occupancy, skip deletion to avoid removing active paths
     return true;
   }
   const candidate = canonicalPath(path);
   let pids: string[];
   try {
-    pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
+    pids = readdirSync(procDir).filter((p: string) => /^\\d+$/.test(p));
   } catch {
-    // Cannot enumerate processes → unverifiable; keep candidate
     return true;
   }
   for (const pid of pids) {
-    const pidDir = join(procDir, pid);
-    // Open file descriptors
-    let fds: string[];
-    try {
-      fds = readdirSync(join(pidDir, 'fd'));
-    } catch (err) {
-      if (isVanished(err)) {
-        continue;
-      }
-      // Permission/other failure → unverifiable; keep candidate
+    const result = processUsesPath(join(procDir, pid), candidate);
+    if (result === 'use' || result === 'unverifiable') {
       return true;
-    }
-    for (const fd of fds) {
-      try {
-        const target = readlinkSync(join(pidDir, 'fd', fd));
-        const resolved = canonicalPath(target);
-        if (resolved === candidate || resolved.startsWith(candidate + '/')) {
-          return true;
-        }
-      } catch (err) {
-        if (isVanished(err)) {
-          continue;
-        }
-        if (isPermission(err)) {
-          return true;
-        }
-      }
-    }
-    // cwd
-    try {
-      const cwd = readlinkSync(join(pidDir, 'cwd'));
-      const resolved = canonicalPath(cwd);
-      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
-        return true;
-      }
-    } catch (err) {
-      if (isVanished(err)) {
-        // vanished; not evidence of use
-      } else if (isPermission(err)) {
-        return true;
-      }
-    }
-    // root (chroot)
-    try {
-      const root = readlinkSync(join(pidDir, 'root'));
-      const resolved = canonicalPath(root);
-      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
-        return true;
-      }
-    } catch (err) {
-      if (isVanished(err)) {
-        // ignore
-      } else if (isPermission(err)) {
-        return true;
-      }
-    }
-    // exe
-    try {
-      const exe = readlinkSync(join(pidDir, 'exe'));
-      const resolved = canonicalPath(exe);
-      if (resolved === candidate || resolved.startsWith(candidate + '/')) {
-        return true;
-      }
-    } catch (err) {
-      if (isVanished(err)) {
-        // ignore
-      } else if (isPermission(err)) {
-        return true;
-      }
     }
   }
   return false;
@@ -407,19 +371,13 @@ export function cleanupTmpDirs(dryRun: boolean): void {
       if (!st.isDirectory()) {
         continue;
       }
-      // Skip entries not owned by current user. If the current UID cannot be
-      // determined, keep every candidate rather than risk deleting another
-      // user's directory.
       if (currentUid === undefined || st.uid !== currentUid) {
         continue;
       }
-      // Prefer deleting entries that look stale (older than threshold)
       const mtime = st.mtimeMs || st.mtime.getTime();
       if (now - mtime < STALE_MS) {
-        // treat as potentially fresh/unrelated; skip unless in-use check already implies, but be conservative
         continue;
       }
-      // Skip if in use by any process
       if (isPathInUse(fullPath)) {
         console.log(`  keep ${fullPath} (${inUseMessage})`);
         continue;
@@ -429,7 +387,6 @@ export function cleanupTmpDirs(dryRun: boolean): void {
         deleted++;
         continue;
       }
-      // Re-check before deletion to reduce race
       if (isPathInUse(fullPath)) {
         console.log(`  keep ${fullPath} (${inUseMessage})`);
         continue;
@@ -439,7 +396,6 @@ export function cleanupTmpDirs(dryRun: boolean): void {
         console.log(`  deleted ${fullPath}`);
         deleted++;
       } catch (err) {
-        // If it failed due to in-use/race, recheck and skip without failing the run
         if (isPathInUse(fullPath)) {
           console.log(`  keep ${fullPath} (${inUseMessage})`);
           continue;
