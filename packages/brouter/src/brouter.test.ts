@@ -11,6 +11,7 @@ import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
 import { clientById, clientIds } from './registry.ts';
 import { configuredProviders } from './providers.ts';
+import { clientInventory, connectorInventory, isInstalled } from './agents.ts';
 import { expandHome, readSettings, writeSettings } from './settings.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-test-'));
@@ -230,4 +231,54 @@ test('the provider inventory reads the configured entries', () => {
   const api = rows.find(r => r.name === 'orcarouter');
   assert.equal(api?.type, 'api');
   assert.equal(api?.models, 1);
+});
+
+test('the client inventory separates installed from configured', () => {
+  const dir = join(scratch, 'clients-repo');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'bro.config.json'),
+    JSON.stringify({
+      providers: {
+        'claude-cli': { type: 'cli', command: 'claude -p --output-format stream-json' },
+        'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-high' },
+      },
+    })
+  );
+  // a PATH with a fake `claude` on it and no `codex`
+  const bin = join(scratch, 'fakebin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'claude'), '#!/bin/sh\n');
+  const env = { PATH: bin };
+  const rows = clientInventory(dir, env);
+  const claude = rows.find(r => r.id === 'claude');
+  assert.equal(claude?.installed, true);
+  assert.equal(claude?.configured, 'claude-cli');
+  assert.equal(claude?.ready, true);
+  const devin = rows.find(r => r.id === 'devin');
+  assert.equal(devin?.installed, false);
+  assert.equal(devin?.configured, 'devin-acp');
+  assert.equal(devin?.ready, false);
+  assert.equal(isInstalled('claude', env), true);
+  assert.equal(isInstalled('codex', env), false);
+});
+
+test('the connector registry groups the entries by kind', () => {
+  const dir = join(scratch, 'clients-repo');
+  const connectors = connectorInventory(dir);
+  assert.deepEqual(
+    connectors.map(c => c.kind),
+    ['acp', 'cli']
+  );
+  // the operator's global layer counts too — assert containment, not equality
+  assert.ok(
+    connectorInventory(dir)
+      .find(c => c.kind === 'acp')
+      ?.entries.includes('devin-acp')
+  );
+  assert.ok(
+    connectorInventory(dir)
+      .find(c => c.kind === 'cli')
+      ?.entries.includes('claude-cli')
+  );
 });

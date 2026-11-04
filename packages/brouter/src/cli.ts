@@ -18,11 +18,14 @@ import { runAsk } from './ask.ts';
 import { runAcpFacade } from './acp.ts';
 import { runClient, runModels } from './commands.ts';
 import { readRouterEndpoint } from './gateway.ts';
+import { clientInventory, connectorInventory } from './agents.ts';
 import { configuredProviders } from './providers.ts';
 import { CLIENTS } from './registry.ts';
 
 const USAGE = `usage:
-  brouter providers [--json]                     the configured providers
+  brouter connectors [--json]                    the connector registry
+  brouter clients [--json]                       the agent clients — installed/configured/ready
+  brouter providers [--json]                     the configured provider entries
   brouter ask [--provider <name>] [--model <id>] [--timeout <ms>] [--json] <question…>
                                                     ask an acp agent
   brouter acp [--provider <name>] [--model <id>]  the acp endpoint (stdio)
@@ -60,6 +63,40 @@ function endpointOf(argv: string[]): { url: string; token: string } {
     die('no router found — start one (bro serve) or pass --url and --token');
   }
   return found;
+}
+
+function cmdConnectors(argv: string[]): void {
+  const connectors = connectorInventory(process.cwd());
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(connectors, null, 2));
+    return;
+  }
+  for (const connector of connectors) {
+    console.log(`${connector.kind}\t${connector.entries.length} entry(s)`);
+    for (const entry of connector.entries) {
+      console.log(`  ${entry}`);
+    }
+  }
+}
+
+function cmdClients(argv: string[]): void {
+  const clients = clientInventory(process.cwd());
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(clients, null, 2));
+    return;
+  }
+  console.log('client\tinstalled\tconfigured\tconnector\tready');
+  for (const client of clients) {
+    console.log(
+      [
+        client.id,
+        client.installed ? 'yes' : 'no',
+        client.configured ?? 'no',
+        client.connector ?? '-',
+        client.ready ? 'yes' : 'no',
+      ].join('\t')
+    );
+  }
 }
 
 function cmdProviders(argv: string[]): void {
@@ -134,32 +171,32 @@ async function cmdModels(argv: string[]): Promise<void> {
   }
 }
 
-function cmdClients(argv: string[]): void {
-  if (argv.includes('--json')) {
-    console.log(
-      JSON.stringify(
-        CLIENTS.map(c => ({
-          id: c.id,
-          title: c.title,
-          settingsKey: c.settingsKey,
-          settingsPath: c.defaultSettingsPath,
-        })),
-        null,
-        2
-      )
-    );
-    return;
-  }
-  for (const client of CLIENTS) {
-    console.log(
-      `${client.id}\t${client.title}\t${client.settingsKey}\t${client.defaultSettingsPath}`
-    );
-  }
-}
-
 async function cmdClient(argv: string[]): Promise<void> {
   const pos = positionals(argv, VALUE_FLAGS, { boolFlags: BOOL_FLAGS });
-  const client = pos[0] ?? 'claude-code';
+  if (pos.length === 0) {
+    // no client named — the registry of clients the router can CONFIGURE
+    // (the agents themselves are `brouter clients`)
+    if (argv.includes('--json')) {
+      console.log(
+        JSON.stringify(
+          CLIENTS.map(c => ({
+            id: c.id,
+            title: c.title,
+            settingsKey: c.settingsKey,
+            settingsPath: c.defaultSettingsPath,
+          })),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    for (const c of CLIENTS) {
+      console.log(`${c.id}\t${c.title}\t${c.settingsKey}\t${c.defaultSettingsPath}`);
+    }
+    return;
+  }
+  const client = pos[0];
   const settings = flag(argv, '--settings');
   const outcome = await runClient(
     {
@@ -189,6 +226,12 @@ async function main(): Promise<void> {
   }
   const command = positionals(argv, VALUE_FLAGS, { boolFlags: BOOL_FLAGS })[0];
   switch (command) {
+    case 'connectors':
+      cmdConnectors(argv);
+      return;
+    case 'clients':
+      cmdClients(argv);
+      return;
     case 'providers':
       cmdProviders(argv);
       return;
