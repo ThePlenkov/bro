@@ -110,6 +110,92 @@ describe('loadConfig stores', () => {
   })
 })
 
+describe('loadConfig serve.providers', () => {
+  test('the array form keeps the entry names', () => {
+    const cfg = load({ serve: { providers: ['a', 'b'] } })
+    assert.deepEqual(cfg.serve.providers, ['a', 'b'])
+  })
+  test('the map form declares a route per entry', () => {
+    const cfg = load({ serve: { providers: { 'opencode-acp': 'oc-iceman' } } })
+    assert.deepEqual(cfg.serve.providers, { 'opencode-acp': 'oc-iceman' })
+  })
+  test('a non-string route value is dropped with a diagnostic', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { good: 'oc-iceman', bad: 7 } } })
+      assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /serve\.providers route 'bad' must name a provider entry/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a numeric-index route is dropped — it would lose its declared order', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { good: 'oc-iceman', 1: 'other' } } })
+      assert.deepEqual(cfg.serve.providers, { good: 'oc-iceman' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /route '1' is a numeric index/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a route that duplicates another after trimming is dropped', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers: { 'oc ': 'first', oc: 'second' } } })
+      // the LATER declaration is the one dropped — the first one stands
+      assert.deepEqual(cfg.serve.providers, { oc: 'first' })
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /duplicates an earlier route after trimming/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('the __proto__ route is refused — it is a reserved key', () => {
+    // JSON.parse creates '__proto__' as an OWN property — an object
+    // literal would set the prototype instead
+    const providers = JSON.parse('{"__proto__":"oc-iceman"}') as Record<string, string>
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ serve: { providers } })
+      // '__proto__' is a setter on Object.prototype, not a mergeable
+      // key — the config layer refuses it everywhere else too
+      assert.deepEqual(cfg.serve.providers, {})
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /route '__proto__' is a reserved key/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a provider named __proto__ is refused — it is a reserved key', () => {
+    const errors: string[] = []
+    const original = console.error
+    console.error = (message: unknown) => errors.push(String(message))
+    try {
+      const cfg = load({ providers: JSON.parse('{"__proto__":{"type":"acp","command":"x"}}') })
+      assert.deepEqual(Object.keys(cfg.providers ?? {}), [])
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]!, /providers\.__proto__ is a reserved key/)
+    } finally {
+      console.error = original
+    }
+  })
+  test('a providers value that is neither a list nor a map drops the section', () => {
+    const cfg = load({ serve: { providers: 'oc-iceman' } })
+    assert.equal(cfg.serve.providers, undefined)
+  })
+})
+
 describe('loadConfig pack', () => {
   test('absent pack → undefined, not a default leak', () => {
     assert.equal(load().pack, undefined)
