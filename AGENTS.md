@@ -110,6 +110,19 @@ Developing bro itself: see CONTRIBUTING.md.
   the post-merge cleanup itself; when GitHub auto-merge wins, cleanup
   is NOT guaranteed — branch deletion and bead closure fall to
   `bro review drive` or the operator.
+- **Never delete the working directory of a live session** — a session's
+  cwd is pinned by its harness: removing that directory (or the worktree
+  that holds it) does not error, it kills the session — the next shell
+  call comes back `Working directory does not exist` and the agent is
+  done until the path is recreated by hand. So cleanup of a merged
+  worktree is never the session's own job: another session (or the
+  operator) removes it, and the session sitting in a finished tree
+  detaches and re-adds it (`git checkout --detach`, then
+  `git worktree add --detach <path> <ref>`) instead of deleting it.
+  Before any `rm`/`mv`/`rmdir`/trash/worktree-removal, check the target
+  against `pwd` and the session's worktree — if they intersect, the
+  command is wrong, not the session. The rule is in the global agent
+  file too, so it reaches every client on the box.
 - **One executor per unit of work** — an interactive session (opencode,
   claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
