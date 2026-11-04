@@ -737,10 +737,11 @@ describe('serve /v1/* — the conductor plane', () => {
         ['dv-acp/swe-x', 'dv-acp/swe-y']
       )
       // acp catalog names surface as display_name — pickers show the
-      // human label, clients pin the id
+      // human label, qualified by the lane that serves it, so two lanes'
+      // identically-named models stay distinguishable; clients pin the id
       assert.deepEqual(
         body.data.map((m: { display_name: string }) => m.display_name),
-        ['SWE X', 'SWE Y']
+        ['dv-acp/SWE X', 'dv-acp/SWE Y']
       )
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
@@ -748,6 +749,29 @@ describe('serve /v1/* — the conductor plane', () => {
         body: 'x'.repeat(400),
       })
       assert.equal((await c.json()).input_tokens, 100)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a catalog name that already names its provider keeps it', async () => {
+    // an agent that names its models "vercel/Claude Opus 5" already says
+    // where the model comes from — the gateway must not double the prefix
+    const named: SessionConfigOption = {
+      ...MODEL_OPTION,
+      options: [{ value: 'vercel/anthropic/claude-opus-5', name: 'vercel/Claude Opus 5' }],
+    }
+    const fake = fakeAcpAgent({ configOptions: [named] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/models`, { headers: auth })
+      const body = await r.json()
+      assert.deepEqual(
+        body.data.map((m: { id: string; display_name: string }) => [m.id, m.display_name]),
+        [['dv-acp/vercel/anthropic/claude-opus-5', 'vercel/Claude Opus 5']]
+      )
     } finally {
       await close()
     }

@@ -3899,6 +3899,20 @@ function mergeCatalogs(lanes: LaneCatalog[]): CatalogModel[] {
   return [...byId.values()];
 }
 
+/** The picker label — the model's own name, qualified by WHO serves it.
+ *  An agent may name its models "vercel/Claude Opus 5.5" (the upstream
+ *  provider rides along in the name); one that names them bare ("Claude
+ *  Opus 5.5") leaves two lanes' rows looking identical in a client
+ *  picker — the reader cannot tell which provider a row came from. A
+ *  bare name takes the id's first segment, the lane's ADVERTISED route,
+ *  so the label and the id agree on where the model comes from. */
+function displayName(m: CatalogModel): string {
+  const name = m.name ?? m.id;
+  if (name.includes('/')) return name;
+  const cut = m.id.indexOf('/');
+  return cut <= 0 ? name : `${m.id.slice(0, cut)}/${name}`;
+}
+
 /** The anthropic /v1/models rows — the UNION of every lane's catalog,
  *  through the SAME `bro providers models` surface, so ids arrive
  *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
@@ -3930,7 +3944,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   const data = rows.map(m => ({
     type: 'model',
     id: m.id,
-    display_name: m.name ?? m.id,
+    display_name: displayName(m),
     created_at: '2025-01-01T00:00:00Z',
   }));
   // a lane that FAILED is not silently absent from the union: the
