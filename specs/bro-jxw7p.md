@@ -114,6 +114,13 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
    declaration, so its `serve.backend` key IS its primary route when no
    route is declared for it: `devin-acp/…` keeps being advertised exactly as
    it is today, and a declared alias takes over the advertisement.
+
+   The ONE exception is the `BRO_PROVIDER_CATALOG` pin: it names the entry
+   whose catalog answers `/v1/models`, and the rows carry THAT entry's name
+   — the uniform catalog vocabulary of bro-wxfls ("rows emit
+   `<entry>/<model-id>` ids"). The override picks the SOURCE, not the
+   route: its ids stay re-pinnable, and a client that copies one rides the
+   default lane, which is the backend that runs it.
 7. **The journal names the route that ANSWERED, the pool names the entry.**
    `conductor.*` rows carry the route the request was served under — that is
    the public identity an operator reads. For a CHAINED `/v1/responses`

@@ -385,6 +385,23 @@ describe('conductorConfig', () => {
     assert.throws(() => conductorConfig({}, dir), /numeric index/)
   })
 
+  test('an entry named __proto__ is exposed — it is a legal name', () => {
+    // raw JSON: an object literal would set the prototype instead of
+    // naming an entry
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      '{"serve":{"backend":"dv-acp","providers":{"route-x":"__proto__"}},' +
+        '"providers":{"dv-acp":{"type":"acp","command":"dv acp"},' +
+        '"__proto__":{"type":"acp","command":"oc acp"}}}'
+    )
+    const cfg = conductorConfig({}, dir)
+    // a plain assignment would reach Object.prototype's setter and lose
+    // the lane
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['__proto__'])
+    assert.equal(cfg?.providers?.['__proto__']?.command, 'oc acp')
+  })
+
   test('an entry with no declared route is not exposed at all', () => {
     // the map form owns the public names — an entry nobody routes to is
     // not a lane

@@ -266,7 +266,9 @@ export function conductorConfig(
   // the exposed LANES — the entries the declared routes reach, minus the
   // default's own. A lane is per ENTRY: two routes naming one entry
   // share its agent, its pool and its conversations.
-  const exposed: Record<string, AcpEntry> = {};
+  // a null-prototype bag — an entry named '__proto__' must land as an own
+  // key, not reach Object.prototype's setter and vanish
+  const exposed: Record<string, AcpEntry> = Object.create(null) as Record<string, AcpEntry>;
   const entries = new Set<string>();
   if (Array.isArray(declared)) {
     for (const name of declared) {
