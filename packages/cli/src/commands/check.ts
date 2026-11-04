@@ -365,12 +365,8 @@ function readRunReport(
 ): { data: SverkaRunData; durationMs?: number } | undefined {
   const candidates = []
   if (runId) candidates.push(runId)
-  if (process.env.FAKE_SVERKA_RUNID) candidates.push(process.env.FAKE_SVERKA_RUNID)
-  if (process.env.SVERKA_BRO_RUN_ID && !candidates.includes(process.env.SVERKA_BRO_RUN_ID)) {
-    candidates.push(process.env.SVERKA_BRO_RUN_ID)
-  }
-  if (process.env.BRO_CHECK_RUN_ID && !candidates.includes(process.env.BRO_CHECK_RUN_ID)) {
-    candidates.push(process.env.BRO_CHECK_RUN_ID)
+  if (process.env.FAKE_SVERKA_RUNID && !candidates.includes(process.env.FAKE_SVERKA_RUNID)) {
+    candidates.push(process.env.FAKE_SVERKA_RUNID)
   }
   for (const id of candidates) {
     if (!id) continue
@@ -515,7 +511,7 @@ export function runCheck(
   }
   const data = parsed.data ?? {}
   return {
-    report: toReport(data, parsed.durationMs ?? Date.now() - startedMs ?? 0, code),
+    report: toReport(data, parsed.durationMs ?? Date.now() - startedMs, code),
     data,
     exitCode: code,
   }
