@@ -359,15 +359,24 @@ function isSafeReportPath(root: string, file: string): boolean {
  *  only when it is unambiguously associated with this invocation via a
  *  run-specific identifier (env/marker) written by bro; mtime/uniqueness
  *  are not trusted. */
+/** Validate a recovered run-report step so malformed entries (e.g. `null`)
+ *  cannot reach `stepLines` and throw during rendering. */
+function isValidStep(s: unknown): s is SverkaStep {
+  return (
+    s !== null &&
+    typeof s === 'object' &&
+    !Array.isArray(s) &&
+    typeof (s as { stepId?: unknown }).stepId === 'string' &&
+    typeof (s as { status?: unknown }).status === 'string'
+  )
+}
+
 function readRunReport(
   root: string,
   runId?: string
 ): { data: SverkaRunData; durationMs?: number } | undefined {
   const candidates = []
   if (runId) candidates.push(runId)
-  if (process.env.FAKE_SVERKA_RUNID && !candidates.includes(process.env.FAKE_SVERKA_RUNID)) {
-    candidates.push(process.env.FAKE_SVERKA_RUNID)
-  }
   for (const id of candidates) {
     if (!id) continue
     const runsDir = join(root, '.sverka', 'runs')
@@ -393,8 +402,10 @@ function readRunReport(
         continue
       }
       const data = parsed.data as SverkaRunData
-      if (data.steps !== undefined && !Array.isArray(data.steps)) {
-        continue
+      if (data.steps !== undefined) {
+        if (!Array.isArray(data.steps) || !data.steps.every(isValidStep)) {
+          continue
+        }
       }
       return {
         data,
@@ -441,7 +452,7 @@ function collectionFailedRun(
   if (parsed.data !== undefined) {
     if (parsed.data !== null && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
       const d = parsed.data as SverkaRunData
-      if (Array.isArray(d.steps)) {
+      if (d.steps === undefined || (Array.isArray(d.steps) && d.steps.every(isValidStep))) {
         dataFromParsed = d
       }
     }

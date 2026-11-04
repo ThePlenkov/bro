@@ -335,7 +335,6 @@ describe('runCheck', () => {
 
   test('COLLECTION_FAILED recovers the on-disk sverka.run/v1 report', () => {
     const { dir, bin } = fixture('collect-fails')
-    process.env.FAKE_SVERKA_RUNID = 'run-1'
     const errs: string[] = []
     try {
       const { report, data, evaluation, exitCode } = runCheck(
@@ -354,7 +353,6 @@ describe('runCheck', () => {
       assert.equal(evaluation?.status, 'failed')
       assert.match(evaluation?.reason ?? '', /artifact directory/)
     } finally {
-      delete process.env.FAKE_SVERKA_RUNID
       delete process.env.FAKE_SVERKA_MODE
       rmSync(dir, { recursive: true, force: true })
     }
