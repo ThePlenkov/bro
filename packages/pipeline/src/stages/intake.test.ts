@@ -423,6 +423,18 @@ describe('intake — malformed outcomes fail closed', () => {
     await assert.rejects(async () => malformed('accepted').invoke(call()), /expected a record/);
   });
 
+  test('a prototype-member verdict is malformed — the arm table is own-key gated', async () => {
+    // ARM_CHECKS[verdict] ungated resolves Object.prototype.<verdict>
+    // — a real function, so a presence check alone would invoke it
+    // instead of failing closed; the own-key gate rejects every one
+    for (const verdict of ['toString', 'constructor', 'hasOwnProperty']) {
+      await assert.rejects(
+        async () => malformed({ verdict }).invoke(call()),
+        /accepted\|questions\|declined/
+      );
+    }
+  });
+
   test('a malformed outcome inside a run never settles — crash marker, bounded re-fire, exhaustion parks', async () => {
     // the throw propagates (the pending intent IS the crash marker);
     // each resume re-fires inside the attempt budget until it parks —

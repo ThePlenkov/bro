@@ -239,7 +239,10 @@ const isQuestionList = (v: unknown): v is string[] =>
   Array.isArray(v) && v.length > 0 && v.every(isNonBlank);
 
 /** Per-verdict outcome contracts — the requirements each arm must
- *  satisfy before its outcome can become the stage's payload. */
+ *  satisfy before its outcome can become the stage's payload. The
+ *  lookup in {@link checkOutcome} is own-key gated: a prototype member
+ *  (`toString`, `constructor`) is a function too, and an ungated index
+ *  would invoke it instead of failing closed. */
 const ARM_CHECKS: Record<IntakeVerdict, (out: IntakeOutcome) => void> = {
   questions: out => {
     if (!isQuestionList((out as Record<string, unknown>).questions)) {
@@ -278,7 +281,10 @@ function checkOutcome(out: IntakeOutcome): void {
     throw new Error('intake: the judgment seam returned a malformed outcome — expected a record');
   }
   const checks: Partial<Record<string, (o: IntakeOutcome) => void>> = ARM_CHECKS;
-  const check = typeof out.verdict === 'string' ? checks[out.verdict] : undefined;
+  const check =
+    typeof out.verdict === 'string' && Object.hasOwn(ARM_CHECKS, out.verdict)
+      ? checks[out.verdict]
+      : undefined;
   if (check === undefined) {
     throw new Error(
       `intake: the judgment seam returned a malformed outcome — ` +
