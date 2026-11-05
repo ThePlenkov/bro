@@ -77,9 +77,14 @@ test('no table means the first acp provider — and the rule says it', async () 
 test('a chain with no acp entry falls back — and says which route failed', async () => {
   const dir = configDir(PROVIDERS);
   const table = tableFile(
-    ['kind = "route"', 'version = 1', '', '[routes.edit]', 'chain = [{ provider = "gateway" }]', ''].join(
-      '\n'
-    )
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.edit]',
+      'chain = [{ provider = "gateway" }]',
+      '',
+    ].join('\n')
   );
   const lane = await resolveLane(dir, { question: 'ping', routes: table });
   assert.equal(lane.provider, 'devin-acp');
@@ -87,27 +92,46 @@ test('a chain with no acp entry falls back — and says which route failed', asy
   assert.equal(lane.ruleSource, 'the table');
 });
 
+test('the lane carries the health the decision read', async () => {
+  const dir = configDir(PROVIDERS);
+  const lane = await resolveLane(dir, { question: 'ping', routes: tableFile(TABLE) });
+  assert.notEqual(lane.snapshot, undefined, 'the decision read the health');
+  assert.equal(lane.healthKnown, true);
+});
+
+test('a lane nobody decided carries no snapshot — the ledger is read then', async () => {
+  const dir = configDir(PROVIDERS);
+  const lane = await resolveLane(dir, { question: 'ping', provider: 'kilo-cli' });
+  assert.equal(lane.snapshot, undefined);
+});
+
 test("the operator's model outranks the route's pin", () => {
-  const pinned = modelPin({ question: 'ping', model: 'my-model' }, {
-    provider: 'devin-acp',
-    entry: { type: 'acp', command: 'devin acp' },
-    model: 'swe-2-max',
-    pinnedBy: 'the route',
-    rule: 'the route "edit" — its first acp entry',
-    ruleSource: 'the table',
-  });
+  const pinned = modelPin(
+    { question: 'ping', model: 'my-model' },
+    {
+      provider: 'devin-acp',
+      entry: { type: 'acp', command: 'devin acp' },
+      model: 'swe-2-max',
+      pinnedBy: 'the route',
+      rule: 'the route "edit" — its first acp entry',
+      ruleSource: 'the table',
+    }
+  );
   assert.equal(pinned.model, 'my-model');
   assert.equal(pinned.pinnedBy, 'you');
 });
 
 test('nothing pinned means the agent reports its own model', () => {
-  const pinned = modelPin({ question: 'ping' }, {
-    provider: 'devin-acp',
-    entry: { type: 'acp', command: 'devin acp' },
-    pinnedBy: 'the provider entry',
-    rule: 'the first acp provider in the config',
-    ruleSource: 'the config',
-  });
+  const pinned = modelPin(
+    { question: 'ping' },
+    {
+      provider: 'devin-acp',
+      entry: { type: 'acp', command: 'devin acp' },
+      pinnedBy: 'the provider entry',
+      rule: 'the first acp provider in the config',
+      ruleSource: 'the config',
+    }
+  );
   assert.equal(pinned.model, undefined);
   assert.equal(pinned.pinnedBy, 'the agent');
 });
