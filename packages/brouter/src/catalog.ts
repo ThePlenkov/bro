@@ -31,15 +31,16 @@ export interface ServedModel {
  *  borrows no family-specific handling. */
 export type ModelFamily = 'fable' | 'opus' | 'sonnet' | 'haiku' | 'other';
 
-/** The family an id names — read off the id's TEXT, never off a
- *  prefix: `opencode-acp/claude-opus-5-5-medium` is an opus even
- *  though its head is a lane. */
+/** The family an id names — read off the id's SEGMENTS, never off its
+ *  head: `opencode-acp/claude-opus-5-5-medium` is an opus even though
+ *  its head is a lane. A segment, not a substring: `sonnet` inside
+ *  `sonnetizer` names no family. */
 export function modelFamily(id: string): ModelFamily {
-  const text = id.toLowerCase();
-  if (text.includes('fable')) return 'fable';
-  if (text.includes('opus')) return 'opus';
-  if (text.includes('sonnet')) return 'sonnet';
-  if (text.includes('haiku')) return 'haiku';
+  const segments = id.toLowerCase().split(/[^a-z0-9]+/);
+  if (segments.includes('fable')) return 'fable';
+  if (segments.includes('opus')) return 'opus';
+  if (segments.includes('sonnet')) return 'sonnet';
+  if (segments.includes('haiku')) return 'haiku';
   return 'other';
 }
 

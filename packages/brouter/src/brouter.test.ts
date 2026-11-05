@@ -25,6 +25,11 @@ test('the family is read off the id text, never off the prefix', () => {
   assert.equal(modelFamily('devin-acp/gpt-6-astra-medium'), 'other');
 });
 
+test('a family name inside another segment names no family', () => {
+  assert.equal(modelFamily('devin-acp/sonnetizer-1'), 'other');
+  assert.equal(modelFamily('devin-acp/haikuish-2'), 'other');
+});
+
 test('the source is the id head', () => {
   assert.equal(modelSource('devin-acp/swe-2-high'), 'devin-acp');
   assert.equal(modelSource('bare-model'), undefined);
