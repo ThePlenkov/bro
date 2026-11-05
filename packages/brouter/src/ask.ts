@@ -90,27 +90,38 @@ export function acpProviders(providers: Providers): string[] {
     .map(([name]) => name);
 }
 
-/** The provider an ask runs against — the named one, else the first
- *  acp entry. An unknown name is an error naming the known ones. */
-export function resolveProvider(providers: Providers, name?: string): string {
-  if (name !== undefined && name.trim() !== '') {
-    const wanted = name.trim();
-    const entry = providers[wanted];
-    if (entry === undefined) {
-      throw new Error(
-        `unknown provider "${wanted}" — configured: ${Object.keys(providers).join(', ') || 'none'}`
-      );
-    }
-    if (entry.type !== 'acp') {
-      throw new Error(`provider "${wanted}" is a ${entry.type} entry — ask needs an acp one`);
-    }
-    return wanted;
+/** The provider the operator named — an unknown name is an error naming
+ *  the known ones, a non-acp entry an error naming its kind. */
+function namedProvider(providers: Providers, wanted: string): string {
+  const entry = providers[wanted];
+  if (entry === undefined) {
+    throw new Error(
+      `unknown provider "${wanted}" — configured: ${Object.keys(providers).join(', ') || 'none'}`
+    );
   }
+  if (entry.type !== 'acp') {
+    throw new Error(`provider "${wanted}" is a ${entry.type} entry — ask needs an acp one`);
+  }
+  return wanted;
+}
+
+/** The first acp entry — the fallback when nobody named one. */
+function firstAcp(providers: Providers): string {
   const first = acpProviders(providers)[0];
   if (first === undefined) {
     throw new Error('no acp provider configured — add providers.<name> to bro.config.json');
   }
   return first;
+}
+
+/** The provider an ask runs against — the named one, else the first
+ *  acp entry. */
+export function resolveProvider(providers: Providers, name?: string): string {
+  const wanted = name?.trim();
+  if (wanted === undefined || wanted === '') {
+    return firstAcp(providers);
+  }
+  return namedProvider(providers, wanted);
 }
 
 /** The entry behind a provider name — an acp one, always. */
@@ -143,7 +154,7 @@ function laneFromChain(
       return {
         provider: link.provider,
         entry,
-        ...(link.model === undefined ? {} : { model: link.model }),
+        model: link.model,
       };
     }
   }
@@ -212,9 +223,9 @@ function tableLanePick(
   return {
     provider: lane.provider,
     entry: lane.entry,
-    ...(lane.model === undefined ? {} : { model: lane.model }),
+    model: lane.model,
     pinnedBy: lane.model === undefined ? 'the provider entry' : 'the route',
-    ...(route === undefined ? {} : { route }),
+    route,
     rule: `the route "${route}" — its first acp entry`,
     ruleSource: 'the table',
     decision,
@@ -235,7 +246,7 @@ function fallbackLane(
     pinnedBy: 'the provider entry',
     rule: fallback.rule,
     ruleSource: fallback.source,
-    ...(decision === undefined ? {} : { decision }),
+    decision,
   };
 }
 
@@ -252,7 +263,7 @@ async function tableDecision(
     table,
     task: {},
     text: request.question,
-    ...(router === undefined ? {} : { router }),
+    router,
   });
   return decision;
 }
@@ -315,29 +326,26 @@ async function costSlice(input: {
 }): Promise<ExplainFact[]> {
   const window = await windowCounters({ provider: input.lane.provider, model: input.model });
   const reported = input.usage?.inputTokens !== undefined;
+  const usage = input.usage;
+  const turn = reported
+    ? {
+        reported: {
+          inputTokens: usage?.inputTokens,
+          outputTokens: usage?.outputTokens,
+        },
+      }
+    : {
+        estimated: {
+          inputTokens: estimateTokens(input.question),
+          outputTokens: estimateTokens(input.answer),
+        },
+      };
   return costFacts({
-    turn: {
-      ...(reported
-        ? {
-            reported: {
-              ...(input.usage?.inputTokens === undefined
-                ? {}
-                : { inputTokens: input.usage.inputTokens }),
-              ...(input.usage?.outputTokens === undefined
-                ? {}
-                : { outputTokens: input.usage.outputTokens }),
-            },
-          }
-        : {
-            estimated: {
-              inputTokens: estimateTokens(input.question),
-              outputTokens: estimateTokens(input.answer),
-            },
-          }),
-    },
-    ...(window === undefined
-      ? {}
-      : { window: { ...window, provider: input.lane.provider, model: input.model } }),
+    turn,
+    window:
+      window === undefined
+        ? undefined
+        : { ...window, provider: input.lane.provider, model: input.model },
     ledgerKnown: input.ledgerKnown,
   });
 }
@@ -364,7 +372,7 @@ async function explainAsk(input: {
       agent: lane.provider,
       model: input.model,
       pinnedBy: pin.pinnedBy,
-      ...(lane.route === undefined ? {} : { route: lane.route }),
+      route: lane.route,
       rule: lane.rule,
       ruleSource: lane.ruleSource,
     })
@@ -381,7 +389,7 @@ async function explainAsk(input: {
     await costSlice({
       lane,
       model: input.model,
-      ...(input.usage === undefined ? {} : { usage: input.usage }),
+      usage: input.usage,
       question: input.request.question,
       answer: input.answer,
       ledgerKnown: known,
@@ -400,8 +408,8 @@ export async function runAsk(request: AskRequest, dir: string): Promise<AskOutco
     lane.provider,
     lane.entry,
     {
-      ...(pin.model === undefined ? {} : { model: pin.model }),
-      ...(request.cwd === undefined ? {} : { acp: { cwd: request.cwd } }),
+      model: pin.model,
+      acp: { cwd: request.cwd },
     },
     request.question,
     () => undefined,
@@ -422,7 +430,7 @@ export async function runAsk(request: AskRequest, dir: string): Promise<AskOutco
           lane,
           pin,
           model,
-          ...(result.usage === undefined ? {} : { usage: result.usage }),
+          usage: result.usage,
           answer: result.text,
         });
   return {
@@ -430,7 +438,7 @@ export async function runAsk(request: AskRequest, dir: string): Promise<AskOutco
     model,
     stopReason: result.stopReason,
     text: result.text,
-    ...(result.usage === undefined ? {} : { usage: result.usage }),
-    ...(explanation === undefined ? {} : { explanation }),
+    usage: result.usage,
+    explanation,
   };
 }
