@@ -21,19 +21,39 @@ export {
 export type { JournalLocator, JournalRow, PipelineJournal } from './journal.ts';
 export {
   appendJournalRow,
+  appendJsonlRow,
   fileJournal,
   journalRecords,
   memoryJournal,
   openPipelineJournal,
   pendingRecord,
+  pipelineDir,
   pipelineJournalPath,
   readJournalFile,
 } from './journal.ts';
 export type {
+  AwaitingRun,
+  CustomerAnswer,
+  CustomerRecord,
+  CustomerVerdict,
+} from './customer.ts';
+export {
+  appendCustomerRecord,
+  awaitingCustomerRuns,
+  CUSTOMER_SUFFIX,
+  customerChannelPath,
+  fileVerdictStore,
+  latestVerdict,
+  readCustomerFile,
+  writeCustomerRecord,
+} from './customer.ts';
+export type {
   AdmitFn,
+  EngineAlert,
   EngineFn,
   EngineHandler,
   EngineMap,
+  EngineOutcome,
   EngineResult,
   JournalEvent,
   ParkAlert,
@@ -48,6 +68,7 @@ export {
   DEFAULT_ADMIT_INTENTS,
   DEFAULT_FIX_ROUNDS,
   DEFAULT_FIX_VERDICT,
+  DEFAULT_FIX_VERDICTS,
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_MAX_STEPS,
   JOURNAL_EVENTS,
@@ -56,6 +77,8 @@ export {
   runPipeline,
   STAGE_INTENTS,
 } from './runner.ts';
+export type { AcceptDeps, AcceptPayload, EvidenceBundle } from './stages/accept.ts';
+export { acceptStage, evidenceBundle, REJECTED_VERDICT } from './stages/accept.ts';
 export type {
   CaptureDeps,
   CaptureMode,

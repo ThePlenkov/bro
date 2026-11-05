@@ -70,6 +70,13 @@ export const DEFAULT_FIX_ROUNDS = 3;
  *  work` re-enters work with `notes` as its scope. */
 export const DEFAULT_FIX_VERDICT = 'fix';
 
+/** The verdict names a scoped-fix re-entry binds to by default —
+ *  `review.fix` AND the accept gate's `rejected` both re-enter `work`
+ *  with the emitter's `notes` as the fix scope (spec §stage semantics:
+ *  the customer's notes scope the fix round under the same fail-closed
+ *  contract as the internal review's). */
+export const DEFAULT_FIX_VERDICTS = [DEFAULT_FIX_VERDICT, 'rejected'];
+
 /** Fail-closed park tags stamped on alert rows. */
 export const PARK_ALERTS = {
   gateIndeterminate: 'gate-indeterminate',
@@ -83,6 +90,12 @@ export const PARK_ALERTS = {
   admissionUnavailable: 'admission-unavailable',
   itemMismatch: 'item-mismatch',
   cycleExhausted: 'cycle-budget-exhausted',
+  /** an accept-gate verdict signed by anyone but the run's recorded
+   *  customer — a worker can never self-accept */
+  customerMismatch: 'customer-mismatch',
+  /** the customer's verdict record failed shape validation — a
+   *  record the stage cannot trust never settles the gate */
+  verdictMalformed: 'verdict-malformed',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
 
@@ -101,12 +114,31 @@ export type JournalEvent = (typeof JOURNAL_EVENTS)[keyof typeof JOURNAL_EVENTS];
  *  resolve. */
 export type PipelineContext = Record<string, unknown>;
 
-/** What an engine returns — the verdict tag plus the typed payload the
- *  next stage reads. */
+/** What an engine returns to settle a stage — the verdict tag plus
+ *  the typed payload the next stage reads. */
 export interface EngineResult {
   verdict: string;
   payload?: unknown;
 }
+
+/** A fail-closed park an engine asks for — the runner journals the
+ *  alert row and halts; a wake re-enters the stage (the run's world
+ *  may repair: a corrected verdict record, restored context). `alert`
+ *  names a PARK_ALERTS tag or an engine-local one; the run never
+ *  moves on an engine alert — that is the whole contract. */
+export interface EngineAlert {
+  alert: string;
+  detail?: string;
+}
+
+/** An engine's answer — a settling verdict, 'pending' while the
+ *  journaled side effect is still in flight, or a fail-closed alert.
+ *  'pending' from `invoke` means the side effect FIRED but the stage
+ *  cannot settle yet (the accept gate's emit awaiting the customer's
+ *  out-of-band verdict): the runner parks WITHOUT a verdict row, so
+ *  the intent stays the resume anchor a later wake's `recheck`
+ *  settles — identical semantics to a recheck 'pending'. */
+export type EngineOutcome = EngineResult | 'pending' | EngineAlert;
 
 /** One engine invocation — everything a stage handler needs, nothing
  *  pipeline-internal leaks further. */
@@ -120,23 +152,29 @@ export interface StageCall {
   fixRound?: number;
   /** the fix scope — the review's `notes`, set on scoped re-entry */
   notes?: string;
+  /** the run's recorded customer identity (opts.customer) — carried on
+   *  the call, never inside ctx, so a stage payload can never
+   *  overwrite it: the accept gate compares a verdict's `accepted_by`
+   *  against exactly this field (a worker can never self-accept). */
+  customer?: string;
   ctx: PipelineContext;
   journal: PipelineJournal;
   dir?: string;
 }
 
-export type EngineFn = (call: StageCall) => MaybePromise<EngineResult>;
+export type EngineFn = (call: StageCall) => MaybePromise<EngineOutcome>;
 
 /** Resume verdict for a verdict-less intent: an EngineResult settles
  *  the record ("landed, here's the outcome"), 'pending' means the side
  *  effect is still in flight (runner parks WITHOUT a new row — the
- *  pending intent stays the resume anchor), and undefined attests
+ *  pending intent stays the resume anchor), an EngineAlert parks
+ *  fail-closed with a journal alert row, and undefined attests
  *  "checked, didn't land" → the runner re-fires under its attempt
  *  budget. An engine that cannot tell must return 'pending', not
  *  undefined — undefined IS the attestation that re-fires. With NO
  *  hook bound at all the runner never re-fires a spawn-like intent
  *  blind (recheck-unavailable park). */
-export type RecheckFn = (call: StageCall) => MaybePromise<EngineResult | 'pending' | undefined>;
+export type RecheckFn = (call: StageCall) => MaybePromise<EngineOutcome | undefined>;
 
 /** An engine binding — `invoke` runs the stage; `recheck` is the
  *  resume hook attesting whether a journaled intent already landed. */
@@ -202,8 +240,20 @@ export interface RunOptions {
   maxSteps?: number;
   /** scoped-fix re-entry budget — default 3 (act.maxRounds contract) */
   fixRounds?: number;
-  /** the verdict name scoped-fix mode binds to — default 'fix' */
+  /** the verdict name scoped-fix mode binds to — default 'fix'
+   *  (single-name shorthand for {@link RunOptions.fixVerdicts}) */
   fixVerdict?: string;
+  /** the verdict names scoped-fix mode binds to — default
+   *  {@link DEFAULT_FIX_VERDICTS} (`fix` + `rejected`: the internal
+   *  review's fix AND the customer's rejection both re-enter work
+   *  with `notes` as scope under the same fail-closed contract) */
+  fixVerdicts?: string[];
+  /** the run's recorded customer identity — who may sign `accept`
+   *  verdicts. Recorded at run creation; carried on the StageCall,
+   *  never inside ctx, so no engine payload can overwrite it. Absent
+   *  means no identity can pass the accept gate — stages needing it
+   *  fail loud. */
+  customer?: string;
   /** seed context — journaled payloads replay over it on resume */
   ctx?: PipelineContext;
 }
@@ -220,7 +270,8 @@ interface NextStep {
 type Step = { go: NextStep } | { halt: RunResult };
 
 interface AlertSpec {
-  alert: ParkAlert;
+  /** a PARK_ALERTS tag or an engine-local fail-closed tag */
+  alert: string;
   detail?: string;
   resume?: string;
 }
@@ -241,7 +292,8 @@ interface Run {
   maxSteps: number;
   steps: number;
   fixRounds: number;
-  fixVerdict: string;
+  fixVerdicts: string[];
+  customer?: string;
   ctx: PipelineContext;
   seq: number;
 }
@@ -278,6 +330,29 @@ function bounded(name: string, v: number | undefined, dflt: number, min = 1): nu
   }
   return n;
 }
+
+/** The scoped-fix verdict names — `fixVerdicts` wins, the singular
+ *  `fixVerdict` pins one name, else the spec pair (fix + rejected).
+ *  An explicit empty list opts OUT of scoped-fix binding entirely;
+ *  a non-string or empty entry is invalid input — a binding that
+ *  names nothing would silently turn every re-entry unscoped. */
+function fixVerdictsFor(opts: RunOptions): string[] {
+  const list =
+    opts.fixVerdicts ??
+    (opts.fixVerdict !== undefined ? [opts.fixVerdict] : [...DEFAULT_FIX_VERDICTS]);
+  if (!Array.isArray(list) || list.some(v => typeof v !== 'string' || v === '')) {
+    throw new Error(
+      'pipeline run: fixVerdicts must be an array of non-empty strings (or fixVerdict, a single name)'
+    );
+  }
+  return list;
+}
+
+/** The engine-alert shape — `{alert, detail?}` vs EngineResult's
+ *  `{verdict, payload?}`; disjoint on the `alert` key (a settled
+ *  verdict record never carries one). */
+const isEngineAlert = (r: EngineOutcome): r is EngineAlert =>
+  isRecord(r) && typeof r.alert === 'string' && r.verdict === undefined;
 
 /** The journal this run writes — injected wins (it IS the resume
  *  identity), else opts.journal, else the file journal under the
@@ -340,7 +415,8 @@ function initRun(
     // 0 IS a valid fix budget — 'no scoped-fix rounds' parks on the
     // first fix verdict via the normal exhaustion path
     fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS, 0),
-    fixVerdict: opts.fixVerdict ?? DEFAULT_FIX_VERDICT,
+    fixVerdicts: fixVerdictsFor(opts),
+    customer: opts.customer,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
     ctx: Object.assign(Object.create(null), opts.ctx) as PipelineContext,
@@ -454,6 +530,7 @@ function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
     attempt: to.attempt,
     fixRound: to.fixRound,
     notes: to.notes,
+    customer: run.customer,
     ctx: run.ctx,
     journal: run.journal,
     dir: run.dir,
@@ -465,7 +542,7 @@ function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
  *  refusal detail, not stage output, so it is journaled with
  *  `admit: true` and never absorbed into the pipeline context. */
 interface SideEffect {
-  res: EngineResult;
+  res: EngineOutcome;
   viaAdmit: boolean;
 }
 
@@ -529,7 +606,7 @@ function fixRoundsUsed(run: Run): number {
  *  + alert, never a scopeless re-entry) and rounds bounded (exhaustion
  *  parks, never loops). */
 function reentryStep(run: Run, out: EngineResult, target: string, to: NextStep): Step {
-  if (out.verdict !== run.fixVerdict) {
+  if (!run.fixVerdicts.includes(out.verdict)) {
     return { go: { stage: target, attempt: 1 } };
   }
   const notes = notesFor(out.payload);
@@ -636,6 +713,22 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
     });
   }
   const { res, viaAdmit } = await sideEffect(run, stage, handler, to);
+  if (res === 'pending') {
+    // the side effect fired but the stage cannot settle (the accept
+    // gate's emit awaiting an out-of-band verdict) — park WITHOUT a
+    // verdict row: the verdict-less intent stays the resume anchor a
+    // later wake's recheck settles, identical to a recheck 'pending'
+    return {
+      halt: result(run, 'park', to.stage, { detail: 'side effect still in flight' }),
+    };
+  }
+  if (isEngineAlert(res)) {
+    return alertStep(run, to, {
+      alert: res.alert,
+      detail: res.detail,
+      resume: to.stage,
+    });
+  }
   const done = verdictRow(intent, res);
   if (viaAdmit) {
     done.admit = true;
@@ -758,7 +851,17 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
       }),
     };
   }
-  return r === undefined ? refireAttempt(run, last, to) : settleRecheck(run, last, r, to);
+  if (r === undefined) {
+    return refireAttempt(run, last, to);
+  }
+  if (isEngineAlert(r)) {
+    return alertStep(run, to, {
+      alert: r.alert,
+      detail: r.detail,
+      resume: last.stage,
+    });
+  }
+  return settleRecheck(run, last, r, to);
 }
 
 /** Parked runs resume by re-entering the SAME stage (spec §terminal

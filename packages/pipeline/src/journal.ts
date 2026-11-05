@@ -94,6 +94,14 @@ export interface JournalLocator {
  *  `mintRunId` hex always passes). */
 const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
 
+/** `<git-common>/bro/pipeline/` — the shared plane every pipeline
+ *  file lives in (journals, customer channels): linked worktrees see
+ *  the same dir, nothing lands in git. Null outside a repo. */
+export function pipelineDir(loc: Pick<JournalLocator, 'dir'>): string | null {
+  const common = gitCommonDir(loc.dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'pipeline');
+}
+
 /** `<git-common>/bro/pipeline/<run_id>.journal.jsonl` — null outside a
  *  repo. An unsafe run id throws: a journal that could escape its dir
  *  is invalid input, not absence. */
@@ -101,8 +109,8 @@ export function pipelineJournalPath(loc: JournalLocator): string | null {
   if (!RUN_ID_RE.test(loc.runId)) {
     throw new Error(`pipeline journal: unsafe run id ${JSON.stringify(loc.runId)}`);
   }
-  const common = gitCommonDir(loc.dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'pipeline', `${loc.runId}.journal.jsonl`);
+  const dir = pipelineDir(loc);
+  return dir === null ? null : join(dir, `${loc.runId}.journal.jsonl`);
 }
 
 /** The durable journal for a run under `loc.dir`'s git common dir —
@@ -163,8 +171,10 @@ export function memoryJournal(runId?: string): PipelineJournal {
  *  killed writer leaves a torn tail, and a naive append would
  *  concatenate the next row onto it — losing BOTH (the merged line
  *  parses as garbage and drops). The torn bytes stay torn; the row
- *  lands on a fresh line. O(1): only the last byte is read. */
-export function appendJournalRow(file: string, row: JournalRow): void {
+ *  lands on a fresh line. O(1): only the last byte is read. The
+ *  generic form — every pipeline-plane JSONL file (journals, customer
+ *  channels) shares the same torn-tail append contract. */
+export function appendJsonlRow(file: string, row: unknown): void {
   mkdirSync(dirname(file), { recursive: true });
   let sep = '';
   try {
@@ -183,6 +193,10 @@ export function appendJournalRow(file: string, row: JournalRow): void {
     sep = ''; // absent/unreadable file — nothing to separate from
   }
   appendFileSync(file, `${sep}${JSON.stringify(row)}\n`);
+}
+
+export function appendJournalRow(file: string, row: JournalRow): void {
+  appendJsonlRow(file, row);
 }
 
 const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
