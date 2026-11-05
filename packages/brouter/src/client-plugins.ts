@@ -40,7 +40,14 @@ function laneFlags(argv: string[]): LaneFlags {
   }
   const timeout = flag(argv, '--timeout');
   if (timeout !== undefined) {
-    flags.timeoutMs = Number(timeout);
+    // the budget is a deadline: a float or a NaN makes every comparison
+    // against it false, and the call never times out
+    const ms = Number(timeout);
+    if (!Number.isInteger(ms) || ms <= 0) {
+      console.error('error: --timeout must be a whole number of milliseconds');
+      process.exit(2);
+    }
+    flags.timeoutMs = ms;
   }
   return flags;
 }

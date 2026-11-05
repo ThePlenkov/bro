@@ -192,6 +192,13 @@ test('an unknown slice is an error naming the known ones', () => {
   assert.match(out.stderr, /route, model, health, cost/);
 });
 
+test('a malformed --timeout is a usage error — the deadline would never fire', () => {
+  if (!existsSync(CLI)) return;
+  const out = run(['ask', 'ping', '--timeout', 'soon']);
+  assert.equal(out.code, 2);
+  assert.match(out.stderr, /--timeout must be a whole number of milliseconds/);
+});
+
 test('the explain surface speaks JSON when asked', () => {
   if (!existsSync(CLI)) return;
   const out = run([
