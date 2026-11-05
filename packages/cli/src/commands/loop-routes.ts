@@ -12,23 +12,33 @@
  * path downstream cannot tell which face answered.
  */
 import { SpawnError } from '@broject/core';
-import type { ResolvedClass } from '@broject/core';
+import type { HealthSnapshot, ResolvedClass } from '@broject/core';
 import { healthSnapshot, migrateStore, openStore, routerStorePath } from '@broject/router-store';
 import { readRouteTable, resolveRoute, unservedChains } from '@broject/router-routes';
-import type { RouteTable, ServedDeclaration } from '@broject/router-routes';
+import type { RouteDecision, RouteTable, ServedDeclaration } from '@broject/router-routes';
+
+/** The route a bead lands on — the lane, and the verdict behind it. The
+ *  verdict is what the explanation reads: the reasons the resolver
+ *  computed must not die with the lane. */
+export interface RouteTableLane extends ResolvedClass {
+  /** the resolver's verdict — the route, the chain, the why */
+  decision: RouteDecision;
+  /** the health the verdict read — the walls and the sessions */
+  snapshot: HealthSnapshot;
+}
 
 /** The health — the router's own ledger. A ledger that cannot be read
  *  is no wall at all: the decision degrades, the run continues. */
-async function ledgerHealth(): Promise<Awaited<ReturnType<typeof healthSnapshot>>> {
+async function ledgerHealth(): Promise<{ snapshot: HealthSnapshot; known: boolean }> {
   const handle = openStore(routerStorePath());
   if (!handle.ok) {
-    return {};
+    return { snapshot: {}, known: false };
   }
   try {
     await migrateStore(handle.db);
-    return await healthSnapshot(handle.db);
+    return { snapshot: await healthSnapshot(handle.db), known: true };
   } catch {
-    return {};
+    return { snapshot: {}, known: false };
   } finally {
     handle.close();
   }
@@ -77,7 +87,7 @@ export async function routeTableLane(opts: {
   priority?: number;
   /** what the operator declared the router serves — the served universe */
   served?: ServedDeclaration;
-}): Promise<ResolvedClass | undefined> {
+}): Promise<RouteTableLane | undefined> {
   const file = opts.table;
   if (file === undefined) {
     return undefined;
@@ -92,8 +102,8 @@ export async function routeTableLane(opts: {
     );
   }
   assertServed(table, file, opts.served ?? {});
-  const health = await ledgerHealth();
-  const decision = resolveRoute(table, taskShape(opts), health);
+  const { snapshot } = await ledgerHealth();
+  const decision = resolveRoute(table, taskShape(opts), snapshot);
   const route = decision.route;
   if (route === undefined) {
     return undefined;
@@ -108,5 +118,7 @@ export async function routeTableLane(opts: {
     onWall: wallPolicy(route, opts.priority),
     provider: head.provider,
     ...(head.model === undefined ? {} : { model: head.model }),
+    decision,
+    snapshot,
   };
 }
