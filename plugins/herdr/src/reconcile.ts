@@ -19,7 +19,7 @@
  * the snapshot it produced. bro state is never written — the only
  * mutations are herdr CLI calls and the plugin's own state file.
  */
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { handleOwner } from '../../../packages/core/src/index.ts';
 import { type Lane, laneOf } from './lanes.ts';
@@ -40,6 +40,7 @@ import {
   repoDir,
   type StatusWorktree,
   saveState,
+  STATE_DIR,
   stateScope,
   syncPidPath,
   type WorkspaceRec,
@@ -545,66 +546,77 @@ const OPEN_GRACE_MS = 60_000;
 export function ensureSyncLoop(): void {
   const scope = stateScope(repoDir(ctxJson()));
   const pidFile = syncPidPath(scope);
-  // check → sweep → marker → open under ONE lock: two ensures racing
-  // the same gap both pass the probes and each opens a pane — a lock
-  // the file alone could never give (the marker only lands mid-span).
-  // Its name differs from converge()'s state lock — this span never
-  // holds that one, and withStateLock does not reenter.
-  withStateLock(`${scope}-sync`, () => {
+  /** The probe — a live pinned pid IS the loop (the start token pins
+   *  identity against reuse; EPERM/zombie verdicts ride inside
+   *  pidAlive), and a FRESH 'pending' is another ensure mid-open. A
+   *  dead pid, a stale pending, or an absent file means the slot is
+   *  free. */
+  const liveOrPending = (): boolean => {
     try {
       const text = readFileSync(pidFile, 'utf8').trim();
       const owner = handleOwner(text);
-      // a live pinned pid IS the loop — the start token pins identity
-      // against reuse (a recycled pid is not the loop that wrote this),
-      // and the EPERM/zombie verdicts ride inside pidAlive
-      if (owner !== null && pidAlive(owner.pid, owner.start)) return;
-      if (
-        owner === null &&
-        text === 'pending' &&
-        Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS
-      ) {
-        // a fresh marker means another ensure is mid-open; a stale
-        // one is a crashed opener's residue and falls through
-        return;
-      }
+      if (owner !== null) return pidAlive(owner.pid, owner.start);
+      return text === 'pending' && Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS;
     } catch {
-      // absent or unreadable pid file — nobody is live or mid-open
+      return false;
     }
-    // the loop is confirmed dead: every 'bro sync' pane rooted at THIS
-    // plugin is a husk — close them or the successor piles up next to
-    // bare shells. cwd scoping keeps another repository's sync pane
-    // (same label, different checkout) out of the sweep
-    for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
-      if (
-        p.label === SYNC_LABEL &&
-        p.pane_id !== undefined &&
-        p.cwd === PLUGIN_ROOT &&
-        paneIdle(p.pane_id)
-      ) {
-        herdrTry(['pane', 'close', p.pane_id]);
-      }
-    }
-    // the in-flight marker lands BEFORE the open — a loop whose first
-    // pid write lands before `pane open` returns can only overwrite
-    // 'pending' with the real pid; the reverse order let 'pending'
-    // clobber the pid and a later ensure re-opened a second loop
-    try {
-      writeFileSync(pidFile, 'pending\n');
-    } catch {
-      // advisory — a failed marker just loses the dedup for a pass
-    }
-    const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
-    if (out === undefined) {
-      // a failed open must not leave a fresh 'pending' suppressing the
-      // next ensure for the whole grace window
+  };
+  if (liveOrPending()) return;
+  // the in-flight marker IS the reservation — an exclusive 'wx' create
+  // loses to any marker that landed meanwhile (a live pinned pid or a
+  // fresh pending). It must land BEFORE the slow sweep/open: the state
+  // lock fails OPEN past its wait, so a racer probing inside the
+  // sweep's shadow would open a second pane under it
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+      // an unwritable marker file still opens — dedup degrades, the
+      // loop must not be stranded on a marker it cannot write
+    } else if (liveOrPending()) {
+      return; // a live pid or a fresh pending owns the slot
+    } else {
+      // a stale 'pending' is a crashed opener's residue — break it once
+      // and take the slot; a racer winning this gap owns the open
       try {
         rmSync(pidFile, { force: true });
+        writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
       } catch {
-        // best effort — the next pass just waits out the grace
+        return;
       }
     }
-    log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
-  });
+  }
+  // the loop is confirmed dead and the slot is ours: every 'bro sync'
+  // pane rooted at THIS plugin is a husk — close them or the successor
+  // piles up next to bare shells. cwd scoping keeps another
+  // repository's sync pane (same label, different checkout) out of
+  // the sweep
+  for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
+    if (
+      p.label === SYNC_LABEL &&
+      p.pane_id !== undefined &&
+      p.cwd === PLUGIN_ROOT &&
+      paneIdle(p.pane_id)
+    ) {
+      herdrTry(['pane', 'close', p.pane_id]);
+    }
+  }
+  const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
+  if (out === undefined) {
+    // a failed open must not leave a fresh 'pending' suppressing the
+    // next ensure for the whole grace window — but the pane may have
+    // spawned anyway and already published its real pid; that marker
+    // is a live loop's, not ours to erase
+    try {
+      if (handleOwner(readFileSync(pidFile, 'utf8').trim()) === null) {
+        rmSync(pidFile, { force: true });
+      }
+    } catch {
+      // absent already — nothing to clean
+    }
+  }
+  log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
 }
 
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {

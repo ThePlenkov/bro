@@ -181,7 +181,10 @@ function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number):
       Number.isFinite(spawned) &&
       now - spawned < SESSION_SLOT_TTL_MS &&
       reg.exitStatus === undefined &&
-      reg.stopped !== true
+      reg.stopped !== true &&
+      // a recorded spawnError is already the failed end of the window —
+      // the placeholder must not outlive the connector's own verdict
+      typeof reg.spawnError !== 'string'
     )
       return 'spawn';
   }

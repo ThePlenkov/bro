@@ -80,7 +80,9 @@ export function displayAgentOf(base: string, id: string | undefined): string | u
  *  is alive, not absent — /proc stat is world-readable, so ownership
  *  never makes identity unverifiable. */
 export function pidAlive(pid: number, start?: string): boolean {
-  return corePidAlive(pid, start);
+  // '' is "stamp never landed" — unverifiable, not a mismatch: the core
+  // probe compares a recorded '' against /proc and reads a live pid dead
+  return corePidAlive(pid, start === '' ? undefined : start);
 }
 
 /** A journal is "actively written" when its mtime is this young —

@@ -543,7 +543,7 @@ function emptyTurn(startedAt: number, archive = false): NonNullable<Session["tur
 
 // -- Turn lifecycle (task 3.4) ------------------------------------------------------------------
 
-function finaliseLiveItems(session: Session): Session {
+function finaliseLiveItems(session: Session, at: number): Session {
   let next = finaliseItem(session, session.liveTextItemId);
   for (const id of next.order) {
     const item = next.items.get(id);
@@ -555,8 +555,10 @@ function finaliseLiveItems(session: Session): Session {
               status: "final",
               // a call the sealed turn abandoned never completed —
               // "failed" is the terminal the readers key liveness on
-              // (keeping pending/in_progress would glow live forever)
+              // (keeping pending/in_progress would glow live forever),
+              // and the seal time is its end like every other terminal
               toolStatus: isTerminalToolStatus(it.toolStatus) ? it.toolStatus : "failed",
+              endedAt: it.endedAt ?? at,
             }
           : it,
       );
@@ -583,7 +585,7 @@ function endTurn(
   at: number,
   marker: Omit<Extract<MarkerItem, { markerKind: "turn_end" }>, "id" | "status" | "origin"> | null,
 ): Session {
-  let next = finaliseLiveItems(session);
+  let next = finaliseLiveItems(session, at);
   next = commitPlanIfReported(next);
 
   if (marker) {
@@ -814,7 +816,7 @@ export function reduce(
       // or the next id-less chunk concatenates into a dead turn's
       // item. The seal commits a reported plan like endTurn does —
       // a dropped stop must not lose the plan it already printed
-      const sealed = commitPlanIfReported(finaliseLiveItems(session));
+      const sealed = commitPlanIfReported(finaliseLiveItems(session, event.at));
       return { ...withOpenRequests(sealed, emptyTurn(event.at, true)), stopReason: null };
     }
 

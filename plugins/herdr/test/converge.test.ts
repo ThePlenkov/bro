@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -987,6 +988,28 @@ describe('the sync loop ensure', () => {
     writeFileSync(pidFile(), 'pending\n');
     ensureSyncLoop();
     assert.equal(called('plugin', 'pane', 'open').length, 0);
+  });
+
+  test('a stale pending marker is a crashed opener — broken and replaced', () => {
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), 'pending\n');
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(pidFile(), old, old);
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 1);
+  });
+
+  test('a failed open keeps a real pid the pane already published', () => {
+    reset({ failSubcommands: ['plugin pane'] });
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    // the pane spawned anyway and wrote its handle before the CLI
+    // reported failure — that marker is a live loop's, not residue
+    writeFileSync(pidFile(), `${process.pid} ${procStat(process.pid)?.start ?? ''}\n`);
+    // the live probe wins before the open path is even reached
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 0);
+    assert.equal(existsSync(pidFile()), true);
   });
 
   test('a failed open leaves no pending marker behind', () => {

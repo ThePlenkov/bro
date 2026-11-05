@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { procStat } from '@broject/core';
 import {
   agentEntry,
   agentKey,
@@ -75,6 +76,18 @@ test('displayAgentOf — provider wins over the run id, stem is the last resort 
     assert.equal(displayAgentOf(base, 'native-lost'), 'native-lost');
     assert.equal(displayAgentOf(base, undefined), undefined);
   });
+});
+
+test('pidAlive — an empty start stamp is unverifiable, never a mismatch', () => {
+  // a recorded '' must not be compared against /proc — that reads a
+  // live pid dead (the wrapper normalizes before the core probe)
+  assert.equal(pidAlive(process.pid, ''), true);
+  assert.equal(pidAlive(process.pid, procStat(process.pid)?.start ?? ''), true);
+  const st = procStat(process.pid);
+  if (st !== null && st.start !== '') {
+    // a wrong start is a different process — reuse still reads dead
+    assert.equal(pidAlive(process.pid, `${Number(st.start) + 1}`), false);
+  }
 });
 
 test('registryHomeOf — only the <git-common>/bro/agents layout resolves a home', () => {

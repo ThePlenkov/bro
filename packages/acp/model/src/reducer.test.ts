@@ -72,6 +72,9 @@ test('a sealed turn abandons its tool call — live status reads failed, never g
   const tool = [...s.items.values()].find(i => i.kind === 'tool_call');
   assert.equal(tool?.status, 'final');
   assert.equal(tool?.kind === 'tool_call' ? tool.toolStatus : '', 'failed');
+  // the seal stamps endedAt like every other terminal — a run that
+  // never ends has no duration to render
+  assert.equal(tool?.kind === 'tool_call' ? tool.endedAt : 0, 9000);
 });
 
 test("a fresh turn_started commits the dropped turn's reported plan", () => {
