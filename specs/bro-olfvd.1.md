@@ -86,7 +86,7 @@ version = 1
 
 [routes.edit]
 match = { type = "edit", complexity = "low" }
-chain = [{ provider = "anthropic", model = "claude-sonnet-4" }]
+chain = [{ provider = "devin-acp", model = "swe-2-high" }]
 onWall = "fallthrough"
 prompt = "routes/edit.md"
 ```
@@ -100,8 +100,13 @@ prompt = "routes/edit.md"
   one machine dialect, one validator.
 - The candidate universe is the served catalog — the epic's M2 makes
   `brouter.models` the whitelist. A route may name only a served
-  (provider, model); a route naming an unserved model is a config error,
-  never a skipped entry (the repo's "absent = off" rule).
+  (provider, model), and the chain names the SERVED ids the catalog
+  speaks: `devin-acp` serves the swe-2 family, so `devin-acp/swe-2-high`
+  is a model and `devin-acp/claude-opus-5` is not. A route whose chain
+  CONTRADICTS the declaration is a config error, never a skipped entry
+  (`brouter routes validate` names it; the spawn path refuses to run). A
+  declaration SILENT about a provider is no verdict — the repo's "absent =
+  off" rule.
 
 ### 3. Health (S3)
 

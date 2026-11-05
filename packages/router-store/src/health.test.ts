@@ -23,14 +23,14 @@ test('a wall makes the model unavailable, with the reason and the reset', async 
   const s = await store('wall');
   await recordLimit(s.db, {
     provider: 'devin-acp',
-    model: 'claude-opus-5',
+    model: 'swe-2-high',
     resetAt: 900,
     reason: 'rate-limited',
     source: 'devin',
     seenAt: 100,
   });
   const snapshot = await healthSnapshot(s.db, 500);
-  const verdict = snapshot['devin-acp/claude-opus-5'];
+  const verdict = snapshot['devin-acp/swe-2-high'];
   assert.equal(verdict?.available, false);
   assert.equal(verdict?.reason, 'rate-limited');
   assert.equal(verdict?.until, 900);

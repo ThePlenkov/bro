@@ -33,21 +33,21 @@ test('the traffic of one window accumulates on the same row', async () => {
   const s = await store('usage');
   await recordUsage(s.db, {
     provider: 'devin-acp',
-    model: 'claude-opus-5',
+    model: 'swe-2-high',
     windowStart: 1000,
     requests: 2,
     tokens: 40,
   });
   await recordUsage(s.db, {
     provider: 'devin-acp',
-    model: 'claude-opus-5',
+    model: 'swe-2-high',
     windowStart: 1000,
     requests: 3,
     tokens: 10,
   });
   const window = await usageInWindow(s.db, {
     provider: 'devin-acp',
-    model: 'claude-opus-5',
+    model: 'swe-2-high',
     since: 0,
     until: 2000,
   });

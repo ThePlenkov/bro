@@ -18,7 +18,7 @@ const scratch = mkdtempSync(join(tmpdir(), 'brouter-test-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
 test('the family is read off the id text, never off the prefix', () => {
-  assert.equal(modelFamily('devin-acp/claude-opus-5-5-medium'), 'opus');
+  assert.equal(modelFamily('opencode-acp/claude-opus-5-5-medium'), 'opus');
   assert.equal(modelFamily('opencode-acp/claude-sonnet-4-6'), 'sonnet');
   assert.equal(modelFamily('devin-acp/claude-haiku-4-5'), 'haiku');
   assert.equal(modelFamily('devin-acp/claude-fable-5-1'), 'fable');

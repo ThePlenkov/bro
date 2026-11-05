@@ -109,7 +109,7 @@ import {
   issueLink,
   printUsage,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
+import type { BrouterModels, ExitCode } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -697,6 +697,43 @@ function beadClassInfo(
  *  verdict). Throws SpawnError — a bad `class:` label or broken chain
  *  is a config error the caller settles as a failed item, never a
  *  silent template drop. */
+/** The task the route table is asked about — the bead's class and
+ *  label, plus the served universe the operator declared. */
+interface RouteTableTask {
+  /** the table's path */
+  table: string;
+  /** the bead's explicit class */
+  class?: string;
+  /** the bead's `class:` label */
+  label?: string;
+  /** the bead's priority */
+  priority?: number;
+  /** what the operator declared the router serves */
+  served?: BrouterModels;
+}
+
+function routeTableTask(
+  ctx: Ctx,
+  table: string,
+  label: { label?: string; priority?: number }
+): RouteTableTask {
+  const task: RouteTableTask = { table };
+  if (ctx.sel.class !== undefined) {
+    task.class = ctx.sel.class;
+  }
+  if (label.label !== undefined) {
+    task.label = label.label;
+  }
+  if (label.priority !== undefined) {
+    task.priority = label.priority;
+  }
+  const models = ctx.env.brouter?.models;
+  if (models !== undefined) {
+    task.served = models;
+  }
+  return task;
+}
+
 /** The route table's lane for one bead — undefined when the operator
  *  declares no table (fleet.routing stays the compatibility face for the
  *  runs that declare none). */
@@ -706,12 +743,7 @@ async function routeTableLaneFor(ctx: Ctx, bead: ReadyBead): Promise<LoopLane | 
     return undefined;
   }
   const label = beadClassInfo(ctx, bead, false);
-  const routed = await routeTableLane({
-    table: tablePath,
-    ...(ctx.sel.class === undefined ? {} : { class: ctx.sel.class }),
-    ...(label.label === undefined ? {} : { label: label.label }),
-    ...(label.priority === undefined ? {} : { priority: label.priority }),
-  });
+  const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
   return routed === undefined ? undefined : resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
 }
 

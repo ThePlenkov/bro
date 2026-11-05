@@ -19,6 +19,11 @@ export {
 } from './candidates.ts';
 export { resolveRoute, type RouteDecision } from './resolve.ts';
 export {
+  unservedChains,
+  type ServedDeclaration,
+  type UnservedChain,
+} from './served.ts';
+export {
   parseRouteDoc,
   readRouteTable,
   routeTable,

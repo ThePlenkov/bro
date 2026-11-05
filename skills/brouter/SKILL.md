@@ -58,14 +58,19 @@ version = 1
 
 [routes.edit]
 match = { type = "edit" }
-chain = [{ provider = "devin-acp", model = "claude-opus-5" }]
+chain = [{ provider = "devin-acp", model = "swe-2-high" }]
 onWall = "fallthrough"
 ```
 
 - `match` — the task's shape: `type`, `complexity`, `priority`. A route
   that pins a field needs the task to carry it; a route that pins nothing
   fits every task.
-- `chain` — the models, in order, as the honest `<entry>/<model>` ids.
+- `chain` — the models, in order, as the honest `<entry>/<model>` ids the
+  catalog speaks. `devin-acp` serves the swe-2 family, so
+  `devin-acp/swe-2-high` is a model and `devin-acp/claude-opus-5` is not:
+  a route whose chain contradicts what `brouter.models` declares for that
+  provider is a config error (`routes validate` names it), never a
+  silently skipped route.
 - `onWall` — `park` or `fallthrough`, the fleet's vocabulary.
 - the table's path: `brouter.routes` in `bro.config.json` (or `--routes`).
 

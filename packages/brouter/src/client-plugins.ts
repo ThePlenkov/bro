@@ -80,11 +80,7 @@ function clientSettings(input: {
 }
 
 /** The client's request — what the command runs with. */
-function clientRequest(input: {
-  argv: string[];
-  id: string;
-  policy: RouterPolicy;
-}): ClientRequest {
+function clientRequest(input: { argv: string[]; id: string; policy: RouterPolicy }): ClientRequest {
   const settings = clientSettings(input);
   return {
     client: input.id,

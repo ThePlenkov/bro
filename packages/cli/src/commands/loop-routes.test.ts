@@ -22,7 +22,7 @@ const TABLE = [
   '',
   '[routes.sweep]',
   'match = { type = "sweep" }',
-  'chain = [{ provider = "devin-acp", model = "claude-opus-5" }]',
+  'chain = [{ provider = "devin-acp", model = "swe-2-high" }]',
   'onWall = "fallthrough"',
   '',
   '[routes.fallback]',
@@ -38,7 +38,7 @@ test("the bead's class lands on the route that pins it", async () => {
   const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
   assert.equal(routed?.class, 'sweep');
   assert.equal(routed?.provider, 'devin-acp');
-  assert.equal(routed?.model, 'claude-opus-5');
+  assert.equal(routed?.model, 'swe-2-high');
   assert.equal(routed?.onWall, 'fallthrough');
 });
 
@@ -60,4 +60,38 @@ test('a bead with no class falls on the catch-all route', async () => {
 test('a broken table is a config error, never a silent fallback', async () => {
   const file = tableFile('kind = "route"\n\n[routes.sweep]\nchain = []\n');
   await assert.rejects(() => routeTableLane({ table: file }), SpawnError);
+});
+
+test('a route naming a model the declaration contradicts is a config error', async () => {
+  // the operator declared devin-acp for the swe-2 family — a route that
+  // lands on another model of that provider is wrong, not unusual
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.sweep]',
+      'match = { type = "sweep" }',
+      'chain = [{ provider = "devin-acp", model = "claude-opus-5" }]',
+      '',
+    ].join('\n')
+  );
+  await assert.rejects(
+    () =>
+      routeTableLane({
+        table,
+        label: 'sweep',
+        served: { 'swe-2-high': [{ provider: 'devin-acp' }] },
+      }),
+    SpawnError
+  );
+});
+
+test('a declaration silent about the provider is no verdict', async () => {
+  const routed = await routeTableLane({
+    table: tableFile(TABLE),
+    label: 'sweep',
+    served: { 'swe-2-high': [{ provider: 'other-lane' }] },
+  });
+  assert.equal(routed?.class, 'sweep');
 });
