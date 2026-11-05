@@ -3,9 +3,16 @@ title: Getting started
 description: Install bro and wire it into a repo in under a minute.
 ---
 
+## ICP & JTBD
+
+**ICP:** maintainers and small teams with existing agents, a task store, and PR/CI.  
+**JTBD:** deterministic lifecycle closure — `task → agent → PR → gate → debt`.  
+**Wedge:** start with `bro act status` (review gate) and `bro debt status` (debt ledger). Sweep merged threads with `bro debt collect`. No fleet, no model gateway required. Orchestration is optional and progressive.
+
 ## Requirements
 
-- **Node ≥ 22** — bro runs TypeScript natively, no build step
+- **Node ≥ 22.18** — bro runs TypeScript natively (unflagged type
+  stripping), no build step
 - **`gh`**, authenticated — review data comes from the GitHub API and
   `bro setup` requires it. On GitLab repos the review facade uses an
   authenticated **`glab`**, but `gh` stays a setup prerequisite
@@ -19,30 +26,60 @@ npx -y @broject/bro --help     # zero install
 npm i -g @broject/bro          # or keep bro around
 ```
 
+npm `latest` is **0.2.5** — these pages use the flat spellings the
+published CLI dispatches (`bro debt status`). The grouped surface
+(`bro review debt status`) lands in **0.3.0**; flat names stay
+permanent aliases, and upcoming commands are marked `0.3.0` where the
+docs cite them.
+
 ## Wire a repo
 
 ```bash
-bro setup              # checks gh + bd, writes bro.config.json
+bro setup              # checks gh + bd, writes bro.config.local.json
 bro setup --beads      # also: bd init --stealth + debt-pipeline formula
 bro setup --skills     # also: thin skill wrappers for your agent
 ```
 
-`bro.config.json` is written per-clone and gitignored — store choices are
-machine-local. Fresh checkouts run on defaults until set up.
+`bro setup` writes `bro.config.local.json` — the gitignored
+machine-local layer, excluded via `.git/info/exclude` — and never
+touches the committed `bro.config.{ts,json}` the repo shares as policy.
+Layers merge **local > project > global** (`~/.config/bro/config.*`) —
+see [Configuration](/docs/configuration). Fresh checkouts run on
+defaults until set up.
 
-## First sweep
+## End-to-end scenario (no fleet/model gateway required)
 
 ```bash
-bro review debt prs        # merged PRs nobody processed yet
-bro review debt collect    # harvest threads → .agents/review-debt/ + labels
-bro review debt status     # the damage report
-bro review debt next       # the top open finding — claim, fix, set done
+# 1) Claim work from your task store
+npx @broject/bro next
+BEAD="<bead-id>"  # replace <bead-id> with the ID from the claimed work order
+
+# 2) Implement and open a PR for the claimed work
+git add -A
+git commit -m "$BEAD: <summary>"
+git push -u origin HEAD
+gh pr create --fill  # open a PR for the current branch; the review gate inspects it
+
+# 3) Drive the PR through the review gate
+npx @broject/bro act status        # verdict: threads/ci/reviewers/sast/mergeable
+npx @broject/bro act threads       # work unresolved threads
+#    Must resolve all listed threads before merging (the gate blocks until clean).
+#    Work and resolve every listed thread (e.g. via `bro act resolve`/replies),
+#    then re-check with `bro act status` until it is green.
+npx @broject/bro act merge --bead "$BEAD"  # merge only when green; pass the claimed bead to close it
+
+# 4) Sweep merged threads into debt
+npx @broject/bro debt prs          # merged PRs nobody processed yet
+npx @broject/bro debt collect      # harvest threads → .agents/review-debt/ + labels
+npx @broject/bro debt status       # what's left
+npx @broject/bro debt next         # top open finding
 ```
 
 ## As an agent plugin
 
-The repo is a plugin marketplace — one `bro` plugin packaged per client,
-same skills and lifecycle hooks everywhere:
+The repo is a plugin marketplace — one `bro` plugin packaged per client.
+The skills tree is identical everywhere; the hook surface differs per
+host — see the [capability matrix](/docs/integrations#capability-matrix):
 
 | Client | Install |
 | ------ | ------- |

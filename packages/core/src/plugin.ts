@@ -10,6 +10,29 @@ import type { Connector } from './connectors.ts'
 import type { DocType } from './docs.ts'
 import type { PlanSchema } from './plan.ts'
 
+/** The machine-readable slice of one command (or subcommand) surface —
+ *  flags, exit codes, and the --json schema ref. Recorded as data so
+ *  `bro contract dump` (spec bro-k9ces) serializes it without parsing
+ *  usage prose. Keys are the literal spellings (`"--json"`, `status`,
+ *  `2`). */
+export interface CliSubContract {
+  /** flag spelling → one-line meaning (`"--label <a,b>"`, not prose). */
+  flags?: Record<string, string>
+  /** exit code → meaning — the shared taxonomy lives in bro-1znlu's
+   *  exits.ts; per-command entries only record what that command ships. */
+  exits?: Record<number, string>
+  /** JSON Schema ref for the --json output — `schemas/cli/<name>.json`,
+   *  filled by bro-pbfdp. */
+  json?: string
+}
+
+export interface CliContract extends CliSubContract {
+  /** Subcommand-scoped surfaces — `act status` and `act merge` share
+   *  the plugin but not the flags. The bare command reads the top-level
+   *  fields. */
+  subs?: Record<string, CliSubContract>
+}
+
 export interface BroPlugin {
   /** Subcommand name — argv[0]. */
   name: string
@@ -64,6 +87,9 @@ export interface BroPlugin {
   flatDeprecated?: string
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
+  /** The command's declared contract — flags/exits/--json ref. Absent
+   *  means undocumented, not flagless. */
+  contract?: CliContract
   /** Set by the registry when the plugin came from config `plugins` —
    *  not part of the author-facing contract. */
   external?: boolean

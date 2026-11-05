@@ -7,7 +7,17 @@
  */
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
+import {
+  bd,
+  bdAt,
+  facade,
+  gitCommonDir,
+  hasHelpFlag,
+  loadConfig,
+  printUsage,
+  taskStore,
+  taskStoreAt,
+} from '@broject/core'
 import {
   acceptWanted,
   claimWanted,
@@ -762,6 +772,9 @@ function cmdWait(dir: string, args: string[]): void {
 export function runMeshCommand(argv: string[]): void {
   const dir = process.cwd()
   const [verb, ...rest] = argv
+  if (verb !== undefined && hasHelpFlag(rest)) {
+    printUsage(USAGE, 0)
+  }
   switch (verb) {
     case 'me':
       return cmdMe(dir)
@@ -802,6 +815,8 @@ export function runMeshCommand(argv: string[]): void {
     default:
       break
   }
-  console.error(USAGE)
-  process.exit(verb === undefined || verb === 'help' ? 0 : 2)
+  printUsage(
+    USAGE,
+    verb === undefined || verb === 'help' || verb === '--help' || verb === '-h' ? 0 : 2,
+  )
 }

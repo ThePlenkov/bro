@@ -309,6 +309,47 @@ describe('serve — routes', () => {
     assert.equal(blind.status, 503)
   })
 
+  test('DELETE /api/v1/agents/<ref> — a survivor or unconfirmed death is 409, not 200', async () => {
+    // stop() landing is a request, not a death: a worker that survived
+    // the signal, or a death the backend cannot confirm, must not be
+    // an HTTP success a client could respawn over (bro-l8c4f.3)
+    for (const verdict of ['still-running', 'unverified'] as const) {
+      const r = await route(
+        'DELETE',
+        '/api/v1/agents/native-aa11',
+        undefined,
+        deps({
+          stop: async () => ({
+            found: true,
+            degraded: [],
+            agent: { ...fakeAgent, state: verdict === 'still-running' ? ('running' as const) : ('lost' as const) },
+            stopped: false,
+            verdict,
+          }),
+        })
+      )
+      assert.equal(r.status, 409, verdict)
+      const body = r.body as { stopped: boolean; verdict: string; error: string }
+      assert.equal(body.stopped, false)
+      assert.equal(body.verdict, verdict)
+      assert.match(
+        body.error,
+        verdict === 'still-running' ? /survived the stop signal/ : /stop unconfirmed/
+      )
+    }
+
+    // a verdict-less stop (a connector reporting the old way) keeps
+    // its 200 — the gate is the verdict, nothing else changes
+    const legacy = await route(
+      'DELETE',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({ stop: async () => ({ found: true, degraded: [], agent: fakeAgent, stopped: true }) })
+    )
+    assert.equal(legacy.status, 200)
+    assert.equal((legacy.body as { stopped: boolean }).stopped, true)
+  })
+
   test('POST /api/v1/agents — 201 on spawn, 409 on SpawnError, 400 on input errors', async () => {
     const ok = await route('POST', '/api/v1/agents', JSON.stringify({ molStep: 'fx-1' }))
     assert.equal(ok.status, 201)

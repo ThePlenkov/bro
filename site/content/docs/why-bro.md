@@ -1,7 +1,13 @@
 ---
+
 title: Why bro
 description: The problem bro solves — agent workflows are mechanics, not prompts.
 ---
+
+_Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`)._
 
 Agents are good at judgment and bad at bookkeeping. Prompts try to carry
 both — and the bookkeeping parts ("remember to check for unresolved
@@ -43,9 +49,9 @@ defers the dependency to a later, less predictable failure.
 The init is stealth: `.beads` is written to `.git/info/exclude`, nothing
 lands in git, no hooks or `AGENTS.md` edits, and `rm -rf .beads` reverses
 it — the same machine-local contract as `.agents/review-debt/` and the
-gitignored `bro.config.json`. It announces itself on stderr; a tool that
-wants adoption doesn't get to be silent about writing to your repo.
-Opt out once: `"stores": ["jsonl"]` in `bro.config.json`.
+gitignored `bro.config.local.json`. It announces itself on stderr; a tool
+that wants adoption doesn't get to be silent about writing to your repo.
+Opt out once: `"stores": ["jsonl"]` in `bro.config.local.json`.
 
 ## What it doesn't do
 

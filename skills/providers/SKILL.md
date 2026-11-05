@@ -1,4 +1,5 @@
 ---
+
 name: providers
 description: "Use when configuring or debugging bro's provider registry — `providers` in bro.config.json, provider kinds (api/acp/cli), model wire selection, `judge.provider` / `agents.<backend>.provider` references, or `bro doctor` provider rows. Mechanics live in the CLI + @broject/providers; this skill carries the contract and policy only."
 ---
@@ -20,17 +21,18 @@ can serve.
 {
   "providers": {
     // One API host, many models — each model declares its wire.
-    "orcarouter": { "type": "api", "baseUrl": "https://api.orcarouter.ai",
-                    "apiKeyCommand": "secret-tool lookup service typesafe.ai",
-                    "models": {
-                      "typesafe/jev-1.13": "systemone",
-                      "acme/cheap-chat":   "openai-compat",
-                      "acme/auto-x":       null          // inferred
-                    } },
-    "kilo-cli":   { "type": "acp", "command": "kilo --acp",
-                    "model": "typesafe/jev-1.13" },
-    "local":      { "type": "cli", "command": "devin -p --prompt-file {promptFile}",
-                    "model": "devin-1" }
+    "orcarouter": {
+      "type": "api",
+      "baseUrl": "https://api.orcarouter.ai",
+      "apiKeyCommand": "secret-tool lookup service typesafe.ai",
+      "models": {
+        "typesafe/jev-1.13": "systemone",
+        "acme/cheap-chat": "openai-compat",
+        "acme/auto-x": null // inferred
+      }
+    },
+    "kilo-cli": { "type": "acp", "command": "kilo --acp", "model": "typesafe/jev-1.13" },
+    "local": { "type": "cli", "command": "devin -p --prompt-file {promptFile}", "model": "devin-1" }
   }
 }
 ```
@@ -42,7 +44,6 @@ can serve.
 | `api` | by model wire — `systemone` typed, `openai-compat` prose | —                                  |
 | `acp` | typed on a `jev`-family model, else prose                | yes                                |
 | `cli` | prose — stdout parsed                                    | yes — loop.agent template contract |
-
 - An `api` entry is a host + auth + a **`models` allowlist** —
   `{ "<model-id>": "systemone" | "openai-compat" | { "wire": … } | null }`.
   `null`/absent infers the wire: `jev`-family ids → `systemone`,
@@ -63,6 +64,37 @@ can serve.
   model id per line — the catalog surface, e.g.
   `"models": "opencode models"`. Absent = no enumerable catalog; a
   pinned `model` still renders.
+
+## `brouter` — the model-centric routing registry
+
+`brouter.models` inverts the lookup: the MODEL id is the routing key.
+A consumer asks for a model and the registry answers which provider
+serves it (spec: specs/bro-n1p0s.md).
+
+```jsonc
+{
+  "brouter": {
+    "models": {
+      "swe-2-max": "devin-acp", // shorthand: same id upstream
+      "jev": { "provider": "kilo-cli", "model": "kilo/orcarouter/typesafe/jev-1.13" }, // alias → upstream id
+      "cheap": ["opencode-free", "pi"] // ordered candidates, first = primary
+    }
+  }
+}
+```
+
+Resolution order (first hit wins): a qualified `<provider>/<model>` id
+(head must be a configured provider) → `brouter.models.<id>` → the
+catalog (providers serving the id, in config order). A declared route
+to an unconfigured provider is a config error naming the key; absent
+`brouter` = routing off.
+
+- `bro providers route <id>` prints the primary route as
+  `provider/model`; `--all` prints every candidate. Unresolved exits 1.
+- `--model` with no `--provider`/`agents.<backend>.provider` resolves
+  through the **static** index (declared routes + statically-known
+  models) — a spawn never pays a live catalog probe; an unresolved
+  model stays a provenance label.
 
 ## `bro providers models [name…]` — the catalog
 

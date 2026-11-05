@@ -16,12 +16,15 @@ import {
   ensureAuth,
   facadeAuth,
   gitTry,
+  hasHelpFlag,
   isBdCompatError,
+  printUsage,
   reviewHost,
   type MergedPrScan,
   type PrLabelOp,
   type ReviewFacade,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
@@ -79,8 +82,8 @@ function readOption(argv: string[], index: number): string | null {
   return value
 }
 
-function usage(): never {
-  console.error(`Usage: bro debt <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro debt <command> [args…]
 
 Commands:
   collect [OWNER REPO] [filters]  Collect findings from unprocessed merged PRs
@@ -107,8 +110,7 @@ Commands:
   next [--json] [--claim]         Top open finding for an agent to fix
         [--area A] [--author U]   (--claim marks it claimed atomically)
   watch [collect flags]           Collect on an interval until Ctrl-C
-        [--interval SEC=300]`)
-  process.exit(1)
+        [--interval SEC=300]`, exitCode)
 }
 
 // --- collect ---------------------------------------------------------------
@@ -1404,8 +1406,8 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
     cmdStatus()
     return
   }
-  if (cmd === '--help' || cmd === '-h') {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const handler = COMMANDS[cmd!]
   if (!handler) {

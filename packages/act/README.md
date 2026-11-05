@@ -15,7 +15,7 @@ and the act plan schema.
 npm i @broject/act
 ```
 
-Requires Node ≥ 22 and an authenticated `gh`. ESM only.
+Requires Node ≥ 22.18 and an authenticated `gh`. ESM only.
 
 ## Surface
 

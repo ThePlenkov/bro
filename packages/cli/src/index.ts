@@ -6,7 +6,7 @@
  * (subcommand + skill + config section); see plugins.ts for the list
  * and `bro plugins` for the live registry.
  */
-import { warnDeprecated, type BroPlugin } from '@broject/core'
+import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
 import { registerTelegramSink } from './commands/sinks-telegram.ts'
 import { otelSpan, setAmbient } from '@broject/providers'
@@ -104,11 +104,12 @@ async function dispatchGroup(cmd: string, rest: string[]): Promise<boolean> {
     await runMember(cmd, member, rest.slice(1))
     return true
   }
-  console.error(groupTable(cmd, group))
-  process.exit(rest.length === 0 ? 0 : 1)
+  // bare `bro <group>` and `--help` ask for the member table (stdout,
+  // 0); anything else is an unknown member — the canonical usage error
+  return printUsage(groupTable(cmd, group), rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage)
 }
 
-function usage(exitCode = 1): never {
+function usage(exitCode: ExitCode = 1): never {
   const groups = pluginGroups()
   const groupRows = GROUP_META.filter(([g]) =>
     groups.get(g)?.some((p) => !p.hidden)
@@ -118,7 +119,7 @@ function usage(exitCode = 1): never {
   const commands = PLUGINS.filter((p) => !p.hidden && !p.group && !p.aliasOf)
     .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
     .join('\n')
-  console.error(`bro — agent's sidekick CLI
+  printUsage(`bro — agent's sidekick CLI
 
 Usage: bro <command> [args…]
        bro <group> <member> [args…]
@@ -132,7 +133,7 @@ ${docUsageLines().join('\n')}
 
 Options:
   --version    Print version
-  --help       This text
+  --help       This text (also: bro help, bro help <cmd>)
 
 Examples:
   bro review debt collect             # harvest merged-PR findings → ledger + labels
@@ -140,12 +141,20 @@ Examples:
   bro review debt sync                # project the ledger into beads
   bro review act status --json        # exit gate for the current PR
   bro plugins                         # the registry — subcommand+skill+config
-  bro setup`)
-  process.exit(exitCode)
+  bro setup`, exitCode)
 }
 
 async function main(): Promise<void> {
-  const [cmd, ...rest] = process.argv.slice(2)
+  // `bro help` is `bro --help`; `bro help <cmd>…` is `bro <cmd>… --help` —
+  // one spelling for explicit help whichever side of the command it sits on
+  let argv = process.argv.slice(2)
+  if (argv[0] === 'help') {
+    const tail = argv.slice(1)
+    const sep = tail.indexOf('--')
+    const head = sep === -1 ? tail : tail.slice(0, sep)
+    argv = head.length === 0 ? ['--help'] : [...head, '--help']
+  }
+  const [cmd, ...rest] = argv
 
   // sink delivery policies — the plugin layer owns each type's wire
   // shape; core dispatches to whoever registered (bro-mq1t2)
@@ -204,7 +213,7 @@ async function main(): Promise<void> {
     return
   }
   console.error(`unknown command: ${cmd}`)
-  usage()
+  usage(EXIT.usage)
 }
 
 main().catch((err: unknown) => {

@@ -15,7 +15,7 @@ review gate, closes the bead, repeats.
 npm i @broject/loop
 ```
 
-Requires Node ≥ 22, `bd`, and a configured agent (`loop.agent` in
+Requires Node ≥ 22.18, `bd`, and a configured agent (`loop.agent` in
 bro.config.json). ESM only.
 
 ## Surface

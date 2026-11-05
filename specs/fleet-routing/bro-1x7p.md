@@ -1,18 +1,20 @@
 ---
+
 parent: fleet-routing
 scope:
-  - packages/core/src/routing.ts
-  - packages/core/src/config.ts
-  - packages/core/src/agents.ts
-  - packages/cli/src/agent-connectors.ts
-  - packages/cli/src/commands/agents.ts
-  - packages/cli/src/commands/convoy.ts
-  - packages/cli/src/commands/convoy-run.ts
-  - packages/cli/src/commands/drive.ts
-  - packages/cli/src/commands/next.ts
-  - packages/providers/src/acp-worker.ts
-  - skills/convoy/
-  - skills/next/
+- packages/core/src/routing.ts
+- packages/core/src/config.ts
+- packages/core/src/agents.ts
+- packages/cli/src/agent-connectors.ts
+- packages/cli/src/commands/agents.ts
+- packages/cli/src/commands/convoy.ts
+- packages/cli/src/commands/convoy-run.ts
+- packages/cli/src/commands/drive.ts
+- packages/cli/src/commands/next.ts
+- packages/providers/src/acp-worker.ts
+- skills/convoy/
+- skills/next/
+
 ---
 
 # bro-1x7p — dispatch arbiter: provider tiers, quota fallbacks, shell-native workers
@@ -51,12 +53,12 @@ the next work order in.
 - **provider chain** — the ordered list of `providers.<name>` entries
   a class tries, cheapest acceptable last.
 - **provider wall** — a provider-level blocked state derived from the
-  provider's unstopped *wallable* deaths (`rate_limited`, `quota` —
+  provider's unstopped _wallable_ deaths (`rate_limited`, `quota` —
   `crash`/`auth` never join the scan): `rate_limited` walls until
   `resetAt` (indefinitely when none was reported), `quota` walls
   until the operator clears the record.
-- **park vs fall** — a walled step's two verdicts: *park* waits the
-  wall out on the current provider; *fall* re-dispatches the step to
+- **park vs fall** — a walled step's two verdicts: _park_ waits the
+  wall out on the current provider; _fall_ re-dispatches the step to
   the next un-walled chain entry.
 - **shell unit** — a convoy step materialized as a pinned detached
   shell (`sh -c` spawn, own process group, `pid`/`log`/`exit` under
@@ -75,8 +77,8 @@ chain:
 {
   "fleet": {
     "routing": {
-      "default":  { "chain": ["devin", "kilo-free", "opencode-zen"] },
-      "sweep":    { "chain": ["kilo-free", "opencode-zen"] },
+      "default": { "chain": ["devin", "kilo-free", "opencode-zen"] },
+      "sweep": { "chain": ["kilo-free", "opencode-zen"] },
       "critical": { "chain": ["devin"], "onWall": "park" }
     },
     "router": { "provider": "typesafe", "mode": "shadow" }
@@ -112,7 +114,7 @@ an unclassed step: the step's title/description goes in, a typed
 judgments ladder — `shadow` journals the verdict beside the resolved
 class, `enforce` lets it pick. `off`/absent = static classes only.
 The router never invents a class and never picks a provider directly
-— it answers *which lane*, the table still owns the chain.
+— it answers _which lane_, the table still owns the chain.
 `enforce` holds the typed promise: it requires the provider's
 resolved call grade to be `typed` — an `api` entry on the systemone
 wire or an `acp` entry on a jev-family model. A prose-grade entry
@@ -126,7 +128,7 @@ demotion; `shadow` accepts prose — the verdict journals with its
 A provider's wall state is **computed from `agents.json`**, not kept
 in a new store: scan the registry for death records attributed to P —
 an entry's live fields plus each `attempts` record a re-dispatch left
-behind (below) — and keep only the unstopped *wallable* ones: `quota`
+behind (below) — and keep only the unstopped _wallable_ ones: `quota`
 dominates, walling P until every quota-caused record on P is
 `stopped` (`bro agents down` is the manual clear — its `stopped`
 stamp covers the entry and its `attempts` alike, same as today);
@@ -147,7 +149,7 @@ retry-storm a walled one); a `resetAt` passing is the proof of lift.
 ## Re-dispatch — the chain walk
 
 `prepareSpawn`'s respawn refusal becomes **provider-scoped**: a block
-forbids re-running the step on the *same* provider while it holds,
+forbids re-running the step on the _same_ provider while it holds,
 never the step itself. The respawn seam resolves the class chain and
 walks it from the step's current position (the registry entry's
 recorded `provider`) to the first un-walled entry. A fresh step has no
@@ -174,11 +176,11 @@ dedup, wall check, claim, start stay atomic.
 
 ## Resume semantics — per provider kind
 
-| kind | session? | stopped-without-result → |
-| ---- | -------- | ------------------------ |
+| kind  | session?                           | stopped-without-result →                                                                                                                                                                  |
+| ----- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `acp` | `acpSessionId` pinned on the entry | **ping/resume** (same provider only): `session/load` on the recorded session id where the agent advertises it; capability absent or chain-fell → fresh `session/new`, noted in provenance |
-| `cli` | none | **respawn + rehydrate**: new process; the prompt is regenerated from live beads state (`convoy next` inputs, the claim, the prior log tail) — never a replay of the stale prompt file |
-| `api` | no spawn surface | never a chain entry |
+| `cli` | none                               | **respawn + rehydrate**: new process; the prompt is regenerated from live beads state (`convoy next` inputs, the claim, the prior log tail) — never a replay of the stale prompt file     |
+| `api` | no spawn surface                   | never a chain entry                                                                                                                                                                       |
 
 The session id is lifted at the clear point: `prepareSpawn` already
 holds the dying `existing` entry inside the registry lock, so it hands
@@ -247,7 +249,7 @@ shapes or orphaned PRs lose their only owner:
 
 - **`--for` bound** — `drive --every N --for S` rides the bound
   `bro watch` already ships (same flag, same monotonic deadline, same
-  `≥ --every` parse rule). The deadline gates what *starts*: the
+  `≥ --every` parse rule). The deadline gates what _starts_: the
   inter-tick sleep is capped at the remaining budget and no new tick
   begins past it, but the check sits between awaited ticks — a tick
   in flight at expiry runs to completion, so coverage outlives the
@@ -305,7 +307,7 @@ for explicit parallel fan-out:
 
 ## Non-negotiables
 
-- **Contracts stay vendor-blind.** Routing resolves *names* into the
+- **Contracts stay vendor-blind.** Routing resolves _names_ into the
   same `SpawnSpec.provider`/`model` opaque labels — no new field leaks
   vendor semantics upward.
 - **No undeclared routes.** Absent `fleet.routing` = today's static
@@ -389,6 +391,6 @@ skills/{convoy,next}/                 continuation + finite-watcher text
   be the spec'd path, not an afterthought, or half the fleet silently
   loses continuity.
 - **Prompt drift on rehydrate.** Regenerating from beads state means
-  the worker sees *current* truth — but a step whose description
+  the worker sees _current_ truth — but a step whose description
   changed mid-flight resumes into a different work order. The claim's
   version (updatedAt) lands in the prompt so the drift is visible.

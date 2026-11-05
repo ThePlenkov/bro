@@ -1,0 +1,42 @@
+{
+  "name": "@broject/herdr-kit",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@broject/acp-session": "^0.3.0",
+    "@broject/core": "^0.3.0",
+    "@broject/providers": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/herdr-kit"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "bro-side herdr bridge kit \u2014 pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions"
+}

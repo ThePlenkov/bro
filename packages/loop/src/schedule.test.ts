@@ -14,6 +14,7 @@ const snap = (over: Partial<GateSnapshot> = {}): GateSnapshot => ({
   mergeable: 'MERGEABLE',
   mergeState: 'CLEAN',
   openThreads: 0,
+  reopenedThreads: 0,
   fixRounds: 0,
   maxRounds: 0,
   ok: false,
@@ -70,6 +71,22 @@ describe('memberAction', () => {
       opts()
     )
     assert.deepEqual(a, { kind: 'park', why: 'blocked: 2 failing check(s)' })
+  })
+
+  test('a reopened thread parks instead of respawning the fixer', () => {
+    // the thread was resolved and then commented on again — the earlier
+    // resolution was wrong, so a fixer must not re-resolve it
+    const a = memberAction(
+      snap({
+        openThreads: 1,
+        reopenedThreads: 1,
+        blockers: ['reopened thread t1 — resolved before, commented on again by bob'],
+      }),
+      clock({ rounds: 1 }),
+      opts()
+    )
+    assert.equal(a.kind, 'park')
+    assert.match((a as { why: string }).why, /reopened thread/)
   })
 
   test('open threads with rounds left respawn the fixer', () => {

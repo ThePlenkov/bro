@@ -10,5 +10,6 @@ description: "Plugin registry + client adapters: install|uninstall|list <client>
 | | |
 | --- | --- |
 | group | `utility` |
+| npm latest | `0.2.5` |
 | guide | [commands/utility](/docs/commands/utility) |
 

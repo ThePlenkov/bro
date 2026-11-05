@@ -28,7 +28,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { gitCommonDir, gitTry, worktreeGitDir } from '@broject/core'
+import { gitCommonDir, gitTry, hasHelpFlag, printUsage, worktreeGitDir } from '@broject/core'
 import { envProvenance, liveSessionIds } from './githooks.ts'
 import { flag, positionals } from './args.ts'
 
@@ -151,6 +151,9 @@ export const stampAgo = (ts: number, now: number): string => {
  *  via after yours is the overwrite), a label writes this session's.
  *  `--session <id>` pins the writer; `--json` prints the record. */
 export function runStampCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage('usage: bro stamp [<via>] [--session <id>] [--json]', 0)
+  }
   const via = positionals(argv, new Set(['--session']), {
     boolFlags: new Set(['--json']),
     strict: true,

@@ -44,10 +44,13 @@ import {
   emitLifecycle,
   facade,
   git,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitTry,
   loadConfig,
   LockTimeout,
   pidAlive,
+  hasHelpFlag,
+  printUsage,
   readAgentRegistry,
   reviewHost,
   stackSection,
@@ -57,6 +60,8 @@ import {
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
+import { assertMutableConfig } from '../config-policy.ts'
 import { loopSection, loopSlug, type LoopConfig } from '@broject/loop'
 import { listWatches, type ListedWatch } from '@broject/act'
 import { parseStackBranch } from '@broject/stack'
@@ -304,13 +309,12 @@ export function claimWorktree(
 
 const SLUG_RE = /^\w[\w.-]*$/
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
   bro work list [--sizes]
-  bro work prune [--loop] [--dry-run]`)
-  process.exit(2)
+  bro work prune [--loop] [--dry-run]`, exitCode)
 }
 
 export function mainWorktree(): WorktreeInfo {
@@ -357,6 +361,10 @@ export function claimBead(slug: string): { claimed?: string; refused?: boolean }
   // pins a non-beads store; the anchor is the git root so a linked
   // worktree or subdirectory resolves the same backend
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  // the same gate prepareSpawn enforces: a bead claim is an
+  // authoritative mutation — invalid policy config refuses BEFORE the
+  // claim lands, not after a refused spawn strands it (spec: bro-d9dmx)
+  assertMutableConfig(root)
   let store: TaskStore
   try {
     store = facade('tasks', { dir: root }, { prefer: loadConfig(root).connectors })
@@ -1718,7 +1726,7 @@ function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       typeof l.watch.workdir === 'string' &&
       resolve(l.watch.workdir) === resolve(c.w.path)
     if (hitsBead || hitsTree) {
-      return `watch on PR #${l.watch.pr} live`
+      return `watch on ${l.watch.link} live`
     }
   }
   return undefined
@@ -2042,6 +2050,9 @@ function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
 
 export function runWorkCommand(argv: string[]): void {
   const [sub, ...rest] = argv
+  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
+    usage(0)
+  }
   switch (sub) {
     case 'enter':
       return cmdEnter(rest)
@@ -2059,14 +2070,11 @@ export function runWorkCommand(argv: string[]): void {
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
-  const res = spawnSync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { // NOSONAR — git is a required runtime dep; fixed argv
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  if (res.status !== 0) {
+  const res = gitTry(['-C', cwd, 'rev-parse', '--absolute-git-dir'], GIT_SYNC_PROBE_TIMEOUT_MS)
+  if (res.code !== 0) {
     return null
   }
-  const dir = (res.stdout ?? '').trim()
+  const dir = res.out.trim()
   return dir ? resolve(dir) : null
 }
 
@@ -2092,19 +2100,19 @@ export const workConnector: Connector = {
     },
     parallelWork(ctx) {
       try {
-        const cur = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel']).out.trim()
+        const cur = gitTry(
+          ['-C', ctx.dir, 'rev-parse', '--show-toplevel'],
+          GIT_SYNC_PROBE_TIMEOUT_MS
+        ).out.trim()
         // ctx.owner is the dispatched owner; undefined means the caller
         // never resolved one — resolve lazily. An explicit null stays
         // ownerless: no suppression, every claim reports as foreign
-        const self = ctx.owner === undefined ? agentOwner() : ctx.owner
+        const self = ctx.owner === undefined ? agentOwner() : ctx.owner;
         return parseWorktreePorcelain(
-          gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain']).out
+          gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS).out
         )
-          .slice(1) // porcelain lists the main worktree first
+          .slice(1)
           .filter((w) => !w.prunable && w.path !== cur)
-          // a worktree claimed by THIS agent's process tree is own
-          // work, not a foreign session — the nudge exists to warn
-          // about OTHER live claimants (bro-7022c)
           .filter((w) => {
             const claimOwner = worktreeClaimInfo(w.path)?.owner
             return (
@@ -2126,8 +2134,19 @@ export const workConnector: Connector = {
         if (!gd || !isLinkedGitDir(gd)) {
           return []
         }
-        const res = gitTry(['-C', ctx.dir, 'status', '--porcelain'])
-        const dirty = res.code === 0 ? res.out.split('\n').filter(Boolean).length : 0
+        const res = gitTry(['-C', ctx.dir, 'status', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS);
+        if (res.code !== 0) {
+          return [
+            {
+              aspect: 'work',
+              block:
+                'bro: could not verify clean state in linked worktree (status timed out or failed) — ' +
+                'commit/push the work or discard deliberately, then `bro work leave`',
+              armedHint: 'bro: still inside a linked worktree — `bro work leave` when done',
+            },
+          ];
+        }
+        const dirty = res.out.split('\n').filter(Boolean).length;
         return [
           {
             aspect: 'work',

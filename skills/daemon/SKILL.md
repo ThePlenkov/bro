@@ -41,6 +41,11 @@ in-flight agents, and killing a watch window never touches either.
 
 - `BRO_AGENT_ID` sessions are refused at `up` — spawned workers never
   arm supervisors (same predicate as `bro review drive --every`).
+- **The daemon is only as live as its binary** — it execs whatever
+  `bro` resolved at `up`/rearm time and keeps running it until `down`.
+  Merged changes protect the fleet only after that binary is rebuilt
+  AND the supervisor restarted; `bro doctor`'s `daemon` row compares
+  the running entry against the repo.
 - `daemon run` inherits drive's own guard, `drive.lock` hold, and
   heartbeat emission — the watchdog reads supervisor liveness through
   them, and `bro review watch` renders it in the `daemon` section. A
