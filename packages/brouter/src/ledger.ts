@@ -43,7 +43,7 @@ export async function ledgerHealth(
     return { snapshot: {}, known: false };
   }
   try {
-    await migrateStore(handle.db);
+    migrateStore(handle.db);
     return { snapshot: await healthSnapshot(handle.db, now), known: true };
   } catch {
     return { snapshot: {}, known: false };
@@ -74,7 +74,7 @@ export async function recordTurn(turn: {
   // session that skews the health counts
   const session = `ask-${now}-${turn.provider}-${randomUUID()}`;
   try {
-    await migrateStore(handle.db);
+    migrateStore(handle.db);
     await recordUsage(handle.db, {
       provider: turn.provider,
       model: turn.model,
@@ -109,7 +109,7 @@ export async function windowCounters(
     return undefined;
   }
   try {
-    await migrateStore(handle.db);
+    migrateStore(handle.db);
     return await usageInWindow(handle.db, {
       provider: model.provider,
       model: model.model,

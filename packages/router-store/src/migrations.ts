@@ -77,7 +77,7 @@ function recordApplied(db: RouterDb, id: string): void {
  *  event loop to a second caller, which would then `BEGIN` inside ours —
  *  "cannot start a transaction within a transaction". Without an await
  *  between `BEGIN` and `COMMIT` nothing can interleave. */
-export async function migrateStore(db: RouterDb): Promise<string[]> {
+export function migrateStore(db: RouterDb): string[] {
   db.$client.exec(BOOKKEEPING);
   const applied = appliedIds(db);
   const fresh: string[] = [];

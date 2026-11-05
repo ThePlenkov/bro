@@ -85,7 +85,7 @@ export class RouteTableError extends Error {
 
   constructor(problems: string[], source?: string) {
     super(
-      `${source === undefined ? 'route table' : source}: ${problems.length} problem(s)\n` +
+      `${source ?? 'route table'}: ${problems.length} problem(s)\n` +
         problems.map(p => `  ${p}`).join('\n')
     );
     this.name = 'RouteTableError';

@@ -69,7 +69,7 @@ export function unservedChains(table: RouteTable, declared: ServedDeclaration): 
         model: entry.model,
         reason:
           `brouter.models declares ${entry.provider} for ` +
-          `${[...models].sort().join(', ')} — not ${entry.model}`,
+          `${[...models].sort((a, b) => a.localeCompare(b)).join(', ')} — not ${entry.model}`,
       });
     }
   }

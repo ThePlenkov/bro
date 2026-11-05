@@ -95,7 +95,10 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type BrouterModels,
   type ClaimCapability,
+  type ExitCode,
+  type ExplainSlice,
   type Lease,
   type LeaseStore,
   type MirrorPolicy,
@@ -110,7 +113,6 @@ import {
   issueLink,
   printUsage,
 } from '@broject/core';
-import type { BrouterModels, ExitCode, ExplainSlice } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -2853,6 +2855,7 @@ function everySecArg(argv: string[]): number | undefined {
   }
   return everySec;
 }
+
 
 
 export async function runLoopCommand(argv: string[]): Promise<void> {

@@ -29,13 +29,13 @@ export async function runHealthCommand(argv: string[]): Promise<void> {
   }
   try {
     // a fresh machine must still answer — the tables are what the read needs
-    await migrateStore(handle.db);
+    migrateStore(handle.db);
     const snapshot = await healthSnapshot(handle.db);
     if (argv.includes('--json')) {
       console.log(JSON.stringify(snapshot, null, 2));
       return;
     }
-    const keys = Object.keys(snapshot).sort();
+    const keys = Object.keys(snapshot).sort((a, b) => a.localeCompare(b));
     for (const key of keys) {
       console.log(row(key, snapshot[key]!));
     }

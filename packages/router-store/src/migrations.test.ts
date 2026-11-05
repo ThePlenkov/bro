@@ -17,7 +17,7 @@ const TABLES = [usage, limits, sessions, migrations];
 test('the schema and the SQL agree — every table, every column', async () => {
   const handle = openStore(join(scratch, 'drift.db'));
   assert.ok(handle.ok);
-  await migrateStore(handle.db);
+  migrateStore(handle.db);
   for (const table of TABLES) {
     const config = getTableConfig(table);
     const rows = handle.db.$client.prepare(`pragma table_info("${config.name}")`).all() as {
@@ -36,8 +36,8 @@ test('the schema and the SQL agree — every table, every column', async () => {
 test('a second run applies nothing — the store is opened by every command', async () => {
   const handle = openStore(join(scratch, 'idempotent.db'));
   assert.ok(handle.ok);
-  const first = await migrateStore(handle.db);
-  const second = await migrateStore(handle.db);
+  const first = migrateStore(handle.db);
+  const second = migrateStore(handle.db);
   assert.deepEqual(first, migrationIds());
   assert.deepEqual(second, []);
   handle.close();
@@ -46,7 +46,7 @@ test('a second run applies nothing — the store is opened by every command', as
 test('the bookkeeping table remembers what ran', async () => {
   const handle = openStore(join(scratch, 'bookkeeping.db'));
   assert.ok(handle.ok);
-  await migrateStore(handle.db);
+  migrateStore(handle.db);
   const rows = handle.db.$client.prepare('select id from migrations').all();
   assert.deepEqual(
     rows.map(r => r.id as string),
@@ -55,11 +55,12 @@ test('the bookkeeping table remembers what ran', async () => {
   handle.close();
 });
 
-test('two runs at once do not fight over the transaction', async () => {
+test('the migration never yields — a second caller cannot land inside the transaction', () => {
   const handle = openStore(join(scratch, 'concurrent.db'));
   assert.ok(handle.ok);
-  const [first, second] = await Promise.all([migrateStore(handle.db), migrateStore(handle.db)]);
-  assert.deepEqual([...first, ...second].sort(), [...migrationIds()].sort());
+  const first = migrateStore(handle.db);
+  const second = migrateStore(handle.db);
+  assert.deepEqual(first, migrationIds());
   assert.deepEqual(second, [], 'the second run applies nothing');
   const rows = handle.db.$client.prepare('select id from migrations').all();
   assert.equal(rows.length, migrationIds().length, 'the bookkeeping holds one row per migration');

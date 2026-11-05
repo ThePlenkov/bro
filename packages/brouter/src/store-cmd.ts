@@ -31,7 +31,7 @@ function openOrFail(path: string): Extract<StoreHandle, { ok: true }> {
 async function migrate(path: string, json: boolean): Promise<void> {
   const handle = openOrFail(path);
   try {
-    const applied = await migrateStore(handle.db);
+    const applied = migrateStore(handle.db);
     if (json) {
       console.log(JSON.stringify({ path, applied }, null, 2));
       return;

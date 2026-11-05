@@ -36,11 +36,11 @@ export type ModelFamily = 'fable' | 'opus' | 'sonnet' | 'haiku' | 'other';
  *  its head is a lane. A segment, not a substring: `sonnet` inside
  *  `sonnetizer` names no family. */
 export function modelFamily(id: string): ModelFamily {
-  const segments = id.toLowerCase().split(/[^a-z0-9]+/);
-  if (segments.includes('fable')) return 'fable';
-  if (segments.includes('opus')) return 'opus';
-  if (segments.includes('sonnet')) return 'sonnet';
-  if (segments.includes('haiku')) return 'haiku';
+  const segments = new Set(id.toLowerCase().split(/[^a-z0-9]+/));
+  if (segments.has('fable')) return 'fable';
+  if (segments.has('opus')) return 'opus';
+  if (segments.has('sonnet')) return 'sonnet';
+  if (segments.has('haiku')) return 'haiku';
   return 'other';
 }
 

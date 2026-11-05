@@ -35,7 +35,7 @@ async function ledgerHealth(): Promise<{ snapshot: HealthSnapshot; known: boolea
     return { snapshot: {}, known: false };
   }
   try {
-    await migrateStore(handle.db);
+    migrateStore(handle.db);
     return { snapshot: await healthSnapshot(handle.db), known: true };
   } catch {
     return { snapshot: {}, known: false };
