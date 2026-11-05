@@ -930,3 +930,13 @@ this run's own work product):
   merge/capture) behind the `EngineMap` + `admit`/`recheck` seams;
   `.7` stamps traceability — after that, logged runs replay as
   golden tests end to end.
+
+## Run 8.6 — live e2e: full nine-stage run on the real durable plane
+
+- **Invocation:** `npx tsx scripts/pipeline-live-e2e.mts` — the real repo's pipeline plane (`.git/bro/pipeline/`), real `taskSpecFacade(taskStore(dir))` over the bd store, item `bro-qjji2.6` (4 real `## Acceptance` rows), REAL `intakeStage`/`verifyStage`/`acceptStage`, customer `petr`. Scripted only where declared: classify/route/review verdicts, the `fleet` work seam (a real provider spawn is budget), merge/capture.
+- **Spec ref:** bro-7d5nb §stages/§transitions/§customer channels.
+- **Expected:** run walks classify→route→intake→work→verify→review→accept, emits the evidence bundle and parks; a forged signer parks on `customer-mismatch`; the recorded customer's verdict settles accept → merge → capture → end.
+- **Actual:** exactly as expected, on durable state — run `4f37f26f`: journal shows per-stage pending intent → settled verdict; `intake.accepted` journaled spec-sha `4294c6e1…` + worker slot; `verify.verified` journaled 4 evidence rows produced by real `grep -ic` probes against this log; `accept` emitted → parked → `customer-mismatch` on `--by mallory` → settled `accepted` on `--by petr`; `merge.landed` → `capture.captured` → end. The customer verdicts were written by the **built CLI** (`node packages/cli/dist/index.js pipeline accept`) which auto-discovered the parked run via `awaitingCustomerRuns` and appended durable records to `<run>.customer.jsonl`.
+- **First-run friction (real gates, not bugs):** `work` parked `admission-unavailable` until the `admit` go-marker bound (spawn admission is real); `review` parked `gate-indeterminate` until classify journaled `complexity` (the `gate_on` contract is real). Both surfaced exactly as the spec designed — fail-closed on missing inputs.
+- **Gaps → beads:** `bro pipeline answer` has no intake consumer (.9); no production run-starter / `run.customer` source (.10); emit transport adapter (.11); fleet work engine (.12); annotate crash-window dedup (.13); typed proof refs (.14).
+- **Golden:** yes — the durable journal + channel rows are replayable evidence; the script is the harness.
