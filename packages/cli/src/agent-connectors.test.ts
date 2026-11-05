@@ -2793,6 +2793,77 @@ describe('provider-resolved spawns', () => {
     }
   });
 
+  test('native: pipeline provenance pins BRO_FORMULA + session, stamps the registry (spec bro-7d5nb)', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = 'f'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipeline', formulaSha: sha, stage: 'work', sessionId: 'sess-9' },
+        // ambient forgery attempts are pin-filtered like every other
+        // provenance key
+        env: { BRO_FORMULA: 'forged@bad', BRO_SESSION_ID: 'forged-session' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipeline@${sha}|sess-9`);
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, 'pipeline');
+      assert.equal(entry.formula_sha, sha);
+      assert.equal(entry.pipeline_stage, 'work');
+      assert.equal(entry.session_id, 'sess-9');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a pipeline spawn without a sessionId pins agentId as the attested session', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = '0'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipe', formulaSha: sha },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipe@${sha}|${entry.agentId}`);
+      assert.equal(entry.session_id, entry.agentId);
+      assert.equal(entry.pipeline_stage, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a non-pipeline spawn writes no formula stamps', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, undefined);
+      assert.equal(entry.formula_sha, undefined);
+      assert.equal(entry.pipeline_stage, undefined);
+      assert.equal(entry.session_id, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('gascity: a provider-resolved worker refuses before any gc call', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }]);
     try {

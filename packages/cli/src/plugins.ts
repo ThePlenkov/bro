@@ -683,7 +683,8 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'trace',
     group: 'fleet',
-    summary: 'OTLP export of the session trace journals — export [--session|--dry-run|--json]',
+    summary:
+      '<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals',
     run: runTraceCommand,
     skill: 'trace',
     configKey: 'telemetry',

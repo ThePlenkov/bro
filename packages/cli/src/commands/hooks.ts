@@ -9,7 +9,9 @@
  *                                       the review host parses its own PR URLs → act snapshot
  *   pre-tool                          connector preTool verdicts — the guard plane:
  *                                       first block vetoes the call, input overrides merge
- *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
+ *   post-tool                         exec nudges: gh pr create → act gate + the
+ *                                       detached trace-stamp footer (bro-7d5nb);
+ *                                       merge → debt sweep;
  *                                       first mutating bro subcommand per session cites its
  *                                       governing skill (skills/<name>/SKILL.md); arms the
  *                                       stop gate for this session (bro act/drill/
@@ -117,6 +119,7 @@ import {
 } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
+import { maybeSpawnTraceStamp } from './trace-resolve.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
@@ -1605,6 +1608,13 @@ async function emitPostTool(input: HookInput): Promise<void> {
   }
   if (outcome === true) {
     lines.push(...execNudges(cmd));
+    // a landed `gh pr create` in a formula-attested session earns the
+    // detached PR-body footer stamp (spec bro-7d5nb §traceability) —
+    // the worker ran create; the driver-side stamp is what a worker
+    // cannot fake (the resolver still treats it as a hint)
+    if (classifyExecCommand(cmd) === 'pr-create') {
+      maybeSpawnTraceStamp(process.cwd());
+    }
   }
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
