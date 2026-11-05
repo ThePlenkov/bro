@@ -8,6 +8,7 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { procStat } from '../../../packages/core/src/index.ts';
 import { ctxJson, repoDir, STATE_DIR, stateScope, syncPidPath } from './lib.ts';
 import { converge } from './reconcile.ts';
 import { type EventSource, LiveSource, PollSource } from './sources.ts';
@@ -17,11 +18,22 @@ const EVERY_MS = Math.max(5, Number.isFinite(requested) ? requested : 30) * 1000
 
 const repo = repoDir(ctxJson());
 
-// publish our pid — the ensure-probe in reconcile.ts reads this file,
-// so a launcher that rewrites argv (absolute path, non-node runtime)
-// still counts as a live loop instead of a missing one
-mkdirSync(STATE_DIR, { recursive: true });
-writeFileSync(syncPidPath(stateScope(repo)), `${process.pid}\n`);
+// publish our pid + /proc starttime — the ensure-probe in reconcile.ts
+// reads this file, so a launcher that rewrites argv (absolute path,
+// non-node runtime) still counts as a live loop instead of a missing
+// one, and a pid the kernel recycled is never mistaken for this loop.
+// The write is advisory: a loop that cannot publish still reconciles —
+// the ensure path just loses dedup for the pass
+try {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const start = procStat(process.pid)?.start;
+  writeFileSync(
+    syncPidPath(stateScope(repo)),
+    `${process.pid}${start !== undefined && start !== '' ? ` ${start}` : ''}\n`
+  );
+} catch {
+  console.log('bro sync — pid marker write failed; open-dedup degraded this pass');
+}
 const source: EventSource =
   process.env.BRO_SYNC_SOURCE === 'poll'
     ? new PollSource(repo, EVERY_MS)

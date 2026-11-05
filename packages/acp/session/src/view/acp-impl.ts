@@ -10,8 +10,8 @@
  * "other"` (observed activity, the readonly posture). `turn stop`
  * rows map to `prompt_response` (the turn_end marker; duration 0 —
  * the archive never records prompt_sent); `turn start` maps to
- * nothing rather than fabricate a user message; permission rows map
- * to `permission_opened`.
+ * `turn_started` — the lifecycle half only, never a fabricated user
+ * message; permission rows map to `permission_opened`.
  *
  * Their session is immutable and delta-free, so `drain()` diffs the
  * item maps and emits our ops — a changed item re-projects whole.
@@ -85,7 +85,10 @@ function eventsOf(row: ArchiveRow): ModelEvent[] {
   if (row.kind === 'turn' && row.phase === 'start') {
     // the archive's turn-open marker — `prompt_sent` would fabricate a
     // user message the journal does not carry; `turn_started` is the
-    // lifecycle half only, but it is what lets the LED reach running
+    // lifecycle half only, but it is what lets the LED reach running.
+    // A stamp-less start (t === 0) must not anchor the turn at epoch —
+    // the matching stop would render an epoch-sized duration
+    if (t === 0) return [];
     return [{ type: 'turn_started', at: t }];
   }
   if (row.kind === 'turn' && row.phase === 'stop') {

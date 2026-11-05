@@ -1,9 +1,10 @@
 /**
  * The pane impl seam (spec bro-q2edc, "Phase 2 — the seam"): the
- * registry resolves `--impl`/env to a `PaneImpl`, the default stays
- * `legacy`, and unknown names fail loud. The `acp` impl is Bun-only
- * (it loads `acp-model`), so these tests exercise the seam's
- * Node-safe half only — resolution and the legacy impl end to end.
+ * registry resolves `--impl`/env to a `PaneImpl`, the default is
+ * `acp` (the headless dump falls back to `legacy` unflagged), and
+ * unknown names fail loud. Both impls run under Node here — the
+ * `acp` cases exercise the seam end to end; only the Solid/TUI
+ * shell above them stays Bun-only.
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';

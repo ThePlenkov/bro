@@ -40,7 +40,9 @@ const VALUE_FLAGS = new Set(['--events', '--agent']);
  *  a missing value, or a flag-looking one — a hand-rolled indexOf
  *  silently dropped the binding. */
 function viewContext(argv: string[]): SessionPaneCtx | undefined {
-  const worktree = positionals(argv, VALUE_FLAGS)[0];
+  // single-dash tokens are positional to positionals() — keep the
+  // dash filter so `-h`/`-v` can never become the worktree arg
+  const worktree = positionals(argv, VALUE_FLAGS).find(a => !a.startsWith('-'));
   if (worktree === undefined) {
     console.error(
       'usage: bro herdr session-view <worktree> [--once] [--events <path>] [--agent <id>]'

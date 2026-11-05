@@ -50,6 +50,65 @@ test('a second turn_started re-anchors an idle-pending turn', () => {
   assert.equal(end?.kind === 'marker' && end.markerKind === 'turn_end' ? end.durationMs : -1, 1000);
 });
 
+test('a fresh turn_started seals the dropped turn — an id-less chunk never joins it', () => {
+  let s = createSession();
+  s = reduce(s, { type: 'turn_started', at: 1000 } as ModelEvent);
+  const chunk = (text: string, at: number): ModelEvent =>
+    ({
+      type: 'session_update',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+      },
+      at,
+    }) as ModelEvent;
+  s = reduce(s, chunk('hi', 1100));
+  // the first turn's stop was dropped mid-window; the next start
+  // seals its live item so a later id-less chunk cannot append to it
+  s = reduce(s, { type: 'turn_started', at: 9000 } as ModelEvent);
+  s = reduce(s, chunk('there', 9100));
+  const texts = [...s.items.values()]
+    .filter(i => i.kind === 'agent_message')
+    .map(i => (i.kind === 'agent_message' ? i.text : ''));
+  assert.deepEqual(texts, ['hi', 'there']);
+});
+
+test('a sealed turn abandons its tool call — live status reads failed, never glows live', () => {
+  let s = createSession();
+  s = reduce(s, { type: 'turn_started', at: 1000 } as ModelEvent);
+  s = reduce(s, {
+    type: 'session_update',
+    update: {
+      sessionUpdate: 'tool_call',
+      toolCallId: 't1',
+      title: 'run it',
+      status: 'in_progress',
+    },
+    at: 1100,
+  } as ModelEvent);
+  s = reduce(s, { type: 'turn_started', at: 9000 } as ModelEvent);
+  const tool = [...s.items.values()].find(i => i.kind === 'tool_call');
+  assert.equal(tool?.status, 'final');
+  assert.equal(tool?.kind === 'tool_call' ? tool.toolStatus : '', 'failed');
+});
+
+test("a fresh turn_started commits the dropped turn's reported plan", () => {
+  let s = createSession();
+  s = reduce(s, { type: 'turn_started', at: 1000 } as ModelEvent);
+  s = reduce(s, {
+    type: 'session_update',
+    update: {
+      sessionUpdate: 'plan',
+      entries: [{ content: 'step one', priority: 'high', status: 'pending' }],
+    },
+    at: 1100,
+  } as ModelEvent);
+  s = reduce(s, { type: 'turn_started', at: 9000 } as ModelEvent);
+  const plans = [...s.items.values()].filter(i => i.kind === 'plan');
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0]?.kind === 'plan' ? plans[0].entries[0]?.content : '', 'step one');
+});
+
 test('a second turn_started keeps the pending permission tracking', () => {
   let s = createSession();
   s = reduce(s, { type: 'turn_started', at: 1000 } as ModelEvent);

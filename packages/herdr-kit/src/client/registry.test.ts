@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   agentEntry,
+  agentKey,
   displayAgentOf,
   pidAlive,
   registryHomeOf,
@@ -89,7 +90,7 @@ test('registryHomeOf — only the <git-common>/bro/agents layout resolves a home
   });
 });
 
-test('workerLedState — working needs an unfinished run AND a live pid AND a fresh journal', () => {
+test('workerLedState — working needs a live pid AND a fresh, non-empty journal', () => {
   withBase(base => {
     const events = join(base, 'native-x.events.jsonl');
     writeFileSync(events, '{}\n');
@@ -148,5 +149,29 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     // live pid, no journal path known → idle: a pid alone proves
     // nothing — 'working' needs a journal provably being written
     assert.equal(workerLedState(live, undefined), 'idle');
+    // a journal stamped in the FUTURE is not fresh — a stopped clock
+    // must not pin 'working' until wall time catches up
+    const future = new Date(Date.now() + 3_600_000);
+    utimesSync(events, future, future);
+    assert.equal(workerLedState(live, events), 'idle');
+  });
+});
+
+test('workerLedState — a failed spawn (spawnError, no pid) reads blocked, not idle', () => {
+  assert.equal(workerLedState({ spawnError: 'boom' }, '/x.events.jsonl'), 'blocked');
+  // a never-attempted entry has no crash to report
+  assert.equal(workerLedState({}, '/x.events.jsonl'), 'idle');
+});
+
+test('agentEntry/agentKey — a malformed log field never throws the stem lookup', () => {
+  withBase(base => {
+    seedReg(base, {
+      'bro-num': { log: 42 },
+      'bro-ok': { agentId: 'native-ok', log: '/x/native-ok.log' },
+    });
+    // the malformed row is skipped, the well-formed one still resolves
+    assert.equal(agentEntry(base, 'native-ok')?.agentId, 'native-ok');
+    assert.equal(agentKey(base, 'native-ok'), 'bro-ok');
+    assert.equal(agentEntry(base, '42'), undefined);
   });
 });

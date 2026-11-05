@@ -85,11 +85,17 @@ export function sessionCommand(
 function armSession(ctx: RenderCtx, paneId: string): boolean {
   herdrTry(['pane', 'rename', paneId, SESSION_LABEL]);
   if (!herdrOk(['pane', 'run', paneId, sessionCommand(ctx.path, ctx.agent)])) return false;
+  // the record REPLACES on every arm — the close ledger must ride it
+  // or a rebind/rearm silently orphans the stale panes it still owes
+  const prev = ctx.state.sessions[ctx.path];
   ctx.state.sessions[ctx.path] = {
     workspace: ctx.ws,
     worktree: ctx.path,
     pane_id: paneId,
     agent_id: ctx.agent?.id,
+    ...(prev !== undefined && (prev.closePending?.length ?? 0) > 0
+      ? { closePending: prev.closePending }
+      : {}),
   };
   return true;
 }
@@ -148,11 +154,16 @@ function paneLive(ctx: RenderCtx): boolean {
 }
 
 /** Stale panes the last rebinds could not close — retried at the top
- *  of every pass so they do not linger showing the old archive. */
-function retryClose(ctx: RenderCtx, rec: SessionRec | undefined): void {
+ *  of every pass so they do not linger showing the old archive. A
+ *  pending id is only ours to close while it still carries the
+ *  session label — a recycled pane id wearing a foreign label is a
+ *  user's pane now; it drops off the ledger, never gets killed. */
+function retryClose(ctx: RenderCtx, rec: SessionRec | undefined, panes: HerdrPane[]): void {
   const pending = rec?.closePending;
   if (pending === undefined || pending.length === 0) return;
-  const left = pending.filter(id => paneExists(id) && !herdrOk(['pane', 'close', id]));
+  const ours = (id: string): boolean =>
+    panes.some(p => p.pane_id === id && p.label === SESSION_LABEL);
+  const left = pending.filter(id => ours(id) && !herdrOk(['pane', 'close', id]));
   const { closePending: _closePending, ...rest } = rec;
   ctx.state.sessions[ctx.path] = left.length === 0 ? rest : { ...rest, closePending: left };
 }
@@ -161,16 +172,22 @@ function retryClose(ctx: RenderCtx, rec: SessionRec | undefined): void {
  *  running pane is pinned to the old archive. Arm the replacement
  *  FIRST: closing the workspace's last pane before its successor
  *  exists auto-reaps the whole workspace mid-pass (dogfood reap —
- *  the same constraint the arm-order follows). */
+ *  the same constraint the arm-order follows). False while no new
+ *  pane is bound — a backed-off or failed rebind reports the stale
+ *  pane as it is: not a live session view (the caller's fallback
+ *  surfaces still arm). */
 function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): boolean {
   if (rec?.retryAt !== undefined && rec.retryAt > Date.now()) {
-    return paneLive(ctx); // a failed arm is still backing off — keep the stale pane
+    // a failed arm is still backing off — keep the stale pane, but it
+    // is bound to the old archive: not the pass's live session pane
+    return false;
   }
   const next = splitPane(paneId, ctx);
   if (next !== undefined && armSession(ctx, next)) {
     if (!herdrOk(['pane', 'close', paneId])) {
       // the stale pane survived — remember it so a later pass retries;
       // each rebind can leave another, so the field is a list
+      // (armSession already carried the prior ledger forward)
       const r = ctx.state.sessions[ctx.path];
       if (r !== undefined) {
         ctx.state.sessions[ctx.path] = {
@@ -190,7 +207,7 @@ function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): bo
     ctx.state.sessions[ctx.path] = { ...rec, retryAt: Date.now() + REBIND_BACKOFF_MS };
   }
   log(`session pane ${paneId} → ${ctx.ws}: rebind deferred (split/arm failed)`);
-  return paneLive(ctx);
+  return false;
 }
 
 /** One workspace's session-pane convergence — the decision lives in
@@ -198,9 +215,10 @@ function rebind(ctx: RenderCtx, rec: SessionRec | undefined, paneId: string): bo
  *  idle pane → split); this is the exec half: probe, decide, run.
  *  Returns whether a live session pane is bound after the pass. */
 export function ensureSession(ctx: RenderCtx): boolean {
-  const rec = ctx.state.sessions[ctx.path];
-  retryClose(ctx, rec);
   const panes = paneList(ctx.ws);
+  retryClose(ctx, ctx.state.sessions[ctx.path], panes);
+  // re-read after the ledger drain — retryClose rewrites the record
+  const rec = ctx.state.sessions[ctx.path];
   const act = decideSession({
     rec,
     panes,
@@ -229,15 +247,24 @@ export function ensureSession(ctx: RenderCtx): boolean {
  *  or orphan-labeled `bro: session` pane and drop the record. */
 export function retireSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
+  const panes = paneList(ctx.ws);
   const { closeId } = decideSessionRetire({
     rec,
-    panes: paneList(ctx.ws),
+    panes,
     sessionLabel: SESSION_LABEL,
     exists: paneExists,
   });
   if (closeId !== undefined) {
     herdrTry(['pane', 'close', closeId]);
     log(`retire session pane ${closeId} — no resolvable session (${ctx.ws})`);
+  }
+  // the pending-close ledger dies with the record — drain it now or
+  // stale archives linger forever past the retire (label-checked the
+  // same as retryClose: a recycled id is never ours to kill)
+  for (const id of rec?.closePending ?? []) {
+    if (id !== closeId && panes.some(p => p.pane_id === id && p.label === SESSION_LABEL)) {
+      herdrTry(['pane', 'close', id]);
+    }
   }
   delete ctx.state.sessions[ctx.path];
 }

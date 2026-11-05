@@ -68,12 +68,17 @@ export function decideSession(input: {
   idle: (paneId: string) => boolean;
   /** The live agent the caller resolved for this pass — when the
    *  recorded binding points at a different archive the pane is
-   *  closed and re-armed (a running tail never restarts itself). */
+   *  closed and re-armed (a running tail never restarts itself). An
+   *  UNRESOLVED pass (`agent` absent) never rebinds: a transient
+   *  registry miss must not close a live view — the pane keeps its
+   *  current binding until a replacement is actually resolved. */
   agent?: { id: string };
 }): SessionAction {
   const { rec } = input;
   if (rec !== undefined && input.exists(rec.pane_id)) {
-    if (rec.agent_id !== input.agent?.id) return { kind: 'rebind', paneId: rec.pane_id };
+    if (input.agent !== undefined && rec.agent_id !== input.agent.id) {
+      return { kind: 'rebind', paneId: rec.pane_id };
+    }
     if (!input.idle(rec.pane_id)) return { kind: 'none' };
     return { kind: 'rearm', paneId: rec.pane_id, adopted: true };
   }

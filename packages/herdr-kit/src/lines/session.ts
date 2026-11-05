@@ -28,8 +28,10 @@ import type {
   SessionUpdateLike,
 } from '@broject/providers';
 import {
+  type AgentEntry,
   agentEntry,
-  agentKey,
+  displayAgentOf,
+  logStem,
   type PaneLed,
   release as paneRelease,
   registryHomeOf,
@@ -465,6 +467,17 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
     (ctx.events !== undefined ? registryHomeOf(ctx.events) : undefined) ??
     gitCommonDir(ctx.worktree) ??
     ctx.worktree;
+  /** The bound worker's registry entry — `--agent` first; a
+   *  journal-only bind (`--events` alone) still names its worker by
+   *  the file's own stem, or a provable crash reads 'unknown'. */
+  const entryOf = (): AgentEntry | undefined =>
+    agentEntry(
+      base,
+      ctx.agent ??
+        (ctx.events !== undefined
+          ? basename(ctx.events).replace(/\.events\.jsonl$/, '')
+          : undefined)
+    );
   /** The bound journal path — `--agent` may carry a registry KEY
    *  (`bro-2bv6q`) while the journal sits on the archive stem
    *  (`native-<hash>.events.jsonl`), so resolve through the matched
@@ -473,19 +486,14 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const eventsPathOf = (): string | undefined => {
     if (ctx.events !== undefined) return ctx.events;
     if (ctx.agent === undefined) return undefined;
-    const stem =
-      agentEntry(base, ctx.agent)
-        ?.log?.replace(/\.log$/, '')
-        .split('/')
-        .pop() ?? ctx.agent;
-    return eventsFile(base, stem);
+    return eventsFile(base, logStem(entryOf()) ?? ctx.agent);
   };
   /** The worker floor with its reason stamped — a blocked worker
    *  reports WHEN it exited (the journal's last write), an idle one
    *  when it went quiet. */
   const workerLedOf = (): PaneLed => {
     const eventsPath = eventsPathOf();
-    const state = workerLedState(agentEntry(base, ctx.agent), eventsPath);
+    const state = workerLedState(entryOf(), eventsPath);
     if (state === 'working' || state === 'unknown' || eventsPath === undefined) {
       return { state };
     }
@@ -499,14 +507,20 @@ export async function runSessionPane(ctx: SessionPaneCtx, deps: SessionPaneDeps)
   const directTarget = (): SessionTarget | undefined => {
     if (!bound) return undefined;
     const eventsPath = eventsPathOf();
+    const entry = entryOf();
     return {
       worktree: ctx.worktree,
       status: 'live',
       workerLed: workerLedOf(),
       ...(eventsPath !== undefined ? { events: eventsPath } : {}),
+      // the display agent is the true provider name — the same label
+      // the OpenTUI path resolves — never the registry run key
       ...(ctx.agent !== undefined
-        ? { agent: agentKey(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
+        ? { agent: displayAgentOf(base, ctx.agent) ?? ctx.agent, slug: ctx.agent }
         : {}),
+      // the native log rides along — an events-render failure tails
+      // it instead of ending on a bare note
+      ...(typeof entry?.log === 'string' ? { log: entry.log } : {}),
     };
   };
 

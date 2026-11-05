@@ -478,7 +478,10 @@ function handlePermissionOpened(
   };
   next = appendItem(next, item);
 
-  const turn = next.turn ?? emptyTurn(at);
+  // a permission that opens a turn with no `turn_started` sits in the
+  // archive window mid-turn — the fabricated turn is archive-sourced,
+  // or the rest of it mislabels `self`
+  const turn = next.turn ?? emptyTurn(at, true);
   const ids = turn.openPermissionToolCallIds.includes(toolCallId)
     ? turn.openPermissionToolCallIds
     : [...turn.openPermissionToolCallIds, toolCallId];
@@ -504,7 +507,9 @@ function closePermission(
 // -- Elicitation requests (they add no item; only the turn state follows them) --------------------
 
 function openElicitation(session: Session, elicitationId: string, at: number): Session {
-  const turn = session.turn ?? emptyTurn(at);
+  // same archive rule as permissions: a turn fabricated here is
+  // archive-sourced, never `self`
+  const turn = session.turn ?? emptyTurn(at, true);
   if (turn.openElicitationIds.includes(elicitationId)) return session;
   return withOpenRequests(session, { ...turn, openElicitationIds: [...turn.openElicitationIds, elicitationId] });
 }
@@ -543,7 +548,18 @@ function finaliseLiveItems(session: Session): Session {
   for (const id of next.order) {
     const item = next.items.get(id);
     if (item && item.kind === "tool_call" && item.status === "live") {
-      next = updateItem(next, id, (it) => (it.kind === "tool_call" ? { ...it, status: "final" } : it));
+      next = updateItem(next, id, (it) =>
+        it.kind === "tool_call"
+          ? {
+              ...it,
+              status: "final",
+              // a call the sealed turn abandoned never completed —
+              // "failed" is the terminal the readers key liveness on
+              // (keeping pending/in_progress would glow live forever)
+              toolStatus: isTerminalToolStatus(it.toolStatus) ? it.toolStatus : "failed",
+            }
+          : it,
+      );
     }
   }
   return { ...next, liveTextItemId: null, activeRun: null };
@@ -795,13 +811,20 @@ export function reduce(
         return { ...withOpenRequests(session, { ...prev, archive: true }), stopReason: null };
       }
       // a fresh archive turn — seal the dropped turn's live run too,
-      // or the next id-less chunk concatenates into a dead turn's item
-      const sealed = finaliseLiveItems(session);
+      // or the next id-less chunk concatenates into a dead turn's
+      // item. The seal commits a reported plan like endTurn does —
+      // a dropped stop must not lose the plan it already printed
+      const sealed = commitPlanIfReported(finaliseLiveItems(session));
       return { ...withOpenRequests(sealed, emptyTurn(event.at, true)), stopReason: null };
     }
 
     case "prompt_response": {
-      const durationMs = session.turn ? Math.max(0, event.at - session.turn.startedAt) : 0;
+      // a turn anchored at epoch 0 (a stamp-less start row) would
+      // render an epoch-sized duration — only a real start anchors
+      const durationMs =
+        session.turn && session.turn.startedAt > 0
+          ? Math.max(0, event.at - session.turn.startedAt)
+          : 0;
       const next = endTurn(session, event.at, {
         kind: "marker",
         markerKind: "turn_end",
