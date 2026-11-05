@@ -11,6 +11,7 @@
  * by. A window is not a session: the session's own cost is the turn's, and
  * the window's counters are the scale around it.
  */
+import { randomUUID } from 'node:crypto';
 import type { HealthSnapshot } from '@broject/core';
 import {
   closeSession,
@@ -68,7 +69,10 @@ export async function recordTurn(turn: {
   if (!handle.ok) {
     return false;
   }
-  const session = `ask-${now}-${turn.provider}`;
+  // the id must be unique: two turns in the same millisecond would collide,
+  // and the collision resets the first session's endedAt — a ghost open
+  // session that skews the health counts
+  const session = `ask-${now}-${turn.provider}-${randomUUID()}`;
   try {
     await migrateStore(handle.db);
     await recordUsage(handle.db, {
