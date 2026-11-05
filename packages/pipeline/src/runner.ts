@@ -23,6 +23,7 @@ import { type MaybePromise, mintRunId } from '@broject/core';
 import {
   entryStage,
   type GateOn,
+  isTerminalAction,
   type PipelineFormula,
   type PipelineStage,
   SKIP_VERDICT,
@@ -98,6 +99,18 @@ export const PARK_ALERTS = {
   verdictMalformed: 'verdict-malformed',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
+
+/** The capacity-wait park tag — stamped on an alert row when an item
+ *  is held out of a saturated stage (or the pipeline itself, under
+ *  `limits.in_flight`). Deliberately NOT in PARK_ALERTS: that union is
+ *  the fail-closed contract (the world must repair before a wake
+ *  helps), while a saturated park waits for a slot to free — an
+ *  occupant's verdict transitioning it out is the wake. Same
+ *  queue-shaped semantics as `route`'s `queue` verdict on
+ *  `QUEUE_REASONS.saturated`: the item suspends at the stage's door
+ *  (`resume` = the stage it was entering) and a later wake re-checks
+ *  occupancy before letting it in. */
+export const SATURATION_ALERT = 'stage-saturated';
 
 /** Journal events stamped on alert rows that are NOT fail-closed
  *  parks — durable markers a `ParkAlert` union must not absorb, so
@@ -240,6 +253,16 @@ export interface RunOptions {
   maxSteps?: number;
   /** scoped-fix re-entry budget — default 3 (act.maxRounds contract) */
   fixRounds?: number;
+  /** the machine budget — what the box CAN run (the caller binds a
+   *  `fleet.maxConcurrent`/`agents.<kind>.maxBatchWorkers`-style cap).
+   *  Composes with the formula the way `route`'s occupancy guard
+   *  composes its `cap`: the effective in-flight limit is
+   *  `min(formula.limits.in_flight, maxInFlight)` — the formula limit
+   *  is the contract (what this flow MAY run), the machine number can
+   *  only narrow it. 0 or absent = no machine cap, the formula limit
+   *  stands alone (same `cap ≤ 0` = uncapped convention as
+   *  `RouteLoad.cap`). */
+  maxInFlight?: number;
   /** the verdict name scoped-fix mode binds to — default 'fix'
    *  (single-name shorthand for {@link RunOptions.fixVerdicts}) */
   fixVerdict?: string;
@@ -293,6 +316,9 @@ interface Run {
   steps: number;
   fixRounds: number;
   fixVerdicts: string[];
+  /** effective pipeline cap — min(formula limits.in_flight, machine
+   *  budget); stage caps narrow it further, never widen it */
+  inFlight: number;
   customer?: string;
   ctx: PipelineContext;
   seq: number;
@@ -312,6 +338,87 @@ function recordsOf(run: Run): JournalRow[] {
   return journalRecords(
     run.journal.rows().filter(r => r.run_id === run.runId && r.item === run.item)
   );
+}
+
+/** One flow's tail — where its last journaled record leaves it
+ *  (spec §Concurrency: "the journaled stage occupancy IS the
+ *  semaphore"). `moving` means the item is still inside the pipeline
+ *  and counts toward `limits.in_flight`; `stage` is the stage it
+ *  occupies — a stage occupies an item between its intent and its
+ *  verdict-settled transition out, so:
+ *
+ *  - verdict-less intent → occupies `stage` (the crash window counts —
+ *    a crashed runner resumes with the same counts);
+ *  - settled verdict → the transition decides: `retry` re-enters the
+ *    SAME stage (the item never left — still occupies it); a stage
+ *    target means the item is mid-transit — moving, occupying nothing
+ *    until the target's intent lands; `park`/terminal/unknown targets
+ *    mean the flow suspended or ended — not moving, occupying nothing;
+ *  - alert row → parked out of the active set — neither.
+ */
+interface FlowTail {
+  moving: boolean;
+  stage?: string;
+}
+
+function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
+  const last = records.at(-1);
+  if (last === undefined || last.alert !== undefined) {
+    return { moving: false };
+  }
+  if (last.verdict === undefined) {
+    return { moving: true, stage: last.stage };
+  }
+  const target = transitionFor(formula, last.stage, last.verdict);
+  if (target === 'retry') {
+    return { moving: true, stage: last.stage };
+  }
+  if (target !== undefined && !isTerminalAction(target)) {
+    return { moving: true };
+  }
+  return { moving: false };
+}
+
+/** Every other flow's tail, reconstructed from the journal — rows
+ *  group per run_id BEFORE seq-collapse (seqs are per-run; collapsing
+ *  across runs would merge unrelated intents). This run's own rows are
+ *  excluded: its slot is already held, never counted against itself.
+ *  One journal file per run means a file-backed journal sees only its
+ *  own flow — cross-run counting needs a journal spanning the run set
+ *  (tests share one; prod binds an occupancy view over the pipeline
+ *  dir — the `opts.journal` seam is where it lands). */
+function flowTails(run: Run): FlowTail[] {
+  const byRun = new Map<string, JournalRow[]>();
+  for (const r of run.journal.rows()) {
+    if (r.run_id === run.runId) {
+      continue;
+    }
+    const g = byRun.get(r.run_id);
+    if (g === undefined) {
+      byRun.set(r.run_id, [r]);
+    } else {
+      g.push(r);
+    }
+  }
+  return [...byRun.values()].map(rows => flowTail(run.formula, journalRecords(rows)));
+}
+
+/** Is THIS run still moving — its own tail, same rule as the others. */
+const selfMoving = (run: Run): boolean => flowTail(run.formula, recordsOf(run)).moving;
+
+/** Effective cap on a stage — `concurrency` narrows the pipeline cap,
+ *  never widens it; absent → the pipeline cap applies (spec
+ *  §Concurrency). */
+const stageCap = (run: Run, stage: PipelineStage): number =>
+  Math.min(stage.concurrency ?? run.inFlight, run.inFlight);
+
+/** Effective pipeline cap — the formula contract vs the machine
+ *  budget: `min(limits.in_flight, maxInFlight)`, where a machine cap
+ *  of 0/absent is uncapped (route's occupancy-guard convention: a
+ *  `cap` that can't trip is no cap). */
+function inFlightFor(formula: PipelineFormula, opts: RunOptions): number {
+  const machine = bounded('maxInFlight', opts.maxInFlight, 0, 0);
+  return machine > 0 ? Math.min(formula.limits.in_flight, machine) : formula.limits.in_flight;
 }
 
 /** The run id: explicit opt wins, else the journal's own (an injected
@@ -416,6 +523,7 @@ function initRun(
     // first fix verdict via the normal exhaustion path
     fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS, 0),
     fixVerdicts: fixVerdictsFor(opts),
+    inFlight: inFlightFor(formula, opts),
     customer: opts.customer,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
@@ -740,13 +848,38 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
   return transitionStep(run, res, to);
 }
 
-/** One loop tick: stage exists → gate → skip or invoke. */
+/** One loop tick: stage exists → admission → gate → occupancy →
+ *  skip or invoke. The two capacity checks (spec §Concurrency —
+ *  "declared, never assumed") read the journaled occupancy as the
+ *  semaphore:
+ *
+ *  - `in_flight` bounds ADMISSION — a run that is not already moving
+ *    (fresh, or waking from a park) may enter only while fewer than
+ *    the cap items are moving; a moving run already holds its slot and
+ *    flows on. Checked before the gate: even a would-be-skip entry is
+ *    an admission.
+ *  - `concurrency`/the pipeline cap bounds OCCUPANCY — checked after
+ *    the gate because a gate-fail skips the stage entirely (its skip
+ *    record settles in one row, so it never occupies a slot).
+ *
+ *  Either cap refusing parks the item at the stage's door —
+ *  `stage-saturated`, `resume` = the stage it was entering — the
+ *  queue-shaped path: a wake re-enters here and re-checks. */
 async function stepOnce(run: Run, to: NextStep): Promise<Step> {
   const stage = run.formula.stages.find(s => s.name === to.stage);
   if (stage === undefined) {
     return alertStep(run, to, {
       alert: PARK_ALERTS.formulaDrift,
       detail: `stage "${to.stage}" is not in this formula`,
+      resume: to.stage,
+    });
+  }
+  const tails = flowTails(run);
+  const moving = tails.filter(t => t.moving).length;
+  if (!selfMoving(run) && moving >= run.inFlight) {
+    return alertStep(run, to, {
+      alert: SATURATION_ALERT,
+      detail: `in_flight ${run.inFlight} reached — ${moving} item(s) already moving`,
       resume: to.stage,
     });
   }
@@ -758,7 +891,19 @@ async function stepOnce(run: Run, to: NextStep): Promise<Step> {
       resume: stage.name,
     });
   }
-  return gate === 'fail' ? skipStage(run, to) : invokeStage(run, stage, to);
+  if (gate === 'fail') {
+    return skipStage(run, to);
+  }
+  const cap = stageCap(run, stage);
+  const holding = tails.filter(t => t.stage === stage.name).length;
+  if (holding >= cap) {
+    return alertStep(run, to, {
+      alert: SATURATION_ALERT,
+      detail: `stage "${stage.name}" cap ${cap} reached — ${holding} item(s) occupying`,
+      resume: to.stage,
+    });
+  }
+  return invokeStage(run, stage, to);
 }
 
 async function drive(run: Run, start: NextStep): Promise<RunResult> {

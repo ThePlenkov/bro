@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { parse } from 'smol-toml';
 import { parsePipelineFormula, SKIP_VERDICT } from './formula.ts';
-import { type JournalRow, journalRecords, memoryJournal, type PipelineJournal } from './journal.ts';
+import {
+  fileJournal,
+  type JournalRow,
+  journalRecords,
+  memoryJournal,
+  type PipelineJournal,
+} from './journal.ts';
 import {
   type EngineFn,
   type EngineMap,
@@ -13,6 +22,7 @@ import {
   type RunOptions,
   resumePipeline,
   runPipeline,
+  SATURATION_ALERT,
   type StageCall,
 } from './runner.ts';
 import { SPEC_FORMULA } from './spec-formula.fixture.ts';
@@ -30,8 +40,9 @@ interface Spy {
 }
 
 /** A scripted engine — answers each call with the next queued result;
- *  `calls` records every invocation for assertions. */
-const spy = (results: (EngineResult | Error)[], calls: StageCall[] = []): Spy => ({
+ *  `calls` records every invocation for assertions. 'pending' is a
+ *  valid EngineOutcome — the run parks leaving a verdict-less intent. */
+const spy = (results: (EngineResult | Error | 'pending')[], calls: StageCall[] = []): Spy => ({
   calls,
   fn: async call => {
     calls.push(call);
@@ -911,6 +922,8 @@ describe('runner invariants', () => {
       { maxSteps: 0 },
       { maxAttempts: -1 },
       { fixRounds: 1.5 },
+      { maxInFlight: -1 },
+      { maxInFlight: 1.5 },
     ]) {
       await assert.rejects(
         runPipeline(FORMULA, 'x', {
@@ -961,5 +974,204 @@ describe('runner invariants', () => {
       return { verdict: 'solo' };
     };
     await assert.rejects(run({ judge }), /context is not writable/);
+  });
+});
+
+describe('declared concurrency — the journaled occupancy semaphore', () => {
+  /** A two-stage flow — `a` admits into `b`, the capped stage. */
+  const capped = (limits: string, stageCap?: number) =>
+    parsePipelineFormula(
+      parse(`
+version = 1
+${limits}
+[[stages]]
+name = "a"
+engine = "judge"
+verdicts = ["go"]
+[[stages]]
+name = "b"
+engine = "judge"
+verdicts = ["done"]${stageCap === undefined ? '' : `\nconcurrency = ${stageCap}`}
+[transitions]
+a = { go = "b" }
+b = { done = "end" }
+`)
+    );
+
+  /** A foreign run occupying `stage` — a verdict-less intent is the
+   *  crash window: the occupant sits between intent and settled
+   *  transition out. */
+  const occupy = (j: PipelineJournal, runId: string, stage: string): void => {
+    j.append({
+      run_id: runId,
+      item: `${runId}-item`,
+      seq: 1,
+      stage,
+      intent: 'judge',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+  };
+
+  /** Free the occupant — the completing verdict (same seq) settles
+   *  `done` → `end`: the flow exits, the slot frees. */
+  const release = (j: PipelineJournal, runId: string, stage: string): void => {
+    j.append({
+      run_id: runId,
+      item: `${runId}-item`,
+      seq: 1,
+      stage,
+      intent: 'judge',
+      attempt: 1,
+      verdict: 'done',
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:01.000Z',
+    });
+  };
+
+  test('serial default — a second item cannot enter while one is moving', async () => {
+    const j = memoryJournal();
+    occupy(j, 'A', 'a'); // A is mid-stage at `a`
+    const judge = spy([]); // B must never reach an engine
+    const res = await runPipeline(capped(''), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(res.stage, 'a'); // parked at the entry door — no in_flight slot
+    assert.equal(judge.calls.length, 0);
+  });
+
+  test('explicit in_flight=2 admits two — B flows through the occupied stage', async () => {
+    const j = memoryJournal();
+    occupy(j, 'A', 'b'); // A sits inside `b`
+    const judge = spy([{ verdict: 'go' }, { verdict: 'done' }]);
+    const res = await runPipeline(capped('[limits]\nin_flight = 2'), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'end');
+    assert.deepEqual(
+      judge.calls.map(c => c.stage.name),
+      ['a', 'b'] // B entered `b` alongside A — cap = min(in_flight) = 2
+    );
+  });
+
+  test('a stage cap narrower than in_flight holds the second item at the door', async () => {
+    const j = memoryJournal();
+    occupy(j, 'A', 'b');
+    const judge = spy([{ verdict: 'go' }]); // `b` must never be invoked for B
+    const res = await runPipeline(capped('[limits]\nin_flight = 3', 1), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(res.stage, 'b'); // waited at b's door, not the pipeline's
+    assert.deepEqual(
+      judge.calls.map(c => c.stage.name),
+      ['a']
+    );
+
+    // the occupant's verdict transitions it out — the slot-free wake
+    release(j, 'A', 'b');
+    const judge2 = spy([{ verdict: 'done' }]);
+    const woken = await resumePipeline(capped('[limits]\nin_flight = 3', 1), 'item-B', j, {
+      engines: { judge: judge2.fn },
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(woken.outcome, 'end');
+    assert.equal(judge2.calls[0].stage.name, 'b'); // re-entered at the door it parked at
+  });
+
+  test('a stage cap wider than in_flight never widens the pipeline', async () => {
+    const j = memoryJournal();
+    occupy(j, 'A', 'b');
+    // B enters `b` alongside A (b cap = min(9, 2) = 2), then pends —
+    // its verdict-less intent keeps it moving + occupying
+    const judge = spy([{ verdict: 'go' }, 'pending']);
+    const parked = await runPipeline(capped('[limits]\nin_flight = 2', 9), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(parked.outcome, 'park');
+    // C is a third item — both slots are spent even though `b` could
+    // hold 9: the pipeline cap is the contract, not the stage's
+    const judgeC = spy([]);
+    const res = await runPipeline(capped('[limits]\nin_flight = 2', 9), 'item-C', {
+      engines: { judge: judgeC.fn },
+      journal: j,
+      runId: 'C',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(res.stage, 'a');
+    assert.equal(judgeC.calls.length, 0);
+  });
+
+  test('the machine budget narrows the formula cap — min(contract, machine)', async () => {
+    const j = memoryJournal();
+    occupy(j, 'A', 'a');
+    const judge = spy([]);
+    const res = await runPipeline(capped('[limits]\nin_flight = 3'), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+      maxInFlight: 1, // the box runs one, whatever the formula allows
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(judge.calls.length, 0);
+  });
+
+  test('occupancy counts survive a journal reload — the semaphore is the disk', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-occ-'));
+    const file = join(dir, 'shared.journal.jsonl');
+    fileJournal(file).append({
+      run_id: 'A',
+      item: 'A-item',
+      seq: 1,
+      stage: 'b',
+      intent: 'judge',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    // a fresh reader = a new process's view: A still occupies `b`
+    const judge = spy([{ verdict: 'go' }]);
+    const formula = capped('[limits]\nin_flight = 3', 1);
+    const parked = await runPipeline(formula, 'item-B', {
+      engines: { judge: judge.fn },
+      journal: fileJournal(file),
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(parked.outcome, 'park');
+    assert.equal(parked.alert, SATURATION_ALERT);
+    assert.equal(parked.stage, 'b');
+    // the occupant's verdict frees the slot — another reload, the
+    // counts are recomputed from the journaled rows, not memory
+    release(fileJournal(file), 'A', 'b');
+    const judge2 = spy([{ verdict: 'done' }]);
+    const woken = await resumePipeline(formula, 'item-B', fileJournal(file), {
+      engines: { judge: judge2.fn },
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(woken.outcome, 'end');
+    assert.equal(judge2.calls[0].stage.name, 'b');
   });
 });

@@ -61,6 +61,33 @@ describe('parsePipelineFormula', () => {
     assert.equal(entryStage(f).name, 'classify');
   });
 
+  test('the spec formula declares its parallelism — limits + stage cap', () => {
+    const f = parseFormula(SPEC_FORMULA);
+    assert.equal(f.limits.in_flight, 1); // [limits] in_flight = 1
+    const work = f.stages.find(s => s.name === 'work');
+    assert.equal(work?.concurrency, 1); // stage-level cap narrows, never widens
+    const classify = f.stages.find(s => s.name === 'classify');
+    assert.equal(classify?.concurrency, undefined); // absent → inherits in_flight
+  });
+
+  test('[limits] absent → serial default; explicit in_flight parses', () => {
+    assert.equal(parseFormula(oneStage(A, 'a = { ok = "end" }')).limits.in_flight, 1);
+    const f = parseFormula(`[limits]\nin_flight = 4\n${oneStage(A, 'a = { ok = "end" }')}`);
+    assert.equal(f.limits.in_flight, 4);
+  });
+
+  test('a stage cap parses; absent stays undefined — inherits at runtime', () => {
+    const f = parseFormula(
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = 2\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      )
+    );
+    assert.equal(f.stages[0].concurrency, 2);
+    const g = parseFormula(oneStage(A, 'a = { ok = "end" }'));
+    assert.equal(g.stages[0].concurrency, undefined);
+  });
+
   test('a verdict literally named __proto__ lands as data, not a setter', () => {
     const f = parseFormula(
       oneStage(
@@ -153,6 +180,42 @@ describe('invalid formulas — table of rejections', () => {
       'version pin above latest is rejected',
       `version = 99\n${SPEC_FORMULA.replace('version = 1\n', '')}`,
       /newer than this bro understands/,
+    ],
+    [
+      'in_flight below 1 — a cap that admits nothing is a declared deadlock',
+      `[limits]\nin_flight = 0\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'in_flight non-integer',
+      `[limits]\nin_flight = 1.5\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'in_flight as a string',
+      `[limits]\nin_flight = "two"\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'unknown [limits] key — strict-key contract',
+      `[limits]\nin_flight = 2\nworkers = 3\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits: unknown key "workers"/,
+    ],
+    [
+      'stage concurrency below 1',
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = 0\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /concurrency: must be an integer ≥ 1/,
+    ],
+    [
+      'stage concurrency non-integer',
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = "many"\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /concurrency: must be an integer ≥ 1/,
     ],
   ];
   for (const [name, toml, re] of bad) {

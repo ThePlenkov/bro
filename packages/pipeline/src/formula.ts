@@ -7,10 +7,19 @@
  *   kind = "pipeline"
  *   version = 1                    # optional — schema pin
  *
+ *   [limits]                       # optional — declared parallelism
+ *   in_flight = 1                  # items moving at once; SERIAL default
+ *
  *   [[stages]]
  *   name = "classify"
  *   engine = "judge"
  *   verdicts = ["solo", "clump", "duplicate", "defer"]
+ *
+ *   [[stages]]
+ *   name = "work"
+ *   engine = "fleet"
+ *   concurrency = 1                # stage cap; absent → in_flight
+ *   verdicts = ["done", "rate_limited", "crash", "stopped"]
  *
  *   [[stages]]
  *   name = "review"
@@ -90,19 +99,37 @@ export interface PipelineStage {
   gate_on?: GateOn;
   /** engine-specific mode token (e.g. learn's "always-capture") */
   mode?: string;
+  /** stage-level cap on simultaneous occupants — absent →
+   *  `limits.in_flight` applies. Narrows the pipeline cap, never
+   *  widens it (spec §Concurrency). */
+  concurrency?: number;
 }
+
+/** The `[limits]` table — declared parallelism (spec §Concurrency:
+ *  "declared, never assumed"). `in_flight` caps how many items may be
+ *  moving through the pipeline at once; SERIAL IS THE DEFAULT — a
+ *  formula that wants parallel workers says so. */
+export interface PipelineLimits {
+  in_flight: number;
+}
+
+/** `limits.in_flight` when the table/key is absent — serial. */
+export const DEFAULT_IN_FLIGHT = 1;
 
 export interface PipelineFormula {
   kind: typeof PIPELINE_KIND;
   version: number;
+  /** declared caps — `{ in_flight: 1 }` when [limits] is absent */
+  limits: PipelineLimits;
   /** declaration order — stages[0] is the entry point */
   stages: PipelineStage[];
   /** stage name → verdict → stage name | terminal action */
   transitions: Record<string, Record<string, string>>;
 }
 
-const TOP_KEYS = new Set(['kind', 'version', 'stages', 'transitions']);
-const STAGE_KEYS = new Set(['name', 'engine', 'verdicts', 'gate_on', 'mode']);
+const TOP_KEYS = new Set(['kind', 'version', 'limits', 'stages', 'transitions']);
+const LIMITS_KEYS = new Set(['in_flight']);
+const STAGE_KEYS = new Set(['name', 'engine', 'verdicts', 'gate_on', 'mode', 'concurrency']);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -120,6 +147,18 @@ class Checks {
   get failed(): boolean {
     return this.errors.length > 0;
   }
+}
+
+/** A cap field — `in_flight`/`concurrency` must be an integer ≥ 1:
+ *  a cap that can't admit a single item is a deadlock declared in
+ *  TOML, and a fractional/NaN cap silently miscompares — invalid
+ *  input fails loud (spec §Concurrency). Undefined means absent. */
+function capInt(raw: unknown, at: string, c: Checks): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+    return c.fail(`${at}: must be an integer ≥ 1, got ${JSON.stringify(raw)}`);
+  }
+  return raw;
 }
 
 function gateOn(raw: unknown, at: string, c: Checks): GateOn | undefined {
@@ -171,12 +210,36 @@ function verdictList(raw: unknown, at: string, c: Checks): string[] | undefined 
   return raw as string[];
 }
 
-function unknownKeys(raw: Record<string, unknown>, at: string, c: Checks): void {
+function unknownKeys(
+  raw: Record<string, unknown>,
+  at: string,
+  allowed: Set<string>,
+  c: Checks
+): void {
   for (const key of Object.keys(raw)) {
-    if (!STAGE_KEYS.has(key)) {
+    if (!allowed.has(key)) {
       c.fail(`${at}: unknown key "${key}"`);
     }
   }
+}
+
+/** The `[limits]` table — absent → serial default; present → strict
+ *  keys, `in_flight` an integer ≥ 1. */
+function limitsTable(raw: unknown, c: Checks): PipelineLimits {
+  const limits: PipelineLimits = { in_flight: DEFAULT_IN_FLIGHT };
+  if (raw === undefined) {
+    return limits;
+  }
+  if (!isRecord(raw)) {
+    c.fail('limits: must be a TOML table');
+    return limits;
+  }
+  unknownKeys(raw, 'limits', LIMITS_KEYS, c);
+  const inFlight = capInt(raw.in_flight, 'limits.in_flight', c);
+  if (inFlight !== undefined) {
+    limits.in_flight = inFlight;
+  }
+  return limits;
 }
 
 function parseStage(raw: unknown, i: number, c: Checks): PipelineStage | undefined {
@@ -184,7 +247,7 @@ function parseStage(raw: unknown, i: number, c: Checks): PipelineStage | undefin
   if (!isRecord(raw)) {
     return c.fail(`${where}: expected a TOML table`);
   }
-  unknownKeys(raw, where, c);
+  unknownKeys(raw, where, STAGE_KEYS, c);
   const name = stageName(raw.name, where, c);
   if (name === undefined) return undefined;
   const at = `${where} ("${name}")`;
@@ -201,6 +264,7 @@ function parseStage(raw: unknown, i: number, c: Checks): PipelineStage | undefin
     verdicts,
     gate_on: gateOn(raw.gate_on, at, c),
     mode: mode as string | undefined,
+    concurrency: capInt(raw.concurrency, `${at}.concurrency`, c),
   };
 }
 
@@ -358,6 +422,7 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
   const errors: string[] = [];
   const c = new Checks(errors);
   envelope(doc, c);
+  const limits = limitsTable(doc.limits, c);
   const stages = stageList(doc.stages, c);
   const transitions = transitionTable(doc.transitions, stages, c);
   if (c.failed) {
@@ -366,6 +431,7 @@ export function parsePipelineFormula(doc: unknown, source = 'formula'): Pipeline
   return {
     kind: PIPELINE_KIND,
     version: typeof doc.version === 'number' ? doc.version : PIPELINE_VERSION,
+    limits,
     stages,
     transitions,
   };

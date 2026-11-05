@@ -1,11 +1,13 @@
 export type {
   GateOn,
   PipelineFormula,
+  PipelineLimits,
   PipelineStage,
   StageEngine,
   TerminalAction,
 } from './formula.ts';
 export {
+  DEFAULT_IN_FLIGHT,
   entryStage,
   formulaSha,
   isTerminalAction,
@@ -75,6 +77,7 @@ export {
   PARK_ALERTS,
   resumePipeline,
   runPipeline,
+  SATURATION_ALERT,
   STAGE_INTENTS,
 } from './runner.ts';
 export type { AcceptDeps, AcceptPayload, EvidenceBundle } from './stages/accept.ts';

@@ -6,6 +6,9 @@
 export const SPEC_FORMULA = `
 version = 1
 
+[limits]
+in_flight = 1              # items moving through the pipeline at once — serial default
+
 [[stages]]
 name = "classify"          # G1: dedup, group, rank (judge)
 engine = "judge"
@@ -24,6 +27,7 @@ verdicts = ["accepted", "questions", "declined"]
 [[stages]]
 name = "work"              # spawn via fleet facade → exit taxonomy
 engine = "fleet"
+concurrency = 1            # stage-level cap; absent → in_flight applies
 verdicts = ["done", "rate_limited", "crash", "stopped"]
 
 [[stages]]
