@@ -64,12 +64,23 @@ export interface CustomerAnswer {
   ts: string;
 }
 
-/** A drain marker — the intake pass consumed every channel row
- *  before this one: the `answer` records it covered are already
- *  annotated on the item and must never re-feed a later wake. */
+/** A drain marker — the intake pass consumed the channel rows it
+ *  saw: the `answer` records it covered are already annotated on the
+ *  item and must never re-feed a later wake.
+ *
+ *  `upto` is the marker's BOUND — the channel row count the draining
+ *  pass read. A bare position marker could not say that: a row
+ *  appended between the feed's read and the marker lands BEFORE the
+ *  marker and position-bound reads would count it consumed — input
+ *  the customer gave, silently lost (the run re-parks at questions
+ *  waiting for it forever). Markers written before `upto` existed
+ *  bind by their own position instead — the only rows they can
+ *  honestly vouch for are the ones that preceded them. */
 export interface CustomerConsumed {
   kind: 'consumed';
   item: string;
+  /** channel rows covered — index bound: rows `>= upto` stay pending */
+  upto?: number;
   ts: string;
 }
 
@@ -162,18 +173,26 @@ export function fileVerdictStore(dir: string) {
   };
 }
 
-/** Rows appended since the last `consumed` marker — the pending
- *  answer input a waking intake drains. Verdict rows ride the same
- *  file: they are not intake input, but the next marker covers them
- *  too — the accept store reads the whole file regardless. */
+/** Rows not yet covered by a `consumed` marker — the pending answer
+ *  input a waking intake drains. A marker bounds by the row count it
+ *  saw (`upto`): a record appended between the feed's read and the
+ *  marker lands inside the marker's position but OUTSIDE its bound,
+ *  so it stays pending instead of being silently eaten. A marker
+ *  without `upto` (pre-bound writes) vouches only for rows before
+ *  its own position. Verdict rows ride the same file: they are not
+ *  intake input, but the next marker covers them too — the accept
+ *  store reads the whole file regardless. */
 export function pendingAnswers(rows: unknown[]): unknown[] {
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const r = rows[i];
-    if (isRecord(r) && r.kind === 'consumed') {
-      return rows.slice(i + 1);
+  let start = 0;
+  rows.forEach((r, i) => {
+    if (!isRecord(r) || r.kind !== 'consumed') {
+      return;
     }
-  }
-  return rows;
+    const upto = r.upto;
+    const bound = typeof upto === 'number' && Number.isInteger(upto) && upto >= 0 ? upto : i + 1;
+    start = Math.max(start, bound);
+  });
+  return rows.slice(start);
 }
 
 /** What the intake wake drains — the pending channel rows plus the
@@ -191,19 +210,25 @@ export interface AnswerFeed {
 }
 
 /** The durable answer-feed binding — the run's own channel file,
- *  `fileVerdictStore`'s intake-side sibling. */
+ *  `fileVerdictStore`'s intake-side sibling. The marker records the
+ *  row count this read saw (`upto`), not just a position: a record
+ *  appended between the read and the marker lands at index `>= upto`
+ *  and stays pending — a bound marker can never eat a record it did
+ *  not see. */
 export function fileAnswerFeed(dir: string) {
   return (call: StageCall): AnswerFeed => {
     const file = customerChannelPath({ dir, runId: call.runId });
     if (file === null) {
       return { records: [], consume: () => {} };
     }
+    const rows = readCustomerFile(file);
     return {
-      records: pendingAnswers(readCustomerFile(file)),
+      records: pendingAnswers(rows),
       consume: () =>
         appendCustomerRecord(file, {
           kind: 'consumed',
           item: call.item,
+          upto: rows.length,
           ts: new Date().toISOString(),
         }),
     };

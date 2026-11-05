@@ -370,6 +370,11 @@ function recordsOf(run: Run): JournalRow[] {
  *    `in_flight` lane too, EXCEPT an `emit` intent: the accept gate's
  *    suspension is a customer wait, not work in flight (same as
  *    intake's settled `questions` park, which never counted);
+ *  - settled `emit` verdict → the customer wait ENDED, but the run
+ *    still holds no in_flight lane — it never took one. The next
+ *    stage entry must pass admission like a fresh wake: reading the
+ *    settled record as "already moving" would let the flow walk into
+ *    its target over another flow's seat;
  *  - settled verdict → the transition decides: `retry` re-enters the
  *    SAME stage (the item never left — still occupies it); a stage
  *    target means the item is mid-transit — moving, occupying nothing
@@ -397,6 +402,13 @@ function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
     // (an accept-level `concurrency` cap still bounds the gate).
     const customerWait = last.intent === STAGE_INTENTS.accept;
     return { moving: !customerWait, stage: last.stage };
+  }
+  if (last.intent === STAGE_INTENTS.accept) {
+    // the verdict settled a CUSTOMER-WAIT intent — the wait is over
+    // but the flow holds no in_flight lane: the pending emit never
+    // took one. The next stage's door re-passes admission — settling
+    // the wait is not occupying the lane.
+    return { moving: false };
   }
   const target = transitionFor(formula, last.stage, last.verdict);
   if (target === 'retry') {

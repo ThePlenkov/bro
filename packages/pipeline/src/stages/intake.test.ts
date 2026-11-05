@@ -628,6 +628,46 @@ describe('intake — the customer answer feed', () => {
     assert.match(enriched?.body ?? '', /## Answers\nthe customer decides/);
   });
 
+  test('an answer appended between feed-read and marker stays pending — the bound cannot eat it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-intake-'));
+    testRepoInit(dir);
+    const file = customerChannelPath({ dir, runId: 'r1' });
+    assert.ok(file !== null);
+    // the pending ANSWER rows a feed exposes — bound-marker rows can
+    // sit inside the pending range (they are not intake input)
+    const answersOf = (f: AnswerFeed) =>
+      f.records
+        .filter(r => (r as { kind?: string }).kind === 'answer')
+        .map(r => (r as CustomerAnswer).answers);
+    appendCustomerRecord(file, answer('first'));
+    // the feed reads — the wake starts draining — and the customer
+    // answers AGAIN before the drain marker lands
+    const feed = fileAnswerFeed(dir)(call({ runId: 'r1' }));
+    assert.deepEqual(answersOf(feed), ['first']);
+    appendCustomerRecord(file, answer('second'));
+    await feed.consume();
+    // the marker bound covers ONLY what the feed read — the raced
+    // row sits before the marker in the file but after its bound, so
+    // it is still pending input, never silently consumed
+    const next = fileAnswerFeed(dir)(call({ runId: 'r1' }));
+    assert.deepEqual(answersOf(next), ['second']);
+    await next.consume();
+    // and a drained file stays drained — the bound never re-feeds
+    const last = fileAnswerFeed(dir)(call({ runId: 'r1' }));
+    assert.equal(answersOf(last).length, 0);
+    // a pre-`upto` marker still bounds by its own position — rows
+    // before it are covered, rows after stay pending
+    appendCustomerRecord(file, answer('third'));
+    appendCustomerRecord(file, {
+      kind: 'consumed',
+      item: ITEM,
+      ts: '2026-11-06T00:00:01Z',
+    });
+    appendCustomerRecord(file, answer('fourth'));
+    const legacy = fileAnswerFeed(dir)(call({ runId: 'r1' }));
+    assert.deepEqual(answersOf(legacy), ['fourth']);
+  });
+
   test('a malformed channel record parks answer-malformed — a corrected append repairs', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pipeline-intake-'));
     testRepoInit(dir);

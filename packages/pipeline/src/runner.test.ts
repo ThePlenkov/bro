@@ -1439,4 +1439,97 @@ b = { done = "end" }
     );
     assert.equal(judge.calls.length, 0);
   });
+
+  test('a settled accept re-passes admission — the verdict ended the wait, not claimed a lane', async () => {
+    // accept → merge so the customer's 'accepted' wants the NEXT
+    // stage's door — the shape a real accept→merge formula carries
+    const formula = parsePipelineFormula(
+      parse(`
+version = 1
+[[stages]]
+name = "accept"
+engine = "accept"
+verdicts = ["accepted"]
+[[stages]]
+name = "merge"
+engine = "judge"
+verdicts = ["done"]
+[transitions]
+accept = { accepted = "merge" }
+merge = { done = "end" }
+`)
+    );
+    const j = memoryJournal();
+    // A suspended at the customer gate — the emit wait holds its
+    // accept SEAT but never took an in_flight lane
+    j.append({
+      run_id: 'A',
+      item: 'item-A',
+      seq: 1,
+      stage: 'accept',
+      intent: 'emit',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    // B moved in while A waited — the serial lane is spent
+    j.append({
+      run_id: 'B',
+      item: 'item-B',
+      seq: 1,
+      stage: 'merge',
+      intent: 'judge',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:01.000Z',
+    });
+    // A's verdict lands — the recheck settles the emit and the wake
+    // wants merge. A settled customer wait is NOT a held lane: B's
+    // seat wins, A parks at the door instead of walking in over it
+    const judge = spy([]); // merge must never fire for A
+    const res = await resumePipeline(formula, 'item-A', j, {
+      engines: {
+        accept: {
+          invoke: async () => 'pending' as const, // resume never invokes
+          recheck: () => ({ verdict: 'accepted' }),
+        },
+        judge: judge.fn,
+      },
+      runId: 'A',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(res.stage, 'merge'); // refused at merge's door
+    assert.equal(judge.calls.length, 0);
+    // …and once B's lane frees, the SAME wake shape admits A into merge
+    j.append({
+      run_id: 'B',
+      item: 'item-B',
+      seq: 1,
+      stage: 'merge',
+      intent: 'judge',
+      attempt: 1,
+      verdict: 'done', // B's flow exits — the serial lane frees
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:02.000Z',
+    });
+    const judge2 = spy([{ verdict: 'done' }]);
+    const res2 = await resumePipeline(formula, 'item-A', j, {
+      engines: {
+        accept: {
+          invoke: async () => 'pending' as const,
+          recheck: () => ({ verdict: 'accepted' }),
+        },
+        judge: judge2.fn,
+      },
+      runId: 'A',
+      formulaSha: SHA,
+    });
+    assert.equal(res2.outcome, 'end');
+    assert.deepEqual(
+      judge2.calls.map(c => c.stage.name),
+      ['merge']
+    );
+  });
 });
