@@ -123,3 +123,24 @@ export {
   ROUTE_TIMINGS,
   routeStage,
 } from './stages/route.ts';
+export type {
+  ArtifactTrace,
+  TraceDeps,
+  TraceEntryView,
+  TraceHop,
+  TraceHopState,
+  TraceRefKind,
+  TraceStamps,
+  TraceVerdict,
+} from './trace.ts';
+export {
+  detectKind,
+  formulaRef,
+  parseTraceStamps,
+  prTraceFooter,
+  resolveTrace,
+  splitFormulaRef,
+  TRACE_FOOTER_MARK,
+  TRACE_TRAILERS,
+  trailerBlock,
+} from './trace.ts';

@@ -637,6 +637,119 @@ orch: foreground, timing: now}`.
   tests). A real `captureLessons` binding stays deferred to the
   runner-backed graduation.
 
+## Run 7: bro-7d5nb.7 — trace stamps (S7)
+
+- Invocation: `bro trace <ref>` → `resolveTrace(ref, deps, kind)` in
+  `packages/pipeline/src/trace.ts`, the CLI binding in
+  `commands/trace-resolve.ts` — plus the three stamp surfaces the
+  resolver reads: `commitSpawn` registry fields,
+  `prepare-commit-msg` trailers, the detached PR-body footer.
+- Spec reference: §traceability block (registry fields, trailers,
+  PR footer, the `bro trace` chain + verdicts), §formula identity
+  (`sha256(<raw file bytes>)` — the stamps carry the pair, never a
+  re-hash), §verification ("`bro trace` on a produced PR prints
+  agent, model, session, formula@sha, mol step — VERIFIED against
+  registry").
+- Input: bead `bro-7d5nb.7` (epic child, needs: [.2] → ready),
+  spec formula, repo `/home/pepl/projects/bro`.
+- Expected by spec: spawn records `formula`, `formula_sha`,
+  `session_id`, `pipeline_stage` beside provider/backend; commits
+  carry `BRO-Run`/`BRO-Formula`/`BRO-Session`; the PR body carries
+  a run/formula/session footer; `bro trace <commit|pr|branch>`
+  resolves → registry and reports VERIFIED/FORGED/MISSING.
+- Actual action and result:
+  - classify → `clump` — same emulated payload shape as Runs 3–6.
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - work → `done` — `SpawnSpec.pipeline` (core) threads the four
+    fields into `commitSpawn`'s single registry write for every
+    backend (native/tmux/gascity/docker/copilot all funnel there);
+    `agentEnvPins` stamps `BRO_FORMULA=<id>@<sha>` and overrides
+    `BRO_SESSION_ID` with the driver's attested session (agentId
+    default), and `BRO_FORMULA` joins `AGENT_PIN_KEYS` so
+    caller/spec/ambient env can never forge it. `commitTrailers`
+    emits the exact trio iff `BRO_FORMULA` is pinned — env pins
+    only, never marker/branch fallbacks — while legacy
+    Agent/Session/Bead/Molecule trailers ride unchanged. The PR
+    footer writer is `prTraceFooter` + `bro trace stamp`: the
+    post-tool hook sees a landed `gh pr create` and respawns the
+    stamp detached — a worker never authors its own stamp, a human
+    `gh pr create` has no `BRO_FORMULA` and gets none. The resolver
+    (`resolveTrace`) treats every stamp as a hint: trailers/footer
+    parse attested run/formula/session, the keyed registry lookup
+    resolves the entry (run → worktree → session → molStep hints,
+    strongest first per kind), and each attested hop verifies —
+    `match`/`mismatch`/`unattested` → VERIFIED/FORGED/MISSING.
+    `bro trace export` keeps the OTLP surface; every other argv
+    shape dispatches to the resolver (28 pipeline tests + 11 CLI
+    tests + 31 githooks + 160 connector tests green; connector
+    suite proves pins can't be forged by spec.env or ambient env).
+  - review → in flight at log time — act gate + reviewers stand
+    in (same standing-in as Runs 1–6).
+  - merge → pending; capture → the `bro trace` surface itself is
+    the item under test.
+- Design decisions worth recording (spec-consistent,
+  underdetermined by the spec):
+  - `commitSpawn` is the one stamp surface — every connector
+    backend funnels through it, so the fields land once for all
+    backends instead of six parallel writes. A non-pipeline
+    respawn CLEARS stale `formula*`/`session_id` fields rather
+    than inheriting the previous run's formula — a respawned
+    agent is a different run, not a continuation.
+  - No `BRO_STAGE` env pin: stage names are pipeline vocabulary
+    the worker must never see (invariant 1); `pipeline_stage`
+    lives only in the registry, where the resolver reads it.
+  - The PR footer is an HTML comment —
+    `<!-- bro:trace run=… formula=<id>@<sha> session=… -->` — one
+    line, invisible in render, grep-able whole. `gh pr create`
+    can't be intercepted before the body lands (pre-tool input
+    overrides can't rewrite gh's `--fill`-generated body either),
+    so the stamp is post-create and detached: `gh pr view` on the
+    current branch resolves the just-created PR, `gh pr edit`
+    appends the mark, and the mark check makes it idempotent. It
+    runs driver-side via the hook — the worker's shell could fake
+    env but the resolver verifies the claim, so a forged footer
+    is a FORGED verdict, not a trusted one.
+  - `via` records HOW the entry resolved (`run` | `worktree` |
+    `session` | `molStep`) — the resolution's own provenance, so a
+    registry-only hit is honest about its weaker chain (still
+    MISSING: nothing was attested).
+  - Forged-by-absence is real: an attested formula against a
+    formula-less registry entry is `mismatch`, and an attested
+    run resolving to NO entry is MISSING with
+    "unbacked attestation" — the registry is the authority, never
+    the artifact.
+- Spec gaps hit:
+  1. **The footer writer is unspecified.** "PR → body footer"
+     doesn't name who writes it — the spec's own chain says "the
+     driver's PR path" but no pipeline PR path exists yet. This
+     run binds the seam twice: `prTraceFooter` in the package
+     (the future work-stage's writer) and the post-tool stamp
+     (today's driver-side writer, covering the `gh pr create`
+     workers already run). Proposed wording: "the PR footer is
+     written by whoever owns the create — the post-tool stamp
+     covers worker-authored creates; a pipeline work stage calls
+     `prTraceFooter` directly."
+  2. **`BRO-Session` identity is underdetermined.** The trailer
+     says `<id>` without naming which session — the run's agentId
+     or a driver-minted session id. This run pins
+     `BRO_SESSION_ID=sessionId ?? agentId` at spawn and records
+     the same value as `session_id`, so the trailer, the pin, and
+     the registry all speak one id; the session hop also accepts
+     backend-reported ids (`sessionId`, `acpSessionId`) so an
+     acp/gascity worker's real session verifies too.
+- Friction: `AgentRegistryEntry`'s index signature types
+  extension fields `unknown`, so the CLI's registry→TraceEntryView
+  binding needs a double assertion — worth a typed
+  `RegistryTraceView` export in core if a second consumer appears.
+- Golden case: **partial** — `trace.test.ts` replays the full
+  verdict matrix over injected seams (VERIFIED/FORGED/MISSING
+  across commit/branch/PR refs incl. forged-by-absence and
+  registry-only resolution); `stampBranchPr` is seam-tested the
+  same way. A live end-to-end (real spawn → real commit → real
+  PR → `bro trace` VERIFIED) stays deferred to the runner-backed
+  graduation the work stage enables.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the

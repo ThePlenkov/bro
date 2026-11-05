@@ -879,6 +879,11 @@ const AGENT_PIN_KEYS = new Set([
   // delegation provenance is connector-owned too — a caller-supplied
   // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
   'BRO_DELEGATED_BY',
+  // pipeline provenance is connector-owned too (spec bro-7d5nb) — a
+  // caller-supplied BRO_FORMULA would let a commit claim a formula the
+  // registry never recorded, and `bro trace` only catches a claim it
+  // can compare
+  'BRO_FORMULA',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -952,13 +957,24 @@ const agentEnvPins = (
     ['BRO_BEAD_ID', spec.molStep],
     ['BRO_AGENT_ID', agentId],
     ['BRO_PROMPT_FILE', promptFile],
-    ['BRO_SESSION_ID', agentId],
+    // a pipeline spawn may attest a session id the driver knows
+    // (spec bro-7d5nb) — the pin and the registry's session_id carry
+    // the same value so the BRO-Session trailer verifies; absent the
+    // override the agentId stays the session, as before
+    ['BRO_SESSION_ID', spec.pipeline?.sessionId ?? agentId],
   ];
   if (agentCli !== undefined && agentCli !== '') {
     pins.push(['BRO_AGENT', agentCli]);
   }
   if (mol !== undefined) {
     pins.push(['BRO_MOL_ID', mol]);
+  }
+  // pipeline provenance pin (spec bro-7d5nb) — `<id>@<sha>` verbatim;
+  // the prepare-commit-msg hook emits the BRO-Formula trailer from it.
+  // No stage pin: stage names are pipeline vocabulary the worker must
+  // never see (spec invariant 1)
+  if (spec.pipeline !== undefined) {
+    pins.push(['BRO_FORMULA', `${spec.pipeline.formula}@${spec.pipeline.formulaSha}`]);
   }
   // provenance pins (spec bro-5hx1.1) — BRO_AGENT_MODEL doubles as
   // MODEL_ENV[0] so the Agent-Model: commit trailer lands the day a
@@ -1830,6 +1846,15 @@ function commitSpawn(
     // which agent asked for this spawn — same provenance write; a
     // respawn re-stamps (clears when the respawn wasn't delegated)
     delegatedBy: spec.delegatedBy,
+    // pipeline provenance (spec bro-7d5nb §traceability) — same
+    // provenance write: a non-formula respawn clears the previous
+    // run's stamps rather than keeping a formula it never ran under.
+    // session_id mirrors the BRO_SESSION_ID pin — the session the run
+    // attests, agentId unless the driver named one
+    formula: spec.pipeline?.formula,
+    formula_sha: spec.pipeline?.formulaSha,
+    pipeline_stage: spec.pipeline?.stage,
+    session_id: spec.pipeline === undefined ? undefined : (spec.pipeline.sessionId ?? agentId),
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,

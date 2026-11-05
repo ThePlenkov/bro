@@ -9,7 +9,9 @@
  *                                       the review host parses its own PR URLs → act snapshot
  *   pre-tool                          connector preTool verdicts — the guard plane:
  *                                       first block vetoes the call, input overrides merge
- *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
+ *   post-tool                         exec nudges: gh pr create → act gate + the
+ *                                       detached trace-stamp footer (bro-7d5nb);
+ *                                       merge → debt sweep;
  *                                       first mutating bro subcommand per session cites its
  *                                       governing skill (skills/<name>/SKILL.md); arms the
  *                                       stop gate for this session (bro act/drill/
@@ -117,6 +119,7 @@ import {
 } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
+import { maybeSpawnTraceStamp } from './trace-resolve.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
@@ -1602,6 +1605,16 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // probe that finds nothing, a missed arm loses the gate entirely.
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId));
+    // a `gh pr create` in a formula-attested session earns the detached
+    // PR-body footer stamp (spec bro-7d5nb §traceability) — same
+    // over-approximation as arming: hosts that can't observe the exit
+    // (Codex reports no success field) still stamp, a failed create
+    // just buys one `gh pr view` that finds nothing. The stamp reads
+    // worker-env pins, so like every stamp it is a hint the resolver
+    // verifies against the registry, not proof
+    if (classifyExecCommand(cmd) === 'pr-create') {
+      maybeSpawnTraceStamp(process.cwd());
+    }
   }
   if (outcome === true) {
     lines.push(...execNudges(cmd));

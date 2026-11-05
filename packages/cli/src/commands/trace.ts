@@ -575,9 +575,17 @@ function reportExport(r: ExportResult | null, args: ExportArgs): number {
 
 export async function runTraceCommand(argv: string[]): Promise<void> {
   const [verb, ...rest] = argv;
-  const args = hasHelpFlag(rest) ? null : verb === 'export' ? parseExportArgs(rest) : null;
+  // `bro trace <ref>` is the provenance resolver (spec bro-7d5nb) —
+  // every argv shape that isn't `export` dispatches there; the
+  // resolver's own parser decides ref-kind/usage
+  if (verb !== 'export') {
+    const { runTraceResolve } = await import('./trace-resolve.ts');
+    await runTraceResolve(argv);
+    return;
+  }
+  const args = hasHelpFlag(rest) ? null : parseExportArgs(rest);
   if (args === null) {
-    printUsage(EXPORT_USAGE, verb === '--help' || verb === '-h' || hasHelpFlag(rest) ? 0 : 2);
+    printUsage(EXPORT_USAGE, hasHelpFlag(rest) ? 0 : 2);
   }
   const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun });
   const code = reportExport(r, args);

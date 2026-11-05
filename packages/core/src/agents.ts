@@ -205,6 +205,27 @@ export type SpawnWorker =
       cliName?: string;
     };
 
+/** The pipeline context a formula-driven spawn carries (spec
+ *  bro-7d5nb §traceability). Set by the pipeline driver — never by the
+ *  worker: the registry stamps it verbatim and the commit trailers it
+ *  feeds (`BRO-Formula`) are driver-attested hints `bro trace`
+ *  verifies against the registry, so a forged stamp is reported, not
+ *  trusted. Absent on ad-hoc and legacy spawns — provenance is never
+ *  fabricated. */
+export interface PipelineProvenance {
+  /** The formula's identity — its logical/file name. */
+  formula: string;
+  /** sha256 over the formula's raw bytes — the version identity
+   *  (`formulaSha()` in @broject/pipeline computes it). */
+  formulaSha: string;
+  /** The pipeline stage that produced this spawn (e.g. `work`). */
+  stage?: string;
+  /** The session the run attests — pinned into the worker's
+   *  BRO_SESSION_ID and recorded as the registry's `session_id`.
+   *  Defaults to the spawn's agentId pin. */
+  sessionId?: string;
+}
+
 /** What a backend needs to start a worker. `beadsDir` is the resolved
  *  shared-store identity — connectors MUST claim there, never in a
  *  backend-private store. */
@@ -238,6 +259,10 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Pipeline provenance — stamped into the registry and pinned into
+   *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
+   *  trailer). Absent on non-formula spawns. */
+  pipeline?: PipelineProvenance;
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
@@ -398,6 +423,17 @@ export interface AgentRegistryEntry {
    *  bro-l8c4f.5). A respawn mints a fresh one; entries written before
    *  the handshake contract carry none. */
   runId?: string;
+  /** Pipeline provenance (spec bro-7d5nb §traceability) — the formula
+   *  the run was admitted under (id + sha256 over its raw bytes), the
+   *  stage that produced the spawn, and the session the run attests
+   *  (the pinned BRO_SESSION_ID value). Snake_case on purpose: these
+   *  are the spec's wire names, shared with the journal's `formula_sha`
+   *  rows, so every stamped surface speaks one vocabulary. Absent on
+   *  non-pipeline spawns. */
+  formula?: string;
+  formula_sha?: string;
+  session_id?: string;
+  pipeline_stage?: string;
   [key: string]: unknown;
 }
 

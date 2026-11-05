@@ -457,6 +457,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
