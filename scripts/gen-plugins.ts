@@ -775,6 +775,10 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
   // the title instead of preceding it (that order also produced the
   // double blank line MD012 flagged)
   const trimmed = body.replace(/^\s+/, '');
+  if (!/^#(?:\s|$)/.test(trimmed)) {
+    console.error(`${BRO_SKILL}: body must start with a level-one heading`);
+    process.exit(1);
+  }
   const h1End = trimmed.indexOf('\n');
   const h1 = h1End === -1 ? trimmed : trimmed.slice(0, h1End);
   // one blank line between the $ARGUMENTS note and the body — the skill's
