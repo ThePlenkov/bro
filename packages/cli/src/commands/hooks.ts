@@ -1610,8 +1610,8 @@ async function emitPostTool(input: HookInput): Promise<void> {
     lines.push(...execNudges(cmd));
     // a landed `gh pr create` in a formula-attested session earns the
     // detached PR-body footer stamp (spec bro-7d5nb §traceability) —
-    // the worker ran create; the driver-side stamp is what a worker
-    // cannot fake (the resolver still treats it as a hint)
+    // the stamp reads worker-env pins, so like every stamp it is a
+    // hint the resolver verifies against the registry, not proof
     if (classifyExecCommand(cmd) === 'pr-create') {
       maybeSpawnTraceStamp(process.cwd());
     }

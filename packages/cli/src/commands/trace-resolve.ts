@@ -121,16 +121,17 @@ const HOP_MARK: Record<TraceHop['state'], string> = {
   unattested: '·',
 };
 
+const HOP_TAIL: Record<TraceHop['state'], string> = {
+  match: 'registry agrees',
+  mismatch: 'registry says',
+  unattested: 'not attested',
+};
+
 function hopLine(h: TraceHop): string {
   const attested = h.attested ?? '—';
   const registry = h.registry ?? '—';
-  const tail =
-    h.state === 'mismatch'
-      ? ` — registry says ${registry}`
-      : h.state === 'match'
-        ? ' — registry agrees'
-        : ' — not attested';
-  return `  ${HOP_MARK[h.state]} ${h.hop.padEnd(7)} ${attested}${tail}`;
+  const tail = h.state === 'mismatch' ? `registry says ${registry}` : HOP_TAIL[h.state];
+  return `  ${HOP_MARK[h.state]} ${h.hop.padEnd(7)} ${attested} — ${tail}`;
 }
 
 /** The human report — resolved record first, then the per-hop
@@ -233,9 +234,9 @@ export function stampBranchPr(
     if (view.code !== 0) {
       return 'skipped';
     }
-    let body: string;
+    let body: unknown;
     try {
-      body = (JSON.parse(view.out) as { body?: unknown }).body as string;
+      body = (JSON.parse(view.out) as { body?: unknown }).body;
     } catch {
       return 'skipped';
     }
@@ -304,6 +305,7 @@ export async function runTraceResolve(argv: string[]): Promise<void> {
   const args = hasHelpFlag(argv) ? null : parseResolveArgs(argv);
   if (args === null) {
     printUsage(RESOLVE_USAGE, hasHelpFlag(argv) ? EXIT.ok : EXIT.usage);
+    return; // printUsage is `never` — the return documents the exit, not the type
   }
   const dir = process.cwd();
   const t = resolveTrace(args.ref, traceDeps(dir), args.kind);

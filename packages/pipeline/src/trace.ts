@@ -84,29 +84,42 @@ export function prTraceFooter(stamps: Required<TraceStamps>): string {
   );
 }
 
-const FOOTER_RE = new RegExp(`<!--\\s*${TRACE_FOOTER_MARK}\\s+([^]*?)-->`, 'm');
-const FOOTER_FIELD = /(\w+)=([^\s]+)/g;
-
 /** The footer mark's `key=value` tokens — only the three stamp keys
- *  count; an unknown token is forward-compat noise, not an error. */
+ *  count; an unknown token is forward-compat noise, not an error.
+ *  String-ops only (no regex): the mark is one line and the PR body
+ *  is uncontrolled input, so every scan is a bounded indexOf/split —
+ *  there is nothing for a crafted body to backtrack. */
 function footerStamps(body: string): TraceStamps {
-  const m = FOOTER_RE.exec(body);
-  if (m === null) {
-    return {};
-  }
   const out: TraceStamps = {};
-  for (const tok of m[1]!.matchAll(FOOTER_FIELD)) {
-    const [, key, value] = tok;
-    if (key === 'run' || key === 'formula' || key === 'session') {
-      Reflect.set(out, key, value);
+  const open = `<!-- ${TRACE_FOOTER_MARK} `;
+  for (const line of body.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith(open)) {
+      continue;
     }
+    const end = t.indexOf('-->', open.length);
+    const inner = t.slice(open.length, end < 0 ? t.length : end);
+    for (const tok of inner.split(/\s+/)) {
+      const eq = tok.indexOf('=');
+      const key = eq < 0 ? tok : tok.slice(0, eq);
+      const value = eq < 0 ? '' : tok.slice(eq + 1);
+      if ((key === 'run' || key === 'formula' || key === 'session') && value !== '') {
+        Reflect.set(out, key, value);
+      }
+    }
+    return out; // first mark wins — a forged second footer is noise
   }
   return out;
 }
 
-const TRAILER_LINE = /^(BRO-Run|BRO-Formula|BRO-Session):\s*(\S.*?)\s*$/;
+/** `Key: value` with the value's trailing whitespace OUTSIDE the
+ *  capture — `(\S[^\n]*\S|\S)` is the linear shape: `[^\n]*` greedy
+ *  backtracks once for the final `\S`, so a crafted line full of
+ *  spaces walks one path, never a polynomial retry storm (CodeQL's
+ *  `(\S.*?)\s*$` complaint). */
+const TRAILER_LINE = /^(BRO-Run|BRO-Formula|BRO-Session):\s*(\S[^\n]*\S|\S)\s*$/;
 const TRAILER_SHAPED = /^[\w][\w-]*:\s*\S/;
-const LEGACY_TRAILER = /^(Session|Bead):\s*(\S.*?)\s*$/;
+const LEGACY_TRAILER = /^(Session|Bead):\s*(\S[^\n]*\S|\S)\s*$/;
 
 /** Trailer-shaped lines ending the message — git's own rule: trailers
  *  live in the last contiguous `Key: value` block, so a `BRO-Run:`
@@ -383,6 +396,16 @@ function recordOf(
   };
 }
 
+/** Resolution-side context an artifact carries beyond its stamps —
+ *  the legacy `Session:`/`Bead:` hint trailers, a branch's checked-out
+ *  worktree, a PR's head branch. */
+interface TraceExtras {
+  session?: string;
+  bead?: string;
+  worktree?: string;
+  headBranch?: string;
+}
+
 /** Hints a ref's resolution may use, strongest first per kind —
  *  the chain's direction is the spec's: a commit speaks its trailers;
  *  a branch goes through the worktree; a PR through its footer, then
@@ -390,7 +413,7 @@ function recordOf(
 function hintsFor(
   kind: TraceRefKind,
   stamps: TraceStamps,
-  extra: { session?: string; bead?: string; worktree?: string; headBranch?: string },
+  extra: TraceExtras,
   wt: { path: string; branch: string }[]
 ): [string, string | undefined][] {
   const byBranch = (b: string | undefined): string | undefined =>
@@ -419,34 +442,39 @@ function hintsFor(
   ];
 }
 
+/** The kind-specific attestation read — a commit speaks its own
+ *  trailers; a branch's attestation is its tip commit's trailers plus
+ *  its checked-out worktree path; a PR speaks its body footer plus
+ *  the head branch name. */
+function attestationOf(
+  k: TraceRefKind,
+  ref: string,
+  deps: TraceDeps,
+  wt: { path: string; branch: string }[]
+): { stamps: TraceStamps; extra: TraceExtras } {
+  const extra: TraceExtras = {};
+  if (k === 'pr') {
+    const view = deps.prView?.(ref);
+    extra.headBranch = nonEmpty(view?.headRefName);
+    return { stamps: parseTraceStamps(view?.body, 'pr'), extra };
+  }
+  const msg = deps.commitMessage?.(ref);
+  const block = msg === undefined ? { stamps: {} as TraceStamps } : trailerBlock(msg);
+  extra.session = block.session;
+  extra.bead = block.bead;
+  if (k === 'branch') {
+    extra.worktree = wt.find(w => w.branch === ref)?.path;
+  }
+  return { stamps: block.stamps, extra };
+}
+
 /** Resolve an artifact's provenance and verify it against the
  *  registry. Never throws — every absence is a verdict input. */
 export function resolveTrace(ref: string, deps: TraceDeps, kind?: TraceRefKind): ArtifactTrace {
   const k = kind ?? deps.kind?.(ref) ?? detectKind(ref);
   const wt = deps.worktrees?.() ?? [];
   const reg = deps.registry();
-
-  let stamps: TraceStamps = {};
-  const extra: { session?: string; bead?: string; worktree?: string; headBranch?: string } = {};
-  if (k === 'commit' || k === 'branch') {
-    // a branch's attestation is its tip commit's trailers — the branch
-    // itself carries no stamps
-    const msg = deps.commitMessage?.(ref);
-    if (msg !== undefined) {
-      const block = trailerBlock(msg);
-      stamps = block.stamps;
-      extra.session = block.session;
-      extra.bead = block.bead;
-    }
-  }
-  if (k === 'branch') {
-    extra.worktree = wt.find(w => w.branch === ref)?.path;
-  }
-  if (k === 'pr') {
-    const view = deps.prView?.(ref);
-    stamps = parseTraceStamps(view?.body, 'pr');
-    extra.headBranch = nonEmpty(view?.headRefName);
-  }
+  const { stamps, extra } = attestationOf(k, ref, deps, wt);
 
   const hit = findEntry(reg, hintsFor(k, stamps, extra, wt));
   const hops: TraceHop[] =
