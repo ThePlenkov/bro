@@ -26,7 +26,12 @@ import {
 } from './capture.ts';
 
 const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
-const CAPTURE_STAGE = FORMULA.stages[5];
+// by name, never by index — a stage-order change in SPEC_FORMULA must
+// not silently re-point every call() at the wrong stage
+const CAPTURE_STAGE = FORMULA.stages.find(s => s.name === 'capture');
+if (CAPTURE_STAGE === undefined) {
+  throw new Error('SPEC_FORMULA lost its capture stage');
+}
 const ITEM = 'bro-cc4';
 const SHA = 'cafebabe';
 const TS = '2026-11-06T00:00:00Z';
@@ -477,9 +482,19 @@ describe('capture inside runPipeline — the runner contract', () => {
     const res = await resumePipeline(UNLANDED_FORMULA, ITEM, j, opts(j));
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.attemptsExhausted);
-    // two bounded invocations journaled intents — the seams never ran:
-    // the land check throws first, capture on un-landed work never sweeps
-    assert.equal(j.rows().filter(r => r.intent === 'capture').length, 2);
+    // exactly two capture intents journaled — the budget check parks
+    // BEFORE minting a third intent (the runner's exhausted-budget
+    // branch journals an 'alert' row, not another 'capture' one), and
+    // the seams never ran: the land check throws before the sweep
+    const captures = j.rows().filter(r => r.intent === 'capture');
+    assert.equal(captures.length, 2);
+    assert.deepEqual(
+      captures.map(r => r.attempt),
+      [1, 2]
+    );
+    const alerts = j.rows().filter(r => r.intent === 'alert');
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].alert, PARK_ALERTS.attemptsExhausted);
     assert.equal(cap.calls.length, 0);
     assert.equal(ret.calls.length, 0);
   });

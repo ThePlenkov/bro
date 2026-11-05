@@ -148,15 +148,27 @@ function landRecord(records: JournalRow[]): JournalRow | undefined {
   return undefined;
 }
 
-/** The run's molecule — the LAST settled payload carrying a string
- *  `mol` field. Re-entries (a scoped-fix work round can re-pour) may
- *  update it; the freshest wins. A non-string `mol` is malformed
- *  payload data, ignored rather than harvested. */
+/** A payload's `mol` field — only a non-empty string counts; a
+ *  non-string `mol` is malformed payload data, never harvested. */
+const molField = (p: unknown): string | undefined => {
+  if (!isRecord(p)) {
+    return undefined;
+  }
+  const m = p.mol;
+  if (typeof m !== 'string') {
+    return undefined;
+  }
+  return m === '' ? undefined : m;
+};
+
+/** The run's molecule — the LAST settled payload carrying a usable
+ *  `mol`. Re-entries (a scoped-fix work round can re-pour) may update
+ *  it; the freshest wins. */
 function molOf(records: JournalRow[]): string | undefined {
   for (let i = records.length - 1; i >= 0; i--) {
-    const p = records[i].payload;
-    if (isRecord(p) && typeof p.mol === 'string' && p.mol !== '') {
-      return p.mol;
+    const m = molField(records[i].payload);
+    if (m !== undefined) {
+      return m;
     }
   }
   return undefined;
@@ -200,6 +212,60 @@ function checkMode(call: StageCall): void {
   }
 }
 
+/** A counted value — a non-negative integer, nothing else. */
+const isCount = (v: unknown): boolean => {
+  if (typeof v !== 'number') {
+    return false;
+  }
+  if (!Number.isInteger(v)) {
+    return false;
+  }
+  return v >= 0;
+};
+
+/** A bead-id list — non-empty strings only. */
+const isBeadId = (v: unknown): v is string => {
+  if (typeof v !== 'string') {
+    return false;
+  }
+  return v !== '';
+};
+
+const isBeadList = (v: unknown): v is string[] => {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  return v.every(isBeadId);
+};
+
+/** One skip-report row — an {origin, reason} record. */
+const isSkipRow = (v: unknown): v is { origin: string; reason: string } => {
+  if (!isRecord(v)) {
+    return false;
+  }
+  if (typeof v.origin !== 'string') {
+    return false;
+  }
+  return typeof v.reason === 'string';
+};
+
+const isSkipList = (v: unknown): v is { origin: string; reason: string }[] => {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  return v.every(isSkipRow);
+};
+
+/** An optional list field — absent is fine, present must validate. */
+function checkList<T>(v: T[] | undefined, ok: (v: unknown) => v is T[], what: string): void {
+  if (v === undefined) {
+    return;
+  }
+  if (!ok(v)) {
+    throw new Error(`capture: the learn seam returned malformed ${what}`);
+  }
+}
+
 /** The seam's outcome, validated before it becomes the payload —
  *  `lessons` must be a countable int, `followups` a bead-id list,
  *  `skipped` origin+reason records. A malformed outcome is never
@@ -207,43 +273,37 @@ function checkMode(call: StageCall): void {
  *  dedup makes re-fire merge-only), but an unreadable report can't be
  *  trusted as the stage's typed output. */
 function checkOutcome(out: CaptureOutcome): void {
-  if (!isRecord(out) || !Number.isInteger(out.lessons) || out.lessons < 0) {
+  if (!isRecord(out)) {
+    throw new Error('capture: the learn seam returned a malformed outcome — expected a record');
+  }
+  if (!isCount(out.lessons)) {
     throw new Error(
       'capture: the learn seam returned a malformed outcome — ' +
         'lessons must be a non-negative integer'
     );
   }
-  if (
-    out.followups !== undefined &&
-    (!Array.isArray(out.followups) || out.followups.some(f => typeof f !== 'string' || f === ''))
-  ) {
-    throw new Error(
-      'capture: the learn seam returned malformed followups — expected an array of bead ids'
-    );
-  }
-  if (
-    out.skipped !== undefined &&
-    (!Array.isArray(out.skipped) ||
-      out.skipped.some(
-        s => !isRecord(s) || typeof s.origin !== 'string' || typeof s.reason !== 'string'
-      ))
-  ) {
-    throw new Error(
-      'capture: the learn seam returned malformed skipped — expected {origin, reason} records'
-    );
-  }
+  checkList(out.followups, isBeadList, 'followups — expected an array of bead ids');
+  checkList(out.skipped, isSkipList, 'skipped — expected {origin, reason} records');
 }
 
-/** The retro queue's receipt — an opaque batch id or nothing. Anything
- *  else is a seam returning shapes the payload can't carry. */
+/** The retro queue's receipt — an opaque batch id or nothing. A seam
+ *  returning runtime shapes its type forbids (null, a bare string) is
+ *  malformed data, same rule as every other seam output. */
 function checkReceipt(r: RetroReceipt | undefined): RetroReceipt {
-  if (r === undefined || r === null) {
+  if (r === undefined) {
     return {};
   }
-  if (!isRecord(r) || (r.batch !== undefined && typeof r.batch !== 'string')) {
+  if (!isRecord(r)) {
     throw new Error('capture: the retro seam returned a malformed receipt — expected {batch?}');
   }
-  return r as RetroReceipt;
+  const batch = r.batch;
+  if (batch === undefined) {
+    return {};
+  }
+  if (typeof batch !== 'string') {
+    throw new Error('capture: the retro seam returned a malformed receipt — expected {batch?}');
+  }
+  return { batch };
 }
 
 /**
