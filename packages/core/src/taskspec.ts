@@ -10,25 +10,36 @@
  *
  * The carrier convention: the item's markdown body holds the spec
  * under `## Acceptance`, `## DoD`, `## DoR`, `## Scenarios` headings
- * (level-2 ATX; names match case-insensitively; the first occurrence
- * wins — a repeated heading and its text are body prose, not a
- * second section). Bullet items under Acceptance/Scenarios become
- * `acceptance[]`/`scenarios[]` — `-`/`*`/`+`/`•` and numbered items
- * all count, and a section mixing bullets with prose keeps the
- * bullets; a bullet-less section's non-empty lines are the items.
- * `## DoD`/`## DoR` text lands verbatim in `dod`/`dor`. Everything
- * outside the managed sections — prose, other headings, a `###`
- * subsection — is `body`. `acceptance` absent-or-empty is verify's
- * `unverifiable` input, never "no checks".
+ * (level-2 ATX — up to 3 leading spaces like CommonMark; names match
+ * case-insensitively; the first occurrence wins — a repeated heading
+ * and its text are body prose, not a second section). Bullet items
+ * under Acceptance/Scenarios become `acceptance[]`/`scenarios[]` —
+ * `-`/`*`/`+`/`•` and numbered items all count, and a section mixing
+ * bullets with prose keeps the bullets; a bullet-less section's
+ * non-empty lines are the items. `## DoD`/`## DoR` text lands
+ * verbatim in `dod`/`dor`. Everything outside the managed sections —
+ * prose, other headings, `###` subsections — is `body`. Fenced code
+ * blocks (``` and ~~~) are opaque: a `## Acceptance` inside a fence
+ * is an example, not a section, and a `- example` inside one is never
+ * an item. `acceptance` absent-or-empty is verify's `unverifiable`
+ * input, never "no checks".
  *
  * The same seam is the write path for intake artifacts: `annotate`
  * appends `## <heading>` + lines to the body so `questions` and
  * `declined` feedback land ON the item and the next intake pass
- * reads the enriched spec. The append is read-modify-write through
- * `store.update({description})` — best-effort like every store
- * patch: two annotates racing one item interleave, they don't
- * transact. A `<!-- bro: -->` metadata trailer keeps its body-last
- * position across the append (taskmeta.ts's contract).
+ * reads the enriched spec. Artifact lines are verbatim text — a
+ * segment that would open structure (an ATX heading, a code fence)
+ * throws, because a heading in an artifact truncates its section on
+ * the next read and an unclosed fence hides every artifact after it.
+ * The append is read-modify-write through `store.update({description})`
+ * — best-effort like every store patch: two annotates racing one
+ * item interleave, they don't transact. A `<!-- bro: -->` metadata
+ * trailer keeps its body-last position across the append
+ * (taskmeta.ts's contract).
+ *
+ * The parser is deliberately regex-free on the line path — heading,
+ * fence, and bullet probes are linear string scans, so a hostile
+ * body can't wedge the event loop (CodeQL polynomial-regex).
  */
 import { bodyMeta, stripMeta, withMeta } from './taskmeta.ts';
 import type { TaskRow, TaskStore } from './tasks.ts';
@@ -59,10 +70,10 @@ export interface TaskSpecFacade {
   spec(id: string): TaskSpec | undefined;
   /** `taskAnnotate(id, heading, lines)` — an intake artifact lands
    *  ON the item as `## <heading>` + the lines. Fails loud: a missing
-   *  item, an empty or multi-line heading, an empty artifact, and a
-   *  managed section name that already exists all throw — a second
-   *  `## Acceptance` never reaches the parser's first-wins read, so
-   *  writing one would be a silent no-op. */
+   *  item, an empty or multi-line heading, an empty artifact, a
+   *  managed section name that already exists, and a line whose
+   *  segments open structure (an ATX heading or code fence — an
+   *  artifact's text never becomes a section) all throw. */
   annotate(id: string, heading: string, lines: readonly string[]): void;
 }
 
@@ -79,12 +90,116 @@ const MANAGED: Record<string, SpecField> = {
   scenarios: 'scenarios',
 };
 
-/** ATX heading — `##Acceptance` (no space) is prose, not a heading. */
-const HEADING = /^(#{1,6})\s+(.+?)\s*$/;
-/** `## Foo ##` — the ATX closing sequence is decoration, not name. */
-const CLOSING_HASHES = /\s+#+\s*$/;
-/** A list item — `-`, `*`, `+`, `•`, or `1.`/`1)` numbered. */
-const BULLET = /^\s*(?:[-*+•]|\d{1,9}[.)])\s+(.+)$/;
+/** A body line with its fenced-ness — lines inside a code fence are
+ *  literal text: no headings start, no bullets count. */
+interface Line {
+  t: string;
+  fenced: boolean;
+}
+
+/** Heading text → its name — the ATX closing sequence (a trailing
+ *  `#` run preceded by whitespace) is decoration, not name. */
+function headingName(text: string): string {
+  const t = text.trim();
+  let e = t.length;
+  while (e > 0 && t[e - 1] === '#') e--;
+  if (e < t.length && (e === 0 || t[e - 1] === ' ' || t[e - 1] === '\t')) {
+    return t.slice(0, e).trimEnd();
+  }
+  return t;
+}
+
+/** ATX heading probe — a linear string scan, never a regex on
+ *  uncontrolled data. CommonMark shape: up to 3 leading spaces
+ *  (4+ is indented code), 1–6 `#`s, then a space/tab/EOL, then the
+ *  name minus its closing run. Every level answers — `###`+ headings
+ *  terminate managed sections like `##` ones do. */
+function headingOf(raw: string): { level: number; name: string } | null {
+  let i = 0;
+  while (raw[i] === ' ') i++;
+  if (i > 3) {
+    return null;
+  }
+  let level = 0;
+  while (raw[i + level] === '#') level++;
+  if (level === 0 || level > 6) {
+    return null;
+  }
+  const next = raw[i + level];
+  if (next !== undefined && next !== ' ' && next !== '\t') {
+    return null; // `##Acceptance` — no space — is prose, not a heading
+  }
+  return { level, name: headingName(raw.slice(i + level)) };
+}
+
+interface FenceMark {
+  ch: string;
+  len: number;
+  info: string;
+}
+
+/** Fenced-code marker probe — ` ``` ` or `~~~` (3+ of one char), ≤3
+ *  leading spaces; `info` is the tag after the marker (` ```ts `).
+ *  A backtick marker whose info contains '`' is an inline-code line,
+ *  never a fence. Closers need `info === ''` — an info string on a
+ *  `~~~` line inside a fence is content. */
+function fenceOf(raw: string): FenceMark | null {
+  let i = 0;
+  while (raw[i] === ' ') i++;
+  if (i > 3) {
+    return null;
+  }
+  const ch = raw[i];
+  if (ch !== '`' && ch !== '~') {
+    return null;
+  }
+  let len = 0;
+  while (raw[i + len] === ch) len++;
+  if (len < 3) {
+    return null;
+  }
+  const info = raw.slice(i + len).trim();
+  return ch === '`' && info.includes('`') ? null : { ch, len, info };
+}
+
+/** Bullet item text — `-`/`*`/`+`/`•` or `N.`/`N)` numbered (≤9
+ *  digits per CommonMark) — or null when the line isn't an item.
+ *  Linear string scan, same contract as headingOf/fenceOf. */
+function bulletText(raw: string): string | null {
+  const t = raw.trimStart();
+  const c = t[0];
+  if (c === '-' || c === '*' || c === '+' || c === '•') {
+    return t[1] === ' ' || t[1] === '\t' ? t.slice(1).trim() : null;
+  }
+  if (c !== undefined && c >= '0' && c <= '9') {
+    let i = 0;
+    while (t[i] !== undefined && t[i] >= '0' && t[i] <= '9') i++;
+    if (i <= 9 && (t[i] === '.' || t[i] === ')') && (t[i + 1] === ' ' || t[i + 1] === '\t')) {
+      return t.slice(i + 1).trim();
+    }
+  }
+  return null;
+}
+
+/** Bullet items when the live (unfenced) lines have any, else the
+ *  non-empty ones — an AC written as a bare sentence is still a
+ *  criterion, but intro prose next to real bullets is not. */
+function itemsOf(lines: Line[]): string[] {
+  const live = lines.filter(l => !l.fenced).map(l => l.t);
+  const bullets = live.map(bulletText).filter((s): s is string => s !== null && s !== '');
+  return bullets.length > 0 ? bullets : live.map(l => l.trim()).filter(s => s !== '');
+}
+
+/** The section's text verbatim — undefined for an absent/empty one.
+ *  Fenced content stays: a ``` block inside `## DoD` is content. */
+function textOf(lines: Line[] | undefined): string | undefined {
+  const t =
+    lines
+      ?.map(l => l.t)
+      .join('\n')
+      .trim() ?? '';
+  return t === '' ? undefined : t;
+}
 
 interface ParsedBody {
   fields: SpecFields;
@@ -93,50 +208,35 @@ interface ParsedBody {
   present: Set<SpecField>;
 }
 
-/** Bullet items when the section has any, else its non-empty lines —
- *  an AC written as a bare sentence is still a criterion, but intro
- *  prose next to real bullets is not. */
-function itemsOf(lines: string[]): string[] {
-  const bullets = lines
-    .map(l => BULLET.exec(l)?.[1]?.trim())
-    .filter((s): s is string => s !== undefined && s !== '');
-  return bullets.length > 0 ? bullets : lines.map(l => l.trim()).filter(s => s !== '');
-}
-
-/** The section's text verbatim — undefined for an absent/empty one. */
-function textOf(lines: string[] | undefined): string | undefined {
-  const t = lines?.join('\n').trim() ?? '';
-  return t === '' ? undefined : t;
-}
-
-/** One pass over the body — managed sections out, the rest is body. */
-function parseBody(description: string): ParsedBody {
-  const bodyLines: string[] = [];
-  const present = new Set<SpecField>();
-  const content = new Map<SpecField, string[]>();
-  // curLines collects into the current sink — body or a section's array
-  let curLines = bodyLines;
-  for (const raw of description.split(/\r?\n/)) {
-    const h = HEADING.exec(raw);
-    if (h === null || h[1]!.length > 2) {
-      // a content line, or a ### subheading inside the section
-      curLines.push(raw);
-      continue;
-    }
-    const name = h[2]!.replace(CLOSING_HASHES, '').trim().toLowerCase();
-    const field = h[1]!.length === 2 ? MANAGED[name] : undefined;
-    if (field === undefined || present.has(field)) {
-      // an unmanaged or duplicate heading — body prose like any other
-      curLines = bodyLines;
-      bodyLines.push(raw);
-    } else {
-      present.add(field);
-      curLines = [];
-      content.set(field, curLines);
-    }
+/** A heading line — starts its managed section on first sighting and
+ *  answers that section's line sink; anything else (an unmanaged
+ *  name, a duplicate, a non-level-2 heading) is body prose. */
+function openSection(
+  h: { level: number; name: string },
+  raw: string,
+  present: Set<SpecField>,
+  content: Map<SpecField, Line[]>,
+  bodyLines: Line[]
+): Line[] {
+  const field = h.level === 2 ? MANAGED[h.name.toLowerCase()] : undefined;
+  if (field === undefined || present.has(field)) {
+    bodyLines.push({ t: raw, fenced: false });
+    return bodyLines;
   }
+  present.add(field);
+  const lines: Line[] = [];
+  content.set(field, lines);
+  return lines;
+}
+
+/** Collected lines → the spec fields — body verbatim, item sections
+ *  bullet-extracted, text sections verbatim. */
+function fieldsOf(content: Map<SpecField, Line[]>, bodyLines: Line[]): SpecFields {
   const fields: SpecFields = {};
-  const body = bodyLines.join('\n').trim();
+  const body = bodyLines
+    .map(l => l.t)
+    .join('\n')
+    .trim();
   if (body !== '') {
     fields.body = body;
   }
@@ -156,7 +256,40 @@ function parseBody(description: string): ParsedBody {
   if (dor !== undefined) {
     fields.dor = dor;
   }
-  return { fields, present };
+  return fields;
+}
+
+/** One pass over the body — managed sections out, the rest is body.
+ *  Fence state runs ahead of heading detection: inside ```/~~~ no
+ *  heading opens and no bullet counts. */
+function parseBody(description: string): ParsedBody {
+  const bodyLines: Line[] = [];
+  const present = new Set<SpecField>();
+  const content = new Map<SpecField, Line[]>();
+  let curLines = bodyLines;
+  let fence: FenceMark | null = null;
+  for (const raw of description.split(/\r?\n/)) {
+    const f = fenceOf(raw);
+    if (fence !== null) {
+      curLines.push({ t: raw, fenced: true });
+      if (f !== null && f.ch === fence.ch && f.len >= fence.len && f.info === '') {
+        fence = null;
+      }
+      continue;
+    }
+    if (f !== null) {
+      fence = f;
+      curLines.push({ t: raw, fenced: true });
+      continue;
+    }
+    const h = headingOf(raw);
+    if (h === null) {
+      curLines.push({ t: raw, fenced: false });
+    } else {
+      curLines = openSection(h, raw, present, content, bodyLines);
+    }
+  }
+  return { fields: fieldsOf(content, bodyLines), present };
 }
 
 /** The body's spec fields — the pure parser every TaskSpec adapter
@@ -174,6 +307,32 @@ function specFromRow(row: TaskRow): TaskSpec {
   return { id: row.id, title: row.title ?? '', ...parseTaskSpecBody(row.description) };
 }
 
+/** annotate's input contract — the heading is a single line and
+ *  every line segment is verbatim text, never structure. An ATX
+ *  heading in an artifact truncates its section on the next read
+ *  (a managed name would inject spec fields); a fence marker hides
+ *  every later artifact inside it. Both fail loud. */
+function checkAnnotateInput(heading: string, lines: readonly string[]): string {
+  const h = heading.trim();
+  if (h === '' || /[\r\n]/.test(h)) {
+    throw new Error('taskSpec annotate: heading must be a single non-empty line');
+  }
+  if (lines.length === 0) {
+    throw new Error('taskSpec annotate: an artifact with no lines is no artifact');
+  }
+  for (const line of lines) {
+    for (const seg of line.split(/\r?\n/)) {
+      if (headingOf(seg) !== null || fenceOf(seg) !== null) {
+        throw new Error(
+          `taskSpec annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
+            'artifact text never becomes a section or a fence'
+        );
+      }
+    }
+  }
+  return h;
+}
+
 /**
  * The prod adapter — the TaskSpecFacade over a TaskStore. bd is the
  * first store it binds (`taskSpecFacade(taskStore(dir))`); any
@@ -189,20 +348,15 @@ export function taskSpecFacade(store: TaskStore): TaskSpecFacade {
       return row === undefined ? undefined : specFromRow(row);
     },
     annotate: (id, heading, lines) => {
-      const h = heading.trim();
-      if (h === '' || /[\r\n]/.test(h)) {
-        throw new Error('taskSpec annotate: heading must be a single non-empty line');
-      }
-      if (lines.length === 0) {
-        throw new Error('taskSpec annotate: an artifact with no lines is no artifact');
-      }
+      const h = checkAnnotateInput(heading, lines);
       const row = store.get(id);
       if (row === undefined) {
         throw new Error(`taskSpec annotate: item "${id}" is not in the store`);
       }
-      const parsed = parseBody(stripMeta(row.description));
-      const managed = MANAGED[h.toLowerCase()];
-      if (managed !== undefined && parsed.present.has(managed)) {
+      // same normalization the parser applies — 'Acceptance ##' names
+      // the managed section, a miss would write dead text
+      const managed = MANAGED[headingName(h).toLowerCase()];
+      if (managed !== undefined && parseBody(stripMeta(row.description)).present.has(managed)) {
         throw new Error(
           `taskSpec annotate: "## ${h}" already exists on ${id} — ` +
             'a duplicate never reaches the spec read (first wins)'

@@ -100,10 +100,62 @@ describe('parseTaskSpecBody — malformed input', () => {
     assert.deepEqual(f.scenarios, ['first', 'second', 'third', 'fourth', 'fifth']);
   });
 
-  test('a deeper ### heading inside a section is content', () => {
+  test('a ### subsection inside a managed section is body, not content', () => {
     const f = parseTaskSpecBody('## DoD\n### Detail\nkept verbatim\n\n## Acceptance\n- a');
-    assert.equal(f.dod, '### Detail\nkept verbatim');
+    assert.equal(f.dod, undefined);
+    assert.equal(f.body, '### Detail\nkept verbatim');
     assert.deepEqual(f.acceptance, ['a']);
+  });
+
+  test('### Examples bullets under ## Acceptance never become criteria', () => {
+    const f = parseTaskSpecBody(
+      '## Acceptance\n- real\n\n### Examples\n- example, not an ac\n\n## DoD\nd'
+    );
+    assert.deepEqual(f.acceptance, ['real']);
+    assert.ok(f.body?.includes('### Examples\n- example, not an ac'));
+  });
+
+  test('ATX headings with up to three leading spaces count; four is code', () => {
+    const f = parseTaskSpecBody('  ## Acceptance\n- a\n\n   ## Scenarios\n- s');
+    assert.deepEqual(f.acceptance, ['a']);
+    assert.deepEqual(f.scenarios, ['s']);
+    // four spaces — indented code, never a heading
+    const g = parseTaskSpecBody('    ## Acceptance\n- not an ac');
+    assert.equal(g.acceptance, undefined);
+    assert.ok(g.body?.includes('## Acceptance'));
+  });
+
+  test('a section inside a fenced code block is an example, not a spec', () => {
+    const f = parseTaskSpecBody(
+      'the body\n\n```md\n## Acceptance\n- example check\n```\n\n## DoD\nreal done'
+    );
+    assert.equal(f.acceptance, undefined);
+    assert.equal(f.dod, 'real done');
+    assert.ok(f.body?.includes('## Acceptance'));
+  });
+
+  test('~~~ fences hide sections the same way', () => {
+    const f = parseTaskSpecBody('~~~\n## Acceptance\n- fake\n~~~\n\n## Acceptance\n- real');
+    assert.deepEqual(f.acceptance, ['real']);
+  });
+
+  test('a fenced bullet under ## Acceptance never becomes an item', () => {
+    const f = parseTaskSpecBody('## Acceptance\n```\n- fake ac\n```\n- real ac');
+    assert.deepEqual(f.acceptance, ['real ac']);
+  });
+
+  test('an unclosed fence swallows the rest — nothing after it parses', () => {
+    const f = parseTaskSpecBody('## DoD\nd\n\n```\n## Acceptance\n- fake');
+    // the fence is DoD's own verbatim content — what it hides is the section
+    assert.equal(f.dod, 'd\n\n```\n## Acceptance\n- fake');
+    assert.equal(f.acceptance, undefined);
+  });
+
+  test('a pathological whitespace heading parses in linear time', () => {
+    const t0 = Date.now();
+    const f = parseTaskSpecBody(`## ${' '.repeat(200_000)}`);
+    assert.ok(Date.now() - t0 < 1000, 'heading scan must not backtrack');
+    assert.equal(f.acceptance, undefined);
   });
 
   test('an ATX closing sequence is not part of the name', () => {
@@ -197,5 +249,45 @@ describe('taskSpecFacade — annotate write', () => {
   test('an empty artifact throws', () => {
     const f = taskSpecFacade(fakeStore([{ id: 't1' }]).store);
     assert.throws(() => f.annotate('t1', 'Questions', []), /no artifact/);
+  });
+
+  test('a managed name with a closing sequence still hits the dup guard', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: '## Acceptance\n- a' }];
+    const f = taskSpecFacade(fakeStore(rows).store);
+    assert.throws(() => f.annotate('t1', 'Acceptance ##', ['- b']), /already exists/);
+  });
+
+  test('artifact lines that open a section throw — no structure injection', () => {
+    const f = taskSpecFacade(fakeStore([{ id: 't1', description: 'body' }]).store);
+    assert.throws(() => f.annotate('t1', 'Declined', ['## Acceptance', '- fake']), /structure/);
+    assert.throws(() => f.annotate('t1', 'Declined', ['  ## DoD']), /structure/);
+    // even embedded past a line break inside one element
+    assert.throws(() => f.annotate('t1', 'Questions', ['who?\n## Acceptance']), /structure/);
+  });
+
+  test('an injected managed name can never author criteria', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body' }];
+    const f = taskSpecFacade(fakeStore(rows).store);
+    assert.throws(
+      () => f.annotate('t1', 'Declined', ['weak spec', '## Acceptance', '- x']),
+      /structure/
+    );
+    assert.equal(f.spec('t1')?.acceptance, undefined);
+  });
+
+  test('artifact lines that open a fence throw — later artifacts stay live', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body' }];
+    const f = taskSpecFacade(fakeStore(rows).store);
+    assert.throws(() => f.annotate('t1', 'Questions', ['```']), /structure/);
+    assert.throws(() => f.annotate('t1', 'Questions', ['~~~ts']), /structure/);
+    // inline backticks mid-line are prose, not a fence
+    f.annotate('t1', 'Questions', ['how do I use ```ts blocks?']);
+  });
+
+  test('non-structural line breaks inside an element stay verbatim', () => {
+    const rows: TaskRow[] = [{ id: 't1', description: 'body' }];
+    const { store, updates } = fakeStore(rows);
+    taskSpecFacade(store).annotate('t1', 'Questions', ['who decides?\nand when?']);
+    assert.equal(updates[0]?.[1].description, 'body\n\n## Questions\nwho decides?\nand when?');
   });
 });
