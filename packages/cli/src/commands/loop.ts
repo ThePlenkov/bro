@@ -141,6 +141,7 @@ import { runSyncCommand } from './sync.ts';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
 import { isStackName } from '@broject/stack';
 import { loopSlug } from '@broject/loop';
+import { routeTableLane } from './loop-routes.ts';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -628,6 +629,22 @@ async function resolveBeadLane(
   bead: ReadyBead,
   opts: { router?: boolean } = {}
 ): Promise<LoopLane> {
+  // the route table is the router's own routing face — when the
+  // operator declares one, it answers; fleet.routing stays the
+  // compatibility face for the runs that declare none
+  const tablePath = ctx.env.brouter?.routes;
+  if (tablePath !== undefined) {
+    const label = beadClassInfo(ctx, bead, false);
+    const routed = await routeTableLane({
+      table: tablePath,
+      ...(ctx.sel.class === undefined ? {} : { class: ctx.sel.class }),
+      ...(label.label === undefined ? {} : { label: label.label }),
+      ...(label.priority === undefined ? {} : { priority: label.priority }),
+    });
+    if (routed !== undefined) {
+      return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+    }
+  }
   if (!ctx.routing) {
     return ctx.lane;
   }
