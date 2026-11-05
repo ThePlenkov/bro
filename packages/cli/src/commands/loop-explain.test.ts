@@ -7,6 +7,7 @@ import type { RouteTableLane } from './loop-routes.ts';
 const ROUTED: RouteTableLane = {
   class: 'edit',
   chain: [{ provider: 'devin-acp', model: 'swe-2-max' }],
+  onWall: 'fallthrough',
   provider: 'devin-acp',
   model: 'swe-2-max',
   decision: {
