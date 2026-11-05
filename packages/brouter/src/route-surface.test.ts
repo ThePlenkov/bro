@@ -41,7 +41,7 @@ const TABLE = [
   '',
   '[routes.edit]',
   'match = { type = "edit" }',
-  'chain = [{ provider = "devin-acp", model = "swe-2-high" }]',
+  'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
   'description = "a small edit"',
   '',
   '[routes.fallback]',
@@ -122,7 +122,7 @@ test('a route naming a model the declaration contradicts is a config error', () 
   if (!existsSync(CLI)) return;
   // the operator declared devin-acp for the swe-2 family
   const dir = configDir({
-    brouter: { models: { 'swe-2-high': [{ provider: 'devin-acp' }] } },
+    brouter: { models: { 'swe-2-max': [{ provider: 'devin-acp' }] } },
   });
   const table = tableFile(
     [
@@ -137,14 +137,14 @@ test('a route naming a model the declaration contradicts is a config error', () 
   const out = run(['routes', 'validate', '--routes', table], dir);
   assert.equal(out.code, 1);
   assert.match(out.stderr, /does not serve/);
-  assert.match(out.stderr, /swe-2-high/);
+  assert.match(out.stderr, /swe-2-max/);
   rmSync(dir, { recursive: true, force: true });
 });
 
 test('a declaration that agrees leaves the table valid', () => {
   if (!existsSync(CLI)) return;
   const dir = configDir({
-    brouter: { models: { 'swe-2-high': [{ provider: 'devin-acp' }] } },
+    brouter: { models: { 'swe-2-max': [{ provider: 'devin-acp' }] } },
   });
   const out = run(['routes', 'validate', '--routes', tableFile(TABLE)], dir);
   assert.equal(out.code, 0);
