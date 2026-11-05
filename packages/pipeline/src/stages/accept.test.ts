@@ -10,11 +10,11 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { parse } from 'smol-toml';
 import { testRepoInit } from '@broject/core';
+import { parse } from 'smol-toml';
+import { awaitingCustomerRuns } from '../awaiting.ts';
 import {
   appendCustomerRecord,
-  awaitingCustomerRuns,
   customerChannelPath,
   fileVerdictStore,
   latestVerdict,
@@ -568,9 +568,9 @@ describe('customer channel — the durable carrier', () => {
       ts: TS,
     });
     // a foreign item's pending accept never matches
-    const hits = awaitingCustomerRuns(dir, ITEM, 'accept');
+    const hits = awaitingCustomerRuns(dir, { item: ITEM, stage: 'accept' });
     assert.deepEqual(hits, [{ runId: 'run-9', stage: 'accept', via: 'pending' }]);
-    assert.deepEqual(awaitingCustomerRuns(dir, 'other-item', 'accept'), []);
+    assert.deepEqual(awaitingCustomerRuns(dir, { item: 'other-item', stage: 'accept' }), []);
     // an accept-stage alert (customer-mismatch) still counts — the
     // corrected record is exactly what the wake needs
     j.append({
@@ -585,7 +585,7 @@ describe('customer channel — the durable carrier', () => {
       formula_sha: SHA,
       ts: TS,
     });
-    assert.deepEqual(awaitingCustomerRuns(dir, ITEM, 'accept'), [
+    assert.deepEqual(awaitingCustomerRuns(dir, { item: ITEM, stage: 'accept' }), [
       { runId: 'run-9', stage: 'accept', via: 'alert' },
     ]);
   });

@@ -526,16 +526,22 @@ function bounded(name: string, v: number | undefined, dflt: number, min = 1): nu
   return n;
 }
 
-/** The scoped-fix verdict names — `fixVerdicts` wins, the singular
+/** The configured scoped-fix names — `fixVerdicts` wins, the singular
  *  `fixVerdict` pins one name, else the spec pair (fix + rejected).
- *  An explicit empty list opts OUT of scoped-fix binding entirely;
- *  a non-string or empty entry is invalid input — a binding that
- *  names nothing would silently turn every re-entry unscoped. */
+ *  An explicit empty list opts OUT of scoped-fix binding entirely. */
+const fixVerdictList = (opts: RunOptions): string[] =>
+  opts.fixVerdicts ??
+  (opts.fixVerdict !== undefined ? [opts.fixVerdict] : [...DEFAULT_FIX_VERDICTS]);
+
+/** A usable verdict name — a non-empty string, nothing else. */
+const isVerdictName = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
+/** The scoped-fix verdict names — a non-array or an entry that names
+ *  nothing is invalid input: a binding that names nothing would
+ *  silently turn every re-entry unscoped. */
 function fixVerdictsFor(opts: RunOptions): string[] {
-  const list =
-    opts.fixVerdicts ??
-    (opts.fixVerdict !== undefined ? [opts.fixVerdict] : [...DEFAULT_FIX_VERDICTS]);
-  if (!Array.isArray(list) || list.some(v => typeof v !== 'string' || v === '')) {
+  const list = fixVerdictList(opts);
+  if (!Array.isArray(list) || !list.every(isVerdictName)) {
     throw new Error(
       'pipeline run: fixVerdicts must be an array of non-empty strings (or fixVerdict, a single name)'
     );
@@ -1221,44 +1227,67 @@ function replayCtx(run: Run, records: JournalRow[]): void {
   }
 }
 
+/** A fail-closed park at the entry door — NO row is appended: an
+ *  alert stamped under a contested identity (foreign item, imposter
+ *  customer) would itself be foreign state and lock both parties
+ *  out of resume forever. */
+const guardPark = (run: Run, alert: string, detail: string): RunResult =>
+  result(run, 'park', entryStage(run.formula).name, { alert, detail });
+
+/** run_id ↔ item is 1:1 — rows for this run id belonging to another
+ *  item mean a corrupt/mixed journal namespace; refuse to resume or
+ *  replay any of it. */
+function foreignItemGuard(run: Run): RunResult | undefined {
+  const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
+  return foreign
+    ? guardPark(
+        run,
+        PARK_ALERTS.itemMismatch,
+        `journal rows for run ${run.runId} belong to another item`
+      )
+    : undefined;
+}
+
+/** A resume carrying a DIFFERENT signer than the run's journaled
+ *  customer is an imposter — one carrying none just inherits. */
+const customerMismatch = (journaled: string | undefined, run: Run): boolean => {
+  if (journaled === undefined || run.customer === undefined) {
+    return false;
+  }
+  return journaled !== run.customer;
+};
+
+/** The recorded customer is run state — journaled on every row — so a
+ *  resume cannot quietly swap who may sign the accept gate. A resume
+ *  carrying a DIFFERENT customer fails closed like a foreign item;
+ *  one carrying none inherits the journaled identity — the customer
+ *  is durable. */
+function bindCustomer(run: Run, records: JournalRow[]): RunResult | undefined {
+  const journaled = records.find(r => typeof r.customer === 'string')?.customer;
+  if (customerMismatch(journaled, run)) {
+    return guardPark(
+      run,
+      PARK_ALERTS.customerMismatch,
+      `run ${run.runId} recorded customer ${JSON.stringify(journaled)} — ` +
+        `resume carried ${JSON.stringify(run.customer)}`
+    );
+  }
+  run.customer = journaled ?? run.customer;
+  return undefined;
+}
+
 /** The shared entry: reconstruct journal state, then drive — fresh at
  *  the entry stage, or from wherever the journal last settled. */
 async function begin(run: Run): Promise<RunResult> {
-  // run_id ↔ item is 1:1 — rows for this run id belonging to another
-  // item mean a corrupt/mixed journal namespace; refuse to resume or
-  // replay any of it. And park WITHOUT a row: an alert appended under
-  // the shared run id would itself be a foreign row for the original
-  // item — the poison would lock BOTH items out of resume forever.
-  const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
-  if (foreign) {
-    const entry = entryStage(run.formula).name;
-    return result(run, 'park', entry, {
-      alert: PARK_ALERTS.itemMismatch,
-      detail: `journal rows for run ${run.runId} belong to another item`,
-    });
+  const guard = foreignItemGuard(run);
+  if (guard !== undefined) {
+    return guard;
   }
   const records = recordsOf(run);
-  // the recorded customer is run state — journaled on every row — so
-  // a resume cannot quietly swap who may sign the accept gate. A
-  // resume carrying a DIFFERENT customer fails closed like a foreign
-  // item: park WITHOUT a row (an alert stamped under the imposter's
-  // claimed identity would poison the ledger). A resume that carries
-  // none inherits the journaled identity — the customer is durable.
-  const journaledCustomer = records.find(r => typeof r.customer === 'string')?.customer;
-  if (
-    journaledCustomer !== undefined &&
-    run.customer !== undefined &&
-    journaledCustomer !== run.customer
-  ) {
-    const entry = entryStage(run.formula).name;
-    return result(run, 'park', entry, {
-      alert: PARK_ALERTS.customerMismatch,
-      detail:
-        `run ${run.runId} recorded customer ${JSON.stringify(journaledCustomer)} — ` +
-        `resume carried ${JSON.stringify(run.customer)}`,
-    });
+  const customerPark = bindCustomer(run, records);
+  if (customerPark !== undefined) {
+    return customerPark;
   }
-  run.customer = journaledCustomer ?? run.customer;
   run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
   replayCtx(run, records);
   const last = records.at(-1);

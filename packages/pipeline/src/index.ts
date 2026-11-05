@@ -1,3 +1,23 @@
+export type { AwaitingRun, AwaitTarget } from './awaiting.ts';
+export { awaitingCustomerRuns } from './awaiting.ts';
+export type {
+  AnswerFeed,
+  CustomerAnswer,
+  CustomerConsumed,
+  CustomerRecord,
+  CustomerVerdict,
+} from './customer.ts';
+export {
+  appendCustomerRecord,
+  CUSTOMER_SUFFIX,
+  customerChannelPath,
+  fileAnswerFeed,
+  fileVerdictStore,
+  latestVerdict,
+  pendingAnswers,
+  readCustomerFile,
+  writeCustomerRecord,
+} from './customer.ts';
 export type {
   GateOn,
   PipelineFormula,
@@ -33,26 +53,6 @@ export {
   pipelineJournalPath,
   readJournalFile,
 } from './journal.ts';
-export type {
-  AnswerFeed,
-  AwaitingRun,
-  CustomerAnswer,
-  CustomerConsumed,
-  CustomerRecord,
-  CustomerVerdict,
-} from './customer.ts';
-export {
-  appendCustomerRecord,
-  awaitingCustomerRuns,
-  CUSTOMER_SUFFIX,
-  customerChannelPath,
-  fileAnswerFeed,
-  fileVerdictStore,
-  latestVerdict,
-  pendingAnswers,
-  readCustomerFile,
-  writeCustomerRecord,
-} from './customer.ts';
 export type {
   AdmitFn,
   EngineAlert,
@@ -168,6 +168,15 @@ export {
   routeStage,
 } from './stages/route.ts';
 export type {
+  EvidenceRow,
+  RowVerdict,
+  VerifyDeps,
+  VerifyPayload,
+  VerifySpec,
+  VerifyVerdict,
+} from './stages/verify.ts';
+export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';
+export type {
   ArtifactTrace,
   TraceDeps,
   TraceEntryView,
@@ -188,12 +197,3 @@ export {
   TRACE_TRAILERS,
   trailerBlock,
 } from './trace.ts';
-export type {
-  EvidenceRow,
-  RowVerdict,
-  VerifyDeps,
-  VerifyPayload,
-  VerifySpec,
-  VerifyVerdict,
-} from './stages/verify.ts';
-export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';

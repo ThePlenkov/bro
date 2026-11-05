@@ -24,15 +24,20 @@ import type {
   TaskSpecFacade,
 } from '@broject/core';
 import { parseTaskSpecBody } from '@broject/core';
-import type { EngineOutcome, EngineResult } from './runner.ts';
+import type { EngineAlert, EngineOutcome, EngineResult } from './runner.ts';
 import type { ClassifyBacklog } from './stages/classify.ts';
+
+/** The engine-alert shape — `{alert, …}` vs EngineResult's
+ *  `{verdict, …}`: disjoint on the `alert` key. */
+const isAlertOutcome = (r: EngineOutcome): r is EngineAlert =>
+  typeof r === 'object' && r !== null && 'alert' in r;
 
 /** Narrow an engine outcome to a settling result — the stages these
  *  suites drive (judge/learn engines) never suspend or alert, so a
  *  'pending' or engine-alert here is a fixture bug, not a branch to
  *  assert through. */
 export const settled = (r: EngineOutcome): EngineResult => {
-  if (r === 'pending' || (typeof r === 'object' && r !== null && 'alert' in r)) {
+  if (r === 'pending' || isAlertOutcome(r)) {
     throw new Error(`test stage did not settle — got ${JSON.stringify(r)}`);
   }
   return r;
@@ -177,6 +182,34 @@ export interface SpecStoreSpy extends TaskSpecFacade {
 const opensStructure = (seg: string): boolean =>
   /^ {0,3}#{1,6}(?:[ \t]|$)/.test(seg) || /^ {0,3}(?:`{3,}|~{3,})/.test(seg);
 
+/** Every artifact segment must be inert body text — a line that
+ *  opens a section or a fence is a sanitize regression the real
+ *  facade refuses the same way. */
+const assertInert = (lines: readonly string[]): void => {
+  for (const line of lines) {
+    for (const seg of line.split(/\r?\n/)) {
+      if (opensStructure(seg)) {
+        throw new Error(
+          `specStore annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
+            'artifact text never becomes a section or a fence'
+        );
+      }
+    }
+  }
+};
+
+/** The annotate contract's loud failures — heading shape, non-empty
+ *  artifact, and no segment that opens structure. */
+const guardAnnotate = (heading: string, lines: readonly string[]): void => {
+  if (heading.trim() === '' || /[\r\n]/.test(heading)) {
+    throw new Error('specStore annotate: heading must be a single non-empty line');
+  }
+  if (lines.length === 0) {
+    throw new Error('specStore annotate: an artifact with no lines is no artifact');
+  }
+  assertInert(lines);
+};
+
 /** An in-memory TaskSpecFacade — `spec()` projects the stored body
  *  through the REAL parser (`parseTaskSpecBody`, the same read prod's
  *  adapter makes: a `## Acceptance` section becomes `acceptance[]`,
@@ -200,22 +233,7 @@ export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
         : { id, title: titles.get(id) ?? '', ...parseTaskSpecBody(d) };
     },
     annotate: (id, heading, lines) => {
-      if (heading.trim() === '' || /[\r\n]/.test(heading)) {
-        throw new Error('specStore annotate: heading must be a single non-empty line');
-      }
-      if (lines.length === 0) {
-        throw new Error('specStore annotate: an artifact with no lines is no artifact');
-      }
-      for (const line of lines) {
-        for (const seg of line.split(/\r?\n/)) {
-          if (opensStructure(seg)) {
-            throw new Error(
-              `specStore annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
-                'artifact text never becomes a section or a fence'
-            );
-          }
-        }
-      }
+      guardAnnotate(heading, lines);
       const base = bodies.get(id);
       if (base === undefined) {
         throw new Error(`specStore annotate: item "${id}" is not in the store`);

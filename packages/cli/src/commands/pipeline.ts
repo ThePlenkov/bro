@@ -65,12 +65,46 @@ const envSigner = (): string | undefined => {
   return badge === undefined || badge === '' ? undefined : badge;
 };
 
+/** One command's invocation — the normalized argv it parses and the
+ *  repo dir it resolves the pipeline plane under. Internal only;
+ *  the exported command surfaces keep their argv shape. */
+interface CmdCtx {
+  argv: string[];
+  dir: string;
+}
+
+/** The gate a record targets — which stage's park for which item the
+ *  run scan looks for (verdicts narrow the parked wait state). */
+interface Gate {
+  item: string;
+  stage: string;
+  verdicts?: readonly string[];
+}
+
+/** The command's flag reads — parsed once per invocation so
+ *  downstream code reads fields instead of repeated argv lookups. */
+interface Flags {
+  run?: string;
+  by?: string;
+  notes?: string;
+  message?: string;
+  answersFile?: string;
+}
+
+const flagsOf = (argv: string[]): Flags => ({
+  run: flag(argv, '--run'),
+  by: flag(argv, '--by'),
+  notes: flag(argv, '--notes'),
+  message: flag(argv, '--message'),
+  answersFile: flag(argv, '--answers-file'),
+});
+
 /** The signer identity — explicit --by wins, else the env badge a
  *  spawned agent-customer carries, else the store's actor chain. An
  *  unresolvable identity is a hard fail: a verdict with no signer
  *  can never pass the gate, so recording it is worse than refusing. */
-function signer(argv: string[], dir: string): string {
-  const by = flag(argv, '--by') ?? envSigner() ?? bdActor(dir);
+function signer(ctx: CmdCtx, f: Flags): string {
+  const by = f.by ?? envSigner() ?? bdActor(ctx.dir);
   if (by === '') {
     fail('cannot resolve the signer — pass --by or set BRO_AGENT_ID');
   }
@@ -78,48 +112,42 @@ function signer(argv: string[], dir: string): string {
 }
 
 /** The run this record belongs to: --run pins it, else the sole run
- *  parked at `stage` for `item` wins, else we refuse — a verdict for
- *  no run (or an ambiguous one) must never land in a channel. */
-function targetRun(
-  argv: string[],
-  dir: string,
-  item: string,
-  stage: string,
-  verdicts: readonly string[] = []
-): AwaitingRun {
-  const pinned = flag(argv, '--run');
+ *  parked at the gate wins, else we refuse — a verdict for no run
+ *  (or an ambiguous one) must never land in a channel. */
+function targetRun(ctx: CmdCtx, gate: Gate, f: Flags): AwaitingRun {
+  const pinned = f.run;
   if (pinned !== undefined) {
-    return { runId: pinned, stage, via: 'pending' };
+    return { runId: pinned, stage: gate.stage, via: 'pending' };
   }
-  const hits = awaitingCustomerRuns(dir, item, stage, verdicts);
+  const hits = awaitingCustomerRuns(ctx.dir, gate);
   if (hits.length === 0) {
-    fail(`no run parked at ${stage} for ${item} — nothing awaits this input`);
+    fail(`no run parked at ${gate.stage} for ${gate.item} — nothing awaits this input`);
   }
   if (hits.length > 1) {
     fail(
-      `${hits.length} runs parked at ${stage} for ${item} — pin one with --run ` +
+      `${hits.length} runs parked at ${gate.stage} for ${gate.item} — pin one with --run ` +
         `(${hits.map(h => h.runId).join(', ')})`
     );
   }
-  return hits[0] ?? fail(`no run parked at ${stage} for ${item}`);
+  return hits[0] ?? fail(`no run parked at ${gate.stage} for ${gate.item}`);
 }
 
 /** Append a record to a run's channel — the path's null case means no
  *  pipeline plane exists under this repo at all. */
 function appendToRun(
-  dir: string,
-  runId: string,
+  ctx: CmdCtx,
+  run: AwaitingRun,
   rec: Parameters<typeof appendCustomerRecord>[1]
 ): void {
   const file = ((): string | null => {
     try {
-      return customerChannelPath({ dir, runId });
+      return customerChannelPath({ dir: ctx.dir, runId: run.runId });
     } catch (e) {
       fail(`unsafe run id: ${(e as Error).message}`, 2);
     }
   })();
   if (file === null) {
-    fail(`no pipeline plane under ${dir} — not a git repo`);
+    fail(`no pipeline plane under ${ctx.dir} — not a git repo`);
   }
   appendCustomerRecord(file, rec);
 }
@@ -138,18 +166,18 @@ function cmdAccept(argv: string[]): void {
   if (!(ACCEPT_VERDICTS as readonly string[]).includes(verdict)) {
     fail(`verdict must be one of ${ACCEPT_VERDICTS.join('|')} — got ${JSON.stringify(verdict)}`, 2);
   }
-  const notes = flag(argv, '--notes');
-  if (verdict === 'rejected' && blank(notes)) {
+  const f = flagsOf(argv);
+  if (verdict === 'rejected' && blank(f.notes)) {
     fail("--notes is required on rejected — it is the customer's fix scope", 2);
   }
-  const dir = process.cwd();
-  const run = targetRun(argv, dir, item, 'accept');
-  appendToRun(dir, run.runId, {
+  const ctx: CmdCtx = { argv, dir: process.cwd() };
+  const run = targetRun(ctx, { item, stage: 'accept' }, f);
+  appendToRun(ctx, run, {
     kind: 'verdict',
     item,
     verdict,
-    accepted_by: signer(argv, dir),
-    ...(notes !== undefined ? { notes } : {}),
+    accepted_by: signer(ctx, f),
+    ...(f.notes !== undefined ? { notes: f.notes } : {}),
     ts: new Date().toISOString(),
   });
   console.log(
@@ -160,7 +188,8 @@ function cmdAccept(argv: string[]): void {
 /** The --answers-file payload — JSON when the file parses (a
  *  structured qid→answer map), the raw text otherwise. An unreadable
  *  file is a hard fail — recording nothing is worse than refusing. */
-function answersFromFile(file: string): unknown {
+function answersFromFile(f: Flags): unknown {
+  const file = f.answersFile ?? fail('answer needs -m/--message or --answers-file', 2);
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
@@ -177,19 +206,17 @@ function answersFromFile(file: string): unknown {
 /** The answers payload: -m/--message is raw text; --answers-file
  *  reads a file that parses as JSON when it can (a structured
  *  qid→answer map), else the raw text. */
-function answersPayload(argv: string[]): unknown {
-  const message = flag(argv, '--message');
-  const file = flag(argv, '--answers-file');
-  if (message !== undefined && file !== undefined) {
+function answersPayload(f: Flags): unknown {
+  if (f.message !== undefined && f.answersFile !== undefined) {
     fail('pass --message OR --answers-file, not both', 2);
   }
-  if (message !== undefined) {
-    return message;
+  if (f.message !== undefined) {
+    return f.message;
   }
-  if (file === undefined) {
+  if (f.answersFile === undefined) {
     fail('answer needs -m/--message or --answers-file', 2);
   }
-  return answersFromFile(file);
+  return answersFromFile(f);
 }
 
 /** Flag spellings that take the NEXT token as their value — a bare
@@ -197,41 +224,36 @@ function answersPayload(argv: string[]): unknown {
  *  `=<v>` spelling never does. */
 const VALUE_FLAGS = new Set(['-m', '--message', '--answers-file', '--by', '--run']);
 
-/** The token's flag name — its segment up to the first `=`. A name
- *  of `-m` means the token IS `-m` or `-m=<v>` exactly: segment
- *  equality, never a prefix match (`-mfoo` is literal answer text,
- *  not the option). */
-const flagName = (a: string): string => a.split('=', 1)[0]!;
-
-/** `-m`'s option name — segment equality only. */
-const isShortFlag = (name: string): boolean => name === '-m';
-
-/** There IS a next token to consume as a flag value. */
-const hasNext = (argv: string[], i: number): boolean => i + 1 < argv.length;
-
-/** A bare value flag followed by a token — the flag consumes it as
- *  its value, copied untouched, so `--message -m=x` keeps `-m=x` as
- *  text. An inline `=`-form token never consumes (the value is in
- *  the token already). */
-const consumesValue = (a: string, argv: string[], i: number): boolean =>
-  flagName(a) === a && VALUE_FLAGS.has(a) && hasNext(argv, i);
-
-/** A `-m`-position token's rewrite — the `--message` token(s) to
- *  emit plus how many further input tokens they consume: `-m=<v>`
- *  lands inline and consumes nothing, a bare `-m` takes the next
- *  token as its value verbatim. */
-const shortFlagTokens = (
-  a: string,
-  name: string,
-  argv: string[],
-  i: number
-): { tokens: string[]; consumed: number } => {
-  if (a !== name) {
-    return { tokens: [`--message=${a.slice(name.length + 1)}`], consumed: 0 };
+/** One token's emitted spelling + how many further tokens it
+ *  consumes, where `next` is the following argv token (undefined at
+ *  the tail). `-m` in option position rewrites to `--message`
+ *  (`-m=<v>` lands inline, a bare `-m` takes `next` verbatim); a bare
+ *  value flag copies `next` untouched even when it spells `-m`; an
+ *  inline `=<v>` token carries its value inside and consumes
+ *  nothing. Segment equality decides the flag name — `-mfoo` is
+ *  literal text, never the option. */
+const emitFor = (t: {
+  a: string;
+  next: string | undefined;
+}): { tokens: string[]; consumed: number } => {
+  const { a, next } = t;
+  const name = a.split('=', 1)[0]!;
+  if (name === '-m') {
+    // `-m=<v>` lands inline; a bare `-m` takes `next` verbatim
+    if (name !== a) {
+      return { tokens: [`--message=${a.slice(name.length + 1)}`], consumed: 0 };
+    }
+    return next === undefined
+      ? { tokens: ['--message'], consumed: 0 }
+      : { tokens: ['--message', next], consumed: 1 };
   }
-  return hasNext(argv, i)
-    ? { tokens: ['--message', argv[i + 1]!], consumed: 1 }
-    : { tokens: ['--message'], consumed: 0 };
+  // an inline `=<v>` token carries its value inside — consumes none;
+  // only a BARE value flag takes `next`
+  if (name !== a) {
+    return { tokens: [a], consumed: 0 };
+  }
+  const bareValueFlag = VALUE_FLAGS.has(a) && next !== undefined;
+  return bareValueFlag ? { tokens: [a, next], consumed: 1 } : { tokens: [a], consumed: 0 };
 };
 
 /** `-m` → `--message`, ONLY in option position: a `-m` token that is
@@ -253,18 +275,9 @@ function normalizeShortFlag(argv: string[]): string[] {
       out.push(a);
       continue;
     }
-    const name = flagName(a);
-    if (isShortFlag(name)) {
-      const r = shortFlagTokens(a, name, argv, i);
-      out.push(...r.tokens);
-      i += r.consumed;
-      continue;
-    }
-    out.push(a);
-    if (consumesValue(a, argv, i)) {
-      i += 1;
-      out.push(argv[i]!);
-    }
+    const step = emitFor({ a, next: argv[i + 1] });
+    out.push(...step.tokens);
+    i += step.consumed;
   }
   return out;
 }
@@ -281,17 +294,17 @@ function cmdAnswer(argv: string[]): void {
     process.exit(2);
   }
   const [item] = pos as [string];
-  const answers = answersPayload(norm);
-  const dir = process.cwd();
+  const f = flagsOf(norm);
+  const answers = answersPayload(f);
+  const ctx: CmdCtx = { argv: norm, dir: process.cwd() };
   // intake's wait states: parked on the `questions` verdict, a pending
   // intake intent, or a repairable intake alert
-  const run = targetRun(norm, dir, item, 'intake', ['questions']);
-  const by = flag(norm, '--by');
-  appendToRun(dir, run.runId, {
+  const run = targetRun(ctx, { item, stage: 'intake', verdicts: ['questions'] }, f);
+  appendToRun(ctx, run, {
     kind: 'answer',
     item,
     answers,
-    ...(by !== undefined ? { by } : {}),
+    ...(f.by !== undefined ? { by: f.by } : {}),
     ts: new Date().toISOString(),
   });
   console.log(

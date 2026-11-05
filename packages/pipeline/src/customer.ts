@@ -18,17 +18,10 @@
  * git dir (linked worktrees share it, nothing lands in git), plain
  * append with torn-tail separation, malformed lines dropped on read.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MaybePromise } from '@broject/core';
-import {
-  appendJsonlRow,
-  fileJournal,
-  type JournalLocator,
-  journalRecords,
-  type PipelineJournal,
-  pipelineDir,
-} from './journal.ts';
+import { appendJsonlRow, type JournalLocator, pipelineDir } from './journal.ts';
 import type { StageCall } from './runner.ts';
 
 /** The channel file's suffix — `<run_id>.customer.jsonl` sits beside
@@ -244,88 +237,6 @@ export function fileAnswerFeed(dir: string) {
         }),
     };
   };
-}
-
-/** One run parked where a customer acts — discovered by scanning the
- *  pipeline dir's journals. `via` is WHY it counts as awaiting:
- *  'pending' a verdict-less intent at the stage (accept's suspended
- *  emit), 'alert' a fail-closed park a corrected record can repair
- *  (verdict-malformed, customer-mismatch, fix-notes-missing), and
- *  'verdict' a settled record whose verdict names a wait state
- *  (intake's `questions` park). */
-export interface AwaitingRun {
-  runId: string;
-  stage: string;
-  via: 'pending' | 'alert' | 'verdict';
-}
-
-/** The pipeline dir's `*.journal.jsonl` file names — [] when the
- *  dir itself can't be listed: no pipeline dir means nothing ever
- *  ran here, and a discovery scan that can't read the plane finds
- *  nothing rather than dying on it. */
-function journalFileNames(d: string): string[] {
-  try {
-    return readdirSync(d).filter(f => f.endsWith('.journal.jsonl'));
-  } catch {
-    return []; // no pipeline dir — nothing ever ran here
-  }
-}
-
-/** One journal file's tail → WHY its run awaits the customer, or
- *  undefined when it doesn't: an empty journal or a tail parked at
- *  another stage, and a settled verdict counts only when `verdicts`
- *  names it a wait state. The tail record decides — a pending intent
- *  or a repairable alert always counts. */
-function awaitingVia(
-  journal: PipelineJournal,
-  item: string,
-  stage: string,
-  verdicts: readonly string[]
-): AwaitingRun['via'] | undefined {
-  const records = journalRecords(
-    journal.rows().filter(r => r.run_id === journal.runId && r.item === item)
-  );
-  const last = records.at(-1);
-  if (last === undefined || (last.resume ?? last.stage) !== stage) {
-    return undefined;
-  }
-  if (last.alert !== undefined) {
-    return 'alert';
-  }
-  if (last.verdict === undefined) {
-    return 'pending';
-  }
-  return verdicts.includes(last.verdict) ? 'verdict' : undefined;
-}
-
-/** Runs whose journal tail sits at `stage` awaiting customer input
- *  for `item`. The tail record decides: a pending intent or an alert
- *  with `resume`/`stage` at the stage always counts; a settled record
- *  counts only when its verdict is in `verdicts` (the wait-state
- *  words — `['questions']` for intake, `[]` for accept where every
- *  settled verdict is terminal-for-the-gate). */
-export function awaitingCustomerRuns(
-  dir: string,
-  item: string,
-  stage: string,
-  verdicts: readonly string[] = []
-): AwaitingRun[] {
-  const d = pipelineDir({ dir });
-  if (d === null) {
-    return [];
-  }
-  const out: AwaitingRun[] = [];
-  for (const f of journalFileNames(d)) {
-    const journal = fileJournal(join(d, f));
-    if (journal.runId === undefined) {
-      continue;
-    }
-    const via = awaitingVia(journal, item, stage, verdicts);
-    if (via !== undefined) {
-      out.push({ runId: journal.runId, stage, via });
-    }
-  }
-  return out;
 }
 
 /** One channel append behind the seams both CLI subs share —
