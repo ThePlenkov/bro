@@ -214,7 +214,9 @@ describe('bro pipeline accept', () => {
         const saved = process.env.BRO_PIPELINE_KEY;
         process.env.BRO_PIPELINE_KEY = 'channel-key-x';
         try {
-          exits(() => runPipelineCommand(['accept', ITEM, 'accepted', '--by', 'cust-1']));
+          exits(() =>
+            runPipelineCommand(['accept', ITEM, 'rejected', '--notes', 'ac-2', '--by', 'cust-1'])
+          );
           const rec = channel(main, 'run-1')[0] as Record<string, unknown>;
           assert.equal(rec.accepted_by, 'cust-1');
           assert.match(rec.signature as string, /^[0-9a-f]{64}$/);
@@ -227,6 +229,16 @@ describe('bro pipeline accept', () => {
           );
           assert.equal(
             recordSignatureValid({ key: 'other-key', runId: 'run-1', record: rec }),
+            false
+          );
+          // the MAC binds the decision payload — rewritten notes
+          // under the copied signature no longer verify
+          assert.equal(
+            recordSignatureValid({
+              key: 'channel-key-x',
+              runId: 'run-1',
+              record: { ...rec, notes: 'whatever, ship it' },
+            }),
             false
           );
         } finally {

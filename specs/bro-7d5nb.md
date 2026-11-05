@@ -315,9 +315,19 @@ next stage reads:
   Trust model: `accepted_by` is a self-asserted label — a worker
   CAN read it off the journal and forge it. When a channel key is
   configured (`BRO_PIPELINE_KEY` or `~/.config/bro/pipeline.key`,
-  outside every worktree) records carry an HMAC `signature` and the
-  gate requires it (`verdict-forged` parks); unkeyed channels keep
-  the label-check as documented operator-trust degraded mode.
+  outside every worktree) records carry an HMAC `signature` over
+  the decision payload (`{verdict, notes}` digest for verdicts,
+  `answers` digest for answers) and the gate requires it
+  (`verdict-forged` parks); unkeyed channels keep the label-check
+  as documented operator-trust degraded mode. The keyed boundary
+  is the ENVIRONMENT, not the path: it assumes the customer
+  channel runs where the worker cannot read — a separate OS user
+  or host, or a sandboxed spawn that drops the operator's home and
+  env (fleet workers spawn without both). Workers sharing the
+  operator's OS user can read the key file — same-trust-domain
+  spawns degrade to label-check semantics. A key file with any
+  group/other permission bit reads as absent: a world-readable
+  key is a leaked key.
 - **merge** — the existing act gate: threads/CI/reviewers settle;
   `blocked` retries bounded by fix-rounds, `dropped` is terminal.
 - **capture** — `self learn capture` on land (cheap, per-item);

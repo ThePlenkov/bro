@@ -40,7 +40,8 @@
  * {@link pipelineKey}: `BRO_PIPELINE_KEY` →
  * `~/.config/bro/pipeline.key`, outside every worktree) the verdict
  * must ALSO carry a `signature` — an hmac-sha256 over
- * `runId|item|kind|verdict|signer|ts`. A missing or wrong MAC parks
+ * `runId|item|kind|digest({verdict,notes})|signer|ts`, so rewritten
+ * fix-scope notes break the MAC too. A missing or wrong MAC parks
  * `verdict-forged`, consumed by detail like the malformed-answer
  * pattern so the same forged record cannot re-alert every wake. No
  * key configured → the unsigned degraded mode: `accepted_by` is
@@ -307,11 +308,13 @@ const forgedDetail = (raw: Record<string, unknown>): string =>
 
 /** The cryptographic identity gate — when a channel key is
  *  configured the record's `signature` must verify over
- *  `runId|item|kind|verdict|signer|ts`; a missing or wrong MAC is
- *  `verdict-forged`, never a settle. Runs BEFORE the label gate:
- *  `accepted_by` is self-asserted text a journal-reader can copy —
- *  a forged label reports as forgery, not a mere mismatch, and a
- *  keyless record never reaches the check it was built to fool. */
+ *  `runId|item|kind|digest({verdict,notes})|signer|ts`; a missing
+ *  or wrong MAC is `verdict-forged`, never a settle (the payload
+ *  digest binds `notes` — a rewritten fix scope fails the same
+ *  way). Runs BEFORE the label gate: `accepted_by` is self-asserted
+ *  text a journal-reader can copy — a forged label reports as
+ *  forgery, not a mere mismatch, and a keyless record never reaches
+ *  the check it was built to fool. */
 const signatureGate =
   (key: string): VerdictGate =>
   (call, raw) =>

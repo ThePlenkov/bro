@@ -22,6 +22,7 @@ export {
   readCustomerFile,
   recordSignatureValid,
   signCustomerRecord,
+  verdictDigest,
   writeCustomerRecord,
 } from './customer.ts';
 export type {

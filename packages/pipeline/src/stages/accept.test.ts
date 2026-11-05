@@ -20,6 +20,7 @@ import {
   latestVerdict,
   readCustomerFile,
   signCustomerRecord,
+  verdictDigest,
 } from '../customer.ts';
 import { parsePipelineFormula } from '../formula.ts';
 import {
@@ -622,7 +623,7 @@ describe('accept — the signature gate (keyed mode)', () => {
         runId: 'r1',
         item: ITEM,
         kind: 'verdict',
-        content: v,
+        content: verdictDigest({ verdict: v, notes: r.notes }),
         signer: r.accepted_by as string,
         ts: r.ts as string,
       }),
@@ -655,6 +656,16 @@ describe('accept — the signature gate (keyed mode)', () => {
     // via --by, but no key means no valid signature — the label-check
     // alone never fires in keyed mode
     const store = storeSpy(verdict('accepted', { accepted_by: CUSTOMER }));
+    const res = await recheckOutcome(store, keyed);
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+  });
+
+  test('notes rewritten under a copied signature parks — the MAC binds the fix scope', async () => {
+    // the customer signed `rejected` with her fix scope; a worker
+    // kept the MAC but rewrote the notes — the digest covers the
+    // payload bytes, not just the verdict word
+    const signed = signedVerdict(REJECTED_VERDICT, KEY, { notes: 'ac-2 fails' });
+    const store = storeSpy({ ...signed, notes: 'lgtm actually' });
     const res = await recheckOutcome(store, keyed);
     assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
   });

@@ -29,6 +29,7 @@ import {
   customerChannelPath,
   pipelineKey,
   signCustomerRecord,
+  verdictDigest,
 } from '@broject/pipeline';
 import { flag, positionals } from './args.ts';
 
@@ -185,15 +186,17 @@ function cmdAccept(argv: string[]): void {
     accepted_by: acceptedBy,
     ...(f.notes !== undefined ? { notes: f.notes } : {}),
     // a channel key resolved → the record carries its MAC proof;
-    // the accept gate will require it. No key → unsigned (the
-    // label-check degraded mode — operator trust)
+    // the accept gate will require it. The content slot digests the
+    // {verdict, notes} payload — rewritten fix-scope notes break
+    // the MAC too. No key → unsigned (the label-check degraded
+    // mode — operator trust)
     ...(key !== undefined
       ? {
           signature: signCustomerRecord(key, {
             runId: run.runId,
             item,
             kind: 'verdict',
-            content: verdict,
+            content: verdictDigest({ verdict, notes: f.notes }),
             signer: acceptedBy,
             ts,
           }),

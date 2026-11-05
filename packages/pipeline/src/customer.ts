@@ -25,7 +25,7 @@
  * separates a customer's record from a forgery.
  */
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { MaybePromise } from '@broject/core';
@@ -273,16 +273,41 @@ export function writeCustomerRecord(loc: JournalLocator, rec: CustomerRecord): v
  *  read the recorded customer label off the journal, yet still
  *  cannot read the material a forged signature would need.
  *
+ *  The boundary is the ENVIRONMENT, not the path: keyed mode
+ *  assumes the customer channel runs where the worker cannot read —
+ *  a separate OS user or host, or a sandboxed spawn that drops the
+ *  operator's home and env (the fleet's worker spawn drops both). A
+ *  worker sharing the operator's OS user CAN read the key file —
+ *  same-trust-domain spawns degrade to the unsigned label-check
+ *  semantics below; that boundary is a deployment fact, not
+ *  something this module can enforce.
+ *
+ *  Hardening, not trust: a key file with ANY group/other permission
+ *  bit set reads as ABSENT — a world-readable key is a leaked key:
+ *  it no longer separates the customer from any reader, so trusting
+ *  it would sign forgery with operator authority.
+ *
  *  Absent → undefined: the unsigned mode, where `accepted_by` is a
  *  self-asserted label the gate merely label-checks — operator
- *  trust, not cryptographic identity. */
-export function pipelineKey(): string | undefined {
-  const env = process.env.BRO_PIPELINE_KEY?.trim();
-  if (env !== undefined && env !== '') {
-    return env;
+ *  trust, not cryptographic identity.
+ *
+ *  `over` is the test seam — inject `env`/`home` so tests never
+ *  touch the real operator environment. */
+export function pipelineKey(over?: { env?: NodeJS.ProcessEnv; home?: string }): string | undefined {
+  const env = over?.env ?? process.env;
+  const badge = env.BRO_PIPELINE_KEY?.trim();
+  if (badge !== undefined && badge !== '') {
+    return badge;
   }
+  const file = join(over?.home ?? homedir(), '.config', 'bro', 'pipeline.key');
   try {
-    const key = readFileSync(join(homedir(), '.config', 'bro', 'pipeline.key'), 'utf8').trim();
+    // any group/other permission bit → the key is readable beyond
+    // its owner, so it counts as absent (0600/0400 are the only
+    // trusted modes)
+    if ((statSync(file).mode & 0o077) !== 0) {
+      return undefined;
+    }
+    const key = readFileSync(file, 'utf8').trim();
     return key === '' ? undefined : key;
   } catch {
     return undefined; // no key file — unsigned mode
@@ -291,11 +316,12 @@ export function pipelineKey(): string | undefined {
 
 /** The fields a record's MAC binds — every field the accept gate
  *  compares is inside the message, so an edited signer, verdict, or
- *  timestamp cannot re-verify. `content` is the record's decision
- *  content: the verdict word for a `verdict` — the message then is
- *  literally `runId|item|kind|verdict|signer|ts` — while for an
- *  `answer` it is {@link contentDigest} of the answers payload, so
- *  swapped payload bytes fail to verify too, not just the envelope. */
+ *  timestamp cannot re-verify. `content` is a DIGEST of the
+ *  record's decision bytes — {@link verdictDigest} for a verdict
+ *  (the `{verdict, notes}` payload, so rewritten fix-scope notes
+ *  break the MAC too), {@link contentDigest} of the answers payload
+ *  for an answer: swapped payload bytes fail to verify, not just
+ *  the envelope. */
 export interface SignatureInput {
   runId: string;
   item: string;
@@ -306,12 +332,20 @@ export interface SignatureInput {
   ts?: string;
 }
 
-/** An answer record's content slot — sha256 of the canonical JSON
- *  the writer signed (object key order survives the file's
+/** A record's content slot — sha256 of the canonical JSON the
+ *  writer signed (object key order survives the file's
  *  parse/stringify round-trip, so the digest the verifier computes
  *  matches the writer's). */
 export const contentDigest = (v: unknown): string =>
   createHash('sha256').update(JSON.stringify(v)).digest('hex');
+
+/** A verdict record's content slot — sha256 of the canonical
+ *  `{verdict, notes}` payload (an absent `notes` drops out of the
+ *  JSON, same bytes on both sides). The MAC binds the decision
+ *  bytes: a worker rewriting `rejected`'s fix-scope notes under a
+ *  copied signature breaks this digest exactly like a forged label. */
+export const verdictDigest = (r: { verdict: unknown; notes: unknown }): string =>
+  contentDigest({ verdict: r.verdict, notes: r.notes });
 
 /** The pipe-joined MAC message — fixed positional fields, each
  *  verbatim, so no boundary can be smuggled (an `|` inside a field
@@ -350,7 +384,7 @@ const inputFor = (runId: string, raw: Record<string, unknown>): SignatureInput =
         runId,
         item: raw.item as string,
         kind: 'verdict',
-        content: raw.verdict as string | undefined,
+        content: verdictDigest({ verdict: raw.verdict, notes: raw.notes }),
         signer: raw.accepted_by as string | undefined,
         ts: raw.ts as string | undefined,
       };
