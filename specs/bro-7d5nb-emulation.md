@@ -382,6 +382,138 @@ orch: foreground, timing: now}`.
   route` re-entry end-to-end (`pass 55` pipeline tests); a
   live-judge replay stays deferred to the runner-backed graduation.
 
+## Run 5: bro-7d5nb.5 — G3 review stage (S5)
+
+- Invocation: `reviewStage(deps).invoke(call)` inside
+  `runPipeline(formula, 'bro-7d5nb.5', opts)` — bound beside
+  classify/route into the runner's `judge` slot via
+  `stageDispatch({ classify, route, review }, DEFAULT_ADMIT_INTENTS)`
+  (the multiplexer Run 3 introduced; the judge slot is now shared by
+  all three G-stages).
+- Spec reference: §stage semantics review bullet (internal pre-push
+  pass via `routing.review.chain`, risk-gated on complexity, `fix`
+  re-enters `work` in scoped-fix mode with required `notes`, bounded
+  by `pipeline.fixRounds`), §typed stage outputs (`{verdict, notes}`),
+  §gates (complex required — cheap synthesizes `skip`), invariant 1
+  (no pipeline vocabulary in the decide).
+- Input: bead `bro-7d5nb.5` (epic child, needs: [.4] → ready),
+  spec formula, repo `/home/pepl/projects/bro`; the reviewed artifact
+  = this item's own diff on `work/bro-7d5nb.5`.
+- Expected by spec: `routing.review.chain` resolves a review-capable
+  provider; judge reads the worktree diff → `push` → merge / `fix`
+  (with `notes`) → scoped work re-entry / `abandon` → terminal; cheap
+  items never reach the engine.
+- Actual action and result:
+  - classify → `clump` — same stage-engine surface as .3/.4/.6;
+    payload `{group: clump, complexity: complex, clumpId:
+    bro-7d5nb.3, rank: 3}` (emulated, gate field set so review
+    fires).
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - work → `done` — `stages/review.ts` + `stages/review.test.ts`
+    - index wiring; 28 stage tests green (package suite `pass 167`).
+  - review → in flight at log time — act gate + reviewers stand
+    in (same standing-in as Runs 1–4); the stage under test emits
+    `push`/`fix`/`abandon` under scripted decides.
+  - merge / capture → pending.
+- Design decisions worth recording (spec-consistent, underdetermined
+  by the spec):
+  - `routing.review` is a routing class NAMED `review` in the same
+    `fleet.routing` table the route lanes use — `routing.review.chain`
+    reads literally as `fleet.routing.review.chain`. Entries validate
+    against the `call` surface, NOT `spawn`: reviewing is judging, so
+    an `api` provider that could never spawn a worker still reviews —
+    `resolveStepClass` was not reusable (it asserts `spawn`).
+  - The reviewer slot is the first un-walled chain entry — walls fall
+    through like the route dispatch, and an all-walled chain THROWS
+    (the pending intent is the crash marker; the bounded re-fire waits
+    the wall out) rather than attributing a verdict to a provider that
+    can't answer. The slot stamps `reviewer: {provider, model?}` on
+    the payload — NESTED, because flat `provider`/`model` keys would
+    clobber route's own spawn slot in the merged context and flip
+    their meaning mid-pipeline (traceability for "via
+    `routing.review.chain`").
+  - The verdict is DERIVED, never asked (same contract as classify):
+    `abandon` = affirmed abandon noul; `fix` = ≥1 affirmed
+    `finding_<kind>` noul; `push` = affirmed push noul; precedence
+    abandon > findings > push. Push is NEVER the default — a judge
+    that withholds the push affirmation while categorizing nothing
+    takes one bounded fix round (`UNCATEGORIZED_FIX_NOTES`), because
+    unaffirmed-to-push work must not sail to merge on a dimmed or
+    denied read. A decide with ZERO confident gating answers throws —
+    the diff was never read, and manufacturing a verdict from nothing
+    is worse than a crash marker + bounded re-fire.
+  - `notes` is COMPOSED, never judge-written: the decide contract
+    speaks choice/score/noul only, so `fix` notes join the affirmed
+    finding kinds' rubric lines (`correctness: …; tests: …`) into the
+    scope text the work re-entry reads — non-empty by construction,
+    which is exactly the runner's `notesFor` contract.
+  - The diff reaches the judge through an injected `diff` SEAM taking
+    the `StageCall` (ctx.work provenance + journal in, `{diff, files?,
+    worktree?, base?, head?}` out) — the stage never invokes git;
+    prod wires `git diff` over the journaled work payload behind it.
+    `undefined` = no reviewable artifact → throw; `''` = a `done` that
+    changed nothing — a reviewable fact the judge sees. The decide
+    state carries a bounded window (`maxDiffChars`, default 24k, +
+    `truncated` flag) and a bounded file list (40 names + count).
+    `maxDiffChars` is validated (non-negative integer — NaN would
+    silently unbound the window), and an affirmed `push` on a
+    truncated read DEMOTES to `fix` with a convergent note — "narrow
+    the change below the window (split or shrink the diff) so the
+    whole diff is judged": the tail was never judged, so unreviewed
+    content does not merge on a prefix read; a diff that cannot
+    converge burns `fixRounds` and parks, which is the honest
+    park-condition for an unreviewable change.
+  - The scoped-fix history comes from the JOURNAL, not ctx: highest
+    `fix_round` + its `notes` ride the decide state as `fix:
+    {round, notes}` so a re-review sees what the last round was asked
+    to mend — same journal-authority split as route's wall evidence.
+    A prior review's `notes` flat-merged into ctx is deliberately NOT
+    read (stale scope; the runner already keys on this verdict's
+    payload).
+- Spec gaps hit:
+  1. **How the diff reaches the judge is unspecified.** "Internal
+     review pass on the worktree diff" doesn't say whether the stage
+     reads git, the work payload, or a seam. This run takes the
+     minimal faithful seam: `diff(call) → ReviewDiff | undefined`
+     (provenance fields `worktree`/`base`/`head`/`files` + text),
+     prod wires `git diff` against the journaled work record. Proposed
+     wording: "the review engine's diff input is a seam — it reads the
+     work stage's journaled worktree provenance and returns the
+     bounded diff text + file list; the stage never invokes git
+     itself."
+  2. **`notes` has no producer.** The spec types review's payload as
+     `{verdict, notes}` but the judge contract can't emit free text.
+     This run declares a finding-kind enum (`correctness|scope|tests|
+     safety|quality`, one noul each) and composes notes from the
+     affirmed kinds' rubric lines — the enum IS the scope vocabulary.
+     Proposed wording: "review's `notes` is composed by the stage from
+     the affirmed finding categories — the judge's typed answers name
+     the kinds, the stage's rubric text carries the actionable
+     scope."
+  3. **The chain's authority is designation, not dispatch.** The
+     spec's "via `routing.review.chain`" doesn't say whether the chain
+     selects the deciding backend — the bound JudgeFacade decides
+     regardless. This run records BOTH: `reviewer` = the designated
+     (first un-walled) chain slot, and `judge = {model, decidedBy?}`
+     = the decide's own attribution (`res.model` plus the connector
+     when every answer names one) — the backend that DID answer, not
+     just the one that may. Proposed wording: "the review chain names
+     the providers a verdict may be attributed to; the payload stamps
+     the designated slot AND the decide's own model/connector."
+- Friction: same shared-`judge`-slot caveat as Runs 3–4, plus the
+  zero-signal throw needed a test to distinguish "judge alive but
+  dimmed" (≥1 confident answer → derive fix) from "judge answered
+  nothing readable" (zero confident → throw) — the spy's answers map
+  only holds asked answers, so scripting "everyone denied" matters.
+- Golden case: **partial** — `stages/review.test.ts` scripts the
+  decide answers and replays the spec formula end-to-end: complex →
+  review push → merge; cheap → gate `skip` with the engine never
+  invoked; fix → work re-entry carrying `notes`+`fixRound` →
+  re-review push; abandon → terminal; `fixRounds` exhaustion → park
+  (`pass 167` pipeline tests). A live-judge replay stays deferred to
+  the runner-backed graduation.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the

@@ -65,8 +65,8 @@ export type {
   DeferReason,
 } from './stages/classify.ts';
 export {
-  classifyStage,
   CLUMP_LABEL_PREFIX,
+  classifyStage,
   DEFAULT_MAX_PEERS,
   DEFAULT_PEER_LIMIT,
   DEFER_REASONS,
@@ -74,6 +74,23 @@ export {
   stageDispatch,
   taskBacklog,
 } from './stages/classify.ts';
+export type {
+  FindingKind,
+  ReviewBacklog,
+  ReviewDeps,
+  ReviewDiff,
+  ReviewPayload,
+  ReviewVerdict,
+} from './stages/review.ts';
+export {
+  DEFAULT_MAX_DIFF_CHARS,
+  DEFAULT_MAX_DIFF_FILES,
+  FINDING_KINDS,
+  REVIEW_CLASS,
+  REVIEW_VERDICTS,
+  reviewStage,
+  UNCATEGORIZED_FIX_NOTES,
+} from './stages/review.ts';
 export type {
   QueueReason,
   RouteBacklog,
