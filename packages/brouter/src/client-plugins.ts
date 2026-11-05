@@ -10,13 +10,14 @@
  * is a plugin whose complexity nobody can name.
  */
 import { definePlugin, type CommandPlugin } from '@broject/command';
-import { flag, positionals } from '@broject/core';
+import { explainSlicesOrExit, flag, positionals, renderExplanation } from '@broject/core';
 import { runAcpFacade } from './acp.ts';
 import { runAsk } from './ask.ts';
 import { runClient } from './commands.ts';
 import type { ClientOutcome, ClientRequest } from './commands.ts';
 import { BOOL_FLAGS, VALUE_FLAGS, endpointFor, type RouterPolicy } from './policy.ts';
 import { CLIENTS } from './registry.ts';
+import { routeTablePath } from './routes-cmd.ts';
 
 /** The lane flags every agent command reads — the provider, the model and
  *  the budget. */
@@ -137,7 +138,7 @@ function clientPlugin(policy: RouterPolicy): CommandPlugin {
 function askPlugin(): CommandPlugin {
   return definePlugin({
     name: 'ask',
-    summary: 'Ask an ACP agent one question — the answer printed',
+    summary: 'Ask an ACP agent one question — the answer printed [--explain]',
     run: async argv => {
       const pos = positionals(argv, VALUE_FLAGS, { boolFlags: BOOL_FLAGS });
       const question = pos.join(' ').trim();
@@ -145,11 +146,23 @@ function askPlugin(): CommandPlugin {
         console.error('error: brouter ask needs a question');
         process.exit(2);
       }
-      const request = { ...laneFlags(argv), question };
-      const outcome = await runAsk(request, process.cwd());
+      const dir = process.cwd();
+      const routes = routeTablePath(dir, argv);
+      const slices = explainSlicesOrExit(argv);
+      const request = {
+        ...laneFlags(argv),
+        question,
+        ...(routes === undefined ? {} : { routes }),
+        ...(slices === undefined ? {} : { slices }),
+      };
+      const outcome = await runAsk(request, dir);
       if (argv.includes('--json')) {
         console.log(JSON.stringify(outcome, null, 2));
         return;
+      }
+      if (outcome.explanation !== undefined) {
+        // stderr — stdout stays the answer, pipeable
+        console.error(renderExplanation(outcome.explanation, slices ?? []));
       }
       console.log(outcome.text);
     },

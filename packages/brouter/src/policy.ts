@@ -21,7 +21,7 @@ export interface RouterPolicy {
 }
 
 /** The flags the router's commands read — the boolean ones. */
-export const BOOL_FLAGS = new Set(['--write', '--wire', '--json']);
+export const BOOL_FLAGS = new Set(['--write', '--wire', '--json', '--explain']);
 
 /** The flags the router's commands read — the valued ones. */
 export const VALUE_FLAGS = new Set([
@@ -31,6 +31,7 @@ export const VALUE_FLAGS = new Set([
   '--provider',
   '--model',
   '--timeout',
+  '--routes',
 ]);
 
 /** The router's endpoint — the flags win over the state file, so an
