@@ -54,3 +54,14 @@ test('the bookkeeping table remembers what ran', async () => {
   );
   handle.close();
 });
+
+test('two runs at once do not fight over the transaction', async () => {
+  const handle = openStore(join(scratch, 'concurrent.db'));
+  assert.ok(handle.ok);
+  const [first, second] = await Promise.all([migrateStore(handle.db), migrateStore(handle.db)]);
+  assert.deepEqual([...first, ...second].sort(), [...migrationIds()].sort());
+  assert.deepEqual(second, [], 'the second run applies nothing');
+  const rows = handle.db.$client.prepare('select id from migrations').all();
+  assert.equal(rows.length, migrationIds().length, 'the bookkeeping holds one row per migration');
+  handle.close();
+});

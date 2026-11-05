@@ -54,23 +54,39 @@ create table if not exists migrations (
 `;
 
 /** The migration ids already applied. */
-async function appliedIds(db: RouterDb): Promise<Set<string>> {
-  const rows = await db.select({ id: migrations.id }).from(migrations);
+function appliedIds(db: RouterDb): Set<string> {
+  const rows = db.select({ id: migrations.id }).from(migrations).all();
   return new Set(rows.map(r => r.id));
 }
 
+/** Record that a migration ran. A duplicate is ignored, not an error: two
+ *  callers may reach the same migration, and the second one must not fail
+ *  the run. */
+function recordApplied(db: RouterDb, id: string): void {
+  db.insert(migrations)
+    .values({ id, appliedAt: Date.now() })
+    .onConflictDoNothing({ target: migrations.id })
+    .run();
+}
+
 /** Apply the migrations this database has not seen yet; return their ids.
- *  A second run is a no-op — the store is opened by every command. */
+ *  A second run is a no-op — the store is opened by every command.
+ *
+ *  The run is synchronous on purpose. The client is node:sqlite's
+ *  `DatabaseSync`, and an `await` inside the transaction would hand the
+ *  event loop to a second caller, which would then `BEGIN` inside ours —
+ *  "cannot start a transaction within a transaction". Without an await
+ *  between `BEGIN` and `COMMIT` nothing can interleave. */
 export async function migrateStore(db: RouterDb): Promise<string[]> {
   db.$client.exec(BOOKKEEPING);
-  const applied = await appliedIds(db);
+  const applied = appliedIds(db);
   const fresh: string[] = [];
   for (const migration of MIGRATIONS) {
     if (applied.has(migration.id)) continue;
     db.$client.exec('BEGIN');
     try {
       db.$client.exec(migration.sql);
-      await db.insert(migrations).values({ id: migration.id, appliedAt: Date.now() });
+      recordApplied(db, migration.id);
       db.$client.exec('COMMIT');
     } catch (err) {
       db.$client.exec('ROLLBACK');
