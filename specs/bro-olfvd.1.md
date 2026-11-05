@@ -37,7 +37,11 @@ ledger. One SQLite database, owned by `brouter`, written by the router:
 - `node:sqlite` needs no `--experimental-sqlite` flag from Node 22.13
   (Node docs: v23.4.0/v22.13.0 unflagged) — the repo's floor (≥22.18) is
   covered.
-- `drizzle-kit` (dev only) generates the migrations from the schema.
+- The migrations are HAND-WRITTEN SQL (a list in the package), and a
+  drift test proves the SQL and the drizzle schema agree — every table,
+  every column (`PRAGMA table_info` against the schema). No generator,
+  no codegen step, no folder to ship: the schema stays the source of
+  truth for the queries, and the test is what keeps the SQL honest.
 - **Path**: `${XDG_STATE_HOME:-~/.local/state}/brouter/router.db`. Not the
   git common dir: brouter runs without beads, without the bus, without a
   git repo (spec bro-olfvd). bro's own state stays where it is.
@@ -137,15 +141,53 @@ The judge — exactly the machinery `fleet.router` already uses
 **The model picks a ROUTE. The chain and the health are the code's.** A
 model cannot see a rate limit; it must never name a provider.
 
+**The decision model may be a model the ROUTER SERVES.** The provider
+is either a lane the operator configured (`providers.<name>`) or a served
+model id (`typesafe/jev-1.13`, `openai/gpt-5`, `anthropic/claude-…` — the
+served catalog is the router's own). A served model is proxied through
+the router's own gateway: the decision model is just another model the
+router fronts.
+
+The wire follows the host. A lane may speak the systemone wire — the
+native typed judgment. The router's gateway does NOT: its routes are
+`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`.
+So a PROXIED model answers in prose — prose-grade evidence, never a
+calibrated judgment. Under `enforce` that is refused (the same typed-
+grade gate the fleet's router keeps); under `shadow` it journals its
+opinion and picks nothing. Closing the gap is one route on the gateway:
+serve `/v1/systemone` and a proxied jev model answers in the typed
+contract.
+
 ### 5. The resolver and the surface (S5)
 
 - `brouter route "<task>" [--json]` → the chosen route, the candidate set,
   the health reason for every reject, the chain, the wall policy. The
   "why" is the product.
 - `brouter routes list | validate`.
-- The spawn path: `bro loop` / `bro fleet` ask the router for a route.
-  `fleet.routing` classes become routes in the same table — the old
-  section is the compatibility face, one table underneath.
+- The spawn path: `bro loop` asks the route table for the bead's route —
+  the bead's class label is the task's type, the bead's priority the
+  task's priority band. The verdict reuses the fleet's shape
+  (`ResolvedClass`), so the spawn path downstream cannot tell which face
+  answered. `fleet.routing` stays the compatibility face: a run that
+  declares a route table gets the router's routing, a run that declares
+  none keeps today's behaviour.
+
+### The package design
+
+One responsibility per package — the router's ledger, the router's
+table, the decision model, the CLI:
+
+| Package                     | Owns                                                        |
+| --------------------------- | ----------------------------------------------------------- |
+| `@broject/router-store`     | the ledger: the drizzle schema, the migrations, the API, the health read-model |
+| `@broject/router-routes`    | the route table: the TOML schema, the candidates, the resolver |
+| `@broject/judge`            | `routePick` — the decision model, beside `routeClass`       |
+| `@broject/brouter`          | the CLI surfaces: `store`, `routes`, `health`, `route`       |
+| `@broject/cli`              | the spawn path: the loop asks the table for the bead's route |
+
+`core` holds the shared contract (the health types, the wall policy,
+the chain entry). Nothing reaches back: the store knows no routing, the
+table knows no store, the judge knows no table.
 
 ## Milestones
 
@@ -183,6 +225,9 @@ Each milestone is its own bead under this one; SDD gates the code.
 - drizzle 1.0 is still an RC tag (the stable line has no node:sqlite
   driver). The milestone writes down the fallback: better-sqlite3 or
   libsql, at the price of a native module.
+- The router's gateway has no `/v1/systemone` route, so a proxied
+  decision model answers in prose — usable in `shadow`, refused in
+  `enforce`. Serving the typed wire is the follow-up that unlocks it.
 - "Find the sessions of that bead / that sha" is a FILTER, not a vector
   search — an index answers it. A vector index would be the wrong tool
   for an exact key, and the wrong domain (the router's ledger does not
@@ -201,8 +246,10 @@ Each milestone is its own bead under this one; SDD gates the code.
 
 - `brouter store migrate` on a tmp dir: the schema applies, a second run
   is a no-op.
-- `brouter routes validate` rejects an unserved model, an unknown key, and
-  a version above the schema.
+- `brouter routes validate` rejects an unknown key, an empty chain, a bad
+  `onWall`, and a version above the schema.
+- the drift test: after the migrations, every drizzle table's columns
+  match `PRAGMA table_info` — the SQL and the schema cannot drift.
 - `brouter health --json` reports the wall the store saw (429 → resetAt)
   and the usage inside the window.
 - `brouter route "<task>" --json` in shadow mode: the candidate set is
