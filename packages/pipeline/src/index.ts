@@ -90,6 +90,19 @@ export {
   taskBacklog,
 } from './stages/classify.ts';
 export type {
+  IntakeDeps,
+  IntakeOutcome,
+  IntakePayload,
+  IntakeVerdict,
+  SpecFingerprint,
+} from './stages/intake.ts';
+export {
+  DECLINED_HEADING,
+  INTAKE_VERDICTS,
+  intakeStage,
+  QUESTIONS_HEADING,
+} from './stages/intake.ts';
+export type {
   FindingKind,
   ReviewBacklog,
   ReviewDeps,
