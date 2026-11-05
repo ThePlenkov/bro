@@ -24,7 +24,19 @@ import type {
   TaskSpecFacade,
 } from '@broject/core';
 import { parseTaskSpecBody } from '@broject/core';
+import type { EngineOutcome, EngineResult } from './runner.ts';
 import type { ClassifyBacklog } from './stages/classify.ts';
+
+/** Narrow an engine outcome to a settling result — the stages these
+ *  suites drive (judge/learn engines) never suspend or alert, so a
+ *  'pending' or engine-alert here is a fixture bug, not a branch to
+ *  assert through. */
+export const settled = (r: EngineOutcome): EngineResult => {
+  if (r === 'pending' || (typeof r === 'object' && r !== null && 'alert' in r)) {
+    throw new Error(`test stage did not settle — got ${JSON.stringify(r)}`);
+  }
+  return r;
+};
 
 /** A bare task row — id + title + open, extras spread over it. */
 export const row = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({

@@ -16,6 +16,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
+import { settled } from '../testkit.ts';
 import {
   type CaptureDeps,
   type CaptureOutcome,
@@ -157,7 +158,7 @@ const landJournal = (...extra: JournalRow[]): PipelineJournal => {
 };
 
 const invoke = async (journal: PipelineJournal, d: CaptureDeps, over: Partial<StageCall> = {}) =>
-  captureStage(d).invoke(call(journal, over));
+  settled(await captureStage(d).invoke(call(journal, over)));
 
 describe('capture — the land context', () => {
   test('captured on land — the spec pair rides the payload', async () => {

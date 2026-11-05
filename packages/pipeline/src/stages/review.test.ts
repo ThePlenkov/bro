@@ -19,7 +19,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { backlog, type JudgeSpy, judge, noul, row } from '../testkit.ts';
+import { backlog, type JudgeSpy, judge, noul, row, settled } from '../testkit.ts';
 import { stageDispatch } from './classify.ts';
 import {
   DEFAULT_MAX_DIFF_FILES,
@@ -132,7 +132,7 @@ const invoke = async (
   extra: Partial<ReviewDeps> = {},
   over: Partial<StageCall> = {},
   b = backlog([row(ITEM)])
-) => reviewStage(deps(j, b, extra)).invoke(call(over));
+) => settled(await reviewStage(deps(j, b, extra)).invoke(call(over)));
 
 describe('review — the decide', () => {
   test('state carries item + work ctx + diff provenance; questions are typed nouls', async () => {
