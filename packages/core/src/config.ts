@@ -479,6 +479,12 @@ brouterSection.jsonSchema = js.obj({
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
   ),
   routes: js.str,
+  // the decision model — the judge that picks the route. The same shape
+  // the fleet's router keeps: a provider and a mode.
+  router: js.obj(
+    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    { required: ['provider', 'mode'] }
+  ),
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,
