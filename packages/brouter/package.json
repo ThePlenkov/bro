@@ -21,6 +21,7 @@
     "typescript": "^5.9.0"
   },
   "dependencies": {
+    "@broject/command": "^0.3.0",
     "@broject/core": "^0.3.0",
     "@broject/providers": "^0.3.0"
   },
