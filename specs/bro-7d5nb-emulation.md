@@ -552,9 +552,11 @@ orch: foreground, timing: now}`.
   by the spec):
   - Two injected seams, both taking `(call, LandContext)`:
     `capture` is the learn-capture path (prod binds
-    `captureLessons` — the stage calls the seam, never the CLI and
-    never `@broject/learn` directly; pipeline keeps its one-dep
-    shape), `retro` is the batched-retro intent QUEUE — a required
+    `captureLessons` only via a future adapter that maps its
+    `CaptureReport` into `CaptureOutcome` — the stage calls the
+    seam, never the CLI and never `@broject/learn` directly;
+    pipeline keeps its one-dep shape), `retro` is the
+    batched-retro intent QUEUE — a required
     dep, because an unwired hook is a wiring error, not a skipped
     retro. The queue records that this item's run joins the next
     off-path retro batch; `void` or `{batch}` back, and the payload
@@ -596,8 +598,10 @@ orch: foreground, timing: now}`.
      "heavyweight session retro runs batched off-path" but names no
      seam — no queue, marker, or schedule exists in the repo to
      bind. This run takes the minimal faithful seam: an injected
-     `retro(call, ctx) → {batch?} | void` the stage ALWAYS calls on
-     a settled land; prod wires whatever batch carrier emerges (a
+     `retro(call, ctx) → {batch?} | void` the stage calls once its
+     sweep completes — a throwing capture aborts before queueing,
+     so the intent always describes a finished capture; prod wires
+     whatever batch carrier emerges (a
      bead, a file, a schedule). Proposed wording: "the capture
      engine's retro hook is a queue seam — it records the item's
      membership in the next retro batch and returns the batch id;
