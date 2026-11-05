@@ -208,6 +208,9 @@ Each milestone is its own bead under this one; SDD gates the code.
    shadow → enforce, journaled.
 5. **S5 — the resolver and the spawn path.** `brouter route`, and
    `fleet.routing` folded into the same table.
+6. **S6 — the explain surface.** `--explain` on `brouter route`,
+   `brouter ask` and `bro loop`: the route, the model and its provenance,
+   the health, and the cost of the session (specs/bro-olfvd.1.6.md).
 
 ## Non-negotiables
 

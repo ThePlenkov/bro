@@ -44,7 +44,31 @@ client's own vocabulary, written into the client's own settings.
 | `brouter routes list \| validate [--routes P]`                   | the route table — the routes, or the problems                          |
 | `brouter health [--json] [--path P]`                              | what can serve right now — the walls and the open sessions             |
 | `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why |
+| `brouter ask "<question>" [--provider P] [--model M] [--explain[=SLICES]]` | ask one agent — `--explain` says which agent served, which model, and what it cost |
 | `bro router …`                                                   | the same surfaces, bro's spelling (the wrapper)                        |
+
+## The explain surface
+
+`--explain` answers WHY a request went where it went. The vocabulary is
+SLICES, not levels — the user asks questions, so the flag names them:
+
+| Slice    | What it answers                                                       |
+| -------- | --------------------------------------------------------------------- |
+| `route`  | the route, the chain, the candidates, every reject with its reason    |
+| `model`  | the model that serves, and who pinned it (you, the route, the entry)  |
+| `health` | what the router knew at decision time — the walls, the sessions       |
+| `cost`   | the turn's context and cost, and the ledger's window counters         |
+
+- `--explain` — every slice. `--explain=route,model` — only those.
+- `brouter route --explain` → stdout (the explanation IS the output).
+  `brouter ask --explain` → stderr (stdout stays the answer, pipeable);
+  `bro loop --explain` → stderr (stdout stays the run log).
+- An unknown cost says **unknown**, never `0` — a provider that reports no
+  cost is unknown, not free. Token counts are labelled `reported` or
+  `estimated`.
+- `brouter ask` routes through the table when one is declared: the chain's
+  first acp entry serves, `--provider` still wins, and with no table the
+  first acp entry answers. The explanation names WHICH rule fired.
 
 ## The route table
 
