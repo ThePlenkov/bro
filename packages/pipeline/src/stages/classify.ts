@@ -31,22 +31,15 @@
  * uncertain intake falls back to the safe shape (solo + complex),
  * never to closing or parking someone's work on a dim answer.
  */
-import type {
-  DecideResult,
-  JudgeAnswer,
-  JudgeFacade,
-  JudgeQuestion,
-  TaskRow,
-  TaskStore,
-} from '@broject/core';
+import type { DecideResult, JudgeFacade, JudgeQuestion, TaskRow, TaskStore } from '@broject/core';
 import {
-  DEFAULT_ADMIT_INTENTS,
   STAGE_INTENTS,
   type EngineFn,
   type EngineHandler,
   type EngineResult,
   type StageCall,
 } from '../runner.ts';
+import { affirmed, choiceOf, confident, scoreOf } from './answers.ts';
 
 /** Label a duplicate carries — `dup:<id>` names the peer it duplicates. */
 export const DUP_LABEL_PREFIX = 'dup:';
@@ -70,8 +63,6 @@ export const DEFER_REASONS = [
 ] as const;
 export type DeferReason = (typeof DEFER_REASONS)[number];
 
-/** noul ≥ this means the judge affirms the yes/no question. */
-const AFFIRM = 0.5;
 /** rank emitted when the judge gives no confident rank — the 1..5
  *  midpoint, so an uncertain item queues in the middle instead of
  *  jumping first-in-line on silence. */
@@ -158,29 +149,6 @@ interface Cx {
   peers: TaskRow[];
   res: DecideResult;
 }
-
-/** An answer the chain left under-confidence is unread — dim intake
- *  signals never gate. */
-const confident = (res: DecideResult, qid: string): boolean =>
-  Object.hasOwn(res.answers, qid) && !res.lowConfidence.includes(qid);
-
-const answer = (res: DecideResult, qid: string): JudgeAnswer | undefined =>
-  Object.hasOwn(res.answers, qid) ? res.answers[qid] : undefined;
-
-const choiceOf = (res: DecideResult, qid: string): string | undefined => {
-  const a = answer(res, qid);
-  return a?.type === 'choice' ? a.choice : undefined;
-};
-
-const noulOf = (res: DecideResult, qid: string): number | undefined => {
-  const a = answer(res, qid);
-  return a?.type === 'noul' ? a.noul : undefined;
-};
-
-const scoreOf = (res: DecideResult, qid: string): number | undefined => {
-  const a = answer(res, qid);
-  return a?.type === 'score' ? a.score : undefined;
-};
 
 /** Peer → the criteria row the judge reads — title plus the labels
  *  that already mark its group/class lanes. */
@@ -340,7 +308,7 @@ function dupOf(cx: Cx): string | undefined {
 }
 
 function deferred(cx: Cx): boolean {
-  return confident(cx.res, 'defer') && (noulOf(cx.res, 'defer') ?? 0) >= AFFIRM;
+  return affirmed(cx.res, 'defer');
 }
 
 function deferReason(cx: Cx): string {
@@ -354,7 +322,7 @@ function mateIds(cx: Cx): string[] {
   return cx.peers
     .filter(p => {
       const qid = mateQid(p.id);
-      return confident(cx.res, qid) && (noulOf(cx.res, qid) ?? 0) >= AFFIRM;
+      return affirmed(cx.res, qid);
     })
     .map(p => p.id);
 }

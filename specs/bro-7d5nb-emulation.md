@@ -278,6 +278,110 @@ orch: foreground, timing: now}`.
   decide answers; a real-judge replay belongs to the runner-backed
   graduation when items flow under live engines.
 
+## Run 4: bro-7d5nb.4 — G2 route stage (S4)
+
+- Invocation: `routeStage(deps).invoke(call)` inside
+  `runPipeline(formula, 'bro-7d5nb.4', opts)` — the stage engine this
+  item ships, bound beside classify into the runner's `judge` slot via
+  `stageDispatch({ classify, route }, DEFAULT_ADMIT_INTENTS)` (one
+  engine slot, multiplexed on `call.stage.name` — the friction noted
+  in Run 3 carried forward).
+- Spec reference: §typed stage outputs (`{class, kind, orch, timing,
+  provider?, model?}`), §stage semantics (`queue` parks until capacity,
+  `defer` is an operator verdict, occupancy plane feeds the load
+  signal), §transitions (`work.rate_limited → route` honoring
+  `fleet.routing.<class>.onWall`), invariant 2 (provider-agnostic
+  core — the router emits class/kind, never provider logic).
+- Input: bead `bro-7d5nb.4` (epic child, needs: [.3] → ready),
+  spec formula, repo `/home/pepl/projects/bro`.
+- Expected by spec: judge emits `{class,kind,orch,timing}` →
+  `class:` label + routing resolution; `rate_limited` re-entry
+  honors onWall — `fallthrough` next chain entry, `park` → queue→park.
+- Actual action and result:
+  - classify → `clump` — shared surface with .3/.5/.6 (same epic,
+    same package, same EngineMap seam); payload `{group: clump,
+    complexity: complex, clumpId: bro-7d5nb.3, rank: 3}` (emulated,
+    as in Runs 1–3).
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - work → `done` — `stages/route.ts` + `stages/route.test.ts` +
+    index wiring; 30 stage tests green (package suite `pass 55`).
+  - review → in flight at log time — act gate + CodeScene stand in
+    (same standing-in as Runs 1–3).
+  - merge / capture → pending.
+- Design decisions worth recording (spec-consistent, underdetermined
+  by the spec):
+  - The wall re-entry is DETECTED FROM THE JOURNAL, not from ctx or
+    a new call field: the last settled route payload followed by a
+    settled `rate_limited` on a `spawn` intent — keyed on the intent
+    the runner derives (fleet → `spawn`), so a formula that renames
+    the work stage still detects the wall, and an `admit` refusal
+    verdict counts too (the wall is real even when the spawn never
+    fired). A queue-parked route that simply woke shows no death and
+    takes the fresh decide path.
+  - The wall path is DETERMINISTIC — no decide: `onWall` is the
+    class's effective answer (`park` → `queue` reason `onwall`;
+    `fallthrough` → next un-walled chain entry, `chain-spent` parks
+    when exhausted). The journaled routing fields (class/kind/orch)
+    stand; the wall recomputes timing/reason and may replace
+    provider/model. Judge cost on a wall: zero.
+  - `dispatch` unifies fresh and wall paths: `start` is the chain
+    index to try first — 0 fresh, one past the died-on provider on a
+    wall. The provider/model PAIR names the slot (a model pin
+    belongs to its own provider, matching ResolvedClass docs);
+    drift out of the table reads as "head was tried".
+  - Saturation is a deterministic guard, not a judge input alone:
+    `occupancy` returning `live ≥ cap > 0` parks `queue` reason
+    `saturated` even when the judge says `now` — a spawn verdict
+    into a full lane lands on the refusal the cap exists to
+    pre-empt. The judge's `timing` stays advisory (reason `timing`).
+  - `kind` candidates are CALLER-DECLARED (`deps.kinds` — the
+    `agents.<kind>` keys in prod); with none declared the question
+    is skipped and kind defaults. Orch defaults `exec` — the lane
+    with the fewest prerequisites (no session attach, no pane).
+  - `queue`/`defer` payloads still carry the resolved provider/model
+    when a chain slot resolved — a spent chain parks with none, an
+    onwall park keeps the died-on slot it waits out — and, when labels
+    are enabled, the `class:` label lands on every verdict. The pin
+    records where the item WOULD run, and the wake re-dispatches it.
+  - `reason` on queue verdicts discriminates the park input:
+    `saturated` (occupancy guard), `timing` (judge said queue),
+    `onwall` (class policy parked the wall), `chain-spent`
+    (fallthrough exhausted).
+- Spec gaps hit:
+  1. **`kind`'s domain is undefined.** The spec emits `{class, kind,
+     orch, timing}` and says provider packages map class→provider/
+     model, but never says what the kind candidates ARE. This run
+     treats kinds as caller-declared (`agents.<kind>` keys) offered
+     as a `choice`; unanswered → first declared / `default`.
+     Proposed wording: "route's `kind` picks among the configured
+     agent kinds — the provider package maps the winner to its
+     spawn semantics."
+  2. **`timing`'s authority is split.** "Judge emits timing" plus
+     "queue parks until capacity opens" doesn't say who wins when
+     the judge says `now` into a saturated lane. This run makes
+     occupancy the deterministic guard (saturation → `queue`
+     regardless) and the judge's timing advisory. Proposed wording:
+     "the occupancy cap is a hard input: a saturated lane answers
+     `queue` even on a judged `now`; the judge's timing can only
+     ADD a queue, never remove one."
+  3. **Wall detection is journal-derived, not specified.** The spec
+     says `rate_limited` "re-enters route honoring onWall" but not
+     HOW the stage knows it re-entered on a wall vs a capacity
+     wake. This run derives it from the write-ahead journal (last
+     route payload + spawn-intent `rate_limited`), which also
+     preserves the routing fields the wall path re-uses.
+- Friction: the `judge` engine slot is now shared by THREE stages on
+  some formulas — `stageDispatch` multiplexes fine, but the wall path
+  deliberately never decides, so a judge spy can't distinguish
+  "route didn't ask" from "route was skipped" without reading the
+  journal. Asserting `judge.calls.length` stays flat is the test's
+  answer.
+- Golden case: **partial** — `stages/route.test.ts` scripts the
+  decide answers and replays the spec formula's `work.rate_limited →
+  route` re-entry end-to-end (`pass 55` pipeline tests); a
+  live-judge replay stays deferred to the runner-backed graduation.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the
