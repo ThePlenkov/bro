@@ -27,7 +27,7 @@ import { type Planes, readPlanes } from './planes.ts';
 // the board-short timestamp the session pane's footer already owns —
 // one formatter, one contract
 import { fmtWhen } from '../../../packages/acp/session/src/index.ts';
-import { SESSION_SLOT_TTL_MS } from '../../../packages/core/src/index.ts';
+import { SESSION_SLOT_TTL_MS } from '../../../packages/core/src/session-planes.ts';
 
 const requested = Number(process.env.BRO_BOARD_EVERY_S ?? 15);
 const EVERY_MS = Math.max(3, Number.isFinite(requested) ? requested : 15) * 1000;

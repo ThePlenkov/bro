@@ -21,7 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
-import { handleOwner } from '../../../packages/core/src/index.ts';
+import { handleOwner } from '../../../packages/core/src/proc.ts';
 import { type Lane, laneOf } from './lanes.ts';
 import {
   agentsJson,
