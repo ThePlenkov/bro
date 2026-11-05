@@ -41,13 +41,29 @@ ledger. One SQLite database, owned by `brouter`, written by the router:
 - **Path**: `${XDG_STATE_HOME:-~/.local/state}/brouter/router.db`. Not the
   git common dir: brouter runs without beads, without the bus, without a
   git repo (spec bro-olfvd). bro's own state stays where it is.
+- **What the engine already is**: `node:sqlite` ships SQLite 3.53.4 with
+  **FTS5** and **JSON1** — so text search and a JSON `meta` column are
+  free, no extension and no native module. The ledger needs no more than
+  that.
+- **The ledger is vector-free, on purpose.** Embeddings are not a health
+  fact: the ledger answers "who can serve right now". Semantic recall
+  ("find me a session like this one") is a different domain — bro's
+  session/lesson plane, not the router's — and when it becomes a real
+  need it gets its own store: PGlite + the separate
+  `@electric-sql/pglite-pgvector` extension (pgvector is NOT inside
+  `@electric-sql/pglite`; it ships as its own package), one embedded
+  process, no server. Until then, no vector column, no second engine, no
+  WASM Postgres in the router's runtime.
 - **Tables** — the ledger, three facts:
   - `usage(provider, model, window_start, requests, tokens)` — the
     router's own counters.
   - `limits(provider, model, reset_at, source, reason)` — the rate limit
     the router SAW (429 + resetAt), the wall.
-  - `sessions(id, provider, model, started_at, ended_at)` — the sessions
-    the router holds open.
+  - `sessions(id, provider, model, started_at, ended_at, meta)` — the
+    sessions the router holds open. `meta` is a JSON column (JSON1) for
+    the tags a session carries (bead id, the bus sha), and those tags are
+    INDEXED — "find me the sessions of that bead" is a filter, not a
+    similarity search.
 - Every write is best-effort and never blocks a request: the store is a
   ledger, not a gate. A missing or unwritable store costs the numbers,
   never the run — the devin lane's precedent
@@ -167,6 +183,11 @@ Each milestone is its own bead under this one; SDD gates the code.
 - drizzle 1.0 is still an RC tag (the stable line has no node:sqlite
   driver). The milestone writes down the fallback: better-sqlite3 or
   libsql, at the price of a native module.
+- "Find the sessions of that bead / that sha" is a FILTER, not a vector
+  search — an index answers it. A vector index would be the wrong tool
+  for an exact key, and the wrong domain (the router's ledger does not
+  own bro's session history). The semantic case ("find me something like
+  this") is where PGlite + pgvector enters — its own store, its own bead.
 - The judge is another LLM call on the spawn path. Shadow first; enforce
   only once the journal shows the router agreeing with what actually
   routed.
