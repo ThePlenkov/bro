@@ -1,15 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { parse } from 'smol-toml';
-import type {
-  DecideResult,
-  JudgeAnswer,
-  JudgeFacade,
-  JudgeQuestion,
-  ProviderEntry,
-  RoutingTable,
-  TaskRow,
-} from '@broject/core';
+import type { ProviderEntry, RoutingTable } from '@broject/core';
 import { CLASS_LABEL_PREFIX } from '@broject/core';
 import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal, type JournalRow, type PipelineJournal } from '../journal.ts';
@@ -21,6 +13,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
+import { backlog, choice, judge, noul, row, type JudgeSpy } from '../testkit.ts';
 import { stageDispatch } from './classify.ts';
 import {
   QUEUE_REASONS,
@@ -34,13 +27,6 @@ const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
 const ROUTE_STAGE = FORMULA.stages[1];
 const ITEM = 'bro-aa1';
 const SHA = 'deadbeef';
-
-const row = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({
-  id,
-  title: `task ${id}`,
-  status: 'open',
-  ...extra,
-});
 
 /** Test providers — acp/cli both carry the spawn surface. */
 const PROVIDERS: Record<string, ProviderEntry> = {
@@ -58,71 +44,6 @@ const ROUTING: RoutingTable = {
     onWall: 'park',
   },
   sweep: { chain: [{ provider: 'pb' }, { provider: 'pc', model: 'm2' }] },
-};
-
-const choice = (c: string, confidence = 0.9): JudgeAnswer => ({
-  type: 'choice',
-  choice: c,
-  probabilities: {},
-  confidence,
-  decidedBy: 'fake',
-});
-const noul = (n: number, confidence = 0.9): JudgeAnswer => ({
-  type: 'noul',
-  noul: n,
-  confidence,
-  decidedBy: 'fake',
-});
-
-interface JudgeSpy {
-  calls: { state: unknown; questions: Record<string, JudgeQuestion> }[];
-  facade: JudgeFacade;
-}
-
-/** A scripted JudgeFacade — same helper shape as classify.test.ts. */
-const judge = (answers: Record<string, JudgeAnswer>, lowConfidence: string[] = []): JudgeSpy => {
-  const calls: JudgeSpy['calls'] = [];
-  return {
-    calls,
-    facade: {
-      decide: async (state, questions) => {
-        calls.push({ state, questions });
-        const res: DecideResult = {
-          answers,
-          model: 'fake-judge',
-          latencyMs: 1,
-          lowConfidence,
-        };
-        return res;
-      },
-    },
-  };
-};
-
-interface BacklogSpy extends RouteBacklog {
-  added: [string, string][];
-  removed: [string, string][];
-}
-
-/** An in-memory backlog — label writes land on the spy lists and
- *  mutate the row, so the seam's re-read sees current labels. */
-const backlog = (rows: TaskRow[]): BacklogSpy => {
-  const spy: BacklogSpy = {
-    added: [],
-    removed: [],
-    item: id => rows.find(r => r.id === id),
-    addLabel: (id, l) => {
-      spy.added.push([id, l]);
-      const r = rows.find(x => x.id === id);
-      if (r !== undefined) r.labels = [...(r.labels ?? []), l];
-    },
-    removeLabel: (id, l) => {
-      spy.removed.push([id, l]);
-      const r = rows.find(x => x.id === id);
-      if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
-    },
-  };
-  return spy;
 };
 
 const call = (item = ITEM, journal?: PipelineJournal): StageCall =>

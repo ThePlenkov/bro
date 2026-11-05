@@ -35,7 +35,6 @@
  */
 import type {
   DecideResult,
-  JudgeAnswer,
   JudgeFacade,
   JudgeQuestion,
   ProviderEntry,
@@ -48,6 +47,7 @@ import type {
 import { CLASS_LABEL_PREFIX, resolveStepClass } from '@broject/core';
 import { journalRecords, type JournalRow } from '../journal.ts';
 import type { EngineHandler, EngineResult, StageCall } from '../runner.ts';
+import { affirmed, choiceOf, confident } from './answers.ts';
 
 /** `orch` — the orchestration lane the spec declares (acp session /
  *  foreground run / exec spawn). Enum-shaped like classify's defer
@@ -168,27 +168,6 @@ interface Cx {
   load: RouteLoad | undefined;
   walled: Set<string>;
 }
-
-/** An answer the chain left under-confidence is unread — dim intake
- *  signals never route. */
-const confident = (res: DecideResult, qid: string): boolean =>
-  Object.hasOwn(res.answers, qid) && !res.lowConfidence.includes(qid);
-
-const answer = (res: DecideResult, qid: string): JudgeAnswer | undefined =>
-  Object.hasOwn(res.answers, qid) ? res.answers[qid] : undefined;
-
-const choiceOf = (res: DecideResult, qid: string): string | undefined => {
-  const a = answer(res, qid);
-  return a?.type === 'choice' ? a.choice : undefined;
-};
-
-const noulOf = (res: DecideResult, qid: string): number | undefined => {
-  const a = answer(res, qid);
-  return a?.type === 'noul' ? a.noul : undefined;
-};
-
-/** noul ≥ this means the judge affirms the yes/no question. */
-const AFFIRM = 0.5;
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -349,7 +328,7 @@ function orchOf(cx: Cx): RouteOrch {
 
 /** The deferred arm — an affirmed operator-defer noul. */
 function deferred(cx: Cx): boolean {
-  return confident(cx.res, 'defer') && (noulOf(cx.res, 'defer') ?? 0) >= AFFIRM;
+  return affirmed(cx.res, 'defer');
 }
 
 /** The judged timing — 'queue' only on a confident queue; an

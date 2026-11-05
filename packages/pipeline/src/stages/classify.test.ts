@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { parse } from 'smol-toml';
-import type { DecideResult, JudgeAnswer, JudgeFacade, JudgeQuestion, TaskRow } from '@broject/core';
+import type { TaskRow } from '@broject/core';
 import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal } from '../journal.ts';
 import { DEFAULT_ADMIT_INTENTS, runPipeline, type StageCall } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
+import { backlog, choice, judge, noul, row, score, type JudgeSpy } from '../testkit.ts';
 import {
   classifyStage,
   CLUMP_LABEL_PREFIX,
@@ -20,100 +21,6 @@ import {
 const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
 const ITEM = 'bro-aa1';
 const SHA = 'deadbeef';
-
-const row = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({
-  id,
-  title: `task ${id}`,
-  status: 'open',
-  ...extra,
-});
-
-const choice = (c: string, confidence = 0.9): JudgeAnswer => ({
-  type: 'choice',
-  choice: c,
-  probabilities: {},
-  confidence,
-  decidedBy: 'fake',
-});
-const noul = (n: number, confidence = 0.9): JudgeAnswer => ({
-  type: 'noul',
-  noul: n,
-  confidence,
-  decidedBy: 'fake',
-});
-const score = (s: number, confidence = 0.9): JudgeAnswer => ({
-  type: 'score',
-  score: s,
-  probabilities: {},
-  confidence,
-  decidedBy: 'fake',
-});
-
-interface JudgeSpy {
-  calls: { state: unknown; questions: Record<string, JudgeQuestion> }[];
-  facade: JudgeFacade;
-}
-
-/** A scripted JudgeFacade — answers come from `answers`, every asked
- *  question id + the seen state are recorded for assertions. */
-const judge = (answers: Record<string, JudgeAnswer>, lowConfidence: string[] = []): JudgeSpy => {
-  const calls: JudgeSpy['calls'] = [];
-  return {
-    calls,
-    facade: {
-      decide: async (state, questions) => {
-        calls.push({ state, questions });
-        const res: DecideResult = {
-          answers,
-          model: 'fake-judge',
-          latencyMs: 1,
-          lowConfidence,
-        };
-        return res;
-      },
-    },
-  };
-};
-
-interface BacklogSpy extends ClassifyBacklog {
-  added: [string, string][];
-  removed: [string, string][];
-  /** one ordered op log — '+' add / '-' remove — so tests can assert
-   *  removals precede adds (the remove-then-add contract). */
-  events: string[];
-  peersAsked: number;
-}
-
-/** An in-memory backlog — label writes land on the spy lists, never
- *  on a store. */
-const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
-  const spy: BacklogSpy = {
-    added: [],
-    removed: [],
-    events: [],
-    peersAsked: 0,
-    item: id => rows.find(r => r.id === id),
-    peers: () => {
-      spy.peersAsked += 1;
-      return peers ?? rows.filter(r => r.id !== ITEM);
-    },
-    // writes mutate the row — the seam's re-read sees current labels,
-    // mirroring a real store (tagMates checks labels post-snapshot)
-    addLabel: (id, l) => {
-      spy.added.push([id, l]);
-      spy.events.push(`+${id}:${l}`);
-      const r = rows.find(x => x.id === id);
-      if (r !== undefined) r.labels = [...(r.labels ?? []), l];
-    },
-    removeLabel: (id, l) => {
-      spy.removed.push([id, l]);
-      spy.events.push(`-${id}:${l}`);
-      const r = rows.find(x => x.id === id);
-      if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
-    },
-  };
-  return spy;
-};
 
 const call = (item = ITEM): StageCall =>
   ({
