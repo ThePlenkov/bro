@@ -31,7 +31,7 @@
     },
     "work": {
       "summary": "worktree & session mechanics",
-      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep"]
+      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep", "exec"]
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
@@ -410,7 +410,7 @@
     "cleanup": {
       "name": "cleanup",
       "group": "review",
-      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "summary": "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]",
       "spellings": ["cleanup", "review cleanup"],
       "aliases": [],
       "hidden": false,
@@ -892,6 +892,22 @@
       "aliases": [],
       "hidden": false,
       "plan": false,
+      "external": false
+    },
+    "exec": {
+      "name": "exec",
+      "group": "work",
+      "summary": "Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)",
+      "spellings": ["exec", "work exec"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "exits": {
+          "2": "usage",
+          "130": "child killed by SIGINT"
+        }
+      },
       "external": false
     },
     "plan": {

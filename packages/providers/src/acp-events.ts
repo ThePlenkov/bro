@@ -45,12 +45,13 @@ const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  *  pending one), so nothing is lost — just decimated in flight. */
 export const AGENT_USAGE_THROTTLE_MS = 2_000;
 
-/** Upper bound on drain() — publishes self-bound at the bus timeout
- *  each, but a wedged half-open socket could still serialize N events
- *  into N×timeout; the drain cap keeps a worker's exit prompt.
- *  Raised to tolerate parallel CI load (nx) where socket connect/ack
- *  latency compounds across sequential publishes. */
-const DRAIN_CAP_MS = 10_000;
+/** Default upper bound on drain() — publishes self-bound at the bus
+ *  timeout each, but a wedged half-open socket could still serialize N
+ *  events into N×timeout; the drain default keeps a turn's exit prompt.
+ *  drain(timeoutMs) may override up to Node's timer maximum; callers
+ *  that need a longer bound (e.g. the CI-sensitive worker) pass it
+ *  explicitly. */
+export const DRAIN_DEFAULT_MS = 3_000;
 
 export interface AgentTurnPlaneOpts {
   /** The session's cwd — resolves the repo's bus socket and the agent
@@ -381,7 +382,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       const cap =
         timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
           ? Math.min(timeoutMs, 2_147_483_647)
-          : DRAIN_CAP_MS;
+          : DRAIN_DEFAULT_MS;
       await Promise.race([
         queue.then(() => undefined),
         new Promise<void>(resolve => {

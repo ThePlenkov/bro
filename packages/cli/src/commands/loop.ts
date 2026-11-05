@@ -1751,7 +1751,14 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     endLoopRun(ctx.root, loopSlug(lead.id));
     return { kind: 'done', result: 'failed' };
   }
-  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend);
+  const prompt = buildWorkPrompt(
+    beads,
+    item.branch,
+    slot?.base,
+    slot?.bottom,
+    ctx.backend,
+    ctx.cfg.autoMerge && !ctx.act.requireApproval
+  );
   ctx.stage = 'prompt write';
   try {
     writePrompt(item, prompt);
@@ -2228,6 +2235,34 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
   });
+  // loop.autoMerge — GitHub owns the merge once the worker armed
+  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase
+  // rounds — threads never gate a landing the merge bot drives.
+  // 'update' survives: a strict up-to-date repo would stall the
+  // merge bot on a behind-base PR otherwise. 'land' keeps the
+  // post-merge bookkeeping, 'closed'/'park' settle as usual — and
+  // the member still parks on the mergeTimeoutMin clock: a PR GitHub
+  // never lands (auto-merge unarmed, checks never green) must not
+  // wait forever. pushItem withholds the arm order when
+  // act.requireApproval is set — mirror that predicate here so the
+  // gate keeps supervisor semantics (merge stays approval-gated)
+  // instead of waiting on an auto-merge that was never armed.
+  const autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  const autoMergeTimedOut = Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
+  const kind =
+    autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
+      ? autoMergeTimedOut
+        ? 'park'
+        : act.kind === 'merge' || act.kind === 'fix' || act.kind === 'rebase'
+          ? 'wait'
+          : act.kind
+      : act.kind;
+  const parkWhy =
+    act.kind === 'park'
+      ? act.why
+      : autoMergeTimedOut
+        ? `auto-merge did not land after ${Math.round(ctx.cfg.mergeTimeoutMin)}m`
+        : 'parked';
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
@@ -2246,7 +2281,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       },
     });
   };
-  switch (act.kind) {
+  switch (kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
       gateRow('green', { action: 'land' });
@@ -2313,11 +2348,11 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'wait':
       return 'kept';
     case 'park':
-      gateRow('parked', { action: 'park', why: act.why });
+      gateRow('parked', { action: 'park', why: parkWhy });
       parkBeads(
         ctx,
         m.beads,
-        `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`
+        `loop: PR ${prRef(ctx, pr)} ${parkWhy} — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
   }

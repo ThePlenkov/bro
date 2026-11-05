@@ -18,10 +18,19 @@
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process';
-import { accessSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import {
+  accessSync,
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { X_OK } from 'node:constants';
+import { randomUUID } from 'node:crypto';
 import { hasHelpFlag, printUsage } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { flag } from './args.ts';
@@ -275,7 +284,7 @@ function spawnTarget(bin: SverkaBin): { file: string; args: string[] } {
   return bin;
 }
 
-function spawnRun(bin: SverkaBin, root: string, args: string[]) {
+function spawnRun(bin: SverkaBin, root: string, args: string[], env?: Record<string, string>) {
   const target = spawnTarget(bin);
   return spawnSync(target.file, [...target.args, ...args], {
     cwd: root,
@@ -283,59 +292,138 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
     // step stdout/stderr ride inside the JSON payload — headroom for
     // chatty checks
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, NO_COLOR: '1' },
+    env: { ...process.env, NO_COLOR: '1', ...(env ?? {}) },
   });
+}
+
+function isPathInside(base: string, target: string): boolean {
+  const rel = relative(resolve(base), resolve(target));
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    return false;
+  }
+  if (rel.split(sep).includes('..')) {
+    return false;
+  }
+  return true;
+}
+
+function isSafeReportPath(root: string, file: string): boolean {
+  const runsDir = resolve(root, '.sverka', 'runs');
+  const resolvedFile = resolve(file);
+  if (!isPathInside(runsDir, resolvedFile)) {
+    return false;
+  }
+  try {
+    const runsDirStat = lstatSync(runsDir);
+    if (runsDirStat.isSymbolicLink()) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    const lst = lstatSync(resolvedFile);
+    if (lst.isSymbolicLink()) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  // Reject symlinked components along the path beneath runsDir
+  try {
+    const rel = relative(runsDir, resolvedFile);
+    const parts = rel.split(sep).filter(p => p !== '' && p !== '.');
+    let cur = runsDir;
+    for (let i = 0; i < parts.length; i += 1) {
+      cur = join(cur, parts[i]!);
+      try {
+        const st = lstatSync(cur);
+        if (st.isSymbolicLink()) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+  } catch {
+    return false;
+  }
+  try {
+    const runsReal = realpathSync(runsDir);
+    const fileReal = realpathSync(resolvedFile);
+    const rel = relative(runsReal, fileReal);
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel) || rel.split(sep).includes('..')) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 /** sverka ≥ Spec 53 writes `.sverka/runs/<runId>/report.json`
  *  (`sverka.run/v1`) before reporting COLLECTION_FAILED — the step stats
  *  survive on disk even though stdout drops them. Recovers the report
- *  only when it is unambiguously this run's: exactly one report written
- *  at-or-after `sinceMs`. Older files are previous runs, and two fresh
- *  reports mean a concurrent sverka run in the same root — the envelope
- *  carries no runId to correlate by, so ambiguity attributes nothing
- *  rather than another run's stats. sverka 0.2.x writes no report —
- *  recovery is opportunistic and degrades to an empty data. */
+ *  only when it is unambiguously associated with this invocation via a
+ *  run-specific identifier (env/marker) written by bro; mtime/uniqueness
+ *  are not trusted. */
+/** Validate a recovered run-report step so malformed entries (e.g. `null`)
+ *  cannot reach `stepLines` and throw during rendering. */
+function isValidStep(s: unknown): s is SverkaStep {
+  return (
+    s !== null &&
+    typeof s === 'object' &&
+    !Array.isArray(s) &&
+    typeof (s as { stepId?: unknown }).stepId === 'string' &&
+    typeof (s as { status?: unknown }).status === 'string'
+  );
+}
+
 function readRunReport(
   root: string,
-  sinceMs: number
+  runId?: string
 ): { data: SverkaRunData; durationMs?: number } | undefined {
-  let entries: string[];
-  try {
-    entries = readdirSync(join(root, '.sverka', 'runs'));
-  } catch {
-    return undefined;
-  }
-  const fresh: string[] = [];
-  for (const entry of entries) {
-    const file = join(root, '.sverka', 'runs', entry, 'report.json');
+  const candidates = [];
+  if (runId) candidates.push(runId);
+  for (const id of candidates) {
+    if (!id) continue;
+    const runsDir = join(root, '.sverka', 'runs');
+    const candidateDir = join(runsDir, id);
+    const file = join(candidateDir, 'report.json');
     try {
-      if (statSync(file).mtimeMs >= sinceMs) {
-        fresh.push(file);
+      if (!isSafeReportPath(root, file)) {
+        continue;
       }
     } catch {
-      // not a report-bearing run dir
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as {
+        schema?: string;
+        data?: unknown;
+        durationMs?: number;
+      };
+      if (parsed.schema !== 'sverka.run/v1') {
+        continue;
+      }
+      if (parsed.data === null || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
+        continue;
+      }
+      const data = parsed.data as SverkaRunData;
+      if (data.steps !== undefined) {
+        if (!Array.isArray(data.steps) || !data.steps.every(isValidStep)) {
+          continue;
+        }
+      }
+      return {
+        data,
+        ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
+      };
+    } catch {
+      continue;
     }
   }
-  if (fresh.length !== 1) {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(fresh[0]!, 'utf8')) as {
-      schema?: string;
-      data?: SverkaRunData;
-      durationMs?: number;
-    };
-    if (parsed.schema !== 'sverka.run/v1' || typeof parsed.data !== 'object') {
-      return undefined;
-    }
-    return {
-      data: parsed.data ?? {},
-      ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
-    };
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 /** parsed data → the normalized text-render view; absent fields stay
@@ -358,8 +446,9 @@ function toReport(data: SverkaRunData, durationMs: number, code: number): CheckR
 function collectionFailedRun(
   parsed: ParsedRun,
   root: string,
-  sinceMs: number,
+  runId: string | undefined,
   code: number,
+  durationMs: number,
   err: (msg: string) => void
 ): ReturnType<typeof runCheck> {
   const reason = parsed.message ?? 'collection failed';
@@ -367,15 +456,24 @@ function collectionFailedRun(
     `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
   );
   const evaluation: CheckEvaluation = { status: 'failed', reason };
-  const recovered = parsed.data === undefined ? readRunReport(root, sinceMs) : undefined;
-  const data = parsed.data ?? recovered?.data;
+  let dataFromParsed: SverkaRunData | undefined;
+  if (parsed.data !== undefined) {
+    if (parsed.data !== null && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
+      const d = parsed.data as SverkaRunData;
+      if (d.steps === undefined || (Array.isArray(d.steps) && d.steps.every(isValidStep))) {
+        dataFromParsed = d;
+      }
+    }
+  }
+  const recovered = dataFromParsed === undefined ? readRunReport(root, runId) : undefined;
+  const data = dataFromParsed ?? recovered?.data;
   const exitCode = code === 0 ? 1 : code;
   if (data === undefined) {
     return { evaluation, exitCode };
   }
   return {
     report: {
-      ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
+      ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? durationMs ?? 0, code),
       evaluation,
     },
     data,
@@ -403,7 +501,11 @@ export function runCheck(
   exitCode: number;
 } {
   const startedMs = Date.now();
-  const proc = spawnRun(bin, root, sverkaArgs(opts));
+  const runId = randomUUID();
+  const proc = spawnRun(bin, root, sverkaArgs(opts), {
+    BRO_CHECK_RUN_ID: runId,
+    SVERKA_BRO_RUN_ID: runId,
+  });
   const parsed = proc.stdout ? parseRunJson(proc.stdout) : null;
   if (proc.error) {
     err(`error: failed to run sverka (${proc.error.message})`);
@@ -419,7 +521,7 @@ export function runCheck(
     return { exitCode: failCode };
   }
   if (parsed.error === 'COLLECTION_FAILED') {
-    return collectionFailedRun(parsed, root, startedMs, code, err);
+    return collectionFailedRun(parsed, root, runId, code, Date.now() - startedMs, err);
   }
   if (parsed.error !== undefined) {
     err(`error: sverka ${parsed.error}: ${parsed.message ?? 'run failed'}`);
@@ -427,7 +529,7 @@ export function runCheck(
   }
   const data = parsed.data ?? {};
   return {
-    report: toReport(data, parsed.durationMs ?? 0, code),
+    report: toReport(data, parsed.durationMs ?? Date.now() - startedMs, code),
     data,
     exitCode: code,
   };
@@ -635,8 +737,18 @@ export function runCheckCommand(argv: string[]): void {
     process.exit(1);
   }
 
+  const startedMs = Date.now();
   const { report, data, evaluation, exitCode } = runCheck(bin, root, opts);
   if (report === undefined && data === undefined && evaluation === undefined) {
+    if (format === 'json') {
+      console.log(
+        JSON.stringify({
+          command: 'check',
+          data: {},
+          durationMs: Date.now() - startedMs,
+        })
+      );
+    }
     process.exit(exitCode);
   }
   if (format === 'json') {
@@ -651,7 +763,7 @@ export function runCheckCommand(argv: string[]): void {
         // contract; on a run whose report didn't survive it's empty,
         // its fields absent, never fabricated
         data: data ?? {},
-        ...(report !== undefined ? { durationMs: report.durationMs } : {}),
+        durationMs: report?.durationMs ?? Date.now() - startedMs,
         ...(evaluation !== undefined
           ? {
               evaluationStatus: evaluation.status,

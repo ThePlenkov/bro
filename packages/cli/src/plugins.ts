@@ -122,6 +122,8 @@ import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
+import { runExecCommand } from './commands/exec.ts';
+import { herdrConnector } from './commands/herdr-connector.ts';
 import { runStackCommand } from './commands/stack.ts';
 import { runStampCommand } from './commands/buildstamp.ts';
 import { SPEC_CONNECTORS } from './spec-connectors.ts';
@@ -167,6 +169,9 @@ registerConnector(sddConnector);
 // the host-wide session cap — refuses a session start at the cap
 registerConnector(sessionCapConnector);
 registerConnector(notifyConnector);
+// pane report-back — env-gated inside the connector; outside herdr
+// every probe is a no-op (spec bro-84zrj)
+registerConnector(herdrConnector);
 registerConnector(learnConnector);
 registerConnector(systemoneConnector);
 registerConnector(llmJudgeConnector);
@@ -484,7 +489,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'cleanup',
     group: 'review',
-    summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
+    summary: 'Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]',
     run: runCleanupCommand,
   }),
   definePlugin({
@@ -863,6 +868,16 @@ export const PLUGINS: BroPlugin[] = [
     group: 'plan',
     summary: 'Execute a plan file — `kind` routes to the owning plugin',
     run: argv => runPlanFile(argv),
+  }),
+  definePlugin({
+    name: 'exec',
+    group: 'work',
+    summary:
+      'Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)',
+    run: runExecCommand,
+    contract: {
+      exits: { 2: 'usage', 130: 'child killed by SIGINT' },
+    },
   }),
   definePlugin({
     name: 'plan',
