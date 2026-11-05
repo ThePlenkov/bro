@@ -33,6 +33,21 @@
  * no evidence leaks to a gate nobody can pass. The run NEVER moves
  * on a bad verdict; a corrected record on a later wake can still
  * settle — the alert rows are repairable parks, not tombstones.
+ *
+ * Two more ledger rules keep the gate honest across re-entry:
+ *
+ *   - the record's `item` must name THIS run's item — a verdict
+ *     written to this run's channel for another item (`--run` pins
+ *     blindly, the per-run file is the only scoping) is malformed
+ *     input, never a settling one;
+ *   - a verdict settles ONE accept entry only. `rejected → work`
+ *     re-enters accept after the fix round with the SAME channel
+ *     record still latest; re-settling it would burn a fix round
+ *     per wake until exhaustion. The journal is the consumption
+ *     ledger — the settled accept record's payload echoes the
+ *     verdict record it consumed — so a deep-equal latest record
+ *     reads as 'pending': the gate waits for a FRESH customer
+ *     decision on every entry.
  */
 import type { MaybePromise } from '@broject/core';
 import { type JournalRow, journalRecords } from '../journal.ts';
@@ -175,6 +190,32 @@ const malformed = (detail: string): EngineAlert => ({
   detail,
 });
 
+/** Has THIS record already settled an accept entry? The journal is
+ *  the consumption ledger — the settled accept record's payload IS
+ *  the verdict record it consumed (the engine echoes
+ *  accepted_by/notes/ts verbatim). A latest channel record that
+ *  deep-equals the last settled accept's (verdict, payload) has
+ *  already moved this gate once and must not move it again — the
+ *  customer decides each entry fresh. */
+function consumedVerdict(call: StageCall, verdict: string, payload: AcceptPayload): boolean {
+  const records = settledOf(call);
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r.stage !== call.stage.name) {
+      continue;
+    }
+    const p = r.payload;
+    return (
+      r.verdict === verdict &&
+      isRecord(p) &&
+      p.accepted_by === payload.accepted_by &&
+      (p.notes ?? null) === (payload.notes ?? null) &&
+      (p.ts ?? null) === (payload.ts ?? null)
+    );
+  }
+  return false;
+}
+
 /** The verdict record → a settling result, 'pending', or a
  *  fail-closed alert — every gate rule in one place so invoke and
  *  recheck can never disagree on what counts. */
@@ -190,6 +231,15 @@ function outcomeFromVerdict(call: StageCall, raw: unknown): EngineOutcome {
     return malformed(
       `verdict ${JSON.stringify(v)} is not one of the accept stage's verdicts ` +
         `(${call.stage.verdicts.join('|')})`
+    );
+  }
+  // attribution — the channel file keys the run; a record naming
+  // another item (a blindly pinned --run's foreign verdict) is
+  // malformed input, never a settling one
+  if (raw.item !== call.item) {
+    return malformed(
+      `verdict names item ${JSON.stringify(raw.item)} — ` +
+        `this run's item is ${JSON.stringify(call.item)}`
     );
   }
   if (typeof raw.accepted_by !== 'string' || raw.accepted_by === '') {
@@ -223,6 +273,12 @@ function outcomeFromVerdict(call: StageCall, raw: unknown): EngineOutcome {
   }
   if (raw.ts !== undefined) {
     payload.ts = raw.ts;
+  }
+  if (consumedVerdict(call, v, payload)) {
+    // this exact record already settled an earlier accept entry —
+    // the customer must decide each entry fresh; the pending intent
+    // stays the resume anchor until a new record lands
+    return 'pending';
   }
   return { verdict: v, payload };
 }

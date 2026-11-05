@@ -230,6 +230,35 @@ describe('bro pipeline answer', () => {
         assert.equal(rec.kind, 'answer');
         assert.equal(rec.answers, 'q1: use sqlite');
         assert.equal(rec.item, ITEM);
+        assert.match(
+          r.out[0] ?? '',
+          /^recorded answers for bro-p1 on run run-2 — resume the run to continue intake$/
+        );
+      })
+    );
+  });
+
+  test('-m=<text> lands the inline form; a literal -m inside a VALUE is not rewritten', () => {
+    const { root, main } = initRepo('bro-pipeline-meq-');
+    inside(main, root, () =>
+      cleanSessionEnv(() => {
+        parkAtQuestions(main, 'run-2');
+        // the inline spelling — the option token carries its own value
+        exits(() => runPipelineCommand(['answer', ITEM, '-m=q1: postgres']));
+        assert.equal(
+          (channel(main, 'run-2')[0] as Record<string, unknown>).answers,
+          'q1: postgres'
+        );
+        // `--message`'s VALUE may itself spell `-m=…` — it is text the
+        // customer is answering with, never a flag: rewriting it would
+        // corrupt the recorded payload
+        exits(() => runPipelineCommand(['answer', ITEM, '--message', '-m=literal']));
+        assert.equal((channel(main, 'run-2')[1] as Record<string, unknown>).answers, '-m=literal');
+        // and a `-m` spelled as --by's value stays the signer id
+        exits(() => runPipelineCommand(['answer', ITEM, '-m', 'ok', '--by', '-m']));
+        const rec = channel(main, 'run-2')[2] as Record<string, unknown>;
+        assert.equal(rec.answers, 'ok');
+        assert.equal(rec.by, '-m');
       })
     );
   });

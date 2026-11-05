@@ -175,12 +175,46 @@ function answersPayload(argv: string[]): unknown {
   }
 }
 
+/** `-m` → `--message`, ONLY in option position: a `-m` token that is
+ *  another option's value (or sits past `--`) is literal answer text,
+ *  never a flag — rewriting it would corrupt the very payload being
+ *  recorded. Walk once: a bare value flag consumes the next token
+ *  verbatim (even when it spells `-m`), and `--` ends flag scanning. */
+function normalizeShortFlag(argv: string[]): string[] {
+  const valueFlags = new Set(['-m', '--message', '--answers-file', '--by', '--run']);
+  const out: string[] = [];
+  let verbatim = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!;
+    if (verbatim) {
+      out.push(a);
+      continue;
+    }
+    if (a === '--') {
+      verbatim = true;
+      out.push(a);
+      continue;
+    }
+    if (a.startsWith('-m=')) {
+      out.push(`--message=${a.slice(3)}`);
+      continue;
+    }
+    const name = a.split('=', 1)[0]!;
+    out.push(a === '-m' ? '--message' : a);
+    // a known value flag in bare form consumes the next token as its
+    // value — copied untouched, so `--message -m=x` keeps `-m=x` as text
+    if (a === name && valueFlags.has(name) && i + 1 < argv.length) {
+      i += 1;
+      out.push(argv[i]!);
+    }
+  }
+  return out;
+}
+
 function cmdAnswer(argv: string[]): void {
   // -m is a single-dash spelling — normalize it before the flag pass
   // so the shared parser (which only speaks --flags) sees it
-  const norm = argv.map(a =>
-    a === '-m' ? '--message' : a.startsWith('-m=') ? `--message=${a.slice(3)}` : a
-  );
+  const norm = normalizeShortFlag(argv);
   const pos = positionals(norm, new Set(['--message', '--answers-file', '--by', '--run']), {
     strict: true,
   });

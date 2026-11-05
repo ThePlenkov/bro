@@ -128,6 +128,7 @@ const call = (journal: PipelineJournal, over: Partial<StageCall> = {}): StageCal
 
 const verdict = (v: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
   kind: 'verdict',
+  item: ITEM,
   verdict: v,
   accepted_by: CUSTOMER,
   ts: TS,
@@ -255,7 +256,9 @@ describe('accept — the verdict gate', () => {
   const MALFORMED: [string, unknown][] = [
     ['a bare string', 'accepted'],
     ['a record with a non-enum verdict', verdict('lgtm')],
-    ['a record missing accepted_by', { kind: 'verdict', verdict: 'accepted' }],
+    ['a record missing accepted_by', verdict('accepted', { accepted_by: undefined })],
+    ['a record naming another item', verdict('accepted', { item: 'bro-other' })],
+    ['a record missing item', verdict('accepted', { item: undefined })],
     ['a record with non-string notes', verdict('accepted', { notes: 3 })],
     ['a record with non-string ts', verdict('accepted', { ts: 3 })],
   ];
@@ -423,6 +426,30 @@ capture = { captured = "end" }
     const recs = journalRecords(j.rows());
     const fix = recs.find(r => r.fix_round === 1);
     assert.equal(fix?.notes, 'redo the ac');
+    // AND the rejection itself is spent: the SAME record is still the
+    // channel's latest, but a verdict settles one accept entry only —
+    // the re-entered gate parks on a pending emit waiting for a FRESH
+    // customer decision instead of re-consuming the stale rejection
+    // (each reuse would burn a fix round until exhaustion)
+    assert.equal(res2.stage, 'accept');
+    assert.equal(res2.alert, undefined); // a suspension, not a failure
+    assert.equal(Math.max(...recs.map(r => r.fix_round ?? 0)), 1);
+    const tail = recs.at(-1);
+    assert.equal(tail?.stage, 'accept');
+    assert.equal(tail?.intent, 'emit');
+    assert.equal(tail?.verdict, undefined);
+    // a fresh record settles the re-entered gate — same verdict word,
+    // new ts = a new customer decision the gate honours
+    store.s.current = verdict(REJECTED_VERDICT, {
+      notes: 'still wrong',
+      ts: '2026-11-07T00:00:00Z',
+    });
+    const res3 = await sliceResume(j, accept);
+    // …and THAT one re-scopes too — the consumption ledger keeps
+    // exactly-once per record, not per verdict word
+    const recs3 = journalRecords(j.rows());
+    assert.equal(recs3.filter(r => r.fix_round === 2).length > 0, true);
+    assert.equal(res3.outcome, 'park');
   });
 
   test('a mismatched signer parks the run with a journal alert — no movement', async () => {

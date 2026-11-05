@@ -187,11 +187,14 @@ describe('verify — verdicts', () => {
     assert.equal(p.rows.length, 3); // the whole evidence bundle is journaled
     assert.equal(p.summary, '2 of 3 acceptance criteria failed');
     assert.ok(p.notes !== undefined && p.notes !== ''); // non-empty by construction
-    assert.match(p.notes, /address the failed acceptance criteria/);
-    // only the FAILING rows scope the fix — the pass stays evidence, not scope
-    assert.match(p.notes, new RegExp(`${ACS[1]} \\(evidence: e2e-run-77\\)`));
-    assert.match(p.notes, new RegExp(`${ACS[2]} \\(evidence: e2e-run-78\\)`));
-    assert.ok(!p.notes.includes(ACS[0]));
+    // only the FAILING rows scope the fix — the pass stays evidence,
+    // not scope. Exact composition, never a substring check: the
+    // passing AC's text inside another row's wording is not membership
+    assert.equal(
+      p.notes,
+      'address the failed acceptance criteria — ' +
+        `${ACS[1]} (evidence: e2e-run-77); ${ACS[2]} (evidence: e2e-run-78)`
+    );
   });
 
   test('one fail among passes still fails — verified requires EVERY row', async () => {
@@ -334,8 +337,12 @@ describe('verify inside runPipeline — the spec DAG', () => {
     const failed = jn.rows().filter(row => row.stage === 'verify' && row.verdict === 'failed');
     assert.equal(failed.length, 1);
     const fp = failed[0].payload as VerifyPayload;
-    assert.match(fp.notes ?? '', new RegExp(`${ACS[1]} \\(evidence: e2e-run-9\\)`));
-    assert.ok(!(fp.notes ?? '').includes(ACS[0])); // the passing AC is not scope
+    // the passing AC is not scope — exact composition, never a
+    // substring check: its text inside another row is not membership
+    assert.equal(
+      fp.notes,
+      `address the failed acceptance criteria — ${ACS[1]} (evidence: e2e-run-9)`
+    );
     // the re-entry is SCOPED — fix_round + the failed rows' scope, same
     // contract as review.fix / accept.rejected
     assert.equal(workCalls[1].fixRound, 1);

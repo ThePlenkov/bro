@@ -68,6 +68,10 @@ export interface JournalRow {
   detail?: string;
   /** stage a wake re-enters after an alert park */
   resume?: string;
+  /** the run's recorded customer identity — stamped at creation so a
+   *  resume can't silently swap who may sign the accept gate (a
+   *  different `opts.customer` than the journaled one fails closed) */
+  customer?: string;
   /** content-hash of the formula this run interprets */
   formula_sha: string;
   ts: string;

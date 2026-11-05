@@ -59,6 +59,8 @@
     "---Mesh---",
     "mesh",
     "request",
+    "---pipeline---",
+    "pipeline",
     "---Utility---",
     "check",
     "setup",

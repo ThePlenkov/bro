@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import type { TaskSpec } from '@broject/core';
+import { type TaskSpec, testRepoInit } from '@broject/core';
 import { parse } from 'smol-toml';
+import {
+  type AnswerFeed,
+  appendCustomerRecord,
+  type CustomerAnswer,
+  customerChannelPath,
+  fileAnswerFeed,
+} from '../customer.ts';
 import { parsePipelineFormula } from '../formula.ts';
 import { journalRecords, memoryJournal } from '../journal.ts';
 import {
@@ -14,6 +24,7 @@ import {
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
 import { row, settled, type SpecStoreSpy, specStore } from '../testkit.ts';
 import {
+  ANSWERS_HEADING,
   DECLINED_HEADING,
   type IntakeDeps,
   type IntakeOutcome,
@@ -100,16 +111,50 @@ const call = (over: Partial<StageCall> = {}): StageCall =>
     ...over,
   }) as StageCall;
 
-const deps = (spy: IntakeSpy, specs: SpecStoreSpy): IntakeDeps => ({
+const deps = (spy: IntakeSpy, specs: SpecStoreSpy, feed?: AnswerFeedSpy): IntakeDeps => ({
   taskSpec: specs,
   intake: spy.fn,
+  ...(feed !== undefined ? { answers: feed.fn } : {}),
 });
+
+/** A mutable answer feed — `records` is what the next invoke drains;
+ *  `consumed` counts the drain-point stamps. */
+interface AnswerFeedSpy {
+  s: { records: unknown[]; consumed: number };
+  fn: NonNullable<IntakeDeps['answers']>;
+}
+
+const feedSpy = (records: unknown[] = []): AnswerFeedSpy => {
+  const s = { records, consumed: 0 };
+  return {
+    s,
+    fn: async (_call: StageCall): Promise<AnswerFeed> => ({
+      records: s.records,
+      consume: () => {
+        s.consumed += 1;
+      },
+    }),
+  };
+};
+
+/** A channel answer record the way `bro pipeline answer` writes it.
+ *  `extra` overrides fields — malformed shapes come out that way on
+ *  purpose, so the return is a cast, not a lie the type proves. */
+const answer = (answers: unknown, extra: Record<string, unknown> = {}): CustomerAnswer =>
+  ({
+    kind: 'answer',
+    item: ITEM,
+    answers,
+    ts: '2026-11-06T00:00:00Z',
+    ...extra,
+  }) as CustomerAnswer;
 
 const invoke = async (
   spy: IntakeSpy,
   specs = specStore([row(ITEM, { description: SPEC_BODY })]),
-  over: Partial<StageCall> = {}
-) => settled(await intakeStage(deps(spy, specs)).invoke(call(over)));
+  over: Partial<StageCall> = {},
+  feed?: AnswerFeedSpy
+) => settled(await intakeStage(deps(spy, specs, feed)).invoke(call(over)));
 
 describe('intake — the spec read', () => {
   test('the seam judges the spec the facade parsed — AC/DoR/scenarios/body', async () => {
@@ -346,6 +391,214 @@ describe('intake — malformed outcomes fail closed', () => {
   });
 });
 
+describe('intake — the customer answer feed', () => {
+  test('a string answer lands verbatim under ## Answers before the judgment', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([answer('the api is /v2, region eu-central')]);
+    await invoke(spy, specs, {}, feed);
+    assert.deepEqual(specs.annotated, [
+      { id: ITEM, heading: ANSWERS_HEADING, lines: ['the api is /v2, region eu-central'] },
+    ]);
+    assert.equal(feed.s.consumed, 1);
+    assert.match(spy.calls[0].spec.body ?? '', /## Answers/);
+  });
+
+  test('a qid→answer map lands one `qid: answer` line per entry', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([answer({ 'which api?': '/v2', 'which region?': 'eu-central' })]);
+    await invoke(spy, specs, {}, feed);
+    assert.deepEqual(specs.annotated[0]?.lines, ['which api?: /v2', 'which region?: eu-central']);
+  });
+
+  test('an array payload lands element-per-line; non-strings JSON-stamp', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([answer(['use the v2 api', { region: 'eu' }, 42])]);
+    await invoke(spy, specs, {}, feed);
+    assert.deepEqual(specs.annotated[0]?.lines, ['use the v2 api', '{"region":"eu"}', '42']);
+  });
+
+  test('a non-answer row on the channel is ignored — still covered by the marker', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([
+      { kind: 'verdict', item: ITEM, verdict: 'accepted', accepted_by: 'c', ts: 'x' },
+      answer('fine'),
+    ]);
+    await invoke(spy, specs, {}, feed);
+    // only the answer record annotated; the verdict rides the same
+    // file untouched (accept's own reader scans the whole channel)
+    assert.deepEqual(specs.annotated, [{ id: ITEM, heading: ANSWERS_HEADING, lines: ['fine'] }]);
+    assert.equal(feed.s.consumed, 1);
+  });
+
+  const BAD_ANSWERS: [string, unknown][] = [
+    ['missing item', { kind: 'answer', answers: 'x', ts: 't' }],
+    ['a foreign item', answer('x', { item: 'bro-other' })],
+    ['empty answers', answer('   ')],
+    ['missing answers', { kind: 'answer', item: ITEM, ts: 't' }],
+    ['a null payload', answer(null)],
+    ['an empty map', answer({})],
+    ['a non-string ts', answer('x', { ts: 5 })],
+    ['a non-string by', answer('x', { by: 7 })],
+  ];
+  for (const [what, rec] of BAD_ANSWERS) {
+    test(`malformed answer — ${what} → answer-malformed, consumed, nothing annotated`, async () => {
+      const spy = intakeSpy({ verdict: 'accepted' });
+      const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+      const feed = feedSpy([rec]);
+      const res = await intakeStage(deps(spy, specs, feed)).invoke(call());
+      assert.equal((res as { alert?: string }).alert, PARK_ALERTS.answerMalformed);
+      assert.match(
+        (res as { detail?: string }).detail ?? '',
+        /^1 malformed answer record\(s\): .+/
+      );
+      assert.equal(specs.annotated.length, 0);
+      assert.equal(feed.s.consumed, 1); // drained anyway — it must not re-alert every wake
+      assert.equal(spy.calls.length, 0); // the judgment never ran
+    });
+  }
+
+  test('a poisoned artifact line is malformed input — good answers still land', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    // the spy's annotate skips the facade's structure guard — stand
+    // it back up for this case so the throw path is exercised
+    const orig = specs.annotate;
+    specs.annotate = (id, heading, lines) => {
+      if (lines.some(l => l.startsWith('#'))) {
+        throw new Error(
+          'taskSpec annotate: artifact line "## x" opens structure — ' +
+            'artifact text never becomes a section or a fence'
+        );
+      }
+      orig(id, heading, lines);
+    };
+    const feed = feedSpy([answer('## Acceptance\n- injected'), answer('clean answer')]);
+    const res = await intakeStage(deps(spy, specs, feed)).invoke(call());
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.answerMalformed);
+    assert.match((res as { detail?: string }).detail ?? '', /opens markdown structure/);
+    // the clean answer still landed; only the poisoned one was refused
+    assert.deepEqual(specs.annotated, [
+      { id: ITEM, heading: ANSWERS_HEADING, lines: ['clean answer'] },
+    ]);
+    assert.equal(feed.s.consumed, 1);
+    assert.equal(spy.calls.length, 0);
+  });
+
+  test('a mixed batch — good rows land, bad rows alert, all consumed', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([answer('valid one'), answer(null)]);
+    const res = await intakeStage(deps(spy, specs, feed)).invoke(call());
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.answerMalformed);
+    assert.deepEqual(specs.annotated, [
+      { id: ITEM, heading: ANSWERS_HEADING, lines: ['valid one'] },
+    ]);
+    assert.equal(feed.s.consumed, 1);
+  });
+
+  test('the feed reads the REAL channel — consumed marker gives exactly-once across wakes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-intake-'));
+    testRepoInit(dir);
+    const file = customerChannelPath({ dir, runId: 'r1' });
+    assert.ok(file !== null);
+    const spy = intakeSpy([
+      { verdict: 'questions', questions: ['who decides?'] },
+      { verdict: 'questions', questions: ['still asking?'] },
+      { verdict: 'accepted' },
+    ]);
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const jn = memoryJournal('r1');
+    const engines = (): RunOptions['engines'] => ({
+      intake: intakeStage({
+        taskSpec: specs,
+        intake: spy.fn,
+        answers: fileAnswerFeed(dir),
+      }),
+      fleet: () => ({ verdict: 'done' }),
+    });
+    const opts = (): RunOptions => ({
+      formulaSha: SHA,
+      journal: jn,
+      admit: () => true,
+      engines: engines(),
+    });
+    const parked = await runPipeline(INTAKE_FORMULA, ITEM, opts());
+    assert.equal(parked.outcome, 'park');
+    assert.equal(parked.verdict, 'questions');
+    // `bro pipeline answer` writes while the run is parked — the
+    // channel record sits pending until a wake's intake pass drains it
+    appendCustomerRecord(file, answer('the customer decides'));
+    // wake 1: the channel record lands on the item + marker stamped —
+    // the re-judgment still has questions, so the run parks again
+    const w1 = await resumePipeline(INTAKE_FORMULA, ITEM, jn, opts());
+    assert.equal(w1.outcome, 'park');
+    assert.equal(w1.verdict, 'questions');
+    assert.equal(specs.annotated.filter(a => a.heading === ANSWERS_HEADING).length, 1);
+    // wake 2: the marker means the SAME record is never re-fed — no
+    // second ## Answers append, the enriched spec is simply judged
+    const w2 = await resumePipeline(INTAKE_FORMULA, ITEM, jn, opts());
+    assert.equal(w2.outcome, 'end');
+    assert.equal(specs.annotated.filter(a => a.heading === ANSWERS_HEADING).length, 1);
+    const enriched = spy.calls.at(-1)?.spec;
+    assert.match(enriched?.body ?? '', /## Answers\nthe customer decides/);
+  });
+
+  test('a malformed channel record parks answer-malformed — a corrected append repairs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-intake-'));
+    testRepoInit(dir);
+    const file = customerChannelPath({ dir, runId: 'r1' });
+    assert.ok(file !== null);
+    const spy = intakeSpy([
+      { verdict: 'questions', questions: ['who decides?'] },
+      { verdict: 'accepted' },
+      { verdict: 'accepted' },
+    ]);
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const jn = memoryJournal('r1');
+    const opts = (): RunOptions => ({
+      formulaSha: SHA,
+      journal: jn,
+      admit: () => true,
+      engines: {
+        intake: intakeStage({
+          taskSpec: specs,
+          intake: spy.fn,
+          answers: fileAnswerFeed(dir),
+        }),
+        fleet: () => ({ verdict: 'done' }),
+      },
+    });
+    const parked = await runPipeline(INTAKE_FORMULA, ITEM, opts());
+    assert.equal(parked.outcome, 'park');
+    // a hand-edited row that lost its answers payload — fail closed,
+    // never crash the resume (cast: the row is malformed on purpose)
+    appendCustomerRecord(file, {
+      kind: 'answer',
+      item: ITEM,
+      ts: 't',
+    } as CustomerAnswer);
+    const alerted = await resumePipeline(INTAKE_FORMULA, ITEM, jn, opts());
+    assert.equal(alerted.outcome, 'park');
+    assert.equal(alerted.alert, PARK_ALERTS.answerMalformed);
+    const alertRow = journalRecords(jn.rows()).at(-1);
+    assert.equal(alertRow?.alert, PARK_ALERTS.answerMalformed);
+    assert.equal(alertRow?.resume, 'intake');
+    // the bad row was consumed — a corrected append is the repair;
+    // the wake drains only the new record and judges the enriched spec
+    appendCustomerRecord(file, answer('now it is answered'));
+    const repaired = await resumePipeline(INTAKE_FORMULA, ITEM, jn, opts());
+    assert.equal(repaired.outcome, 'end');
+    assert.deepEqual(
+      specs.annotated.filter(a => a.heading === ANSWERS_HEADING),
+      [{ id: ITEM, heading: ANSWERS_HEADING, lines: ['now it is answered'] }]
+    );
+  });
+});
+
 describe('intake inside runPipeline — the DAG', () => {
   const runDag = (spy: IntakeSpy, specs: SpecStoreSpy, opts: Partial<RunOptions> = {}) =>
     runPipeline(INTAKE_FORMULA, ITEM, {
@@ -399,33 +652,39 @@ describe('intake inside runPipeline — the DAG', () => {
 
   test('questions → park → answers land → wake re-runs intake on the enriched spec → accepted → end', async () => {
     // the spec's wake contract: a parked questions run resumes INTO
-    // intake, and the judgment reads the spec the answers enriched
+    // intake, and the judgment reads the spec the answers enriched —
+    // the feed IS the consumer: `bro pipeline answer`'s channel
+    // records land on the item before the seam re-judges
     const spy = intakeSpy([
       { verdict: 'questions', questions: ['who signs?'] },
       { verdict: 'accepted' },
     ]);
     const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const feed = feedSpy([answer({ 'who signs?': 'the customer does' })]);
     const jn = memoryJournal('r1'); // pinned run id — resume is the same run
     const parked = await runDag(spy, specs, { journal: jn });
     assert.equal(parked.outcome, 'park');
     assert.equal(spy.calls.length, 1);
+    assert.equal(feed.s.consumed, 0); // the park pass drained nothing — answers landed after
 
-    // the customer's answers land on the item (bro pipeline answer's
-    // write path — same annotate seam)
-    specs.annotate(ITEM, 'Answers', ['- the customer does']);
     const resumed = await resumePipeline(INTAKE_FORMULA, ITEM, jn, {
       formulaSha: SHA,
       admit: () => true,
       engines: {
-        intake: intakeStage(deps(spy, specs)),
+        intake: intakeStage(deps(spy, specs, feed)),
         fleet: () => ({ verdict: 'done' }),
       },
     });
     assert.equal(resumed.outcome, 'end');
     assert.equal(spy.calls.length, 2);
+    assert.equal(feed.s.consumed, 1); // drained + stamped exactly once
     const enriched = spy.calls[1].spec;
     assert.match(enriched.body ?? '', /## Questions\n- who signs\?/);
-    assert.match(enriched.body ?? '', /## Answers\n- the customer does/);
+    assert.match(enriched.body ?? '', /## Answers\nwho signs\?: the customer does/);
+    assert.deepEqual(
+      specs.annotated.filter(a => a.heading === ANSWERS_HEADING),
+      [{ id: ITEM, heading: ANSWERS_HEADING, lines: ['who signs?: the customer does'] }]
+    );
     const p = resumed.ctx.intake as IntakePayload;
     assert.equal(p.verdict, 'accepted');
     // the accepted point journals the ENRICHED spec's sha — the

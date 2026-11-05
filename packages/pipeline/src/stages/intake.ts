@@ -28,6 +28,19 @@
  * customer's answers enrich the spec the next intake pass reads
  * (`questions → park`, wake on `bro pipeline answer`).
  *
+ * The answer half of that contract is real, not aspirational: every
+ * invoke first drains the run's customer channel through the
+ * `answers` feed — pending `answer` records land on the item under
+ * `## Answers` (the unmanaged domain heading, never pipeline
+ * vocabulary), the feed's `consume` stamps the drain point so no
+ * record is re-fed on a later wake, and the judgment then reads the
+ * ENRICHED spec. Malformed records (missing/foreign item, empty or
+ * unshaped payload, artifact text that would open markdown
+ * structure) park the run `answer-malformed` — the drain marker
+ * covers them too, so the same bad row can't re-alert every wake;
+ * the customer's corrected append is what repairs it. An unbound
+ * feed simply judges the spec as it stands.
+ *
  * Why a direct seam and not a typed-question decide: the stage's
  * contract emits `{questions: [string], feedback: string}` — free
  * text the judge contract (choice/score/noul) cannot carry, so the
@@ -57,7 +70,14 @@
  */
 import { createHash } from 'node:crypto';
 import type { MaybePromise, TaskSpec, TaskSpecFacade } from '@broject/core';
-import type { EngineHandler, EngineResult, StageCall } from '../runner.ts';
+import type { AnswerFeed } from '../customer.ts';
+import {
+  type EngineAlert,
+  type EngineHandler,
+  type EngineOutcome,
+  PARK_ALERTS,
+  type StageCall,
+} from '../runner.ts';
 
 /** The intake verdicts — the formula's declared enum. */
 export const INTAKE_VERDICTS = ['accepted', 'questions', 'declined'] as const;
@@ -70,6 +90,10 @@ export type IntakeVerdict = (typeof INTAKE_VERDICTS)[number];
  *  section — the earlier rounds stay visible as spec history. */
 export const QUESTIONS_HEADING = 'Questions';
 export const DECLINED_HEADING = 'Declined';
+/** The customer's replies to `## Questions` — landed per answer
+ *  record; unmanaged so repeated answer rounds each keep their own
+ *  section (the earlier rounds stay visible as spec history). */
+export const ANSWERS_HEADING = 'Answers';
 
 /** The judgment seam's return — the worker's typed intake answer. A
  *  discriminated union: each arm carries exactly the fields its
@@ -133,6 +157,14 @@ export interface IntakeDeps {
    *  routed worker speaks; the seam owns the verdict, the engine owns
    *  its contract. */
   intake: (call: StageCall, spec: TaskSpec) => MaybePromise<IntakeOutcome>;
+  /** the customer-channel answer feed — drained BEFORE the judgment:
+   *  pending `answer` records annotate onto the item under
+   *  `## Answers`, `consume` stamps the drain point (exactly-once
+   *  per record — a wake never re-feeds it), and the seam judges the
+   *  enriched spec. Prod binds `fileAnswerFeed(dir)`; unbound, the
+   *  stage judges the spec as it stands (the answer CLI's record
+   *  then stays harmlessly unconsumed). */
+  answers?: (call: StageCall) => MaybePromise<AnswerFeed>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -269,6 +301,113 @@ function annotateArtifact(deps: IntakeDeps, item: string, out: IntakeOutcome): v
   }
 }
 
+/** A candidate answer row — the CLI's `kind:"answer"` record, or a
+ *  kind-less row still carrying `answers` (the same admission rule as
+ *  the accept gate's verdict candidates: a hand-written row the stage
+ *  should see — and fully validate). Other kinds ride the same
+ *  channel file and are not intake input. */
+const isAnswerCandidate = (v: unknown): boolean =>
+  isRecord(v) && (v.kind === 'answer' || (v.kind === undefined && 'answers' in v));
+
+/** The `answers` payload → artifact lines: a bare string lands
+ *  verbatim, a qid→answer map lands one `qid: answer` line per entry,
+ *  an array lands element-per-line (non-strings JSON-stamped), a
+ *  scalar lands as its literal. Empty or unshaped payloads are no
+ *  answer — malformed, never annotated. */
+function answerLines(answers: unknown): string[] | undefined {
+  if (typeof answers === 'string') {
+    return answers.trim() === '' ? undefined : [answers];
+  }
+  if (Array.isArray(answers)) {
+    const lines = answers.map(v => (typeof v === 'string' ? v : JSON.stringify(v)));
+    return lines.every(l => l.trim() === '') ? undefined : lines;
+  }
+  if (isRecord(answers)) {
+    const lines = Object.entries(answers).map(
+      ([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`
+    );
+    return lines.length === 0 ? undefined : lines;
+  }
+  if (typeof answers === 'number' || typeof answers === 'boolean') {
+    return [String(answers)];
+  }
+  return undefined;
+}
+
+/** One drained record → its artifact lines, or why it is malformed.
+ *  `item` must name this run's item — a record that can't be
+ *  attributed is never landed (same attribution check the accept
+ *  gate's verdict records pass). */
+function answerRow(v: unknown, item: string): { lines: string[] } | { err: string } {
+  const o = v as Record<string, unknown>;
+  if (typeof o.item !== 'string' || o.item === '') {
+    return { err: 'item is missing or not a non-empty string' };
+  }
+  if (o.item !== item) {
+    return { err: `names item ${JSON.stringify(o.item)}, not this run's ${JSON.stringify(item)}` };
+  }
+  if (o.ts !== undefined && typeof o.ts !== 'string') {
+    return { err: 'ts must be a string when present' };
+  }
+  if (o.by !== undefined && typeof o.by !== 'string') {
+    return { err: 'by must be a string when present' };
+  }
+  const lines = answerLines(o.answers);
+  return lines === undefined ? { err: 'the answers payload is empty or unshaped' } : { lines };
+}
+
+/** The drained answer feed → the spec the judgment reads — or a
+ *  fail-closed `answer-malformed` alert. Well-formed `answer`
+ *  records land on the item under `## Answers` before `consume`
+ *  stamps the drain point: a crash between the two re-feeds the rows
+ *  on the next wake — the annotate is append-shaped, so a re-drain
+ *  adds a fresh section, never a clobber (the marker's whole job is
+ *  making the NORMAL wake exactly-once). Malformed records are
+ *  consumed too — consumed does not mean landed; it means "was
+ *  offered once" — so the same bad row can't re-alert every wake. */
+async function landAnswers(
+  deps: IntakeDeps,
+  call: StageCall,
+  feed: AnswerFeed,
+  spec: TaskSpec
+): Promise<{ spec: TaskSpec } | { alert: EngineAlert }> {
+  const bad: string[] = [];
+  let annotated = false;
+  for (const r of feed.records) {
+    if (!isAnswerCandidate(r)) {
+      continue; // a verdict row on the same file — not intake input
+    }
+    const out = answerRow(r, call.item);
+    if ('err' in out) {
+      bad.push(out.err);
+      continue;
+    }
+    try {
+      deps.taskSpec.annotate(call.item, ANSWERS_HEADING, out.lines);
+      annotated = true;
+    } catch (e) {
+      // the facade's artifact guard refusing a poisoned line is
+      // malformed INPUT, not a crash — a missing row or store write
+      // error still throws through the normal crash path
+      if (e instanceof Error && e.message.includes('opens structure')) {
+        bad.push('an answer line opens markdown structure — artifact text must stay prose');
+      } else {
+        throw e;
+      }
+    }
+  }
+  await feed.consume();
+  if (bad.length > 0) {
+    return {
+      alert: {
+        alert: PARK_ALERTS.answerMalformed,
+        detail: `${bad.length} malformed answer record(s): ${bad.join('; ')}`,
+      },
+    };
+  }
+  return { spec: annotated ? (deps.taskSpec.spec(call.item) ?? spec) : spec };
+}
+
 /**
  * The intake stage as an EngineHandler for the runner's `intake` slot —
  * read the spec, take the worker's judgment, validate the outcome,
@@ -283,15 +422,23 @@ function annotateArtifact(deps: IntakeDeps, item: string, out: IntakeOutcome): v
  */
 export function intakeStage(deps: IntakeDeps): EngineHandler {
   return {
-    async invoke(call: StageCall): Promise<EngineResult> {
+    async invoke(call: StageCall): Promise<EngineOutcome> {
       const spec = deps.taskSpec.spec(call.item);
       if (spec === undefined) {
         throw new Error(`intake: item "${call.item}" is not in the task store`);
       }
-      const out = await deps.intake(call, spec);
+      const feed = deps.answers === undefined ? undefined : await deps.answers(call);
+      const landed =
+        feed === undefined || feed.records.length === 0
+          ? { spec }
+          : await landAnswers(deps, call, feed, spec);
+      if ('alert' in landed) {
+        return landed.alert;
+      }
+      const out = await deps.intake(call, landed.spec);
       checkOutcome(out);
       annotateArtifact(deps, call.item, out);
-      const p: IntakePayload = { verdict: out.verdict, spec: fingerprint(spec) };
+      const p: IntakePayload = { verdict: out.verdict, spec: fingerprint(landed.spec) };
       if (out.verdict === 'questions') {
         p.questions = [...out.questions];
       } else if (out.verdict === 'declined') {

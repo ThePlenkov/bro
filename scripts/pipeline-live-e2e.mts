@@ -8,12 +8,14 @@
  *  merge/capture) — work's fleet spawn needs a real provider budget.
  */
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'smol-toml';
 import { taskSpecFacade, taskStore } from '../packages/core/src/index.ts';
 import {
   acceptStage,
   type EngineMap,
   type EngineResult,
+  fileAnswerFeed,
   fileVerdictStore,
   formulaSha,
   intakeStage,
@@ -27,7 +29,10 @@ import {
 } from '../packages/pipeline/src/index.ts';
 import { SPEC_FORMULA } from '../packages/pipeline/src/spec-formula.fixture.ts';
 
-const DIR = '/home/pepl/projects/bro';
+/** the checkout this script sits in — not a fixed absolute path:
+ *  task-store, git, evidence, and CLI ops must all use the same
+ *  checkout the script's imports come from */
+const DIR = fileURLToPath(new URL('..', import.meta.url));
 const ITEM = 'bro-qjji2.6';
 const CUSTOMER = 'petr';
 const EVIDENCE = 'specs/bro-7d5nb-emulation.md';
@@ -43,8 +48,18 @@ const sh = (args: string[]): string =>
  *  the proof string IS the command and its output */
 const probe = (ac: string): { verdict: 'pass' | 'fail'; proof: string } => {
   const a = ac.toLowerCase();
-  const count = (pat: string): number =>
-    Number(sh(['grep', '-ic', pat, EVIDENCE]) || '0');
+  const count = (pat: string): number => {
+    // grep -ic exits 1 on zero matches — execFileSync throws; a
+    // no-match is the count 0, not a failure (other exits still throw)
+    try {
+      return Number(sh(['grep', '-ic', pat, EVIDENCE]) || '0');
+    } catch (e) {
+      if ((e as { status?: number }).status === 1) {
+        return 0;
+      }
+      throw e;
+    }
+  };
   if (a.includes('run entry')) {
     const n = count('run 8');
     return {
@@ -84,9 +99,12 @@ const engines: EngineMap = {
     }
     return verdict('push'); // review → accept
   },
-  // REAL intake — the judgment seam reads the real spec honestly
+  // REAL intake — the judgment seam reads the real spec honestly,
+  // and the customer-channel answer feed lands `bro pipeline answer`
+  // records on the item before it judges
   intake: intakeStage({
     taskSpec: spec,
+    answers: fileAnswerFeed(DIR),
     intake: (_call, s) =>
       (s.acceptance?.length ?? 0) > 0
         ? { verdict: 'accepted' }

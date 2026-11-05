@@ -171,7 +171,12 @@ stage, the item follows the queue-shaped path — `route`'s native
 `queue` verdict for routing, `park` with a slot-free wake
 elsewhere. A slot frees when an occupant's verdict moves it out.
 The journaled stage occupancy IS the semaphore — a crashed runner
-resumes with the same counts, so a limit survives restarts.
+resumes with the same counts, so a limit survives restarts. A
+customer-wait suspension holds NO `in_flight` slot — accept's
+pending `emit` intent and intake's settled `questions` park are
+input waits, not work in flight (the suspended run still holds its
+stage seat, so a stage-level `concurrency` cap still bounds the
+gate's occupant count).
 
 This binds worker-budget policy to the formula: `fleet.maxConcurrent`
 config remains the machine budget (what the box CAN run); formula
@@ -196,7 +201,7 @@ stage payloads, with THREE outcomes — never a silent bypass:
 `skip` is an implicit verdict: required in the transitions table for
 every stage with `gate_on`, forbidden on ungated stages. This keeps
 cheap-class bypass paths explicit — `done` still routes to `review`,
-and `review`'s `skip` takes the cheap item to `merge` without running
+and `review`'s `skip` takes the cheap item to `accept` without running
 the engine.
 
 ### Terminal actions
@@ -283,7 +288,7 @@ next stage reads:
   silently through.
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
-  complexity verdict: `complex` required, `cheap` skips to merge.
+  complexity verdict: `complex` required, `cheap` skips to `accept`.
   `fix` re-enters `work` in scoped-fix mode — the work stage runs
   against the SAME worktree with the review's `notes` payload as
   its scope input (a fix round), never a re-run of the original

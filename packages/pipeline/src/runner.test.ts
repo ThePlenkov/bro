@@ -3,14 +3,17 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { testRepoInit } from '@broject/core';
 import { parse } from 'smol-toml';
 import { parsePipelineFormula, SKIP_VERDICT } from './formula.ts';
 import {
+  appendJournalRow,
   fileJournal,
   type JournalRow,
   journalRecords,
   memoryJournal,
   type PipelineJournal,
+  pipelineDir,
 } from './journal.ts';
 import {
   type EngineFn,
@@ -812,6 +815,97 @@ describe('resume — the write-ahead contract', () => {
       [1, 2, 3]
     );
   });
+
+  test('the run customer journals — a resume carrying another fails closed', async () => {
+    const j = memoryJournal('rc1');
+    const e = happyScript();
+    const res = await run(emap(e), { runId: 'rc1', customer: 'customer-1' }, j);
+    assert.equal(res.outcome, 'end');
+    // every row stamps the recorded identity
+    assert.ok(records(j).every(r => r.customer === 'customer-1'));
+    // a resume that claims a different customer never runs — and
+    // journals NO row under the imposter's claimed identity
+    const judge2 = spy([{ verdict: 'solo' }]);
+    const bad = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: { judge: judge2.fn },
+      formulaSha: SHA,
+      customer: 'mallory',
+    });
+    assert.equal(bad.outcome, 'park');
+    assert.equal(bad.alert, PARK_ALERTS.customerMismatch);
+    assert.match(bad.detail ?? '', /recorded customer "customer-1" — resume carried "mallory"/);
+    assert.equal(judge2.calls.length, 0);
+    const rowsBefore = j.rows().length;
+    assert.equal(records(j).filter(r => r.alert !== undefined).length, 0);
+    // same run, the recorded customer — resumes fine
+    const rowsN = j.rows().length;
+    assert.equal(rowsN, rowsBefore);
+  });
+
+  test('a resume carrying no customer inherits the journaled identity', async () => {
+    const j = memoryJournal('rc2');
+    const e = happyScript();
+    // park mid-run: route's queue verdict suspends after classify
+    e.judge = spy([{ verdict: 'solo', payload: { complexity: 'complex' } }, { verdict: 'queue' }]);
+    const parked = await run(emap(e), { runId: 'rc2', customer: 'customer-1' }, j);
+    assert.equal(parked.outcome, 'park');
+    const judge2 = spy([{ verdict: 'spawn', payload: {} }, { verdict: 'push' }]);
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: {
+        judge: judge2.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
+        fleet: spy([{ verdict: 'done' }]).fn,
+        e2e: spy([{ verdict: 'verified' }]).fn,
+        accept: spy([{ verdict: 'accepted' }]).fn,
+        'act-gate': spy([{ verdict: 'landed' }]).fn,
+        learn: spy([{ verdict: 'captured' }]).fn,
+      },
+      formulaSha: SHA,
+      admit: () => true,
+      // NO customer passed — the journaled one carries over
+    });
+    assert.equal(res.outcome, 'end');
+    assert.equal(judge2.calls[0]?.customer, 'customer-1'); // the call saw the journaled identity
+  });
+
+  test('a recheck alert on a spawn-like intent parks WITHOUT a row — never a re-fire anchor', async () => {
+    const { j, engines, fleet } = crashSetup();
+    await assert.rejects(run(engines, { runId: 'r1' }, j), /runner killed/);
+    const before = j.rows().length;
+    // the hook's alert cannot journal an alert row: its resume path
+    // would re-enter invokeStage and re-fire the spawn blind — park
+    // with the pending intent still the anchor, same as the no-hook
+    // park
+    const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
+      engines: {
+        ...engines,
+        fleet: {
+          invoke: fleet.fn,
+          recheck: () => ({ alert: 'spawn-confirmed-dead', detail: 'the pod is gone' }),
+        },
+      },
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, 'spawn-confirmed-dead');
+    assert.equal(res.detail, 'the pod is gone');
+    assert.equal(j.rows().length, before); // nothing journaled
+    assert.equal(fleet.calls.length, 1); // never re-invoked
+    // a non-spawn intent's recheck alert DOES journal — the
+    // repairable-park contract is unchanged there
+    const j2 = memoryJournal('ra2');
+    const jg = spy([{ verdict: 'solo', payload: { complexity: 'complex' } }, new Error('killed')]);
+    await assert.rejects(run({ judge: jg.fn }, { runId: 'ra2' }, j2), /killed/);
+    const res2 = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
+      engines: { judge: { invoke: jg.fn, recheck: () => ({ alert: 'world-broken' }) } },
+      formulaSha: SHA,
+    });
+    assert.equal(res2.outcome, 'park');
+    assert.equal(res2.alert, 'world-broken');
+    const alertRow = records(j2).at(-1);
+    assert.equal(alertRow?.alert, 'world-broken');
+    assert.equal(alertRow?.resume, 'route');
+  });
 });
 
 describe('bounded drives and journal isolation', () => {
@@ -1173,5 +1267,124 @@ b = { done = "end" }
     });
     assert.equal(woken.outcome, 'end');
     assert.equal(judge2.calls[0].stage.name, 'b');
+  });
+
+  test('the pipeline dir IS the occupancy view — sibling run files count', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-occ-'));
+    testRepoInit(dir);
+    const d = pipelineDir({ dir });
+    assert.ok(d !== null);
+    const fileA = join(d, 'A.journal.jsonl');
+    const occupyA = (seq: number, stage: string, verdict?: string) =>
+      appendJournalRow(fileA, {
+        run_id: 'A',
+        item: 'item-A',
+        seq,
+        stage,
+        intent: 'judge',
+        attempt: 1,
+        ...(verdict !== undefined ? { verdict } : {}),
+        formula_sha: SHA,
+        ts: `2026-01-01T00:00:0${seq}.000Z`,
+      });
+    // run A sits mid-stage at `a` — a DIFFERENT journal file than B's.
+    // The default binding opens only B.journal.jsonl; the dir scan is
+    // what lets the semaphore see A at all
+    occupyA(1, 'a');
+    const judge = spy([]); // B must never reach an engine
+    const res = await runPipeline(capped(''), 'item-B', {
+      engines: { judge: judge.fn },
+      dir, // no journal opt — the default file journal binds
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'park');
+    assert.equal(res.alert, SATURATION_ALERT);
+    assert.equal(res.stage, 'a'); // parked at the entry door
+    assert.equal(judge.calls.length, 0);
+    // A's verdict moves it to `b` — still moving (mid-transit), so the
+    // pipeline slot stays spent and B's wake parks at the same door.
+    // The resume re-opens B's own file AND still sees the sibling
+    occupyA(1, 'a', 'go');
+    const res2 = await resumePipeline(
+      capped(''),
+      'item-B',
+      fileJournal(join(d, 'B.journal.jsonl')),
+      { engines: { judge: judge.fn }, dir, runId: 'B', formulaSha: SHA }
+    );
+    assert.equal(res2.outcome, 'park');
+    assert.equal(res2.alert, SATURATION_ALERT);
+    assert.equal(judge.calls.length, 0);
+    // A settles `b → end`: its flow exits, the in_flight slot frees,
+    // and B's next wake walks the stage it was refused
+    occupyA(2, 'b', 'done');
+    const judge2 = spy([{ verdict: 'go' }, { verdict: 'done' }]);
+    const res3 = await resumePipeline(
+      capped(''),
+      'item-B',
+      fileJournal(join(d, 'B.journal.jsonl')),
+      { engines: { judge: judge2.fn }, dir, runId: 'B', formulaSha: SHA }
+    );
+    assert.equal(res3.outcome, 'end');
+    assert.deepEqual(
+      judge2.calls.map(c => c.stage.name),
+      ['a', 'b']
+    );
+  });
+
+  test('an accept emit suspension frees the in_flight lane — a customer wait is not work', async () => {
+    const j = memoryJournal();
+    // a run suspended at the customer gate — the pending `emit`
+    // intent parks for an unbounded wait the same way intake's
+    // settled `questions` verdict does; it must not pin the only slot
+    j.append({
+      run_id: 'A',
+      item: 'item-A',
+      seq: 1,
+      stage: 'accept',
+      intent: 'emit',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const judge = spy([{ verdict: 'go' }, { verdict: 'done' }]);
+    const res = await runPipeline(capped(''), 'item-B', {
+      engines: { judge: judge.fn },
+      journal: j,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res.outcome, 'end'); // admitted — the waiting gate is not moving
+    assert.deepEqual(
+      judge.calls.map(c => c.stage.name),
+      ['a', 'b']
+    );
+    // …but the stage seat still counts: an `a`-named stage capped at 1
+    // and occupied by a suspended emit keeps its occupant
+    const j2 = memoryJournal();
+    j2.append({
+      run_id: 'A',
+      item: 'item-A',
+      seq: 1,
+      stage: 'b',
+      intent: 'emit',
+      attempt: 1,
+      formula_sha: SHA,
+      ts: '2026-01-01T00:00:00.000Z',
+    });
+    const judge2 = spy([{ verdict: 'go' }]); // `b` must never fire for B
+    const res2 = await runPipeline(capped('[limits]\nin_flight = 3', 1), 'item-B', {
+      engines: { judge: judge2.fn },
+      journal: j2,
+      runId: 'B',
+      formulaSha: SHA,
+    });
+    assert.equal(res2.outcome, 'park');
+    assert.equal(res2.alert, SATURATION_ALERT);
+    assert.equal(res2.stage, 'b'); // the suspended gate still holds its seat
+    assert.deepEqual(
+      judge2.calls.map(c => c.stage.name),
+      ['a']
+    );
   });
 });

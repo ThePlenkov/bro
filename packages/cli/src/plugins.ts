@@ -951,6 +951,7 @@ export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
   ['plan', 'versioned plans'],
   ['mesh', 'inter-rig federation'],
   ['spec', 'spec-driven development'],
+  ['pipeline', 'pipeline customer surface — accept verdicts, intake answers'],
 ];
 
 /** name → members, derived over the live registry each call so

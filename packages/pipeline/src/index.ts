@@ -34,8 +34,10 @@ export {
   readJournalFile,
 } from './journal.ts';
 export type {
+  AnswerFeed,
   AwaitingRun,
   CustomerAnswer,
+  CustomerConsumed,
   CustomerRecord,
   CustomerVerdict,
 } from './customer.ts';
@@ -44,8 +46,10 @@ export {
   awaitingCustomerRuns,
   CUSTOMER_SUFFIX,
   customerChannelPath,
+  fileAnswerFeed,
   fileVerdictStore,
   latestVerdict,
+  pendingAnswers,
   readCustomerFile,
   writeCustomerRecord,
 } from './customer.ts';
@@ -123,6 +127,7 @@ export type {
   SpecFingerprint,
 } from './stages/intake.ts';
 export {
+  ANSWERS_HEADING,
   DECLINED_HEADING,
   INTAKE_VERDICTS,
   intakeStage,

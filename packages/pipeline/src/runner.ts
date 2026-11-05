@@ -19,6 +19,8 @@
  * go-stamp protocol the agents registry uses: an unadmitted survivor
  * can never double a respawn.
  */
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { type MaybePromise, mintRunId } from '@broject/core';
 import {
   entryStage,
@@ -31,11 +33,13 @@ import {
   transitionFor,
 } from './formula.ts';
 import {
+  fileJournal,
   type JournalRow,
   journalRecords,
   openPipelineJournal,
   type PipelineJournal,
   pendingRecord,
+  pipelineDir,
 } from './journal.ts';
 
 /** The side-effect word a stage's intent carries — derived from its
@@ -98,6 +102,9 @@ export const PARK_ALERTS = {
   /** the customer's verdict record failed shape validation — a
    *  record the stage cannot trust never settles the gate */
   verdictMalformed: 'verdict-malformed',
+  /** the customer's answer record failed shape validation — drained
+   *  and consumed so the same bad row can't re-alert every wake */
+  answerMalformed: 'answer-malformed',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
 
@@ -308,6 +315,12 @@ interface Run {
   runId: string;
   sha: string;
   dir?: string;
+  /** set from `opts.dir` — occupancy counts every `*.journal.jsonl`
+   *  under the pipeline dir, not just the run's own file: a
+   *  file-backed journal sees this run alone, and a cap counting
+   *  only itself never trips. The injected journal's rows still add
+   *  to the view (a store spans whatever it returns). */
+  occupancyDir?: string;
   journal: PipelineJournal;
   engines: Map<string, EngineHandler>;
   admit?: AdmitFn;
@@ -349,7 +362,10 @@ function recordsOf(run: Run): JournalRow[] {
  *  verdict-settled transition out, so:
  *
  *  - verdict-less intent → occupies `stage` (the crash window counts —
- *    a crashed runner resumes with the same counts);
+ *    a crashed runner resumes with the same counts). It holds the
+ *    `in_flight` lane too, EXCEPT an `emit` intent: the accept gate's
+ *    suspension is a customer wait, not work in flight (same as
+ *    intake's settled `questions` park, which never counted);
  *  - settled verdict → the transition decides: `retry` re-enters the
  *    SAME stage (the item never left — still occupies it); a stage
  *    target means the item is mid-transit — moving, occupying nothing
@@ -368,7 +384,15 @@ function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
     return { moving: false };
   }
   if (last.verdict === undefined) {
-    return { moving: true, stage: last.stage };
+    // a pending intent occupies its stage — the crash window counts.
+    // EXCEPT the `emit` suspension on the ADMISSION lane: accept's
+    // pending intent parks for an unbounded customer wait the same
+    // way intake's settled `questions` verdict does — an input wait
+    // is not pipeline work, and under the serial default one parked
+    // accept would hold the only slot forever. The stage seat stays
+    // (an accept-level `concurrency` cap still bounds the gate).
+    const customerWait = last.intent === STAGE_INTENTS.accept;
+    return { moving: !customerWait, stage: last.stage };
   }
   const target = transitionFor(formula, last.stage, last.verdict);
   if (target === 'retry') {
@@ -380,17 +404,44 @@ function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
   return { moving: false };
 }
 
+/** The rows occupancy counts — the run's journal view UNIONED with
+ *  every `*.journal.jsonl` under the pipeline dir when `opts.dir`
+ *  binds one: a file-backed journal carries this run alone, and a cap
+ *  counting only itself never trips (a resume re-opens the run's own
+ *  file, so the dir scan is what keeps the semaphore honest across
+ *  processes). An unreadable sibling throws like the run's own file
+ *  would — a flow that can't be counted must not be silently ignored
+ *  by a semaphore. */
+function occupancyRows(run: Run): JournalRow[] {
+  if (run.occupancyDir === undefined) {
+    return run.journal.rows();
+  }
+  const d = pipelineDir({ dir: run.occupancyDir });
+  if (d === null) {
+    return run.journal.rows();
+  }
+  let files: string[];
+  try {
+    files = readdirSync(d);
+  } catch {
+    return run.journal.rows(); // no pipeline dir yet — this run is alone
+  }
+  const rows = run.journal.rows();
+  for (const f of files) {
+    if (f.endsWith('.journal.jsonl')) {
+      rows.push(...fileJournal(join(d, f)).rows());
+    }
+  }
+  return rows;
+}
+
 /** Every other flow's tail, reconstructed from the journal — rows
  *  group per run_id BEFORE seq-collapse (seqs are per-run; collapsing
  *  across runs would merge unrelated intents). This run's own rows are
- *  excluded: its slot is already held, never counted against itself.
- *  One journal file per run means a file-backed journal sees only its
- *  own flow — cross-run counting needs a journal spanning the run set
- *  (tests share one; prod binds an occupancy view over the pipeline
- *  dir — the `opts.journal` seam is where it lands). */
+ *  excluded: its slot is already held, never counted against itself. */
 function flowTails(run: Run): FlowTail[] {
   const byRun = new Map<string, JournalRow[]>();
-  for (const r of run.journal.rows()) {
+  for (const r of occupancyRows(run)) {
     if (r.run_id === run.runId) {
       continue;
     }
@@ -513,6 +564,10 @@ function initRun(
     runId,
     sha: opts.formulaSha,
     dir: opts.dir,
+    // occupancy spans the pipeline dir whenever one is bound — an
+    // injected journal's rows UNION in; they never subtract from the
+    // durable plane
+    occupancyDir: opts.dir,
     journal: journalFor(opts, journal, runId),
     engines: engineMapFor(opts.engines),
     admit: opts.admit,
@@ -564,6 +619,7 @@ function rowFor(run: Run, to: NextStep, intent: string): JournalRow {
   };
   if (to.fixRound !== undefined) row.fix_round = to.fixRound;
   if (to.notes !== undefined) row.notes = to.notes;
+  if (run.customer !== undefined) row.customer = run.customer;
   return row;
 }
 
@@ -1001,6 +1057,16 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
     return refireAttempt(run, last, to);
   }
   if (isEngineAlert(r)) {
+    // an alert row's resume path re-enters through invokeStage — a
+    // blind re-fire of a spawn-like side effect this pending intent
+    // still anchors (the same hole refire's no-hook park exists to
+    // close). Halt WITHOUT a row: the intent stays the resume anchor
+    // and every wake re-asks the hook.
+    if (run.admitIntents.includes(intentFor(stage))) {
+      return {
+        halt: result(run, 'park', last.stage, { alert: r.alert, detail: r.detail }),
+      };
+    }
     return alertStep(run, to, {
       alert: r.alert,
       detail: r.detail,
@@ -1136,6 +1202,27 @@ async function begin(run: Run): Promise<RunResult> {
     });
   }
   const records = recordsOf(run);
+  // the recorded customer is run state — journaled on every row — so
+  // a resume cannot quietly swap who may sign the accept gate. A
+  // resume carrying a DIFFERENT customer fails closed like a foreign
+  // item: park WITHOUT a row (an alert stamped under the imposter's
+  // claimed identity would poison the ledger). A resume that carries
+  // none inherits the journaled identity — the customer is durable.
+  const journaledCustomer = records.find(r => typeof r.customer === 'string')?.customer;
+  if (
+    journaledCustomer !== undefined &&
+    run.customer !== undefined &&
+    journaledCustomer !== run.customer
+  ) {
+    const entry = entryStage(run.formula).name;
+    return result(run, 'park', entry, {
+      alert: PARK_ALERTS.customerMismatch,
+      detail:
+        `run ${run.runId} recorded customer ${JSON.stringify(journaledCustomer)} — ` +
+        `resume carried ${JSON.stringify(run.customer)}`,
+    });
+  }
+  run.customer = journaledCustomer ?? run.customer;
   run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
   replayCtx(run, records);
   const last = records.at(-1);

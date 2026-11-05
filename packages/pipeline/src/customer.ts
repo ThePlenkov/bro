@@ -20,6 +20,7 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { MaybePromise } from '@broject/core';
 import {
   appendJsonlRow,
   fileJournal,
@@ -63,7 +64,16 @@ export interface CustomerAnswer {
   ts: string;
 }
 
-export type CustomerRecord = CustomerVerdict | CustomerAnswer;
+/** A drain marker — the intake pass consumed every channel row
+ *  before this one: the `answer` records it covered are already
+ *  annotated on the item and must never re-feed a later wake. */
+export interface CustomerConsumed {
+  kind: 'consumed';
+  item: string;
+  ts: string;
+}
+
+export type CustomerRecord = CustomerVerdict | CustomerAnswer | CustomerConsumed;
 
 /** `<git-common>/bro/pipeline/<run_id>.customer.jsonl` — null outside
  *  a repo. Same path-safety rule as the journal: an unsafe run id
@@ -149,6 +159,54 @@ export function fileVerdictStore(dir: string) {
       return undefined;
     }
     return latestVerdict(readCustomerFile(file));
+  };
+}
+
+/** Rows appended since the last `consumed` marker — the pending
+ *  answer input a waking intake drains. Verdict rows ride the same
+ *  file: they are not intake input, but the next marker covers them
+ *  too — the accept store reads the whole file regardless. */
+export function pendingAnswers(rows: unknown[]): unknown[] {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (isRecord(r) && r.kind === 'consumed') {
+      return rows.slice(i + 1);
+    }
+  }
+  return rows;
+}
+
+/** What the intake wake drains — the pending channel rows plus the
+ *  marker append. `consume` must run only AFTER the records' payload
+ *  is durable on the item: a crash between annotate and marker
+ *  re-feeds the rows on the next wake (the annotate is append-shaped,
+ *  so a re-drain adds a fresh `## Answers` section, never a clobber);
+ *  the other order could lose the answers entirely. */
+export interface AnswerFeed {
+  /** every channel row since the last consumed marker — raw; the
+   *  consuming stage validates each record's shape and fails closed */
+  records: unknown[];
+  /** append the drain marker — rows before it are never re-fed */
+  consume(): MaybePromise<void>;
+}
+
+/** The durable answer-feed binding — the run's own channel file,
+ *  `fileVerdictStore`'s intake-side sibling. */
+export function fileAnswerFeed(dir: string) {
+  return (call: StageCall): AnswerFeed => {
+    const file = customerChannelPath({ dir, runId: call.runId });
+    if (file === null) {
+      return { records: [], consume: () => {} };
+    }
+    return {
+      records: pendingAnswers(readCustomerFile(file)),
+      consume: () =>
+        appendCustomerRecord(file, {
+          kind: 'consumed',
+          item: call.item,
+          ts: new Date().toISOString(),
+        }),
+    };
   };
 }
 
