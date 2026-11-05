@@ -72,8 +72,9 @@ const SESSION_ENV = [
  *  visible to the session running in another. Null outside a git dir. */
 function goalDir(dir: string): string | null {
   try {
-    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-      // NOSONAR — PATH lookup is the contract for a user-installed git
+    // PATH-resolved git is the contract for a user-installed CLI — the
+    // NOSONAR must share the callee's line (biome reflows a trailing one)
+    const gd = /* NOSONAR */ execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd: dir,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],

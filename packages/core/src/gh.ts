@@ -107,8 +107,9 @@ export async function ghJsonAsync<T>(args: string[], cwd?: string, opts?: GhOpts
  * (`gh pr checks` exits 1 when checks fail while still printing JSON).
  */
 export function ghTry(args: string[], cwd?: string): { code: number; out: string; err: string } {
-  const proc = spawnSync('gh', args, {
-    // NOSONAR — user-installed CLI; PATH lookup is the contract
+  // user-installed CLI — PATH lookup is the contract; the NOSONAR must
+  // share the callee's line (biome reflows a trailing one inside {})
+  const proc = /* NOSONAR */ spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
