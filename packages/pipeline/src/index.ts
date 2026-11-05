@@ -144,3 +144,12 @@ export {
   TRACE_TRAILERS,
   trailerBlock,
 } from './trace.ts';
+export type {
+  EvidenceRow,
+  RowVerdict,
+  VerifyDeps,
+  VerifyPayload,
+  VerifySpec,
+  VerifyVerdict,
+} from './stages/verify.ts';
+export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';
