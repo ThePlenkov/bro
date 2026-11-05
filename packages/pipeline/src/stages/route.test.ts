@@ -483,6 +483,7 @@ describe('route inside runPipeline — the full DAG', () => {
           })
         )
       ),
+      intake: () => ({ verdict: 'accepted' }),
       fleet: () => {
         workCalls += 1;
         // first spawn dies on the wall; the re-routed one lands
@@ -492,6 +493,8 @@ describe('route inside runPipeline — the full DAG', () => {
         }
         return { verdict: 'done' };
       },
+      e2e: () => ({ verdict: 'verified' }),
+      accept: () => ({ verdict: 'accepted' }),
       'act-gate': () => ({ verdict: 'landed' }),
       learn: () => ({ verdict: 'captured' }),
     });

@@ -28,22 +28,33 @@ ${transitions}
 const A = 'name = "a"\nengine = "judge"\nverdicts = ["ok"]';
 
 describe('parsePipelineFormula', () => {
-  test('parses the spec formula — 6 stages, gate_on, full transitions', () => {
+  test('parses the spec formula — 9 stages, gate_on, full transitions', () => {
     const f = parseFormula(SPEC_FORMULA);
-    assert.equal(f.stages.length, 6);
+    assert.equal(f.stages.length, 9);
     assert.deepEqual(
       f.stages.map(s => s.name),
-      ['classify', 'route', 'work', 'review', 'merge', 'capture']
+      ['classify', 'route', 'intake', 'work', 'verify', 'review', 'accept', 'merge', 'capture']
     );
-    assert.deepEqual(f.stages[3].gate_on, {
+    assert.deepEqual(f.stages[5].gate_on, {
       field: 'complexity',
       op: '==',
       value: 'complex',
     });
-    assert.equal(f.stages[5].mode, 'always-capture');
+    assert.equal(f.stages[8].mode, 'always-capture');
+    // the agile-contract edges — intake gates work on a validated
+    // spec, verify gates review on evidence, accept gates merge on the
+    // customer (review skip/push both cross acceptance now)
+    assert.equal(transitionFor(f, 'route', 'spawn'), 'intake');
+    assert.equal(transitionFor(f, 'intake', 'accepted'), 'work');
+    assert.equal(transitionFor(f, 'intake', 'declined'), 'close');
+    assert.equal(transitionFor(f, 'work', 'done'), 'verify');
     assert.equal(transitionFor(f, 'work', 'crash'), 'retry');
-    assert.equal(transitionFor(f, 'review', 'push'), 'merge');
-    assert.equal(transitionFor(f, 'review', 'skip'), 'merge');
+    assert.equal(transitionFor(f, 'verify', 'verified'), 'review');
+    assert.equal(transitionFor(f, 'verify', 'unverifiable'), 'park');
+    assert.equal(transitionFor(f, 'review', 'push'), 'accept');
+    assert.equal(transitionFor(f, 'review', 'skip'), 'accept');
+    assert.equal(transitionFor(f, 'accept', 'accepted'), 'merge');
+    assert.equal(transitionFor(f, 'accept', 'rejected'), 'work');
     assert.equal(transitionFor(f, 'capture', 'captured'), 'end');
     assert.ok(isTerminalAction('park'));
     assert.ok(!isTerminalAction('work'));
@@ -175,7 +186,7 @@ describe('loadPipelineFormula', () => {
     const file = join(dir, 'f.toml');
     writeFileSync(file, SPEC_FORMULA);
     const { formula, sha } = loadPipelineFormula(file);
-    assert.equal(formula.stages.length, 6);
+    assert.equal(formula.stages.length, 9);
     assert.equal(sha, formulaSha(SPEC_FORMULA));
   });
 

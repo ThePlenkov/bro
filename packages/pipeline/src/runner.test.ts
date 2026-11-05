@@ -56,7 +56,17 @@ const happyScript = (complexity = 'complex') => ({
     },
     { verdict: 'push', payload: { notes: 'looks good' } },
   ]),
+  // intake re-runs on every route → spawn — a rate_limited/admit
+  // refusal re-route crosses it again, so the script carries two
+  intake: spy([{ verdict: 'accepted' }, { verdict: 'accepted' }]),
   fleet: spy([{ verdict: 'done', payload: { pr: 42 } }]),
+  e2e: spy([
+    {
+      verdict: 'verified',
+      payload: { rows: [{ ac: 'ships', verdict: 'pass', proof: 'run-1' }] },
+    },
+  ]),
+  accept: spy([{ verdict: 'accepted', payload: { accepted_by: 'customer-1' } }]),
   'act-gate': spy([{ verdict: 'landed' }]),
   learn: spy([{ verdict: 'captured', payload: { lessons: 0, followups: [] } }]),
 });
@@ -79,7 +89,7 @@ const run = (engines: EngineMap, opts: Partial<RunOptions> = {}, journal = memor
 const records = (j: PipelineJournal): JournalRow[] => journalRecords(j.rows());
 
 describe('runPipeline — happy path', () => {
-  test('walks classify → route → work → review → merge → capture to end', async () => {
+  test('walks classify → … → capture to end — all 9 stages settle', async () => {
     const e = happyScript();
     const j = memoryJournal();
     const res = await run(emap(e), {}, j);
@@ -90,14 +100,20 @@ describe('runPipeline — happy path', () => {
       ['classify', 'route', 'review']
     );
     assert.equal(e.fleet.calls.length, 1);
+    assert.equal(e.intake.calls.length, 1);
+    assert.equal(e.e2e.calls.length, 1);
+    assert.equal(e.accept.calls.length, 1);
     const recs = records(j);
     assert.deepEqual(
       recs.map(r => [r.stage, r.verdict]),
       [
         ['classify', 'solo'],
         ['route', 'spawn'],
+        ['intake', 'accepted'],
         ['work', 'done'],
+        ['verify', 'verified'],
         ['review', 'push'],
+        ['accept', 'accepted'],
         ['merge', 'landed'],
         ['capture', 'captured'],
       ]
@@ -127,7 +143,8 @@ describe('gate_on — three outcomes, fail closed', () => {
     const skip = records(j).find(r => r.verdict === SKIP_VERDICT);
     assert.equal(skip?.stage, 'review');
     assert.equal(skip?.intent, 'gate');
-    assert.equal(e['act-gate'].calls.length, 1); // review.skip → merge still ran
+    assert.equal(e.accept.calls.length, 1); // review.skip → accept still ran
+    assert.equal(e['act-gate'].calls.length, 1); // … then merge
   });
 
   test('an absent gate field parks indeterminate — never fails open', async () => {
@@ -176,12 +193,7 @@ describe('terminal actions', () => {
     // wake: the item re-enters the PARKED stage — route, not classify
     const judge2 = spy([{ verdict: 'spawn', payload: {} }, { verdict: 'push' }]);
     const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
-      engines: {
-        judge: judge2.fn,
-        fleet: e.fleet.fn,
-        'act-gate': e['act-gate'].fn,
-        learn: e.learn.fn,
-      },
+      engines: { ...emap(e), judge: judge2.fn },
       formulaSha: SHA,
       admit: () => true,
     });
@@ -244,7 +256,10 @@ describe('scoped-fix mode — review.fix → work', () => {
     const fleet = spy([{ verdict: 'done' }, { verdict: 'done' }]);
     const e: EngineMap = {
       judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
       fleet: fleet.fn,
+      e2e: spy([{ verdict: 'verified' }, { verdict: 'verified' }]).fn,
+      accept: spy([{ verdict: 'accepted' }]).fn,
       'act-gate': spy([{ verdict: 'landed' }]).fn,
       learn: spy([{ verdict: 'captured' }]).fn,
     };
@@ -267,7 +282,12 @@ describe('scoped-fix mode — review.fix → work', () => {
       { verdict: 'fix', payload: {} }, // missing notes
     ]);
     const fleet = spy([{ verdict: 'done' }]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn });
+    const res = await run({
+      judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
+      fleet: fleet.fn,
+      e2e: spy([{ verdict: 'verified' }]).fn,
+    });
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.fixNotesMissing);
     assert.equal(res.stage, 'review'); // parks AT the source — a wake re-judges
@@ -282,7 +302,15 @@ describe('scoped-fix mode — review.fix → work', () => {
       { verdict: 'fix', payload: { notes: 'round 2' } },
     ]);
     const fleet = spy([{ verdict: 'done' }, { verdict: 'done' }]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn }, { fixRounds: 1 });
+    const res = await run(
+      {
+        judge: judge.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
+        fleet: fleet.fn,
+        e2e: spy([{ verdict: 'verified' }, { verdict: 'verified' }]).fn,
+      },
+      { fixRounds: 1 }
+    );
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.fixRoundsExhausted);
     assert.equal(fleet.calls.length, 2); // original + one fix round
@@ -297,7 +325,12 @@ describe('scoped-fix mode — review.fix → work', () => {
       { verdict: 'fix', payload: {} }, // no notes of its own
     ]);
     const fleet = spy([{ verdict: 'done' }, { verdict: 'done' }]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn });
+    const res = await run({
+      judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
+      fleet: fleet.fn,
+      e2e: spy([{ verdict: 'verified' }, { verdict: 'verified' }]).fn,
+    });
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.fixNotesMissing);
     assert.equal(fleet.calls.length, 2); // second fix never re-entered on stale scope
@@ -310,7 +343,12 @@ describe('scoped-fix mode — review.fix → work', () => {
       { verdict: 'fix', payload: { notes: 'round 1' } },
     ]);
     const fleet = spy([{ verdict: 'done' }, { verdict: 'crash' }, { verdict: 'stopped' }]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn });
+    const res = await run({
+      judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
+      fleet: fleet.fn,
+      e2e: spy([{ verdict: 'verified' }]).fn,
+    });
     assert.equal(res.outcome, 'abandon'); // stopped → abandon
     assert.equal(fleet.calls.length, 3); // work, crash-retry, retry
     assert.equal(fleet.calls[2].fixRound, 1); // scope preserved across the retry
@@ -331,7 +369,16 @@ describe('scoped-fix mode — review.fix → work', () => {
       { verdict: 'crash' },
       { verdict: 'crash' },
     ]);
-    const parked = await run({ judge: judge.fn, fleet: fleet.fn }, { runId: 'r9' }, j);
+    const parked = await run(
+      {
+        judge: judge.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
+        fleet: fleet.fn,
+        e2e: spy([{ verdict: 'verified' }]).fn,
+      },
+      { runId: 'r9' },
+      j
+    );
     assert.equal(parked.outcome, 'park');
     assert.equal(parked.alert, PARK_ALERTS.attemptsExhausted);
     // wake: the scoped fix re-enters work with round+notes, fresh attempts
@@ -439,7 +486,11 @@ describe('resume — the write-ahead contract', () => {
       { verdict: 'spawn', payload: {} },
     ]);
     const fleet = spy([new Error('runner killed mid-stage')]);
-    const engines: EngineMap = { judge: judge.fn, fleet: fleet.fn };
+    const engines: EngineMap = {
+      judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
+      fleet: fleet.fn,
+    };
     return { j, judge, fleet, engines };
   };
 
@@ -457,6 +508,8 @@ describe('resume — the write-ahead contract', () => {
         ...engines,
         fleet: { invoke: fleet.fn, recheck },
         judge: judge2.fn,
+        e2e: spy([{ verdict: 'verified' }]).fn,
+        accept: spy([{ verdict: 'accepted' }]).fn,
         'act-gate': spy([{ verdict: 'landed' }]).fn,
         learn: spy([{ verdict: 'captured' }]).fn,
       },
@@ -507,7 +560,11 @@ describe('resume — the write-ahead contract', () => {
       { verdict: 'spawn', payload: {} },
     ]);
     const fl = spy([new Error('killed')]);
-    await assert.rejects(run({ judge: jg.fn, fleet: fl.fn }, { runId: 'r3' }, j2), /killed/);
+    const intake = spy([{ verdict: 'accepted' }]);
+    await assert.rejects(
+      run({ judge: jg.fn, intake: intake.fn, fleet: fl.fn }, { runId: 'r3' }, j2),
+      /killed/
+    );
     const res2 = await resumePipeline(FORMULA, 'bro-7d5nb.2', j2, {
       engines: { judge: jg.fn, fleet: { invoke: fl.fn } }, // invoke-only: no recheck
       formulaSha: SHA,
@@ -548,7 +605,11 @@ describe('resume — the write-ahead contract', () => {
       { verdict: 'spawn', payload: {} },
     ]);
     const fl = spy([new Error('killed')]);
-    await assert.rejects(run({ judge: jg.fn, fleet: fl.fn }, { runId: 'r3b' }, j2), /killed/);
+    const intake = spy([{ verdict: 'accepted' }]);
+    await assert.rejects(
+      run({ judge: jg.fn, intake: intake.fn, fleet: fl.fn }, { runId: 'r3b' }, j2),
+      /killed/
+    );
     // the hook exists and attests "didn't land" → re-fire is the safe
     // restart even though 'work' is a spawn-intent stage
     const fl2 = spy([{ verdict: 'stopped' }]);
@@ -573,7 +634,11 @@ describe('resume — the write-ahead contract', () => {
       { verdict: 'queue', payload: {} },
     ]);
     const parked = await run(
-      { judge: judge1.fn, fleet: spy([]).fn },
+      {
+        judge: judge1.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
+        fleet: spy([]).fn,
+      },
       {
         runId: 'ra',
         admit: () => ({
@@ -589,7 +654,10 @@ describe('resume — the write-ahead contract', () => {
     const res = await resumePipeline(FORMULA, 'bro-7d5nb.2', j, {
       engines: {
         judge: judge2.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
         fleet: spy([{ verdict: 'done', payload: { pr: 1 } }]).fn,
+        e2e: spy([{ verdict: 'verified' }]).fn,
+        accept: spy([{ verdict: 'accepted' }]).fn,
         'act-gate': spy([{ verdict: 'landed' }]).fn,
         learn: spy([{ verdict: 'captured' }]).fn,
       },
@@ -751,10 +819,15 @@ describe('bounded drives and journal isolation', () => {
       { verdict: 'rate_limited' },
       { verdict: 'rate_limited' },
     ]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn }, { maxSteps: 6 }, j);
+    const intake = spy([{ verdict: 'accepted' }, { verdict: 'accepted' }, { verdict: 'accepted' }]);
+    const res = await run(
+      { judge: judge.fn, intake: intake.fn, fleet: fleet.fn },
+      { maxSteps: 9 },
+      j
+    );
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.cycleExhausted);
-    // work ran at steps 3 and 5; step 7 hits the budget BEFORE a third
+    // work ran at steps 4 and 7; step 10 hits the budget BEFORE a third
     // spawn — the cycle is bounded, never infinite
     assert.equal(fleet.calls.length, 2);
   });
@@ -795,7 +868,10 @@ describe('bounded drives and journal isolation', () => {
     const fleet = spy([{ verdict: 'done', payload: { pr: 1 } }]);
     const res = await run({
       judge: judge.fn,
+      intake: spy([{ verdict: 'accepted' }]).fn,
       fleet: fleet.fn,
+      e2e: spy([{ verdict: 'verified' }]).fn,
+      accept: spy([{ verdict: 'accepted' }]).fn,
       'act-gate': spy([{ verdict: 'landed' }]).fn,
       learn: spy([{ verdict: 'captured' }]).fn,
     });
@@ -866,7 +942,15 @@ describe('runner invariants', () => {
       { verdict: 'fix', payload: { notes: 'scope' } },
     ]);
     const fleet = spy([{ verdict: 'done' }]);
-    const res = await run({ judge: judge.fn, fleet: fleet.fn }, { fixRounds: 0 });
+    const res = await run(
+      {
+        judge: judge.fn,
+        intake: spy([{ verdict: 'accepted' }]).fn,
+        fleet: fleet.fn,
+        e2e: spy([{ verdict: 'verified' }]).fn,
+      },
+      { fixRounds: 0 }
+    );
     assert.equal(res.outcome, 'park');
     assert.equal(res.alert, PARK_ALERTS.fixRoundsExhausted);
   });

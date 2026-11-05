@@ -31,7 +31,12 @@ import {
 } from './review.ts';
 
 const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
-const REVIEW_STAGE = FORMULA.stages[3];
+// by name, never by index — a stage-order change in SPEC_FORMULA must
+// not silently retarget the stage under test
+const REVIEW_STAGE = FORMULA.stages.find(s => s.name === 'review');
+if (REVIEW_STAGE === undefined) {
+  throw new Error('SPEC_FORMULA lost its review stage');
+}
 const ITEM = 'bro-bb2';
 const SHA = 'cafebabe';
 const DIFF_TEXT = 'diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n';
@@ -477,13 +482,16 @@ describe('review inside runPipeline — the full DAG', () => {
           },
           DEFAULT_ADMIT_INTENTS
         ),
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done' }),
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: () => ({ verdict: 'captured' }),
       },
     });
 
-  test('complex → review runs → push → merge → end', async () => {
+  test('complex → review runs → push → accept → merge → end', async () => {
     const j = judge({ push: noul(0.9) });
     const res = await runDag(j, 'complex');
     assert.equal(res.outcome, 'end');
@@ -521,10 +529,13 @@ describe('review inside runPipeline — the full DAG', () => {
           },
           DEFAULT_ADMIT_INTENTS
         ),
+        intake: () => ({ verdict: 'accepted' }),
         fleet: (c: StageCall) => {
           workCalls.push(c);
           return { verdict: 'done' };
         },
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: () => ({ verdict: 'captured' }),
       },
@@ -557,7 +568,9 @@ describe('review inside runPipeline — the full DAG', () => {
           },
           DEFAULT_ADMIT_INTENTS
         ),
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done' }),
+        e2e: () => ({ verdict: 'verified' }),
         'act-gate': () => {
           gated += 1;
           return { verdict: 'landed' };

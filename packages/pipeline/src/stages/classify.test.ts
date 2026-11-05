@@ -385,7 +385,10 @@ describe('classify inside runPipeline — the payload feeds the gate', () => {
           },
           DEFAULT_ADMIT_INTENTS
         ),
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done' }),
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: () => ({ verdict: 'captured' }),
       },

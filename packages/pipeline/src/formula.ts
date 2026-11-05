@@ -1,8 +1,8 @@
 /**
  * Pipeline formulas — stage DAGs describing how each work item flows
- * through bro's gates (classify → route → work → review? → merge →
- * capture). Data, never agent-facing: the formula is read by the core
- * stage-runner, never poured into prompts.
+ * through bro's gates (classify → route → intake → work → verify →
+ * review? → accept → merge → capture). Data, never agent-facing: the
+ * formula is read by the core stage-runner, never poured into prompts.
  *
  *   kind = "pipeline"
  *   version = 1                    # optional — schema pin
@@ -21,8 +21,8 @@
  *   [transitions]                  # root table — verdict → next stage
  *   classify = { solo = "route", clump = "route", duplicate = "close",
  *                defer = "park" }
- *   review   = { skip = "merge", push = "merge", fix = "work",
- *                abandon = "close" }
+ *   review   = { skip = "accept", push = "accept", fix = "work",
+ *                abandon = "abandon" }
  *
  * Every declared verdict needs a target; a target is another stage
  * name or a terminal action. A stage with `gate_on` also gets the
@@ -42,8 +42,20 @@ export const PIPELINE_VERSION = 1;
 
 /** Engines a stage may name — the core facilities the runner invokes.
  *  `judge` emits typed verdicts; `fleet` spawns/moves agents; `act-gate`
- *  is the PR review gate; `learn` is the capture/self-learn engine. */
-export const STAGE_ENGINES = ['judge', 'fleet', 'act-gate', 'learn'] as const;
+ *  is the PR review gate; `learn` is the capture/self-learn engine.
+ *  The agile-contract engines: `intake` validates the task spec before
+ *  the worker commits (DoR); `e2e` verifies work against the item's
+ *  declared AC (DoD, evidence rows); `accept` is the customer gate —
+ *  only the recorded customer identity can pass it. */
+export const STAGE_ENGINES = [
+  'judge',
+  'fleet',
+  'act-gate',
+  'learn',
+  'intake',
+  'e2e',
+  'accept',
+] as const;
 export type StageEngine = (typeof STAGE_ENGINES)[number];
 
 /** Transition targets that are runner actions, not stages. `end` is

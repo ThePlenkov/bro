@@ -540,7 +540,10 @@ describe('capture in the spec DAG — the last stage', () => {
         },
         // cheap complexity — the review gate synthesizes skip; capture
         // still reads the landed record (a skipped review changes nothing)
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done', payload: { mol: 'mol-7' } }),
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: captureStage(deps(cap.fn, ret.fn)),
       },
