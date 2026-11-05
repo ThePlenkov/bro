@@ -83,11 +83,7 @@ type SpecField = 'acceptance' | 'dod' | 'dor' | 'scenarios';
 type SpecFields = Pick<TaskSpec, 'body' | 'acceptance' | 'dod' | 'dor' | 'scenarios'>;
 
 /** Managed heading name (lowercased) → the field its section feeds.
- *  Every index into it is own-key gated (`Object.hasOwn`): a
- *  prototype member (`## Constructor`, `## __proto__`, `## ToString`)
- *  resolves to an Object.prototype member, and an ungated lookup
- *  would open a "managed" section that silently eats the heading's
- *  text into a field that never existed. */
+ *  Lookups are own-key gated — see {@link managedField}. */
 const MANAGED: Record<string, SpecField> = {
   acceptance: 'acceptance',
   dod: 'dod',
@@ -102,38 +98,70 @@ interface Line {
   fenced: boolean;
 }
 
+/** A parsed ATX heading — its level plus the name minus decoration. */
+interface Heading {
+  level: number;
+  name: string;
+}
+
+/** space/tab — CommonMark's heading and list whitespace. */
+const isBlank = (c: string | undefined): boolean => c === ' ' || c === '\t';
+
+const isDigit = (c: string | undefined): boolean => c !== undefined && c >= '0' && c <= '9';
+
+/** The bullet marks that open an item line (`-`, `*`, `+`, `•`). */
+const BULLETS = new Set(['-', '*', '+', '•']);
+
+const isBulletMark = (c: string | undefined): boolean => c !== undefined && BULLETS.has(c);
+
+/** Consecutive `ch` run length from index i — the one scan shape the
+ *  parser's probes all share (spaces, `#`s, fence chars, digits are
+ *  all runs). */
+function charRun(raw: string, i: number, ch: string): number {
+  let n = 0;
+  while (raw[i + n] === ch) n++;
+  return n;
+}
+
+/** Leading-space count — CommonMark's ≤3 indent rule uses it. */
+function leadingSpaces(raw: string): number {
+  return charRun(raw, 0, ' ');
+}
+
+/** Where a trailing `#` run starts, when it is a real closing
+ *  sequence — all-`#` text or a run preceded by whitespace. */
+function closingRunStart(t: string): number | undefined {
+  let e = t.length;
+  while (e > 0 && t[e - 1] === '#') e--;
+  const bounded = e === 0 || isBlank(t[e - 1]);
+  return e < t.length && bounded ? e : undefined;
+}
+
 /** Heading text → its name — the ATX closing sequence (a trailing
  *  `#` run preceded by whitespace) is decoration, not name. */
 function headingName(text: string): string {
   const t = text.trim();
-  let e = t.length;
-  while (e > 0 && t[e - 1] === '#') e--;
-  if (e < t.length && (e === 0 || t[e - 1] === ' ' || t[e - 1] === '\t')) {
-    return t.slice(0, e).trimEnd();
-  }
-  return t;
+  const e = closingRunStart(t);
+  return e === undefined ? t : t.slice(0, e).trimEnd();
+}
+
+/** CommonMark heading legality — 1–6 `#`s, then a space/tab/EOL
+ *  before the name (`##Acceptance` — no space — is prose). */
+function legalHeading(raw: string, i: number, level: number): boolean {
+  if (level === 0 || level > 6) return false;
+  const next = raw[i + level];
+  return next === undefined || isBlank(next);
 }
 
 /** ATX heading probe — a linear string scan, never a regex on
- *  uncontrolled data. CommonMark shape: up to 3 leading spaces
- *  (4+ is indented code), 1–6 `#`s, then a space/tab/EOL, then the
- *  name minus its closing run. Every level answers — `###`+ headings
- *  terminate managed sections like `##` ones do. */
-function headingOf(raw: string): { level: number; name: string } | null {
-  let i = 0;
-  while (raw[i] === ' ') i++;
-  if (i > 3) {
-    return null;
-  }
-  let level = 0;
-  while (raw[i + level] === '#') level++;
-  if (level === 0 || level > 6) {
-    return null;
-  }
-  const next = raw[i + level];
-  if (next !== undefined && next !== ' ' && next !== '\t') {
-    return null; // `##Acceptance` — no space — is prose, not a heading
-  }
+ *  uncontrolled data. Up to 3 leading spaces (4+ is indented code),
+ *  then the legalHeading shape. Every level answers — `###`+
+ *  headings terminate managed sections like `##` ones do. */
+function headingOf(raw: string): Heading | null {
+  const i = leadingSpaces(raw);
+  if (i > 3) return null;
+  const level = charRun(raw, i, '#');
+  if (!legalHeading(raw, i, level)) return null;
   return { level, name: headingName(raw.slice(i + level)) };
 }
 
@@ -143,55 +171,60 @@ interface FenceMark {
   info: string;
 }
 
-/** Fenced-code marker probe — ` ``` ` or `~~~` (3+ of one char), ≤3
- *  leading spaces; `info` is the tag after the marker (` ```ts `).
- *  A backtick marker whose info contains '`' is an inline-code line,
- *  never a fence. Closers need `info === ''` — an info string on a
- *  `~~~` line inside a fence is content. */
-function fenceOf(raw: string): FenceMark | null {
-  let i = 0;
-  while (raw[i] === ' ') i++;
-  if (i > 3) {
-    return null;
-  }
+/** 3+ of one fence char after the indent → the mark, else null.
+ *  ` ``` ` and `~~~` are the only chars. */
+function fenceMark(raw: string, i: number): { ch: string; len: number } | null {
   const ch = raw[i];
-  if (ch !== '`' && ch !== '~') {
-    return null;
-  }
-  let len = 0;
-  while (raw[i + len] === ch) len++;
-  if (len < 3) {
-    return null;
-  }
-  const info = raw.slice(i + len).trim();
-  return ch === '`' && info.includes('`') ? null : { ch, len, info };
+  if (ch !== '`' && ch !== '~') return null;
+  const len = charRun(raw, i, ch);
+  return len >= 3 ? { ch, len } : null;
 }
 
-/** Bullet item text — `-`/`*`/`+`/`•` or `N.`/`N)` numbered (≤9
- *  digits per CommonMark) — or null when the line isn't an item.
- *  Linear string scan, same contract as headingOf/fenceOf. */
+/** Fenced-code marker probe — ` ``` ` or `~~~`, ≤3 leading spaces;
+ *  `info` is the tag after the marker (` ```ts `). A backtick marker
+ *  whose info contains '`' is an inline-code line, never a fence.
+ *  Closers need `info === ''` — an info string on a `~~~` line
+ *  inside a fence is content. */
+function fenceOf(raw: string): FenceMark | null {
+  const i = leadingSpaces(raw);
+  if (i > 3) return null;
+  const mark = fenceMark(raw, i);
+  if (mark === null) return null;
+  const info = raw.slice(i + mark.len).trim();
+  if (mark.ch === '`' && info.includes('`')) return null;
+  return { ...mark, info };
+}
+
+/** `N.`/`N)` followed by a blank → the item text, else null. ≤9
+ *  digits per CommonMark. */
+function numberedText(t: string): string | null {
+  let i = 0;
+  while (isDigit(t[i])) i++;
+  if (i > 9) return null;
+  const dot = t[i] === '.' || t[i] === ')';
+  return dot && isBlank(t[i + 1]) ? t.slice(i + 1).trim() : null;
+}
+
+/** Bullet item text — `-`/`*`/`+`/`•` or `N.`/`N)` numbered — or
+ *  null when the line isn't an item. Linear string scan, same
+ *  contract as headingOf/fenceOf. */
 function bulletText(raw: string): string | null {
   const t = raw.trimStart();
-  const c = t[0];
-  if (c === '-' || c === '*' || c === '+' || c === '•') {
-    return t[1] === ' ' || t[1] === '\t' ? t.slice(1).trim() : null;
+  if (isBulletMark(t[0])) {
+    return isBlank(t[1]) ? t.slice(1).trim() : null;
   }
-  if (c !== undefined && c >= '0' && c <= '9') {
-    let i = 0;
-    while (t[i] !== undefined && t[i] >= '0' && t[i] <= '9') i++;
-    if (i <= 9 && (t[i] === '.' || t[i] === ')') && (t[i + 1] === ' ' || t[i + 1] === '\t')) {
-      return t.slice(i + 1).trim();
-    }
-  }
-  return null;
+  return isDigit(t[0]) ? numberedText(t) : null;
 }
+
+/** Non-null and non-empty — the bullet filter's guard. */
+const isItemText = (s: string | null): s is string => s !== null && s !== '';
 
 /** Bullet items when the live (unfenced) lines have any, else the
  *  non-empty ones — an AC written as a bare sentence is still a
  *  criterion, but intro prose next to real bullets is not. */
 function itemsOf(lines: Line[]): string[] {
   const live = lines.filter(l => !l.fenced).map(l => l.t);
-  const bullets = live.map(bulletText).filter((s): s is string => s !== null && s !== '');
+  const bullets = live.map(bulletText).filter(isItemText);
   return bullets.length > 0 ? bullets : live.map(l => l.trim()).filter(s => s !== '');
 }
 
@@ -213,89 +246,134 @@ interface ParsedBody {
   present: Set<SpecField>;
 }
 
-/** A heading line — starts its managed section on first sighting and
- *  answers that section's line sink; anything else (an unmanaged
- *  name, a duplicate, a non-level-2 heading) is body prose. */
-function openSection(
-  h: { level: number; name: string },
-  raw: string,
-  present: Set<SpecField>,
-  content: Map<SpecField, Line[]>,
-  bodyLines: Line[]
-): Line[] {
+/** One parseBody pass's mutable state — the section sinks plus the
+ *  fence marker currently open (null outside a fence). */
+interface ParseState {
+  bodyLines: Line[];
+  /** the sink the next line lands in — bodyLines or a section's. */
+  cur: Line[];
+  present: Set<SpecField>;
+  content: Map<SpecField, Line[]>;
+  fence: FenceMark | null;
+}
+
+/** Heading → the managed field it opens. Own-key gated: a prototype
+ *  member (`## Constructor`, `## __proto__`, `## ToString`) resolves
+ *  to an Object.prototype member, and an ungated lookup would open a
+ *  "managed" section that silently eats the heading's text into a
+ *  field that never existed. Non-level-2 headings never manage. */
+function managedField(h: Heading): SpecField | undefined {
+  if (h.level !== 2) return undefined;
   const name = h.name.toLowerCase();
-  const field = h.level === 2 && Object.hasOwn(MANAGED, name) ? MANAGED[name] : undefined;
-  if (field === undefined || present.has(field)) {
-    bodyLines.push({ t: raw, fenced: false });
-    return bodyLines;
+  return Object.hasOwn(MANAGED, name) ? MANAGED[name] : undefined;
+}
+
+/** A heading line — starts its managed section on first sighting and
+ *  retargets the line sink at it; anything else (an unmanaged name,
+ *  a duplicate, a non-level-2 heading) stays body prose. */
+function openSection(h: Heading, raw: string, st: ParseState): void {
+  const field = managedField(h);
+  if (field === undefined || st.present.has(field)) {
+    st.bodyLines.push({ t: raw, fenced: false });
+    st.cur = st.bodyLines;
+    return;
   }
-  present.add(field);
+  st.present.add(field);
   const lines: Line[] = [];
-  content.set(field, lines);
-  return lines;
+  st.content.set(field, lines);
+  st.cur = lines;
+}
+
+/** A fence closer: same char, run length ≥ the opener's, bare info
+ *  (` ``` ` closes ` ```ts `, ` ```ts ` never does). */
+function closesOn(f: FenceMark, open: FenceMark): boolean {
+  if (f.ch !== open.ch || f.info !== '') return false;
+  return f.len >= open.len;
+}
+
+/** A line inside an open fence — literal text; only its closer
+ *  reopens the live stream. */
+function fencedLine(raw: string, f: FenceMark | null, open: FenceMark, st: ParseState): void {
+  st.cur.push({ t: raw, fenced: true });
+  if (f !== null && closesOn(f, open)) st.fence = null;
+}
+
+/** The line that opens a fence — it is itself fenced content. */
+function openFence(raw: string, f: FenceMark, st: ParseState): void {
+  st.fence = f;
+  st.cur.push({ t: raw, fenced: true });
+}
+
+/** A live (unfenced) line — either section content or the heading
+ *  that retargets the sink. */
+function liveLine(raw: string, st: ParseState): void {
+  const h = headingOf(raw);
+  if (h === null) {
+    st.cur.push({ t: raw, fenced: false });
+    return;
+  }
+  openSection(h, raw, st);
+}
+
+/** One body line through the fence/heading state machine — fence
+ *  state runs ahead of heading detection: inside ```/~~~ no heading
+ *  opens and no bullet counts. */
+function feedLine(raw: string, st: ParseState): void {
+  const f = fenceOf(raw);
+  if (st.fence !== null) {
+    fencedLine(raw, f, st.fence, st);
+    return;
+  }
+  if (f !== null) {
+    openFence(raw, f, st);
+    return;
+  }
+  liveLine(raw, st);
+}
+
+/** Item sections — bullets when present, non-empty lines else. */
+function putItems(
+  fields: SpecFields,
+  k: 'acceptance' | 'scenarios',
+  lines: Line[] | undefined
+): void {
+  const items = itemsOf(lines ?? []);
+  if (items.length > 0) fields[k] = items;
+}
+
+/** Text sections — verbatim, absent when empty. */
+function putText(fields: SpecFields, k: 'dod' | 'dor', lines: Line[] | undefined): void {
+  const t = textOf(lines);
+  if (t !== undefined) fields[k] = t;
 }
 
 /** Collected lines → the spec fields — body verbatim, item sections
  *  bullet-extracted, text sections verbatim. */
 function fieldsOf(content: Map<SpecField, Line[]>, bodyLines: Line[]): SpecFields {
   const fields: SpecFields = {};
-  const body = bodyLines
-    .map(l => l.t)
-    .join('\n')
-    .trim();
-  if (body !== '') {
-    fields.body = body;
-  }
-  const acceptance = itemsOf(content.get('acceptance') ?? []);
-  if (acceptance.length > 0) {
-    fields.acceptance = acceptance;
-  }
-  const scenarios = itemsOf(content.get('scenarios') ?? []);
-  if (scenarios.length > 0) {
-    fields.scenarios = scenarios;
-  }
-  const dod = textOf(content.get('dod'));
-  if (dod !== undefined) {
-    fields.dod = dod;
-  }
-  const dor = textOf(content.get('dor'));
-  if (dor !== undefined) {
-    fields.dor = dor;
-  }
+  const body = textOf(bodyLines);
+  if (body !== undefined) fields.body = body;
+  putItems(fields, 'acceptance', content.get('acceptance'));
+  putItems(fields, 'scenarios', content.get('scenarios'));
+  putText(fields, 'dod', content.get('dod'));
+  putText(fields, 'dor', content.get('dor'));
   return fields;
 }
 
-/** One pass over the body — managed sections out, the rest is body.
- *  Fence state runs ahead of heading detection: inside ```/~~~ no
- *  heading opens and no bullet counts. */
+/** One pass over the body — managed sections out, the rest is body. */
 function parseBody(description: string): ParsedBody {
   const bodyLines: Line[] = [];
-  const present = new Set<SpecField>();
-  const content = new Map<SpecField, Line[]>();
-  let curLines = bodyLines;
-  let fence: FenceMark | null = null;
+  const st: ParseState = {
+    bodyLines,
+    cur: bodyLines,
+    present: new Set(),
+    content: new Map(),
+    fence: null,
+  };
   for (const raw of description.split(/\r?\n/)) {
-    const f = fenceOf(raw);
-    if (fence !== null) {
-      curLines.push({ t: raw, fenced: true });
-      if (f !== null && f.ch === fence.ch && f.len >= fence.len && f.info === '') {
-        fence = null;
-      }
-      continue;
-    }
-    if (f !== null) {
-      fence = f;
-      curLines.push({ t: raw, fenced: true });
-      continue;
-    }
-    const h = headingOf(raw);
-    if (h === null) {
-      curLines.push({ t: raw, fenced: false });
-    } else {
-      curLines = openSection(h, raw, present, content, bodyLines);
-    }
+    feedLine(raw, st);
   }
-  return { fields: fieldsOf(content, bodyLines), present };
+  return { fields: fieldsOf(st.content, st.bodyLines), present: st.present };
 }
 
 /** The body's spec fields — the pure parser every TaskSpec adapter
@@ -313,11 +391,23 @@ function specFromRow(row: TaskRow): TaskSpec {
   return { id: row.id, title: row.title ?? '', ...parseTaskSpecBody(row.description) };
 }
 
+/** One artifact element's segments must all be verbatim prose — an
+ *  ATX heading truncates its section on the next read (a managed
+ *  name would inject spec fields); a fence marker hides every later
+ *  artifact inside it. Both fail loud. */
+function checkVerbatim(line: string): void {
+  for (const seg of line.split(/\r?\n/)) {
+    if (headingOf(seg) !== null || fenceOf(seg) !== null) {
+      throw new Error(
+        `taskSpec annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
+          'artifact text never becomes a section or a fence'
+      );
+    }
+  }
+}
+
 /** annotate's input contract — the heading is a single line and
- *  every line segment is verbatim text, never structure. An ATX
- *  heading in an artifact truncates its section on the next read
- *  (a managed name would inject spec fields); a fence marker hides
- *  every later artifact inside it. Both fail loud. */
+ *  every line is verbatim text, never structure. */
 function checkAnnotateInput(heading: string, lines: readonly string[]): string {
   const h = heading.trim();
   if (h === '' || /[\r\n]/.test(h)) {
@@ -327,16 +417,31 @@ function checkAnnotateInput(heading: string, lines: readonly string[]): string {
     throw new Error('taskSpec annotate: an artifact with no lines is no artifact');
   }
   for (const line of lines) {
-    for (const seg of line.split(/\r?\n/)) {
-      if (headingOf(seg) !== null || fenceOf(seg) !== null) {
-        throw new Error(
-          `taskSpec annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
-            'artifact text never becomes a section or a fence'
-        );
-      }
-    }
+    checkVerbatim(line);
   }
   return h;
+}
+
+/** The dup guard — same normalization the parser applies, so
+ *  'Acceptance ##' names the managed section; a miss would write
+ *  dead text the spec read never reaches (first wins). */
+function guardDuplicate(row: TaskRow, h: string, id: string): void {
+  const managed = managedField({ level: 2, name: headingName(h) });
+  const dup = managed !== undefined && parseBody(stripMeta(row.description)).present.has(managed);
+  if (dup) {
+    throw new Error(
+      `taskSpec annotate: "## ${h}" already exists on ${id} — ` +
+        'a duplicate never reaches the spec read (first wins)'
+    );
+  }
+}
+
+/** The append — blank-separated onto the (meta-stripped) body; the
+ *  `<!-- bro: -->` trailer goes back last (taskmeta's contract). */
+function appendSection(row: TaskRow, section: string): string {
+  const base = stripMeta(row.description);
+  const body = base === '' ? section : `${base}\n\n${section}`;
+  return withMeta(body, bodyMeta(row.description));
 }
 
 /**
@@ -359,20 +464,8 @@ export function taskSpecFacade(store: TaskStore): TaskSpecFacade {
       if (row === undefined) {
         throw new Error(`taskSpec annotate: item "${id}" is not in the store`);
       }
-      // same normalization the parser applies — 'Acceptance ##' names
-      // the managed section, a miss would write dead text
-      const mname = headingName(h).toLowerCase();
-      const managed = Object.hasOwn(MANAGED, mname) ? MANAGED[mname] : undefined;
-      if (managed !== undefined && parseBody(stripMeta(row.description)).present.has(managed)) {
-        throw new Error(
-          `taskSpec annotate: "## ${h}" already exists on ${id} — ` +
-            'a duplicate never reaches the spec read (first wins)'
-        );
-      }
-      const base = stripMeta(row.description);
-      const section = `## ${h}\n${lines.join('\n')}`;
-      const body = base === '' ? section : `${base}\n\n${section}`;
-      store.update(id, { description: withMeta(body, bodyMeta(row.description)) });
+      guardDuplicate(row, h, id);
+      store.update(id, { description: appendSection(row, `## ${h}\n${lines.join('\n')}`) });
     },
   };
 }
