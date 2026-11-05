@@ -136,7 +136,7 @@ function footerStamps(body: string): TraceStamps {
  *  spaces walks one path, never a polynomial retry storm (CodeQL's
  *  `(\S.*?)\s*$` complaint). */
 const TRAILER_LINE = /^(BRO-Run|BRO-Formula|BRO-Session):\s*(\S[^\n]*\S|\S)\s*$/;
-const TRAILER_SHAPED = /^[\w][\w-]*:\s*\S/;
+const TRAILER_SHAPED = /^\w[\w-]*:\s*\S/;
 const LEGACY_TRAILER = /^(Session|Bead):\s*(\S[^\n]*\S|\S)\s*$/;
 
 const TRAILER_KEY: Record<string, keyof TraceStamps> = {
@@ -315,6 +315,18 @@ interface Hit {
   via: string;
 }
 
+/** One hint's match test — a lookup table, not a branch: each `how`
+ *  names the single entry comparison that proves it. `molStep` is the
+ *  map key, so its probe reads the key, not a field. */
+type EntryProbe = (molStep: string, entry: TraceEntryView, want: string) => boolean;
+
+const HINT_MATCH: Record<string, EntryProbe> = {
+  molStep: (molStep, _entry, want) => molStep === want,
+  worktree: (_m, entry, want) => nonEmpty(entry.worktree) === want,
+  run: (_m, entry, want) => nonEmpty(entry.agentId) === want,
+  session: (_m, entry, want) => entrySessions(entry).includes(want),
+};
+
 /** The keyed lookup — strongest hint first for `rank` order; the FIRST
  *  hit wins because resolution order IS the chain's direction (an
  *  attested run beats a worktree for a commit, the worktree beats
@@ -327,16 +339,12 @@ function findEntry(
     if (want === undefined) {
       continue;
     }
+    const probe = HINT_MATCH[how];
+    if (probe === undefined) {
+      continue;
+    }
     for (const [molStep, entry] of Object.entries(reg)) {
-      const found =
-        how === 'molStep'
-          ? molStep === want
-          : how === 'worktree'
-            ? nonEmpty(entry.worktree) === want
-            : how === 'run'
-              ? nonEmpty(entry.agentId) === want
-              : /* session */ entrySessions(entry).includes(want);
-      if (found) {
+      if (probe(molStep, entry, want)) {
         return { molStep, entry, via: how };
       }
     }
