@@ -2637,6 +2637,9 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
   const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
+  // the explain slices ride the run — the spawn path prints them when the
+  // operator asked for the routing story
+  ctx.explain = explainSlicesOrExit(argv);
   if (argv.includes('--dry-run')) {
     await dryRunPlan(ctx);
     return;
@@ -2867,7 +2870,6 @@ function buildCtx(
     routing,
     intervalS,
     json: argv.includes('--json'),
-    explain: explainSlicesOrExit(argv),
     selection: {
       filters: labelSelection(argv),
       gates: 'forbid' as const,
