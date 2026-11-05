@@ -46,13 +46,19 @@ async function healthOf(
 
 /** The decision model's pick — the judge over the candidate routes.
  *  Fail-open: no judge, no verdict, the table's own order stands. */
-async function modelPick(
-  dir: string,
-  router: FleetRouter,
-  found: RouteCandidate[],
-  task: string,
-  resolved: string
-): Promise<string | undefined> {
+async function modelPick(opts: {
+  /** the working dir — the journal and the config anchor here */
+  dir: string;
+  /** the decision model's provider + mode */
+  router: FleetRouter;
+  /** the candidate routes the table and the health left standing */
+  found: RouteCandidate[];
+  /** the task text the model reads */
+  task: string;
+  /** the statically resolved route — journaled beside the model's opinion */
+  resolved: string;
+}): Promise<string | undefined> {
+  const { dir, router, found, task, resolved } = opts;
   const { chainedJudge, judgeConfig, providerJudge, routePick } = await import('@broject/judge');
   const provider = decisionProvider(dir, router);
   if (router.mode === 'enforce') {
@@ -133,7 +139,13 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   const named =
     router === undefined || found.candidates.length === 0
       ? undefined
-      : await modelPick(dir, router, found.candidates, task, resolved);
+      : await modelPick({
+          dir,
+          router,
+          found: found.candidates,
+          task,
+          resolved,
+        });
   const decision = resolveRoute(table, shape, snapshot, () => named);
   if (argv.includes('--json')) {
     console.log(JSON.stringify(decision, null, 2));

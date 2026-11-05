@@ -697,26 +697,34 @@ function beadClassInfo(
  *  verdict). Throws SpawnError — a bad `class:` label or broken chain
  *  is a config error the caller settles as a failed item, never a
  *  silent template drop. */
+/** The route table's lane for one bead — undefined when the operator
+ *  declares no table (fleet.routing stays the compatibility face for the
+ *  runs that declare none). */
+async function routeTableLaneFor(ctx: Ctx, bead: ReadyBead): Promise<LoopLane | undefined> {
+  const tablePath = ctx.env.brouter?.routes;
+  if (tablePath === undefined) {
+    return undefined;
+  }
+  const label = beadClassInfo(ctx, bead, false);
+  const routed = await routeTableLane({
+    table: tablePath,
+    ...(ctx.sel.class === undefined ? {} : { class: ctx.sel.class }),
+    ...(label.label === undefined ? {} : { label: label.label }),
+    ...(label.priority === undefined ? {} : { priority: label.priority }),
+  });
+  return routed === undefined ? undefined : resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+}
+
 async function resolveBeadLane(
   ctx: Ctx,
   bead: ReadyBead,
   opts: { router?: boolean } = {}
 ): Promise<LoopLane> {
   // the route table is the router's own routing face — when the
-  // operator declares one, it answers; fleet.routing stays the
-  // compatibility face for the runs that declare none
-  const tablePath = ctx.env.brouter?.routes;
-  if (tablePath !== undefined) {
-    const label = beadClassInfo(ctx, bead, false);
-    const routed = await routeTableLane({
-      table: tablePath,
-      ...(ctx.sel.class === undefined ? {} : { class: ctx.sel.class }),
-      ...(label.label === undefined ? {} : { label: label.label }),
-      ...(label.priority === undefined ? {} : { priority: label.priority }),
-    });
-    if (routed !== undefined) {
-      return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
-    }
+  // operator declares one, it answers
+  const tableLane = await routeTableLaneFor(ctx, bead);
+  if (tableLane !== undefined) {
+    return tableLane;
   }
   if (!ctx.routing) {
     return ctx.lane;

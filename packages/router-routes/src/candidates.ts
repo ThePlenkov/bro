@@ -43,6 +43,30 @@ export interface CandidateSet {
 /** The match fields — the task's shape. */
 const FIELDS = ['type', 'complexity', 'priority'] as const;
 
+/** One match field — the task's shape, as the table spells it. */
+type Field = (typeof FIELDS)[number];
+
+/** The value a route pins on a field — undefined when it pins nothing. */
+function pinned(route: Route, field: Field): string | undefined {
+  return route.match[field];
+}
+
+/** The value the task carries on a field. */
+function carried(task: RouteTask, field: Field): string | undefined {
+  return task[field];
+}
+
+/** The field's fit — the route pins it AND the task carries the same
+ *  value. A route that pins nothing fits every task. */
+function fits(route: Route, task: RouteTask, field: Field): string | undefined {
+  const want = pinned(route, field);
+  if (want === undefined) {
+    return undefined;
+  }
+  const got = carried(task, field);
+  return got === want ? want : undefined;
+}
+
 /**
  * The field the route contradicts, or undefined when it fits.
  *
@@ -72,11 +96,10 @@ function fit(route: Route, task: RouteTask): { score: number; reasons: string[] 
   const reasons: string[] = [];
   let score = 0;
   for (const field of FIELDS) {
-    const want = route.match[field];
-    const got = task[field];
-    if (want !== undefined && got !== undefined && want === got) {
+    const pinnedValue = fits(route, task, field);
+    if (pinnedValue !== undefined) {
       score += 1;
-      reasons.push(`${field}=${want}`);
+      reasons.push(`${field}=${pinnedValue}`);
     }
   }
   return { score, reasons };
