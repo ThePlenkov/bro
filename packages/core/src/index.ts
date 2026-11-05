@@ -166,6 +166,18 @@ export type {
 } from './brouter.ts';
 export { healthKey } from './router-health.ts';
 export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
+export {
+  EXPLAIN_SLICES,
+  explainFlag,
+  explainSlicesOrExit,
+  parseExplainSlices,
+  renderExplanation,
+  sliceFacts,
+  sliceNames,
+  unknownFact,
+  withSlice,
+} from './router-explain.ts';
+export type { ExplainFact, ExplainSlice, Explanation } from './router-explain.ts';
 export { estimateTokens } from './tokens.ts';
 export {
   DATA_REF,
