@@ -86,14 +86,27 @@ export function prTraceFooter(stamps: Required<TraceStamps>): string {
 
 const STAMP_KEYS = ['run', 'formula', 'session'] as const;
 
+/** `key=value` → [stampKey, value], or undefined when the token is not
+ *  a non-empty stamp claim — unknown keys are forward-compat noise. */
+function stampPair(tok: string): [keyof TraceStamps, string] | undefined {
+  const eq = tok.indexOf('=');
+  if (eq <= 0) {
+    return undefined;
+  }
+  const key = tok.slice(0, eq) as keyof TraceStamps;
+  if (!STAMP_KEYS.includes(key) || eq + 1 >= tok.length) {
+    return undefined;
+  }
+  return [key, tok.slice(eq + 1)];
+}
+
 /** One footer line's `key=value` tokens — only the three stamp keys
  *  count; an unknown token is forward-compat noise, not an error. */
 function footerTokens(out: TraceStamps, inner: string): void {
   for (const tok of inner.split(/\s+/)) {
-    const eq = tok.indexOf('=');
-    const key = tok.slice(0, Math.max(eq, 0)) as keyof TraceStamps;
-    if (eq > 0 && eq + 1 < tok.length && STAMP_KEYS.includes(key)) {
-      Reflect.set(out, key, tok.slice(eq + 1));
+    const pair = stampPair(tok);
+    if (pair !== undefined) {
+      Reflect.set(out, pair[0], pair[1]);
     }
   }
 }
@@ -126,44 +139,63 @@ const TRAILER_LINE = /^(BRO-Run|BRO-Formula|BRO-Session):\s*(\S[^\n]*\S|\S)\s*$/
 const TRAILER_SHAPED = /^[\w][\w-]*:\s*\S/;
 const LEGACY_TRAILER = /^(Session|Bead):\s*(\S[^\n]*\S|\S)\s*$/;
 
+const TRAILER_KEY: Record<string, keyof TraceStamps> = {
+  'BRO-Run': 'run',
+  'BRO-Formula': 'formula',
+  'BRO-Session': 'session',
+};
+
+/** The trailing `Key: value` lines, bottom-up: blanks before the
+ *  block are skipped, a blank inside or a non-trailer line seals it. */
+function trailerLines(message: string): string[] {
+  const block: string[] = [];
+  for (const raw of message.split('\n').reverse()) {
+    const line = raw.trimEnd();
+    const seals = line === '' ? block.length > 0 : !TRAILER_SHAPED.test(line);
+    if (seals) {
+      break;
+    }
+    if (line !== '') {
+      block.push(line);
+    }
+  }
+  return block.reverse();
+}
+
+interface TrailerOut {
+  stamps: TraceStamps;
+  session?: string;
+  bead?: string;
+}
+
+/** One block line: a `BRO-*` trailer fills a stamp, a legacy
+ *  `Session:`/`Bead:` fills the hint slot it names (first wins —
+ *  resolution hints only, never attested stamps). */
+function trailerInto(out: TrailerOut, line: string): void {
+  const t = TRAILER_LINE.exec(line);
+  if (t !== null) {
+    const key = TRAILER_KEY[t[1]!];
+    if (key !== undefined) {
+      Reflect.set(out.stamps, key, t[2]);
+    }
+    return;
+  }
+  const l = LEGACY_TRAILER.exec(line);
+  if (l !== null) {
+    const slot = l[1] === 'Session' ? 'session' : 'bead';
+    out[slot] ??= l[2];
+  }
+}
+
 /** Trailer-shaped lines ending the message — git's own rule: trailers
  *  live in the last contiguous `Key: value` block, so a `BRO-Run:`
  *  mentioned mid-body is prose, not a stamp. Also returns the legacy
  *  `Session`/`Bead` values found in that block — resolution hints
  *  only, never attested stamps. */
-export function trailerBlock(message: string): {
-  stamps: TraceStamps;
-  session?: string;
-  bead?: string;
-} {
-  const lines = message.split('\n');
-  const block: string[] = [];
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!.trimEnd();
-    if (line === '') {
-      if (block.length > 0) {
-        break;
-      }
-      continue; // trailing blanks aren't part of the block
-    }
-    if (!TRAILER_SHAPED.test(line)) {
-      break;
-    }
-    block.unshift(line);
-  }
-  const out: { stamps: TraceStamps; session?: string; bead?: string } = { stamps: {} };
-  for (const line of block) {
-    const t = TRAILER_LINE.exec(line);
-    if (t !== null) {
-      const key = t[1] === 'BRO-Run' ? 'run' : t[1] === 'BRO-Formula' ? 'formula' : 'session';
-      Reflect.set(out.stamps, key, t[2]);
-      continue;
-    }
-    const l = LEGACY_TRAILER.exec(line);
-    if (l !== null) {
-      if (l[1] === 'Session') out.session ??= l[2];
-      else out.bead ??= l[2];
-    }
+export function trailerBlock(message: string): TrailerOut {
+  const out: TrailerOut = { stamps: {} };
+  for (const line of trailerLines(message)) {
+    trailerInto(out, line);
   }
   return out;
 }
@@ -260,11 +292,10 @@ export interface ArtifactTrace {
  *  safe to detect; everything else reads 'commit' (a branch guessed
  *  here simply finds no trailer block → missing, never a wrong
  *  verdict). */
+const PR_SHAPED = [/^#?\d+$/, /\/pull\/\d+/, /\/merge_requests\/\d+/];
+
 export function detectKind(ref: string): TraceRefKind {
-  if (/^#?\d+$/.test(ref) || /\/pull\/\d+/.test(ref) || /\/merge_requests\/\d+/.test(ref)) {
-    return 'pr';
-  }
-  return 'commit';
+  return PR_SHAPED.some(re => re.test(ref)) ? 'pr' : 'commit';
 }
 
 const nonEmpty = (v: unknown): string | undefined =>
@@ -475,40 +506,42 @@ function attestationOf(
   return { stamps: block.stamps, extra };
 }
 
-/** Resolve an artifact's provenance and verify it against the
- *  registry. Never throws — every absence is a verdict input. */
-export function resolveTrace(ref: string, deps: TraceDeps, kind?: TraceRefKind): ArtifactTrace {
-  const k = kind ?? deps.kind?.(ref) ?? detectKind(ref);
-  const wt = deps.worktrees?.() ?? [];
-  const reg = deps.registry();
-  const { stamps, extra } = attestationOf(k, ref, deps, wt);
+/** The three attestation hops once an entry resolves — no entry means
+ *  no comparison table at all. */
+function hopsOf(stamps: TraceStamps, hit: Hit | undefined): TraceHop[] {
+  if (hit === undefined) {
+    return [];
+  }
+  return [runHop(stamps, hit.entry), formulaHop(stamps, hit.entry), sessionHop(stamps, hit.entry)];
+}
 
-  const hit = findEntry(reg, hintsFor(k, stamps, extra, wt));
-  const hops: TraceHop[] =
-    hit === undefined
-      ? []
-      : [runHop(stamps, hit.entry), formulaHop(stamps, hit.entry), sessionHop(stamps, hit.entry)];
-  const stamped =
-    stamps.run !== undefined || stamps.formula !== undefined || stamps.session !== undefined;
+/** The artifact carried at least one attested stamp claim. */
+function stamped(stamps: TraceStamps): boolean {
+  return stamps.run !== undefined || stamps.formula !== undefined || stamps.session !== undefined;
+}
 
-  const base: ArtifactTrace = { ref, kind: k, verdict: 'missing', stamps, hops };
+/** The verdict assembly — the resolver's honest decision tree:
+ *  no hit is MISSING (unbacked attestation or bare absence), a hit
+ *  without stamps is registry-only MISSING, a hit with stamps is
+ *  FORGED on any mismatch else VERIFIED. */
+function verdictOf(base: ArtifactTrace, stamps: TraceStamps, hit: Hit | undefined): ArtifactTrace {
   if (hit === undefined) {
     return {
       ...base,
-      detail: stamped
+      detail: stamped(stamps)
         ? 'stamps resolve to no registry entry — unbacked attestation'
         : 'no trace stamps and no registry record resolved',
     };
   }
   const record = recordOf(hit.molStep, hit.entry, hit.via);
-  if (!stamped) {
+  if (!stamped(stamps)) {
     return {
       ...base,
       ...record,
       detail: `no trace stamps on the artifact — registry-only resolution via ${hit.via}`,
     };
   }
-  const forged = hops.some(h => h.state === 'mismatch');
+  const forged = base.hops.some(h => h.state === 'mismatch');
   return {
     ...base,
     ...record,
@@ -517,4 +550,21 @@ export function resolveTrace(ref: string, deps: TraceDeps, kind?: TraceRefKind):
       ? 'attestation disagrees with the registry'
       : 'registry agrees on every attested hop',
   };
+}
+
+/** Resolve an artifact's provenance and verify it against the
+ *  registry. Never throws — every absence is a verdict input. */
+export function resolveTrace(ref: string, deps: TraceDeps, kind?: TraceRefKind): ArtifactTrace {
+  const k = kind ?? deps.kind?.(ref) ?? detectKind(ref);
+  const wt = deps.worktrees?.() ?? [];
+  const { stamps, extra } = attestationOf(k, ref, deps, wt);
+  const hit = findEntry(deps.registry(), hintsFor(k, stamps, extra, wt));
+  const base: ArtifactTrace = {
+    ref,
+    kind: k,
+    verdict: 'missing',
+    stamps,
+    hops: hopsOf(stamps, hit),
+  };
+  return verdictOf(base, stamps, hit);
 }
