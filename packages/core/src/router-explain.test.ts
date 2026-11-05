@@ -55,7 +55,11 @@ test('a fact carries its reason and its source', () => {
 });
 
 test('an unknown says unknown — never a zero', () => {
-  const fact = unknownFact('cost', 'the agent reports no cost', 'the agent');
+  const fact = unknownFact({
+    label: 'cost',
+    because: 'the agent reports no cost',
+    source: 'the agent',
+  });
   assert.equal(fact.value, 'unknown');
   assert.match(renderExplanation(withSlice({ slices: {} }, 'cost', [fact]), ['cost']), /cost: unknown/);
 });

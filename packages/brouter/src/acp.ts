@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { agent, ndJsonStream } from '@agentclientprotocol/sdk';
+import { loadConfig } from '@broject/core';
 import { acpOpen, acpSessionRetain, promptText } from '@broject/providers';
 import { acpEntry, resolveProvider } from './ask.ts';
 
@@ -39,8 +40,9 @@ export function localSessionId(): string {
 
 /** Serve the ACP endpoint over stdio until the client disconnects. */
 export async function runAcpFacade(request: AcpFacadeRequest, dir: string): Promise<void> {
-  const provider = resolveProvider(dir, request.provider);
-  const entry = acpEntry(dir, provider);
+  const providers = loadConfig(dir).providers ?? {};
+  const provider = resolveProvider(providers, request.provider);
+  const entry = acpEntry(providers, provider);
   const timeoutMs = request.timeoutMs ?? 120_000;
   const wire = {
     ...(request.model === undefined ? {} : { model: request.model }),

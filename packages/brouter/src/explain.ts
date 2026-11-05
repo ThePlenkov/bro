@@ -19,9 +19,9 @@ function chainId(entry: { provider: string; model?: string }): string {
   return entry.model === undefined ? entry.provider : `${entry.provider}/${entry.model}`;
 }
 
-/** The route's facts — the decision, its candidates, and every reject. */
-export function routeFacts(decision: RouteDecision): ExplainFact[] {
-  const facts: ExplainFact[] = [
+/** The verdict's own facts — the route and the chain it names. */
+function verdictFacts(decision: RouteDecision): ExplainFact[] {
+  return [
     {
       label: 'route',
       value: decision.route?.name ?? '(none)',
@@ -38,34 +38,49 @@ export function routeFacts(decision: RouteDecision): ExplainFact[] {
       source: 'the table',
     },
   ];
-  for (const dropped of decision.dropped) {
-    facts.push({
-      label: `dropped: ${chainId(dropped.entry)}`,
-      value: dropped.reason,
-      because: 'health removed it from the chain',
-      source: 'the ledger',
-    });
-  }
-  for (const candidate of decision.candidates) {
-    facts.push({
-      label: `candidate: ${candidate.route.name}`,
-      value: String(candidate.score),
-      because:
-        candidate.reasons.length === 0
-          ? 'the catch-all — it pins nothing of the task'
-          : `it pins ${candidate.reasons.join(', ')}`,
-      source: 'the table',
-    });
-  }
-  for (const rejected of decision.rejected) {
-    facts.push({
-      label: `rejected: ${rejected.route.name}`,
-      value: rejected.reason,
-      because: 'the route does not fit this task',
-      source: 'the table',
-    });
-  }
-  return facts;
+}
+
+/** The chain's own facts — the entries health removed. */
+function chainFacts(decision: RouteDecision): ExplainFact[] {
+  return decision.dropped.map(dropped => ({
+    label: `dropped: ${chainId(dropped.entry)}`,
+    value: dropped.reason,
+    because: 'health removed it from the chain',
+    source: 'the ledger',
+  }));
+}
+
+/** The candidates' facts — how much of the task each route pins. */
+function candidateFacts(decision: RouteDecision): ExplainFact[] {
+  return decision.candidates.map(candidate => ({
+    label: `candidate: ${candidate.route.name}`,
+    value: String(candidate.score),
+    because:
+      candidate.reasons.length === 0
+        ? 'the catch-all — it pins nothing of the task'
+        : `it pins ${candidate.reasons.join(', ')}`,
+    source: 'the table',
+  }));
+}
+
+/** The rejects' facts — every route that did not make it, and why. */
+function rejectFacts(decision: RouteDecision): ExplainFact[] {
+  return decision.rejected.map(rejected => ({
+    label: `rejected: ${rejected.route.name}`,
+    value: rejected.reason,
+    because: 'the route does not fit this task',
+    source: 'the table',
+  }));
+}
+
+/** The route's facts — the decision, its candidates, and every reject. */
+export function routeFacts(decision: RouteDecision): ExplainFact[] {
+  return [
+    ...verdictFacts(decision),
+    ...chainFacts(decision),
+    ...candidateFacts(decision),
+    ...rejectFacts(decision),
+  ];
 }
 
 /** Who pinned the model — the provenance the `model` slice exists for. */
@@ -222,15 +237,15 @@ export function costFacts(input: {
 function turnFacts(turn: TurnUsage | undefined): ExplainFact[] {
   if (turn === undefined) {
     return [
-      unknownFact('context', 'nothing was served yet', 'the router'),
-      unknownFact('cost', 'nothing was served yet', 'the router'),
+      unknownFact({ label: 'context', because: 'nothing was served yet', source: 'the router' }),
+      unknownFact({ label: 'cost', because: 'nothing was served yet', source: 'the router' }),
     ];
   }
   const facts: ExplainFact[] = [];
   facts.push(tokenFact('context', turn.reported?.inputTokens, turn.estimated?.inputTokens));
   facts.push(tokenFact('output', turn.reported?.outputTokens, turn.estimated?.outputTokens));
   if (turn.costUsd === undefined) {
-    facts.push(unknownFact('cost', 'the agent reports no cost', 'the agent'));
+    facts.push(unknownFact({ label: 'cost', because: 'the agent reports no cost', source: 'the agent' }));
   } else {
     facts.push({
       label: 'cost',
@@ -264,7 +279,11 @@ function tokenFact(
       source: 'estimated (4 chars/token)',
     };
   }
-  return unknownFact(label, 'the agent reported no usage and bro has no text to estimate', 'the agent');
+  return unknownFact({
+    label,
+    because: 'the agent reported no usage and bro has no text to estimate',
+    source: 'the agent',
+  });
 }
 
 /** The ledger's window counters — the scale around this turn. */
@@ -274,14 +293,22 @@ function windowFacts(
 ): ExplainFact[] {
   if (!known) {
     return [
-      unknownFact('requests', 'the ledger could not be read', 'the ledger'),
-      unknownFact('tokens', 'the ledger could not be read', 'the ledger'),
+      unknownFact({ label: 'requests', because: 'the ledger could not be read', source: 'the ledger' }),
+      unknownFact({ label: 'tokens', because: 'the ledger could not be read', source: 'the ledger' }),
     ];
   }
   if (window === undefined) {
     return [
-      unknownFact('requests', 'the ledger holds no counter for this model', 'the ledger'),
-      unknownFact('tokens', 'the ledger holds no counter for this model', 'the ledger'),
+      unknownFact({
+        label: 'requests',
+        because: 'the ledger holds no counter for this model',
+        source: 'the ledger',
+      }),
+      unknownFact({
+        label: 'tokens',
+        because: 'the ledger holds no counter for this model',
+        source: 'the ledger',
+      }),
     ];
   }
   return [
