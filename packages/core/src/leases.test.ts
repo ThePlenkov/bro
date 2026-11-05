@@ -55,6 +55,24 @@ describe('local lease store', () => {
     }
   })
 
+  test('a foreign-host holder survives a dead recorded pid until TTL', () => {
+    let clock = 1_000
+    const store = localLeaseStore('remote-holder', {
+      ...options,
+      now: () => clock,
+      pidAlive: () => false,
+    })
+    // the remote-worker stamp — the spawner's pid is dead but the
+    // hosted worker owns no local pid to probe, so only the TTL frees
+    // the key (a same-host holder would reclaim immediately)
+    const remote = { host: 'remote:copilot', pid: 10, rig: 'rig', agentId: 'agent' }
+    assert.equal(store.acquire('bead/x', remote, 100).ok, true)
+    assert.equal(store.acquire('bead/x', remote, 100).ok, false)
+    assert.notEqual(store.read('bead/x'), undefined)
+    clock += 100
+    assert.equal(store.acquire('bead/x', remote, 100).ok, true)
+  })
+
   test('rejects mismatched tokens and encodes distinct keys', () => {
     const store = localLeaseStore('tokens', options)
     const acquired = store.acquire('a/b', holder, 100)

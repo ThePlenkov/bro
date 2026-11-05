@@ -97,6 +97,7 @@ import {
   type FleetWallTtls,
   type ListResult,
   type Lease,
+  type LeaseHolder,
   type LeaseStore,
   type ProviderEntry,
   type ProviderWall,
@@ -1652,16 +1653,38 @@ function spawnLeaseKey(spec: SpawnSpec): string {
   return pullRequestLeaseKey(spec) ?? `bead/${spec.molStep}`
 }
 
+/** Every work lease is BORN stamped with a foreign host — `live()`
+ *  governs a foreign-host holder by TTL alone, so the lease outlives
+ *  the spawning CLI no matter what the backend's worker turns out to
+ *  be. A backend that later surfaces a locally-probeable pid downgrades
+ *  to `{host: hostname(), pid}` via rebindSpawnLease — a dead worker
+ *  then frees the key immediately instead of at TTL. Stamping local at
+ *  acquire would leave a window (spawn → rebind) where the lease dies
+ *  with `process.pid` beneath a worker this host can never probe — a
+ *  copilot task, a remote daemon's container, a tmux pane whose pid
+ *  never surfaced — freeing the key for the duplicate spawn the lease
+ *  exists to refuse. `:` can't appear in a hostname, so the marker can
+ *  never alias a real host. */
+function remoteLeaseHost(backend: string): string {
+  return `remote:${backend}`
+}
+
 function acquireSpawnLease(
   dir: string,
   spec: SpawnSpec,
   agentId: string,
   existing: AgentRegistryEntry | undefined,
-  env: AgentConnectorEnv
+  env: AgentConnectorEnv,
+  backend: string
 ): SpawnWorkLease {
   const store = localLeaseStore(projectId(dir))
   const key = spawnLeaseKey(spec)
-  const holder = { host: hostname(), pid: process.pid, rig: basename(resolve(dir)), agentId }
+  const holder = {
+    host: remoteLeaseHost(backend),
+    pid: process.pid,
+    rig: basename(resolve(dir)),
+    agentId,
+  }
   if (existing?.leaseKey === key && typeof existing.leaseToken === 'string') {
     const current = store.read(key)
     if (current?.token === existing.leaseToken) {
@@ -1684,12 +1707,29 @@ function acquireSpawnLease(
   return { store, lease: result.lease }
 }
 
-function rebindSpawnLease(dir: string, lease: Lease, pid: number | undefined): void {
-  if (pid === undefined || pid <= 0) {
+/** Downgrade a born-TTL-governed spawn lease to local governance once
+ *  the worker surfaces a pid this host can probe — `{host: hostname(),
+ *  pid}` so a dead worker frees the key without waiting out the TTL.
+ *  An `undefined` field must not clobber the value it names, and a
+ *  local stamp with no probeable pid governs nothing — either way the
+ *  acquired TTL stamp stays. Token-checked under the store lock, so a
+ *  stale rebind can't overwrite a successor's row; a failed rebind
+ *  warns but never blocks the spawn report. */
+function rebindSpawnLease(dir: string, lease: Lease, holderPatch: Partial<LeaseHolder>): void {
+  const patch = Object.fromEntries(
+    Object.entries(holderPatch).filter(([, value]) => value !== undefined)
+  ) as Partial<LeaseHolder>
+  if (patch.pid !== undefined && patch.pid <= 0) {
+    return
+  }
+  if (patch.host === hostname() && patch.pid === undefined) {
+    return // a local stamp with no pid to probe dies with the spawner — keep the TTL stamp
+  }
+  if (Object.keys(patch).length === 0) {
     return
   }
   try {
-    localLeaseStore(projectId(dir)).rebind(lease, { pid })
+    localLeaseStore(projectId(dir)).rebind(lease, patch)
   } catch (err) {
     console.error(
       `warning: work lease rebind failed — ${err instanceof Error ? err.message : String(err)}`
@@ -1789,7 +1829,8 @@ function prepareSpawn(
     spec,
     agentId,
     existing,
-    opts.cap?.env ?? loadAgentEnv(dir)
+    opts.cap?.env ?? loadAgentEnv(dir),
+    backend
   )
   // session-kind admission — count + slot claim under ONE host-wide
   // mutex: the registry lock above is per-repo and cannot serialize a
@@ -2645,7 +2686,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ? (procStat(child.pid)?.start ?? null)
               : null,
           })
-          rebindSpawnLease(dir, lease, child.pid)
+          // the spawned pid IS probeable — downgrade the born-TTL
+          // lease to local governance so a dead worker frees the key
+          // without waiting out the TTL
+          rebindSpawnLease(dir, lease, { host: hostname(), pid: child.pid })
           writeWorkMarker(dir, agentId, spec.molStep, child.pid)
         } catch (err) {
           // sync failure after the reservation — hand the slot back
@@ -3031,7 +3075,11 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           spec.molStep,
           hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
         )
-        rebindSpawnLease(dir, lease, hasPanePid ? panePid : undefined)
+        // a readable pane pid is a local liveness probe — downgrade the
+        // born-TTL lease to pid governance. No pane pid: the lease keeps
+        // its foreign host and the TTL backs it while the pane may still
+        // be live
+        rebindSpawnLease(dir, lease, hasPanePid ? { host: hostname(), pid: panePid } : {})
         writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined)
         return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
         })
@@ -4349,6 +4397,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // serialize every concurrent spawn behind one `docker build`
       const image = dockerImageFor(spec, knobs)
       const mol = stepParent(spec.beadsDir, spec.molStep)
+      // only a LOCAL daemon's State.Pid is probeable from this host
+      const dockerPidIsLocal =
+        process.env.DOCKER_HOST === undefined && process.env.DOCKER_CONTEXT === undefined
       return withAgentRegistryLock(dir, () => {
         const { agentId, promptFile, log, stderrLog, exitFile, lease, reservation } = prepareSpawn(
           dir,
@@ -4439,9 +4490,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               { pid: insp.pid, pidStart: null }
             : {}),
         })
-        const dockerPidIsLocal =
-          process.env.DOCKER_HOST === undefined && process.env.DOCKER_CONTEXT === undefined
-        rebindSpawnLease(dir, lease, dockerPidIsLocal ? insp.pid : undefined)
+        // a usable local State.Pid downgrades the born-TTL lease to
+        // local governance — a remote daemon's pid names its own host,
+        // and an empty patch keeps the foreign stamp
+        rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {})
         writeWorkMarker(dir, agentId, spec.molStep, insp.pid)
         return toDockerInfo(dir, home, spec.molStep, spawned)
       })

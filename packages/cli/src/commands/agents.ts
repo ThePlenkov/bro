@@ -72,8 +72,11 @@ import {
   taskStoreAt,
   type AgentConnector,
   type AgentInfo,
+  type AgentRegistryEntry,
   type AgentState,
   type DiscoveredSession,
+  type Lease,
+  type LeaseStore,
   type SpawnSpec,
 } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
@@ -793,16 +796,16 @@ export async function stopAgent(
     current.state === 'blocked'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
+  // the generation the connector's stop binds is the registry's CURRENT
+  // entry for this agentId (a respawn reuses the id) — capture it
+  // BEFORE the stop so the release below can be token-checked against
+  // ITS lease. Re-reading after stop (or keying off leaseKey alone)
+  // re-opens the double-spawn window: A stops → B legitimately
+  // acquires the key → A's release deletes B's live row → C duplicates.
+  const stoppedEntry = readAgentRegistry(dir)[current.molStep]
   await hit.conn.stop(hit.agent.id)
-  const leaseKey = readAgentRegistry(dir)[current.molStep]?.leaseKey
-  if (typeof leaseKey === 'string') {
-    try {
-      localLeaseStore(projectId(dir)).forceRelease(leaseKey)
-    } catch (err) {
-      console.error(
-        `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+  if (stoppedEntry?.agentId === hit.agent.id && stoppedEntry.backend === hit.conn.name) {
+    releaseEntryLease(dir, stoppedEntry)
   }
   return {
     found: true,
@@ -1248,18 +1251,69 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
 }
 
-function forceReleaseStepLease(dir: string, target: string): void {
-  const registry = readAgentRegistry(dir)
-  const entry =
-    registry[target] ?? Object.values(registry).find((candidate) => candidate.agentId === target)
-  const key = typeof entry?.leaseKey === 'string' ? entry.leaseKey : `bead/${target}`
+/** A stored lease record only releases when the entry's own key+token
+ *  still agree with it — a diverged pair is tampered state, not a
+ *  release handle. */
+function recordedLease(entry: AgentRegistryEntry | undefined): Lease | undefined {
+  const record = entry?.leaseRecord
+  if (record === undefined) {
+    return undefined
+  }
+  if (record.key !== entry?.leaseKey || record.token !== entry?.leaseToken) {
+    return undefined
+  }
+  return record
+}
+
+/** The live row an entry's key+token still owns — read returns live
+ *  rows only, so a stale token can never name a successor's lease. */
+function tokenKeyedLease(
+  store: LeaseStore,
+  entry: AgentRegistryEntry | undefined
+): Lease | undefined {
+  if (typeof entry?.leaseKey !== 'string' || typeof entry.leaseToken !== 'string') {
+    return undefined
+  }
+  const live = store.read(entry.leaseKey)
+  return live?.token === entry.leaseToken ? live : undefined
+}
+
+/** Release a step's work lease. When the registry entry carries lease
+ *  identity the release is TOKEN-checked (releaseClassifiedLease's
+ *  shape in agent-connectors.ts): a blind forceRelease(key) re-opens
+ *  the double-spawn window — a stale actor's release lands after a
+ *  successor legitimately acquired the key and deletes its live row,
+ *  so a third spawn duplicates the worker. Raw forceRelease stays for
+ *  rows no token names: the operator path on a lease-less entry, or a
+ *  fallback key with no entry at all. */
+function releaseEntryLease(
+  dir: string,
+  entry: AgentRegistryEntry | undefined,
+  fallbackKey?: string
+): void {
   try {
-    localLeaseStore(projectId(dir)).forceRelease(key)
+    const store = localLeaseStore(projectId(dir))
+    const lease = recordedLease(entry) ?? tokenKeyedLease(store, entry)
+    if (lease !== undefined) {
+      store.release(lease)
+      return
+    }
+    const key = typeof entry?.leaseKey === 'string' ? entry.leaseKey : fallbackKey
+    if (key !== undefined) {
+      store.forceRelease(key)
+    }
   } catch (err) {
     console.error(
       `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
     )
   }
+}
+
+function forceReleaseStepLease(dir: string, target: string): void {
+  const registry = readAgentRegistry(dir)
+  const entry =
+    registry[target] ?? Object.values(registry).find((candidate) => candidate.agentId === target)
+  releaseEntryLease(dir, entry, `bead/${target}`)
 }
 
 /** States prune reaps — 'blocked' stays: a wall-parked worker is

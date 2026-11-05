@@ -177,9 +177,19 @@ with the usual `bro.config` field error.
    another live holder owns the key, spawn throws a `SpawnError` of kind
    `cap` naming the key, holder (`<rig>@<host>`), pid, and expiry. A
    respawn reuses or rebinds its lease when the existing registry entry's
-   token matches the live lease. Once the worker starts, the holder pid
-   is rebound to the worker pid. Spawn failure and exit classification
-   release the lease; `agents down <step>` force-releases its key.
+   token matches the live lease. The lease is born stamped with a foreign
+   host — `remote:<backend>` — so it is TTL-governed from acquire and can
+   never die with the spawner's own pid beneath a worker this host cannot
+   probe (copilot's hosted task, a remote docker daemon, a gc session, a
+   tmux pane whose pid never surfaced). Once the worker starts and
+   surfaces a locally-probeable pid (native child, local docker
+   `State.Pid`, tmux pane pid), the holder downgrades to
+   `{host: <hostname>, pid}` so a dead worker frees the key without
+   waiting out the TTL. Spawn failure and exit classification release the
+   lease; `agents down <step>` releases it token-checked against the
+   registry entry's recorded token (a stale release must not drop a
+   successor's live lease), falling back to force-release only when no
+   entry names a token.
 2. **Pick skip.** `bro loop`'s existing ready-bead pick skips a bead
    whose `bead/<id>` lease is held by another live holder and logs the
    holder. `bro flow next` and `agents run --for` do not share that pick
