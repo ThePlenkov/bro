@@ -15,7 +15,15 @@
  * One kit keeps every stage suite asserting against the same spy
  * shape — same role as core's testkit for the wider repo.
  */
-import type { DecideResult, JudgeAnswer, JudgeFacade, JudgeQuestion, TaskRow } from '@broject/core';
+import type {
+  DecideResult,
+  JudgeAnswer,
+  JudgeFacade,
+  JudgeQuestion,
+  TaskRow,
+  TaskSpecFacade,
+} from '@broject/core';
+import { parseTaskSpecBody } from '@broject/core';
 import type { ClassifyBacklog } from './stages/classify.ts';
 
 /** A bare task row — id + title + open, extras spread over it. */
@@ -127,6 +135,62 @@ export const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
       spy.events.push(`-${id}:${l}`);
       const r = find(id);
       if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
+    },
+  };
+  return spy;
+};
+
+/** What specStore records per annotate — the id, the heading, and the
+ *  exact lines appended under it. */
+export interface SpecAnnotateCall {
+  id: string;
+  heading: string;
+  lines: string[];
+}
+
+export interface SpecStoreSpy extends TaskSpecFacade {
+  /** every annotate call, in order */
+  annotated: SpecAnnotateCall[];
+  /** raw body text per item — tests seed spec sections through
+   *  `description` on the rows and read appended artifacts back here */
+  bodies: Map<string, string>;
+}
+
+/** An in-memory TaskSpecFacade — `spec()` projects the stored body
+ *  through the REAL parser (`parseTaskSpecBody`, the same read prod's
+ *  adapter makes: a `## Acceptance` section becomes `acceptance[]`,
+ *  `## Questions` stays body prose), and `annotate()` appends the
+ *  `## heading` section the way prod's read-modify-write does while
+ *  recording the call. Enforces the contract's loud failures an
+ *  engine must hit — missing item, empty/multi-line heading, empty
+ *  lines — but not the managed-section dup guard (an intake artifact
+ *  never targets a managed name). */
+export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
+  const bodies = new Map(rows.map(r => [r.id, r.description ?? '']));
+  const titles = new Map(rows.map(r => [r.id, r.title ?? `task ${r.id}`]));
+  const spy: SpecStoreSpy = {
+    annotated: [],
+    bodies,
+    spec: id => {
+      const d = bodies.get(id);
+      return d === undefined
+        ? undefined
+        : { id, title: titles.get(id) ?? '', ...parseTaskSpecBody(d) };
+    },
+    annotate: (id, heading, lines) => {
+      if (heading.trim() === '' || /[\r\n]/.test(heading)) {
+        throw new Error('specStore annotate: heading must be a single non-empty line');
+      }
+      if (lines.length === 0) {
+        throw new Error('specStore annotate: an artifact with no lines is no artifact');
+      }
+      const base = bodies.get(id);
+      if (base === undefined) {
+        throw new Error(`specStore annotate: item "${id}" is not in the store`);
+      }
+      spy.annotated.push({ id, heading, lines: [...lines] });
+      const section = `## ${heading}\n${lines.join('\n')}`;
+      bodies.set(id, base === '' ? section : `${base}\n\n${section}`);
     },
   };
   return spy;
