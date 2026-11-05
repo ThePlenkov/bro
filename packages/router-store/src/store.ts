@@ -9,7 +9,7 @@
  * The decision about whether a model may serve belongs to the serving
  * path (it knows the caps); this layer only records what happened.
  */
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, eq, gt, gte, lte, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-sqlite';
 import type { NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
 import { mkdirSync } from 'node:fs';
@@ -149,10 +149,12 @@ export function clearLimit(db: RouterDb, provider: string, model: string): Promi
   });
 }
 
-/** The walls that still hold — a limit whose reset has not come. */
+/** The walls that still hold — a limit whose reset has not come. The reset
+ *  IS the end of the wall: at `resetAt` the limit is over, not one tick
+ *  more. */
 export async function activeLimits(db: RouterDb, now: number): Promise<LimitRow[]> {
   try {
-    const rows = await db.select().from(limits).where(gte(limits.resetAt, now));
+    const rows = await db.select().from(limits).where(gt(limits.resetAt, now));
     return rows.map(r => ({
       provider: r.provider,
       model: r.model,

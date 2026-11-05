@@ -101,6 +101,21 @@ test('a wall whose reset has passed is not a wall anymore', async () => {
   s.close();
 });
 
+test('a wall whose reset is NOW is over — the reset ends the wall', async () => {
+  const s = await store('limits-boundary');
+  await recordLimit(s.db, {
+    provider: 'p',
+    model: 'm',
+    resetAt: 100,
+    reason: 'quota',
+    source: 'src',
+    seenAt: 50,
+  });
+  assert.deepEqual(await activeLimits(s.db, 100), [], 'at the reset the wall is over');
+  assert.equal((await activeLimits(s.db, 99)).length, 1, 'a tick before it, the wall holds');
+  s.close();
+});
+
 test('a session is open until it is closed', async () => {
   const s = await store('sessions');
   await openSession(s.db, {
