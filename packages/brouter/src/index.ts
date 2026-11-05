@@ -34,6 +34,19 @@ export { catalogPlugins } from './catalog-plugins.ts';
 export { clientPlugins } from './client-plugins.ts';
 export { routePlugins } from './route-plugins.ts';
 export { decisionProvider, requireTypedGrade, type DecisionProvider } from './decision-model.ts';
+export {
+  chainModelFacts,
+  costFacts,
+  healthFacts,
+  modelFacts,
+  routeFacts,
+  type ModelPin,
+  type ModelPick,
+  type TurnUsage,
+  type WindowCounters,
+} from './explain.ts';
+export { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
+export { decideRoute, type TaskDecision } from './route-decide.ts';
 export { runHealthCommand } from './health-cmd.ts';
 export { runRouteCommand } from './route-cmd.ts';
 export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';

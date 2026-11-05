@@ -12,11 +12,14 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js'
 const scratch = mkdtempSync(join(tmpdir(), 'brouter-route-surface-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
-/** Run the CLI — a real process, so the exit codes are the real ones. */
+/** Run the CLI — a real process, so the exit codes are the real ones. The
+ *  router's own state is isolated: the ledger is the operator's, not the
+ *  test's. */
 function run(args: string[], cwd?: string): { code: number; stdout: string; stderr: string } {
   const proc = spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
     ...(cwd === undefined ? {} : { cwd }),
+    env: { ...process.env, XDG_STATE_HOME: join(scratch, 'state') },
   });
   return { code: proc.status ?? -1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 }
@@ -150,4 +153,61 @@ test('a declaration that agrees leaves the table valid', () => {
   assert.equal(out.code, 0);
   assert.match(out.stdout, /the table is valid/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('the explain surface answers the questions — route, model, health, cost', () => {
+  if (!existsSync(CLI)) return;
+  const out = run([
+    'route',
+    'fix',
+    'a',
+    'typo',
+    '--type',
+    'edit',
+    '--routes',
+    tableFile(TABLE),
+    '--explain',
+  ]);
+  assert.equal(out.code, 0);
+  for (const slice of ['route', 'model', 'health', 'cost']) {
+    assert.match(out.stdout, new RegExp(`^${slice}$`, 'm'));
+  }
+  assert.match(out.stdout, /route: edit — the table's own order/);
+  assert.match(out.stdout, /model: swe-2-max — the route "edit" pins it/);
+});
+
+test('the explain surface takes a subset of the slices', () => {
+  if (!existsSync(CLI)) return;
+  const out = run(['route', 'fix', 'a', 'typo', '--routes', tableFile(TABLE), '--explain=model']);
+  assert.equal(out.code, 0);
+  assert.match(out.stdout, /^model$/m);
+  assert.doesNotMatch(out.stdout, /^health$/m);
+});
+
+test('an unknown slice is an error naming the known ones', () => {
+  if (!existsSync(CLI)) return;
+  const out = run(['route', 'fix', 'a', 'typo', '--routes', tableFile(TABLE), '--explain=nope']);
+  assert.equal(out.code, 2);
+  assert.match(out.stderr, /unknown explain slice "nope"/);
+  assert.match(out.stderr, /route, model, health, cost/);
+});
+
+test('the explain surface speaks JSON when asked', () => {
+  if (!existsSync(CLI)) return;
+  const out = run([
+    'route',
+    'fix',
+    'a',
+    'typo',
+    '--type',
+    'edit',
+    '--routes',
+    tableFile(TABLE),
+    '--explain',
+    '--json',
+  ]);
+  assert.equal(out.code, 0);
+  const explanation = JSON.parse(out.stdout);
+  assert.equal(explanation.slices.model[0].value, 'devin-acp');
+  assert.ok(explanation.slices.route.length > 0);
 });
