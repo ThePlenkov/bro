@@ -885,6 +885,33 @@ this run's own work product):
   single `run.fixVerdict`; generalize to a verdict set so
   failed/rejected consume the fix budget.
 
+### Run 8.5: bro-qjji2.5 — accept engine + customer verdict surface (worker: gatekeeper)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted`.
+- work → `done` — `stages/accept.ts` + `customer.ts` (durable
+  per-run JSONL channel `<run>.customer.jsonl` beside the journal)
+  - `bro pipeline accept|answer` CLI; runner widened:
+    `EngineOutcome = result | 'pending' | alert`, `run.customer`
+    identity, `fixVerdicts` set (['fix','rejected']) — .8's gap is
+    PARTIALLY closed here: rejected already re-enters work scoped.
+    `f7143197`.
+- verify → `verified` — 24/24 accept + 10/10 CLI tests on its
+  tree; merged head green at 187/187 pipeline + 42/42 CLI after
+  dist rebuild.
+- review/accept → `accepted` — merged after one import-conflict
+  resolution in testkit.ts.
+- Design notes worth keeping: verdict store keyed PER RUN (a
+  verdict cannot settle the wrong run); `accepted_by` compared
+  against `run.customer` — wrong signer parks + alert, merge
+  unreachable; `pending` parks WITHOUT a verdict row — the intent
+  tail stays the resume anchor; emit is idempotent on resume.
+- Gaps filed: `run.customer` production source unresolved (no
+  run-starter exists yet — whoever binds the runner must record
+  the same identity the CLI signer chain produces); `answer`'s
+  consumer lands with the intake engine binding; `emit` prod
+  adapter (notify/mailbox/A2A) still unbound.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the
