@@ -174,7 +174,9 @@ describe('capture — the land context', () => {
 
   test('the seam sees item + runId + the landed record — stage, ts, payload', async () => {
     const cap = captureSpy({ lessons: 1 });
-    const j = landJournal();
+    const PR = 'https://github.com/ThePlenkov/bro/pull/916';
+    const j = memoryJournal('r1');
+    j.append(landed({ payload: { pr: PR } }));
     const res = await invoke(j, deps(cap.fn, retroSpy().fn));
     assert.equal(cap.calls.length, 1);
     const ctx = cap.calls[0].ctx;
@@ -182,6 +184,8 @@ describe('capture — the land context', () => {
     assert.equal(ctx.runId, 'r1'); // the live call's run, same as the journaled rows
     assert.equal(ctx.landed.stage, 'merge');
     assert.equal(ctx.landed.ts, TS);
+    // the merge row's evidence rides along — a `pr:` ref is lesson material
+    assert.deepEqual(ctx.landed.payload, { pr: PR });
     assert.equal(res.verdict, 'captured');
   });
 
@@ -203,14 +207,26 @@ describe('capture — the land context', () => {
     assert.equal((res.payload as CapturePayload).mol, 'mol-2');
   });
 
-  test('a non-string mol is ignored — malformed payload data is never harvested', async () => {
+  test('a malformed freshest mol throws — a stale molecule is never harvested', async () => {
     const cap = captureSpy({ lessons: 0 });
+    const ret = retroSpy();
     const j = landJournal(
       rec(2, 'work', 'done', { payload: { mol: 'mol-1' } }),
-      rec(3, 'work', 'done', { payload: { mol: 42 } })
+      rec(3, 'work', 'done', { payload: { mol: 42 } }) // a re-pour journaled garbage
     );
-    await invoke(j, deps(cap.fn, retroSpy().fn));
-    assert.equal(cap.calls[0].ctx.mol, 'mol-1'); // the malformed later one is skipped
+    await assert.rejects(() => invoke(j, deps(cap.fn, ret.fn)), /malformed mol/);
+    // fail closed: falling back to mol-1 would scope the harvest to a
+    // molecule the run already superseded
+    assert.equal(cap.calls.length, 0);
+    assert.equal(ret.calls.length, 0);
+  });
+
+  test('an empty-string mol throws too — absent is unscoped, malformed is broken', async () => {
+    const j = landJournal(rec(2, 'work', 'done', { payload: { mol: '' } }));
+    await assert.rejects(
+      () => invoke(j, deps(captureSpy({ lessons: 0 }).fn, retroSpy().fn)),
+      /malformed mol/
+    );
   });
 
   test('no mol in the run — the sweep runs unscoped', async () => {
@@ -348,22 +364,14 @@ describe('capture — fail closed', () => {
   });
 
   test('a malformed retro receipt throws — the seam speaks {batch?} or void', async () => {
-    await assert.rejects(
-      () =>
-        invoke(
-          landJournal(),
-          deps(captureSpy({ lessons: 1 }).fn, retroSpy({ batch: 7 } as unknown as RetroReceipt).fn)
-        ),
-      /malformed receipt/
-    );
-    await assert.rejects(
-      () =>
-        invoke(
-          landJournal(),
-          deps(captureSpy({ lessons: 1 }).fn, retroSpy('b9' as unknown as RetroReceipt).fn)
-        ),
-      /malformed receipt/
-    );
+    // a bare string, a non-record, an empty batch id — none may be
+    // journaled as the run's retro mark
+    for (const receipt of [{ batch: 7 }, 'b9', { batch: '' }] as unknown as RetroReceipt[]) {
+      await assert.rejects(
+        () => invoke(landJournal(), deps(captureSpy({ lessons: 1 }).fn, retroSpy(receipt).fn)),
+        /malformed receipt/
+      );
+    }
   });
 
   test('a throwing learn seam propagates — the retro hook never fires', async () => {

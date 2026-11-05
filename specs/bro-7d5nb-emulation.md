@@ -542,8 +542,9 @@ orch: foreground, timing: now}`.
   - route → `spawn` — `{class: interactive, kind: ts-package,
     orch: foreground, timing: now}`.
   - work → `done` — `stages/capture.ts` + `stages/capture.test.ts`
-    - index wiring; 27 stage tests green (package suite `pass 197`
-      across all seven test files).
+    - index wiring; 28 stage tests green (package suite `pass 198`
+      = 170 pre-existing + 28 new, across all seven test files —
+      Run 5's `pass 167` predates review-wave test additions).
   - review → in flight at log time — act gate + reviewers stand
     in (same standing-in as Runs 1–5); the stage under test emits
     `captured` under scripted seams.
@@ -571,10 +572,13 @@ orch: foreground, timing: now}`.
     lessons that never survived a merge gate, so the pending intent
     is the crash marker and the bounded re-fire parks the item
     (`attempts-exhausted`) instead of harvesting nothing into
-    lessons. `mol` is the LAST settled payload carrying a string
-    `mol` field (convoy's `{mol: <id>}` convention — a scoped-fix
-    work re-entry can re-pour; freshest wins; a non-string `mol` is
-    malformed payload data, skipped for the next record).
+    lessons. `mol` is the LAST settled payload carrying a `mol`
+    field (convoy's `{mol: <id>}` convention — a scoped-fix work
+    re-entry can re-pour; freshest wins), and it must be a usable
+    id — a malformed freshest `mol` throws, because reaching past
+    it for an older record's `mol` would scope the harvest to a
+    molecule the run already superseded; gap 3's fail-closed rule
+    covers journal data, not just the land record.
   - `mode` is validated: absent reads `always-capture`, an unknown
     token throws — a stage that can't tell its capture scope can't
     know what it runs (same fail-loud posture as an empty routing
@@ -629,7 +633,7 @@ orch: foreground, timing: now}`.
   mini-formulas: merge→capture needing NO `admit` seam, and an
   `ok`-merge formula proving the fail-closed park); the spec DAG
   case drives cheap-complexity → gate skip → merge → capture with
-  the work payload's `mol` reaching the sweep (`pass 197` pipeline
+  the work payload's `mol` reaching the sweep (`pass 198` pipeline
   tests). A real `captureLessons` binding stays deferred to the
   runner-backed graduation.
 

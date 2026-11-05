@@ -26,10 +26,12 @@
  * fails loud, never captures un-landed work into lessons. `mol` is
  * the last settled payload's string `mol` field — the work stage
  * journals it when the run poured a molecule (convoy's
- * `{mol: <id>}` convention) — and scopes the harvest's mol source.
+ * `{mol: <id>}` convention) — it must be a usable id, so a malformed
+ * freshest `mol` throws rather than harvest a superseded molecule.
  *
  * Injected seams keep the stage provider- and store-agnostic:
- * `capture` is the learn-capture path (prod binds `captureLessons`),
+ * `capture` is the learn-capture path (prod binds `captureLessons`
+ * through an adapter mapping its `CaptureReport` into `CaptureOutcome`),
  * `retro` is the batched-retro intent queue (prod wires whatever
  * batch mechanism carries the retro — a marker is the whole contract,
  * the run never waits on it). Both take the StageCall plus the
@@ -148,28 +150,26 @@ function landRecord(records: JournalRow[]): JournalRow | undefined {
   return undefined;
 }
 
-/** A payload's `mol` field — only a non-empty string counts; a
- *  non-string `mol` is malformed payload data, never harvested. */
-const molField = (p: unknown): string | undefined => {
-  if (!isRecord(p)) {
-    return undefined;
-  }
-  const m = p.mol;
-  if (typeof m !== 'string') {
-    return undefined;
-  }
-  return m === '' ? undefined : m;
-};
-
-/** The run's molecule — the LAST settled payload carrying a usable
- *  `mol`. Re-entries (a scoped-fix work round can re-pour) may update
- *  it; the freshest wins. */
+/** The run's molecule — the LAST settled payload carrying a `mol`
+ *  field. Re-entries (a scoped-fix work round can re-pour) may update
+ *  it; the freshest wins, and it must be a usable id. A malformed
+ *  freshest `mol` throws: silently reaching past it would scope the
+ *  harvest to a stale molecule the run already superseded — broken
+ *  journal data fails closed like every other broken-context branch.
+ *  No `mol` field anywhere means the sweep runs unscoped. */
 function molOf(records: JournalRow[]): string | undefined {
   for (let i = records.length - 1; i >= 0; i--) {
-    const m = molField(records[i].payload);
-    if (m !== undefined) {
-      return m;
+    const p = records[i].payload;
+    if (!isRecord(p) || !('mol' in p)) {
+      continue;
     }
+    const m = p.mol;
+    if (typeof m !== 'string' || m === '') {
+      throw new Error(
+        `capture: run journaled a malformed mol — expected a non-empty string, got ${JSON.stringify(m)}`
+      );
+    }
+    return m;
   }
   return undefined;
 }
@@ -300,7 +300,7 @@ function checkReceipt(r: RetroReceipt | undefined): RetroReceipt {
   if (batch === undefined) {
     return {};
   }
-  if (typeof batch !== 'string') {
+  if (typeof batch !== 'string' || batch === '') {
     throw new Error('capture: the retro seam returned a malformed receipt — expected {batch?}');
   }
   return { batch };

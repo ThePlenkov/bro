@@ -58,6 +58,7 @@ export {
 } from './runner.ts';
 export type {
   CaptureDeps,
+  CaptureMode,
   CaptureOutcome,
   CapturePayload,
   LandContext,
