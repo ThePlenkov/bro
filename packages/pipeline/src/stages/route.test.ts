@@ -13,7 +13,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { backlog, choice, judge, noul, row, type JudgeSpy } from '../testkit.ts';
+import { backlog, choice, judge, noul, row, settled, type JudgeSpy } from '../testkit.ts';
 import { stageDispatch } from './classify.ts';
 import {
   QUEUE_REASONS,
@@ -70,7 +70,7 @@ const invoke = async (
   b: RouteBacklog,
   extra: Partial<RouteDeps> = {},
   journal?: PipelineJournal
-) => routeStage(deps(j, b, extra)).invoke(call(ITEM, journal));
+) => settled(await routeStage(deps(j, b, extra)).invoke(call(ITEM, journal)));
 
 const jrow = (r: Partial<JournalRow> & Pick<JournalRow, 'seq' | 'stage'>): JournalRow => ({
   run_id: 'r1',
@@ -483,6 +483,7 @@ describe('route inside runPipeline — the full DAG', () => {
           })
         )
       ),
+      intake: () => ({ verdict: 'accepted' }),
       fleet: () => {
         workCalls += 1;
         // first spawn dies on the wall; the re-routed one lands
@@ -492,6 +493,8 @@ describe('route inside runPipeline — the full DAG', () => {
         }
         return { verdict: 'done' };
       },
+      e2e: () => ({ verdict: 'verified' }),
+      accept: () => ({ verdict: 'accepted' }),
       'act-gate': () => ({ verdict: 'landed' }),
       learn: () => ({ verdict: 'captured' }),
     });

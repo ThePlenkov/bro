@@ -82,6 +82,7 @@ import {
   type NextPlan,
 } from './commands/next-plan.ts';
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
+import { runPipelineCommand } from './commands/pipeline.ts';
 import { runPluginsCommand } from './commands/plugins.ts';
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
@@ -294,6 +295,42 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    name: 'pipeline',
+    group: 'pipeline',
+    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    run: runPipelineCommand,
+    contract: {
+      subs: {
+        accept: {
+          flags: {
+            '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
+            '--by <id>': 'signer identity — default: $BRO_AGENT_ID, else the actor chain',
+            '--run <id>': 'the run to write to — default: the sole run parked at accept',
+          },
+          exits: {
+            0: 'verdict recorded on the run channel',
+            1: 'no run awaiting, an ambiguous target, or an unresolvable signer',
+            2: 'usage',
+          },
+        },
+        answer: {
+          flags: {
+            '-m <text>': 'answer text (short spelling)',
+            '--message <text>': 'answer text',
+            '--answers-file <path>': 'answers from a file (JSON parsed when it parses)',
+            '--by <id>': 'who answered — optional provenance',
+            '--run <id>': 'the run to write to — default: the sole run parked at intake',
+          },
+          exits: {
+            0: 'answers recorded on the run channel',
+            1: 'no run awaiting answers or an unreadable file',
+            2: 'usage',
+          },
+        },
+      },
+    },
   }),
   definePlugin({
     name: 'fleet',
@@ -914,6 +951,7 @@ export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
   ['plan', 'versioned plans'],
   ['mesh', 'inter-rig federation'],
   ['spec', 'spec-driven development'],
+  ['pipeline', 'pipeline customer surface — accept verdicts, intake answers'],
 ];
 
 /** name → members, derived over the live registry each call so

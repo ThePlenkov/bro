@@ -6,7 +6,7 @@ import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal } from '../journal.ts';
 import { DEFAULT_ADMIT_INTENTS, runPipeline, type StageCall } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { backlog, choice, judge, noul, row, score, type JudgeSpy } from '../testkit.ts';
+import { backlog, choice, judge, noul, row, score, settled, type JudgeSpy } from '../testkit.ts';
 import {
   classifyStage,
   CLUMP_LABEL_PREFIX,
@@ -33,7 +33,7 @@ const call = (item = ITEM): StageCall =>
   }) as StageCall;
 
 const invoke = async (j: JudgeSpy, b: ClassifyBacklog, deps: { labels?: boolean } = {}) =>
-  classifyStage({ judge: j.facade, backlog: b, ...deps }).invoke(call());
+  settled(await classifyStage({ judge: j.facade, backlog: b, ...deps }).invoke(call()));
 
 describe('classify — dedup', () => {
   test('a confident dup_of peer → duplicate with dupOf + dup: label', async () => {
@@ -334,7 +334,7 @@ describe('stageDispatch — one judge slot, many stages', () => {
       { classify: classifyStage({ judge: j.facade, backlog: b }) },
       DEFAULT_ADMIT_INTENTS
     );
-    const res = await h.invoke(call());
+    const res = settled(await h.invoke(call()));
     assert.equal(res.verdict, 'solo');
     const routeCall = { ...call(), stage: FORMULA.stages[1] };
     await assert.rejects(async () => h.invoke(routeCall), /no engine bound for stage "route"/);
@@ -385,7 +385,10 @@ describe('classify inside runPipeline — the payload feeds the gate', () => {
           },
           DEFAULT_ADMIT_INTENTS
         ),
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done' }),
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: () => ({ verdict: 'captured' }),
       },

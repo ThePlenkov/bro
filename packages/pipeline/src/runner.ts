@@ -19,10 +19,13 @@
  * go-stamp protocol the agents registry uses: an unadmitted survivor
  * can never double a respawn.
  */
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { type MaybePromise, mintRunId } from '@broject/core';
 import {
   entryStage,
   type GateOn,
+  isTerminalAction,
   type PipelineFormula,
   type PipelineStage,
   SKIP_VERDICT,
@@ -30,11 +33,13 @@ import {
   transitionFor,
 } from './formula.ts';
 import {
+  fileJournal,
   type JournalRow,
   journalRecords,
   openPipelineJournal,
   type PipelineJournal,
   pendingRecord,
+  pipelineDir,
 } from './journal.ts';
 
 /** The side-effect word a stage's intent carries — derived from its
@@ -45,6 +50,9 @@ export const STAGE_INTENTS: Record<StageEngine, string> = {
   fleet: 'spawn',
   'act-gate': 'gate',
   learn: 'capture',
+  intake: 'spec',
+  e2e: 'verify',
+  accept: 'emit',
 };
 
 /** Intents `opts.admit` is consulted for by default — spawn-like side
@@ -67,6 +75,14 @@ export const DEFAULT_FIX_ROUNDS = 3;
  *  work` re-enters work with `notes` as its scope. */
 export const DEFAULT_FIX_VERDICT = 'fix';
 
+/** The verdict names a scoped-fix re-entry binds to by default —
+ *  `review.fix`, the accept gate's `rejected`, AND verify's `failed`
+ *  all re-enter `work` with the emitter's `notes` as the fix scope
+ *  (spec §stage semantics: review's internal scope, the customer's
+ *  rejection notes, and the failed-AC scope share one fail-closed
+ *  contract). */
+export const DEFAULT_FIX_VERDICTS = [DEFAULT_FIX_VERDICT, 'rejected', 'failed'];
+
 /** Fail-closed park tags stamped on alert rows. */
 export const PARK_ALERTS = {
   gateIndeterminate: 'gate-indeterminate',
@@ -80,8 +96,35 @@ export const PARK_ALERTS = {
   admissionUnavailable: 'admission-unavailable',
   itemMismatch: 'item-mismatch',
   cycleExhausted: 'cycle-budget-exhausted',
+  /** an accept-gate verdict signed by anyone but the run's recorded
+   *  customer — a worker can never self-accept */
+  customerMismatch: 'customer-mismatch',
+  /** the customer's verdict record failed shape validation — a
+   *  record the stage cannot trust never settles the gate */
+  verdictMalformed: 'verdict-malformed',
+  /** the customer's verdict record failed MAC verification — when a
+   *  channel key is configured, a missing or wrong `signature` means
+   *  the record is forged (a worker CAN read the recorded customer
+   *  label, but not the key material); parked once, then consumed by
+   *  detail so the same record cannot re-alert every wake */
+  verdictForged: 'verdict-forged',
+  /** the customer's answer record failed shape validation — drained
+   *  and consumed so the same bad row can't re-alert every wake */
+  answerMalformed: 'answer-malformed',
 } as const;
 export type ParkAlert = (typeof PARK_ALERTS)[keyof typeof PARK_ALERTS];
+
+/** The capacity-wait park tag — stamped on an alert row when an item
+ *  is held out of a saturated stage (or the pipeline itself, under
+ *  `limits.in_flight`). Deliberately NOT in PARK_ALERTS: that union is
+ *  the fail-closed contract (the world must repair before a wake
+ *  helps), while a saturated park waits for a slot to free — an
+ *  occupant's verdict transitioning it out is the wake. Same
+ *  queue-shaped semantics as `route`'s `queue` verdict on
+ *  `QUEUE_REASONS.saturated`: the item suspends at the stage's door
+ *  (`resume` = the stage it was entering) and a later wake re-checks
+ *  occupancy before letting it in. */
+export const SATURATION_ALERT = 'stage-saturated';
 
 /** Journal events stamped on alert rows that are NOT fail-closed
  *  parks — durable markers a `ParkAlert` union must not absorb, so
@@ -98,12 +141,31 @@ export type JournalEvent = (typeof JOURNAL_EVENTS)[keyof typeof JOURNAL_EVENTS];
  *  resolve. */
 export type PipelineContext = Record<string, unknown>;
 
-/** What an engine returns — the verdict tag plus the typed payload the
- *  next stage reads. */
+/** What an engine returns to settle a stage — the verdict tag plus
+ *  the typed payload the next stage reads. */
 export interface EngineResult {
   verdict: string;
   payload?: unknown;
 }
+
+/** A fail-closed park an engine asks for — the runner journals the
+ *  alert row and halts; a wake re-enters the stage (the run's world
+ *  may repair: a corrected verdict record, restored context). `alert`
+ *  names a PARK_ALERTS tag or an engine-local one; the run never
+ *  moves on an engine alert — that is the whole contract. */
+export interface EngineAlert {
+  alert: string;
+  detail?: string;
+}
+
+/** An engine's answer — a settling verdict, 'pending' while the
+ *  journaled side effect is still in flight, or a fail-closed alert.
+ *  'pending' from `invoke` means the side effect FIRED but the stage
+ *  cannot settle yet (the accept gate's emit awaiting the customer's
+ *  out-of-band verdict): the runner parks WITHOUT a verdict row, so
+ *  the intent stays the resume anchor a later wake's `recheck`
+ *  settles — identical semantics to a recheck 'pending'. */
+export type EngineOutcome = EngineResult | 'pending' | EngineAlert;
 
 /** One engine invocation — everything a stage handler needs, nothing
  *  pipeline-internal leaks further. */
@@ -117,23 +179,29 @@ export interface StageCall {
   fixRound?: number;
   /** the fix scope — the review's `notes`, set on scoped re-entry */
   notes?: string;
+  /** the run's recorded customer identity (opts.customer) — carried on
+   *  the call, never inside ctx, so a stage payload can never
+   *  overwrite it: the accept gate compares a verdict's `accepted_by`
+   *  against exactly this field (a worker can never self-accept). */
+  customer?: string;
   ctx: PipelineContext;
   journal: PipelineJournal;
   dir?: string;
 }
 
-export type EngineFn = (call: StageCall) => MaybePromise<EngineResult>;
+export type EngineFn = (call: StageCall) => MaybePromise<EngineOutcome>;
 
 /** Resume verdict for a verdict-less intent: an EngineResult settles
  *  the record ("landed, here's the outcome"), 'pending' means the side
  *  effect is still in flight (runner parks WITHOUT a new row — the
- *  pending intent stays the resume anchor), and undefined attests
+ *  pending intent stays the resume anchor), an EngineAlert parks
+ *  fail-closed with a journal alert row, and undefined attests
  *  "checked, didn't land" → the runner re-fires under its attempt
  *  budget. An engine that cannot tell must return 'pending', not
  *  undefined — undefined IS the attestation that re-fires. With NO
  *  hook bound at all the runner never re-fires a spawn-like intent
  *  blind (recheck-unavailable park). */
-export type RecheckFn = (call: StageCall) => MaybePromise<EngineResult | 'pending' | undefined>;
+export type RecheckFn = (call: StageCall) => MaybePromise<EngineOutcome | undefined>;
 
 /** An engine binding — `invoke` runs the stage; `recheck` is the
  *  resume hook attesting whether a journaled intent already landed. */
@@ -199,8 +267,30 @@ export interface RunOptions {
   maxSteps?: number;
   /** scoped-fix re-entry budget — default 3 (act.maxRounds contract) */
   fixRounds?: number;
-  /** the verdict name scoped-fix mode binds to — default 'fix' */
+  /** the machine budget — what the box CAN run (the caller binds a
+   *  `fleet.maxConcurrent`/`agents.<kind>.maxBatchWorkers`-style cap).
+   *  Composes with the formula the way `route`'s occupancy guard
+   *  composes its `cap`: the effective in-flight limit is
+   *  `min(formula.limits.in_flight, maxInFlight)` — the formula limit
+   *  is the contract (what this flow MAY run), the machine number can
+   *  only narrow it. 0 or absent = no machine cap, the formula limit
+   *  stands alone (same `cap ≤ 0` = uncapped convention as
+   *  `RouteLoad.cap`). */
+  maxInFlight?: number;
+  /** the verdict name scoped-fix mode binds to — default 'fix'
+   *  (single-name shorthand for {@link RunOptions.fixVerdicts}) */
   fixVerdict?: string;
+  /** the verdict names scoped-fix mode binds to — default
+   *  {@link DEFAULT_FIX_VERDICTS} (`fix` + `rejected`: the internal
+   *  review's fix AND the customer's rejection both re-enter work
+   *  with `notes` as scope under the same fail-closed contract) */
+  fixVerdicts?: string[];
+  /** the run's recorded customer identity — who may sign `accept`
+   *  verdicts. Recorded at run creation; carried on the StageCall,
+   *  never inside ctx, so no engine payload can overwrite it. Absent
+   *  means no identity can pass the accept gate — stages needing it
+   *  fail loud. */
+  customer?: string;
   /** seed context — journaled payloads replay over it on resume */
   ctx?: PipelineContext;
 }
@@ -217,7 +307,8 @@ interface NextStep {
 type Step = { go: NextStep } | { halt: RunResult };
 
 interface AlertSpec {
-  alert: ParkAlert;
+  /** a PARK_ALERTS tag or an engine-local fail-closed tag */
+  alert: string;
   detail?: string;
   resume?: string;
 }
@@ -230,6 +321,16 @@ interface Run {
   runId: string;
   sha: string;
   dir?: string;
+  /** set from `opts.dir` — occupancy counts every `*.journal.jsonl`
+   *  under the pipeline dir, not just the run's own file: a
+   *  file-backed journal sees this run alone, and a cap counting
+   *  only itself never trips. The injected journal's rows still add
+   *  to the view (a store spans whatever it returns). */
+  occupancyDir?: string;
+  /** the sibling-run-file snapshot — read once on the first
+   *  `flowTails` call of a wake, cached for the whole drive (a
+   *  per-step rescan reads every sibling file O(steps × files)) */
+  siblingRows?: JournalRow[];
   journal: PipelineJournal;
   engines: Map<string, EngineHandler>;
   admit?: AdmitFn;
@@ -238,7 +339,11 @@ interface Run {
   maxSteps: number;
   steps: number;
   fixRounds: number;
-  fixVerdict: string;
+  fixVerdicts: string[];
+  /** effective pipeline cap — min(formula limits.in_flight, machine
+   *  budget); stage caps narrow it further, never widen it */
+  inFlight: number;
+  customer?: string;
   ctx: PipelineContext;
   seq: number;
 }
@@ -259,6 +364,157 @@ function recordsOf(run: Run): JournalRow[] {
   );
 }
 
+/** One flow's tail — where its last journaled record leaves it
+ *  (spec §Concurrency: "the journaled stage occupancy IS the
+ *  semaphore"). `moving` means the item is still inside the pipeline
+ *  and counts toward `limits.in_flight`; `stage` is the stage it
+ *  occupies — a stage occupies an item between its intent and its
+ *  verdict-settled transition out, so:
+ *
+ *  - verdict-less intent → occupies `stage` (the crash window counts —
+ *    a crashed runner resumes with the same counts). It holds the
+ *    `in_flight` lane too, EXCEPT an `emit` intent: the accept gate's
+ *    suspension is a customer wait, not work in flight (same as
+ *    intake's settled `questions` park, which never counted);
+ *  - settled `emit` verdict → the customer wait ENDED, but the run
+ *    still holds no in_flight lane — it never took one. The next
+ *    stage entry must pass admission like a fresh wake: reading the
+ *    settled record as "already moving" would let the flow walk into
+ *    its target over another flow's seat;
+ *  - settled verdict → the transition decides: `retry` re-enters the
+ *    SAME stage (the item never left — still occupies it); a stage
+ *    target means the item is mid-transit — moving, occupying nothing
+ *    until the target's intent lands; `park`/terminal/unknown targets
+ *    mean the flow suspended or ended — not moving, occupying nothing;
+ *  - alert row → parked out of the active set — neither.
+ */
+interface FlowTail {
+  moving: boolean;
+  stage?: string;
+}
+
+function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
+  const last = records.at(-1);
+  if (last === undefined || last.alert !== undefined) {
+    return { moving: false };
+  }
+  if (last.verdict === undefined) {
+    // a pending intent occupies its stage — the crash window counts.
+    // EXCEPT the `emit` suspension on the ADMISSION lane: accept's
+    // pending intent parks for an unbounded customer wait the same
+    // way intake's settled `questions` verdict does — an input wait
+    // is not pipeline work, and under the serial default one parked
+    // accept would hold the only slot forever. The stage seat stays
+    // (an accept-level `concurrency` cap still bounds the gate).
+    const customerWait = last.intent === STAGE_INTENTS.accept;
+    return { moving: !customerWait, stage: last.stage };
+  }
+  if (last.intent === STAGE_INTENTS.accept) {
+    // the verdict settled a CUSTOMER-WAIT intent — the wait is over
+    // but the flow holds no in_flight lane: the pending emit never
+    // took one. The next stage's door re-passes admission — settling
+    // the wait is not occupying the lane.
+    return { moving: false };
+  }
+  const target = transitionFor(formula, last.stage, last.verdict);
+  if (target === 'retry') {
+    return { moving: true, stage: last.stage };
+  }
+  if (target !== undefined && !isTerminalAction(target)) {
+    return { moving: true };
+  }
+  return { moving: false };
+}
+
+/** Every `*.journal.jsonl` under the pipeline dir — read ONCE per
+ *  wake and cached on the run: `flowTails` runs per stage entry, and
+ *  a per-step rescan would read every sibling file O(steps × files)
+ *  deep in a synchronous loop tick. Within one wake only THIS run
+ *  appends, and its rows come live from `run.journal` anyway — the
+ *  sibling view at wake time is the honest semaphore.
+ *
+ *  `ENOENT` alone means "no pipeline dir yet — this run is alone".
+ *  Every other readdirSync failure, and an unreadable sibling file,
+ *  throws like the run's own journal would: a semaphore that can't
+ *  see the plane must fail CLOSED — narrowing to the run's own rows
+ *  on EACCES/EMFILE/ENOTDIR would admit past cap on an empty view. */
+function siblingJournalRows(dir: string): JournalRow[] {
+  const d = pipelineDir({ dir });
+  if (d === null) {
+    return [];
+  }
+  let files: string[];
+  try {
+    files = readdirSync(d);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw e;
+  }
+  const rows: JournalRow[] = [];
+  for (const f of files) {
+    if (f.endsWith('.journal.jsonl')) {
+      rows.push(...fileJournal(join(d, f)).rows());
+    }
+  }
+  return rows;
+}
+
+/** The rows occupancy counts — the run's journal view UNIONED with
+ *  every `*.journal.jsonl` under the pipeline dir when `opts.dir`
+ *  binds one: a file-backed journal carries this run alone, and a cap
+ *  counting only itself never trips (a resume re-opens the run's own
+ *  file, so the dir scan is what keeps the semaphore honest across
+ *  processes). An unreadable sibling throws like the run's own file
+ *  would — a flow that can't be counted must not be silently ignored
+ *  by a semaphore. */
+function occupancyRows(run: Run): JournalRow[] {
+  if (run.occupancyDir === undefined) {
+    return run.journal.rows();
+  }
+  run.siblingRows ??= siblingJournalRows(run.occupancyDir);
+  return [...run.journal.rows(), ...run.siblingRows];
+}
+
+/** Every other flow's tail, reconstructed from the journal — rows
+ *  group per run_id BEFORE seq-collapse (seqs are per-run; collapsing
+ *  across runs would merge unrelated intents). This run's own rows are
+ *  excluded: its slot is already held, never counted against itself. */
+function flowTails(run: Run): FlowTail[] {
+  const byRun = new Map<string, JournalRow[]>();
+  for (const r of occupancyRows(run)) {
+    if (r.run_id === run.runId) {
+      continue;
+    }
+    const g = byRun.get(r.run_id);
+    if (g === undefined) {
+      byRun.set(r.run_id, [r]);
+    } else {
+      g.push(r);
+    }
+  }
+  return [...byRun.values()].map(rows => flowTail(run.formula, journalRecords(rows)));
+}
+
+/** Is THIS run still moving — its own tail, same rule as the others. */
+const selfMoving = (run: Run): boolean => flowTail(run.formula, recordsOf(run)).moving;
+
+/** Effective cap on a stage — `concurrency` narrows the pipeline cap,
+ *  never widens it; absent → the pipeline cap applies (spec
+ *  §Concurrency). */
+const stageCap = (run: Run, stage: PipelineStage): number =>
+  Math.min(stage.concurrency ?? run.inFlight, run.inFlight);
+
+/** Effective pipeline cap — the formula contract vs the machine
+ *  budget: `min(limits.in_flight, maxInFlight)`, where a machine cap
+ *  of 0/absent is uncapped (route's occupancy-guard convention: a
+ *  `cap` that can't trip is no cap). */
+function inFlightFor(formula: PipelineFormula, opts: RunOptions): number {
+  const machine = bounded('maxInFlight', opts.maxInFlight, 0, 0);
+  return machine > 0 ? Math.min(formula.limits.in_flight, machine) : formula.limits.in_flight;
+}
+
 /** The run id: explicit opt wins, else the journal's own (an injected
  *  journal IS the resume identity — minting over it would restart the
  *  run and could re-fire spawn-like effects), else a fresh mint. */
@@ -275,6 +531,35 @@ function bounded(name: string, v: number | undefined, dflt: number, min = 1): nu
   }
   return n;
 }
+
+/** The configured scoped-fix names — `fixVerdicts` wins, the singular
+ *  `fixVerdict` pins one name, else the spec pair (fix + rejected).
+ *  An explicit empty list opts OUT of scoped-fix binding entirely. */
+const fixVerdictList = (opts: RunOptions): string[] =>
+  opts.fixVerdicts ??
+  (opts.fixVerdict !== undefined ? [opts.fixVerdict] : [...DEFAULT_FIX_VERDICTS]);
+
+/** A usable verdict name — a non-empty string, nothing else. */
+const isVerdictName = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
+/** The scoped-fix verdict names — a non-array or an entry that names
+ *  nothing is invalid input: a binding that names nothing would
+ *  silently turn every re-entry unscoped. */
+function fixVerdictsFor(opts: RunOptions): string[] {
+  const list = fixVerdictList(opts);
+  if (!Array.isArray(list) || !list.every(isVerdictName)) {
+    throw new Error(
+      'pipeline run: fixVerdicts must be an array of non-empty strings (or fixVerdict, a single name)'
+    );
+  }
+  return list;
+}
+
+/** The engine-alert shape — `{alert, detail?}` vs EngineResult's
+ *  `{verdict, payload?}`; disjoint on the `alert` key (a settled
+ *  verdict record never carries one). */
+const isEngineAlert = (r: EngineOutcome): r is EngineAlert =>
+  isRecord(r) && typeof r.alert === 'string' && r.verdict === undefined;
 
 /** The journal this run writes — injected wins (it IS the resume
  *  identity), else opts.journal, else the file journal under the
@@ -327,6 +612,10 @@ function initRun(
     runId,
     sha: opts.formulaSha,
     dir: opts.dir,
+    // occupancy spans the pipeline dir whenever one is bound — an
+    // injected journal's rows UNION in; they never subtract from the
+    // durable plane
+    occupancyDir: opts.dir,
     journal: journalFor(opts, journal, runId),
     engines: engineMapFor(opts.engines),
     admit: opts.admit,
@@ -337,7 +626,9 @@ function initRun(
     // 0 IS a valid fix budget — 'no scoped-fix rounds' parks on the
     // first fix verdict via the normal exhaustion path
     fixRounds: bounded('fixRounds', opts.fixRounds, DEFAULT_FIX_ROUNDS, 0),
-    fixVerdict: opts.fixVerdict ?? DEFAULT_FIX_VERDICT,
+    fixVerdicts: fixVerdictsFor(opts),
+    inFlight: inFlightFor(formula, opts),
+    customer: opts.customer,
     // null-prototype: engine payloads flat-merge onto ctx, and a
     // hostile `__proto__` key must land as inert data, never a setter
     ctx: Object.assign(Object.create(null), opts.ctx) as PipelineContext,
@@ -376,6 +667,7 @@ function rowFor(run: Run, to: NextStep, intent: string): JournalRow {
   };
   if (to.fixRound !== undefined) row.fix_round = to.fixRound;
   if (to.notes !== undefined) row.notes = to.notes;
+  if (run.customer !== undefined) row.customer = run.customer;
   return row;
 }
 
@@ -451,6 +743,7 @@ function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
     attempt: to.attempt,
     fixRound: to.fixRound,
     notes: to.notes,
+    customer: run.customer,
     ctx: run.ctx,
     journal: run.journal,
     dir: run.dir,
@@ -462,7 +755,7 @@ function stageCall(run: Run, stage: PipelineStage, to: NextStep): StageCall {
  *  refusal detail, not stage output, so it is journaled with
  *  `admit: true` and never absorbed into the pipeline context. */
 interface SideEffect {
-  res: EngineResult;
+  res: EngineOutcome;
   viaAdmit: boolean;
 }
 
@@ -526,7 +819,7 @@ function fixRoundsUsed(run: Run): number {
  *  + alert, never a scopeless re-entry) and rounds bounded (exhaustion
  *  parks, never loops). */
 function reentryStep(run: Run, out: EngineResult, target: string, to: NextStep): Step {
-  if (out.verdict !== run.fixVerdict) {
+  if (!run.fixVerdicts.includes(out.verdict)) {
     return { go: { stage: target, attempt: 1 } };
   }
   const notes = notesFor(out.payload);
@@ -633,6 +926,22 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
     });
   }
   const { res, viaAdmit } = await sideEffect(run, stage, handler, to);
+  if (res === 'pending') {
+    // the side effect fired but the stage cannot settle (the accept
+    // gate's emit awaiting an out-of-band verdict) — park WITHOUT a
+    // verdict row: the verdict-less intent stays the resume anchor a
+    // later wake's recheck settles, identical to a recheck 'pending'
+    return {
+      halt: result(run, 'park', to.stage, { detail: 'side effect still in flight' }),
+    };
+  }
+  if (isEngineAlert(res)) {
+    return alertStep(run, to, {
+      alert: res.alert,
+      detail: res.detail,
+      resume: to.stage,
+    });
+  }
   const done = verdictRow(intent, res);
   if (viaAdmit) {
     done.admit = true;
@@ -644,13 +953,38 @@ async function invokeStage(run: Run, stage: PipelineStage, to: NextStep): Promis
   return transitionStep(run, res, to);
 }
 
-/** One loop tick: stage exists → gate → skip or invoke. */
+/** One loop tick: stage exists → admission → gate → occupancy →
+ *  skip or invoke. The two capacity checks (spec §Concurrency —
+ *  "declared, never assumed") read the journaled occupancy as the
+ *  semaphore:
+ *
+ *  - `in_flight` bounds ADMISSION — a run that is not already moving
+ *    (fresh, or waking from a park) may enter only while fewer than
+ *    the cap items are moving; a moving run already holds its slot and
+ *    flows on. Checked before the gate: even a would-be-skip entry is
+ *    an admission.
+ *  - `concurrency`/the pipeline cap bounds OCCUPANCY — checked after
+ *    the gate because a gate-fail skips the stage entirely (its skip
+ *    record settles in one row, so it never occupies a slot).
+ *
+ *  Either cap refusing parks the item at the stage's door —
+ *  `stage-saturated`, `resume` = the stage it was entering — the
+ *  queue-shaped path: a wake re-enters here and re-checks. */
 async function stepOnce(run: Run, to: NextStep): Promise<Step> {
   const stage = run.formula.stages.find(s => s.name === to.stage);
   if (stage === undefined) {
     return alertStep(run, to, {
       alert: PARK_ALERTS.formulaDrift,
       detail: `stage "${to.stage}" is not in this formula`,
+      resume: to.stage,
+    });
+  }
+  const tails = flowTails(run);
+  const moving = tails.filter(t => t.moving).length;
+  if (!selfMoving(run) && moving >= run.inFlight) {
+    return alertStep(run, to, {
+      alert: SATURATION_ALERT,
+      detail: `in_flight ${run.inFlight} reached — ${moving} item(s) already moving`,
       resume: to.stage,
     });
   }
@@ -662,7 +996,19 @@ async function stepOnce(run: Run, to: NextStep): Promise<Step> {
       resume: stage.name,
     });
   }
-  return gate === 'fail' ? skipStage(run, to) : invokeStage(run, stage, to);
+  if (gate === 'fail') {
+    return skipStage(run, to);
+  }
+  const cap = stageCap(run, stage);
+  const holding = tails.filter(t => t.stage === stage.name).length;
+  if (holding >= cap) {
+    return alertStep(run, to, {
+      alert: SATURATION_ALERT,
+      detail: `stage "${stage.name}" cap ${cap} reached — ${holding} item(s) occupying`,
+      resume: to.stage,
+    });
+  }
+  return invokeStage(run, stage, to);
 }
 
 async function drive(run: Run, start: NextStep): Promise<RunResult> {
@@ -755,7 +1101,27 @@ async function recheckStep(run: Run, last: JournalRow, to: NextStep): Promise<St
       }),
     };
   }
-  return r === undefined ? refireAttempt(run, last, to) : settleRecheck(run, last, r, to);
+  if (r === undefined) {
+    return refireAttempt(run, last, to);
+  }
+  if (isEngineAlert(r)) {
+    // an alert row's resume path re-enters through invokeStage — a
+    // blind re-fire of a spawn-like side effect this pending intent
+    // still anchors (the same hole refire's no-hook park exists to
+    // close). Halt WITHOUT a row: the intent stays the resume anchor
+    // and every wake re-asks the hook.
+    if (run.admitIntents.includes(intentFor(stage))) {
+      return {
+        halt: result(run, 'park', last.stage, { alert: r.alert, detail: r.detail }),
+      };
+    }
+    return alertStep(run, to, {
+      alert: r.alert,
+      detail: r.detail,
+      resume: last.stage,
+    });
+  }
+  return settleRecheck(run, last, r, to);
 }
 
 /** Parked runs resume by re-entering the SAME stage (spec §terminal
@@ -867,23 +1233,67 @@ function replayCtx(run: Run, records: JournalRow[]): void {
   }
 }
 
+/** A fail-closed park at the entry door — NO row is appended: an
+ *  alert stamped under a contested identity (foreign item, imposter
+ *  customer) would itself be foreign state and lock both parties
+ *  out of resume forever. */
+const guardPark = (run: Run, alert: string, detail: string): RunResult =>
+  result(run, 'park', entryStage(run.formula).name, { alert, detail });
+
+/** run_id ↔ item is 1:1 — rows for this run id belonging to another
+ *  item mean a corrupt/mixed journal namespace; refuse to resume or
+ *  replay any of it. */
+function foreignItemGuard(run: Run): RunResult | undefined {
+  const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
+  return foreign
+    ? guardPark(
+        run,
+        PARK_ALERTS.itemMismatch,
+        `journal rows for run ${run.runId} belong to another item`
+      )
+    : undefined;
+}
+
+/** A resume carrying a DIFFERENT signer than the run's journaled
+ *  customer is an imposter — one carrying none just inherits. */
+const customerMismatch = (journaled: string | undefined, run: Run): boolean => {
+  if (journaled === undefined || run.customer === undefined) {
+    return false;
+  }
+  return journaled !== run.customer;
+};
+
+/** The recorded customer is run state — journaled on every row — so a
+ *  resume cannot quietly swap who may sign the accept gate. A resume
+ *  carrying a DIFFERENT customer fails closed like a foreign item;
+ *  one carrying none inherits the journaled identity — the customer
+ *  is durable. */
+function bindCustomer(run: Run, records: JournalRow[]): RunResult | undefined {
+  const journaled = records.find(r => typeof r.customer === 'string')?.customer;
+  if (customerMismatch(journaled, run)) {
+    return guardPark(
+      run,
+      PARK_ALERTS.customerMismatch,
+      `run ${run.runId} recorded customer ${JSON.stringify(journaled)} — ` +
+        `resume carried ${JSON.stringify(run.customer)}`
+    );
+  }
+  run.customer = journaled ?? run.customer;
+  return undefined;
+}
+
 /** The shared entry: reconstruct journal state, then drive — fresh at
  *  the entry stage, or from wherever the journal last settled. */
 async function begin(run: Run): Promise<RunResult> {
-  // run_id ↔ item is 1:1 — rows for this run id belonging to another
-  // item mean a corrupt/mixed journal namespace; refuse to resume or
-  // replay any of it. And park WITHOUT a row: an alert appended under
-  // the shared run id would itself be a foreign row for the original
-  // item — the poison would lock BOTH items out of resume forever.
-  const foreign = run.journal.rows().some(r => r.run_id === run.runId && r.item !== run.item);
-  if (foreign) {
-    const entry = entryStage(run.formula).name;
-    return result(run, 'park', entry, {
-      alert: PARK_ALERTS.itemMismatch,
-      detail: `journal rows for run ${run.runId} belong to another item`,
-    });
+  const guard = foreignItemGuard(run);
+  if (guard !== undefined) {
+    return guard;
   }
   const records = recordsOf(run);
+  const customerPark = bindCustomer(run, records);
+  if (customerPark !== undefined) {
+    return customerPark;
+  }
   run.seq = records.reduce((m, r) => Math.max(m, r.seq), 0);
   replayCtx(run, records);
   const last = records.at(-1);

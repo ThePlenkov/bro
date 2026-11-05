@@ -15,8 +15,33 @@
  * One kit keeps every stage suite asserting against the same spy
  * shape — same role as core's testkit for the wider repo.
  */
-import type { DecideResult, JudgeAnswer, JudgeFacade, JudgeQuestion, TaskRow } from '@broject/core';
+import type {
+  DecideResult,
+  JudgeAnswer,
+  JudgeFacade,
+  JudgeQuestion,
+  TaskRow,
+  TaskSpecFacade,
+} from '@broject/core';
+import { parseTaskSpecBody } from '@broject/core';
+import type { EngineAlert, EngineOutcome, EngineResult } from './runner.ts';
 import type { ClassifyBacklog } from './stages/classify.ts';
+
+/** The engine-alert shape — `{alert, …}` vs EngineResult's
+ *  `{verdict, …}`: disjoint on the `alert` key. */
+const isAlertOutcome = (r: EngineOutcome): r is EngineAlert =>
+  typeof r === 'object' && r !== null && 'alert' in r;
+
+/** Narrow an engine outcome to a settling result — the stages these
+ *  suites drive (judge/learn engines) never suspend or alert, so a
+ *  'pending' or engine-alert here is a fixture bug, not a branch to
+ *  assert through. */
+export const settled = (r: EngineOutcome): EngineResult => {
+  if (r === 'pending' || isAlertOutcome(r)) {
+    throw new Error(`test stage did not settle — got ${JSON.stringify(r)}`);
+  }
+  return r;
+};
 
 /** A bare task row — id + title + open, extras spread over it. */
 export const row = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({
@@ -127,6 +152,95 @@ export const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
       spy.events.push(`-${id}:${l}`);
       const r = find(id);
       if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
+    },
+  };
+  return spy;
+};
+
+/** What specStore records per annotate — the id, the heading, and the
+ *  exact lines appended under it. */
+export interface SpecAnnotateCall {
+  id: string;
+  heading: string;
+  lines: string[];
+}
+
+export interface SpecStoreSpy extends TaskSpecFacade {
+  /** every annotate call, in order */
+  annotated: SpecAnnotateCall[];
+  /** raw body text per item — tests seed spec sections through
+   *  `description` on the rows and read appended artifacts back here */
+  bodies: Map<string, string>;
+}
+
+/** Approximate mirror of the facade's artifact guard — the real
+ *  probes live unexported in core's taskspec (`headingOf`/`fenceOf`);
+ *  this covers their common shapes (≤3 leading spaces + 1–6 `#`s +
+ *  space/tab/EOL, ≤3 spaces + a 3+ run of '`' or '~') so an
+ *  unsanitized artifact throws here like prod does — a sanitize
+ *  regression in a stage becomes a test failure, never a silent pass. */
+const opensStructure = (seg: string): boolean =>
+  /^ {0,3}#{1,6}(?:[ \t]|$)/.test(seg) || /^ {0,3}(?:`{3,}|~{3,})/.test(seg);
+
+/** Every artifact segment must be inert body text — a line that
+ *  opens a section or a fence is a sanitize regression the real
+ *  facade refuses the same way. */
+const assertInert = (lines: readonly string[]): void => {
+  for (const line of lines) {
+    for (const seg of line.split(/\r?\n/)) {
+      if (opensStructure(seg)) {
+        throw new Error(
+          `specStore annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
+            'artifact text never becomes a section or a fence'
+        );
+      }
+    }
+  }
+};
+
+/** The annotate contract's loud failures — heading shape, non-empty
+ *  artifact, and no segment that opens structure. */
+const guardAnnotate = (heading: string, lines: readonly string[]): void => {
+  if (heading.trim() === '' || /[\r\n]/.test(heading)) {
+    throw new Error('specStore annotate: heading must be a single non-empty line');
+  }
+  if (lines.length === 0) {
+    throw new Error('specStore annotate: an artifact with no lines is no artifact');
+  }
+  assertInert(lines);
+};
+
+/** An in-memory TaskSpecFacade — `spec()` projects the stored body
+ *  through the REAL parser (`parseTaskSpecBody`, the same read prod's
+ *  adapter makes: a `## Acceptance` section becomes `acceptance[]`,
+ *  `## Questions` stays body prose), and `annotate()` appends the
+ *  `## heading` section the way prod's read-modify-write does while
+ *  recording the call. Enforces the contract's loud failures an
+ *  engine must hit — missing item, empty/multi-line heading, empty
+ *  lines, artifact segments that open structure — but not the
+ *  managed-section dup guard (an intake artifact never targets a
+ *  managed name). */
+export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
+  const bodies = new Map(rows.map(r => [r.id, r.description ?? '']));
+  const titles = new Map(rows.map(r => [r.id, r.title ?? `task ${r.id}`]));
+  const spy: SpecStoreSpy = {
+    annotated: [],
+    bodies,
+    spec: id => {
+      const d = bodies.get(id);
+      return d === undefined
+        ? undefined
+        : { id, title: titles.get(id) ?? '', ...parseTaskSpecBody(d) };
+    },
+    annotate: (id, heading, lines) => {
+      guardAnnotate(heading, lines);
+      const base = bodies.get(id);
+      if (base === undefined) {
+        throw new Error(`specStore annotate: item "${id}" is not in the store`);
+      }
+      spy.annotated.push({ id, heading, lines: [...lines] });
+      const section = `## ${heading}\n${lines.join('\n')}`;
+      bodies.set(id, base === '' ? section : `${base}\n\n${section}`);
     },
   };
   return spy;

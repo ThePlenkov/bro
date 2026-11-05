@@ -750,6 +750,168 @@ orch: foreground, timing: now}`.
   PR → `bro trace` VERIFIED) stays deferred to the runner-backed
   graduation the work stage enables.
 
+## Run 8: bro-qjji2 — agile contract epic (extended formula)
+
+The emulated formula is now the EXTENDED DAG (spec delta lands with
+this run's own work product):
+
+    classify → route → intake → work → verify → review(gated)
+             → accept → merge → capture
+
+- Invocation: `runPipeline(extended-formula, 'bro-qjji2', opts)` —
+  hand-emulated by the interactive worker session; the six epic
+  children (bro-qjji2.1–.6) are the pipeline items; each child's run
+  entry lands below as it progresses.
+- Spec reference: §stage semantics intake/verify/accept bullets,
+  §task spec facade, §interactive and non-interactive customer
+  channels, §learning plane — all introduced by this run's diff.
+- Input: epic `bro-qjji2` (customer = the user; worker = this
+  session; the session's own subagents are workers under the same
+  contract with this session as their customer).
+- Actual action and result:
+  - classify → `solo` — agile-contract stage work shares no surface
+    with other open items; payload `{group: solo, complexity:
+    complex, rank: 1}`.
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - intake → `accepted` — REAL INTAKE, first emulated pass: the
+    worker validated the task against the spec-in-progress and asked
+    the customer three intake questions in-session (interactive
+    channel — the customer is live): (1) run scope → full cycle
+    confirmed; (2) verdict-surface naming → delegated to the worker
+    (architect's call); (3) AC storage → answered "facade, never bd
+    coupling" which produced the §task spec facade section itself.
+    Verdict `accepted` journaled after answers landed.
+  - work → `done` — spec delta: intake/verify/accept stages +
+    transitions, typed outputs, task-spec facade, interactive vs
+    non-interactive channels, learning plane, verification clauses;
+    epic + six children beads minted with `## Acceptance` sections
+    (the taskSpec contract dogfooded immediately); deps wired
+    (.3–.5 need .1+.2, .6 needs .3–.5).
+  - verify/review/accept → pending — evidence bundle to the
+    customer, then their verdict.
+- Design decisions worth recording (spec-consistent,
+  underdetermined by the spec):
+  - `accepted_by`/`run.customer` — the customer identity is
+    recorded at run creation, and `accept` may only be settled by
+    that identity: a worker cannot self-accept. Emulated here as
+    "this session waits for the user's verdict, never self-signs".
+  - Draft PR MAY sit inside the evidence bundle (review surface,
+    never merge-ready before `accepted`) — chosen over strict
+    zero-push; the customer confirmed evidence-before-push as the
+    contract but the draft surface is their call per run.
+  - `verify` rides a new `e2e` engine slot (evidence runner), not
+    `judge` — proof artifacts are side-effecting checks, not
+    decide answers.
+- Spec gaps hit: none yet — the delta is this run's work product;
+  gaps will surface when .3–.5 engines bind real seams.
+- Golden case: pending — the extended formula's TOML becomes the
+  conformance fixture in .1.
+
+### Run 8.1: bro-qjji2.1 — STAGE_ENGINES + spec fixture (worker: agents-engine)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted` — worker validated the bead's `## Acceptance`
+  section via the emulated facade, no questions needed.
+- work → `done` — STAGE_ENGINES += intake|e2e|accept, SPEC_FORMULA
+  fixture = the 9-stage DAG, STAGE_INTENTS += spec|verify|emit,
+  all engine maps bind fakes at the new stages. `25f575ce`.
+- verify → `verified` — customer (this session) re-ran the suite on
+  the committed state: 227/227 pipeline tests, typecheck clean.
+- review/accept → `accepted` by the customer (acceptance contract:
+  local commit only, no push) — merged into `work/bro-qjji2`.
+- Friction: worker's report of "227 tests" was on ITS tree (branch
+  cut before siblings merged); the acceptance pass re-verifies on
+  the merged base — 163/163 at integration head after .3/.4.
+
+### Run 8.2: bro-qjji2.2 — taskSpec facade (worker: agents-facade)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted`.
+- work → `done` — `packages/core/src/taskspec.ts`: TaskSpec
+  contract, `parseTaskSpecBody` (## Acceptance/DoD/DoR/Scenarios
+  markdown sections), `taskSpecFacade(store)` adapter over the
+  existing TaskStore seam. `52a14685`.
+- verify → `verified` — 24/24 taskspec tests + 810/810 core suite;
+  live e2e: `spec('bro-qjji2.3').acceptance` → 6 rows parsed from
+  the real bead via `bd show --json`. The facade dogfoods: the
+  epic's own beads carry `## Acceptance` since minting.
+- review/accept → `accepted` — merged into `work/bro-qjji2`.
+- Design notes: annotate() write path lands intake artifacts on the
+  item (## Questions/## Declined managed headings, loud on
+  duplicate managed sections); `<!-- bro: -->` trailer stays
+  body-last via taskmeta helpers.
+- Gap filed: checkboxes `- [ ]` keep their marker verbatim in AC
+  rows — verify's seam sees the raw text; a strip rule is a
+  follow-up if desired.
+
+### Run 8.3: bro-qjji2.3 — intake engine (worker: intake)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted`.
+- work → `done` — `stages/intake.ts`: direct-seam engine
+  (`deps.intake(call, spec)` — free-text questions/feedback can't
+  ride the decide contract), spec fingerprint sha on `accepted`,
+  `## Questions`/`## Declined` annotate write-path, fail-closed on
+  malformed payloads via throw→crash marker→attempts-exhausted.
+  `6e027f77` + specStore testkit (in-memory TaskSpecFacade over
+  parseTaskSpecBody).
+- verify → `verified` — 23/23 intake tests on its tree; merged
+  integration head green at 163/163.
+- review/accept → `accepted` — merged.
+- Decision flagged for epic review: no-AC specs pass through
+  intake on judgment (accepted with `acceptance: 0` fingerprint);
+  verify.unverifiable is the deterministic backstop. If intake
+  should deterministically gate no-AC, spec must say so.
+- Gap filed: annotate is append-only — a crash in the
+  annotate→verdict window can duplicate a `## Questions` section;
+  semantic idempotence documented.
+
+### Run 8.4: bro-qjji2.4 — verify engine (worker: tester)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted`.
+- work → `done` — `stages/verify.ts` (engine `e2e`): one seam call
+  per declared AC → {ac,verdict,proof}; derived verdicts —
+  unverifiable (no/empty AC), verified (all pass), failed (any
+  fail, notes composed from failing rows); malformed row → throw.
+  `17f45e59`.
+- verify → `verified` — 25/25 verify tests, 140/140 package suite
+  on its tree; customer re-ran on committed state.
+- review/accept → `accepted` — merged.
+- Gap filed → `bro-qjji2.8`: `verify.failed → work` and
+  `accept.rejected → work` are PLAIN re-entries — the runner's
+  scoped-fix binding (notes+fix_round+fixRounds) keys on the
+  single `run.fixVerdict`; generalize to a verdict set so
+  failed/rejected consume the fix budget.
+
+### Run 8.5: bro-qjji2.5 — accept engine + customer verdict surface (worker: gatekeeper)
+
+- classify → `solo`/complex; route → `spawn` (foreground).
+- intake → `accepted`.
+- work → `done` — `stages/accept.ts` + `customer.ts` (durable
+  per-run JSONL channel `<run>.customer.jsonl` beside the journal)
+  - `bro pipeline accept|answer` CLI; runner widened:
+    `EngineOutcome = result | 'pending' | alert`, `run.customer`
+    identity, `fixVerdicts` set (['fix','rejected']) — .8's gap is
+    PARTIALLY closed here: rejected already re-enters work scoped.
+    `f7143197`.
+- verify → `verified` — 24/24 accept + 10/10 CLI tests on its
+  tree; merged head green at 187/187 pipeline + 42/42 CLI after
+  dist rebuild.
+- review/accept → `accepted` — merged after one import-conflict
+  resolution in testkit.ts.
+- Design notes worth keeping: verdict store keyed PER RUN (a
+  verdict cannot settle the wrong run); `accepted_by` compared
+  against `run.customer` — wrong signer parks + alert, merge
+  unreachable; `pending` parks WITHOUT a verdict row — the intent
+  tail stays the resume anchor; emit is idempotent on resume.
+- Gaps filed: `run.customer` production source unresolved (no
+  run-starter exists yet — whoever binds the runner must record
+  the same identity the CLI signer chain produces); `answer`'s
+  consumer lands with the intake engine binding; `emit` prod
+  adapter (notify/mailbox/A2A) still unbound.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the
@@ -768,3 +930,13 @@ orch: foreground, timing: now}`.
   merge/capture) behind the `EngineMap` + `admit`/`recheck` seams;
   `.7` stamps traceability — after that, logged runs replay as
   golden tests end to end.
+
+## Run 8.6 — live e2e: full nine-stage run on the real durable plane
+
+- **Invocation:** `npx tsx scripts/pipeline-live-e2e.mts` — the real repo's pipeline plane (`.git/bro/pipeline/`), real `taskSpecFacade(taskStore(dir))` over the bd store, item `bro-qjji2.6` (4 real `## Acceptance` rows), REAL `intakeStage`/`verifyStage`/`acceptStage`, customer `petr`. Scripted only where declared: classify/route/review verdicts, the `fleet` work seam (a real provider spawn is budget), merge/capture.
+- **Spec ref:** bro-7d5nb §stages/§transitions/§customer channels.
+- **Expected:** run walks classify→route→intake→work→verify→review→accept, emits the evidence bundle and parks; a forged signer parks on `customer-mismatch`; the recorded customer's verdict settles accept → merge → capture → end.
+- **Actual:** exactly as expected, on durable state — run `4f37f26f`: journal shows per-stage pending intent → settled verdict; `intake.accepted` journaled spec-sha `4294c6e1…` + worker slot; `verify.verified` journaled 4 evidence rows produced by real `grep -ic` probes against this log; `accept` emitted → parked → `customer-mismatch` on `--by mallory` → settled `accepted` on `--by petr`; `merge.landed` → `capture.captured` → end. The customer verdicts were written by the **built CLI** (`node packages/cli/dist/index.js pipeline accept`) which auto-discovered the parked run via `awaitingCustomerRuns` and appended durable records to `<run>.customer.jsonl`.
+- **First-run friction (real gates, not bugs):** `work` parked `admission-unavailable` until the `admit` go-marker bound (spawn admission is real); `review` parked `gate-indeterminate` until classify journaled `complexity` (the `gate_on` contract is real). Both surfaced exactly as the spec designed — fail-closed on missing inputs.
+- **Gaps → beads:** `bro pipeline answer` has no intake consumer (.9); no production run-starter / `run.customer` source (.10); emit transport adapter (.11); fleet work engine (.12); annotate crash-window dedup (.13); typed proof refs (.14).
+- **Golden:** yes — the durable journal + channel rows are replayable evidence; the script is the harness.

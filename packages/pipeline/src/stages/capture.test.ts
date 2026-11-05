@@ -16,6 +16,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
+import { settled } from '../testkit.ts';
 import {
   type CaptureDeps,
   type CaptureOutcome,
@@ -157,7 +158,7 @@ const landJournal = (...extra: JournalRow[]): PipelineJournal => {
 };
 
 const invoke = async (journal: PipelineJournal, d: CaptureDeps, over: Partial<StageCall> = {}) =>
-  captureStage(d).invoke(call(journal, over));
+  settled(await captureStage(d).invoke(call(journal, over)));
 
 describe('capture — the land context', () => {
   test('captured on land — the spec pair rides the payload', async () => {
@@ -540,7 +541,10 @@ describe('capture in the spec DAG — the last stage', () => {
         },
         // cheap complexity — the review gate synthesizes skip; capture
         // still reads the landed record (a skipped review changes nothing)
+        intake: () => ({ verdict: 'accepted' }),
         fleet: () => ({ verdict: 'done', payload: { mol: 'mol-7' } }),
+        e2e: () => ({ verdict: 'verified' }),
+        accept: () => ({ verdict: 'accepted' }),
         'act-gate': () => ({ verdict: 'landed' }),
         learn: captureStage(deps(cap.fn, ret.fn)),
       },

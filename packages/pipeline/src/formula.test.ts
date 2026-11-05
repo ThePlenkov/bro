@@ -28,26 +28,64 @@ ${transitions}
 const A = 'name = "a"\nengine = "judge"\nverdicts = ["ok"]';
 
 describe('parsePipelineFormula', () => {
-  test('parses the spec formula — 6 stages, gate_on, full transitions', () => {
+  test('parses the spec formula — 9 stages, gate_on, full transitions', () => {
     const f = parseFormula(SPEC_FORMULA);
-    assert.equal(f.stages.length, 6);
+    assert.equal(f.stages.length, 9);
     assert.deepEqual(
       f.stages.map(s => s.name),
-      ['classify', 'route', 'work', 'review', 'merge', 'capture']
+      ['classify', 'route', 'intake', 'work', 'verify', 'review', 'accept', 'merge', 'capture']
     );
-    assert.deepEqual(f.stages[3].gate_on, {
+    assert.deepEqual(f.stages[5].gate_on, {
       field: 'complexity',
       op: '==',
       value: 'complex',
     });
-    assert.equal(f.stages[5].mode, 'always-capture');
+    assert.equal(f.stages[8].mode, 'always-capture');
+    // the agile-contract edges — intake gates work on a validated
+    // spec, verify gates review on evidence, accept gates merge on the
+    // customer (review skip/push both cross acceptance now)
+    assert.equal(transitionFor(f, 'route', 'spawn'), 'intake');
+    assert.equal(transitionFor(f, 'intake', 'accepted'), 'work');
+    assert.equal(transitionFor(f, 'intake', 'declined'), 'close');
+    assert.equal(transitionFor(f, 'work', 'done'), 'verify');
     assert.equal(transitionFor(f, 'work', 'crash'), 'retry');
-    assert.equal(transitionFor(f, 'review', 'push'), 'merge');
-    assert.equal(transitionFor(f, 'review', 'skip'), 'merge');
+    assert.equal(transitionFor(f, 'verify', 'verified'), 'review');
+    assert.equal(transitionFor(f, 'verify', 'unverifiable'), 'park');
+    assert.equal(transitionFor(f, 'review', 'push'), 'accept');
+    assert.equal(transitionFor(f, 'review', 'skip'), 'accept');
+    assert.equal(transitionFor(f, 'accept', 'accepted'), 'merge');
+    assert.equal(transitionFor(f, 'accept', 'rejected'), 'work');
     assert.equal(transitionFor(f, 'capture', 'captured'), 'end');
     assert.ok(isTerminalAction('park'));
     assert.ok(!isTerminalAction('work'));
     assert.equal(entryStage(f).name, 'classify');
+  });
+
+  test('the spec formula declares its parallelism — limits + stage cap', () => {
+    const f = parseFormula(SPEC_FORMULA);
+    assert.equal(f.limits.in_flight, 1); // [limits] in_flight = 1
+    const work = f.stages.find(s => s.name === 'work');
+    assert.equal(work?.concurrency, 1); // stage-level cap narrows, never widens
+    const classify = f.stages.find(s => s.name === 'classify');
+    assert.equal(classify?.concurrency, undefined); // absent → inherits in_flight
+  });
+
+  test('[limits] absent → serial default; explicit in_flight parses', () => {
+    assert.equal(parseFormula(oneStage(A, 'a = { ok = "end" }')).limits.in_flight, 1);
+    const f = parseFormula(`[limits]\nin_flight = 4\n${oneStage(A, 'a = { ok = "end" }')}`);
+    assert.equal(f.limits.in_flight, 4);
+  });
+
+  test('a stage cap parses; absent stays undefined — inherits at runtime', () => {
+    const f = parseFormula(
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = 2\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      )
+    );
+    assert.equal(f.stages[0].concurrency, 2);
+    const g = parseFormula(oneStage(A, 'a = { ok = "end" }'));
+    assert.equal(g.stages[0].concurrency, undefined);
   });
 
   test('a verdict literally named __proto__ lands as data, not a setter', () => {
@@ -143,6 +181,42 @@ describe('invalid formulas — table of rejections', () => {
       `version = 99\n${SPEC_FORMULA.replace('version = 1\n', '')}`,
       /newer than this bro understands/,
     ],
+    [
+      'in_flight below 1 — a cap that admits nothing is a declared deadlock',
+      `[limits]\nin_flight = 0\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'in_flight non-integer',
+      `[limits]\nin_flight = 1.5\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'in_flight as a string',
+      `[limits]\nin_flight = "two"\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits\.in_flight: must be an integer ≥ 1/,
+    ],
+    [
+      'unknown [limits] key — strict-key contract',
+      `[limits]\nin_flight = 2\nworkers = 3\n${oneStage(A, 'a = { ok = "end" }')}`,
+      /limits: unknown key "workers"/,
+    ],
+    [
+      'stage concurrency below 1',
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = 0\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /concurrency: must be an integer ≥ 1/,
+    ],
+    [
+      'stage concurrency non-integer',
+      oneStage(
+        'name = "a"\nengine = "judge"\nconcurrency = "many"\nverdicts = ["ok"]',
+        'a = { ok = "end" }'
+      ),
+      /concurrency: must be an integer ≥ 1/,
+    ],
   ];
   for (const [name, toml, re] of bad) {
     test(name, () => assert.throws(() => parseFormula(toml), re));
@@ -175,7 +249,7 @@ describe('loadPipelineFormula', () => {
     const file = join(dir, 'f.toml');
     writeFileSync(file, SPEC_FORMULA);
     const { formula, sha } = loadPipelineFormula(file);
-    assert.equal(formula.stages.length, 6);
+    assert.equal(formula.stages.length, 9);
     assert.equal(sha, formulaSha(SPEC_FORMULA));
   });
 

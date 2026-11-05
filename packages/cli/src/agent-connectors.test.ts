@@ -1,4 +1,3 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -14,34 +13,39 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
+  type AgentCapabilities,
+  type AgentConnector,
+  type AgentInfo,
+  AgentNotFound,
+  type AgentRegistryEntry,
   agentExitFileName,
   agentRegistryPath,
   bdActor,
+  type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
   handleOwner,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
-  scrubEnv,
   SESSION_SLOT_TTL_MS,
   SpawnError,
-  AgentNotFound,
+  scrubEnv,
   testGitSpawn,
-  type AgentCapabilities,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type ConnectorCtx,
 } from '@broject/core';
+import { devinSessionPlane } from '@broject/devin';
 import {
+  type AgentConnectorEnv,
   agentConnectorNames,
   armNativeSpawnTestSeam,
+  BUDGET_LIMITS,
+  type BudgetSnapshot,
+  batchWallRefusal,
   broSpawnArgv,
   budgetLines,
   budgetSnapshot,
-  BUDGET_LIMITS,
   dockerImageFor,
   eachAgentConnector,
   fleetOccupancy,
@@ -54,20 +58,16 @@ import {
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
-  SpawnAbandoned,
   registerAgentConnector,
-  batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
+  SpawnAbandoned,
   sessionKindOf,
   sessionQuotaOf,
   systemdScopeProbe,
   unregisterAgentConnector,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
-import { devinSessionPlane } from '@broject/devin';
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -1253,6 +1253,43 @@ describe('native credential scope (bro-l8c4f.6)', () => {
       delete process.env.BRO_BATCH;
       delete process.env.KEEP_ME;
       delete process.env.LEAK_ME;
+      cleanup(f);
+    }
+  });
+
+  test('BRO_PIPELINE_KEY never reaches the worker — denied in trusted-host AND strict mode', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_PIPELINE_KEY = 'channel-key';
+    // the worker writes back what it saw — the customer-channel key is
+    // never a worker credential (a worker holding it mints verdicts)
+    const payload = "require('fs').writeFileSync('env.out', process.env.BRO_PIPELINE_KEY ?? '')";
+    try {
+      // trusted-host mode (no strictEnv): the blanket passthrough must
+      // still refuse it
+      const a = await conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await conn(f).stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // strict mode — denied too, even allowlisted AND spec.env'd
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'BRO_PIPELINE_KEY'],
+      };
+      const c = conn(f);
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_PIPELINE_KEY: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_PIPELINE_KEY;
       cleanup(f);
     }
   });
