@@ -317,13 +317,42 @@ function annotateArtifact(deps: IntakeDeps, item: string, out: IntakeOutcome): v
   }
 }
 
+/** The kind-less answer shape — a hand-written row carrying `answers`
+ *  without the CLI's kind tag; still fully validated downstream. */
+const isKindlessAnswer = (v: Record<string, unknown>): boolean =>
+  v.kind === undefined && 'answers' in v;
+
 /** A candidate answer row — the CLI's `kind:"answer"` record, or a
  *  kind-less row still carrying `answers` (the same admission rule as
  *  the accept gate's verdict candidates: a hand-written row the stage
  *  should see — and fully validate). Other kinds ride the same
  *  channel file and are not intake input. */
 const isAnswerCandidate = (v: unknown): boolean =>
-  isRecord(v) && (v.kind === 'answer' || (v.kind === undefined && 'answers' in v));
+  isRecord(v) && (v.kind === 'answer' || isKindlessAnswer(v));
+
+/** A bare-string answer — lands verbatim; whitespace-only is no
+ *  answer. */
+const stringAnswer = (v: string): string[] | undefined => (v.trim() === '' ? undefined : [v]);
+
+/** An array answer — element-per-line (non-strings JSON-stamped);
+ *  all-blank is no answer. */
+const listAnswers = (v: unknown[]): string[] | undefined => {
+  const lines = v.map(x => (typeof x === 'string' ? x : JSON.stringify(x)));
+  return lines.every(l => l.trim() === '') ? undefined : lines;
+};
+
+/** A qid→answer map — one `qid: answer` line per entry; an empty map
+ *  is no answer. */
+const mapAnswers = (v: Record<string, unknown>): string[] | undefined => {
+  const lines = Object.entries(v).map(
+    ([k, x]) => `${k}: ${typeof x === 'string' ? x : JSON.stringify(x)}`
+  );
+  return lines.length === 0 ? undefined : lines;
+};
+
+/** A scalar answer — number/boolean lands as its literal. */
+const scalarAnswer = (v: unknown): string[] | undefined =>
+  typeof v === 'number' || typeof v === 'boolean' ? [String(v)] : undefined;
 
 /** The `answers` payload → artifact lines: a bare string lands
  *  verbatim, a qid→answer map lands one `qid: answer` line per entry,
@@ -332,23 +361,34 @@ const isAnswerCandidate = (v: unknown): boolean =>
  *  answer — malformed, never annotated. */
 function answerLines(answers: unknown): string[] | undefined {
   if (typeof answers === 'string') {
-    return answers.trim() === '' ? undefined : [answers];
+    return stringAnswer(answers);
   }
   if (Array.isArray(answers)) {
-    const lines = answers.map(v => (typeof v === 'string' ? v : JSON.stringify(v)));
-    return lines.every(l => l.trim() === '') ? undefined : lines;
+    return listAnswers(answers);
   }
   if (isRecord(answers)) {
-    const lines = Object.entries(answers).map(
-      ([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`
-    );
-    return lines.length === 0 ? undefined : lines;
+    return mapAnswers(answers);
   }
-  if (typeof answers === 'number' || typeof answers === 'boolean') {
-    return [String(answers)];
-  }
-  return undefined;
+  return scalarAnswer(answers);
 }
+
+/** The record's `item` field → why it can't be attributed, or
+ *  undefined when it names this run's item — a record that can't be
+ *  attributed is never landed (same attribution check the accept
+ *  gate's verdict records pass). */
+function attributionErr(o: Record<string, unknown>, item: string): string | undefined {
+  if (typeof o.item !== 'string' || o.item === '') {
+    return 'item is missing or not a non-empty string';
+  }
+  return o.item === item
+    ? undefined
+    : `names item ${JSON.stringify(o.item)}, not this run's ${JSON.stringify(item)}`;
+}
+
+/** An optional string field's contract — absent is fine, a non-string
+ *  is malformed input. */
+const optStringErr = (o: Record<string, unknown>, k: 'ts' | 'by'): string | undefined =>
+  o[k] !== undefined && typeof o[k] !== 'string' ? `${k} must be a string when present` : undefined;
 
 /** One drained record → its artifact lines, or why it is malformed.
  *  `item` must name this run's item — a record that can't be
@@ -356,20 +396,65 @@ function answerLines(answers: unknown): string[] | undefined {
  *  gate's verdict records pass). */
 function answerRow(v: unknown, item: string): { lines: string[] } | { err: string } {
   const o = v as Record<string, unknown>;
-  if (typeof o.item !== 'string' || o.item === '') {
-    return { err: 'item is missing or not a non-empty string' };
-  }
-  if (o.item !== item) {
-    return { err: `names item ${JSON.stringify(o.item)}, not this run's ${JSON.stringify(item)}` };
-  }
-  if (o.ts !== undefined && typeof o.ts !== 'string') {
-    return { err: 'ts must be a string when present' };
-  }
-  if (o.by !== undefined && typeof o.by !== 'string') {
-    return { err: 'by must be a string when present' };
+  const err = attributionErr(o, item) ?? optStringErr(o, 'ts') ?? optStringErr(o, 'by');
+  if (err !== undefined) {
+    return { err };
   }
   const lines = answerLines(o.answers);
   return lines === undefined ? { err: 'the answers payload is empty or unshaped' } : { lines };
+}
+
+/** The facade's artifact guard refusing a poisoned line — malformed
+ *  INPUT, not a crash (a missing row or store write error still
+ *  throws through the normal crash path). */
+const isGuardRefusal = (e: unknown): e is Error =>
+  e instanceof Error && e.message.includes('opens structure');
+
+/** One record through the drain — skipped (not intake input), landed
+ *  (annotated under `## Answers`), or bad (malformed input, collected
+ *  for the alert). */
+type DrainRow = 'skipped' | 'landed' | { err: string };
+
+function landRecord(deps: IntakeDeps, call: StageCall, r: unknown): DrainRow {
+  if (!isAnswerCandidate(r)) {
+    return 'skipped'; // a verdict row on the same file — not intake input
+  }
+  const out = answerRow(r, call.item);
+  if ('err' in out) {
+    return out;
+  }
+  try {
+    deps.taskSpec.annotate(call.item, ANSWERS_HEADING, out.lines);
+    return 'landed';
+  } catch (e) {
+    if (isGuardRefusal(e)) {
+      return { err: 'an answer line opens markdown structure — artifact text must stay prose' };
+    }
+    throw e;
+  }
+}
+
+/** The fail-closed park — every malformed record named in the alert
+ *  detail so the customer's corrected append knows what to fix. */
+const malformedAlert = (bad: string[]): EngineAlert => ({
+  alert: PARK_ALERTS.answerMalformed,
+  detail: `${bad.length} malformed answer record(s): ${bad.join('; ')}`,
+});
+
+/** The drain's outcome — an alert when any record was malformed, else
+ *  the spec the judgment reads: the ENRICHED one when an annotate
+ *  landed, the one it came in with otherwise. */
+function drainOutcome(
+  deps: IntakeDeps,
+  call: StageCall,
+  spec: TaskSpec,
+  annotated: boolean,
+  bad: string[]
+): { spec: TaskSpec } | { alert: EngineAlert } {
+  if (bad.length > 0) {
+    return { alert: malformedAlert(bad) };
+  }
+  return { spec: annotated ? (deps.taskSpec.spec(call.item) ?? spec) : spec };
 }
 
 /** The drained answer feed → the spec the judgment reads — or a
@@ -390,38 +475,49 @@ async function landAnswers(
   const bad: string[] = [];
   let annotated = false;
   for (const r of feed.records) {
-    if (!isAnswerCandidate(r)) {
-      continue; // a verdict row on the same file — not intake input
-    }
-    const out = answerRow(r, call.item);
-    if ('err' in out) {
-      bad.push(out.err);
-      continue;
-    }
-    try {
-      deps.taskSpec.annotate(call.item, ANSWERS_HEADING, out.lines);
-      annotated = true;
-    } catch (e) {
-      // the facade's artifact guard refusing a poisoned line is
-      // malformed INPUT, not a crash — a missing row or store write
-      // error still throws through the normal crash path
-      if (e instanceof Error && e.message.includes('opens structure')) {
-        bad.push('an answer line opens markdown structure — artifact text must stay prose');
-      } else {
-        throw e;
-      }
+    const d = landRecord(deps, call, r);
+    if (isRecord(d)) {
+      bad.push(d.err);
+    } else {
+      annotated ||= d === 'landed';
     }
   }
   await feed.consume();
-  if (bad.length > 0) {
-    return {
-      alert: {
-        alert: PARK_ALERTS.answerMalformed,
-        detail: `${bad.length} malformed answer record(s): ${bad.join('; ')}`,
-      },
-    };
+  return drainOutcome(deps, call, spec, annotated, bad);
+}
+
+/** The answers half of invoke — fetch the run's feed and land pending
+ *  answer records on the item, handing back the spec the judgment
+ *  reads (the enriched one when anything landed) or the fail-closed
+ *  `answer-malformed` alert. An unbound or empty feed simply passes
+ *  the spec through. */
+async function drainAnswers(
+  deps: IntakeDeps,
+  call: StageCall,
+  spec: TaskSpec
+): Promise<{ spec: TaskSpec } | { alert: EngineAlert }> {
+  const feed = deps.answers === undefined ? undefined : await deps.answers(call);
+  return feed === undefined || feed.records.length === 0
+    ? { spec }
+    : landAnswers(deps, call, feed, spec);
+}
+
+/** The judged outcome → the journaled payload — the verdict restated,
+ *  the fingerprint of the spec that was judged, the arm's own fields
+ *  (a `questions` list, a `declined` feedback string), and the routed
+ *  worker slot when one rode the context. */
+function intakePayload(call: StageCall, out: IntakeOutcome, spec: TaskSpec): IntakePayload {
+  const p: IntakePayload = { verdict: out.verdict, spec: fingerprint(spec) };
+  if (out.verdict === 'questions') {
+    p.questions = [...out.questions];
+  } else if (out.verdict === 'declined') {
+    p.feedback = out.feedback;
   }
-  return { spec: annotated ? (deps.taskSpec.spec(call.item) ?? spec) : spec };
+  const worker = workerOf(call);
+  if (worker !== undefined) {
+    p.worker = worker;
+  }
+  return p;
 }
 
 /**
@@ -443,28 +539,14 @@ export function intakeStage(deps: IntakeDeps): EngineHandler {
       if (spec === undefined) {
         throw new Error(`intake: item "${call.item}" is not in the task store`);
       }
-      const feed = deps.answers === undefined ? undefined : await deps.answers(call);
-      const landed =
-        feed === undefined || feed.records.length === 0
-          ? { spec }
-          : await landAnswers(deps, call, feed, spec);
+      const landed = await drainAnswers(deps, call, spec);
       if ('alert' in landed) {
         return landed.alert;
       }
       const out = await deps.intake(call, landed.spec);
       checkOutcome(out);
       annotateArtifact(deps, call.item, out);
-      const p: IntakePayload = { verdict: out.verdict, spec: fingerprint(landed.spec) };
-      if (out.verdict === 'questions') {
-        p.questions = [...out.questions];
-      } else if (out.verdict === 'declined') {
-        p.feedback = out.feedback;
-      }
-      const worker = workerOf(call);
-      if (worker !== undefined) {
-        p.worker = worker;
-      }
-      return { verdict: out.verdict, payload: p };
+      return { verdict: out.verdict, payload: intakePayload(call, out, landed.spec) };
     },
   };
 }
