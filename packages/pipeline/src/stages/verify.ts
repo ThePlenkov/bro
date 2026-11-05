@@ -94,18 +94,24 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const isRowVerdict = (v: unknown): v is RowVerdict =>
   (ROW_VERDICTS as readonly string[]).includes(v as string);
 
+/** One AC row — a non-empty criterion string (a `''` criterion could
+ *  never produce an attributable evidence row). */
+const isAcRow = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
+/** The AC list's contract — every member a usable criterion. The
+ *  facade's parser never emits empty rows, but the seam is a port: a
+ *  taskSpec implementation returning runtime garbage is malformed
+ *  data, fail loud like every other broken input. */
+const isAcList = (v: unknown): v is string[] => Array.isArray(v) && v.every(isAcRow);
+
 /** The declared AC list — absent is the unverifiable input; present
- *  must be a list of non-empty criteria strings. The facade's parser
- *  never emits empty rows, but the seam is a port: a taskSpec
- *  implementation returning runtime garbage is malformed data, and a
- *  `''` criterion could never produce an attributable evidence row —
- *  fail loud, same posture as every other broken input. */
+ *  must satisfy {@link isAcList}. */
 function acListOf(spec: TaskSpec): string[] {
   const ac = spec.acceptance;
   if (ac === undefined) {
     return [];
   }
-  if (!Array.isArray(ac) || ac.some(a => typeof a !== 'string' || a === '')) {
+  if (!isAcList(ac)) {
     throw new Error(
       'verify: the taskSpec seam returned a malformed acceptance list — expected non-empty strings'
     );
@@ -113,26 +119,49 @@ function acListOf(spec: TaskSpec): string[] {
   return ac;
 }
 
-/** One seam answer, validated before it becomes payload — the row
- *  must be a record whose `ac` IS the asked criterion (an `ac` for
- *  anything else is evidence of the wrong check), whose verdict is in
- *  the pass|fail enum, and whose proof is a usable ref. A malformed
+/** A usable proof ref — where the evidence lives, never the claim. */
+const isProof = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
+/** The seam's own answer fields well-formed — verdict in the
+ *  pass|fail enum, proof a usable ref (the `ac` echo is the
+ *  attribution check, kept apart). */
+const isSeamAnswer = (v: Record<string, unknown>): boolean =>
+  isRowVerdict(v.verdict) && isProof(v.proof);
+
+/** The asked criterion echoed back — an `ac` naming anything else is
+ *  evidence of the wrong check. */
+const echoesAc = (v: Record<string, unknown>, ac: string): boolean => v.ac === ac;
+
+/** The evidence-row contract — a record echoing the asked criterion
+ *  whose verdict and proof are well-formed. */
+const isEvidenceRow = (v: unknown, ac: string): v is EvidenceRow =>
+  isRecord(v) && echoesAc(v, ac) && isSeamAnswer(v);
+
+/** One seam answer, validated before it becomes payload. A malformed
  *  row throws like capture's malformed outcome: the check DID run,
  *  but an unreadable answer can't be journaled as the AC's proof. */
 function checkRow(row: EvidenceRow, ac: string): EvidenceRow {
-  if (
-    !isRecord(row) ||
-    row.ac !== ac ||
-    !isRowVerdict(row.verdict) ||
-    typeof row.proof !== 'string' ||
-    row.proof === ''
-  ) {
+  if (!isEvidenceRow(row, ac)) {
     throw new Error(
       `verify: the e2e seam returned a malformed evidence row — expected ` +
         `{ac: <the asked criterion>, verdict: pass|fail, proof: ref}, got ${JSON.stringify(row)}`
     );
   }
   return row;
+}
+
+/** The per-AC evidence sweep — one seam call per declared criterion,
+ *  validated rows back in declared order. */
+async function evidenceRows(
+  deps: VerifyDeps,
+  call: StageCall,
+  acs: string[]
+): Promise<EvidenceRow[]> {
+  const rows: EvidenceRow[] = [];
+  for (const ac of acs) {
+    rows.push(checkRow(await deps.e2e(call, ac), ac));
+  }
+  return rows;
 }
 
 /** The `failed` fix scope — the failing rows rendered as the
@@ -145,6 +174,33 @@ function fixScope(fails: EvidenceRow[]): string {
     'address the failed acceptance criteria — ' +
     fails.map(r => `${r.ac} (evidence: ${r.proof})`).join('; ')
   );
+}
+
+/** The unverifiable arm's payload — the stage ran and found nothing
+ *  to verify against. */
+const unverifiablePayload = (): VerifyPayload => ({
+  rows: [],
+  summary: 'no declared acceptance criteria — the item cannot be verified',
+});
+
+/** Rows → verdict + payload — derived, never asked: every row
+ *  passing is `verified`; any fail is `failed` with the failing rows
+ *  composed into the fix-scope notes. */
+function verdictOf(rows: EvidenceRow[]): EngineResult {
+  const fails = rows.filter(r => r.verdict === 'fail');
+  if (fails.length === 0) {
+    const p: VerifyPayload = {
+      rows,
+      summary: `all ${rows.length} acceptance criteria verified`,
+    };
+    return { verdict: 'verified', payload: p };
+  }
+  const p: VerifyPayload = {
+    rows,
+    summary: `${fails.length} of ${rows.length} acceptance criteria failed`,
+    notes: fixScope(fails),
+  };
+  return { verdict: 'failed', payload: p };
 }
 
 /**
@@ -166,30 +222,9 @@ export function verifyStage(deps: VerifyDeps): EngineHandler {
       }
       const acs = acListOf(spec);
       if (acs.length === 0) {
-        const p: VerifyPayload = {
-          rows: [],
-          summary: 'no declared acceptance criteria — the item cannot be verified',
-        };
-        return { verdict: 'unverifiable', payload: p };
+        return { verdict: 'unverifiable', payload: unverifiablePayload() };
       }
-      const rows: EvidenceRow[] = [];
-      for (const ac of acs) {
-        rows.push(checkRow(await deps.e2e(call, ac), ac));
-      }
-      const fails = rows.filter(r => r.verdict === 'fail');
-      if (fails.length === 0) {
-        const p: VerifyPayload = {
-          rows,
-          summary: `all ${rows.length} acceptance criteria verified`,
-        };
-        return { verdict: 'verified', payload: p };
-      }
-      const p: VerifyPayload = {
-        rows,
-        summary: `${fails.length} of ${rows.length} acceptance criteria failed`,
-        notes: fixScope(fails),
-      };
-      return { verdict: 'failed', payload: p };
+      return verdictOf(await evidenceRows(deps, call, acs));
     },
   };
 }
