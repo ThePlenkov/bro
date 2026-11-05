@@ -22,6 +22,12 @@
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
+ * `/bro` is the one dispatcher command every client ships: the canonical
+ * content is skills/bro/SKILL.md (devin skills ARE slash commands, and
+ * every skills/-linked client resolves the same file); Claude's native
+ * surface is commands/bro.md, generated here from that body so
+ * `check:plugins` catches drift.
+ *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
@@ -786,6 +792,54 @@ emit(
     hooks: './plugins/codex/bro/hooks/hooks.json',
   })
 );
+
+// `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
+// the canonical content: devin resolves skills as slash commands, codex
+// and every skills/-linked adapter read the same file. Claude's native
+// surface is commands/bro.md — derived from the skill body here so a
+// hand edit on either side surfaces as check:plugins drift. opencode's
+// /bro is native (opencode-tui.ts), no file to check.
+const BRO_SKILL = 'skills/bro/SKILL.md';
+if (!existsSync(join(ROOT, BRO_SKILL))) {
+  // same convention as the `null` adapter entries: generation can't
+  // create a missing hand-written source — error in write mode, drift
+  // in check mode
+  if (!CHECK) {
+    console.error(`required canonical file missing: ${BRO_SKILL}`);
+    process.exit(1);
+  }
+  drift.push(BRO_SKILL);
+} else {
+  const skillText = readFileSync(join(ROOT, BRO_SKILL), 'utf8');
+  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(skillText);
+  if (fm === null) {
+    console.error(`${BRO_SKILL}: no YAML frontmatter — cannot derive commands/bro.md`);
+    process.exit(1);
+  }
+  const body = skillText.slice(fm[0].length);
+  // the skill's leading H1 must come first — markdownlint MD041 wants a
+  // top-level heading before any text, so the `$ARGUMENTS` note follows
+  // the title instead of preceding it (that order also produced the
+  // double blank line MD012 flagged)
+  const trimmed = body.replace(/^\s+/, '');
+  if (!/^#(?:\s|$)/.test(trimmed)) {
+    console.error(`${BRO_SKILL}: body must start with a level-one heading`);
+    process.exit(1);
+  }
+  const h1End = trimmed.indexOf('\n');
+  const h1 = h1End === -1 ? trimmed : trimmed.slice(0, h1End);
+  // one blank line between the $ARGUMENTS note and the body — the skill's
+  // own leading blank run would land as consecutive blanks (MD012); the
+  // emit template already ends the note's line, so rest carries one \n
+  const rest = (h1End === -1 ? '' : trimmed.slice(h1End)).replace(/^(\r?\n)+/, '\n');
+  // the npx fallback pin tracks the release line (major.minor) the skill
+  // advertises — the grouped `bro review`/`bro flow` surface needs 0.3+
+  const broReleaseLine = cliVersion.split('.').slice(0, 2).join('.');
+  emit(
+    'commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+}
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
   // A symlinked adapter dir is replaced before any write. emit() only
