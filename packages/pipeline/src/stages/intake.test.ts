@@ -12,7 +12,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { row, type SpecStoreSpy, specStore } from '../testkit.ts';
+import { row, settled, type SpecStoreSpy, specStore } from '../testkit.ts';
 import {
   DECLINED_HEADING,
   type IntakeDeps,
@@ -109,7 +109,7 @@ const invoke = async (
   spy: IntakeSpy,
   specs = specStore([row(ITEM, { description: SPEC_BODY })]),
   over: Partial<StageCall> = {}
-) => intakeStage(deps(spy, specs)).invoke(call(over));
+) => settled(await intakeStage(deps(spy, specs)).invoke(call(over)));
 
 describe('intake — the spec read', () => {
   test('the seam judges the spec the facade parsed — AC/DoR/scenarios/body', async () => {
