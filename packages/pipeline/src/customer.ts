@@ -24,8 +24,9 @@ import type { MaybePromise } from '@broject/core';
 import {
   appendJsonlRow,
   fileJournal,
-  journalRecords,
   type JournalLocator,
+  journalRecords,
+  type PipelineJournal,
   pipelineDir,
 } from './journal.ts';
 import type { StageCall } from './runner.ts';
@@ -173,6 +174,18 @@ export function fileVerdictStore(dir: string) {
   };
 }
 
+/** A well-formed `upto` — the channel row count a marker records:
+ *  a non-negative integer, nothing else. */
+const isUpto = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+
+/** One consumed marker's index bound — `upto` when the marker
+ *  records the row count it saw, else its own position +1 (a
+ *  pre-`upto` marker vouches only for the rows before it). A
+ *  malformed `upto` reads as a legacy marker — never a wider bound
+ *  than the marker can prove. */
+const markerBound = (r: Record<string, unknown>, i: number): number =>
+  isUpto(r.upto) ? r.upto : i + 1;
+
 /** Rows not yet covered by a `consumed` marker — the pending answer
  *  input a waking intake drains. A marker bounds by the row count it
  *  saw (`upto`): a record appended between the feed's read and the
@@ -185,12 +198,9 @@ export function fileVerdictStore(dir: string) {
 export function pendingAnswers(rows: unknown[]): unknown[] {
   let start = 0;
   rows.forEach((r, i) => {
-    if (!isRecord(r) || r.kind !== 'consumed') {
-      return;
+    if (isRecord(r) && r.kind === 'consumed') {
+      start = Math.max(start, markerBound(r, i));
     }
-    const upto = r.upto;
-    const bound = typeof upto === 'number' && Number.isInteger(upto) && upto >= 0 ? upto : i + 1;
-    start = Math.max(start, bound);
   });
   return rows.slice(start);
 }
@@ -248,6 +258,45 @@ export interface AwaitingRun {
   via: 'pending' | 'alert' | 'verdict';
 }
 
+/** The pipeline dir's `*.journal.jsonl` file names — [] when the
+ *  dir itself can't be listed: no pipeline dir means nothing ever
+ *  ran here, and a discovery scan that can't read the plane finds
+ *  nothing rather than dying on it. */
+function journalFileNames(d: string): string[] {
+  try {
+    return readdirSync(d).filter(f => f.endsWith('.journal.jsonl'));
+  } catch {
+    return []; // no pipeline dir — nothing ever ran here
+  }
+}
+
+/** One journal file's tail → WHY its run awaits the customer, or
+ *  undefined when it doesn't: an empty journal or a tail parked at
+ *  another stage, and a settled verdict counts only when `verdicts`
+ *  names it a wait state. The tail record decides — a pending intent
+ *  or a repairable alert always counts. */
+function awaitingVia(
+  journal: PipelineJournal,
+  item: string,
+  stage: string,
+  verdicts: readonly string[]
+): AwaitingRun['via'] | undefined {
+  const records = journalRecords(
+    journal.rows().filter(r => r.run_id === journal.runId && r.item === item)
+  );
+  const last = records.at(-1);
+  if (last === undefined || (last.resume ?? last.stage) !== stage) {
+    return undefined;
+  }
+  if (last.alert !== undefined) {
+    return 'alert';
+  }
+  if (last.verdict === undefined) {
+    return 'pending';
+  }
+  return verdicts.includes(last.verdict) ? 'verdict' : undefined;
+}
+
 /** Runs whose journal tail sits at `stage` awaiting customer input
  *  for `item`. The tail record decides: a pending intent or an alert
  *  with `resume`/`stage` at the stage always counts; a settled record
@@ -264,34 +313,15 @@ export function awaitingCustomerRuns(
   if (d === null) {
     return [];
   }
-  let files: string[];
-  try {
-    files = readdirSync(d);
-  } catch {
-    return []; // no pipeline dir — nothing ever ran here
-  }
   const out: AwaitingRun[] = [];
-  for (const f of files) {
-    if (!f.endsWith('.journal.jsonl')) {
-      continue;
-    }
+  for (const f of journalFileNames(d)) {
     const journal = fileJournal(join(d, f));
     if (journal.runId === undefined) {
       continue;
     }
-    const records = journalRecords(
-      journal.rows().filter(r => r.run_id === journal.runId && r.item === item)
-    );
-    const last = records.at(-1);
-    if (last === undefined || (last.resume ?? last.stage) !== stage) {
-      continue;
-    }
-    if (last.alert !== undefined) {
-      out.push({ runId: journal.runId, stage, via: 'alert' });
-    } else if (last.verdict === undefined) {
-      out.push({ runId: journal.runId, stage, via: 'pending' });
-    } else if (verdicts.includes(last.verdict)) {
-      out.push({ runId: journal.runId, stage, via: 'verdict' });
+    const via = awaitingVia(journal, item, stage, verdicts);
+    if (via !== undefined) {
+      out.push({ runId: journal.runId, stage, via });
     }
   }
   return out;

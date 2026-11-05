@@ -216,6 +216,99 @@ function consumedVerdict(call: StageCall, verdict: string, payload: AcceptPayloa
   return false;
 }
 
+/** One gate rule on the verdict record — the fail-closed alert it
+ *  raises, or undefined when the record passes it. */
+type VerdictGate = (call: StageCall, raw: Record<string, unknown>) => EngineAlert | undefined;
+
+/** raw.verdict names one of the stage's declared verdict words. */
+const verdictDeclared: VerdictGate = (call, raw) => {
+  const v = raw.verdict;
+  return typeof v === 'string' && call.stage.verdicts.includes(v)
+    ? undefined
+    : malformed(
+        `verdict ${JSON.stringify(v)} is not one of the accept stage's verdicts ` +
+          `(${call.stage.verdicts.join('|')})`
+      );
+};
+
+/** The record names THIS run's item — attribution: the channel file
+ *  keys the run, and a record naming another item (a blindly pinned
+ *  --run's foreign verdict) is malformed input, never a settling one. */
+const itemAttributed: VerdictGate = (call, raw) =>
+  raw.item === call.item
+    ? undefined
+    : malformed(
+        `verdict names item ${JSON.stringify(raw.item)} — ` +
+          `this run's item is ${JSON.stringify(call.item)}`
+      );
+
+/** `accepted_by` is a non-empty string — the signer the gate compares. */
+const signerField: VerdictGate = (_call, raw) =>
+  typeof raw.accepted_by === 'string' && raw.accepted_by !== ''
+    ? undefined
+    : malformed('accepted_by is missing or not a non-empty string');
+
+/** `notes` is a string when present — shape before the notes rule. */
+const notesField: VerdictGate = (_call, raw) =>
+  raw.notes === undefined || typeof raw.notes === 'string'
+    ? undefined
+    : malformed('notes must be a string when present');
+
+/** `ts` is a string when present — shape before provenance use. */
+const tsField: VerdictGate = (_call, raw) =>
+  raw.ts === undefined || typeof raw.ts === 'string'
+    ? undefined
+    : malformed('ts must be a string when present');
+
+/** The identity gate — only the recorded customer moves accept; a
+ *  worker's signature is a park, never a transition. */
+const signerMatches: VerdictGate = (call, raw) =>
+  raw.accepted_by === call.customer
+    ? undefined
+    : {
+        alert: PARK_ALERTS.customerMismatch,
+        detail:
+          `verdict signed by ${JSON.stringify(raw.accepted_by)} — ` +
+          `run customer is ${JSON.stringify(call.customer)}`,
+      };
+
+/** A string with no non-whitespace content — no fix scope at all. */
+const blank = (v: string | undefined): boolean => v === undefined || v.trim() === '';
+
+/** `rejected` carries non-empty notes — the customer's fix scope
+ *  (same contract as review.fix). Runs after the shape gates, so
+ *  `notes` here is a string or absent. */
+const fixNotesPresent: VerdictGate = (_call, raw) =>
+  raw.verdict === REJECTED_VERDICT && blank(raw.notes as string | undefined)
+    ? {
+        alert: PARK_ALERTS.fixNotesMissing,
+        detail: "accept.rejected requires non-empty notes — the customer's fix scope",
+      }
+    : undefined;
+
+/** The fail-closed record gates, in contract order — the FIRST
+ *  complaint is the alert raised, so a record failing several rules
+ *  still surfaces the same park the sequential chain produced
+ *  (shape → attribution → fields → identity → fix scope). */
+const VERDICT_GATES: readonly VerdictGate[] = [
+  verdictDeclared,
+  itemAttributed,
+  signerField,
+  notesField,
+  tsField,
+  signerMatches,
+  fixNotesPresent,
+];
+
+/** The journaled echo of the record the gate consumes —
+ *  `accepted_by` always, `notes`/`ts` only when the record carried
+ *  them (the consumption ledger deep-equals on these fields). */
+const verdictPayload = (raw: Record<string, unknown>): AcceptPayload => ({
+  accepted_by: raw.accepted_by as string,
+  ...(raw.notes !== undefined ? { notes: raw.notes as string } : {}),
+  ...(raw.ts !== undefined ? { ts: raw.ts as string } : {}),
+});
+
 /** The verdict record → a settling result, 'pending', or a
  *  fail-closed alert — every gate rule in one place so invoke and
  *  recheck can never disagree on what counts. */
@@ -226,61 +319,21 @@ function outcomeFromVerdict(call: StageCall, raw: unknown): EngineOutcome {
   if (!isRecord(raw)) {
     return malformed('the customer verdict record is not a record');
   }
-  const v = raw.verdict;
-  if (typeof v !== 'string' || !call.stage.verdicts.includes(v)) {
-    return malformed(
-      `verdict ${JSON.stringify(v)} is not one of the accept stage's verdicts ` +
-        `(${call.stage.verdicts.join('|')})`
-    );
+  for (const gate of VERDICT_GATES) {
+    const denied = gate(call, raw);
+    if (denied !== undefined) {
+      return denied;
+    }
   }
-  // attribution — the channel file keys the run; a record naming
-  // another item (a blindly pinned --run's foreign verdict) is
-  // malformed input, never a settling one
-  if (raw.item !== call.item) {
-    return malformed(
-      `verdict names item ${JSON.stringify(raw.item)} — ` +
-        `this run's item is ${JSON.stringify(call.item)}`
-    );
-  }
-  if (typeof raw.accepted_by !== 'string' || raw.accepted_by === '') {
-    return malformed('accepted_by is missing or not a non-empty string');
-  }
-  if (raw.notes !== undefined && typeof raw.notes !== 'string') {
-    return malformed('notes must be a string when present');
-  }
-  if (raw.ts !== undefined && typeof raw.ts !== 'string') {
-    return malformed('ts must be a string when present');
-  }
-  // the identity gate — only the recorded customer moves accept; a
-  // worker's signature is a park, never a transition
-  if (raw.accepted_by !== call.customer) {
-    return {
-      alert: PARK_ALERTS.customerMismatch,
-      detail:
-        `verdict signed by ${JSON.stringify(raw.accepted_by)} — ` +
-        `run customer is ${JSON.stringify(call.customer)}`,
-    };
-  }
-  if (v === REJECTED_VERDICT && (raw.notes === undefined || raw.notes.trim() === '')) {
-    return {
-      alert: PARK_ALERTS.fixNotesMissing,
-      detail: "accept.rejected requires non-empty notes — the customer's fix scope",
-    };
-  }
-  const payload: AcceptPayload = { accepted_by: raw.accepted_by };
-  if (raw.notes !== undefined) {
-    payload.notes = raw.notes;
-  }
-  if (raw.ts !== undefined) {
-    payload.ts = raw.ts;
-  }
-  if (consumedVerdict(call, v, payload)) {
+  const payload = verdictPayload(raw);
+  const verdict = raw.verdict as string; // a declared word — the shape gate proved it
+  if (consumedVerdict(call, verdict, payload)) {
     // this exact record already settled an earlier accept entry —
     // the customer must decide each entry fresh; the pending intent
     // stays the resume anchor until a new record lands
     return 'pending';
   }
-  return { verdict: v, payload };
+  return { verdict, payload };
 }
 
 /** No recorded customer → the gate can never pass → fail closed

@@ -22,9 +22,9 @@
 import { readFileSync } from 'node:fs';
 import { bdActor, hasHelpFlag, printUsage } from '@broject/core';
 import {
+  type AwaitingRun,
   appendCustomerRecord,
   awaitingCustomerRuns,
-  type AwaitingRun,
   customerChannelPath,
 } from '@broject/pipeline';
 import { flag, positionals } from './args.ts';
@@ -58,13 +58,19 @@ function fail(msg: string, code = 1): never {
   process.exit(code);
 }
 
+/** The env-badge identity — `BRO_AGENT_ID` set and non-empty, else
+ *  undefined (an empty badge is no badge — never a signer). */
+const envSigner = (): string | undefined => {
+  const badge = process.env.BRO_AGENT_ID?.trim();
+  return badge === undefined || badge === '' ? undefined : badge;
+};
+
 /** The signer identity — explicit --by wins, else the env badge a
  *  spawned agent-customer carries, else the store's actor chain. An
  *  unresolvable identity is a hard fail: a verdict with no signer
  *  can never pass the gate, so recording it is worse than refusing. */
 function signer(argv: string[], dir: string): string {
-  const badge = process.env.BRO_AGENT_ID?.trim();
-  const by = flag(argv, '--by') ?? (badge !== undefined && badge !== '' ? badge : bdActor(dir));
+  const by = flag(argv, '--by') ?? envSigner() ?? bdActor(dir);
   if (by === '') {
     fail('cannot resolve the signer — pass --by or set BRO_AGENT_ID');
   }
@@ -118,6 +124,10 @@ function appendToRun(
   appendCustomerRecord(file, rec);
 }
 
+/** A string with no non-whitespace content — no answer, no fix
+ *  scope, nothing to record. */
+const blank = (v: string | undefined): boolean => v === undefined || v.trim() === '';
+
 function cmdAccept(argv: string[]): void {
   const pos = positionals(argv, new Set(['--notes', '--by', '--run']), { strict: true });
   if (pos.length !== 2) {
@@ -129,7 +139,7 @@ function cmdAccept(argv: string[]): void {
     fail(`verdict must be one of ${ACCEPT_VERDICTS.join('|')} — got ${JSON.stringify(verdict)}`, 2);
   }
   const notes = flag(argv, '--notes');
-  if (verdict === 'rejected' && (notes === undefined || notes.trim() === '')) {
+  if (verdict === 'rejected' && blank(notes)) {
     fail("--notes is required on rejected — it is the customer's fix scope", 2);
   }
   const dir = process.cwd();
@@ -147,6 +157,23 @@ function cmdAccept(argv: string[]): void {
   );
 }
 
+/** The --answers-file payload — JSON when the file parses (a
+ *  structured qid→answer map), the raw text otherwise. An unreadable
+ *  file is a hard fail — recording nothing is worse than refusing. */
+function answersFromFile(file: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    fail(`cannot read --answers-file ${file}: ${(e as Error).message}`);
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
 /** The answers payload: -m/--message is raw text; --answers-file
  *  reads a file that parses as JSON when it can (a structured
  *  qid→answer map), else the raw text. */
@@ -162,18 +189,32 @@ function answersPayload(argv: string[]): unknown {
   if (file === undefined) {
     fail('answer needs -m/--message or --answers-file', 2);
   }
-  let text: string;
-  try {
-    text = readFileSync(file, 'utf8');
-  } catch (e) {
-    fail(`cannot read --answers-file ${file}: ${(e as Error).message}`);
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
-  }
+  return answersFromFile(file);
 }
+
+/** Flag spellings that take the NEXT token as their value — a bare
+ *  token consumes it verbatim (even when it spells `-m`), an inline
+ *  `=<v>` spelling never does. */
+const VALUE_FLAGS = new Set(['-m', '--message', '--answers-file', '--by', '--run']);
+
+/** The token's flag name — its segment up to the first `=`. A name
+ *  of `-m` means the token IS `-m` or `-m=<v>` exactly: segment
+ *  equality, never a prefix match (`-mfoo` is literal answer text,
+ *  not the option). */
+const flagName = (a: string): string => a.split('=', 1)[0]!;
+
+/** `-m`'s option name — segment equality only. */
+const isShortFlag = (name: string): boolean => name === '-m';
+
+/** There IS a next token to consume as a flag value. */
+const hasNext = (argv: string[], i: number): boolean => i + 1 < argv.length;
+
+/** A bare value flag followed by a token — the flag consumes it as
+ *  its value, copied untouched, so `--message -m=x` keeps `-m=x` as
+ *  text. An inline `=`-form token never consumes (the value is in
+ *  the token already). */
+const consumesValue = (a: string, argv: string[], i: number): boolean =>
+  flagName(a) === a && VALUE_FLAGS.has(a) && hasNext(argv, i);
 
 /** `-m` → `--message`, ONLY in option position: a `-m` token that is
  *  another option's value (or sits past `--`) is literal answer text,
@@ -181,7 +222,6 @@ function answersPayload(argv: string[]): unknown {
  *  recorded. Walk once: a bare value flag consumes the next token
  *  verbatim (even when it spells `-m`), and `--` ends flag scanning. */
 function normalizeShortFlag(argv: string[]): string[] {
-  const valueFlags = new Set(['-m', '--message', '--answers-file', '--by', '--run']);
   const out: string[] = [];
   let verbatim = false;
   for (let i = 0; i < argv.length; i += 1) {
@@ -195,21 +235,17 @@ function normalizeShortFlag(argv: string[]): string[] {
       out.push(a);
       continue;
     }
-    const name = a.split('=', 1)[0]!;
-    if (name === '-m') {
-      // a token that IS `-m` or `-m=<v>` — segment equality, never a
-      // prefix match (`-mfoo` is literal text, not the option)
+    const name = flagName(a);
+    if (isShortFlag(name)) {
       out.push(a === name ? '--message' : `--message=${a.slice(name.length + 1)}`);
-      if (a === name && i + 1 < argv.length) {
+      if (a === name && hasNext(argv, i)) {
         i += 1;
         out.push(argv[i]!); // bare -m consumes its value verbatim
       }
       continue;
     }
     out.push(a);
-    // a known value flag in bare form consumes the next token as its
-    // value — copied untouched, so `--message -m=x` keeps `-m=x` as text
-    if (a === name && valueFlags.has(name) && i + 1 < argv.length) {
+    if (consumesValue(a, argv, i)) {
       i += 1;
       out.push(argv[i]!);
     }
