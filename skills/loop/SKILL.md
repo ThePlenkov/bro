@@ -61,6 +61,15 @@ before the first claim, a bad `class:` label parks its bead instead of
 silently falling through. `fleet.router` (shadow/enforce) classifies
 unclassed beads by judge verdict, same as `agents up`.
 
+**Route table** — declare `brouter.routes` and the loop asks the ROUTER's
+own table instead: the bead's class label is the task's `type`, its
+priority the task's band, and the table's `chain` names the models (the
+honest `<entry>/<model>` ids). `fleet.routing` stays the compatibility
+face — a run that declares no table behaves exactly as before. A table
+that breaks, or names a model `brouter.models` contradicts, is a config
+error: the run refuses to spawn rather than land the bead elsewhere
+(`bro router route "<task>"` shows the verdict and the why).
+
 **Raw template** — `loop.agent` (or an `--agent` value that names no
 provider) is the escape hatch:
 
