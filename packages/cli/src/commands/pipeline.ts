@@ -195,12 +195,18 @@ function normalizeShortFlag(argv: string[]): string[] {
       out.push(a);
       continue;
     }
-    if (a.startsWith('-m=')) {
-      out.push(`--message=${a.slice(3)}`);
+    const name = a.split('=', 1)[0]!;
+    if (name === '-m') {
+      // a token that IS `-m` or `-m=<v>` — segment equality, never a
+      // prefix match (`-mfoo` is literal text, not the option)
+      out.push(a === name ? '--message' : `--message=${a.slice(name.length + 1)}`);
+      if (a === name && i + 1 < argv.length) {
+        i += 1;
+        out.push(argv[i]!); // bare -m consumes its value verbatim
+      }
       continue;
     }
-    const name = a.split('=', 1)[0]!;
-    out.push(a === '-m' ? '--message' : a);
+    out.push(a);
     // a known value flag in bare form consumes the next token as its
     // value — copied untouched, so `--message -m=x` keeps `-m=x` as text
     if (a === name && valueFlags.has(name) && i + 1 < argv.length) {

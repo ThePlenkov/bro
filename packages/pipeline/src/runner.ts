@@ -321,6 +321,10 @@ interface Run {
    *  only itself never trips. The injected journal's rows still add
    *  to the view (a store spans whatever it returns). */
   occupancyDir?: string;
+  /** the sibling-run-file snapshot — read once on the first
+   *  `flowTails` call of a wake, cached for the whole drive (a
+   *  per-step rescan reads every sibling file O(steps × files)) */
+  siblingRows?: JournalRow[];
   journal: PipelineJournal;
   engines: Map<string, EngineHandler>;
   admit?: AdmitFn;
@@ -404,6 +408,41 @@ function flowTail(formula: PipelineFormula, records: JournalRow[]): FlowTail {
   return { moving: false };
 }
 
+/** Every `*.journal.jsonl` under the pipeline dir — read ONCE per
+ *  wake and cached on the run: `flowTails` runs per stage entry, and
+ *  a per-step rescan would read every sibling file O(steps × files)
+ *  deep in a synchronous loop tick. Within one wake only THIS run
+ *  appends, and its rows come live from `run.journal` anyway — the
+ *  sibling view at wake time is the honest semaphore.
+ *
+ *  `ENOENT` alone means "no pipeline dir yet — this run is alone".
+ *  Every other readdirSync failure, and an unreadable sibling file,
+ *  throws like the run's own journal would: a semaphore that can't
+ *  see the plane must fail CLOSED — narrowing to the run's own rows
+ *  on EACCES/EMFILE/ENOTDIR would admit past cap on an empty view. */
+function siblingJournalRows(dir: string): JournalRow[] {
+  const d = pipelineDir({ dir });
+  if (d === null) {
+    return [];
+  }
+  let files: string[];
+  try {
+    files = readdirSync(d);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw e;
+  }
+  const rows: JournalRow[] = [];
+  for (const f of files) {
+    if (f.endsWith('.journal.jsonl')) {
+      rows.push(...fileJournal(join(d, f)).rows());
+    }
+  }
+  return rows;
+}
+
 /** The rows occupancy counts — the run's journal view UNIONED with
  *  every `*.journal.jsonl` under the pipeline dir when `opts.dir`
  *  binds one: a file-backed journal carries this run alone, and a cap
@@ -416,23 +455,8 @@ function occupancyRows(run: Run): JournalRow[] {
   if (run.occupancyDir === undefined) {
     return run.journal.rows();
   }
-  const d = pipelineDir({ dir: run.occupancyDir });
-  if (d === null) {
-    return run.journal.rows();
-  }
-  let files: string[];
-  try {
-    files = readdirSync(d);
-  } catch {
-    return run.journal.rows(); // no pipeline dir yet — this run is alone
-  }
-  const rows = run.journal.rows();
-  for (const f of files) {
-    if (f.endsWith('.journal.jsonl')) {
-      rows.push(...fileJournal(join(d, f)).rows());
-    }
-  }
-  return rows;
+  run.siblingRows ??= siblingJournalRows(run.occupancyDir);
+  return [...run.journal.rows(), ...run.siblingRows];
 }
 
 /** Every other flow's tail, reconstructed from the journal — rows

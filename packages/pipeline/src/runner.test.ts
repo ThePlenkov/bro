@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 import { testRepoInit } from '@broject/core';
 import { parse } from 'smol-toml';
@@ -1386,5 +1386,57 @@ b = { done = "end" }
       judge2.calls.map(c => c.stage.name),
       ['a']
     );
+  });
+
+  test('an unreadable pipeline dir fails CLOSED — the semaphore never admits blind', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-occ-'));
+    testRepoInit(dir);
+    const d = pipelineDir({ dir });
+    assert.ok(d !== null);
+    // `bro` exists but is a FILE — the pipeline dir beneath it is a
+    // path through a non-directory: readdirSync throws ENOTDIR, not
+    // ENOENT ("no dir yet" is the only absence that means alone).
+    // A memory journal keeps the bind clean so the dir scan itself is
+    // the code under test — narrowing to the run's own rows here would
+    // let the semaphore admit past cap on an empty view.
+    writeFileSync(dirname(d), 'not a dir');
+    const judge = spy([{ verdict: 'go' }, { verdict: 'done' }]);
+    await assert.rejects(
+      () =>
+        runPipeline(capped(''), 'item-A', {
+          engines: { judge: judge.fn },
+          journal: memoryJournal(),
+          dir,
+          runId: 'A',
+          formulaSha: SHA,
+        }),
+      (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOTDIR'
+    );
+    assert.equal(judge.calls.length, 0); // refused at the door, never reached an engine
+  });
+
+  test("an unreadable sibling journal fails closed — same contract as the run's own file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pipeline-occ-'));
+    testRepoInit(dir);
+    const d = pipelineDir({ dir });
+    assert.ok(d !== null);
+    // a directory wearing a journal's name — readFileSync throws
+    // EISDIR, and the scan propagates it like the run's own unreadable
+    // file would (only ENOENT is "absent"; a present-but-unreadable
+    // plane is never an empty plane)
+    mkdirSync(join(d, 'evil.journal.jsonl'), { recursive: true });
+    const judge = spy([{ verdict: 'go' }, { verdict: 'done' }]);
+    await assert.rejects(
+      () =>
+        runPipeline(capped(''), 'item-A', {
+          engines: { judge: judge.fn },
+          journal: memoryJournal(),
+          dir,
+          runId: 'A',
+          formulaSha: SHA,
+        }),
+      (e: unknown) => (e as NodeJS.ErrnoException).code === 'EISDIR'
+    );
+    assert.equal(judge.calls.length, 0);
   });
 });
