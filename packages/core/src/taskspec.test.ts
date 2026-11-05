@@ -151,6 +151,17 @@ describe('parseTaskSpecBody — malformed input', () => {
     assert.equal(f.acceptance, undefined);
   });
 
+  test('prototype-member heading names stay body — never a managed section', () => {
+    for (const h of ['## Constructor', '## __proto__', '## ToString', '## HasOwnProperty']) {
+      const f = parseTaskSpecBody(`${h}\nkeep me`);
+      assert.equal(f.acceptance, undefined, h);
+      assert.equal(f.dod, undefined, h);
+      assert.equal(f.dor, undefined, h);
+      assert.equal(f.scenarios, undefined, h);
+      assert.equal(f.body, `${h}\nkeep me`, h);
+    }
+  });
+
   test('a pathological whitespace heading parses in linear time', () => {
     const t0 = Date.now();
     const f = parseTaskSpecBody(`## ${' '.repeat(200_000)}`);

@@ -82,7 +82,12 @@ type SpecField = 'acceptance' | 'dod' | 'dor' | 'scenarios';
 /** The projection half of TaskSpec — what the body carries. */
 type SpecFields = Pick<TaskSpec, 'body' | 'acceptance' | 'dod' | 'dor' | 'scenarios'>;
 
-/** Managed heading name (lowercased) → the field its section feeds. */
+/** Managed heading name (lowercased) → the field its section feeds.
+ *  Every index into it is own-key gated (`Object.hasOwn`): a
+ *  prototype member (`## Constructor`, `## __proto__`, `## ToString`)
+ *  resolves to an Object.prototype member, and an ungated lookup
+ *  would open a "managed" section that silently eats the heading's
+ *  text into a field that never existed. */
 const MANAGED: Record<string, SpecField> = {
   acceptance: 'acceptance',
   dod: 'dod',
@@ -218,7 +223,8 @@ function openSection(
   content: Map<SpecField, Line[]>,
   bodyLines: Line[]
 ): Line[] {
-  const field = h.level === 2 ? MANAGED[h.name.toLowerCase()] : undefined;
+  const name = h.name.toLowerCase();
+  const field = h.level === 2 && Object.hasOwn(MANAGED, name) ? MANAGED[name] : undefined;
   if (field === undefined || present.has(field)) {
     bodyLines.push({ t: raw, fenced: false });
     return bodyLines;
@@ -355,7 +361,8 @@ export function taskSpecFacade(store: TaskStore): TaskSpecFacade {
       }
       // same normalization the parser applies — 'Acceptance ##' names
       // the managed section, a miss would write dead text
-      const managed = MANAGED[headingName(h).toLowerCase()];
+      const mname = headingName(h).toLowerCase();
+      const managed = Object.hasOwn(MANAGED, mname) ? MANAGED[mname] : undefined;
       if (managed !== undefined && parseBody(stripMeta(row.description)).present.has(managed)) {
         throw new Error(
           `taskSpec annotate: "## ${h}" already exists on ${id} — ` +
