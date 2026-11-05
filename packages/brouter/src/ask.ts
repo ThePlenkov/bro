@@ -18,14 +18,20 @@
  * costs the numbers, never the answer.
  */
 import { estimateTokens, getProvider, healthKey, loadConfig, withSlice } from '@broject/core';
-import type { ExplainFact, ExplainSlice, Explanation, ProviderEntry } from '@broject/core';
+import type {
+  ExplainFact,
+  ExplainSlice,
+  Explanation,
+  HealthSnapshot,
+  ProviderEntry,
+} from '@broject/core';
 import { acpConverse } from '@broject/providers';
 import type { AcpUsage } from '@broject/providers';
 import { readRouteTable, unservedChains } from '@broject/router-routes';
 import type { RouteDecision, RouteTable } from '@broject/router-routes';
 import { costFacts, healthFacts, modelFacts, routeFacts, type ModelPin } from './explain.ts';
 import { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
-import { decideRoute } from './route-decide.ts';
+import { decideRoute, type TaskDecision } from './route-decide.ts';
 
 /** An acp provider entry — the shape the ask path speaks. */
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -81,6 +87,11 @@ export interface LanePick {
   ruleSource: string;
   /** the table's verdict — when the table was consulted */
   decision?: RouteDecision;
+  /** the health the decision read — what the router saw when it chose.
+   *  Absent when nobody decided (the operator named the lane). */
+  snapshot?: HealthSnapshot;
+  /** false when the ledger could not be read at decision time */
+  healthKnown?: boolean;
 }
 
 /** The acp entries, in config order. */
@@ -217,8 +228,9 @@ function namedLane(providers: Providers, request: AskRequest): LanePick {
 /** The lane the table's chain points at — its first acp entry. */
 function tableLanePick(
   lane: { provider: string; entry: AcpEntry; model?: string },
-  decision: RouteDecision
+  task: TaskDecision
 ): LanePick {
+  const decision = task.decision;
   const route = decision.route?.name;
   return {
     provider: lane.provider,
@@ -229,16 +241,15 @@ function tableLanePick(
     rule: `the route "${route}" — its first acp entry`,
     ruleSource: 'the table',
     decision,
+    snapshot: task.snapshot,
+    healthKnown: task.healthKnown,
   };
 }
 
 /** The lane that answers when nothing else does — and the rule that
  *  stood in, with the table's verdict beside it. */
-function fallbackLane(
-  providers: Providers,
-  decision: RouteDecision | undefined
-): LanePick {
-  const fallback = fallbackRule(decision);
+function fallbackLane(providers: Providers, task: TaskDecision | undefined): LanePick {
+  const fallback = fallbackRule(task?.decision);
   const provider = resolveProvider(providers);
   return {
     provider,
@@ -246,7 +257,9 @@ function fallbackLane(
     pinnedBy: 'the provider entry',
     rule: fallback.rule,
     ruleSource: fallback.source,
-    decision,
+    decision: task?.decision,
+    snapshot: task?.snapshot,
+    healthKnown: task?.healthKnown,
   };
 }
 
@@ -256,16 +269,15 @@ async function tableDecision(
   dir: string,
   table: RouteTable,
   request: AskRequest
-): Promise<RouteDecision> {
+): Promise<TaskDecision> {
   const router = loadConfig(dir).brouter?.router;
-  const { decision } = await decideRoute({
+  return decideRoute({
     dir,
     table,
     task: {},
     text: request.question,
     router,
   });
-  return decision;
 }
 
 /** The lane the ask runs against — the operator's choice, then the table's
@@ -279,12 +291,12 @@ export async function resolveLane(dir: string, request: AskRequest): Promise<Lan
   if (table === undefined) {
     return fallbackLane(providers, undefined);
   }
-  const decision = await tableDecision(dir, table, request);
-  const lane = laneFromChain(providers, decision.chain);
+  const task = await tableDecision(dir, table, request);
+  const lane = laneFromChain(providers, task.decision.chain);
   if (lane === undefined) {
-    return fallbackLane(providers, decision);
+    return fallbackLane(providers, task);
   }
-  return tableLanePick(lane, decision);
+  return tableLanePick(lane, task);
 }
 
 /** The model's pin — the operator's, then the route's, then the entry's.
@@ -307,7 +319,10 @@ export function modelPin(
 
 /** The turn's tokens — the agent's own numbers when it reports them, the
  *  estimate otherwise. */
-function turnTokens(usage: AcpUsage | undefined, texts: { question: string; answer: string }): number {
+function turnTokens(
+  usage: AcpUsage | undefined,
+  texts: { question: string; answer: string }
+): number {
   const reported = usage?.inputTokens !== undefined || usage?.outputTokens !== undefined;
   if (reported) {
     return (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
@@ -350,6 +365,17 @@ async function costSlice(input: {
   });
 }
 
+/** The health the explanation reports — the snapshot the decision read, so
+ *  the slice says what the router saw when it chose, not a second reading
+ *  after the turn. A lane nobody decided (the operator named it) has no
+ *  snapshot: the ledger is read then, and only then. */
+async function laneHealth(lane: LanePick): Promise<{ snapshot: HealthSnapshot; known: boolean }> {
+  if (lane.snapshot !== undefined) {
+    return { snapshot: lane.snapshot, known: lane.healthKnown === true };
+  }
+  return ledgerHealth();
+}
+
 /** The explanation — the slices the caller asked for, gathered where the
  *  facts live. */
 async function explainAsk(input: {
@@ -377,7 +403,7 @@ async function explainAsk(input: {
       ruleSource: lane.ruleSource,
     })
   );
-  const { snapshot, known } = await ledgerHealth();
+  const { snapshot, known } = await laneHealth(lane);
   explanation = withSlice(
     explanation,
     'health',
