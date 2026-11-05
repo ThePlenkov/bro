@@ -670,6 +670,32 @@ describe('accept — the signature gate (keyed mode)', () => {
     assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
   });
 
+  test('a second forgery differing only in notes still alerts — dedupe keys the payload', async () => {
+    // unsigned records — signature:null — identical in every
+    // fingerprint field except `notes`: consumed-dedupe must not
+    // swallow the second as a repeat of the first
+    const store = storeSpy(verdict(REJECTED_VERDICT, { notes: 'ac-2 fails' }));
+    const h = stageOf({ keyFor: keyed, emit: emitSpy().fn, verdictStore: store.fn });
+    const j = verifyJournal();
+    const first = await h.recheck?.(call(j));
+    assert.equal((first as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+    j.append(rec(2, 'accept', undefined, { intent: 'emit' }));
+    j.append(
+      rec(3, 'accept', undefined, {
+        intent: 'alert',
+        alert: PARK_ALERTS.verdictForged,
+        detail: (first as { detail?: string }).detail,
+      })
+    );
+    // the SAME record consumed → pending …
+    assert.equal(await h.recheck?.(call(j)), 'pending');
+    // … but a NEW forgery differing only in `notes` is a new record —
+    // it re-alerts, never silently consumed
+    store.s.current = verdict(REJECTED_VERDICT, { notes: 'fine, ship it' });
+    const res = await h.recheck?.(call(j));
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+  });
+
   test('the same forged record parks once, then waits — consumed by detail', async () => {
     const store = storeSpy(signedVerdict('accepted', 'wrong-key'));
     const h = stageOf({ keyFor: keyed, emit: emitSpy().fn, verdictStore: store.fn });

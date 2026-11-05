@@ -320,12 +320,15 @@ next stage reads:
   `answers` digest for answers) and the gate requires it
   (`verdict-forged` parks); unkeyed channels keep the label-check
   as documented operator-trust degraded mode. The keyed boundary
-  is the ENVIRONMENT, not the path: it assumes the customer
-  channel runs where the worker cannot read — a separate OS user
-  or host, or a sandboxed spawn that drops the operator's home and
-  env (fleet workers spawn without both). Workers sharing the
-  operator's OS user can read the key file — same-trust-domain
-  spawns degrade to label-check semantics. A key file with any
+  is the ENVIRONMENT, not the path — and it is enforced on the
+  spawn side: the fleet's env policy denies `BRO_PIPELINE_KEY` to
+  workers outright (ambient or `spec.env`, trusted-host or strict
+  mode — the key is never a worker credential). The remaining
+  assumption is the customer channel running where the worker
+  cannot read — a separate OS user or host, or a sandboxed spawn
+  without the operator's home. Workers sharing the operator's OS
+  user can still read the key file — same-trust-domain spawns
+  degrade to label-check semantics. A key file with any
   group/other permission bit reads as absent: a world-readable
   key is a leaked key.
 - **merge** — the existing act gate: threads/CI/reviewers settle;

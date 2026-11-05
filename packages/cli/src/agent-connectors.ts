@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn, spawnSync, type SpawnOptions } from 'node:child_process';
+import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -33,83 +33,83 @@ import {
 } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
+  type AgentCause,
+  type AgentConnector,
+  type AgentInfo,
   AgentNotFound,
+  type AgentRegistryEntry,
+  type AgentState,
+  admitSessionSlot,
   agentEntryBlocked,
   agentExitFileName,
   agentsSection,
-  bdActor,
-  admitSessionSlot,
+  appendPrivateFileSync,
   BATCH_MARKER_ENV,
-  isBatchSpawn,
+  type BrouterConfig,
+  BrouterConfigError,
+  bdActor,
+  brouterStaticCatalog,
+  type ConnectorCtx,
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
-  appendPrivateFileSync,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
+  type DiscoveredSession,
   deriveProviderWalls,
   emitLifecycle,
   entryRunId,
+  type FleetProfile,
+  type FleetRouter,
   ghHost,
   gitTry,
   handleOwner,
   isAgentCause,
+  isBatchSpawn,
+  isQualifiedRouteId,
   JudgeUnavailable,
+  type ListResult,
   loadConfig,
+  type ModelRoute,
   mintAgentId,
   mintRunId,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  type ProviderEntry,
+  ProviderSurfaceError,
+  type ProviderWall,
   patchAgentRegistry,
   pidAlive,
   probeStep,
   procStat,
   providerCallGrade,
-  brouterStaticCatalog,
-  BrouterConfigError,
-  isQualifiedRouteId,
+  type ResolvedClass,
+  type RoutingTable,
+  readAgentRegistry,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
   resolveModelRoute,
   resolveStepClass,
   SESSION_SLOT_TTL_MS,
+  type SessionPlane,
+  SpawnError,
+  type SpawnSpec,
+  type SpawnWorker,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
   sessionSlotsDir,
-  SpawnError,
   stepParent,
-  ProviderSurfaceError,
-  readAgentRegistry,
   UnknownProviderError,
   withAgentRegistryLock,
   writeAgentRegistry,
   writePrivateFileSync,
-  type AgentCause,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type AgentState,
-  type BrouterConfig,
-  type ConnectorCtx,
-  type DiscoveredSession,
-  type FleetProfile,
-  type FleetRouter,
-  type ListResult,
-  type ModelRoute,
-  type ProviderEntry,
-  type ProviderWall,
-  type ResolvedClass,
-  type RoutingTable,
-  type SessionPlane,
-  type SpawnSpec,
-  type SpawnWorker,
 } from '@broject/core';
-import { otelEvent } from '@broject/providers';
+import { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
 import type { AcpSeam, FetchFn } from '@broject/providers';
-import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
+import { otelEvent } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
@@ -123,7 +123,6 @@ import {
   devinSessionPlane,
 } from '@broject/devin';
 import './session-planes/copilot.ts';
-import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
 import {
@@ -132,6 +131,7 @@ import {
   laneGateTake,
   reconcileLanePauseForRegistry,
 } from './lane.ts';
+import { writeCopilotCount } from './session-planes/copilot.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -915,6 +915,10 @@ function isAllowedByEnvPolicy(
   // (spec bro-9h86l), so fromSpec decides it, before trusted-host's
   // blanket pass-through
   if (key === BATCH_MARKER_ENV) return fromSpec;
+  // the customer-channel HMAC key is never a worker credential — a
+  // worker holding it can mint customer verdicts (spec bro-7d5nb
+  // trust model), so it's denied in every mode: ambient AND spec.env
+  if (key === 'BRO_PIPELINE_KEY') return false;
   if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
   // strict mode: only allowlisted
   if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
@@ -3437,7 +3441,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
                 spec,
                 env,
                 policy,
-                Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+                Object.hasOwn(spec.env ?? {}, e[0])
               )
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
@@ -4822,7 +4826,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
           spec,
           env ?? { agents: {}, connectors: {} },
           policy,
-          Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+          Object.hasOwn(spec.env ?? {}, e[0])
         )
       ) {
         return false;

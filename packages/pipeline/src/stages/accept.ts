@@ -298,11 +298,15 @@ const signerMatches: VerdictGate = (call, raw) =>
 /** The alert detail for a failed MAC — echoes the record's own
  *  fields verbatim so a later wake recognizes the SAME record
  *  ({@link forgedAlready}): identical detail → the park already
- *  journaled; different detail → a fresh record evaluates anew. */
+ *  journaled; different detail → a fresh record evaluates anew.
+ *  `notes` is part of the fingerprint — two forged verdicts that
+ *  differ only in their fix scope are DIFFERENT records; omitting
+ *  it would silently consume the second instead of re-alerting. */
 const forgedDetail = (raw: Record<string, unknown>): string =>
   `verdict record signature does not verify under the channel key ` +
   `(signature=${JSON.stringify(raw.signature ?? null)} ` +
   `verdict=${JSON.stringify(raw.verdict)} ` +
+  `notes=${JSON.stringify(raw.notes ?? null)} ` +
   `accepted_by=${JSON.stringify(raw.accepted_by)} ` +
   `ts=${JSON.stringify(raw.ts)}) — forged input or a rotated key`;
 
