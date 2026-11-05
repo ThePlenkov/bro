@@ -107,14 +107,10 @@ import {
   admitSessionSlot,
   explainSlicesOrExit,
   hasHelpFlag,
-  healthKey,
   issueLink,
   printUsage,
-  renderExplanation,
-  withSlice,
 } from '@broject/core';
-import type { BrouterModels, ExitCode, ExplainSlice, Explanation } from '@broject/core';
-import { chainModelFacts, healthFacts, routeFacts } from '@broject/brouter';
+import type { BrouterModels, ExitCode, ExplainSlice } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -167,6 +163,7 @@ import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
 import { isStackName } from '@broject/stack';
 import { loopSlug } from '@broject/loop';
 import { routeTableLane, type RouteTableLane } from './loop-routes.ts';
+import { explainSpawn } from './loop-explain.ts';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -758,30 +755,9 @@ async function routeTableLaneFor(
   }
   const label = beadClassInfo(ctx, bead, false);
   const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
-  if (routed === undefined) {
-    return undefined;
-  }
-  return { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
-}
-
-/** The spawn path's explanation — the route the bead lands on, and why.
- *  stderr: stdout stays the run log. */
-function explainSpawn(ctx: Ctx, bead: ReadyBead, routed: RouteTableLane): void {
-  const slices = ctx.explain;
-  if (slices === undefined) {
-    return;
-  }
-  let explanation: Explanation = { slices: {} };
-  explanation = withSlice(explanation, 'route', routeFacts(routed.decision));
-  explanation = withSlice(
-    explanation,
-    'model',
-    chainModelFacts(routed.decision.chain, routed.decision.route?.name)
-  );
-  const keys = routed.decision.chain.map(e => healthKey(e.provider, e.model));
-  explanation = withSlice(explanation, 'health', healthFacts(routed.snapshot, keys));
-  console.error(`loop: ${bead.id}`);
-  console.error(renderExplanation(explanation, slices));
+  return routed === undefined
+    ? undefined
+    : { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
 }
 
 async function resolveBeadLane(
@@ -793,7 +769,7 @@ async function resolveBeadLane(
   // operator declares one, it answers
   const tableLane = await routeTableLaneFor(ctx, bead);
   if (tableLane !== undefined) {
-    explainSpawn(ctx, bead, tableLane.routed);
+    explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
     return tableLane.lane;
   }
   if (!ctx.routing) {

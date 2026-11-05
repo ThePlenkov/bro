@@ -47,12 +47,16 @@ export interface Explanation {
 
 /** An unknown fact — the value says so, and the reason says why nobody
  *  knows. A zero would be a lie the operator bills against. */
-export function unknownFact(label: string, because: string, source?: string): ExplainFact {
+export function unknownFact(input: {
+  label: string;
+  because: string;
+  source?: string;
+}): ExplainFact {
   return {
-    label,
+    label: input.label,
     value: 'unknown',
-    because,
-    ...(source === undefined ? {} : { source }),
+    because: input.because,
+    ...(input.source === undefined ? {} : { source: input.source }),
   };
 }
 

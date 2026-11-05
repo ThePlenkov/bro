@@ -30,6 +30,9 @@ import { decideRoute } from './route-decide.ts';
 /** An acp provider entry — the shape the ask path speaks. */
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
+/** The providers the ask may pick from — the config's own map. */
+type Providers = Record<string, ProviderEntry>;
+
 /** The ask request. */
 export interface AskRequest {
   /** the provider entry — absent resolves through the route table */
@@ -81,8 +84,7 @@ export interface LanePick {
 }
 
 /** The acp entries, in config order. */
-export function acpProviders(dir: string): string[] {
-  const providers = loadConfig(dir).providers ?? {};
+export function acpProviders(providers: Providers): string[] {
   return Object.entries(providers)
     .filter(([, entry]) => entry.type === 'acp')
     .map(([name]) => name);
@@ -90,14 +92,13 @@ export function acpProviders(dir: string): string[] {
 
 /** The provider an ask runs against — the named one, else the first
  *  acp entry. An unknown name is an error naming the known ones. */
-export function resolveProvider(dir: string, name?: string): string {
-  const configured = loadConfig(dir).providers ?? {};
+export function resolveProvider(providers: Providers, name?: string): string {
   if (name !== undefined && name.trim() !== '') {
     const wanted = name.trim();
-    const entry = configured[wanted];
+    const entry = providers[wanted];
     if (entry === undefined) {
       throw new Error(
-        `unknown provider "${wanted}" — configured: ${Object.keys(configured).join(', ') || 'none'}`
+        `unknown provider "${wanted}" — configured: ${Object.keys(providers).join(', ') || 'none'}`
       );
     }
     if (entry.type !== 'acp') {
@@ -105,7 +106,7 @@ export function resolveProvider(dir: string, name?: string): string {
     }
     return wanted;
   }
-  const first = acpProviders(dir)[0];
+  const first = acpProviders(providers)[0];
   if (first === undefined) {
     throw new Error('no acp provider configured — add providers.<name> to bro.config.json');
   }
@@ -113,8 +114,8 @@ export function resolveProvider(dir: string, name?: string): string {
 }
 
 /** The entry behind a provider name — an acp one, always. */
-export function acpEntry(dir: string, name: string): AcpEntry {
-  const entry = getProvider(loadConfig(dir).providers ?? {}, name);
+export function acpEntry(providers: Providers, name: string): AcpEntry {
+  const entry = getProvider(providers, name);
   if (entry.type !== 'acp') {
     throw new Error(
       `provider "${name}" is a ${entry.type} entry — the acp clients need an acp one`
@@ -125,10 +126,7 @@ export function acpEntry(dir: string, name: string): AcpEntry {
 
 /** The acp entry of a provider name — undefined when the name is not a
  *  configured acp entry. */
-function acpOf(
-  providers: Record<string, ProviderEntry>,
-  name: string
-): AcpEntry | undefined {
+function acpOf(providers: Providers, name: string): AcpEntry | undefined {
   const entry = providers[name];
   return entry !== undefined && entry.type === 'acp' ? entry : undefined;
 }
@@ -136,7 +134,7 @@ function acpOf(
 /** The chain's first acp entry — the lane that can answer an ACP ask. A
  *  gateway lane cannot: ask speaks ACP. */
 function laneFromChain(
-  providers: Record<string, ProviderEntry>,
+  providers: Providers,
   chain: { provider: string; model?: string }[]
 ): { provider: string; entry: AcpEntry; model?: string } | undefined {
   for (const link of chain) {
@@ -193,58 +191,89 @@ function fallbackRule(decision: RouteDecision | undefined): { rule: string; sour
   };
 }
 
-/** The lane the ask runs against — the operator's choice, then the table's
- *  chain, then the first acp entry. */
-export async function resolveLane(dir: string, request: AskRequest): Promise<LanePick> {
-  const providers = loadConfig(dir).providers ?? {};
-  if (request.provider !== undefined && request.provider.trim() !== '') {
-    const provider = resolveProvider(dir, request.provider);
-    return {
-      provider,
-      entry: acpEntry(dir, provider),
-      pinnedBy: 'the provider entry',
-      rule: 'you named it',
-      ruleSource: 'you',
-    };
-  }
-  const table = tableOf(dir, request);
-  const router = loadConfig(dir).brouter?.router;
-  const decision =
-    table === undefined
-      ? undefined
-      : (
-          await decideRoute({
-            dir,
-            table,
-            task: {},
-            text: request.question,
-            ...(router === undefined ? {} : { router }),
-          })
-        ).decision;
-  const lane = decision === undefined ? undefined : laneFromChain(providers, decision.chain);
-  if (lane !== undefined) {
-    const route = decision?.route?.name;
-    return {
-      provider: lane.provider,
-      entry: lane.entry,
-      ...(lane.model === undefined ? {} : { model: lane.model }),
-      pinnedBy: lane.model === undefined ? 'the provider entry' : 'the route',
-      ...(route === undefined ? {} : { route }),
-      rule: `the route "${route}" — its first acp entry`,
-      ruleSource: 'the table',
-      ...(decision === undefined ? {} : { decision }),
-    };
-  }
-  const fallback = fallbackRule(decision);
-  const provider = resolveProvider(dir);
+/** The lane the operator named — their choice, the table does not argue. */
+function namedLane(providers: Providers, request: AskRequest): LanePick {
+  const provider = resolveProvider(providers, request.provider);
   return {
     provider,
-    entry: acpEntry(dir, provider),
+    entry: acpEntry(providers, provider),
+    pinnedBy: 'the provider entry',
+    rule: 'you named it',
+    ruleSource: 'you',
+  };
+}
+
+/** The lane the table's chain points at — its first acp entry. */
+function tableLanePick(
+  lane: { provider: string; entry: AcpEntry; model?: string },
+  decision: RouteDecision
+): LanePick {
+  const route = decision.route?.name;
+  return {
+    provider: lane.provider,
+    entry: lane.entry,
+    ...(lane.model === undefined ? {} : { model: lane.model }),
+    pinnedBy: lane.model === undefined ? 'the provider entry' : 'the route',
+    ...(route === undefined ? {} : { route }),
+    rule: `the route "${route}" — its first acp entry`,
+    ruleSource: 'the table',
+    decision,
+  };
+}
+
+/** The lane that answers when nothing else does — and the rule that
+ *  stood in, with the table's verdict beside it. */
+function fallbackLane(
+  providers: Providers,
+  decision: RouteDecision | undefined
+): LanePick {
+  const fallback = fallbackRule(decision);
+  const provider = resolveProvider(providers);
+  return {
+    provider,
+    entry: acpEntry(providers, provider),
     pinnedBy: 'the provider entry',
     rule: fallback.rule,
     ruleSource: fallback.source,
     ...(decision === undefined ? {} : { decision }),
   };
+}
+
+/** The table's verdict for the ask — the task carries no shape, so only
+ *  a catch-all route fits it. */
+async function tableDecision(
+  dir: string,
+  table: RouteTable,
+  request: AskRequest
+): Promise<RouteDecision> {
+  const router = loadConfig(dir).brouter?.router;
+  const { decision } = await decideRoute({
+    dir,
+    table,
+    task: {},
+    text: request.question,
+    ...(router === undefined ? {} : { router }),
+  });
+  return decision;
+}
+
+/** The lane the ask runs against — the operator's choice, then the table's
+ *  chain, then the first acp entry. */
+export async function resolveLane(dir: string, request: AskRequest): Promise<LanePick> {
+  const providers = loadConfig(dir).providers ?? {};
+  if (request.provider !== undefined && request.provider.trim() !== '') {
+    return namedLane(providers, request);
+  }
+  const table = tableOf(dir, request);
+  if (table === undefined) {
+    return fallbackLane(providers, undefined);
+  }
+  const decision = await tableDecision(dir, table, request);
+  const lane = laneFromChain(providers, decision.chain);
+  if (lane === undefined) {
+    return fallbackLane(providers, decision);
+  }
+  return tableLanePick(lane, decision);
 }
 
 /** The model's pin — the operator's, then the route's, then the entry's.
@@ -267,16 +296,12 @@ export function modelPin(
 
 /** The turn's tokens — the agent's own numbers when it reports them, the
  *  estimate otherwise. */
-function turnTokens(
-  usage: AcpUsage | undefined,
-  question: string,
-  answer: string
-): number {
+function turnTokens(usage: AcpUsage | undefined, texts: { question: string; answer: string }): number {
   const reported = usage?.inputTokens !== undefined || usage?.outputTokens !== undefined;
   if (reported) {
     return (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
   }
-  return estimateTokens(question) + estimateTokens(answer);
+  return estimateTokens(texts.question) + estimateTokens(texts.answer);
 }
 
 /** The cost slice — the turn's own numbers and the ledger's window. */
@@ -286,8 +311,8 @@ async function costSlice(input: {
   usage?: AcpUsage;
   question: string;
   answer: string;
+  ledgerKnown: boolean;
 }): Promise<ExplainFact[]> {
-  const { snapshot, known } = await ledgerHealth();
   const window = await windowCounters({ provider: input.lane.provider, model: input.model });
   const reported = input.usage?.inputTokens !== undefined;
   return costFacts({
@@ -313,7 +338,7 @@ async function costSlice(input: {
     ...(window === undefined
       ? {}
       : { window: { ...window, provider: input.lane.provider, model: input.model } }),
-    ledgerKnown: known,
+    ledgerKnown: input.ledgerKnown,
   });
 }
 
@@ -344,7 +369,7 @@ async function explainAsk(input: {
       ruleSource: lane.ruleSource,
     })
   );
-  const { snapshot } = await ledgerHealth();
+  const { snapshot, known } = await ledgerHealth();
   explanation = withSlice(
     explanation,
     'health',
@@ -359,6 +384,7 @@ async function explainAsk(input: {
       ...(input.usage === undefined ? {} : { usage: input.usage }),
       question: input.request.question,
       answer: input.answer,
+      ledgerKnown: known,
     })
   );
   return explanation;
@@ -385,7 +411,7 @@ export async function runAsk(request: AskRequest, dir: string): Promise<AskOutco
   await recordTurn({
     provider: lane.provider,
     model,
-    tokens: turnTokens(result.usage, request.question, result.text),
+    tokens: turnTokens(result.usage, { question: request.question, answer: result.text }),
     tag: request.question.slice(0, 80),
   });
   const explanation =
