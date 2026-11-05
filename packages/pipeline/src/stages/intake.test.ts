@@ -22,7 +22,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { row, settled, type SpecStoreSpy, specStore } from '../testkit.ts';
+import { row, type SpecStoreSpy, settled, specStore } from '../testkit.ts';
 import {
   ANSWERS_HEADING,
   DECLINED_HEADING,
@@ -271,7 +271,7 @@ describe('intake — questions / declined artifacts', () => {
     assert.equal(p.feedback, 'no verifiable spec — rewrite with AC');
     assert.equal(p.questions, undefined);
     assert.deepEqual(specs.annotated, [
-      { id: ITEM, heading: DECLINED_HEADING, lines: ['no verifiable spec — rewrite with AC'] },
+      { id: ITEM, heading: DECLINED_HEADING, lines: ['- no verifiable spec — rewrite with AC'] },
     ]);
   });
 
@@ -284,6 +284,75 @@ describe('intake — questions / declined artifacts', () => {
     // the re-judgment sees its own unanswered questions
     assert.match(next?.body ?? '', /## Questions\n- which api\?/);
     assert.deepEqual(next?.acceptance, ['the thing works', 'the thing is tested']);
+  });
+
+  test('history sections (Questions/Answers/Declined) ride body — the seam sees the full record', async () => {
+    const spy = intakeSpy({ verdict: 'accepted' });
+    const specs = specStore([
+      row(ITEM, {
+        description:
+          `${SPEC_BODY}\n\n## Questions\n- old q\n\n## Answers\n- old a` +
+          '\n\n## Declined\n- prior decline',
+      }),
+    ]);
+    await invoke(spy, specs);
+    const spec = spy.calls[0].spec;
+    assert.match(spec.body ?? '', /## Questions\n- old q/);
+    assert.match(spec.body ?? '', /## Answers\n- old a/);
+    assert.match(spec.body ?? '', /## Declined\n- prior decline/);
+    // the managed fields never moved — history stays history
+    assert.deepEqual(spec.acceptance, ['the thing works', 'the thing is tested']);
+  });
+});
+
+describe('intake — artifact sanitize', () => {
+  test('a question containing "## Acceptance" lands as bullet text — never injects a section', async () => {
+    const spy = intakeSpy({
+      verdict: 'questions',
+      questions: ['should it be\n## Acceptance\n- x or y?'],
+    });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const res = await invoke(spy, specs);
+    assert.equal(res.verdict, 'questions');
+    // every emitted line is a bullet — heading-shaped text is inert
+    assert.deepEqual(specs.annotated[0]?.lines, [
+      '- should it be',
+      '- ## Acceptance',
+      '- - x or y?',
+    ]);
+    // the write landed (annotate's own guard never fired) and the
+    // item's managed fields never moved — no injected AC
+    assert.deepEqual(specs.spec(ITEM)?.acceptance, ['the thing works', 'the thing is tested']);
+    assert.match(specs.bodies.get(ITEM) ?? '', /\n- ## Acceptance\n/);
+  });
+
+  test('a heading-shaped question lands verbatim — text survives after the marker', async () => {
+    const spy = intakeSpy({ verdict: 'questions', questions: ['## which acceptance?'] });
+    const specs = specStore([row(ITEM, { description: SPEC_BODY })]);
+    const res = await invoke(spy, specs);
+    assert.equal(res.verdict, 'questions');
+    assert.deepEqual(specs.annotated[0]?.lines, ['- ## which acceptance?']);
+    // the payload keeps the question's own text, marker-free
+    assert.equal((res.payload as IntakePayload).questions?.[0], '## which acceptance?');
+  });
+
+  test('a fence marker inside feedback lands as bullet text — the write never breaks', async () => {
+    const spy = intakeSpy({ verdict: 'declined', feedback: 'spec is just\n```\ncode\n```' });
+    const specs = specStore([row(ITEM)]);
+    const res = await invoke(spy, specs);
+    assert.equal(res.verdict, 'declined');
+    assert.deepEqual(specs.annotated[0]?.lines, ['- spec is just', '- ```', '- code', '- ```']);
+    assert.match(specs.bodies.get(ITEM) ?? '', /## Declined\n- spec is just\n- ```/);
+  });
+
+  test('multi-line feedback keeps its line shape — one bullet per line', async () => {
+    const spy = intakeSpy({
+      verdict: 'declined',
+      feedback: 'no owner named\n\n## no spec either',
+    });
+    const specs = specStore([row(ITEM)]);
+    await invoke(spy, specs);
+    assert.deepEqual(specs.annotated[0]?.lines, ['- no owner named', '- ', '- ## no spec either']);
   });
 });
 
@@ -647,7 +716,7 @@ describe('intake inside runPipeline — the DAG', () => {
     const res = await runDag(spy, specs);
     assert.equal(res.outcome, 'close');
     assert.equal(res.verdict, 'declined');
-    assert.match(specs.bodies.get(ITEM) ?? '', /## Declined\nspec is a vibe, not a spec/);
+    assert.match(specs.bodies.get(ITEM) ?? '', /## Declined\n- spec is a vibe, not a spec/);
   });
 
   test('questions → park → answers land → wake re-runs intake on the enriched spec → accepted → end', async () => {

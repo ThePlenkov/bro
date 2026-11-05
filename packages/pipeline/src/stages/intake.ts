@@ -233,6 +233,38 @@ function stray(out: IntakeOutcome, k: 'questions' | 'feedback'): void {
   }
 }
 
+/** The questions arm's contract — a non-empty list of non-blank
+ *  strings, one named guard so the arm check stays single-branch. */
+const isQuestionList = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.length > 0 && v.every(isNonBlank);
+
+/** Per-verdict outcome contracts — the requirements each arm must
+ *  satisfy before its outcome can become the stage's payload. */
+const ARM_CHECKS: Record<IntakeVerdict, (out: IntakeOutcome) => void> = {
+  questions: out => {
+    if (!isQuestionList((out as Record<string, unknown>).questions)) {
+      throw new Error(
+        'intake: the judgment seam returned a malformed outcome — ' +
+          'a "questions" verdict requires a non-empty question list'
+      );
+    }
+    stray(out, 'feedback');
+  },
+  declined: out => {
+    if (!isNonBlank((out as Record<string, unknown>).feedback)) {
+      throw new Error(
+        'intake: the judgment seam returned a malformed outcome — ' +
+          'a "declined" verdict requires non-empty feedback'
+      );
+    }
+    stray(out, 'questions');
+  },
+  accepted: out => {
+    stray(out, 'questions');
+    stray(out, 'feedback');
+  },
+};
+
 /** The seam's outcome, validated before it becomes the payload —
  *  `questions` requires a non-empty list of non-blank strings,
  *  `declined` requires non-blank feedback, `accepted` carries neither.
@@ -245,59 +277,37 @@ function checkOutcome(out: IntakeOutcome): void {
   if (!isRecord(out)) {
     throw new Error('intake: the judgment seam returned a malformed outcome — expected a record');
   }
-  if (
-    typeof out.verdict !== 'string' ||
-    !(INTAKE_VERDICTS as readonly string[]).includes(out.verdict)
-  ) {
+  const checks: Partial<Record<string, (o: IntakeOutcome) => void>> = ARM_CHECKS;
+  const check = typeof out.verdict === 'string' ? checks[out.verdict] : undefined;
+  if (check === undefined) {
     throw new Error(
       `intake: the judgment seam returned a malformed outcome — ` +
         `verdict must be one of ${INTAKE_VERDICTS.join('|')}, got ${JSON.stringify(out.verdict)}`
     );
   }
-  switch (out.verdict) {
-    case 'questions':
-      if (
-        !Array.isArray(out.questions) ||
-        out.questions.length === 0 ||
-        !out.questions.every(isNonBlank)
-      ) {
-        throw new Error(
-          'intake: the judgment seam returned a malformed outcome — ' +
-            'a "questions" verdict requires a non-empty question list'
-        );
-      }
-      stray(out, 'feedback');
-      break;
-    case 'declined':
-      if (!isNonBlank(out.feedback)) {
-        throw new Error(
-          'intake: the judgment seam returned a malformed outcome — ' +
-            'a "declined" verdict requires non-empty feedback'
-        );
-      }
-      stray(out, 'questions');
-      break;
-    case 'accepted':
-      stray(out, 'questions');
-      stray(out, 'feedback');
-      break;
-  }
+  check(out);
 }
+
+/** Artifact text → emitted lines — the sanitize the write path
+ *  needs: every line leaves as a `- ` bullet, so a heading or fence
+ *  marker inside the artifact's text is bullet text, never structure
+ *  — annotate's own guard would throw on it, and a `## Acceptance`
+ *  slipped into a question would otherwise inject managed fields on
+ *  the next parse. The text survives verbatim after the marker;
+ *  multi-line input keeps its line shape, one bullet per line. */
+const artifactLines = (text: string): string[] => text.split(/\r?\n/).map(l => `- ${l}`);
 
 /** The artifact write — `questions`/`declined` land ON the item
  *  through the facade's annotate path: the question list as bullets
- *  under `## Questions`, the decline reasons under `## Declined`
- *  (the feedback's own line structure). The customer's answers append
- *  on the same body, so the next intake pass reads the enriched spec. */
+ *  under `## Questions`, the decline reasons under `## Declined`,
+ *  every line {@link artifactLines}-sanitized so artifact text can
+ *  never open structure. The customer's answers append on the same
+ *  body, so the next intake pass reads the enriched spec. */
 function annotateArtifact(deps: IntakeDeps, item: string, out: IntakeOutcome): void {
   if (out.verdict === 'questions') {
-    deps.taskSpec.annotate(
-      item,
-      QUESTIONS_HEADING,
-      out.questions.map(q => `- ${q}`)
-    );
+    deps.taskSpec.annotate(item, QUESTIONS_HEADING, out.questions.flatMap(artifactLines));
   } else if (out.verdict === 'declined') {
-    deps.taskSpec.annotate(item, DECLINED_HEADING, out.feedback.split(/\r?\n/));
+    deps.taskSpec.annotate(item, DECLINED_HEADING, artifactLines(out.feedback));
   }
 }
 

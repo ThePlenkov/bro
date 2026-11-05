@@ -168,6 +168,15 @@ export interface SpecStoreSpy extends TaskSpecFacade {
   bodies: Map<string, string>;
 }
 
+/** Approximate mirror of the facade's artifact guard — the real
+ *  probes live unexported in core's taskspec (`headingOf`/`fenceOf`);
+ *  this covers their common shapes (≤3 leading spaces + 1–6 `#`s +
+ *  space/tab/EOL, ≤3 spaces + a 3+ run of '`' or '~') so an
+ *  unsanitized artifact throws here like prod does — a sanitize
+ *  regression in a stage becomes a test failure, never a silent pass. */
+const opensStructure = (seg: string): boolean =>
+  /^ {0,3}#{1,6}(?:[ \t]|$)/.test(seg) || /^ {0,3}(?:`{3,}|~{3,})/.test(seg);
+
 /** An in-memory TaskSpecFacade — `spec()` projects the stored body
  *  through the REAL parser (`parseTaskSpecBody`, the same read prod's
  *  adapter makes: a `## Acceptance` section becomes `acceptance[]`,
@@ -175,8 +184,9 @@ export interface SpecStoreSpy extends TaskSpecFacade {
  *  `## heading` section the way prod's read-modify-write does while
  *  recording the call. Enforces the contract's loud failures an
  *  engine must hit — missing item, empty/multi-line heading, empty
- *  lines — but not the managed-section dup guard (an intake artifact
- *  never targets a managed name). */
+ *  lines, artifact segments that open structure — but not the
+ *  managed-section dup guard (an intake artifact never targets a
+ *  managed name). */
 export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
   const bodies = new Map(rows.map(r => [r.id, r.description ?? '']));
   const titles = new Map(rows.map(r => [r.id, r.title ?? `task ${r.id}`]));
@@ -195,6 +205,16 @@ export const specStore = (rows: TaskRow[]): SpecStoreSpy => {
       }
       if (lines.length === 0) {
         throw new Error('specStore annotate: an artifact with no lines is no artifact');
+      }
+      for (const line of lines) {
+        for (const seg of line.split(/\r?\n/)) {
+          if (opensStructure(seg)) {
+            throw new Error(
+              `specStore annotate: artifact line ${JSON.stringify(seg)} opens structure — ` +
+                'artifact text never becomes a section or a fence'
+            );
+          }
+        }
       }
       const base = bodies.get(id);
       if (base === undefined) {
