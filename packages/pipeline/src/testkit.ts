@@ -90,30 +90,42 @@ export interface BacklogSpy extends ClassifyBacklog {
 /** An in-memory backlog — label writes land on the spy lists, never
  *  on a store, and mutate the row so the seam's re-read sees current
  *  labels (mirroring a real store; stale-snapshot guards read through
- *  the same seam). `peers` fixes the candidate set a stage sees —
- *  default: every other row. Structurally satisfies the narrower
- *  RouteBacklog seam (item + label writes) too. */
+ *  the same seam). `peers` fixes the candidate set a stage sees;
+ *  the default mirrors prod's `taskBacklog` tiers (ready ∪ open ∪
+ *  in_progress) — a closed or foreign-status row is never offered to
+ *  the judge. A supplied peer is still a store row: item reads and
+ *  label writes find it (tagMates reads `item()` before `addLabel`).
+ *  Structurally satisfies the narrower RouteBacklog seam (item +
+ *  label writes) too. */
 export const backlog = (rows: TaskRow[], peers?: TaskRow[]): BacklogSpy => {
+  const find = (id: string): TaskRow | undefined =>
+    rows.find(r => r.id === id) ?? (peers ?? []).find(r => r.id === id);
   const spy: BacklogSpy = {
     added: [],
     removed: [],
     events: [],
     peersAsked: 0,
-    item: id => rows.find(r => r.id === id),
+    item: find,
     peers: item => {
       spy.peersAsked += 1;
-      return peers ?? rows.filter(r => r.id !== item.id);
+      return (
+        peers ??
+        rows.filter(r => r.id !== item.id && (r.status === 'open' || r.status === 'in_progress'))
+      );
     },
     addLabel: (id, l) => {
       spy.added.push([id, l]);
       spy.events.push(`+${id}:${l}`);
-      const r = rows.find(x => x.id === id);
-      if (r !== undefined) r.labels = [...(r.labels ?? []), l];
+      // --add-label is set semantics — a standing label never doubles
+      const r = find(id);
+      if (r !== undefined && !(r.labels ?? []).includes(l)) {
+        r.labels = [...(r.labels ?? []), l];
+      }
     },
     removeLabel: (id, l) => {
       spy.removed.push([id, l]);
       spy.events.push(`-${id}:${l}`);
-      const r = rows.find(x => x.id === id);
+      const r = find(id);
       if (r !== undefined) r.labels = (r.labels ?? []).filter(x => x !== l);
     },
   };
