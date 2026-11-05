@@ -181,6 +181,28 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        },
+        "router": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "mode": {
+              "enum": [
+                "shadow",
+                "enforce",
+                "off"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "mode"
+          ]
         }
       },
       "additionalProperties": false
