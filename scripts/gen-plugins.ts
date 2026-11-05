@@ -293,19 +293,24 @@ function cursorHooksJson() {
  * sleep/kill watcher pair — portable where GNU `timeout` is absent
  * (stock macOS), never able to outlive the hook budget. */
 function devinHooksJson() {
-  // the fallback's kill budget: TERM at 8s, KILL at 9s — under the 10s
-  // minimum hook timeout. The watcher polls kill -0 each second and exits
-  // when bro is gone — no orphan sleep outliving the hook — and runs with
-  // its fds redirected or a host reading the hook's output to EOF eats
-  // the full budget on every event.
+  // fallback anatomy (all three review findings):
+  //  1. `cmd &` under POSIX without job control reads stdin from /dev/null —
+  //     `bro hooks` takes its session payload from fd 0, so the stop gate
+  //     would go blind; fd3 preserves the payload into the async child.
+  //  2. the watcher polls kill -0 once a second and exits on its own the
+  //     tick after bro dies — `wait $w` reaps it with no orphan sleep; fds
+  //     off the hook pipe so a host reading to EOF doesn't eat the budget.
+  //  3. TERM at 8s, `pkill -TERM -P` sweeps bro's direct probe children
+  //     (bd/git) while still attached, KILL at 9s — under the 10s minimum
+  //     hook timeout; pkill absent degrades to the c-only kill.
   const cmd = event =>
     `P="\${DEVIN_PLUGIN_ROOT}"; ` +
     `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
     `elif command -v bro >/dev/null 2>&1; then ` +
-    `( bro hooks ${event} & c=$!; ` +
+    `( exec 3<&0; bro hooks ${event} <&3 3<&- & c=$!; ` +
     `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
-    `kill "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
-    `wait "$c" 2>/dev/null; kill "$w" 2>/dev/null ) || true; fi; exit 0`;
+    `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
+    `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
   const hook = (event, timeout, matcher = '') => ({
     matcher,
     hooks: [{ type: 'command', command: cmd(event), timeout }],
