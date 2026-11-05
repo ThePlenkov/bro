@@ -72,11 +72,12 @@ export const DEFAULT_FIX_ROUNDS = 3;
 export const DEFAULT_FIX_VERDICT = 'fix';
 
 /** The verdict names a scoped-fix re-entry binds to by default —
- *  `review.fix` AND the accept gate's `rejected` both re-enter `work`
- *  with the emitter's `notes` as the fix scope (spec §stage semantics:
- *  the customer's notes scope the fix round under the same fail-closed
- *  contract as the internal review's). */
-export const DEFAULT_FIX_VERDICTS = [DEFAULT_FIX_VERDICT, 'rejected'];
+ *  `review.fix`, the accept gate's `rejected`, AND verify's `failed`
+ *  all re-enter `work` with the emitter's `notes` as the fix scope
+ *  (spec §stage semantics: review's internal scope, the customer's
+ *  rejection notes, and the failed-AC scope share one fail-closed
+ *  contract). */
+export const DEFAULT_FIX_VERDICTS = [DEFAULT_FIX_VERDICT, 'rejected', 'failed'];
 
 /** Fail-closed park tags stamped on alert rows. */
 export const PARK_ALERTS = {

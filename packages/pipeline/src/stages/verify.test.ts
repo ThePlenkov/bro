@@ -4,7 +4,13 @@ import type { TaskSpec } from '@broject/core';
 import { parse } from 'smol-toml';
 import { parsePipelineFormula } from '../formula.ts';
 import { memoryJournal, type PipelineJournal } from '../journal.ts';
-import { PARK_ALERTS, resumePipeline, runPipeline, type StageCall } from '../runner.ts';
+import {
+  PARK_ALERTS,
+  resumePipeline,
+  runPipeline,
+  type RunOptions,
+  type StageCall,
+} from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
 import { settled } from '../testkit.ts';
 import {
@@ -260,13 +266,14 @@ describe('verify inside runPipeline — the spec DAG', () => {
    *  merge lands, capture captures. */
   const runDag = (
     d: VerifyDeps,
-    opts: { work?: (c: StageCall) => { verdict: string } } = {},
+    opts: { work?: (c: StageCall) => { verdict: string }; runOpts?: Partial<RunOptions> } = {},
     journal: PipelineJournal = memoryJournal()
   ) => {
     const workCalls: StageCall[] = [];
     const res = runPipeline(FORMULA, ITEM, {
       formulaSha: SHA,
       journal,
+      ...opts.runOpts,
       admit: () => true, // the fleet spawn intent needs the go-marker
       engines: {
         judge: {
@@ -329,6 +336,21 @@ describe('verify inside runPipeline — the spec DAG', () => {
     const fp = failed[0].payload as VerifyPayload;
     assert.match(fp.notes ?? '', new RegExp(`${ACS[1]} \\(evidence: e2e-run-9\\)`));
     assert.ok(!(fp.notes ?? '').includes(ACS[0])); // the passing AC is not scope
+    // the re-entry is SCOPED — fix_round + the failed rows' scope, same
+    // contract as review.fix / accept.rejected
+    assert.equal(workCalls[1].fixRound, 1);
+    assert.match(workCalls[1].notes ?? '', new RegExp(ACS[1]));
+  });
+
+  test('repeated failed verdicts consume the fix budget — exhaustion parks', async () => {
+    const sp = specSpy(spec(ACS.slice(0, 1)));
+    const e = e2eSpy(ac => fail(ac, 'still broken'));
+    const { res, workCalls } = runDag(deps(sp, e.fn), { runOpts: { fixRounds: 1 } });
+    const r = await res;
+    assert.equal(r.outcome, 'park');
+    assert.equal(r.alert, PARK_ALERTS.fixRoundsExhausted);
+    assert.equal(workCalls.length, 2); // original + one scoped round
+    assert.equal(workCalls[1].fixRound, 1);
   });
 
   test('unverifiable → park — the item goes back for spec enrichment', async () => {
