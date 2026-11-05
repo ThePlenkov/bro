@@ -52,23 +52,23 @@ const TABLE = [
   '',
 ].join('\n');
 
-test('the routes surface lists the declared routes', () => {
-  if (!existsSync(CLI)) return;
+test('the routes surface lists the declared routes', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['routes', 'list', '--routes', tableFile(TABLE)]);
   assert.equal(out.code, 0);
   assert.match(out.stdout, /edit\s+type=edit/);
 });
 
-test('a broken table exits with the problems', () => {
-  if (!existsSync(CLI)) return;
+test('a broken table exits with the problems', t => {
+  if (!existsSync(CLI)) return t.skip();
   const file = tableFile('kind = "route"\n\n[routes.edit]\nchain = []\n');
   const out = run(['routes', 'validate', '--routes', file]);
   assert.equal(out.code, 1);
   assert.match(out.stderr, /at least one provider/);
 });
 
-test('the store surface migrates and then reports up to date', () => {
-  if (!existsSync(CLI)) return;
+test('the store surface migrates and then reports up to date', t => {
+  if (!existsSync(CLI)) return t.skip();
   const db = join(scratch, 'ledger.db');
   const first = run(['store', 'migrate', '--path', db]);
   const second = run(['store', 'migrate', '--path', db]);
@@ -76,22 +76,22 @@ test('the store surface migrates and then reports up to date', () => {
   assert.match(second.stdout, /up to date/);
 });
 
-test('the store surface reports where the ledger lives', () => {
-  if (!existsSync(CLI)) return;
+test('the store surface reports where the ledger lives', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['store', 'path']);
   assert.equal(out.code, 0);
   assert.match(out.stdout.trim(), /router\.db$/);
 });
 
-test('the health surface answers with a snapshot', () => {
-  if (!existsSync(CLI)) return;
+test('the health surface answers with a snapshot', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['health', '--json', '--path', join(scratch, 'health.db')]);
   assert.equal(out.code, 0);
   assert.deepEqual(JSON.parse(out.stdout), {});
 });
 
-test('the route surface resolves a task against the table', () => {
-  if (!existsSync(CLI)) return;
+test('the route surface resolves a task against the table', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run([
     'route',
     'fix',
@@ -109,8 +109,8 @@ test('the route surface resolves a task against the table', () => {
   assert.equal(decision.picked, 'static');
 });
 
-test('a route that pins a field needs that field on the task', () => {
-  if (!existsSync(CLI)) return;
+test('a route that pins a field needs that field on the task', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['route', 'fix', 'a', 'typo', '--routes', tableFile(TABLE), '--json']);
   assert.equal(out.code, 0);
   const decision = JSON.parse(out.stdout);
@@ -121,8 +121,8 @@ test('a route that pins a field needs that field on the task', () => {
   assert.match(rejected.reason, /carries no type/);
 });
 
-test('a route naming a model the declaration contradicts is a config error', () => {
-  if (!existsSync(CLI)) return;
+test('a route naming a model the declaration contradicts is a config error', t => {
+  if (!existsSync(CLI)) return t.skip();
   // the operator declared devin-acp for the swe-2 family
   const dir = configDir({
     brouter: { models: { 'swe-2-max': [{ provider: 'devin-acp' }] } },
@@ -144,8 +144,8 @@ test('a route naming a model the declaration contradicts is a config error', () 
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('a declaration that agrees leaves the table valid', () => {
-  if (!existsSync(CLI)) return;
+test('a declaration that agrees leaves the table valid', t => {
+  if (!existsSync(CLI)) return t.skip();
   const dir = configDir({
     brouter: { models: { 'swe-2-max': [{ provider: 'devin-acp' }] } },
   });
@@ -155,8 +155,8 @@ test('a declaration that agrees leaves the table valid', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('the explain surface answers the questions — route, model, health, cost', () => {
-  if (!existsSync(CLI)) return;
+test('the explain surface answers the questions — route, model, health, cost', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run([
     'route',
     'fix',
@@ -176,31 +176,31 @@ test('the explain surface answers the questions — route, model, health, cost',
   assert.match(out.stdout, /model: swe-2-max — the route "edit" pins it/);
 });
 
-test('the explain surface takes a subset of the slices', () => {
-  if (!existsSync(CLI)) return;
+test('the explain surface takes a subset of the slices', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['route', 'fix', 'a', 'typo', '--routes', tableFile(TABLE), '--explain=model']);
   assert.equal(out.code, 0);
   assert.match(out.stdout, /^model$/m);
   assert.doesNotMatch(out.stdout, /^health$/m);
 });
 
-test('an unknown slice is an error naming the known ones', () => {
-  if (!existsSync(CLI)) return;
+test('an unknown slice is an error naming the known ones', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['route', 'fix', 'a', 'typo', '--routes', tableFile(TABLE), '--explain=nope']);
   assert.equal(out.code, 2);
   assert.match(out.stderr, /unknown explain slice "nope"/);
   assert.match(out.stderr, /route, model, health, cost/);
 });
 
-test('a malformed --timeout is a usage error — the deadline would never fire', () => {
-  if (!existsSync(CLI)) return;
+test('a malformed --timeout is a usage error — the deadline would never fire', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run(['ask', 'ping', '--timeout', 'soon']);
   assert.equal(out.code, 2);
   assert.match(out.stderr, /--timeout must be a whole number of milliseconds/);
 });
 
-test('the explain surface speaks JSON when asked', () => {
-  if (!existsSync(CLI)) return;
+test('the explain surface speaks JSON when asked', t => {
+  if (!existsSync(CLI)) return t.skip();
   const out = run([
     'route',
     'fix',

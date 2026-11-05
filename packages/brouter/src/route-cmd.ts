@@ -50,9 +50,8 @@ function taskShape(argv: string[]): RouteTask {
 /** The decision, rendered. */
 function render(decision: RouteDecisionView, known: boolean): void {
   console.log(`route: ${decision.route?.name ?? '(none)'}`);
-  console.log(
-    `chain: ${decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ') || '(empty)'}`
-  );
+  const chain = decision.chain.map(e => `${e.provider}/${e.model ?? ''}`).join(' → ');
+  console.log(`chain: ${chain || '(empty)'}`);
   console.log(`picked: ${decision.picked} — ${decision.reason}`);
   if (!known) {
     console.log('health: unknown — the ledger is unavailable, no wall was applied');

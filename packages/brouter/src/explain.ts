@@ -228,8 +228,7 @@ export function costFacts(input: {
   ledgerKnown?: boolean;
 }): ExplainFact[] {
   const facts: ExplainFact[] = [];
-  facts.push(...turnFacts(input.turn));
-  facts.push(...windowFacts(input.window, input.ledgerKnown !== false));
+  facts.push(...turnFacts(input.turn), ...windowFacts(input.window, input.ledgerKnown !== false));
   return facts;
 }
 
@@ -242,10 +241,14 @@ function turnFacts(turn: TurnUsage | undefined): ExplainFact[] {
     ];
   }
   const facts: ExplainFact[] = [];
-  facts.push(tokenFact('context', turn.reported?.inputTokens, turn.estimated?.inputTokens));
-  facts.push(tokenFact('output', turn.reported?.outputTokens, turn.estimated?.outputTokens));
+  facts.push(
+    tokenFact('context', turn.reported?.inputTokens, turn.estimated?.inputTokens),
+    tokenFact('output', turn.reported?.outputTokens, turn.estimated?.outputTokens)
+  );
   if (turn.costUsd === undefined) {
-    facts.push(unknownFact({ label: 'cost', because: 'the agent reports no cost', source: 'the agent' }));
+    facts.push(
+      unknownFact({ label: 'cost', because: 'the agent reports no cost', source: 'the agent' })
+    );
   } else {
     facts.push({
       label: 'cost',
@@ -287,14 +290,19 @@ function tokenFact(
 }
 
 /** The ledger's window counters — the scale around this turn. */
-function windowFacts(
-  window: WindowCounters | undefined,
-  known: boolean
-): ExplainFact[] {
+function windowFacts(window: WindowCounters | undefined, known: boolean): ExplainFact[] {
   if (!known) {
     return [
-      unknownFact({ label: 'requests', because: 'the ledger could not be read', source: 'the ledger' }),
-      unknownFact({ label: 'tokens', because: 'the ledger could not be read', source: 'the ledger' }),
+      unknownFact({
+        label: 'requests',
+        because: 'the ledger could not be read',
+        source: 'the ledger',
+      }),
+      unknownFact({
+        label: 'tokens',
+        because: 'the ledger could not be read',
+        source: 'the ledger',
+      }),
     ];
   }
   if (window === undefined) {

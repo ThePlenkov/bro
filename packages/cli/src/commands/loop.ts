@@ -78,7 +78,10 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type BrouterModels,
   type ClaimCapability,
+  type ExitCode,
+  type ExplainSlice,
   type MirrorPolicy,
   type ResolvedClass,
   type ReviewFacade,
@@ -91,7 +94,6 @@ import {
   issueLink,
   printUsage,
 } from '@broject/core';
-import type { BrouterModels, ExitCode, ExplainSlice } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -2614,13 +2616,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set([
-  '--json',
-  '--dry-run',
-  '--help',
-  '--auto-approve',
-  '--explain',
-]);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--explain']);
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {

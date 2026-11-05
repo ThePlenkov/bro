@@ -25,7 +25,7 @@ async function store(name: string) {
   const path = join(scratch, `${name}.db`);
   const handle = openStore(path);
   assert.ok(handle.ok, handle.ok ? '' : handle.reason);
-  await migrateStore(handle.db);
+  migrateStore(handle.db);
   return handle;
 }
 
