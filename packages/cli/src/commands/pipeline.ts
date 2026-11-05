@@ -216,6 +216,24 @@ const hasNext = (argv: string[], i: number): boolean => i + 1 < argv.length;
 const consumesValue = (a: string, argv: string[], i: number): boolean =>
   flagName(a) === a && VALUE_FLAGS.has(a) && hasNext(argv, i);
 
+/** A `-m`-position token's rewrite — the `--message` token(s) to
+ *  emit plus how many further input tokens they consume: `-m=<v>`
+ *  lands inline and consumes nothing, a bare `-m` takes the next
+ *  token as its value verbatim. */
+const shortFlagTokens = (
+  a: string,
+  name: string,
+  argv: string[],
+  i: number
+): { tokens: string[]; consumed: number } => {
+  if (a !== name) {
+    return { tokens: [`--message=${a.slice(name.length + 1)}`], consumed: 0 };
+  }
+  return hasNext(argv, i)
+    ? { tokens: ['--message', argv[i + 1]!], consumed: 1 }
+    : { tokens: ['--message'], consumed: 0 };
+};
+
 /** `-m` → `--message`, ONLY in option position: a `-m` token that is
  *  another option's value (or sits past `--`) is literal answer text,
  *  never a flag — rewriting it would corrupt the very payload being
@@ -237,11 +255,9 @@ function normalizeShortFlag(argv: string[]): string[] {
     }
     const name = flagName(a);
     if (isShortFlag(name)) {
-      out.push(a === name ? '--message' : `--message=${a.slice(name.length + 1)}`);
-      if (a === name && hasNext(argv, i)) {
-        i += 1;
-        out.push(argv[i]!); // bare -m consumes its value verbatim
-      }
+      const r = shortFlagTokens(a, name, argv, i);
+      out.push(...r.tokens);
+      i += r.consumed;
       continue;
     }
     out.push(a);

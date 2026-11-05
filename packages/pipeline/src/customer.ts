@@ -144,17 +144,18 @@ export function readCustomerFile(file: string): unknown[] {
  *  An unrecognized `kind` is NOT a candidate: the writer of record is
  *  the CLI, and a row claiming another kind must not be misread as a
  *  verdict. */
-const isVerdictCandidate = (v: unknown): boolean =>
+const isVerdictCandidate = (v: unknown): v is Record<string, unknown> =>
   isRecord(v) && (v.kind === 'verdict' || (v.kind === undefined && 'verdict' in v));
 
 /** The latest verdict candidate — LAST row wins (a corrected record
  *  supersedes an earlier malformed one). Returned raw: shape and
  *  identity validation belong to the gate, which fails closed on a
  *  malformed record rather than silently skipping it. */
-export function latestVerdict(rows: unknown[]): unknown | undefined {
+export function latestVerdict(rows: unknown[]): Record<string, unknown> | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
-    if (isVerdictCandidate(rows[i])) {
-      return rows[i];
+    const r = rows[i];
+    if (isVerdictCandidate(r)) {
+      return r;
     }
   }
   return undefined;
@@ -165,7 +166,7 @@ export function latestVerdict(rows: unknown[]): unknown | undefined {
  *  customer has not answered (no repo, no channel, or no verdict row
  *  yet — all read identically as "still waiting"). */
 export function fileVerdictStore(dir: string) {
-  return (call: StageCall): unknown | undefined => {
+  return (call: StageCall): Record<string, unknown> | undefined => {
     const file = customerChannelPath({ dir, runId: call.runId });
     if (file === null) {
       return undefined;
