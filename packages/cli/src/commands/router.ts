@@ -7,35 +7,34 @@
  * reach the router's surfaces without a second binary on PATH.
  *
  *   bro router models [--json]                      the served catalog
- *   bro router clients [--json]                      the client adapters
+ *   bro router clients [--json]                     the client inventory
+ *   bro router providers [--json]                   the configured providers
  *   bro router client <id> [--write] [--settings P] [--wire] [--json]
  *
- * The endpoint comes from bro's own live state file — the gateway's
- * published `{url, token}` — so a dead listener is an error instead of
- * a read that never answers.
+ * The wrapper mounts the ROUTER'S OWN plugins (`routerPlugins()`), not a
+ * second implementation: one set of commands, two spellings. What the
+ * wrapper adds is POLICY — where the endpoint comes from and which
+ * settings file a client gets:
+ *
+ *  - the endpoint comes from bro's LIVE gateway state (a dead listener
+ *    is an error, not a read that never answers);
+ *  - `serve.client.<id>.settingsPath` names the file the model block
+ *    lands in.
  */
-import { configuredProviders, runClient, runModels, type ClientOutcome } from '@broject/brouter';
-import { hasHelpFlag, printUsage } from '@broject/core';
-import { flag, positionals } from './args.ts';
+import { defineCommand, runCommand } from '@broject/command';
+import { routerPlugins } from '@broject/brouter';
+import type { RouterEndpoint } from '@broject/brouter';
+import { flag } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { liveServeState } from './serve.ts';
 
-const USAGE = `usage:
-  bro router providers [--json]                    the configured providers
-  bro router models [--json]                       the served catalog
-  bro router clients [--json]                       the client adapters
-  bro router client <id> [--write] [--settings P] [--wire] [--json]
-    client        the client to render for (default: claude-code)
-    --write       merge the model block into the client's settings file
-    --settings    the settings file (default: the client's own)
-    --wire        print the wiring (env) the client needs to reach the gateway
-    --json        the model block as JSON
-`;
-
-const BOOL_FLAGS = new Set(['--write', '--wire', '--json']);
-
 /** The gateway's own endpoint — the live state file. */
-function gatewayEndpoint(): { url: string; token: string } {
+function broEndpoint(argv: string[]): RouterEndpoint {
+  const url = flag(argv, '--url');
+  const token = flag(argv, '--token');
+  if (url !== undefined && token !== undefined) {
+    return { url: url.replace(/\/+$/, ''), token };
+  }
   const live = liveServeState(process.cwd());
   if (live === undefined) {
     console.error('error: no live gateway — start one with `bro serve`');
@@ -55,110 +54,20 @@ function configuredSettingsPath(client: string): string | undefined {
   return typeof path === 'string' && path.trim() !== '' ? path.trim() : undefined;
 }
 
-async function cmdRouterClient(argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--settings']), { boolFlags: BOOL_FLAGS });
-  if (pos.length > 1) {
-    console.error('error: bro router client takes at most one client id');
-    printUsage(USAGE, 2);
-  }
-  const client = pos[0] ?? 'claude-code';
-  const flagSettings = flag(argv, '--settings');
-  // the operator's own path wins over the flag's default — the flag
-  // still wins over the config (an explicit answer beats a policy)
-  const configured = configuredSettingsPath(client);
-  const settings = flagSettings ?? configured;
-  let outcome: ClientOutcome;
-  try {
-    outcome = await runClient(
-      {
-        client,
-        write: argv.includes('--write'),
-        ...(settings === undefined ? {} : { settings }),
-        wire: argv.includes('--wire'),
-        json: argv.includes('--json'),
-      },
-      gatewayEndpoint()
-    );
-  } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
-  if (outcome.written !== undefined) {
-    console.log(`wrote ${outcome.models.length} model row(s) → ${outcome.written}`);
-  }
-  if (argv.includes('--wire')) {
-    console.log(JSON.stringify(outcome.wiring, null, 2));
-  }
-  if (argv.includes('--json') || outcome.written === undefined) {
-    console.log(JSON.stringify(outcome.block, null, 2));
-  }
-}
+/** The router's commands, mounted under bro. The parent path makes the
+ *  help text name the command the way the user spells it (`bro router`). */
+const router = defineCommand(
+  {
+    name: 'router',
+    summary: 'The model router — the served catalog and the clients it renders for',
+    plugins: routerPlugins({
+      endpoint: broEndpoint,
+      settingsPath: configuredSettingsPath,
+    }),
+  },
+  'bro'
+);
 
 export async function runRouterCommand(argv: string[]): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    printUsage(USAGE, 0);
-  }
-  const command = argv[0];
-  const rest = argv.slice(1);
-  if (command === 'client') {
-    await cmdRouterClient(rest);
-    return;
-  }
-  if (command === 'providers') {
-    const providers = configuredProviders(process.cwd());
-    if (rest.includes('--json')) {
-      console.log(JSON.stringify(providers, null, 2));
-      return;
-    }
-    if (providers.length === 0) {
-      console.log('no providers configured — add providers.<name> to bro.config.json');
-      return;
-    }
-    for (const p of providers) {
-      const model = p.model === undefined ? '' : `\t${p.model}`;
-      const models = p.models === undefined ? '' : `\t${p.models} model(s)`;
-      console.log(`${p.name}\t${p.type}\t${p.target ?? ''}${model}${models}`);
-    }
-    return;
-  }
-  if (command === 'models') {
-    const { models, dropped } = await runModels(gatewayEndpoint());
-    if (rest.includes('--json')) {
-      console.log(JSON.stringify({ models, dropped }, null, 2));
-      return;
-    }
-    for (const model of models) {
-      console.log(model.label === undefined ? model.id : `${model.id}\t${model.label}`);
-    }
-    if (dropped > 0) {
-      console.error(`bro router: ${dropped} catalog row(s) carried no id — dropped`);
-    }
-    return;
-  }
-  if (command === 'clients') {
-    const { CLIENTS } = await import('@broject/brouter');
-    if (rest.includes('--json')) {
-      console.log(
-        JSON.stringify(
-          CLIENTS.map(c => ({
-            id: c.id,
-            title: c.title,
-            settingsKey: c.settingsKey,
-            settingsPath: c.defaultSettingsPath,
-          })),
-          null,
-          2
-        )
-      );
-      return;
-    }
-    for (const client of CLIENTS) {
-      console.log(
-        `${client.id}\t${client.title}\t${client.settingsKey}\t${client.defaultSettingsPath}`
-      );
-    }
-    return;
-  }
-  console.error(USAGE);
-  printUsage(USAGE, 2);
+  await runCommand(router, argv);
 }

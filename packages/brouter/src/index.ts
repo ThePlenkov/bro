@@ -29,6 +29,7 @@ export {
   type ClaudeCodeRow,
 } from './clients/claude-code.ts';
 export { CLIENTS, clientById, clientIds } from './registry.ts';
+export { routerPlugins, type RouterPolicy } from './plugins.ts';
 export { configuredProviders, type ProviderRow } from './providers.ts';
 export {
   requireClient,
