@@ -134,10 +134,8 @@ function hopLine(h: TraceHop): string {
   return `  ${HOP_MARK[h.state]} ${h.hop.padEnd(7)} ${attested} — ${tail}`;
 }
 
-/** The human report — resolved record first, then the per-hop
- *  verification table, then the detail line. */
-export function formatTrace(t: ArtifactTrace): string {
-  const lines: string[] = [`${VERDICT_WORD[t.verdict]}  ${t.ref} (${t.kind})`];
+/** The resolved-record rows — absent fields simply don't print. */
+function resolvedLines(t: ArtifactTrace): string[] {
   const resolved: [string, string | undefined][] = [
     ['agent', t.agent],
     ['provider', t.provider],
@@ -150,16 +148,15 @@ export function formatTrace(t: ArtifactTrace): string {
     ['backend', t.backend],
     ['via', t.via],
   ];
-  for (const [k, v] of resolved) {
-    if (v !== undefined) {
-      lines.push(`    ${k.padEnd(8)} ${v}`);
-    }
-  }
+  return resolved.filter(([, v]) => v !== undefined).map(([k, v]) => `    ${k.padEnd(8)} ${v}`);
+}
+
+/** The human report — resolved record first, then the per-hop
+ *  verification table, then the detail line. */
+export function formatTrace(t: ArtifactTrace): string {
+  const lines: string[] = [`${VERDICT_WORD[t.verdict]}  ${t.ref} (${t.kind})`, ...resolvedLines(t)];
   if (t.hops.length > 0) {
-    lines.push('  hops:');
-    for (const h of t.hops) {
-      lines.push(hopLine(h));
-    }
+    lines.push('  hops:', ...t.hops.map(hopLine));
   }
   if (t.detail !== undefined) {
     lines.push(`    ${t.detail}`);
@@ -173,6 +170,8 @@ interface ResolveArgs {
   json: boolean;
 }
 
+const RESOLVE_KINDS = ['commit', 'pr', 'branch'] as const;
+
 /** Exported for tests — arg parsing is the command's one branchy
  *  corner (flag order, a dangling --kind, a flag-shaped ref). */
 export function parseResolveArgs(args: string[]): ResolveArgs | null {
@@ -180,24 +179,20 @@ export function parseResolveArgs(args: string[]): ResolveArgs | null {
   let kind: TraceRefKind | undefined;
   const ki = rest.indexOf('--kind');
   if (ki >= 0) {
-    const v = rest[ki + 1];
-    if (v === 'commit' || v === 'pr' || v === 'branch') {
-      kind = v;
-      rest.splice(ki, 2);
-    } else {
+    const v = rest.splice(ki, 2)[1] as TraceRefKind | undefined;
+    if (!RESOLVE_KINDS.includes(v as TraceRefKind)) {
       return null;
     }
+    kind = v;
   }
-  let json = false;
   const ji = rest.indexOf('--json');
   if (ji >= 0) {
-    json = true;
     rest.splice(ji, 1);
   }
   if (rest.length !== 1 || rest[0]!.startsWith('-')) {
     return null;
   }
-  return { ref: rest[0]!, kind, json };
+  return { ref: rest[0]!, kind, json: ji >= 0 };
 }
 
 // --- PR footer stamp -------------------------------------------------------------

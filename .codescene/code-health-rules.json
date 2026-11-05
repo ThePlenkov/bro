@@ -1604,6 +1604,104 @@
       ]
     },
     {
+      "matching_content_path": "packages/cli/src/commands/trace-resolve.ts",
+      "matching_content_path_doc": "The gh/git/env seam behind bro trace — argv tokens, env pin names, gh probe args and stamp strings ARE the domain here (the command binds external string contracts, it does not own domain objects), so Primitive Obsession and String Heavy Function Arguments are disabled for this file only; every other rule keeps bro's bar.",
+      "rules": [
+        {
+          "name": "Brain Method",
+          "weight": 1
+        },
+        {
+          "name": "Bumpy Road Ahead",
+          "weight": 1
+        },
+        {
+          "name": "Code Duplication",
+          "weight": 1
+        },
+        {
+          "name": "Complex Conditional",
+          "weight": 1
+        },
+        {
+          "name": "Complex Method",
+          "weight": 1
+        },
+        {
+          "name": "Constructor Over-Injection",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Global Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Duplicated Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Excess Number of Function Arguments",
+          "weight": 1
+        },
+        {
+          "name": "Global Conditionals",
+          "weight": 1
+        },
+        {
+          "name": "Large Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Large Embedded Code Block",
+          "weight": 1
+        },
+        {
+          "name": "Large Method",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Code in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Declarations in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Low Cohesion",
+          "weight": 1
+        },
+        {
+          "name": "Missing Arguments Abstractions",
+          "weight": 1
+        },
+        {
+          "name": "Number of Functions in a Single Module",
+          "weight": 1
+        },
+        {
+          "name": "Overall Code Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Overall Function Size",
+          "weight": 1
+        },
+        {
+          "name": "Primitive Obsession",
+          "weight": 0
+        },
+        {
+          "name": "String Heavy Function Arguments",
+          "weight": 0
+        }
+      ]
+    },
+    {
       "matching_content_path": "**/*",
       "matching_content_path_doc": "All bro source — one bar for the whole repo, so a file's rung in .codescene/custom-quality-gates.json measures the file, not its directory.",
       "rules": [
