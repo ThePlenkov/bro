@@ -34,7 +34,12 @@ const MATCH_KEYS = new Set(['type', 'complexity', 'priority']);
 
 /** Where a value sits in the table — the path every problem names. */
 export class TablePath {
-  private constructor(readonly text: string) {}
+  /** the path as the operator reads it */
+  readonly text: string;
+
+  private constructor(text: string) {
+    this.text = text;
+  }
 
   /** The table's root — the path of the envelope itself. */
   static root(): TablePath {
@@ -75,15 +80,16 @@ export class RouteProblems {
 
 /** Every problem the table carries — thrown once, listed once. */
 export class RouteTableError extends Error {
-  constructor(
-    readonly problems: string[],
-    source?: string
-  ) {
+  /** every problem, in the order they were found */
+  readonly problems: string[];
+
+  constructor(problems: string[], source?: string) {
     super(
       `${source === undefined ? 'route table' : source}: ${problems.length} problem(s)\n` +
         problems.map(p => `  ${p}`).join('\n')
     );
     this.name = 'RouteTableError';
+    this.problems = problems;
   }
 }
 
