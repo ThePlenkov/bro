@@ -750,6 +750,64 @@ orch: foreground, timing: now}`.
   PR → `bro trace` VERIFIED) stays deferred to the runner-backed
   graduation the work stage enables.
 
+## Run 8: bro-qjji2 — agile contract epic (extended formula)
+
+The emulated formula is now the EXTENDED DAG (spec delta lands with
+this run's own work product):
+
+    classify → route → intake → work → verify → review(gated)
+             → accept → merge → capture
+
+- Invocation: `runPipeline(extended-formula, 'bro-qjji2', opts)` —
+  hand-emulated by the interactive worker session; the six epic
+  children (bro-qjji2.1–.6) are the pipeline items; each child's run
+  entry lands below as it progresses.
+- Spec reference: §stage semantics intake/verify/accept bullets,
+  §task spec facade, §interactive and non-interactive customer
+  channels, §learning plane — all introduced by this run's diff.
+- Input: epic `bro-qjji2` (customer = the user; worker = this
+  session; the session's own subagents are workers under the same
+  contract with this session as their customer).
+- Actual action and result:
+  - classify → `solo` — agile-contract stage work shares no surface
+    with other open items; payload `{group: solo, complexity:
+    complex, rank: 1}`.
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - intake → `accepted` — REAL INTAKE, first emulated pass: the
+    worker validated the task against the spec-in-progress and asked
+    the customer three intake questions in-session (interactive
+    channel — the customer is live): (1) run scope → full cycle
+    confirmed; (2) verdict-surface naming → delegated to the worker
+    (architect's call); (3) AC storage → answered "facade, never bd
+    coupling" which produced the §task spec facade section itself.
+    Verdict `accepted` journaled after answers landed.
+  - work → `done` — spec delta: intake/verify/accept stages +
+    transitions, typed outputs, task-spec facade, interactive vs
+    non-interactive channels, learning plane, verification clauses;
+    epic + six children beads minted with `## Acceptance` sections
+    (the taskSpec contract dogfooded immediately); deps wired
+    (.3–.5 need .1+.2, .6 needs .3–.5).
+  - verify/review/accept → pending — evidence bundle to the
+    customer, then their verdict.
+- Design decisions worth recording (spec-consistent,
+  underdetermined by the spec):
+  - `accepted_by`/`run.customer` — the customer identity is
+    recorded at run creation, and `accept` may only be settled by
+    that identity: a worker cannot self-accept. Emulated here as
+    "this session waits for the user's verdict, never self-signs".
+  - Draft PR MAY sit inside the evidence bundle (review surface,
+    never merge-ready before `accepted`) — chosen over strict
+    zero-push; the customer confirmed evidence-before-push as the
+    contract but the draft surface is their call per run.
+  - `verify` rides a new `e2e` engine slot (evidence runner), not
+    `judge` — proof artifacts are side-effecting checks, not
+    decide answers.
+- Spec gaps hit: none yet — the delta is this run's work product;
+  gaps will surface when .3–.5 engines bind real seams.
+- Golden case: pending — the extended formula's TOML becomes the
+  conformance fixture in .1.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the

@@ -62,15 +62,30 @@ engine = "judge"
 verdicts = ["spawn", "queue", "defer"]
 
 [[stages]]
+name = "intake"            # task acceptance — worker validates the spec (DoR)
+engine = "intake"
+verdicts = ["accepted", "questions", "declined"]
+
+[[stages]]
 name = "work"              # spawn via fleet facade → exit taxonomy
 engine = "fleet"
 verdicts = ["done", "rate_limited", "crash", "stopped"]
+
+[[stages]]
+name = "verify"            # DoD — work validated against the item's AC, evidence-backed
+engine = "e2e"
+verdicts = ["verified", "failed", "unverifiable"]
 
 [[stages]]
 name = "review"            # G3: internal review — risk-gated
 engine = "judge"
 gate_on = "complexity == complex"   # cheap-class items skip
 verdicts = ["push", "fix", "abandon"]
+
+[[stages]]
+name = "accept"            # customer acceptance — the run's customer signs the evidence
+engine = "accept"
+verdicts = ["accepted", "rejected", "abandon"]
 
 [[stages]]
 name = "merge"             # act gate — threads/CI/reviewers settle
@@ -90,21 +105,36 @@ duplicate = "close"
 defer = "park"
 
 [transitions.route]
-spawn = "work"
+spawn = "intake"
 queue = "park"
 defer = "park"
 
+[transitions.intake]
+accepted = "work"
+questions = "park"           # questions journaled; wake on customer's answers
+declined = "close"           # feedback → item returns to the customer for redrafting
+
 [transitions.work]
-done = "review"
+done = "verify"
 rate_limited = "route"       # re-enter routing — honors onWall chain
 crash = "retry"
 stopped = "abandon"
 
+[transitions.verify]
+verified = "review"
+failed = "work"              # failed ACs scope the fix round
+unverifiable = "park"        # no/ambiguous AC — DoR violation, never silently skipped
+
 [transitions.review]
-skip = "merge"               # gate_on failed → bypass target
-push = "merge"
+skip = "accept"              # cheap-class bypass still crosses acceptance
+push = "accept"
 fix = "work"
 abandon = "abandon"          # review-abandon IS terminal failure
+
+[transitions.accept]
+accepted = "merge"
+rejected = "work"            # customer's notes scope the fix round
+abandon = "abandon"
 
 [transitions.merge]
 landed = "capture"
@@ -162,11 +192,22 @@ next stage reads:
   timing: now|queue, provider?, model? }` — provider/model are
   resolved through `fleet.routing.<class>.chain` and `brouter`, never
   named by core.
+- **intake** → `{ verdict: accepted|questions|declined,
+  questions?: [string], feedback?: string }` — `questions` requires a
+  non-empty question list, `declined` requires non-empty feedback;
+  a malformed payload fails closed to `park` + alert (same contract
+  as review's `notes`).
 - **work** → the registry exit taxonomy verbatim
   (`done|rate_limited|crash|stopped`); the verdict is a mapping, not
   a new enum.
+- **verify** → `{ rows: [{ ac: string, verdict: pass|fail,
+  proof: ref }], summary? }` — one row per declared AC;
+  `failed` composes the failing rows into the fix-scope notes.
 - **review** → `{ verdict: push|fix|abandon, notes }` — the internal
   review pass on the worktree diff via `routing.review.chain`.
+- **accept** → `{ accepted_by, notes? }` — `accepted_by` is the
+  run's recorded customer identity (never self-derived); `rejected`
+  requires non-empty `notes` — the customer's fix scope.
 - **merge** → the act gate's settle state (`landed|blocked|dropped`).
 - **capture** → `{ lessons: int, followups: [beadId] }`.
 
@@ -178,12 +219,34 @@ next stage reads:
 - **route** — judge emits `{class,kind,orch,timing}`; occupancy plane
   (`fleetOccupancyFor`) feeds the load signal. `queue` parks the item
   until capacity opens; `defer` is an operator verdict.
+- **intake** — the worker validates the TASK before committing: reads
+  the item's spec through the task facade (AC/DoR/DoD/test-scenarios —
+  see §task spec facade). `accepted` commits the worker to the task —
+  the acceptance point is journaled (who took the task, on which spec
+  sha). `questions` journals the question list and parks: the wake is
+  the customer's answers landing on the item (`bro pipeline answer`),
+  then intake re-runs on the enriched spec. `declined` carries the
+  feedback why the spec fails requirements and returns the item to
+  the customer — close, not abandon: the work was never refused for
+  cause, the spec was. A worker can never silently start an
+  underspecified task: there is no edge from route to work that
+  bypasses intake.
 - **work** — spawn via facade → registry pins {pid, prompt, exit};
   `resolveWorktree` reuses recorded checkouts (resume semantics).
   `rate_limited` re-enters `route` rather than parking on the same
   chain entry: the route stage honors
   `fleet.routing.<class>.onWall` — `fallthrough` dispatches the next
   provider in the chain, `park` answers `queue`→`park`.
+  `done` means "changes written" — never "ready to land".
+- **verify** — self-validation against the item's declared AC via the
+  `e2e` engine (agentic e2e pipeline): each criterion produces an
+  evidence row `{ac, verdict, proof}` — a test run, a rendered probe,
+  a file fact — never the worker's bare claim. `verified` requires
+  every row passing. `failed` composes the failing rows into the
+  fix-scope and re-enters `work`. `unverifiable` — the item carries
+  no usable AC — parks with an alert: a task that cannot be verified
+  cannot be accepted, so it goes back for spec enrichment, never
+  silently through.
 - **review** — internal pre-push pass via `routing.review.chain`
   (review-capable providers list). Risk-gated on classify's
   complexity verdict: `complex` required, `cheap` skips to merge.
@@ -195,11 +258,90 @@ next stage reads:
   scopeless re-entry. Each wave of findings is one scoped-fix
   re-entry, bounded by `pipeline.fixRounds` (default
   `act.maxRounds`, the loop contract); exhaustion `park`s the
-  item rather than looping. `push` proceeds to merge.
+  item rather than looping. `push` proceeds to `accept` —
+  internal approval is not customer acceptance.
+- **accept** — the customer signs the result. The engine emits the
+  evidence bundle `{verify rows, diff summary, draft_pr?}` to the
+  run's recorded customer channel (user → notify/mailbox;
+  agent-customer → the A2A surface) and suspends: journaled intent,
+  no side effects. The customer's verdict lands through
+  `bro pipeline accept <item> accepted|rejected|abandon --notes …`
+  and is journaled with `accepted_by` — only the recorded customer
+  identity can move the gate; a worker cannot self-accept. A draft
+  PR MAY be created inside the evidence bundle — it is the review
+  surface, never merge-ready before `accepted`. `rejected` re-enters
+  `work` scoped by the customer's `notes` (required non-empty —
+  same fail-closed contract as review). There is no edge to `merge`
+  that does not cross `accept`: unpublished work stays unpublished.
 - **merge** — the existing act gate: threads/CI/reviewers settle;
   `blocked` retries bounded by fix-rounds, `dropped` is terminal.
 - **capture** — `self learn capture` on land (cheap, per-item);
   heavyweight session retro runs batched off-path.
+
+### Task spec facade
+
+A pipeline item is not just a title — it is the spec: DoR, DoD,
+acceptance criteria, test scenarios, epic/milestone context. Core
+reads it through a semantic facade (`taskSpec`), never through the
+store's native API: bd is the first adapter of that facade, not its
+definition — a different task store implements the same contract.
+
+```ts
+interface TaskSpec {
+  id: string;
+  title: string;
+  body?: string; // description/context
+  acceptance?: string[]; // AC rows — verify's input
+  dod?: string; // definition-of-done text
+  dor?: string; // definition-of-ready text
+  scenarios?: string[]; // test scenarios
+}
+```
+
+`acceptance` absent or empty is not "no checks" — it is the
+`unverifiable` input. The facade is also the write path for intake
+artifacts: `questions` and `declined` feedback land ON the item
+through the same seam, so the customer's answers enrich the spec
+the next intake pass reads.
+
+### Interactive and non-interactive customer channels
+
+The customer identity is polymorphic — a user, another agent, an
+external requester — recorded on the run at creation
+(`run.customer`). Two transport modes, same gate semantics:
+
+- **interactive** — the customer is live (a user in a session, an
+  agent pane). `questions`/`accept` negotiate inside the session:
+  the intent row parks only for the exchange's duration and the
+  verdict lands in-band.
+- **non-interactive** — batch/convoy runs. The question list or
+  evidence bundle lands through notify/mailbox (+ optional draft
+  PR surface); the run suspends until `bro pipeline answer|accept`
+  journals the customer's input.
+
+The formula never branches on mode — the engine's customer-channel
+seam does. A parked run is resumable by definition, so a customer
+who never answers leaves a parked item, not a hung one.
+
+### Learning plane
+
+Self-learning is a layer, not a stage: every gate produces a
+signal, `capture` distills it, memory is consulted at entry.
+
+- **per-stage signals** — the journal rows are the substrate:
+  classify's duplicate patterns, route's wall/crash rates per
+  provider, intake's questions/declined patterns (spec-authoring
+  lessons), verify's recurring AC failures, review's recurring
+  findings, accept's rejections, merge's blocks.
+- **`capture`** — cheap per-item distill into trigger-gated lessons
+  (`bro self learn`). `accept.rejected` runs are the highest-value
+  signal: the worker verified, the customer refused — the AC were
+  wrong, not the work. Capture marks rejected runs explicitly.
+- **batched retro** — heavyweight, off-path, periodic across runs
+  (the capture stage's retro queue seam).
+- **memory at entry** — stages consult `bro self learn probe` where
+  the signal changes behavior: route asks provider health, intake
+  asks recurring DoR failures, verify asks known AC gaps.
 
 ### Write-ahead journal (resume correctness)
 
@@ -266,6 +408,12 @@ write-ahead journal).
 6. G4 capture stage: self-learn call on land + batched retro hook.
 7. Trace stamps: registry fields, commit trailers, PR footer,
    `bro trace` resolver with verify/mismatch verdicts.
+8. Agile contract (new epic): `STAGE_ENGINES += intake|e2e|accept` +
+   spec-formula fixture; `taskSpec` facade (bd first adapter); `intake`
+   engine (task acceptance — accepted|questions|declined); `verify`
+   engine (e2e/AC evidence rows); `accept` engine + customer verdict
+   surface (`bro pipeline accept|answer`); emulation runs under the
+   extended formula.
 
 ## Non-goals
 
@@ -273,6 +421,8 @@ write-ahead journal).
 - No per-item heavyweight retro session.
 - No agent-visible pipeline mechanics.
 - proto/molecule formulas unchanged — pipeline is a separate kind.
+- The task store's schema is NOT the contract — `taskSpec` is; bd is
+  the first adapter, replaceable.
 
 ## Verification
 
@@ -283,3 +433,10 @@ write-ahead journal).
   intent; a verdict-less intent re-checks the world, never re-fires
   a side effect blindly.
 - cheap-class item skips internal review; complex-class gets one.
+- No transition reaches `merge` without crossing `accept`; a verdict
+  from a non-customer identity cannot settle `accept`; `rejected`
+  without notes fails closed.
+- An item with no AC parks at `unverifiable` — it never reaches
+  `accept` on an empty spec.
+- `questions`/`declined` payloads land on the item through the task
+  facade; the wake re-runs intake on the enriched spec.
