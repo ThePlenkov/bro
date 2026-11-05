@@ -51,6 +51,11 @@ Two formula kinds, both TOML, both content-hash versioned:
 ```toml
 version = 1
 
+[limits]
+in_flight = 1              # items moving through the pipeline at once;
+                           # SERIAL is the default — parallelism must be
+                           # declared, never assumed
+
 [[stages]]
 name = "classify"          # G1: dedup, group, rank (judge)
 engine = "judge"
@@ -69,6 +74,7 @@ verdicts = ["accepted", "questions", "declined"]
 [[stages]]
 name = "work"              # spawn via fleet facade → exit taxonomy
 engine = "fleet"
+concurrency = 1            # stage-level cap; absent → in_flight applies
 verdicts = ["done", "rate_limited", "crash", "stopped"]
 
 [[stages]]
@@ -144,6 +150,34 @@ dropped = "close"
 [transitions.capture]
 captured = "end"
 ```
+
+### Concurrency — declared, never assumed
+
+Parallelism is a formula property, not a runner habit. Two declared
+limits compose:
+
+- **`limits.in_flight`** (default 1) — how many items may be moving
+  through the pipeline at once. SERIAL IS THE DEFAULT: a formula
+  that wants parallel workers says so — parallelism without a
+  declared limit is a bug, not a feature.
+- **`concurrency` on a stage** — how many items may occupy that
+  stage at once; absent → `in_flight` applies. A stage cap can
+  narrow the pipeline cap (a single-customer `accept`) but never
+  widen it.
+
+Enforcement is the existing transition machinery, not a new
+mechanism: when a transition would move an item into a saturated
+stage, the item follows the queue-shaped path — `route`'s native
+`queue` verdict for routing, `park` with a slot-free wake
+elsewhere. A slot frees when an occupant's verdict moves it out.
+The journaled stage occupancy IS the semaphore — a crashed runner
+resumes with the same counts, so a limit survives restarts.
+
+This binds worker-budget policy to the formula: `fleet.maxConcurrent`
+config remains the machine budget (what the box CAN run); formula
+limits are the contract (what this flow MAY run); the effective cap
+is the smaller of the two — like `agents.<kind>.maxBatchWorkers` and
+`route`'s occupancy guard today.
 
 ### Gates and the `skip` verdict — fail closed
 
