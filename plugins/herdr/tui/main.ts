@@ -227,14 +227,19 @@ export async function runTui(argv: string[]): Promise<void> {
    *  first pass had to print. */
   const displayAgentOf0 = (): string | undefined => displayAgentOf(base0, agentArg ?? entryId);
   const displayAgent = displayAgentOf0();
-  // the journal's path resolved ONCE — `--agent` alone still names it
-  // through the matched entry's log stem (a registry run key like
-  // `bro-2bv6q` never becomes the filename; the archive lives on the
-  // native stem); a bare live pid must never stand in for a journal
-  // the floor cannot read
-  const resolvedEvents =
+  // the journal's path resolved through the matched entry's log stem
+  // (a registry run key like `bro-2bv6q` never becomes the filename;
+  // the archive lives on the native stem) — a FUNCTION, not a const:
+  // a bind made before the registry harvest lands must heal on the
+  // next refresh, not keep stating a key-named file that never exists
+  // (the floor reads 'idle' and the watch never fires). A bare live
+  // pid still never stands in for a journal the floor cannot read
+  const eventsPathOf = (): string | undefined =>
     eventsArg ??
-    (agentArg !== undefined ? eventsFile(base0, logStem(entry) ?? agentArg) : undefined);
+    (agentArg !== undefined
+      ? eventsFile(base0, logStem(agentEntry(base0, entryId)) ?? agentArg)
+      : undefined);
+  const resolvedEvents = eventsPathOf();
   const direct: SessionTarget | undefined =
     resolvedEvents === undefined && agentArg === undefined
       ? undefined
@@ -367,8 +372,11 @@ export async function runTui(argv: string[]): Promise<void> {
     if (direct !== undefined) {
       // re-read the registry too — a respawn swaps the record, and
       // probing a stale entry's pid reads 'blocked' on a live worker;
-      // the display name heals the same pass once the record lands
-      direct.workerLed = workerLedOf(agentEntry(base0, entryId), resolvedEvents);
+      // the display name and the journal path heal the same pass once
+      // the record lands (a late stem swap re-keys the feed below)
+      const events = eventsPathOf();
+      direct.workerLed = workerLedOf(agentEntry(base0, entryId), events);
+      if (events !== direct.events) direct.events = events;
       direct.agent = displayAgentOf0();
     }
     target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
