@@ -40,7 +40,42 @@ client's own vocabulary, written into the client's own settings.
 | `brouter models [--json]`                                        | the served catalog, read off the running router                        |
 | `brouter clients [--json]`                                       | the client adapters — id, title, settings key, settings path           |
 | `brouter client <id> [--write] [--settings P] [--wire] [--json]` | render the model block; `--write` merges it into the client's settings |
+| `brouter store path \| migrate \| stats [--path P] [--json]`     | the router's own ledger — where it lives, what it holds                |
+| `brouter routes list \| validate [--routes P]`                   | the route table — the routes, or the problems                          |
+| `brouter health [--json] [--path P]`                              | what can serve right now — the walls and the open sessions             |
+| `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why |
 | `bro router …`                                                   | the same surfaces, bro's spelling (the wrapper)                        |
+
+## The route table
+
+A route says WHICH models a task may land on and WHEN it fits. The table
+is TOML (`kind = "route"`, `version = 1`); the md beside it is prose for
+the decision model, never a second schema.
+
+```toml
+kind = "route"
+version = 1
+
+[routes.edit]
+match = { type = "edit" }
+chain = [{ provider = "devin-acp", model = "claude-opus-5" }]
+onWall = "fallthrough"
+```
+
+- `match` — the task's shape: `type`, `complexity`, `priority`. A route
+  that pins a field needs the task to carry it; a route that pins nothing
+  fits every task.
+- `chain` — the models, in order, as the honest `<entry>/<model>` ids.
+- `onWall` — `park` or `fallthrough`, the fleet's vocabulary.
+- the table's path: `brouter.routes` in `bro.config.json` (or `--routes`).
+
+The DECISION MODEL picks the route; the chain and the health are the
+code's. It is a judge (`brouter.router.provider` + `mode`): either a
+lane the operator configured, or a model the ROUTER SERVES — proxied
+through the router's own gateway, so jev, openai or anthropic can all
+decide. A proxied model answers in prose (the gateway has no
+`/v1/systemone` route), so it journals in `shadow` and is refused under
+`enforce`.
 
 ## The claude-code block
 

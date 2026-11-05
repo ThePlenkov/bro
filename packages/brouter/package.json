@@ -23,7 +23,10 @@
   "dependencies": {
     "@broject/command": "^0.3.0",
     "@broject/core": "^0.3.0",
-    "@broject/providers": "^0.3.0"
+    "@broject/judge": "^0.3.0",
+    "@broject/providers": "^0.3.0",
+    "@broject/router-routes": "^0.3.0",
+    "@broject/router-store": "^0.3.0"
   },
   "files": [
     "dist"
@@ -40,7 +43,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "brouter \u2014 the model router: the served catalog, the client adapters that render it in each client's own vocabulary, and the protocol clients",
+  "description": "brouter — the model router: the served catalog, the client adapters that render it in each client's own vocabulary, and the protocol clients",
   "keywords": [
     "router",
     "models",
