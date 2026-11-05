@@ -155,10 +155,11 @@ class Checks {
  *  input fails loud (spec §Concurrency). Undefined means absent. */
 function capInt(raw: unknown, at: string, c: Checks): number | undefined {
   if (raw === undefined) return undefined;
-  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+  const cap = Number.isInteger(raw) && (raw as number) >= 1 ? (raw as number) : undefined;
+  if (cap === undefined) {
     return c.fail(`${at}: must be an integer ≥ 1, got ${JSON.stringify(raw)}`);
   }
-  return raw;
+  return cap;
 }
 
 function gateOn(raw: unknown, at: string, c: Checks): GateOn | undefined {

@@ -447,14 +447,12 @@ const malformedAlert = (bad: string[]): EngineAlert => ({
 function drainOutcome(
   deps: IntakeDeps,
   call: StageCall,
-  spec: TaskSpec,
-  annotated: boolean,
-  bad: string[]
+  drain: { spec: TaskSpec; annotated: boolean; bad: string[] }
 ): { spec: TaskSpec } | { alert: EngineAlert } {
-  if (bad.length > 0) {
-    return { alert: malformedAlert(bad) };
+  if (drain.bad.length > 0) {
+    return { alert: malformedAlert(drain.bad) };
   }
-  return { spec: annotated ? (deps.taskSpec.spec(call.item) ?? spec) : spec };
+  return { spec: drain.annotated ? (deps.taskSpec.spec(call.item) ?? drain.spec) : drain.spec };
 }
 
 /** The drained answer feed → the spec the judgment reads — or a
@@ -483,7 +481,7 @@ async function landAnswers(
     }
   }
   await feed.consume();
-  return drainOutcome(deps, call, spec, annotated, bad);
+  return drainOutcome(deps, call, { spec, annotated, bad });
 }
 
 /** The answers half of invoke — fetch the run's feed and land pending
