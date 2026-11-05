@@ -45,6 +45,9 @@ export const STAGE_INTENTS: Record<StageEngine, string> = {
   fleet: 'spawn',
   'act-gate': 'gate',
   learn: 'capture',
+  intake: 'spec',
+  e2e: 'verify',
+  accept: 'emit',
 };
 
 /** Intents `opts.admit` is consulted for by default — spawn-like side

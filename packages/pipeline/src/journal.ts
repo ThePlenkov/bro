@@ -44,8 +44,8 @@ export interface JournalRow {
   /** stage the intent/alert concerns */
   stage: string;
   /** side-effect tag — the engine's intent word ('spawn', 'judge',
-   *  'gate', 'capture'), 'gate' for synthesized skip records, 'alert'
-   *  for fail-closed park rows */
+   *  'gate', 'capture', 'spec', 'verify', 'emit'), 'gate' for
+   *  synthesized skip records, 'alert' for fail-closed park rows */
   intent: string;
   /** nth invocation of this stage entry — retry bumps it, a fresh
    *  transition re-entry restarts at 1 */
