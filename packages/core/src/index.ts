@@ -166,6 +166,7 @@ export type {
 } from './brouter.ts';
 export { healthKey } from './router-health.ts';
 export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
+export { estimateTokens } from './tokens.ts';
 export {
   DATA_REF,
   dataRefCommit,
