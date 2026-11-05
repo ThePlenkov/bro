@@ -19,6 +19,7 @@ import {
   fileVerdictStore,
   latestVerdict,
   readCustomerFile,
+  signCustomerRecord,
 } from '../customer.ts';
 import { parsePipelineFormula } from '../formula.ts';
 import {
@@ -29,6 +30,7 @@ import {
   type PipelineJournal,
 } from '../journal.ts';
 import {
+  type EngineHandler,
   type EngineMap,
   type EngineResult,
   PARK_ALERTS,
@@ -37,7 +39,7 @@ import {
   type StageCall,
 } from '../runner.ts';
 import { SPEC_FORMULA } from '../spec-formula.fixture.ts';
-import { acceptStage, type EvidenceBundle, REJECTED_VERDICT } from './accept.ts';
+import { type AcceptDeps, acceptStage, type EvidenceBundle, REJECTED_VERDICT } from './accept.ts';
 
 const FORMULA = parsePipelineFormula(parse(SPEC_FORMULA));
 // by name, never by index — a stage-order change in SPEC_FORMULA must
@@ -52,6 +54,29 @@ const TS = '2026-11-06T00:00:00Z';
 const CUSTOMER = 'customer-1';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'pipeline-accept-'));
+
+/** The unsigned-mode `keyFor` pin — the suite's default dep so the
+ *  ambient environment (`BRO_PIPELINE_KEY`, a dev's
+ *  `~/.config/bro/pipeline.key`) can never flip these tests into
+ *  keyed mode; the keyed-mode describe injects its own key. */
+const noKey = (): string | undefined => undefined;
+
+/** The stage under test — suite deps with `keyFor` pinned to the
+ *  unsigned mode; keyed-mode tests pass their own `keyFor`. */
+const stageOf = (deps: {
+  emit: AcceptDeps['emit'];
+  verdictStore: AcceptDeps['verdictStore'];
+  keyFor?: AcceptDeps['keyFor'];
+}): EngineHandler =>
+  acceptStage({ emit: deps.emit, verdictStore: deps.verdictStore, keyFor: deps.keyFor ?? noKey });
+
+/** One recheck on the minimal evidence journal — the wake's read
+ *  when the store holds `store`'s current record. */
+const recheckOutcome = (
+  store: { fn: AcceptDeps['verdictStore'] },
+  keyFor: AcceptDeps['keyFor'] = noKey
+) =>
+  stageOf({ keyFor, emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(call(verifyJournal()));
 
 /** A journaled record builder — settled unless verdict is nulled. */
 const rec = (
@@ -146,7 +171,7 @@ describe('accept — emit then suspend', () => {
       }),
       rec(3, 'work', 'done', { intent: 'spawn', payload: { draft_pr: 'pr://77' } })
     );
-    const res = await acceptStage({ emit: emit.fn, verdictStore: store.fn }).invoke(call(j));
+    const res = await stageOf({ emit: emit.fn, verdictStore: store.fn }).invoke(call(j));
     assert.equal(res, 'pending');
     assert.equal(emit.calls.length, 1);
     const b = emit.calls[0].bundle;
@@ -166,7 +191,7 @@ describe('accept — emit then suspend', () => {
   test('a pre-landed verdict settles in invoke — emit still fired', async () => {
     const emit = emitSpy();
     const store = storeSpy(verdict('accepted'));
-    const res = await acceptStage({ emit: emit.fn, verdictStore: store.fn }).invoke(
+    const res = await stageOf({ emit: emit.fn, verdictStore: store.fn }).invoke(
       call(verifyJournal())
     );
     assert.deepEqual(res, {
@@ -179,7 +204,7 @@ describe('accept — emit then suspend', () => {
   test('recheck with no verdict re-emits and stays pending — crash-window cover', async () => {
     const emit = emitSpy();
     const store = storeSpy();
-    const h = acceptStage({ emit: emit.fn, verdictStore: store.fn });
+    const h = stageOf({ emit: emit.fn, verdictStore: store.fn });
     assert.ok(h.recheck !== undefined);
     const res = await h.recheck(call(verifyJournal()));
     assert.equal(res, 'pending');
@@ -190,7 +215,7 @@ describe('accept — emit then suspend', () => {
 describe('accept — the verdict gate', () => {
   test('accepted signed by the run customer settles with the spec payload', async () => {
     const store = storeSpy(verdict('accepted', { notes: 'lgtm' }));
-    const h = acceptStage({ emit: emitSpy().fn, verdictStore: store.fn });
+    const h = stageOf({ emit: emitSpy().fn, verdictStore: store.fn });
     const res = await h.recheck?.(call(verifyJournal()));
     assert.deepEqual(res, {
       verdict: 'accepted',
@@ -200,9 +225,7 @@ describe('accept — the verdict gate', () => {
 
   test('rejected carries the customer notes as the fix scope', async () => {
     const store = storeSpy(verdict(REJECTED_VERDICT, { notes: 'misses ac-2' }));
-    const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-      call(verifyJournal())
-    );
+    const res = await recheckOutcome(store);
     assert.deepEqual(res, {
       verdict: 'rejected',
       payload: { accepted_by: CUSTOMER, notes: 'misses ac-2', ts: TS },
@@ -211,9 +234,7 @@ describe('accept — the verdict gate', () => {
 
   test('abandon settles terminal — terminal word, customer-signed', async () => {
     const store = storeSpy(verdict('abandon'));
-    const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-      call(verifyJournal())
-    );
+    const res = await recheckOutcome(store);
     assert.deepEqual(res, {
       verdict: 'abandon',
       payload: { accepted_by: CUSTOMER, ts: TS },
@@ -222,9 +243,7 @@ describe('accept — the verdict gate', () => {
 
   test('wrong accepted_by fails closed — the run does not move', async () => {
     const store = storeSpy(verdict('accepted', { accepted_by: 'worker-7' }));
-    const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-      call(verifyJournal())
-    );
+    const res = await recheckOutcome(store);
     assert.deepEqual(res, {
       alert: PARK_ALERTS.customerMismatch,
       detail: 'verdict signed by "worker-7" — run customer is "customer-1"',
@@ -233,9 +252,7 @@ describe('accept — the verdict gate', () => {
 
   test('rejected without notes fails closed — no scopeless fix round', async () => {
     const store = storeSpy(verdict(REJECTED_VERDICT));
-    const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-      call(verifyJournal())
-    );
+    const res = await recheckOutcome(store);
     assert.deepEqual(res, {
       alert: PARK_ALERTS.fixNotesMissing,
       detail: "accept.rejected requires non-empty notes — the customer's fix scope",
@@ -244,9 +261,7 @@ describe('accept — the verdict gate', () => {
 
   test('rejected with blank-string notes fails closed the same way', async () => {
     const store = storeSpy(verdict(REJECTED_VERDICT, { notes: '   ' }));
-    const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-      call(verifyJournal())
-    );
+    const res = await recheckOutcome(store);
     assert.deepEqual(res, {
       alert: PARK_ALERTS.fixNotesMissing,
       detail: "accept.rejected requires non-empty notes — the customer's fix scope",
@@ -265,9 +280,7 @@ describe('accept — the verdict gate', () => {
   for (const [what, raw] of MALFORMED) {
     test(`malformed verdict record — ${what} → verdict-malformed`, async () => {
       const store = storeSpy(raw);
-      const res = await acceptStage({ emit: emitSpy().fn, verdictStore: store.fn }).recheck?.(
-        call(verifyJournal())
-      );
+      const res = await recheckOutcome(store);
       assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictMalformed);
     });
   }
@@ -275,7 +288,7 @@ describe('accept — the verdict gate', () => {
   test('a run with no recorded customer fails closed BEFORE emit', async () => {
     const emit = emitSpy();
     const store = storeSpy(verdict('accepted', { accepted_by: 'anybody' }));
-    const res = await acceptStage({ emit: emit.fn, verdictStore: store.fn }).invoke(
+    const res = await stageOf({ emit: emit.fn, verdictStore: store.fn }).invoke(
       call(verifyJournal(), { customer: undefined })
     );
     assert.deepEqual(res, {
@@ -289,12 +302,12 @@ describe('accept — the verdict gate', () => {
   test('a malformed freshest diff/draft_pr throws — stale evidence never ships', async () => {
     const j = verifyJournal(rec(2, 'review', 'push', { intent: 'judge', payload: { diff: 42 } }));
     await assert.rejects(
-      async () => acceptStage({ emit: emitSpy().fn, verdictStore: storeSpy().fn }).invoke(call(j)),
+      async () => stageOf({ emit: emitSpy().fn, verdictStore: storeSpy().fn }).invoke(call(j)),
       /malformed diff/
     );
     const j2 = verifyJournal(rec(2, 'work', 'done', { intent: 'spawn', payload: { draft_pr: 9 } }));
     await assert.rejects(
-      async () => acceptStage({ emit: emitSpy().fn, verdictStore: storeSpy().fn }).invoke(call(j2)),
+      async () => stageOf({ emit: emitSpy().fn, verdictStore: storeSpy().fn }).invoke(call(j2)),
       /malformed draft_pr/
     );
   });
@@ -378,7 +391,7 @@ capture = { captured = "end" }
     const j = memoryJournal('r1');
     const emit = emitSpy();
     const store = storeSpy();
-    const accept = acceptStage({ emit: emit.fn, verdictStore: store.fn });
+    const accept = stageOf({ emit: emit.fn, verdictStore: store.fn });
     const res = await sliceRun(j, accept);
     assert.equal(res.outcome, 'park');
     assert.equal(res.stage, 'accept');
@@ -415,7 +428,7 @@ capture = { captured = "end" }
   test('rejected re-enters the scoped-fix path with the customer notes', async () => {
     const j = memoryJournal('r1');
     const store = storeSpy();
-    const accept = acceptStage({ emit: emitSpy().fn, verdictStore: store.fn });
+    const accept = stageOf({ emit: emitSpy().fn, verdictStore: store.fn });
     const res = await sliceRun(j, accept);
     assert.equal(res.outcome, 'park');
     store.s.current = verdict(REJECTED_VERDICT, { notes: 'redo the ac' });
@@ -455,7 +468,7 @@ capture = { captured = "end" }
   test('a mismatched signer parks the run with a journal alert — no movement', async () => {
     const j = memoryJournal('r1');
     const store = storeSpy();
-    const accept = acceptStage({ emit: emitSpy().fn, verdictStore: store.fn });
+    const accept = stageOf({ emit: emitSpy().fn, verdictStore: store.fn });
     const res = await sliceRun(j, accept);
     assert.equal(res.outcome, 'park');
     store.s.current = verdict('accepted', { accepted_by: 'worker-7' });
@@ -472,7 +485,7 @@ capture = { captured = "end" }
   test('abandon is terminal — the run closes, merge never sees it', async () => {
     const j = memoryJournal('r1');
     const store = storeSpy(verdict('abandon'));
-    const accept = acceptStage({ emit: emitSpy().fn, verdictStore: store.fn });
+    const accept = stageOf({ emit: emitSpy().fn, verdictStore: store.fn });
     const res = await sliceRun(j, accept);
     // pre-landed verdict: invoke emits, settles, transitions — no park
     assert.equal(res.outcome, 'abandon');
@@ -484,7 +497,7 @@ capture = { captured = "end" }
   test('a malformed verdict in the channel parks with verdict-malformed', async () => {
     const j = memoryJournal('r1');
     const store = storeSpy();
-    const accept = acceptStage({ emit: emitSpy().fn, verdictStore: store.fn });
+    const accept = stageOf({ emit: emitSpy().fn, verdictStore: store.fn });
     await sliceRun(j, accept);
     store.s.current = { kind: 'verdict', verdict: 'accepted' }; // no accepted_by
     const res2 = await sliceResume(j, accept);
@@ -588,5 +601,98 @@ describe('customer channel — the durable carrier', () => {
     assert.deepEqual(awaitingCustomerRuns(dir, { item: ITEM, stage: 'accept' }), [
       { runId: 'run-9', stage: 'accept', via: 'alert' },
     ]);
+  });
+});
+
+describe('accept — the signature gate (keyed mode)', () => {
+  const KEY = 'channel-key-1';
+  const keyed = (): string | undefined => KEY;
+
+  /** A verdict record MAC'd as the customer under `key` — what
+   *  `bro pipeline accept` writes when a channel key resolves. */
+  const signedVerdict = (
+    v: string,
+    key = KEY,
+    over: Record<string, unknown> = {}
+  ): Record<string, unknown> => {
+    const r = verdict(v, over);
+    return {
+      ...r,
+      signature: signCustomerRecord(key, {
+        runId: 'r1',
+        item: ITEM,
+        kind: 'verdict',
+        content: v,
+        signer: r.accepted_by as string,
+        ts: r.ts as string,
+      }),
+    };
+  };
+
+  test('a signed verdict settles — the MAC proves the customer, not the label', async () => {
+    const store = storeSpy(signedVerdict('accepted'));
+    const res = await recheckOutcome(store, keyed);
+    assert.deepEqual(res, {
+      verdict: 'accepted',
+      payload: { accepted_by: CUSTOMER, ts: TS },
+    });
+  });
+
+  test('a record signed under a DIFFERENT key parks verdict-forged', async () => {
+    const store = storeSpy(signedVerdict('accepted', 'not-the-channel-key'));
+    const res = await recheckOutcome(store, keyed);
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+  });
+
+  test('an unsigned record with a key configured parks verdict-forged — no MAC, no gate', async () => {
+    const store = storeSpy(verdict('accepted'));
+    const res = await recheckOutcome(store, keyed);
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+  });
+
+  test('a copied signer label under the real key still parks — the worker cannot MAC it', async () => {
+    // the worker read run.customer off the journal and asserted it
+    // via --by, but no key means no valid signature — the label-check
+    // alone never fires in keyed mode
+    const store = storeSpy(verdict('accepted', { accepted_by: CUSTOMER }));
+    const res = await recheckOutcome(store, keyed);
+    assert.equal((res as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+  });
+
+  test('the same forged record parks once, then waits — consumed by detail', async () => {
+    const store = storeSpy(signedVerdict('accepted', 'wrong-key'));
+    const h = stageOf({ keyFor: keyed, emit: emitSpy().fn, verdictStore: store.fn });
+    const j = verifyJournal();
+    const first = await h.recheck?.(call(j));
+    assert.equal((first as { alert?: string }).alert, PARK_ALERTS.verdictForged);
+    // journal what the runner journaled — intent + the forged park —
+    // then wake on the SAME channel record: consumed → 'pending',
+    // not a second alert row every wake
+    j.append(rec(2, 'accept', undefined, { intent: 'emit' }));
+    j.append(
+      rec(3, 'accept', undefined, {
+        intent: 'alert',
+        alert: PARK_ALERTS.verdictForged,
+        detail: (first as { detail?: string }).detail,
+      })
+    );
+    const second = await h.recheck?.(call(j));
+    assert.equal(second, 'pending');
+    // and a FRESH record — correctly signed — still settles: the
+    // park consumed only that forgery, never the gate
+    store.s.current = signedVerdict('accepted');
+    assert.deepEqual(await h.recheck?.(call(j)), {
+      verdict: 'accepted',
+      payload: { accepted_by: CUSTOMER, ts: TS },
+    });
+  });
+
+  test('no key configured → the unsigned label-check mode (operator trust)', async () => {
+    const store = storeSpy(verdict('accepted'));
+    const res = await recheckOutcome(store);
+    assert.deepEqual(res, {
+      verdict: 'accepted',
+      payload: { accepted_by: CUSTOMER, ts: TS },
+    });
   });
 });

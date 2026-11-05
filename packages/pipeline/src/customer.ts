@@ -17,8 +17,16 @@
  * shared plane and append conventions as the journals: the common
  * git dir (linked worktrees share it, nothing lands in git), plain
  * append with torn-tail separation, malformed lines dropped on read.
+ *
+ * Signing (spec §trust): a record MAY carry `signature` — an
+ * hmac-sha256 over `runId|item|kind|content|signer|ts` keyed by the
+ * channel key {@link pipelineKey} resolves. The label fields a
+ * worker can read out of the journal prove nothing; the MAC is what
+ * separates a customer's record from a forgery.
  */
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { MaybePromise } from '@broject/core';
 import { appendJsonlRow, type JournalLocator, pipelineDir } from './journal.ts';
@@ -43,6 +51,10 @@ export interface CustomerVerdict {
   accepted_by: string;
   /** the customer's fix scope — required non-empty on `rejected` */
   notes?: string;
+  /** the keyed MAC over the record ({@link signCustomerRecord}) —
+   *  present iff the writer resolved a channel key; the accept gate
+   *  requires it whenever one is configured */
+  signature?: string;
   ts: string;
 }
 
@@ -55,6 +67,10 @@ export interface CustomerAnswer {
   answers: unknown;
   /** who answered — optional; intake does not gate on it */
   by?: string;
+  /** the keyed MAC over the record ({@link signCustomerRecord}) —
+   *  the content slot binds a digest of `answers`, so the payload
+   *  itself verifies, not just the envelope */
+  signature?: string;
   ts: string;
 }
 
@@ -247,4 +263,118 @@ export function writeCustomerRecord(loc: JournalLocator, rec: CustomerRecord): v
     throw new Error(`no pipeline plane under ${loc.dir} — not a git repo`);
   }
   appendCustomerRecord(file, rec);
+}
+
+/** The shared secret a customer record's `signature` MAC proves
+ *  with. Resolution order: `BRO_PIPELINE_KEY` — the badge a spawned
+ *  agent-customer is handed — then `~/.config/bro/pipeline.key`,
+ *  deliberately OUTSIDE the repo and every linked worktree: a
+ *  worker spawned without the badge but rooted in the checkout can
+ *  read the recorded customer label off the journal, yet still
+ *  cannot read the material a forged signature would need.
+ *
+ *  Absent → undefined: the unsigned mode, where `accepted_by` is a
+ *  self-asserted label the gate merely label-checks — operator
+ *  trust, not cryptographic identity. */
+export function pipelineKey(): string | undefined {
+  const env = process.env.BRO_PIPELINE_KEY?.trim();
+  if (env !== undefined && env !== '') {
+    return env;
+  }
+  try {
+    const key = readFileSync(join(homedir(), '.config', 'bro', 'pipeline.key'), 'utf8').trim();
+    return key === '' ? undefined : key;
+  } catch {
+    return undefined; // no key file — unsigned mode
+  }
+}
+
+/** The fields a record's MAC binds — every field the accept gate
+ *  compares is inside the message, so an edited signer, verdict, or
+ *  timestamp cannot re-verify. `content` is the record's decision
+ *  content: the verdict word for a `verdict` — the message then is
+ *  literally `runId|item|kind|verdict|signer|ts` — while for an
+ *  `answer` it is {@link contentDigest} of the answers payload, so
+ *  swapped payload bytes fail to verify too, not just the envelope. */
+export interface SignatureInput {
+  runId: string;
+  item: string;
+  kind: 'verdict' | 'answer';
+  content?: string;
+  /** `accepted_by` for a verdict, `by` for an answer */
+  signer?: string;
+  ts?: string;
+}
+
+/** An answer record's content slot — sha256 of the canonical JSON
+ *  the writer signed (object key order survives the file's
+ *  parse/stringify round-trip, so the digest the verifier computes
+ *  matches the writer's). */
+export const contentDigest = (v: unknown): string =>
+  createHash('sha256').update(JSON.stringify(v)).digest('hex');
+
+/** The pipe-joined MAC message — fixed positional fields, each
+ *  verbatim, so no boundary can be smuggled (an `|` inside a field
+ *  shifts the parse visibly; the digest slot already hex-encodes
+ *  free-form content). */
+const signedMessage = (input: SignatureInput): string =>
+  [
+    input.runId,
+    input.item,
+    input.kind,
+    input.content ?? '',
+    input.signer ?? '',
+    input.ts ?? '',
+  ].join('|');
+
+/** A record's `signature` stamp — `hmac-sha256(key, message)` hex. */
+export const signCustomerRecord = (key: string, input: SignatureInput): string =>
+  createHmac('sha256', key).update(signedMessage(input)).digest('hex');
+
+/** The input a raw channel record's signature was computed over —
+ *  the field-position map depends on `kind` (`accepted_by` for a
+ *  verdict, `by` for an answer; the verdict word vs. the answers
+ *  digest). Callers prove the record's shape first — the gate's
+ *  shape checks precede its signature check. */
+const inputFor = (runId: string, raw: Record<string, unknown>): SignatureInput =>
+  raw.kind === 'answer'
+    ? {
+        runId,
+        item: raw.item as string,
+        kind: 'answer',
+        content: contentDigest(raw.answers),
+        signer: raw.by as string | undefined,
+        ts: raw.ts as string | undefined,
+      }
+    : {
+        runId,
+        item: raw.item as string,
+        kind: 'verdict',
+        content: raw.verdict as string | undefined,
+        signer: raw.accepted_by as string | undefined,
+        ts: raw.ts as string | undefined,
+      };
+
+/** The verification target — the key, the run the record claims to
+ *  belong to, and the raw channel record itself (shape proven by
+ *  the caller's earlier gates). */
+export interface VerifyTarget {
+  key: string;
+  runId: string;
+  record: Record<string, unknown>;
+}
+
+/** Does the record's `signature` verify under `key` for `runId`?
+ *  Constant-time compare on the 64-hex form; anything else — a
+ *  missing field, a non-string, a non-MAC value — is not a
+ *  signature at all: when a key is configured a verdict claiming
+ *  authenticity without a verifiable MAC IS a forgery, and the gate
+ *  parks it `verdict-forged` rather than shape-malformed. */
+export function recordSignatureValid(t: VerifyTarget): boolean {
+  const sig = t.record.signature;
+  if (typeof sig !== 'string' || !/^[0-9a-f]{64}$/.test(sig)) {
+    return false;
+  }
+  const expected = signCustomerRecord(t.key, inputFor(t.runId, t.record));
+  return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }

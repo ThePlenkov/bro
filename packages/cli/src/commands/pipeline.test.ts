@@ -7,7 +7,12 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
-import { customerChannelPath, openPipelineJournal, readCustomerFile } from '@broject/pipeline';
+import {
+  customerChannelPath,
+  openPipelineJournal,
+  readCustomerFile,
+  recordSignatureValid,
+} from '@broject/pipeline';
 import { runPipelineCommand } from './pipeline.ts';
 import { initRepo, inside } from './testrepo.ts';
 
@@ -46,7 +51,9 @@ const ITEM = 'bro-p1';
 const SHA = 'cafebabe';
 const TS = '2026-11-06T00:00:00Z';
 
-const SESSION_VARS = ['BRO_AGENT_ID', 'BRO_SESSION_ID'];
+// BRO_PIPELINE_KEY joins the session scrub: a dev machine's channel
+// key must not flip these tests into keyed writes non-deterministically
+const SESSION_VARS = ['BRO_AGENT_ID', 'BRO_SESSION_ID', 'BRO_PIPELINE_KEY'];
 
 /** Session env must not leak the dev's own badges into the signer
  *  chain — same isolation the other command tests apply. */
@@ -197,6 +204,49 @@ describe('bro pipeline accept', () => {
         else process.env.BRO_AGENT_ID = saved;
       }
     });
+  });
+
+  test('a configured channel key stamps the verdict signature — verifiable HMAC', () => {
+    const { root, main } = initRepo('bro-pipeline-sign-');
+    inside(main, root, () =>
+      cleanSessionEnv(() => {
+        parkAtAccept(main, 'run-1');
+        const saved = process.env.BRO_PIPELINE_KEY;
+        process.env.BRO_PIPELINE_KEY = 'channel-key-x';
+        try {
+          exits(() => runPipelineCommand(['accept', ITEM, 'accepted', '--by', 'cust-1']));
+          const rec = channel(main, 'run-1')[0] as Record<string, unknown>;
+          assert.equal(rec.accepted_by, 'cust-1');
+          assert.match(rec.signature as string, /^[0-9a-f]{64}$/);
+          // the MAC verifies for THIS run + key — a forged replay
+          // under another run or key fails
+          assert.ok(recordSignatureValid({ key: 'channel-key-x', runId: 'run-1', record: rec }));
+          assert.equal(
+            recordSignatureValid({ key: 'channel-key-x', runId: 'run-2', record: rec }),
+            false
+          );
+          assert.equal(
+            recordSignatureValid({ key: 'other-key', runId: 'run-1', record: rec }),
+            false
+          );
+        } finally {
+          if (saved === undefined) delete process.env.BRO_PIPELINE_KEY;
+          else process.env.BRO_PIPELINE_KEY = saved;
+        }
+      })
+    );
+  });
+
+  test('no channel key → the record writes unsigned (label-check mode)', () => {
+    const { root, main } = initRepo('bro-pipeline-unsign-');
+    inside(main, root, () =>
+      cleanSessionEnv(() => {
+        parkAtAccept(main, 'run-1');
+        exits(() => runPipelineCommand(['accept', ITEM, 'accepted', '--by', 'cust-1']));
+        const rec = channel(main, 'run-1')[0] as Record<string, unknown>;
+        assert.equal(rec.signature, undefined);
+      })
+    );
   });
 });
 

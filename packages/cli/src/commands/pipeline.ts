@@ -25,7 +25,10 @@ import {
   type AwaitingRun,
   appendCustomerRecord,
   awaitingCustomerRuns,
+  contentDigest,
   customerChannelPath,
+  pipelineKey,
+  signCustomerRecord,
 } from '@broject/pipeline';
 import { flag, positionals } from './args.ts';
 
@@ -172,13 +175,31 @@ function cmdAccept(argv: string[]): void {
   }
   const ctx: CmdCtx = { argv, dir: process.cwd() };
   const run = targetRun(ctx, { item, stage: 'accept' }, f);
+  const acceptedBy = signer(ctx, f);
+  const ts = new Date().toISOString();
+  const key = pipelineKey();
   appendToRun(ctx, run, {
     kind: 'verdict',
     item,
     verdict,
-    accepted_by: signer(ctx, f),
+    accepted_by: acceptedBy,
     ...(f.notes !== undefined ? { notes: f.notes } : {}),
-    ts: new Date().toISOString(),
+    // a channel key resolved → the record carries its MAC proof;
+    // the accept gate will require it. No key → unsigned (the
+    // label-check degraded mode — operator trust)
+    ...(key !== undefined
+      ? {
+          signature: signCustomerRecord(key, {
+            runId: run.runId,
+            item,
+            kind: 'verdict',
+            content: verdict,
+            signer: acceptedBy,
+            ts,
+          }),
+        }
+      : {}),
+    ts,
   });
   console.log(
     `recorded ${verdict} for ${item} on run ${run.runId} — resume the run to settle the gate`
@@ -300,12 +321,28 @@ function cmdAnswer(argv: string[]): void {
   // intake's wait states: parked on the `questions` verdict, a pending
   // intake intent, or a repairable intake alert
   const run = targetRun(ctx, { item, stage: 'intake', verdicts: ['questions'] }, f);
+  const ts = new Date().toISOString();
+  const key = pipelineKey();
   appendToRun(ctx, run, {
     kind: 'answer',
     item,
     answers,
     ...(f.by !== undefined ? { by: f.by } : {}),
-    ts: new Date().toISOString(),
+    // same keyed MAC as verdicts — the content slot binds a digest
+    // of `answers` so swapped payload bytes fail to verify
+    ...(key !== undefined
+      ? {
+          signature: signCustomerRecord(key, {
+            runId: run.runId,
+            item,
+            kind: 'answer',
+            content: contentDigest(answers),
+            signer: f.by,
+            ts,
+          }),
+        }
+      : {}),
+    ts,
   });
   console.log(
     `recorded answers for ${item} on run ${run.runId} — resume the run to continue intake`

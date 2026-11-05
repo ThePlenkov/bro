@@ -34,6 +34,18 @@
  * on a bad verdict; a corrected record on a later wake can still
  * settle — the alert rows are repairable parks, not tombstones.
  *
+ * The label check alone is NOT the trust model — a worker can read
+ * the recorded customer off this same journal and assert it via
+ * `--by`. When a channel key is configured (`deps.keyFor`, default
+ * {@link pipelineKey}: `BRO_PIPELINE_KEY` →
+ * `~/.config/bro/pipeline.key`, outside every worktree) the verdict
+ * must ALSO carry a `signature` — an hmac-sha256 over
+ * `runId|item|kind|verdict|signer|ts`. A missing or wrong MAC parks
+ * `verdict-forged`, consumed by detail like the malformed-answer
+ * pattern so the same forged record cannot re-alert every wake. No
+ * key configured → the unsigned degraded mode: `accepted_by` is
+ * operator-trust label-checking, never cryptographic proof.
+ *
  * Two more ledger rules keep the gate honest across re-entry:
  *
  *   - the record's `item` must name THIS run's item — a verdict
@@ -50,6 +62,7 @@
  *     decision on every entry.
  */
 import type { MaybePromise } from '@broject/core';
+import { pipelineKey, recordSignatureValid } from '../customer.ts';
 import { type JournalRow, journalRecords } from '../journal.ts';
 import {
   type EngineAlert,
@@ -111,6 +124,15 @@ export interface AcceptDeps {
    *  the stage validates shape + identity and fails closed on a
    *  malformed record. */
   verdictStore: (call: StageCall) => MaybePromise<unknown>;
+  /** the channel's shared HMAC key — resolved per call so a key
+   *  appearing mid-run takes effect on the next read. Default
+   *  {@link pipelineKey} (env `BRO_PIPELINE_KEY` →
+   *  `~/.config/bro/pipeline.key`). When it resolves, every verdict
+   *  record MUST carry a `signature` that verifies — a missing or
+   *  wrong MAC parks `verdict-forged`. Inject `() => undefined` to
+   *  pin the unsigned label-check mode (operator trust — no
+   *  cryptographic binding). */
+  keyFor?: () => MaybePromise<string | undefined>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -272,6 +294,31 @@ const signerMatches: VerdictGate = (call, raw) =>
           `run customer is ${JSON.stringify(call.customer)}`,
       };
 
+/** The alert detail for a failed MAC — echoes the record's own
+ *  fields verbatim so a later wake recognizes the SAME record
+ *  ({@link forgedAlready}): identical detail → the park already
+ *  journaled; different detail → a fresh record evaluates anew. */
+const forgedDetail = (raw: Record<string, unknown>): string =>
+  `verdict record signature does not verify under the channel key ` +
+  `(signature=${JSON.stringify(raw.signature ?? null)} ` +
+  `verdict=${JSON.stringify(raw.verdict)} ` +
+  `accepted_by=${JSON.stringify(raw.accepted_by)} ` +
+  `ts=${JSON.stringify(raw.ts)}) — forged input or a rotated key`;
+
+/** The cryptographic identity gate — when a channel key is
+ *  configured the record's `signature` must verify over
+ *  `runId|item|kind|verdict|signer|ts`; a missing or wrong MAC is
+ *  `verdict-forged`, never a settle. Runs BEFORE the label gate:
+ *  `accepted_by` is self-asserted text a journal-reader can copy —
+ *  a forged label reports as forgery, not a mere mismatch, and a
+ *  keyless record never reaches the check it was built to fool. */
+const signatureGate =
+  (key: string): VerdictGate =>
+  (call, raw) =>
+    recordSignatureValid({ key, runId: call.runId, record: raw })
+      ? undefined
+      : { alert: PARK_ALERTS.verdictForged, detail: forgedDetail(raw) };
+
 /** A string with no non-whitespace content — no fix scope at all. */
 const blank = (v: string | undefined): boolean => v === undefined || v.trim() === '';
 
@@ -289,16 +336,45 @@ const fixNotesPresent: VerdictGate = (_call, raw) =>
 /** The fail-closed record gates, in contract order — the FIRST
  *  complaint is the alert raised, so a record failing several rules
  *  still surfaces the same park the sequential chain produced
- *  (shape → attribution → fields → identity → fix scope). */
-const VERDICT_GATES: readonly VerdictGate[] = [
+ *  (shape → attribution → fields → signature → identity → fix
+ *  scope). The MAC gate only enters the chain when a channel key is
+ *  configured — no key means the unsigned label-check mode, with
+ *  all of `accepted_by`'s self-assertion caveats. */
+const gatesFor = (key: string | undefined): readonly VerdictGate[] => [
   verdictDeclared,
   itemAttributed,
   signerField,
   notesField,
   tsField,
+  ...(key !== undefined ? [signatureGate(key)] : []),
   signerMatches,
   fixNotesPresent,
 ];
+
+/** Has THIS forged record already parked? The last DECIDED row for
+ *  this (run, item, stage) carries the park — the wake's own
+ *  write-ahead intent sits between it and now, so scan past rows
+ *  that are undecided anchors (neither verdict nor alert). A
+ *  `verdict-forged` alert with the detail the record itself
+ *  produced ({@link forgedDetail} echoes its fields verbatim) means
+ *  it already alerted once and is consumed — the gate waits
+ *  'pending' for a FRESH record instead of re-alerting every wake
+ *  (the malformed-answer consume pattern). A different decided row
+ *  — a settle, another alert — means the forgery never parked here
+ *  and reports normally. */
+const forgedAlready = (call: StageCall, detail: string | undefined): boolean => {
+  const rows = call.journal
+    .rows()
+    .filter(r => r.run_id === call.runId && r.item === call.item && r.stage === call.stage.name);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.alert === undefined && r.verdict === undefined) {
+      continue; // pending intent anchor — no decision yet
+    }
+    return r.alert === PARK_ALERTS.verdictForged && r.detail === detail;
+  }
+  return false;
+};
 
 /** The journaled echo of the record the gate consumes —
  *  `accepted_by` always, `notes`/`ts` only when the record carried
@@ -311,17 +387,26 @@ const verdictPayload = (raw: Record<string, unknown>): AcceptPayload => ({
 
 /** The verdict record → a settling result, 'pending', or a
  *  fail-closed alert — every gate rule in one place so invoke and
- *  recheck can never disagree on what counts. */
-function outcomeFromVerdict(call: StageCall, raw: unknown): EngineOutcome {
+ *  recheck can never disagree on what counts. `key` is the channel
+ *  key this call resolved: configured → the MAC gate is in the
+ *  chain; undefined → the unsigned label-check mode. */
+function outcomeFromVerdict(call: StageCall, raw: unknown, key: string | undefined): EngineOutcome {
   if (raw === undefined) {
     return 'pending';
   }
   if (!isRecord(raw)) {
     return malformed('the customer verdict record is not a record');
   }
-  for (const gate of VERDICT_GATES) {
+  for (const gate of gatesFor(key)) {
     const denied = gate(call, raw);
     if (denied !== undefined) {
+      // a forged verdict parks once — the journaled alert is the
+      // consumption ledger, so an identical record on later wakes
+      // waits 'pending' for a FRESH record rather than re-alerting
+      // (the malformed-answer consume pattern)
+      if (denied.alert === PARK_ALERTS.verdictForged && forgedAlready(call, denied.detail)) {
+        return 'pending';
+      }
       return denied;
     }
   }
@@ -357,20 +442,23 @@ const customerGate = (call: StageCall): EngineAlert | undefined =>
  * that moves this gate.
  */
 export function acceptStage(deps: AcceptDeps): EngineHandler {
+  const keyFor = deps.keyFor ?? pipelineKey;
   return {
     async invoke(call: StageCall): Promise<EngineOutcome> {
       const denied = customerGate(call);
       if (denied !== undefined) {
         return denied;
       }
+      const key = await keyFor();
       await deps.emit(call, evidenceBundle(call));
-      return outcomeFromVerdict(call, await deps.verdictStore(call));
+      return outcomeFromVerdict(call, await deps.verdictStore(call), key);
     },
     async recheck(call: StageCall): Promise<EngineOutcome | undefined> {
       const denied = customerGate(call);
       if (denied !== undefined) {
         return denied;
       }
+      const key = await keyFor();
       const raw = await deps.verdictStore(call);
       if (raw === undefined) {
         // the emit may have died inside the pending intent's crash
@@ -379,7 +467,7 @@ export function acceptStage(deps: AcceptDeps): EngineHandler {
         await deps.emit(call, evidenceBundle(call));
         return 'pending';
       }
-      return outcomeFromVerdict(call, raw);
+      return outcomeFromVerdict(call, raw, key);
     },
   };
 }

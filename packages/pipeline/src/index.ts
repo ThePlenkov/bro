@@ -6,16 +6,22 @@ export type {
   CustomerConsumed,
   CustomerRecord,
   CustomerVerdict,
+  SignatureInput,
+  VerifyTarget,
 } from './customer.ts';
 export {
   appendCustomerRecord,
   CUSTOMER_SUFFIX,
+  contentDigest,
   customerChannelPath,
   fileAnswerFeed,
   fileVerdictStore,
   latestVerdict,
   pendingAnswers,
+  pipelineKey,
   readCustomerFile,
+  recordSignatureValid,
+  signCustomerRecord,
   writeCustomerRecord,
 } from './customer.ts';
 export type {

@@ -102,6 +102,12 @@ export const PARK_ALERTS = {
   /** the customer's verdict record failed shape validation — a
    *  record the stage cannot trust never settles the gate */
   verdictMalformed: 'verdict-malformed',
+  /** the customer's verdict record failed MAC verification — when a
+   *  channel key is configured, a missing or wrong `signature` means
+   *  the record is forged (a worker CAN read the recorded customer
+   *  label, but not the key material); parked once, then consumed by
+   *  detail so the same record cannot re-alert every wake */
+  verdictForged: 'verdict-forged',
   /** the customer's answer record failed shape validation — drained
    *  and consumed so the same bad row can't re-alert every wake */
   answerMalformed: 'answer-malformed',
