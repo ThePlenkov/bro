@@ -13,9 +13,19 @@ const scratch = mkdtempSync(join(tmpdir(), 'brouter-route-surface-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
 /** Run the CLI — a real process, so the exit codes are the real ones. */
-function run(args: string[]): { code: number; stdout: string; stderr: string } {
-  const proc = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+function run(args: string[], cwd?: string): { code: number; stdout: string; stderr: string } {
+  const proc = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: 'utf8',
+    ...(cwd === undefined ? {} : { cwd }),
+  });
   return { code: proc.status ?? -1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
+}
+
+/** A directory with its own config — the declaration the check reads. */
+function configDir(config: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'brouter-route-config-'));
+  writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(config));
+  return dir;
 }
 
 /** A route table on disk — the operator's own file. */
@@ -31,7 +41,7 @@ const TABLE = [
   '',
   '[routes.edit]',
   'match = { type = "edit" }',
-  'chain = [{ provider = "devin-acp", model = "claude-opus-5" }]',
+  'chain = [{ provider = "devin-acp", model = "swe-2-high" }]',
   'description = "a small edit"',
   '',
   '[routes.fallback]',
@@ -102,6 +112,42 @@ test('a route that pins a field needs that field on the task', () => {
   assert.equal(out.code, 0);
   const decision = JSON.parse(out.stdout);
   assert.equal(decision.route.name, 'fallback');
-  const rejected = decision.rejected.find((r: { route: { name: string } }) => r.route.name === 'edit');
+  const rejected = decision.rejected.find(
+    (r: { route: { name: string } }) => r.route.name === 'edit'
+  );
   assert.match(rejected.reason, /carries no type/);
+});
+
+test('a route naming a model the declaration contradicts is a config error', () => {
+  if (!existsSync(CLI)) return;
+  // the operator declared devin-acp for the swe-2 family
+  const dir = configDir({
+    brouter: { models: { 'swe-2-high': [{ provider: 'devin-acp' }] } },
+  });
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.edit]',
+      'chain = [{ provider = "devin-acp", model = "claude-opus-5" }]',
+      '',
+    ].join('\n')
+  );
+  const out = run(['routes', 'validate', '--routes', table], dir);
+  assert.equal(out.code, 1);
+  assert.match(out.stderr, /does not serve/);
+  assert.match(out.stderr, /swe-2-high/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a declaration that agrees leaves the table valid', () => {
+  if (!existsSync(CLI)) return;
+  const dir = configDir({
+    brouter: { models: { 'swe-2-high': [{ provider: 'devin-acp' }] } },
+  });
+  const out = run(['routes', 'validate', '--routes', tableFile(TABLE)], dir);
+  assert.equal(out.code, 0);
+  assert.match(out.stdout, /the table is valid/);
+  rmSync(dir, { recursive: true, force: true });
 });

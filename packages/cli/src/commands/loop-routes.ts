@@ -14,8 +14,8 @@
 import { SpawnError } from '@broject/core';
 import type { ResolvedClass } from '@broject/core';
 import { healthSnapshot, migrateStore, openStore, routerStorePath } from '@broject/router-store';
-import { readRouteTable, resolveRoute } from '@broject/router-routes';
-import type { RouteTable } from '@broject/router-routes';
+import { readRouteTable, resolveRoute, unservedChains } from '@broject/router-routes';
+import type { RouteTable, ServedDeclaration } from '@broject/router-routes';
 
 /** The health — the router's own ledger. A ledger that cannot be read
  *  is no wall at all: the decision degrades, the run continues. */
@@ -57,6 +57,17 @@ function wallPolicy(
   return priority !== undefined && priority <= 1 ? 'park' : 'fallthrough';
 }
 
+/** The served-universe check — a route naming a model the declaration
+ *  contradicts is a config error, never a silent fallback. */
+function assertServed(table: RouteTable, file: string, served: ServedDeclaration): void {
+  const unserved = unservedChains(table, served);
+  if (unserved.length === 0) {
+    return;
+  }
+  const first = unserved[0]!;
+  throw new SpawnError(`route table ${file} — routes.${first.route}: ${first.reason}`, 'config');
+}
+
 /** The route a bead lands on — undefined when no table is declared. */
 export async function routeTableLane(opts: {
   /** the route table's path — the operator declares it in the config */
@@ -64,6 +75,8 @@ export async function routeTableLane(opts: {
   class?: string;
   label?: string;
   priority?: number;
+  /** what the operator declared the router serves — the served universe */
+  served?: ServedDeclaration;
 }): Promise<ResolvedClass | undefined> {
   const file = opts.table;
   if (file === undefined) {
@@ -78,6 +91,7 @@ export async function routeTableLane(opts: {
       'config'
     );
   }
+  assertServed(table, file, opts.served ?? {});
   const health = await ledgerHealth();
   const decision = resolveRoute(table, taskShape(opts), health);
   const route = decision.route;

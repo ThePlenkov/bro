@@ -10,10 +10,10 @@
 import { flag, loadConfig, positionals } from '@broject/core';
 import type { FleetRouter } from '@broject/core';
 import { healthSnapshot, migrateStore, openStore, routerStorePath } from '@broject/router-store';
-import { candidates, resolveRoute } from '@broject/router-routes';
+import { candidates, resolveRoute, unservedChains } from '@broject/router-routes';
 import type { RouteCandidate, RouteDecision, RouteTask } from '@broject/router-routes';
 import { decisionProvider, requireTypedGrade } from './decision-model.ts';
-import { routeTablePath } from './routes-cmd.ts';
+import { reportUnserved, routeTablePath } from './routes-cmd.ts';
 
 /** The task's shape — the flags beside the text. */
 function taskShape(argv: string[]): RouteTask {
@@ -131,10 +131,12 @@ export async function runRouteCommand(argv: string[]): Promise<void> {
   }
   const { readRouteTable } = await import('@broject/router-routes');
   const table = readRouteTable(path);
+  const config = loadConfig(dir).brouter;
+  reportUnserved(unservedChains(table, config?.models ?? {}));
   const { snapshot, known } = await healthOf(dir);
   const shape = taskShape(argv);
   const found = candidates(table, shape, snapshot);
-  const router = loadConfig(dir).brouter?.router;
+  const router = config?.router;
   const resolved = found.candidates[0]?.route.name ?? '';
   const named =
     router === undefined || found.candidates.length === 0
