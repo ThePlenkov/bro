@@ -2293,7 +2293,16 @@ async function messages(
   if (out.conv !== undefined) {
     // a stop hit swallowed post-marker output the session still holds —
     // the conversation diverged from the client's view (bro-vfbyc)
-    settleConv(lane.sessions, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
+    settleConv(
+      lane.sessions,
+      key,
+      out.conv,
+      body,
+      view,
+      stopKey,
+      undefined,
+      stops.hit !== undefined
+    );
   }
   otelEvent('conductor.turn', {
     // the ROUTE that answered — the public identity an operator reads
@@ -2864,10 +2873,7 @@ interface ChainEntry {
   route: string;
 }
 
-function pruneChains(
-  chains: Map<string, ChainEntry>,
-  lanes: Map<string, ProviderLane>
-): void {
+function pruneChains(chains: Map<string, ChainEntry>, lanes: Map<string, ProviderLane>): void {
   for (const [id, e] of chains) {
     if (lanes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
   }
@@ -3141,7 +3147,14 @@ async function responses(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel: requestModelOf(body), signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel: requestModelOf(body),
+        signal: ac.signal,
+      }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
       openStream: respStreamOpener(rreq, res, lane, {
@@ -3706,7 +3719,14 @@ async function chatCompletions(
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      ...laneTurnEnv(lane, peer, { body, key, stopKey: stopKeyOf(stopSeqsOf(body) ?? []), parent, requestModel, signal: ac.signal }),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel,
+        signal: ac.signal,
+      }),
       openStream:
         creq.stream === true
           ? () => {
@@ -3728,7 +3748,21 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, { creq, body, out, key, chatId, created, model, tools, live, stops, t0, lane, route });
+  chatDeliver(res, {
+    creq,
+    body,
+    out,
+    key,
+    chatId,
+    created,
+    model,
+    tools,
+    live,
+    stops,
+    t0,
+    lane,
+    route,
+  });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3981,18 +4015,12 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
   // the degradation rides BOTH answers — a client must read the same
   // signal whether the catalog is short (200) or the gateway is down
   // (502). A 502 without it says "down" but not "which lane, why".
-  const laneError =
-    failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
+  const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
   // 502 only when EVERY lane failed — a healthy lane that advertises
   // nothing is an empty catalog, not an outage
   if (failures.length > 0 && failures.length === lanes.length) {
     if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
-    apiError(
-      res,
-      502,
-      'api_error',
-      `bro conductor: ${failures.join('; ')}`
-    );
+    apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
   const data = rows.map(m => ({
@@ -4150,12 +4178,10 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       pendingOpens: new Set<string>(),
     });
   };
-  addLane(
-    cfg.backend,
-    cfg.entry,
-    cfg,
-    { ...wireOpts, acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) } }
-  );
+  addLane(cfg.backend, cfg.entry, cfg, {
+    ...wireOpts,
+    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+  });
   for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
@@ -4163,7 +4189,14 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     addLane(
       entry,
       entryCfg,
-      { ...cfg, backend: entry, entry: entryCfg, model: entryCfg.model, providers: undefined, routes: undefined },
+      {
+        ...cfg,
+        backend: entry,
+        entry: entryCfg,
+        model: entryCfg.model,
+        providers: undefined,
+        routes: undefined,
+      },
       {
         ...wireOpts,
         model: entryCfg.model,

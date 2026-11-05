@@ -385,9 +385,7 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = ra
     // write — a provider named that would mutate the map instead of
     // naming an entry (the mesh section refuses it the same way)
     if (trimmed === '__proto__') {
-      console.error(
-        'bro.config: providers.__proto__ is a reserved key — entry dropped'
-      );
+      console.error('bro.config: providers.__proto__ is a reserved key — entry dropped');
       continue;
     }
     const entry = parseProviderEntry(trimmed, v);
@@ -449,7 +447,7 @@ providersSection.jsonSchema = {
   // must not accept it either (a config that passes the diagnostics
   // must survive the load)
   patternProperties: {
-    [String.raw`^(?!__proto__$)`]: js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
+    '^(?!__proto__$)': js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
   },
   additionalProperties: false,
 };
@@ -766,13 +764,17 @@ export type ServeProviders = string[] | Record<string, string>;
 function providerNames(raw: unknown): string[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
-    console.error('bro.config: serve.providers must be an array of provider names — section dropped');
+    console.error(
+      'bro.config: serve.providers must be an array of provider names — section dropped'
+    );
     return undefined;
   }
   const names: string[] = [];
   for (const n of raw) {
     if (typeof n !== 'string' || n.trim() === '') {
-      console.error('bro.config: serve.providers entries must be non-empty strings — entry dropped');
+      console.error(
+        'bro.config: serve.providers entries must be non-empty strings — entry dropped'
+      );
       continue;
     }
     names.push(n.trim());
@@ -823,9 +825,7 @@ function declareRoute(route: string, entry: unknown, routes: Record<string, stri
     // the config layer refuses it everywhere else (the layer merge skips
     // it, a mesh alias skips it), so a route named that could not survive
     // a layered merge anyway
-    console.error(
-      `bro.config: serve.providers route '${name}' is a reserved key — entry dropped`
-    );
+    console.error(`bro.config: serve.providers route '${name}' is a reserved key — entry dropped`);
     return;
   }
   routes[name] = entry.trim();
@@ -861,7 +861,10 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
  *  an array of entry names (the route IS the entry) or a map of route →
  *  entry, so the public name can be chosen independently of the
  *  entry's own name (spec bro-jxw7p). */
-export const serveSection: ConfigSection<{ backend?: string; providers?: ServeProviders }> = raw => {
+export const serveSection: ConfigSection<{
+  backend?: string;
+  providers?: ServeProviders;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;

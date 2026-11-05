@@ -71,17 +71,17 @@ one.
 ## Plan
 
 - [x] `packages/cli/src/commands/providers.ts` — `catalogModels` takes an
-      optional `deadline`; the acp branch passes it to `acpModels`, the cli
-      branch spends it as the exec timeout (clamped to Node's 32-bit timer
-      ceiling, so an oversized budget cannot become a 1ms timeout).
+  optional `deadline`; the acp branch passes it to `acpModels`, the cli
+  branch spends it as the exec timeout (clamped to Node's 32-bit timer
+  ceiling, so an oversized budget cannot become a 1ms timeout).
 - [x] `packages/cli/src/commands/serve-conductor.ts` — `laneCatalog` reads
-      under `Date.now() + lane.cfg.timeoutMs`; `models()` carries the
-      failures in `x-bro-lane-error` on BOTH the 200 and the 502, capped at
-      4096 characters.
+  under `Date.now() + lane.cfg.timeoutMs`; `models()` carries the
+  failures in `x-bro-lane-error` on BOTH the 200 and the 502, capped at
+  4096 characters.
 - [x] `packages/providers/src/testkit.ts` — the fake agent gains
-      `delayNewMs`, a slow `session/new`, so a test can watch a budget
-      bound a read, and `failNewMessage`, a long diagnostic, so a test can
-      watch the header survive one.
+  `delayNewMs`, a slow `session/new`, so a test can watch a budget
+  bound a read, and `failNewMessage`, a long diagnostic, so a test can
+  watch the header survive one.
 
 ## Verify
 

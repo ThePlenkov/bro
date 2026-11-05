@@ -3,8 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { procStat } from '@broject/core';
 import {
   agentEntry,
+  agentKey,
   displayAgentOf,
   pidAlive,
   registryHomeOf,
@@ -76,6 +78,18 @@ test('displayAgentOf — provider wins over the run id, stem is the last resort 
   });
 });
 
+test('pidAlive — an empty start stamp is unverifiable, never a mismatch', () => {
+  // a recorded '' must not be compared against /proc — that reads a
+  // live pid dead (the wrapper normalizes before the core probe)
+  assert.equal(pidAlive(process.pid, ''), true);
+  assert.equal(pidAlive(process.pid, procStat(process.pid)?.start ?? ''), true);
+  const st = procStat(process.pid);
+  if (st !== null && st.start !== '') {
+    // a wrong start is a different process — reuse still reads dead
+    assert.equal(pidAlive(process.pid, `${Number(st.start) + 1}`), false);
+  }
+});
+
 test('registryHomeOf — only the <git-common>/bro/agents layout resolves a home', () => {
   withBase(base => {
     // a journal under <root>/bro/agents resolves the registry root
@@ -89,7 +103,7 @@ test('registryHomeOf — only the <git-common>/bro/agents layout resolves a home
   });
 });
 
-test('workerLedState — working needs an unfinished run AND a live pid AND a fresh journal', () => {
+test('workerLedState — working needs a live pid AND a fresh, non-empty journal', () => {
   withBase(base => {
     const events = join(base, 'native-x.events.jsonl');
     writeFileSync(events, '{}\n');
@@ -148,5 +162,29 @@ test('workerLedState — working needs an unfinished run AND a live pid AND a fr
     // live pid, no journal path known → idle: a pid alone proves
     // nothing — 'working' needs a journal provably being written
     assert.equal(workerLedState(live, undefined), 'idle');
+    // a journal stamped in the FUTURE is not fresh — a stopped clock
+    // must not pin 'working' until wall time catches up
+    const future = new Date(Date.now() + 3_600_000);
+    utimesSync(events, future, future);
+    assert.equal(workerLedState(live, events), 'idle');
+  });
+});
+
+test('workerLedState — a failed spawn (spawnError, no pid) reads blocked, not idle', () => {
+  assert.equal(workerLedState({ spawnError: 'boom' }, '/x.events.jsonl'), 'blocked');
+  // a never-attempted entry has no crash to report
+  assert.equal(workerLedState({}, '/x.events.jsonl'), 'idle');
+});
+
+test('agentEntry/agentKey — a malformed log field never throws the stem lookup', () => {
+  withBase(base => {
+    seedReg(base, {
+      'bro-num': { log: 42 },
+      'bro-ok': { agentId: 'native-ok', log: '/x/native-ok.log' },
+    });
+    // the malformed row is skipped, the well-formed one still resolves
+    assert.equal(agentEntry(base, 'native-ok')?.agentId, 'native-ok');
+    assert.equal(agentKey(base, 'native-ok'), 'bro-ok');
+    assert.equal(agentEntry(base, '42'), undefined);
   });
 });

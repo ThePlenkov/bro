@@ -19,8 +19,9 @@
  * the snapshot it produced. bro state is never written — the only
  * mutations are herdr CLI calls and the plugin's own state file.
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
+import { handleOwner } from '../../../packages/core/src/index.ts';
 import { type Lane, laneOf } from './lanes.ts';
 import {
   agentsJson,
@@ -34,10 +35,12 @@ import {
   paneIdle,
   PLUGIN_ID,
   PLUGIN_ROOT,
+  pidAlive,
   type PluginState,
   repoDir,
   type StatusWorktree,
   saveState,
+  STATE_DIR,
   stateScope,
   syncPidPath,
   type WorkspaceRec,
@@ -476,7 +479,13 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   }
   const liveByTree = new Map<string, { id: string; events: string }>();
   for (const a of live) {
-    if (a.worktree !== undefined) liveByTree.set(a.worktree, { id: a.id, events: a.events });
+    if (a.worktree === undefined) continue;
+    const cur = liveByTree.get(a.worktree);
+    // several live agents can share one worktree — keep the one whose
+    // journal exists: a warming-up agent that wins the slot leaves
+    // eligibility blind and can retire a live session pane
+    if (cur !== undefined && existsSync(cur.events) && !existsSync(a.events)) continue;
+    liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
   const bindByTree = archiveBinds(base, p.main, liveByTree);
   const sessionArmed = sessionEligibility(p, wsForPath, liveByTree);
@@ -524,6 +533,77 @@ const SYNC_LABEL = 'bro sync';
  *  opening a pane. */
 const OPEN_GRACE_MS = 60_000;
 
+/** The probe — a live pinned pid IS the loop (the start token pins
+ *  identity against reuse; EPERM/zombie verdicts ride inside
+ *  pidAlive), and a FRESH 'pending' is another ensure mid-open. A
+ *  dead pid, a stale pending, or an absent file means the slot is
+ *  free. */
+function syncPidLiveOrPending(pidFile: string): boolean {
+  try {
+    const text = readFileSync(pidFile, 'utf8').trim();
+    const owner = handleOwner(text);
+    if (owner !== null) return pidAlive(owner.pid, owner.start);
+    return text === 'pending' && Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** The 'wx' pending-marker claim — true when the slot is ours to open.
+ *  A non-EEXIST write failure degrades to an undeduplicated open (the
+ *  loop must not be stranded on a marker it cannot write); EEXIST
+ *  means a racer landed a marker — a live one owns the slot, a stale
+ *  'pending' is a crashed opener's residue broken once and retaken
+ *  (a racer winning that gap owns the open). */
+function claimSyncSlot(pidFile: string, live: () => boolean): boolean {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    if (live()) return false; // a live pid or a fresh pending owns the slot
+    try {
+      rmSync(pidFile, { force: true });
+      writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Every 'bro sync' pane rooted at THIS plugin whose loop is dead is a
+ *  husk — close them or the successor piles up next to bare shells.
+ *  cwd scoping keeps another repository's sync pane (same label,
+ *  different checkout) out of the sweep. */
+function sweepSyncHusks(): void {
+  for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
+    if (
+      p.label === SYNC_LABEL &&
+      p.pane_id !== undefined &&
+      p.cwd === PLUGIN_ROOT &&
+      paneIdle(p.pane_id)
+    ) {
+      herdrTry(['pane', 'close', p.pane_id]);
+    }
+  }
+}
+
+/** A failed open must not leave a fresh 'pending' suppressing the next
+ *  ensure for the whole grace window — but the pane may have spawned
+ *  anyway and already published its real pid; that marker is a live
+ *  loop's, not ours to erase. */
+function releasePending(pidFile: string): void {
+  try {
+    if (handleOwner(readFileSync(pidFile, 'utf8').trim()) === null) {
+      rmSync(pidFile, { force: true });
+    }
+  } catch {
+    // absent already — nothing to clean
+  }
+}
+
 /** The sync pane is the converge daemon, but the manifest's `[[panes]]`
  *  entry is only a template — herdr materializes it solely via `plugin
  *  pane open`, and nothing re-opens it after a server restart
@@ -534,39 +614,19 @@ const OPEN_GRACE_MS = 60_000;
  *  to a scoped file at start, so a live loop proves itself regardless
  *  of how its argv was launched; a dead pane's bare shell leaves a
  *  stale pid that fails the liveness check and gets replaced. */
-function ensureSyncLoop(): void {
+export function ensureSyncLoop(): void {
   const pidFile = syncPidPath(stateScope(repoDir(ctxJson())));
-  try {
-    const pid = Number(readFileSync(pidFile, 'utf8').trim());
-    if (Number.isInteger(pid) && pid > 0) {
-      process.kill(pid, 0);
-      return;
-    }
-  } catch {
-    // unreadable or absent pid file — the mtime check below decides
-  }
-  try {
-    if (Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS) return;
-  } catch {
-    // no file — nobody is mid-open either
-  }
-  // the loop is confirmed dead: every 'bro sync' pane rooted at THIS
-  // plugin is a husk — close them or the successor piles up next to
-  // bare shells. cwd scoping keeps another repository's sync pane
-  // (same label, different checkout) out of the sweep
-  for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
-    if (p.label === SYNC_LABEL && p.pane_id !== undefined && p.cwd === PLUGIN_ROOT && paneIdle(p.pane_id)) {
-      herdrTry(['pane', 'close', p.pane_id]);
-    }
-  }
+  const live = (): boolean => syncPidLiveOrPending(pidFile);
+  if (live()) return;
+  // the in-flight marker IS the reservation — an exclusive 'wx' create
+  // loses to any marker that landed meanwhile (a live pinned pid or a
+  // fresh pending). It must land BEFORE the slow sweep/open: the state
+  // lock fails OPEN past its wait, so a racer probing inside the
+  // sweep's shadow would open a second pane under it
+  if (!claimSyncSlot(pidFile, live)) return;
+  sweepSyncHusks();
   const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
-  if (out !== undefined) {
-    try {
-      writeFileSync(pidFile, 'pending\n');
-    } catch {
-      // the in-flight marker is advisory — the next ensure just retries
-    }
-  }
+  if (out === undefined) releasePending(pidFile);
   log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
 }
 

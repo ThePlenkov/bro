@@ -3,6 +3,7 @@
  *  Converged from the plugin's lib.ts and tui/main.ts twins. */
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { pidAlive as corePidAlive } from '@broject/core';
 
 /** One `bro/agents.json` entry — the registry's per-agent record. */
 export interface AgentEntry {
@@ -28,6 +29,15 @@ export function agentsJson(base: string): Record<string, AgentEntry> {
   }
 }
 
+/** An entry's archive stem — its log's basename minus `.log`, or
+ *  undefined when `log` is absent or not a string. The registry is an
+ *  unvalidated JSON boundary: `?.` guards null/undefined only, a
+ *  `log: 42` entry would throw the `.replace` — and `basename` reads
+ *  both separators where a split('/') sees only one. */
+export function logStem(entry: AgentEntry | undefined): string | undefined {
+  return typeof entry?.log === 'string' ? basename(entry.log).replace(/\.log$/, '') : undefined;
+}
+
 /** One registry entry — undefined when the id or the file is absent.
  *  The id matches a registry KEY first, then an entry's archive stem
  *  (its log basename minus `.log`) — pane argv carries the journal
@@ -35,16 +45,7 @@ export function agentsJson(base: string): Record<string, AgentEntry> {
 export function agentEntry(base: string, id: string | undefined): AgentEntry | undefined {
   if (id === undefined) return undefined;
   const reg = agentsJson(base);
-  return (
-    reg[id] ??
-    Object.values(reg).find(
-      e =>
-        e.log
-          ?.replace(/\.log$/, '')
-          .split('/')
-          .pop() === id
-    )
-  );
+  return reg[id] ?? Object.values(reg).find(e => logStem(e) === id);
 }
 
 /** The registry KEY for an id — the readable run id (`bro-2bv6q`)
@@ -55,13 +56,7 @@ export function agentKey(base: string, id: string | undefined): string | undefin
   if (id === undefined) return undefined;
   const reg = agentsJson(base);
   if (reg[id] !== undefined) return id;
-  return Object.keys(reg).find(
-    k =>
-      reg[k]?.log
-        ?.replace(/\.log$/, '')
-        .split('/')
-        .pop() === id
-  );
+  return Object.keys(reg).find(k => logStem(reg[k]) === id);
 }
 
 /** The pane's display agent — the TRUE agent name, the registry
@@ -78,37 +73,28 @@ export function displayAgentOf(base: string, id: string | undefined): string | u
   return (typeof provider === 'string' && provider) || agentKey(base, id) || id;
 }
 
-/** The pid's /proc start stamp — `comm` may carry spaces and parens,
- *  so the fields read from the LAST `)`. null when unreadable (no
- *  /proc, or the process just exited). */
-function procStart(pid: number): string | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const close = stat.lastIndexOf(')');
-    return stat.slice(close + 2).split(' ')[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-
 /** Is the pid live? `start` (the recorded /proc start stamp) tightens
  *  the check against pid reuse — a recycled pid with a different start
- *  reads dead; an unreadable /proc falls back to the kill() verdict. */
+ *  reads dead. The core probe answers two lies a bare kill(0) tells:
+ *  an unreaped zombie still answers, and a foreign-owned pid (EPERM)
+ *  is alive, not absent — /proc stat is world-readable, so ownership
+ *  never makes identity unverifiable. */
 export function pidAlive(pid: number, start?: string): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-  if (start === undefined || start === '') return true;
-  const st = procStart(pid);
-  return st === null || st === start;
+  // '' is "stamp never landed" — unverifiable, not a mismatch: the core
+  // probe compares a recorded '' against /proc and reads a live pid dead
+  return corePidAlive(pid, start === '' ? undefined : start);
 }
 
 /** A journal is "actively written" when its mtime is this young —
  *  an agent mid-turn streams updates constantly; longer silence on a
  *  live pid means it is waiting or done, not working. */
 export const ACTIVE_MS = 15 * 60_000;
+
+/** mtime tolerance for clock drift and float precision — stat's
+ *  mtimeMs is fractional where Date.now() truncates, so a file
+ *  written this instant can read a millisecond "in the future".
+ *  A stopped clock lies by minutes and hours, not sub-ms. */
+const FUTURE_SKEW_MS = 60_000;
 
 /** The registry's git common dir recovered from a journal's own
  *  location — `<git-common>/bro/agents/<id>.events.jsonl` walks up
@@ -152,6 +138,31 @@ function exitCodeOf(entry: AgentEntry, eventsPath: string | undefined): number |
   }
 }
 
+/** A dead pid's floor verdict: a recorded exit beats the stopped flag —
+ *  a `down` on a crashed worker writes stopped:true while exitStatus
+ *  keeps the failure. `exitStatus`/`stopped` are attempt-scoped and go
+ *  stale on a respawn, so they only read when the pid is actually gone. */
+function deadLedState(entry: AgentEntry, eventsPath: string | undefined): 'idle' | 'blocked' {
+  const code =
+    typeof entry.exitStatus === 'number' ? entry.exitStatus : exitCodeOf(entry, eventsPath);
+  if (code !== undefined) return code === 0 ? 'idle' : 'blocked';
+  return entry.stopped === true ? 'idle' : 'blocked';
+}
+
+/** Is the journal provably being written — an unreadable, empty, or
+ *  stale one is 'idle' (the loop's long-lived supervisor cannot fake
+ *  it, and a failed first append leaves an empty file with a fresh
+ *  mtime). A FUTURE mtime past skew is a stopped clock's lie — it
+ *  passes the freshness window until wall time catches up. */
+function journalLive(eventsPath: string, now: number): boolean {
+  try {
+    const st = statSync(eventsPath);
+    return !(st.size === 0 || st.mtimeMs - now > FUTURE_SKEW_MS || now - st.mtimeMs > ACTIVE_MS);
+  } catch {
+    return false;
+  }
+}
+
 /** The worker LED floor for a direct-bound pane, pid-first: a dead
  *  recorded pid is 'blocked' unless a clean exit is proven —
  *  `stopped`/`exitStatus 0` in the registry, or the attempt's own
@@ -170,26 +181,16 @@ export function workerLedState(
   // archive's own verdict ride (a direct-bound pane on an
   // unregistered agent must not be capped by a blind floor)
   if (entry === undefined) return 'unknown';
-  if (entry.pid === undefined) return 'idle'; // never started — no crash to report
-  const alive = pidAlive(entry.pid, entry.pidStart as string | undefined);
-  if (!alive) {
-    // a recorded exit beats the stopped flag — a `down` on a crashed
-    // worker writes stopped:true while exitStatus keeps the failure
-    const code =
-      typeof entry.exitStatus === 'number' ? entry.exitStatus : exitCodeOf(entry, eventsPath);
-    if (code !== undefined) return code === 0 ? 'idle' : 'blocked';
-    return entry.stopped === true ? 'idle' : 'blocked';
-  }
+  // a pid-less entry carrying spawnError is a FAILED spawn, not a
+  // never-attempted one — the pane must show the crash, not idle
+  if (entry.pid === undefined) return typeof entry.spawnError === 'string' ? 'blocked' : 'idle';
+  const alive = pidAlive(
+    entry.pid,
+    typeof entry.pidStart === 'string' ? entry.pidStart : undefined
+  );
+  if (!alive) return deadLedState(entry, eventsPath);
   // a live pid alone is a lie — 'working' needs a journal provably
-  // being written: no path, an unreadable, empty, or stale one is
-  // 'idle' (the loop's long-lived supervisor cannot fake it, and a
-  // failed first append leaves an empty file with a fresh mtime)
+  // being written: no path means none is coming
   if (eventsPath === undefined) return 'idle';
-  try {
-    const st = statSync(eventsPath);
-    if (st.size === 0 || now - st.mtimeMs > ACTIVE_MS) return 'idle';
-  } catch {
-    return 'idle';
-  }
-  return 'working';
+  return journalLive(eventsPath, now) ? 'working' : 'idle';
 }

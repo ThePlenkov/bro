@@ -110,6 +110,9 @@ test('decideSession — a different live agent rebinds the recorded pane', () =>
   assert.deepEqual(decide({ id: 'native-new' }), { kind: 'rebind', paneId: 'pS' });
   // the same bound agent → the live pane keeps
   assert.deepEqual(decide({ id: 'native-old' }), { kind: 'none' });
+  // an UNRESOLVED pass never rebinds — a transient registry miss must
+  // not close a live pane bound to a real agent
+  assert.deepEqual(decide(undefined), { kind: 'none' });
   // a record without a binding + no resolved agent → no rebind storm
   const bare = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
   assert.deepEqual(

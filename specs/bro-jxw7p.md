@@ -46,11 +46,11 @@ What is missing is the seam between an entry and its public name.
 
 ### Vocabulary
 
-| term | meaning | scope |
-| --- | --- | --- |
-| **entry** | a `providers.<key>` config entry | private: the configuration |
-| **route** | the public name a client asks for | public: the model id's first segment |
-| **lane** | the runtime carrier of an entry | private: the ACP pool, sessions, model pin |
+| term      | meaning                           | scope                                      |
+| --------- | --------------------------------- | ------------------------------------------ |
+| **entry** | a `providers.<key>` config entry  | private: the configuration                 |
+| **route** | the public name a client asks for | public: the model id's first segment       |
+| **lane**  | the runtime carrier of an entry   | private: the ACP pool, sessions, model pin |
 
 Today all three are the same string. The design separates them: an **entry**
 may answer to several **routes**, and a **lane** is per entry — never per
@@ -144,14 +144,14 @@ The schema (`serveSection` in `packages/core/src/config.ts`) widens to
 
 ### The id contract (unchanged)
 
-| requested model | lane | resolves against that lane's catalog as |
-| --- | --- | --- |
-| `opencode-acp/opencode/glm-5.3-flash-free` | the `opencode-acp` route | `opencode/glm-5.3-flash-free` |
-| `devin-acp/swe-2-high` | the default lane | `swe-2-high` |
-| `devin/swe-2-max` | the default lane (its own key, or its alias) | `swe-2-max` |
-| `swe-2-high` (bare) | the default lane | `swe-2-high` |
-| `unknown-route/x` | the default lane | `x` — the lane's own verdict |
-| a chained `/v1/responses` id | the PREDECESSOR's lane | the predecessor's route, whatever the id asks for |
+| requested model                            | lane                                         | resolves against that lane's catalog as           |
+| ------------------------------------------ | -------------------------------------------- | ------------------------------------------------- |
+| `opencode-acp/opencode/glm-5.3-flash-free` | the `opencode-acp` route                     | `opencode/glm-5.3-flash-free`                     |
+| `devin-acp/swe-2-high`                     | the default lane                             | `swe-2-high`                                      |
+| `devin/swe-2-max`                          | the default lane (its own key, or its alias) | `swe-2-max`                                       |
+| `swe-2-high` (bare)                        | the default lane                             | `swe-2-high`                                      |
+| `unknown-route/x`                          | the default lane                             | `x` — the lane's own verdict                      |
+| a chained `/v1/responses` id               | the PREDECESSOR's lane                       | the predecessor's route, whatever the id asks for |
 
 Only the FIRST segment is bro-side routing: `providerBare`
 (`packages/providers/src/acp.ts:99`) strips exactly one leading segment, and
@@ -224,24 +224,24 @@ advertise the same models twice. The native-lane vision stays reserved
 here until a PR proposes its transport.
 
 - [x] `packages/core/src/config.ts` — `serveSection` accepts
-      `string[] | Record<string, string>`; `providerRoutes` yields the
-      route → entry pairs (and drops a malformed one with a diagnostic);
-      the emitted schema follows.
+  `string[] | Record<string, string>`; `providerRoutes` yields the
+  route → entry pairs (and drops a malformed one with a diagnostic);
+  the emitted schema follows.
 - [x] `packages/cli/src/commands/serve-conductor.ts` — `ConductorConfig`
-      carries `routes` (a `RouteBinding` list) beside the backend;
-      `conductorConfig` builds the route table, rejecting a duplicate
-      route, a slash in a route, and a non-acp entry; the default lane
-      answers to its own key plus any declared route for it.
+  carries `routes` (a `RouteBinding` list) beside the backend;
+  `conductorConfig` builds the route table, rejecting a duplicate
+  route, a slash in a route, and a non-acp entry; the default lane
+  answers to its own key plus any declared route for it.
 - [x] `packages/cli/src/commands/serve-conductor.ts` — the lane's pool,
-      seam label and session map move to the ENTRY; routes share them. The
-      journal's `backend` field becomes the route that ANSWERED — the
-      predecessor's route for a chained `/v1/responses` request.
+  seam label and session map move to the ENTRY; routes share them. The
+  journal's `backend` field becomes the route that ANSWERED — the
+  predecessor's route for a chained `/v1/responses` request.
 - [x] `packages/cli/src/commands/serve-conductor.ts` — the `/v1/models`
-      catalog advertises each lane under its primary route only.
+  catalog advertises each lane under its primary route only.
 - [x] `packages/cli/src/commands/serve.ts` — the startup line lists the
-      routes, not the entry keys.
+  routes, not the entry keys.
 - [x] `specs/bro-jxw7p.md` — the native-lane vision stays reserved here
-      until a PR proposes its transport.
+  until a PR proposes its transport.
 
 ### What the implementation added
 

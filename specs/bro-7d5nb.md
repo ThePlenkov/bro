@@ -26,8 +26,8 @@ Two observable costs:
    the task and repo facts only. The agent executes a step; the core
    moves pipeline state. Agents never see stage names, gate verdicts,
    or routing decisions.
-2. **Provider-agnostic core.** The router emits a task *class* and
-   *kind*; provider packages map class→provider/model. No
+2. **Provider-agnostic core.** The router emits a task _class_ and
+   _kind_; provider packages map class→provider/model. No
    provider-specific branching in shared paths.
 3. **Durability on existing substrate.** Stage transitions journal to
    the stores we already trust: dolt (beads/molecules), agent registry
@@ -42,9 +42,9 @@ Two observable costs:
 Two formula kinds, both TOML, both content-hash versioned:
 
 - **proto formula** (exists) — work DAG: steps + `needs` edges,
-  poured into a molecule. Describes *what* to build.
+  poured into a molecule. Describes _what_ to build.
 - **pipeline formula** (new) — stage DAG: named stages, typed
-  verdicts, transitions. Describes *how* each work item flows.
+  verdicts, transitions. Describes _how_ each work item flows.
   Rig-independent: lives in formula space, referenced BY a run —
   never poured INTO agent-facing artifacts.
 

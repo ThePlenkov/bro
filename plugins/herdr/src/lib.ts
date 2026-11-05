@@ -243,7 +243,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-export { pidAlive } from '../../../packages/herdr-kit/src/index.ts';
+export { pidAlive, workerLedState } from '../../../packages/herdr-kit/src/index.ts';
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */

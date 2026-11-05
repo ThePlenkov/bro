@@ -18,6 +18,7 @@ import {
   type MirrorRec,
   pidAlive,
   repoDir,
+  workerLedState,
   type StatusAgent,
   type StatusWorktree,
   stateScope,
@@ -71,7 +72,10 @@ function boardJoins(p: Planes): BoardJoins {
     if (a.worktree !== undefined) {
       const reg = p.registry[a.id];
       agentByWt.set(a.worktree, { ...a, agentId: a.agentId ?? reg?.agentId });
+      // a later agent on the same worktree with no registry record
+      // must clear the earlier one — both maps name the same agent
       if (reg !== undefined) regByWt.set(a.worktree, reg);
+      else regByWt.delete(a.worktree);
     }
   }
   return {
@@ -105,7 +109,8 @@ function isArmed(
 ): boolean {
   if (
     w.claim !== undefined ||
-    (reg?.pid !== undefined && pidAlive(reg.pid, reg.pidStart as string | undefined))
+    (reg?.pid !== undefined &&
+      pidAlive(reg.pid, typeof reg.pidStart === 'string' ? reg.pidStart : undefined))
   )
     return true;
   return [...armedDetails].some(d =>
@@ -125,8 +130,6 @@ function beadCell(
   const bead = slug !== undefined ? (titles.get(slug) ?? slug) : '';
   return bead.length > 46 ? `${bead.slice(0, 45)}…` : bead;
 }
-
-const ACTIVE_MS = 15 * 60_000;
 
 /** The agent's last-output stamp — the events journal's mtime first
  *  (it ticks per session update), the native log's as fallback. */
@@ -160,10 +163,13 @@ function deadCell(reg: AgentEntry): string {
   return typeof reg.exitStatus === 'number' ? `exit ${reg.exitStatus}${suffix}` : `dead${suffix}`;
 }
 
-/** The honest liveness cell — pid-alive-first, then journal
- *  freshness; `exitStatus` is attempt-scoped and goes stale on a
- *  respawn, so a live pid beats it (registry showed exitStatus:1 on
- *  a respawned-and-streaming worker). */
+/** The honest liveness cell — the kit's `workerLedState` ladder the
+ *  session pane shares, so the board and the pane never disagree: a
+ *  live pid plus a fresh non-empty journal is 'working', a silent or
+ *  absent one 'idle', a dead pid the dead row's exit/cause text. The
+ *  spawn handoff shows 'spawn' only while no terminal field
+ *  (exitStatus/stopped) is recorded — a crashed attempt shows its
+ *  exit, never the spawn placeholder. */
 function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number): string {
   if (reg === undefined) return w.state ?? '';
   if (reg.pid === undefined) {
@@ -171,12 +177,23 @@ function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number):
     // lands; inside the slot window a pid-less row is 'spawn', the
     // same reading the fleet's own liveness ladder gives it
     const spawned = typeof reg.spawnedAt === 'string' ? Date.parse(reg.spawnedAt) : Number.NaN;
-    if (Number.isFinite(spawned) && now - spawned < SESSION_SLOT_TTL_MS) return 'spawn';
+    if (
+      Number.isFinite(spawned) &&
+      now - spawned < SESSION_SLOT_TTL_MS &&
+      reg.exitStatus === undefined &&
+      reg.stopped !== true &&
+      // a recorded spawnError is already the failed end of the window —
+      // the placeholder must not outlive the connector's own verdict
+      typeof reg.spawnError !== 'string'
+    )
+      return 'spawn';
   }
-  const alive = reg.pid !== undefined && pidAlive(reg.pid, reg.pidStart as string | undefined);
-  if (!alive) return deadCell(reg);
-  const last = lastWrite(reg);
-  return last !== undefined && now - last <= ACTIVE_MS ? 'working' : 'idle';
+  const events =
+    typeof reg.log === 'string' ? reg.log.replace(/\.log$/, '.events.jsonl') : undefined;
+  const led = workerLedState(reg, events, now);
+  if (led === 'blocked') return deadCell(reg);
+  if (led === 'unknown') return w.state ?? '';
+  return led;
 }
 
 function lastCell(reg: AgentEntry | undefined): string {
@@ -214,7 +231,7 @@ function rowFor(w: StatusWorktree, j: BoardJoins, now: number): Row | undefined 
   return {
     worktree: w.name,
     bead: beadCell(w, agent, j.titles),
-    agent: agent?.id ?? '',
+    agent: agent?.agentId ?? '',
     state: stateCell(reg, w, now),
     last: lastCell(reg),
     ws: wsCell(ws),

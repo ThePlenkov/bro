@@ -7,7 +7,7 @@ names (or `BRO_PROVIDER_BACKEND` pins). The operator's machine hosts several
 working providers — `devin-acp`, `opencode-iceman` — and every one of them
 has models a client may ask for. Serving them meant running a second
 listener on a second port, and the repo allows exactly one listener per
-repo: the second serve is refused with *one host per repo*. So the
+repo: the second serve is refused with _one host per repo_. So the
 operator's choice was "one provider on the gateway", not "the gateway
 serves every provider".
 
@@ -58,12 +58,12 @@ pool, and its own conversations.
 
 The requested model's FIRST path segment names the lane:
 
-| requested model | lane |
-| --- | --- |
+| requested model                     | lane                       |
+| ----------------------------------- | -------------------------- |
 | `opencode-iceman/opencode-go/gpt-5` | the `opencode-iceman` lane |
-| `devin-acp/swe-2-high` | the `devin-acp` lane |
-| `swe-2-high` (bare) | the default lane |
-| `unknown-provider/x` | the default lane |
+| `devin-acp/swe-2-high`              | the `devin-acp` lane       |
+| `swe-2-high` (bare)                 | the default lane           |
+| `unknown-provider/x`                | the default lane           |
 
 A bare id, or a prefix naming no lane, rides the default: a model the
 default's catalog cannot serve is that lane's own verdict, not a routing
@@ -92,7 +92,7 @@ gets its own agent and the label it resolves against is the lane's own
 
 ## Verify
 
-- `serve-conductor.test.ts` gains a *one gateway, many providers* suite:
+- `serve-conductor.test.ts` gains a _one gateway, many providers_ suite:
   `/v1/models` lists every lane's models; a model prefix routes the turn
   to THAT provider; a bare model and an unknown prefix ride the default;
   the same conversation under two providers is TWO sessions; one lane
