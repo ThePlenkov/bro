@@ -182,6 +182,8 @@ export type {
   BrouterRoute,
   ModelRoute,
 } from './brouter.ts';
+export { healthKey } from './router-health.ts';
+export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
 export {
   DATA_REF,
   dataRefCommit,
