@@ -447,11 +447,7 @@ providersSection.jsonSchema = {
   // must not accept it either (a config that passes the diagnostics
   // must survive the load)
   patternProperties: {
-    [String.raw`^(?!__proto__$)`]: js.oneOf(
-      providerApiSchema,
-      providerAcpSchema,
-      providerCliSchema
-    ),
+    '^(?!__proto__$)': js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
   },
   additionalProperties: false,
 };

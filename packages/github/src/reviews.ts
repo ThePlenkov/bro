@@ -1020,7 +1020,7 @@ function readAsyncMerge(res: { out: string; err: string }): AsyncMergeResult {
     }
     try {
       const body = JSON.parse(text.slice(start)) as {
-        status?: AsyncMergeResult['status'];
+        status: AsyncMergeResult['status'];
         message?: string;
         details?: { uuid?: string; message?: string };
       };
@@ -1379,13 +1379,27 @@ async function labelPrs(
 // --- mutations ----------------------------------------------------------------
 
 /** Auto-close keywords GitHub recognizes — a body already carrying one
- *  for a ref is wired; re-stamping must not duplicate the line. */
-const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i;
+ *  for a ref is wired; re-stamping must not duplicate the line. The
+ *  token after `#` lands in a capture so the ref compare is a literal
+ *  prefix + boundary test: a `new RegExp` built on the ref needs
+ *  escaping (a bug farm) and trips dynamic-pattern scanners. */
+const CLOSER_TOKEN_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\S+)/gi;
 
-const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-const isWired = (body: string, ref: string): boolean =>
-  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body);
+/** The original contract — `\bcloser\s+#<ref>\b` case-insensitive:
+ *  the token must open with the ref and end it on a word boundary, so
+ *  `#bro-7d5nb.3` wires ref `bro-7d5nb` (its `.` is a boundary) while
+ *  `#bro-1x` does not wire `bro-1`. */
+const isWired = (body: string, ref: string): boolean => {
+  if (ref === '') return false;
+  const wanted = ref.toLowerCase();
+  for (const m of body.matchAll(CLOSER_TOKEN_RE)) {
+    const tok = m[1];
+    if (tok.toLowerCase().startsWith(wanted) && !/\w/.test(tok.charAt(wanted.length))) {
+      return true;
+    }
+  }
+  return false;
+};
 
 /** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
  *  `Fixes #N` line per newly-linked ref, inserted before the bro

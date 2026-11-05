@@ -176,14 +176,16 @@ export async function resolveRepoAsync(positional: string[], cwd?: string): Prom
  *  of github.com. */
 export function ghHost(): string {
   const h = process.env.GH_HOST;
+  if (h === undefined || h.trim() === '') return 'github.com';
   // GH_HOST is a bare host per gh(1) — but a pasted URL with a scheme
-  // would produce https://https://… links, so normalize it away
-  return h !== undefined && h.trim() !== ''
-    ? h
-        .trim()
-        .replace(/^https?:\/\//, '')
-        .replace(/\/+$/, '')
-    : 'github.com';
+  // would produce https://https://… links, so normalize it away. The
+  // trailing-slash trim is a loop, not /\/+$/: a greedy quantifier
+  // pinned to end-of-input backtracks super-linearly on hostile input
+  let host = h.trim().replace(/^https?:\/\//, '');
+  while (host.endsWith('/')) {
+    host = host.slice(0, -1);
+  }
+  return host;
 }
 
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every

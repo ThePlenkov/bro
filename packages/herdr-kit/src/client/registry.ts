@@ -138,6 +138,31 @@ function exitCodeOf(entry: AgentEntry, eventsPath: string | undefined): number |
   }
 }
 
+/** A dead pid's floor verdict: a recorded exit beats the stopped flag —
+ *  a `down` on a crashed worker writes stopped:true while exitStatus
+ *  keeps the failure. `exitStatus`/`stopped` are attempt-scoped and go
+ *  stale on a respawn, so they only read when the pid is actually gone. */
+function deadLedState(entry: AgentEntry, eventsPath: string | undefined): 'idle' | 'blocked' {
+  const code =
+    typeof entry.exitStatus === 'number' ? entry.exitStatus : exitCodeOf(entry, eventsPath);
+  if (code !== undefined) return code === 0 ? 'idle' : 'blocked';
+  return entry.stopped === true ? 'idle' : 'blocked';
+}
+
+/** Is the journal provably being written — an unreadable, empty, or
+ *  stale one is 'idle' (the loop's long-lived supervisor cannot fake
+ *  it, and a failed first append leaves an empty file with a fresh
+ *  mtime). A FUTURE mtime past skew is a stopped clock's lie — it
+ *  passes the freshness window until wall time catches up. */
+function journalLive(eventsPath: string, now: number): boolean {
+  try {
+    const st = statSync(eventsPath);
+    return !(st.size === 0 || st.mtimeMs - now > FUTURE_SKEW_MS || now - st.mtimeMs > ACTIVE_MS);
+  } catch {
+    return false;
+  }
+}
+
 /** The worker LED floor for a direct-bound pane, pid-first: a dead
  *  recorded pid is 'blocked' unless a clean exit is proven —
  *  `stopped`/`exitStatus 0` in the registry, or the attempt's own
@@ -163,27 +188,9 @@ export function workerLedState(
     entry.pid,
     typeof entry.pidStart === 'string' ? entry.pidStart : undefined
   );
-  if (!alive) {
-    // a recorded exit beats the stopped flag — a `down` on a crashed
-    // worker writes stopped:true while exitStatus keeps the failure
-    const code =
-      typeof entry.exitStatus === 'number' ? entry.exitStatus : exitCodeOf(entry, eventsPath);
-    if (code !== undefined) return code === 0 ? 'idle' : 'blocked';
-    return entry.stopped === true ? 'idle' : 'blocked';
-  }
+  if (!alive) return deadLedState(entry, eventsPath);
   // a live pid alone is a lie — 'working' needs a journal provably
-  // being written: no path, an unreadable, empty, or stale one is
-  // 'idle' (the loop's long-lived supervisor cannot fake it, and a
-  // failed first append leaves an empty file with a fresh mtime)
+  // being written: no path means none is coming
   if (eventsPath === undefined) return 'idle';
-  try {
-    const st = statSync(eventsPath);
-    // a FUTURE mtime past skew is a stopped clock's lie — it passes
-    // the freshness window until wall time catches up
-    if (st.size === 0 || st.mtimeMs - now > FUTURE_SKEW_MS || now - st.mtimeMs > ACTIVE_MS)
-      return 'idle';
-  } catch {
-    return 'idle';
-  }
-  return 'working';
+  return journalLive(eventsPath, now) ? 'working' : 'idle';
 }

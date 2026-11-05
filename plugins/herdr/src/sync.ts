@@ -27,10 +27,8 @@ const repo = repoDir(ctxJson());
 try {
   mkdirSync(STATE_DIR, { recursive: true });
   const start = procStat(process.pid)?.start;
-  writeFileSync(
-    syncPidPath(stateScope(repo)),
-    `${process.pid}${start !== undefined && start !== '' ? ` ${start}` : ''}\n`
-  );
+  const stamp = start !== undefined && start !== '' ? ` ${start}` : '';
+  writeFileSync(syncPidPath(stateScope(repo)), `${process.pid}${stamp}\n`);
 } catch {
   console.log('bro sync — pid marker write failed; open-dedup degraded this pass');
 }

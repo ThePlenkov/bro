@@ -73,14 +73,16 @@ const SESSION_ENV = [
 function goalDir(dir: string): string | null {
   try {
     const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-      // NOSONAR
+      // NOSONAR — PATH lookup is the contract for a user-installed git
       cwd: dir,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
+    if (gd === '') return null;
     // rev-parse answers relative to the CWD it ran in — resolve against
     // `dir` so callers (tests, hooks in worktrees) get an absolute path
-    return gd ? join(isAbsolute(gd) ? gd : resolve(dir, gd), 'bro', 'hooks', 'goal') : null;
+    const abs = isAbsolute(gd) ? gd : resolve(dir, gd);
+    return join(abs, 'bro', 'hooks', 'goal');
   } catch {
     return null;
   }

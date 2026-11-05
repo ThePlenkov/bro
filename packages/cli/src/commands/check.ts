@@ -18,15 +18,7 @@
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process';
-import {
-  accessSync,
-  existsSync,
-  lstatSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-} from 'node:fs';
+import { accessSync, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { X_OK } from 'node:constants';
