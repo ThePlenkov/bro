@@ -176,6 +176,11 @@
               }
             ]
           }
+        },
+        "routes": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         }
       },
       "additionalProperties": false

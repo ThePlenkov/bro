@@ -30,6 +30,14 @@ export {
 } from './clients/claude-code.ts';
 export { CLIENTS, clientById, clientIds } from './registry.ts';
 export { routerPlugins, type RouterPolicy } from './plugins.ts';
+export { catalogPlugins } from './catalog-plugins.ts';
+export { clientPlugins } from './client-plugins.ts';
+export { routePlugins } from './route-plugins.ts';
+export { decisionProvider, requireTypedGrade, type DecisionProvider } from './decision-model.ts';
+export { runHealthCommand } from './health-cmd.ts';
+export { runRouteCommand } from './route-cmd.ts';
+export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';
+export { runStoreCommand } from './store-cmd.ts';
 export { configuredProviders, type ProviderRow } from './providers.ts';
 export {
   requireClient,

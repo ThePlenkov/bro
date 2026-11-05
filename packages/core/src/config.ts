@@ -478,6 +478,7 @@ brouterSection.jsonSchema = js.obj({
   models: js.map(
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
   ),
+  routes: js.str,
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,

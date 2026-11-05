@@ -15,6 +15,7 @@
  * the CLI layer; `brouterStaticCatalog` is the offline face.
  */
 import type { ProviderEntry } from './providers.ts';
+import type { FleetRouter } from './routing.ts';
 
 /** One declared route — the provider pick plus the upstream model id
  *  it serves. `model` absent = the registry key verbatim (the bare
@@ -28,9 +29,14 @@ export interface BrouterRoute {
  *  list; list order is preference order, [0] the primary pick. */
 export type BrouterModels = Record<string, BrouterRoute[]>;
 
-/** The `brouter` config section — `models` is the whole registry. */
+/** The `brouter` config section — the model's registry plus the path of
+ *  the route table that maps a task to a (provider, model) chain. */
 export interface BrouterConfig {
   models: BrouterModels;
+  /** the route table's path — the TOML file the routes live in */
+  routes?: string;
+  /** the decision model — the judge that picks the route (provider + mode) */
+  router?: FleetRouter;
 }
 
 /** Where a declared route sits — the model id it was declared under
@@ -167,6 +173,7 @@ function modelEntry(models: BrouterModels, id: string, v: unknown): ModelEntry |
  *  rule as `fleet.routing` chain entries). */
 export function parseBrouter(raw: unknown): BrouterConfig {
   const models: BrouterModels = {};
+  const routes = routeTablePath(raw);
   for (const [id, v] of Object.entries(modelsBag(raw))) {
     const entry = modelEntry(models, id, v);
     if (entry === null) {
@@ -182,7 +189,53 @@ export function parseBrouter(raw: unknown): BrouterConfig {
       configurable: true,
     });
   }
-  return { models };
+  const router = decisionModel(
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)['router']
+      : undefined
+  );
+  return {
+    models,
+    ...(routes === undefined ? {} : { routes }),
+    ...(router === undefined ? {} : { router }),
+  };
+}
+
+/** The decision model — the judge provider and the mode. Absent means the
+ *  table's own order decides; 'shadow' journals the model's opinion and
+ *  picks nothing; 'enforce' lets a confident pick win. */
+function decisionModel(raw: unknown): FleetRouter | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const o = (typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? raw
+    : {}) as Record<string, unknown>;
+  const provider = typeof o.provider === 'string' ? o.provider.trim() : '';
+  const mode = o.mode;
+  if (provider === '' || (mode !== 'shadow' && mode !== 'enforce' && mode !== 'off')) {
+    console.error(
+      'bro.config: brouter.router requires provider + mode (shadow|enforce|off) — section dropped'
+    );
+    return undefined;
+  }
+  return { provider, mode };
+}
+
+/** The route table's path — a non-empty string, or nothing. */
+function routeTablePath(raw: unknown): string | undefined {
+  if (!isPlainObject(raw)) {
+    return undefined;
+  }
+  const value = raw.routes;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string' || value.trim() === '') {
+    console.error('bro.config: brouter.routes must be a path — field dropped');
+    return undefined;
+  }
+  return value.trim();
 }
 
 /** The registry's offline catalog — every model id statically known
