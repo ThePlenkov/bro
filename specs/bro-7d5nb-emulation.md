@@ -514,6 +514,121 @@ orch: foreground, timing: now}`.
   (`pass 167` pipeline tests). A live-judge replay stays deferred to
   the runner-backed graduation.
 
+## Run 6: bro-7d5nb.6 — G4 capture stage (S6)
+
+- Invocation: `captureStage(deps).invoke(call)` inside
+  `runPipeline(formula, 'bro-7d5nb.6', opts)` — the stage engine this
+  item ships, bound into the runner's `learn` slot (a slot the three
+  judge stages never touch — no multiplexer needed: `learn` is
+  capture's engine alone in the spec formula).
+- Spec reference: §stage semantics capture bullet ("`self learn
+  capture` on land (cheap, per-item); heavyweight session retro runs
+  batched off-path"), §typed stage outputs (`{lessons: int,
+  followups: [beadId]}`), §transitions (`merge.landed → capture`,
+  `capture.captured → end`), the formula's
+  `mode = "always-capture"` stage token, non-goal "no per-item
+  heavyweight retro session".
+- Input: bead `bro-7d5nb.6` (epic child, needs: [.5] → ready),
+  spec formula, repo `/home/pepl/projects/bro`.
+- Expected by spec: on `merge.landed` the learn engine distills the
+  item's artifacts into trigger-gated lessons (cheap: the seam's
+  dedup makes a re-sweep merge-only); the batch retro hook records
+  the intent, never executes it per-item; verdict `captured` → end
+  with `{lessons, followups}` absorbed into ctx.
+- Actual action and result:
+  - classify → `clump` — same stage-engine surface as .3–.5;
+    payload `{group: clump, complexity: complex, clumpId:
+    bro-7d5nb.3, rank: 4}` (emulated, as in Runs 1–5).
+  - route → `spawn` — `{class: interactive, kind: ts-package,
+    orch: foreground, timing: now}`.
+  - work → `done` — `stages/capture.ts` + `stages/capture.test.ts`
+    - index wiring; 27 stage tests green (package suite `pass 197`
+      across all seven test files).
+  - review → in flight at log time — act gate + reviewers stand
+    in (same standing-in as Runs 1–5); the stage under test emits
+    `captured` under scripted seams.
+  - merge → pending; capture → the engine under test.
+- Design decisions worth recording (spec-consistent, underdetermined
+  by the spec):
+  - Two injected seams, both taking `(call, LandContext)`:
+    `capture` is the learn-capture path (prod binds
+    `captureLessons` — the stage calls the seam, never the CLI and
+    never `@broject/learn` directly; pipeline keeps its one-dep
+    shape), `retro` is the batched-retro intent QUEUE — a required
+    dep, because an unwired hook is a wiring error, not a skipped
+    retro. The queue records that this item's run joins the next
+    off-path retro batch; `void` or `{batch}` back, and the payload
+    marks `retro: {queued: true, batch?}` — the journaled captured
+    record IS the durable proof the hook fired.
+  - Land context comes from the JOURNAL (same authority split as
+    route's wall evidence / review's fix history): the stage scans
+    this run's settled records — a settled `landed` verdict MUST
+    exist (the merge stage's spec enum word; a formula may name the
+    stage differently, the verdict is fixed). Capture reached with
+    no land throws — a capture of un-landed work would teach
+    lessons that never survived a merge gate, so the pending intent
+    is the crash marker and the bounded re-fire parks the item
+    (`attempts-exhausted`) instead of harvesting nothing into
+    lessons. `mol` is the LAST settled payload carrying a string
+    `mol` field (convoy's `{mol: <id>}` convention — a scoped-fix
+    work re-entry can re-pour; freshest wins; a non-string `mol` is
+    malformed payload data, skipped for the next record).
+  - `mode` is validated: absent reads `always-capture`, an unknown
+    token throws — a stage that can't tell its capture scope can't
+    know what it runs (same fail-loud posture as an empty routing
+    table or a missing `routing.review`).
+  - The seam's outcome is validated before it becomes the payload:
+    `lessons` must be a non-negative int, `followups` a bead-id
+    list, `skipped` `{origin, reason}` records, the retro receipt
+    `{batch?}` or void. Malformed → throw: the sweep DID run (its
+    dedup makes re-fire merge-only) but an unreadable report can't
+    be echoed into the pipeline context.
+  - Sweep BEFORE queue: the retro intent describes a completed
+    capture. A throwing retro propagates with the sweep already
+    done — re-fire re-runs a dedup-safe capture.
+  - No `recheck` hook: `learn` is not a spawn-like intent, so a
+    verdict-less capture re-fires inside the attempt budget like
+    the judge stages' — the seams' side effects are idempotent
+    (lesson dedup folds a re-sweep into a merge; a batch queue
+    dedups on the item/run key it must already take).
+- Spec gaps hit:
+  1. **The batched-retro mechanism is unspecified.** The spec says
+     "heavyweight session retro runs batched off-path" but names no
+     seam — no queue, marker, or schedule exists in the repo to
+     bind. This run takes the minimal faithful seam: an injected
+     `retro(call, ctx) → {batch?} | void` the stage ALWAYS calls on
+     a settled land; prod wires whatever batch carrier emerges (a
+     bead, a file, a schedule). Proposed wording: "the capture
+     engine's retro hook is a queue seam — it records the item's
+     membership in the next retro batch and returns the batch id;
+     execution is the batch runner's, never the stage's."
+  2. **What the harvest scopes to is unspecified.** "The item's
+     artifacts" doesn't say how capture learns WHICH artifacts this
+     run produced. This run derives it from the journal: the item
+     id + the last journaled `mol` + the land record's provenance
+     (a `pr:` ref in the merge payload is lesson evidence
+     material); the store-wide dedup sweep does the rest.
+  3. **`landed` has no producer guarantee.** `merge.landed →
+     capture` is the only path in the spec formula, but nothing
+     stops a formula from reaching capture another way. This run
+     treats a missing settled `landed` as malformed invocation —
+     fail closed to park, same as every other broken-context
+     branch (gate-indeterminate, fix-notes-missing).
+- Friction: `resumePipeline` derives run identity from the
+  journal's own `runId` — a `memoryJournal()` created without one
+  mints a fresh id per resume, silently orphaning the pending
+  intent (the resume became a fresh run and re-threw instead of
+  exhausting attempts). Worth a doc note on `memoryJournal` or an
+  opts.runId requirement in tests driving resume.
+- Golden case: **partial** — `stages/capture.test.ts` scripts both
+  seams and replays land→capture→end inside `runPipeline` (two
+  mini-formulas: merge→capture needing NO `admit` seam, and an
+  `ok`-merge formula proving the fail-closed park); the spec DAG
+  case drives cheap-complexity → gate skip → merge → capture with
+  the work payload's `mol` reaching the sweep (`pass 197` pipeline
+  tests). A real `captureLessons` binding stays deferred to the
+  runner-backed graduation.
+
 ## Graduation
 
 - Stage: **runner-backed, library-only** — `.2` delivers the

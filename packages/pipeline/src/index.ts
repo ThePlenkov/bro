@@ -57,6 +57,20 @@ export {
   STAGE_INTENTS,
 } from './runner.ts';
 export type {
+  CaptureDeps,
+  CaptureOutcome,
+  CapturePayload,
+  LandContext,
+  RetroReceipt,
+} from './stages/capture.ts';
+export {
+  CAPTURE_MODES,
+  CAPTURED_VERDICT,
+  captureStage,
+  DEFAULT_CAPTURE_MODE,
+  LANDED_VERDICT,
+} from './stages/capture.ts';
+export type {
   ClassifyBacklog,
   ClassifyComplexity,
   ClassifyDeps,
