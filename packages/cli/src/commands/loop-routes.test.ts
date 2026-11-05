@@ -95,3 +95,15 @@ test('a declaration silent about the provider is no verdict', async () => {
   });
   assert.equal(routed?.class, 'sweep');
 });
+
+test('the verdict rides with the lane — the reasons do not die', async () => {
+  const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
+  assert.equal(routed?.decision.route?.name, 'sweep');
+  assert.match(routed?.decision.reason ?? '', /the table's own order/);
+  assert.equal(routed?.decision.picked, 'static');
+});
+
+test('the health rides with the lane — the walls are part of the why', async () => {
+  const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
+  assert.deepEqual(routed?.snapshot, {});
+});

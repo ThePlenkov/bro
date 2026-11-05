@@ -105,11 +105,16 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   admitSessionSlot,
+  explainSlicesOrExit,
   hasHelpFlag,
+  healthKey,
   issueLink,
   printUsage,
+  renderExplanation,
+  withSlice,
 } from '@broject/core';
-import type { BrouterModels, ExitCode } from '@broject/core';
+import type { BrouterModels, ExitCode, ExplainSlice, Explanation } from '@broject/core';
+import { chainModelFacts, healthFacts, routeFacts } from '@broject/brouter';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -161,7 +166,7 @@ import { runSyncCommand } from './sync.ts';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
 import { isStackName } from '@broject/stack';
 import { loopSlug } from '@broject/loop';
-import { routeTableLane } from './loop-routes.ts';
+import { routeTableLane, type RouteTableLane } from './loop-routes.ts';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -226,6 +231,10 @@ interface Ctx {
   routing: boolean;
   intervalS: number;
   json: boolean;
+  /** The explain slices — when the operator asked for the routing
+   *  decision's reasons, the spawn path prints them (stderr). Absent =
+   *  the run says nothing about its routing. */
+  explain?: ExplainSlice[];
   /** Declared label scope — `bro loop --label debt,ui` only claims
    *  beads carrying one of these labels; the rest of the shared queue
    *  stays untouched. */
@@ -287,6 +296,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 class:<name> label, else 'default')
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
+  --explain[=SLICES]             print why the bead landed on this route —
+                                route, model, health, cost (or a subset)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --parked-wake MIN              parked bead's snooze before it wakes to
                                 open (loop.parkedWakeMin, 120; 0 = iced
@@ -737,14 +748,40 @@ function routeTableTask(
 /** The route table's lane for one bead — undefined when the operator
  *  declares no table (fleet.routing stays the compatibility face for the
  *  runs that declare none). */
-async function routeTableLaneFor(ctx: Ctx, bead: ReadyBead): Promise<LoopLane | undefined> {
+async function routeTableLaneFor(
+  ctx: Ctx,
+  bead: ReadyBead
+): Promise<{ lane: LoopLane; routed: RouteTableLane } | undefined> {
   const tablePath = ctx.env.brouter?.routes;
   if (tablePath === undefined) {
     return undefined;
   }
   const label = beadClassInfo(ctx, bead, false);
   const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
-  return routed === undefined ? undefined : resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed);
+  if (routed === undefined) {
+    return undefined;
+  }
+  return { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
+}
+
+/** The spawn path's explanation — the route the bead lands on, and why.
+ *  stderr: stdout stays the run log. */
+function explainSpawn(ctx: Ctx, bead: ReadyBead, routed: RouteTableLane): void {
+  const slices = ctx.explain;
+  if (slices === undefined) {
+    return;
+  }
+  let explanation: Explanation = { slices: {} };
+  explanation = withSlice(explanation, 'route', routeFacts(routed.decision));
+  explanation = withSlice(
+    explanation,
+    'model',
+    chainModelFacts(routed.decision.chain, routed.decision.route?.name)
+  );
+  const keys = routed.decision.chain.map(e => healthKey(e.provider, e.model));
+  explanation = withSlice(explanation, 'health', healthFacts(routed.snapshot, keys));
+  console.error(`loop: ${bead.id}`);
+  console.error(renderExplanation(explanation, slices));
 }
 
 async function resolveBeadLane(
@@ -756,7 +793,8 @@ async function resolveBeadLane(
   // operator declares one, it answers
   const tableLane = await routeTableLaneFor(ctx, bead);
   if (tableLane !== undefined) {
-    return tableLane;
+    explainSpawn(ctx, bead, tableLane.routed);
+    return tableLane.lane;
   }
   if (!ctx.routing) {
     return ctx.lane;
@@ -2749,7 +2787,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print']);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print', '--explain']);
 
 function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
   // install arms and uninstall disarms — both are the orchestrator's
@@ -2839,6 +2877,7 @@ function everySecArg(argv: string[]): number | undefined {
   }
   return everySec;
 }
+
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
@@ -3137,6 +3176,7 @@ function buildCtx(
     routing,
     intervalS,
     json: argv.includes('--json'),
+    explain: explainSlicesOrExit(argv),
     selection: {
       filters: labelSelection(argv),
       gates: 'forbid' as const,
