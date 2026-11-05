@@ -22,7 +22,7 @@ const TABLE = [
   '',
   '[routes.sweep]',
   'match = { type = "sweep" }',
-  'chain = [{ provider = "devin-acp", model = "swe-2-high" }]',
+  'chain = [{ provider = "devin-acp", model = "swe-2-max" }]',
   'onWall = "fallthrough"',
   '',
   '[routes.fallback]',
@@ -38,7 +38,7 @@ test("the bead's class lands on the route that pins it", async () => {
   const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
   assert.equal(routed?.class, 'sweep');
   assert.equal(routed?.provider, 'devin-acp');
-  assert.equal(routed?.model, 'swe-2-high');
+  assert.equal(routed?.model, 'swe-2-max');
   assert.equal(routed?.onWall, 'fallthrough');
 });
 
@@ -81,7 +81,7 @@ test('a route naming a model the declaration contradicts is a config error', asy
       routeTableLane({
         table,
         label: 'sweep',
-        served: { 'swe-2-high': [{ provider: 'devin-acp' }] },
+        served: { 'swe-2-max': [{ provider: 'devin-acp' }] },
       }),
     SpawnError
   );
@@ -91,7 +91,7 @@ test('a declaration silent about the provider is no verdict', async () => {
   const routed = await routeTableLane({
     table: tableFile(TABLE),
     label: 'sweep',
-    served: { 'swe-2-high': [{ provider: 'other-lane' }] },
+    served: { 'swe-2-max': [{ provider: 'other-lane' }] },
   });
   assert.equal(routed?.class, 'sweep');
 });

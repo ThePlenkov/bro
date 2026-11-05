@@ -24,7 +24,7 @@ const withRepo = async (fn: (dir: string) => Promise<void>): Promise<void> => {
 
 const OPTIONS = [
   { name: 'edit', description: 'chain: devin-acp → kilo-free' },
-  { name: 'design', description: 'chain: devin-acp(swe-2-high)' },
+  { name: 'design', description: 'chain: devin-acp(swe-2-max)' },
 ];
 
 /** A JudgeFacade returning a scripted DecideResult. */
@@ -71,7 +71,7 @@ describe('routePickQuestions', () => {
     assert.deepEqual(Object.keys(q.criteria).sort(), ['design', 'edit']);
     const design = q.criteria['design']!;
     assert.ok(typeof design === 'string');
-    assert.match(design, /devin-acp\(swe-2-high\)/);
+    assert.match(design, /devin-acp\(swe-2-max\)/);
   });
 
   test('a "__proto__" route lands as an own key, never a prototype write', () => {

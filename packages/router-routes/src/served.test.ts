@@ -10,7 +10,7 @@ const TABLE = {
   routes: {
     edit: {
       match: { type: 'edit' },
-      chain: [{ provider: 'devin-acp', model: 'swe-2-high' }],
+      chain: [{ provider: 'devin-acp', model: 'swe-2-max' }],
     },
     bare: {
       match: { type: 'bare' },
@@ -20,7 +20,7 @@ const TABLE = {
 };
 
 test('a route naming a model the declaration contradicts is unserved', () => {
-  const found = unservedChains(routeTable(TABLE), { 'swe-2-high': [{ provider: 'devin-acp' }] });
+  const found = unservedChains(routeTable(TABLE), { 'swe-2-max': [{ provider: 'devin-acp' }] });
   assert.equal(found.length, 0);
 });
 
@@ -34,15 +34,15 @@ test('the same table under a contradicting declaration names the route and the m
       },
     },
   });
-  const found = unservedChains(table, { 'swe-2-high': [{ provider: 'devin-acp' }] });
+  const found = unservedChains(table, { 'swe-2-max': [{ provider: 'devin-acp' }] });
   assert.equal(found.length, 1);
   assert.equal(found[0]?.route, 'edit');
   assert.equal(found[0]?.model, 'claude-opus-5');
-  assert.match(found[0]?.reason ?? '', /brouter\.models declares devin-acp for swe-2-high/);
+  assert.match(found[0]?.reason ?? '', /brouter\.models declares devin-acp for swe-2-max/);
 });
 
 test('a declaration silent about the provider is no verdict', () => {
-  const found = unservedChains(routeTable(TABLE), { 'swe-2-high': [{ provider: 'other-lane' }] });
+  const found = unservedChains(routeTable(TABLE), { 'swe-2-max': [{ provider: 'other-lane' }] });
   assert.deepEqual(found, []);
 });
 
@@ -51,7 +51,7 @@ test('an absent declaration is off — the router serves what its lanes advertis
 });
 
 test('a bare provider names the provider own model — nothing to contradict', () => {
-  const found = unservedChains(routeTable(TABLE), { 'swe-2-high': [{ provider: 'kilo-free' }] });
+  const found = unservedChains(routeTable(TABLE), { 'swe-2-max': [{ provider: 'kilo-free' }] });
   assert.deepEqual(found, []);
 });
 

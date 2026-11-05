@@ -13,12 +13,12 @@ const TABLE: RouteTable = routeTable({
   routes: {
     edit: {
       match: { type: 'edit' },
-      chain: [{ provider: 'devin-acp', model: 'swe-2-high' }],
+      chain: [{ provider: 'devin-acp', model: 'swe-2-max' }],
       description: 'a small edit',
     },
     design: {
       match: { type: 'design', complexity: 'high' },
-      chain: [{ provider: 'devin-acp', model: 'swe-2-high' }],
+      chain: [{ provider: 'devin-acp', model: 'swe-2-max' }],
       description: 'a hard design',
     },
     fallback: {
@@ -30,7 +30,7 @@ const TABLE: RouteTable = routeTable({
 
 /** A wall on one model — the health the resolver reads. */
 const WALLED: HealthSnapshot = {
-  'devin-acp/swe-2-high': { available: false, reason: 'rate-limited', until: 900 },
+  'devin-acp/swe-2-max': { available: false, reason: 'rate-limited', until: 900 },
 };
 
 test('a route whose match contradicts the task is rejected', () => {
@@ -71,7 +71,7 @@ test('a route with one live model survives the wall on the other', () => {
     kind: 'route',
     routes: {
       mixed: {
-        chain: [{ provider: 'devin-acp', model: 'swe-2-high' }, { provider: 'kilo-free' }],
+        chain: [{ provider: 'devin-acp', model: 'swe-2-max' }, { provider: 'kilo-free' }],
       },
     },
   });

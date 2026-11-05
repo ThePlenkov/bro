@@ -86,7 +86,7 @@ version = 1
 
 [routes.edit]
 match = { type = "edit", complexity = "low" }
-chain = [{ provider = "devin-acp", model = "swe-2-high" }]
+chain = [{ provider = "devin-acp", model = "swe-2-max" }]
 onWall = "fallthrough"
 prompt = "routes/edit.md"
 ```
@@ -101,7 +101,7 @@ prompt = "routes/edit.md"
 - The candidate universe is the served catalog — the epic's M2 makes
   `brouter.models` the whitelist. A route may name only a served
   (provider, model), and the chain names the SERVED ids the catalog
-  speaks: `devin-acp` serves the swe-2 family, so `devin-acp/swe-2-high`
+  speaks: `devin-acp` serves the swe-2 family, so `devin-acp/swe-2-max`
   is a model and `devin-acp/claude-opus-5` is not. A route whose chain
   CONTRADICTS the declaration is a config error, never a skipped entry
   (`brouter routes validate` names it; the spawn path refuses to run). A

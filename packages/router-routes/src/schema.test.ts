@@ -26,7 +26,7 @@ const VALID = {
   routes: {
     edit: {
       match: { type: 'edit' },
-      chain: [{ provider: 'devin-acp', model: 'swe-2-high' }],
+      chain: [{ provider: 'devin-acp', model: 'swe-2-max' }],
       onWall: 'fallthrough',
     },
   },
