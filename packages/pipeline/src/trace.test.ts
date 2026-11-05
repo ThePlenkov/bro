@@ -256,6 +256,25 @@ describe('resolveTrace — commit', () => {
     assert.equal(t.hops.find(h => h.hop === 'session')!.state, 'match');
   });
 
+  test('a recorded session contradicts an agentId-claimed stamp — FORGED', () => {
+    const t = resolveTrace(
+      'deadbeef',
+      depsOf(
+        { 'bro-x': entry() }, // session_id: 'ses-1' recorded
+        {
+          commitMessage: () =>
+            msg(['BRO-Run: ag-1', `BRO-Formula: ${FORMULA_REF}`, 'BRO-Session: ag-1']),
+        }
+      ),
+      'commit'
+    );
+    assert.equal(t.verdict, 'forged');
+    const hop = t.hops.find(h => h.hop === 'session')!;
+    assert.equal(hop.state, 'mismatch');
+    assert.equal(hop.attested, 'ag-1');
+    assert.equal(hop.registry, 'ses-1');
+  });
+
   test('backend session ids count as recorded sessions', () => {
     const t = resolveTrace(
       'deadbeef',

@@ -1605,16 +1605,19 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // probe that finds nothing, a missed arm loses the gate entirely.
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId));
-  }
-  if (outcome === true) {
-    lines.push(...execNudges(cmd));
-    // a landed `gh pr create` in a formula-attested session earns the
-    // detached PR-body footer stamp (spec bro-7d5nb §traceability) —
-    // the stamp reads worker-env pins, so like every stamp it is a
-    // hint the resolver verifies against the registry, not proof
+    // a `gh pr create` in a formula-attested session earns the detached
+    // PR-body footer stamp (spec bro-7d5nb §traceability) — same
+    // over-approximation as arming: hosts that can't observe the exit
+    // (Codex reports no success field) still stamp, a failed create
+    // just buys one `gh pr view` that finds nothing. The stamp reads
+    // worker-env pins, so like every stamp it is a hint the resolver
+    // verifies against the registry, not proof
     if (classifyExecCommand(cmd) === 'pr-create') {
       maybeSpawnTraceStamp(process.cwd());
     }
+  }
+  if (outcome === true) {
+    lines.push(...execNudges(cmd));
   }
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read

@@ -84,11 +84,28 @@ export function prTraceFooter(stamps: Required<TraceStamps>): string {
   );
 }
 
-/** The footer mark's `key=value` tokens — only the three stamp keys
- *  count; an unknown token is forward-compat noise, not an error.
- *  String-ops only (no regex): the mark is one line and the PR body
- *  is uncontrolled input, so every scan is a bounded indexOf/split —
- *  there is nothing for a crafted body to backtrack. */
+/** One footer line's `key=value` tokens — only the three stamp keys
+ *  count; an unknown token is forward-compat noise, not an error. */
+function footerTokens(out: TraceStamps, inner: string): void {
+  for (const tok of inner.split(/\s+/)) {
+    const eq = tok.indexOf('=');
+    if (eq <= 0) {
+      continue;
+    }
+    const key = tok.slice(0, eq);
+    if (key === 'run' || key === 'formula' || key === 'session') {
+      const value = tok.slice(eq + 1);
+      if (value !== '') {
+        Reflect.set(out, key, value);
+      }
+    }
+  }
+}
+
+/** The footer mark's stamps — string-ops only (no regex): the mark is
+ *  one line and the PR body is uncontrolled input, so every scan is a
+ *  bounded indexOf/split — there is nothing for a crafted body to
+ *  backtrack. */
 function footerStamps(body: string): TraceStamps {
   const out: TraceStamps = {};
   const open = `<!-- ${TRACE_FOOTER_MARK} `;
@@ -98,15 +115,7 @@ function footerStamps(body: string): TraceStamps {
       continue;
     }
     const end = t.indexOf('-->', open.length);
-    const inner = t.slice(open.length, end < 0 ? t.length : end);
-    for (const tok of inner.split(/\s+/)) {
-      const eq = tok.indexOf('=');
-      const key = eq < 0 ? tok : tok.slice(0, eq);
-      const value = eq < 0 ? '' : tok.slice(eq + 1);
-      if ((key === 'run' || key === 'formula' || key === 'session') && value !== '') {
-        Reflect.set(out, key, value);
-      }
-    }
+    footerTokens(out, t.slice(open.length, end < 0 ? t.length : end));
     return out; // first mark wins — a forged second footer is noise
   }
   return out;
@@ -342,10 +351,11 @@ function formulaHop(stamps: TraceStamps, entry: TraceEntryView): TraceHop {
   };
 }
 
-/** session hop: attested vs any recorded session id; when the entry
- *  records none, the spawn's session pin IS agentId (BRO_SESSION_ID's
- *  contract), so equality with agentId still verifies — a session the
- *  registry can't name and the pin wouldn't carry is a mismatch. */
+/** session hop: attested vs any recorded session id; the agentId pin
+ *  answers ONLY when the entry records no session at all — that is
+ *  BRO_SESSION_ID's spawn contract. When the registry knows an
+ *  explicit session, a stamp still claiming the agentId contradicts
+ *  the record: mismatch, not a match. */
 function sessionHop(stamps: TraceStamps, entry: TraceEntryView): TraceHop {
   if (stamps.session === undefined) {
     return { hop: 'session', state: 'unattested' };
@@ -353,7 +363,8 @@ function sessionHop(stamps: TraceStamps, entry: TraceEntryView): TraceHop {
   const sessions = entrySessions(entry);
   const registry = sessions[0];
   const agentPin = nonEmpty(entry.agentId);
-  const match = sessions.includes(stamps.session) || stamps.session === agentPin;
+  const match =
+    sessions.includes(stamps.session) || (sessions.length === 0 && stamps.session === agentPin);
   return {
     hop: 'session',
     state: match ? 'match' : 'mismatch',
