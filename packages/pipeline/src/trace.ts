@@ -84,20 +84,16 @@ export function prTraceFooter(stamps: Required<TraceStamps>): string {
   );
 }
 
+const STAMP_KEYS = ['run', 'formula', 'session'] as const;
+
 /** One footer line's `key=value` tokens — only the three stamp keys
  *  count; an unknown token is forward-compat noise, not an error. */
 function footerTokens(out: TraceStamps, inner: string): void {
   for (const tok of inner.split(/\s+/)) {
     const eq = tok.indexOf('=');
-    if (eq <= 0) {
-      continue;
-    }
-    const key = tok.slice(0, eq);
-    if (key === 'run' || key === 'formula' || key === 'session') {
-      const value = tok.slice(eq + 1);
-      if (value !== '') {
-        Reflect.set(out, key, value);
-      }
+    const key = tok.slice(0, Math.max(eq, 0)) as keyof TraceStamps;
+    if (eq > 0 && eq + 1 < tok.length && STAMP_KEYS.includes(key)) {
+      Reflect.set(out, key, tok.slice(eq + 1));
     }
   }
 }
