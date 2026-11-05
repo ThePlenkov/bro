@@ -142,7 +142,7 @@ const show = (label: string, r: RunResult): void =>
   );
 
 const cli = (...args: string[]): string =>
-  execFileSync('node', ['packages/cli/dist/index.js', ...args], {
+  execFileSync(process.execPath, ['packages/cli/dist/index.js', ...args], {
     cwd: DIR,
     encoding: 'utf8',
   }).trim();
