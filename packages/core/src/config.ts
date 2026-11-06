@@ -909,11 +909,13 @@ export const serveSection: ConfigSection<{
     const name = obj.apiKeyEnv.trim();
     // the value NAMES an env var — an invalid name silently misses at
     // resolution time, so an unparsable one drops loud like providers.*
+    // (the bad value stays out of the message — CodeQL reads anything
+    // named *key* as sensitive, and a name is all the diagnostic needs)
     if (isEnvName(name)) {
       out.apiKeyEnv = name;
     } else {
       console.error(
-        `bro.config: serve.apiKeyEnv '${name}' must name an env var (SCREAMING_SNAKE) — entry dropped`
+        'bro.config: serve.apiKeyEnv must name an env var (SCREAMING_SNAKE) — entry dropped'
       );
     }
   }

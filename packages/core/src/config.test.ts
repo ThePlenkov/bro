@@ -217,7 +217,7 @@ describe('loadConfig serve.upstream / serve.apiKeyEnv', () => {
       const cfg = load({ serve: { apiKeyEnv: 'my-proxy-key' } });
       assert.equal(cfg.serve.apiKeyEnv, undefined);
       assert.equal(errors.length, 1);
-      assert.match(errors[0]!, /serve\.apiKeyEnv 'my-proxy-key' must name an env var/);
+      assert.match(errors[0]!, /serve\.apiKeyEnv must name an env var/);
     } finally {
       console.error = original;
     }
