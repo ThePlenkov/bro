@@ -293,6 +293,14 @@ function sarifLevelToPriority(level?: string): DebtPriority {
   }
 }
 
+/** `.sarif` files directly inside one directory — readdir failures
+ *  propagate so the caller can fail the snapshot as incomplete. */
+function sarifFilesIn(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.sarif'))
+    .map((entry) => join(dir, entry.name))
+}
+
 function findSarifFiles(root: string): { files: string[]; complete: boolean; reason?: string } {
   const candidates = [
     join(root, '.sverka', 'artifacts'),
@@ -304,12 +312,7 @@ function findSarifFiles(root: string): { files: string[]; complete: boolean; rea
     try {
       if (!existsSync(dir)) continue
       sawDir = true
-      const entries = readdirSync(dir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.sarif')) {
-          out.push(join(dir, entry.name))
-        }
-      }
+      out.push(...sarifFilesIn(dir))
     } catch (err) {
       return {
         files: [],
