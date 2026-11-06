@@ -92,6 +92,29 @@ describe('collectDependabot', () => {
     );
   });
 
+  test('an open PR for a LONGER package name does not suppress this alert', () => {
+    const ember = {
+      ...DEPENDABOT_ALERT,
+      security_vulnerability: {
+        ...DEPENDABOT_ALERT.security_vulnerability,
+        package: { name: 'ember' },
+      },
+    };
+    withFakeGh(
+      {
+        'dependabot/alerts': JSON.stringify([ember]),
+        // `ember-` is a prefix of `ember-cli` — matching on the raw
+        // substring would silence a distinct package's alert
+        'pr list': JSON.stringify([
+          { number: 43, headRefName: 'dependabot/npm_and_yarn/ember-cli-5.0.0', url: 'u' },
+        ]),
+      },
+      () => {
+        assert.equal(collectDependabot(CTX).length, 1);
+      }
+    );
+  });
+
   test('medium severity maps to scan priority', () => {
     const a = {
       ...DEPENDABOT_ALERT,
@@ -331,6 +354,13 @@ describe('collectSverka', () => {
       'r.sarif': JSON.stringify({
         runs: [{ tool: { driver: { name: 't' } }, results: { bogus: true } }],
       }),
+    });
+  });
+
+  test('a null run element refuses the snapshot — [] would false-resolve prior findings', () => {
+    assertSverkaSkipped({ 'r.sarif': JSON.stringify({ runs: [null] }) });
+    assertSverkaSkipped({
+      'r.sarif': JSON.stringify({ runs: [{ tool: { driver: { name: 't' } }, results: [] }, 42] }),
     });
   });
 

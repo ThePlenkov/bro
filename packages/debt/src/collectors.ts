@@ -404,7 +404,12 @@ function sarifRunRecords(
   relFile: string,
   root: string
 ): DebtRecord[] {
-  if (run === null || typeof run !== 'object') return [];
+  // a null/primitive run element is malformed, not a clean run — `[]`
+  // here would read as "findings fixed upstream" to the resolve sweep,
+  // the exact lie SourceSkipped exists to refuse
+  if (run === null || typeof run !== 'object') {
+    throw new SourceSkipped(`SARIF run in ${relFile} is not an object — refusing partial snapshot`);
+  }
   const tool = run.tool?.driver?.name ?? 'sverka';
   // `results` may be absent (a clean run legitimately reports nothing) but a
   // present non-array value is malformed — silently dropping it would read
@@ -474,8 +479,9 @@ interface DependabotAlert {
 
 /** Open dependabot PRs — an alert with a fix PR in flight isn't debt, the
  *  PR is the work item. Matched by head ref `dependabot/.../<pkg>-<ver>` —
- *  the trailing dash is the version boundary so `ember` can't match
- *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages.
+ *  the `/` before the name pins the segment start and the dash must open
+ *  the VERSION (`-v?\d`), so `ember` can't eat `ember-cli-1.0`'s own
+ *  name dash. Dependabot refs drop the `@` from scoped packages.
  *  Failure propagates: an empty list here would mark every covered alert
  *  as debt, so the caller skips the whole source on error. */
 function dependabotOpenPrs(
@@ -505,7 +511,10 @@ export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const out: DebtRecord[] = [];
   for (const a of alerts) {
     const pkg = a.security_vulnerability?.package?.name?.replace(/^@/, '') ?? '';
-    const fixPr = pkg ? prs.find(p => p.headRefName.includes(`${pkg}-`)) : undefined;
+    const fixRe = pkg
+      ? new RegExp(`/${pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-v?\\d`)
+      : undefined;
+    const fixPr = fixRe ? prs.find(p => fixRe.test(p.headRefName)) : undefined;
     if (fixPr) continue; // linked PR is the work item — see bead bro-8gk
     const severity = a.security_vulnerability?.severity ?? 'medium';
     const body =
