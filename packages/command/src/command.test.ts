@@ -126,6 +126,13 @@ describe('the command bootstrap', () => {
     assert.doesNotMatch(r.stdout, /act-ran/);
   });
 
+  test('the prefix keeps its place — the help token does not lose the selector', async () => {
+    const r = await run(['help', 'creator', 'extra']);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /create-help/);
+    assert.doesNotMatch(r.stdout, /create-ran/);
+  });
+
   test('--version prints the version', async () => {
     const r = await run(['--version']);
     assert.equal(r.code, 0);

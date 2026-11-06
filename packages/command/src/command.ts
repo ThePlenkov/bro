@@ -190,7 +190,7 @@ async function runMember(
   if (member.deprecated) {
     warnDeprecated(`'${command.path} ${via} ${member.name}'`, member.deprecated);
   }
-  await member.run(helpFirst([...(member.argvPrefix ?? []), ...args]));
+  await member.run(pluginArgv(member.argvPrefix ?? [], args));
 }
 
 /** The member a nested command's own table names — the host plugin
@@ -241,7 +241,7 @@ async function runPlugin(
       `${plugin.flatDeprecated} — prefer '${command.path} ${plugin.group} ${plugin.name}'`
     );
   }
-  await plugin.run(helpFirst([...(plugin.argvPrefix ?? []), ...inv.rest]));
+  await plugin.run(pluginArgv(plugin.argvPrefix ?? [], inv.rest));
 }
 
 /** A nested command reached by argv — its member table when argv asks
@@ -309,6 +309,14 @@ function helpFirst(argv: readonly string[]): string[] {
   if (at === -1) return [...argv];
   const rest = head.filter((a) => !HELP_TOKENS.has(a));
   return [head[at] ?? '--help', ...rest, ...tail];
+}
+
+/** The argv a plugin or a member receives: the PREFIX keeps its place
+ *  (a plugin that uses one selects its sub-command with it — the help
+ *  token must not lose the selector), and the help token leads the
+ *  rest — the position every dispatcher reads first. */
+function pluginArgv(prefix: readonly string[], args: readonly string[]): string[] {
+  return [...prefix, ...helpFirst(args)];
 }
 
 /** The bare command — the failure code every bro-family CLI used (1),

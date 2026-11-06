@@ -81,6 +81,18 @@ const actor = definePlugin({
   },
 });
 
+/** A plugin that selects its sub-command with a PREFIX — the help
+ *  token must not lose the selector: the plugin still answers for
+ *  `create`, not for its own root. */
+const creator = definePlugin({
+  name: 'creator',
+  summary: 'a plugin that selects create with its prefix',
+  argvPrefix: ['create'],
+  run: (argv) => {
+    console.log(argv.includes('--help') ? `${argv[0]}-help` : `${argv[0]}-ran`);
+  },
+});
+
 const shop = defineCommand({
   name: 'shop',
   summary: 'a group with a picky member',
@@ -116,7 +128,7 @@ const cli = defineCommand({
   name: 'fixture',
   summary: 'the fixture CLI',
   version: '9.9.9',
-  plugins: [flat, planHost, runner],
+  plugins: [flat, planHost, runner, creator],
   commands: [
     db,
     group,
