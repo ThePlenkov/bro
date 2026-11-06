@@ -1,9 +1,9 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpDir } from './testtmp.ts'
-import { loadConfig } from './config.ts'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpDir } from './testtmp.ts';
+import { loadConfig } from './config.ts';
 import {
   getProvider,
   isEnvName,
@@ -17,51 +17,51 @@ import {
   resolveApiModel,
   UnknownProviderError,
   type ProviderEntry,
-} from './providers.ts'
+} from './providers.ts';
 
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
 // (config.test.ts runs the same guard)
-const XDG = tmpDir('bro-xdg-')
-const prevXdg = process.env.XDG_CONFIG_HOME
-process.env.XDG_CONFIG_HOME = XDG
+const XDG = tmpDir('bro-xdg-');
+const prevXdg = process.env.XDG_CONFIG_HOME;
+process.env.XDG_CONFIG_HOME = XDG;
 process.on('exit', () => {
-  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
-  else process.env.XDG_CONFIG_HOME = prevXdg
-})
+  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = prevXdg;
+});
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
-  const dir = tmpDir('bro-providers-')
+  const dir = tmpDir('bro-providers-');
   if (raw !== undefined) {
-    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(raw))
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(raw));
   }
-  return loadConfig(dir)
+  return loadConfig(dir);
 }
 
 describe('isEnvName', () => {
   test('SCREAMING_SNAKE names pass', () => {
     for (const v of ['TYPESAFE_API_KEY', 'ORCA_API_KEY', 'X', '_PRIVATE']) {
-      assert.equal(isEnvName(v), true, v)
+      assert.equal(isEnvName(v), true, v);
     }
-  })
+  });
 
   test('pasted key values and lowercase fail', () => {
     for (const v of ['sk-live-123', 'ts_live_x', 'apiKey', '', '1ABC', 'MY KEY']) {
-      assert.equal(isEnvName(v), false, v)
+      assert.equal(isEnvName(v), false, v);
     }
-  })
-})
+  });
+});
 
 describe('providers section', () => {
   test('absent section → empty registry', () => {
-    assert.deepEqual(load().providers, {})
-    assert.deepEqual(load({}).providers, {})
-  })
+    assert.deepEqual(load().providers, {});
+    assert.deepEqual(load({}).providers, {});
+  });
 
   test('non-object section → empty registry', () => {
-    assert.deepEqual(load({ providers: 'nope' }).providers, {})
-    assert.deepEqual(load({ providers: [] }).providers, {})
-  })
+    assert.deepEqual(load({ providers: 'nope' }).providers, {});
+    assert.deepEqual(load({ providers: [] }).providers, {});
+  });
 
   test('valid entry of each kind parses', () => {
     const cfg = load({
@@ -79,7 +79,7 @@ describe('providers section', () => {
         'kilo-cli': { type: 'acp', command: 'kilo --acp', model: 'typesafe/jev-1.13' },
         local: { type: 'cli', command: 'devin -p', model: 'devin-1' },
       },
-    })
+    });
     assert.deepEqual(cfg.providers.orca, {
       type: 'api',
       baseUrl: 'https://api.orcarouter.ai',
@@ -89,29 +89,34 @@ describe('providers section', () => {
         'typesafe/jev-1.13': 'systemone',
         'acme/cheap-chat': 'openai-compat',
       },
-    })
-    assert.equal(cfg.providers['kilo-cli'].type, 'acp')
-    assert.equal(cfg.providers.local.type, 'cli')
-  })
+    });
+    assert.equal(cfg.providers['kilo-cli'].type, 'acp');
+    assert.equal(cfg.providers.local.type, 'cli');
+  });
 
   test('account parses on every provider kind and falls back to provider name', () => {
     const cfg = load({
       providers: {
-        api: { type: 'api', baseUrl: 'https://x', models: { m: 'openai-compat' }, account: 'shared' },
+        api: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { m: 'openai-compat' },
+          account: 'shared',
+        },
         acp: { type: 'acp', command: 'worker', account: 'shared' },
         cli: { type: 'cli', command: 'worker', account: 'cli-account' },
         legacy: { type: 'cli', command: 'worker' },
         invalid: { type: 'cli', command: 'worker', account: 42 },
       },
-    })
-    assert.equal(cfg.providers.api?.account, 'shared')
-    assert.equal(cfg.providers.acp?.account, 'shared')
-    assert.equal(cfg.providers.cli?.account, 'cli-account')
-    assert.equal(cfg.providers.invalid?.account, undefined)
-    assert.equal(providerAccount(cfg.providers, 'api'), 'shared')
-    assert.equal(providerAccount(cfg.providers, 'legacy'), 'legacy')
-    assert.equal(providerAccount(cfg.providers, 'missing'), 'missing')
-  })
+    });
+    assert.equal(cfg.providers.api?.account, 'shared');
+    assert.equal(cfg.providers.acp?.account, 'shared');
+    assert.equal(cfg.providers.cli?.account, 'cli-account');
+    assert.equal(cfg.providers.invalid?.account, undefined);
+    assert.equal(providerAccount(cfg.providers, 'api'), 'shared');
+    assert.equal(providerAccount(cfg.providers, 'legacy'), 'legacy');
+    assert.equal(providerAccount(cfg.providers, 'missing'), 'missing');
+  });
 
   test('api models map: bare wire, {wire} object, and null all resolve — null infers by family', () => {
     const cfg = load({
@@ -132,18 +137,18 @@ describe('providers section', () => {
           },
         },
       },
-    })
-    const m = cfg.providers.orca.type === 'api' ? cfg.providers.orca.models : {}
-    assert.equal(m['typesafe/jev-1.13'], 'systemone')
-    assert.equal(m['acme/chat'], 'openai-compat')
+    });
+    const m = cfg.providers.orca.type === 'api' ? cfg.providers.orca.models : {};
+    assert.equal(m['typesafe/jev-1.13'], 'systemone');
+    assert.equal(m['acme/chat'], 'openai-compat');
     // inference: typesafe/jev-* → systemone; the version anchor means
     // jev-router is NOT family → openai-compat (prose), never typed
-    assert.equal(m['auto/inferred-jev'], 'openai-compat')
-    assert.equal(m['typesafe/jev-2.0'], 'systemone')
-    assert.equal(m['other/plain'], 'openai-compat')
-    assert.equal(m['auto/empty-obj'], 'openai-compat')
-    assert.equal(m['typesafe/jev-3.1'], 'systemone')
-  })
+    assert.equal(m['auto/inferred-jev'], 'openai-compat');
+    assert.equal(m['typesafe/jev-2.0'], 'systemone');
+    assert.equal(m['other/plain'], 'openai-compat');
+    assert.equal(m['auto/empty-obj'], 'openai-compat');
+    assert.equal(m['typesafe/jev-3.1'], 'systemone');
+  });
 
   test('api models map: a value that is not a wire string, {wire}, or null is an error — never an inference', () => {
     const cfg = load({
@@ -175,9 +180,9 @@ describe('providers section', () => {
           models: { 'a/b': { wrie: 'systemone' } },
         },
       },
-    })
-    assert.deepEqual(cfg.providers, {})
-  })
+    });
+    assert.deepEqual(cfg.providers, {});
+  });
 
   test("a model literally named 'err' stays a valid id — the parse failure shape is tagged, not key-probed", () => {
     const cfg = load({
@@ -188,10 +193,10 @@ describe('providers section', () => {
           models: { err: 'openai-compat' },
         },
       },
-    })
-    const m = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {}
-    assert.equal(m.err, 'openai-compat')
-  })
+    });
+    const m = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {};
+    assert.equal(m.err, 'openai-compat');
+  });
 
   test('api entry: missing/empty models, bad wire, or a default model outside the allowlist drop the entry', () => {
     const cfg = load({
@@ -206,9 +211,9 @@ describe('providers section', () => {
           models: { m: 'systemone' },
         },
       },
-    })
-    assert.deepEqual(cfg.providers, {})
-  })
+    });
+    assert.deepEqual(cfg.providers, {});
+  });
 
   test('a systemone-wire model with no key source drops the entry — Bearer is the wire contract', () => {
     const cfg = load({
@@ -239,12 +244,12 @@ describe('providers section', () => {
           models: { 'acme/chat': 'openai-compat' },
         },
       },
-    })
-    assert.equal(cfg.providers.nokey, undefined)
-    assert.equal(cfg.providers.inferred, undefined)
-    assert.equal(cfg.providers.keyed.type, 'api')
-    assert.equal(cfg.providers.prose.type, 'api')
-  })
+    });
+    assert.equal(cfg.providers.nokey, undefined);
+    assert.equal(cfg.providers.inferred, undefined);
+    assert.equal(cfg.providers.keyed.type, 'api');
+    assert.equal(cfg.providers.prose.type, 'api');
+  });
 
   test('a __proto__ model id lands as an own key — never pollutes the prototype', () => {
     const cfg = load({
@@ -258,10 +263,10 @@ describe('providers section', () => {
           models: JSON.parse('{"__proto__":"systemone","m":null}'),
         },
       },
-    })
-    const models = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {}
-    assert.equal(Object.hasOwn(models, '__proto__'), true)
-    assert.equal(models['__proto__'], 'systemone')
+    });
+    const models = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {};
+    assert.equal(Object.hasOwn(models, '__proto__'), true);
+    assert.equal(models['__proto__'], 'systemone');
     // an inherited member is still not a declared model — allowlist
     // checks pin to own keys (hasOwn), never to prototype lookups
     const badDefault = load({
@@ -273,9 +278,9 @@ describe('providers section', () => {
           models: { m: 'systemone' },
         },
       },
-    })
-    assert.equal(badDefault.providers.host, undefined)
-  })
+    });
+    assert.equal(badDefault.providers.host, undefined);
+  });
 
   test('retired kinds name the migration — the error IS the note', () => {
     const cfg = load({
@@ -283,10 +288,10 @@ describe('providers section', () => {
         old: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
         ok: { type: 'cli', command: 'devin -p' },
       },
-    })
-    assert.equal(cfg.providers.old, undefined)
-    assert.equal(cfg.providers.ok.type, 'cli')
-  })
+    });
+    assert.equal(cfg.providers.old, undefined);
+    assert.equal(cfg.providers.ok.type, 'cli');
+  });
 
   test('unknown type drops the entry, keeps the rest', () => {
     const cfg = load({
@@ -294,10 +299,10 @@ describe('providers section', () => {
         bad: { type: 'vllm', model: 'x' },
         ok: { type: 'cli', command: 'devin -p' },
       },
-    })
-    assert.equal(cfg.providers.bad, undefined)
-    assert.equal(cfg.providers.ok.type, 'cli')
-  })
+    });
+    assert.equal(cfg.providers.bad, undefined);
+    assert.equal(cfg.providers.ok.type, 'cli');
+  });
 
   test('missing required field drops the entry', () => {
     const cfg = load({
@@ -305,9 +310,9 @@ describe('providers section', () => {
         nobase: { type: 'api', models: { 'jev-1.13.0': 'systemone' } },
         nocmd: { type: 'acp', model: 'x' },
       },
-    })
-    assert.deepEqual(cfg.providers, {})
-  })
+    });
+    assert.deepEqual(cfg.providers, {});
+  });
 
   test('apiKeyEnv holding a key value (not SCREAMING_SNAKE) drops the entry', () => {
     const cfg = load({
@@ -325,33 +330,33 @@ describe('providers section', () => {
           models: { m: 'openai-compat' },
         },
       },
-    })
-    assert.equal(cfg.providers.leaked, undefined)
-    assert.equal(cfg.providers.ok.type, 'api')
-  })
+    });
+    assert.equal(cfg.providers.leaked, undefined);
+    assert.equal(cfg.providers.ok.type, 'api');
+  });
 
   test('optional field with wrong type drops the field, keeps the entry', () => {
-    const cfg = load({ providers: { local: { type: 'cli', command: 'devin -p', model: 42 } } })
-    assert.deepEqual(cfg.providers.local, { type: 'cli', command: 'devin -p' })
-  })
+    const cfg = load({ providers: { local: { type: 'cli', command: 'devin -p', model: 42 } } });
+    assert.deepEqual(cfg.providers.local, { type: 'cli', command: 'devin -p' });
+  });
 
   test('unknown extra keys are stripped from the entry', () => {
     const cfg = load({
       providers: { local: { type: 'cli', command: 'devin -p', futureField: 'x' } },
-    })
-    assert.deepEqual(cfg.providers.local, { type: 'cli', command: 'devin -p' })
-  })
+    });
+    assert.deepEqual(cfg.providers.local, { type: 'cli', command: 'devin -p' });
+  });
 
   test('non-object and empty-name entries are dropped', () => {
-    const cfg = load({ providers: { '': { type: 'cli', command: 'x' }, arr: [1], s: 'x' } })
-    assert.deepEqual(cfg.providers, {})
-  })
-})
+    const cfg = load({ providers: { '': { type: 'cli', command: 'x' }, arr: [1], s: 'x' } });
+    assert.deepEqual(cfg.providers, {});
+  });
+});
 
 describe('PROVIDER_REGISTRY capability matrix', () => {
   test('kind set is the closed spec union', () => {
-    assert.deepEqual(PROVIDER_KINDS, ['api', 'acp', 'cli'])
-  })
+    assert.deepEqual(PROVIDER_KINDS, ['api', 'acp', 'cli']);
+  });
 
   test('matrix matches spec: api is auto-call (wire picks the surface), acp auto+spawn, cli prose+spawn', () => {
     assert.deepEqual(PROVIDER_REGISTRY.api, {
@@ -359,13 +364,13 @@ describe('PROVIDER_REGISTRY capability matrix', () => {
       spawn: false,
       required: ['baseUrl'],
       optional: ['model', 'apiKeyEnv', 'apiKeyCommand', 'account'],
-    })
-    assert.equal(PROVIDER_REGISTRY.acp.call, 'auto')
-    assert.equal(PROVIDER_REGISTRY.acp.spawn, true)
-    assert.equal(PROVIDER_REGISTRY.cli.call, 'prose')
-    assert.equal(PROVIDER_REGISTRY.cli.spawn, true)
-  })
-})
+    });
+    assert.equal(PROVIDER_REGISTRY.acp.call, 'auto');
+    assert.equal(PROVIDER_REGISTRY.acp.spawn, true);
+    assert.equal(PROVIDER_REGISTRY.cli.call, 'prose');
+    assert.equal(PROVIDER_REGISTRY.cli.spawn, true);
+  });
+});
 
 describe('provider lookup + surfaces', () => {
   const providers: Record<string, ProviderEntry> = {
@@ -377,15 +382,15 @@ describe('provider lookup + surfaces', () => {
     },
     'kilo-cli': { type: 'acp', command: 'kilo --acp' },
     local: { type: 'cli', command: 'devin -p' },
-  }
+  };
 
   test('unknown name throws naming the missing key', () => {
-    assert.throws(() => getProvider(providers, 'nope'), UnknownProviderError)
-    assert.throws(() => getProvider(providers, 'nope'), /providers\.nope is not configured/)
+    assert.throws(() => getProvider(providers, 'nope'), UnknownProviderError);
+    assert.throws(() => getProvider(providers, 'nope'), /providers\.nope is not configured/);
     // inherited members are not configured entries — 'constructor'
     // must throw, not return Function.prototype.constructor
-    assert.throws(() => getProvider(providers, 'constructor'), UnknownProviderError)
-  })
+    assert.throws(() => getProvider(providers, 'constructor'), UnknownProviderError);
+  });
 
   test('asking a non-spawn kind to spawn throws naming kind + surface', () => {
     assert.throws(
@@ -393,17 +398,17 @@ describe('provider lookup + surfaces', () => {
       (e: unknown) =>
         e instanceof ProviderSurfaceError &&
         /providers\.orca \(type 'api'\) has no spawn surface/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('spawnable kinds pass the spawn assertion; all kinds pass call', () => {
-    assert.equal(requireProviderSurface(providers, 'kilo-cli', 'spawn').type, 'acp')
-    assert.equal(requireProviderSurface(providers, 'local', 'spawn').type, 'cli')
+    assert.equal(requireProviderSurface(providers, 'kilo-cli', 'spawn').type, 'acp');
+    assert.equal(requireProviderSurface(providers, 'local', 'spawn').type, 'cli');
     for (const name of Object.keys(providers)) {
-      assert.equal(requireProviderSurface(providers, name, 'call').type, providers[name].type)
+      assert.equal(requireProviderSurface(providers, name, 'call').type, providers[name].type);
     }
-  })
-})
+  });
+});
 
 describe('parseProviderEntry', () => {
   test('trims fields and keeps optional ones when valid', () => {
@@ -413,35 +418,35 @@ describe('parseProviderEntry', () => {
       profile: 'work',
       apiKeyEnv: 'KILO_KEY',
       autoApprove: true,
-    })
+    });
     assert.deepEqual(e, {
       type: 'acp',
       command: 'kilo --acp',
       profile: 'work',
       apiKeyEnv: 'KILO_KEY',
       autoApprove: true,
-    })
-  })
+    });
+  });
 
   test('a non-boolean autoApprove drops the field, keeps the entry', () => {
     const e = parseProviderEntry('p', {
       type: 'acp',
       command: 'kilo --acp',
       autoApprove: 'yes',
-    })
-    assert.deepEqual(e, { type: 'acp', command: 'kilo --acp' })
-  })
+    });
+    assert.deepEqual(e, { type: 'acp', command: 'kilo --acp' });
+  });
 
   test('autoApprove on a kind without the knob is stripped like any unknown key', () => {
-    const e = parseProviderEntry('p', { type: 'cli', command: 'devin -p', autoApprove: true })
-    assert.deepEqual(e, { type: 'cli', command: 'devin -p' })
-  })
+    const e = parseProviderEntry('p', { type: 'cli', command: 'devin -p', autoApprove: true });
+    assert.deepEqual(e, { type: 'cli', command: 'devin -p' });
+  });
 
   test('returns null on non-object and bad type', () => {
-    assert.equal(parseProviderEntry('p', 'cli'), null)
-    assert.equal(parseProviderEntry('p', { type: 'wat' }), null)
-    assert.equal(parseProviderEntry('p', {}), null)
-  })
+    assert.equal(parseProviderEntry('p', 'cli'), null);
+    assert.equal(parseProviderEntry('p', { type: 'wat' }), null);
+    assert.equal(parseProviderEntry('p', {}), null);
+  });
 
   test('an apiKeyCommand smuggling a key value drops the entry', () => {
     for (const cmd of [
@@ -455,17 +460,17 @@ describe('parseProviderEntry', () => {
         baseUrl: 'https://x',
         apiKeyCommand: cmd,
         models: { jev: 'systemone' },
-      })
-      assert.equal(e, null, cmd)
+      });
+      assert.equal(e, null, cmd);
     }
     const ok = parseProviderEntry('p', {
       type: 'api',
       baseUrl: 'https://x',
       apiKeyCommand: 'pass show bro/typesafe',
       models: { jev: 'systemone' },
-    })
-    assert.equal(ok?.type, 'api')
-  })
+    });
+    assert.equal(ok?.type, 'api');
+  });
 
   test('resolveApiModel: requested wins, default pin is the fallback, single-model needs neither', () => {
     const entry: ProviderEntry = {
@@ -473,31 +478,31 @@ describe('parseProviderEntry', () => {
       baseUrl: 'https://x',
       model: 'typesafe/jev-1.13',
       models: { 'typesafe/jev-1.13': 'systemone', 'acme/x': 'openai-compat' },
-    }
+    };
     assert.deepEqual(resolveApiModel(entry, 'acme/x'), {
       model: 'acme/x',
       wire: 'openai-compat',
-    })
+    });
     assert.deepEqual(resolveApiModel(entry, undefined), {
       model: 'typesafe/jev-1.13',
       wire: 'systemone',
-    })
+    });
     const solo: ProviderEntry = {
       type: 'api',
       baseUrl: 'https://x',
       models: { 'typesafe/jev-1.13': 'systemone' },
-    }
+    };
     assert.deepEqual(resolveApiModel(solo, undefined), {
       model: 'typesafe/jev-1.13',
       wire: 'systemone',
-    })
+    });
     assert.throws(
       () => resolveApiModel(entry, 'kilo/typesafe/jev-router'),
       /not served.*declared: typesafe\/jev-1\.13, acme\/x/
-    )
-    assert.throws(() => resolveApiModel({ ...entry, model: undefined }, undefined), /name one/)
-  })
-})
+    );
+    assert.throws(() => resolveApiModel({ ...entry, model: undefined }, undefined), /name one/);
+  });
+});
 
 describe('providerCallGrade — the RESOLVED grade (spec bro-1x7p M7)', () => {
   test('an api entry grades on the resolved model wire', () => {
@@ -505,40 +510,40 @@ describe('providerCallGrade — the RESOLVED grade (spec bro-1x7p M7)', () => {
       type: 'api',
       baseUrl: 'https://x',
       models: { 'typesafe/jev-1.13': 'systemone' },
-    }
-    assert.equal(providerCallGrade(typed), 'typed')
+    };
+    assert.equal(providerCallGrade(typed), 'typed');
     const prose: ProviderEntry = {
       type: 'api',
       baseUrl: 'https://x',
       models: { 'acme/x': 'openai-compat' },
-    }
-    assert.equal(providerCallGrade(prose), 'prose')
-  })
+    };
+    assert.equal(providerCallGrade(prose), 'prose');
+  });
 
   test('an acp entry grades on its model pin — jev-family typed, else prose', () => {
     assert.equal(
       providerCallGrade({ type: 'acp', command: 'x', model: 'kilo/orcarouter/typesafe/jev-1.13' }),
       'typed'
-    )
-    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'claude-4' }), 'prose')
+    );
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'claude-4' }), 'prose');
     // 'jev-router' is a router PRODUCT, not a jev model — isSystemoneFamily's
     // version anchor keeps it prose
-    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'jev-router' }), 'prose')
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'jev-router' }), 'prose');
     // a `[<size>]` context opt-in doesn't change the grade (bro-0g2l3)
     assert.equal(
       providerCallGrade({ type: 'acp', command: 'x', model: 'typesafe/jev-1.13[1m]' }),
       'typed'
-    )
-    assert.equal(providerCallGrade({ type: 'acp', command: 'x' }), 'prose')
-  })
+    );
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x' }), 'prose');
+  });
 
   test('a cli entry is always prose — an undeclared api model propagates the config error', () => {
-    assert.equal(providerCallGrade({ type: 'cli', command: 'x' }), 'prose')
+    assert.equal(providerCallGrade({ type: 'cli', command: 'x' }), 'prose');
     const ambiguous: ProviderEntry = {
       type: 'api',
       baseUrl: 'https://x',
       models: { 'a/m': 'systemone', 'b/m': 'openai-compat' },
-    }
-    assert.throws(() => providerCallGrade(ambiguous), /name one/)
-  })
-})
+    };
+    assert.throws(() => providerCallGrade(ambiguous), /name one/);
+  });
+});

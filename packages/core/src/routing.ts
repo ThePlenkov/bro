@@ -5,113 +5,113 @@
  * performed under the spawn registry lock from provider walls derived
  * from the registry.
  */
-import { SpawnError, type AgentRegistryEntry } from './agents.ts'
-import { taskStoreAt } from './tasks.ts'
+import { SpawnError, type AgentRegistryEntry } from './agents.ts';
+import { taskStoreAt } from './tasks.ts';
 import {
   ProviderSurfaceError,
   requireProviderSurface,
   UnknownProviderError,
   type ProviderEntry,
-} from './providers.ts'
+} from './providers.ts';
 
-export const ON_WALL = ['park', 'fallthrough'] as const
+export const ON_WALL = ['park', 'fallthrough'] as const;
 /** A walled step's verdict — `park` waits the current provider's wall
  *  out, `fallthrough` walks the chain to the next un-walled entry. */
-export type OnWall = (typeof ON_WALL)[number]
+export type OnWall = (typeof ON_WALL)[number];
 
 /** One chain link — a `providers.<name>` plus an optional inline model
  *  pin for where the bare string form isn't enough. */
 export interface ChainEntry {
-  provider: string
-  model?: string
+  provider: string;
+  model?: string;
 }
 
 /** One `fleet.routing.<class>` row — the ordered provider chain plus
  *  the class's wall policy. */
 export interface RoutingClass {
-  chain: ChainEntry[]
-  onWall?: OnWall
+  chain: ChainEntry[];
+  onWall?: OnWall;
 }
 
 /** `fleet.routing` — task class → routing row. */
-export type RoutingTable = Record<string, RoutingClass>
+export type RoutingTable = Record<string, RoutingClass>;
 
 export interface FleetWallTtls {
-  rateTtlMinutes: number
-  quotaTtlMinutes: number
+  rateTtlMinutes: number;
+  quotaTtlMinutes: number;
 }
 
 export const DEFAULT_FLEET_WALL_TTLS: FleetWallTtls = {
   rateTtlMinutes: 15,
   quotaTtlMinutes: 360,
-}
+};
 
 /** `fleet.walls` TTLs — invalid fields fall back independently. */
 export function fleetWalls(raw: unknown): FleetWallTtls {
-  const out = { ...DEFAULT_FLEET_WALL_TTLS }
+  const out = { ...DEFAULT_FLEET_WALL_TTLS };
   if (raw === undefined) {
-    return out
+    return out;
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error('bro.config: fleet.walls must be an object — section dropped')
-    return out
+    console.error('bro.config: fleet.walls must be an object — section dropped');
+    return out;
   }
-  const obj = raw as Record<string, unknown>
+  const obj = raw as Record<string, unknown>;
   for (const key of ['rateTtlMinutes', 'quotaTtlMinutes'] as const) {
-    const value = obj[key]
+    const value = obj[key];
     if (value === undefined) {
-      continue
+      continue;
     }
     if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-      console.error(`bro.config: fleet.walls.${key} must be a positive number — field dropped`)
-      continue
+      console.error(`bro.config: fleet.walls.${key} must be a positive number — field dropped`);
+      continue;
     }
-    out[key] = value
+    out[key] = value;
   }
-  return out
+  return out;
 }
 
 /** `fleet.router` — the optional judge classifier (M7): a call-surface
  *  provider that picks which lane an unclassed step takes. `off` is
  *  the spelled-out absent — static classes only, same as no section. */
 export interface FleetRouter {
-  provider: string
-  mode: 'shadow' | 'enforce' | 'off'
+  provider: string;
+  mode: 'shadow' | 'enforce' | 'off';
 }
 
 const str = (v: unknown): string | undefined =>
-  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
 
 /** One chain entry — a bare provider name or {provider, model}.
  *  Bad entries drop with a warning; an empty surviving chain drops the
  *  whole class (providers.ts' field-vs-entry convention). */
 function chainEntry(cls: string, i: number, v: unknown): ChainEntry | null {
-  const key = `fleet.routing.${cls}.chain[${i}]`
+  const key = `fleet.routing.${cls}.chain[${i}]`;
   if (typeof v === 'string') {
-    const s = v.trim()
+    const s = v.trim();
     if (s !== '') {
-      return { provider: s }
+      return { provider: s };
     }
   } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-    const o = v as Record<string, unknown>
-    const provider = str(o.provider)
+    const o = v as Record<string, unknown>;
+    const provider = str(o.provider);
     if (provider === undefined) {
-      console.error(`bro.config: ${key} requires "provider" — entry dropped`)
-      return null
+      console.error(`bro.config: ${key} requires "provider" — entry dropped`);
+      return null;
     }
-    const e: ChainEntry = { provider }
+    const e: ChainEntry = { provider };
     if (o.model !== undefined) {
-      const model = str(o.model)
+      const model = str(o.model);
       if (model === undefined) {
-        console.error(`bro.config: ${key}.model must be a non-empty string — field dropped`)
+        console.error(`bro.config: ${key}.model must be a non-empty string — field dropped`);
       } else {
-        e.model = model
+        e.model = model;
       }
     }
-    return e
+    return e;
   }
-  console.error(`bro.config: ${key} must be a provider name or {provider, model} — entry dropped`)
-  return null
+  console.error(`bro.config: ${key} must be a provider name or {provider, model} — entry dropped`);
+  return null;
 }
 
 /** `fleet.routing` section parse — shape only; chain entries resolve
@@ -120,38 +120,38 @@ function chainEntry(cls: string, i: number, v: unknown): ChainEntry | null {
  *  config error naming class + key, not a parse-time drop). */
 export function fleetRouting(raw: unknown): RoutingTable {
   if (raw === undefined) {
-    return {}
+    return {};
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error('bro.config: fleet.routing must be an object — section dropped')
-    return {}
+    console.error('bro.config: fleet.routing must be an object — section dropped');
+    return {};
   }
-  const out: RoutingTable = {}
+  const out: RoutingTable = {};
   for (const [cls, v] of Object.entries(raw)) {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-      console.error(`bro.config: fleet.routing.${cls} must be an object — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls} must be an object — class dropped`);
+      continue;
     }
-    const o = v as Record<string, unknown>
+    const o = v as Record<string, unknown>;
     if (!Array.isArray(o.chain)) {
-      console.error(`bro.config: fleet.routing.${cls}.chain must be an array — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls}.chain must be an array — class dropped`);
+      continue;
     }
     const chain = o.chain
       .map((e, i) => chainEntry(cls, i, e))
-      .filter((e): e is ChainEntry => e !== null)
+      .filter((e): e is ChainEntry => e !== null);
     if (chain.length === 0) {
-      console.error(`bro.config: fleet.routing.${cls}.chain has no usable entries — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls}.chain has no usable entries — class dropped`);
+      continue;
     }
-    const rc: RoutingClass = { chain }
+    const rc: RoutingClass = { chain };
     if (o.onWall !== undefined) {
       if ((ON_WALL as readonly unknown[]).includes(o.onWall)) {
-        rc.onWall = o.onWall as OnWall
+        rc.onWall = o.onWall as OnWall;
       } else {
         console.error(
           `bro.config: fleet.routing.${cls}.onWall must be one of ${ON_WALL.join('|')} — field dropped`
-        )
+        );
       }
     }
     // defineProperty, not assignment — a class literally named
@@ -162,9 +162,9 @@ export function fleetRouting(raw: unknown): RoutingTable {
       enumerable: true,
       writable: true,
       configurable: true,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 /** `fleet.router` section parse — {provider, mode} or nothing; either
@@ -172,30 +172,27 @@ export function fleetRouting(raw: unknown): RoutingTable {
  *  provider is no router). */
 export function fleetRouter(raw: unknown): FleetRouter | undefined {
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
   const o = (typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<
     string,
     unknown
-  >
-  const provider = str(o.provider)
-  const mode = str(o.mode)
-  if (
-    provider === undefined ||
-    (mode !== 'shadow' && mode !== 'enforce' && mode !== 'off')
-  ) {
+  >;
+  const provider = str(o.provider);
+  const mode = str(o.mode);
+  if (provider === undefined || (mode !== 'shadow' && mode !== 'enforce' && mode !== 'off')) {
     console.error(
       'bro.config: fleet.router requires provider + mode (shadow|enforce|off) — section dropped'
-    )
-    return undefined
+    );
+    return undefined;
   }
-  return { provider, mode }
+  return { provider, mode };
 }
 
 // --- class resolution -----------------------------------------------------------
 
-export const DEFAULT_STEP_CLASS = 'default'
-export const CLASS_LABEL_PREFIX = 'class:'
+export const DEFAULT_STEP_CLASS = 'default';
+export const CLASS_LABEL_PREFIX = 'class:';
 
 /** The step bead's routing inputs — one `bd show` read: labels carry
  *  the `class:<name>` lane pin, priority feeds the onWall default, and
@@ -208,20 +205,20 @@ export function stepClassInfo(
   molStep: string
 ): { label?: string; priority?: number; title?: string; description?: string } {
   try {
-    const row = taskStoreAt(beadsDir).get(molStep)
-    const labels = Array.isArray(row?.labels) ? row.labels : []
+    const row = taskStoreAt(beadsDir).get(molStep);
+    const labels = Array.isArray(row?.labels) ? row.labels : [];
     const hit = labels.find(
       (l): l is string => typeof l === 'string' && l.startsWith(CLASS_LABEL_PREFIX)
-    )
-    const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim()
+    );
+    const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim();
     return {
       ...(name === undefined || name === '' ? {} : { label: name }),
       ...(typeof row?.priority === 'number' ? { priority: row.priority } : {}),
       ...(str(row?.title) === undefined ? {} : { title: str(row?.title) }),
       ...(str(row?.description) === undefined ? {} : { description: str(row?.description) }),
-    }
+    };
   } catch {
-    return {}
+    return {};
   }
 }
 
@@ -229,15 +226,15 @@ export function stepClassInfo(
  *  effective wall policy, and the chain head's initial provider/model
  *  pair. The spawn may walk forward from its current provider. */
 export interface ResolvedClass {
-  class: string
-  chain: ChainEntry[]
+  class: string;
+  chain: ChainEntry[];
   /** `entry.onWall` ?? priority default — P0/P1 park, P2+ fallthrough. */
-  onWall: OnWall
+  onWall: OnWall;
   /** The chain head's slot — `provider`/`model` are a PAIR: the pin
    *  applies only when that provider is selected; an override must not
    *  inherit this model. */
-  provider: string
-  model?: string
+  provider: string;
+  model?: string;
 }
 
 /** Total class resolution, first hit wins (spec §"Class resolution"):
@@ -252,27 +249,27 @@ export function resolveStepClass(
   providers: Record<string, ProviderEntry>,
   sel: { class?: string; label?: string; priority?: number } = {}
 ): ResolvedClass {
-  const cls = sel.class ?? sel.label ?? DEFAULT_STEP_CLASS
-  const row = Object.hasOwn(routing, cls) ? routing[cls] : undefined
+  const cls = sel.class ?? sel.label ?? DEFAULT_STEP_CLASS;
+  const row = Object.hasOwn(routing, cls) ? routing[cls] : undefined;
   if (row === undefined) {
     throw new SpawnError(
       `fleet.routing has no class "${cls}" — declare fleet.routing.${cls}.chain`,
       'config'
-    )
+    );
   }
   for (const [i, e] of row.chain.entries()) {
     try {
-      requireProviderSurface(providers, e.provider, 'spawn')
+      requireProviderSurface(providers, e.provider, 'spawn');
     } catch (err) {
       if (err instanceof UnknownProviderError || err instanceof ProviderSurfaceError) {
-        throw new SpawnError(`fleet.routing.${cls}.chain[${i}] — ${err.message}`, 'config')
+        throw new SpawnError(`fleet.routing.${cls}.chain[${i}] — ${err.message}`, 'config');
       }
-      throw err
+      throw err;
     }
   }
-  const onWall = row.onWall ?? ((sel.priority ?? 2) <= 1 ? 'park' : 'fallthrough')
-  const head = row.chain[0]!
-  return { class: cls, chain: row.chain, onWall, provider: head.provider, model: head.model }
+  const onWall = row.onWall ?? ((sel.priority ?? 2) <= 1 ? 'park' : 'fallthrough');
+  const head = row.chain[0]!;
+  return { class: cls, chain: row.chain, onWall, provider: head.provider, model: head.model };
 }
 
 /** The spawn-side seam — reads the bead for label/priority and
@@ -292,16 +289,16 @@ export function routeStepClass(
    *  read available. */
   info?: { label?: string; priority?: number }
 ): ResolvedClass | undefined {
-  const routing = fleet?.routing
+  const routing = fleet?.routing;
   if (routing === undefined || Object.keys(routing).length === 0) {
-    return undefined
+    return undefined;
   }
-  const read = info ?? (beadsDir === undefined ? {} : stepClassInfo(beadsDir, molStep))
+  const read = info ?? (beadsDir === undefined ? {} : stepClassInfo(beadsDir, molStep));
   return resolveStepClass(routing, providers, {
     class: explicitClass,
     label: read.label,
     priority: read.priority,
-  })
+  });
 }
 
 // --- provider walls ---------------------------------------------------------------
@@ -310,34 +307,34 @@ export function routeStepClass(
  *  wallable classified death, never stored (spec §"Provider walls —
  *  derived, not stored"). */
 export interface ProviderWall {
-  provider: string
-  account?: string
-  cause: 'rate_limited' | 'quota'
+  provider: string;
+  account?: string;
+  cause: 'rate_limited' | 'quota';
   /** rate_limited only — the provider-reported reset the wall holds
    *  until; absent when none was reported (indefinite). */
-  until?: string
+  until?: string;
 }
 
 export interface AccountWall {
-  account: string
-  cause: 'rate_limited' | 'quota'
-  until?: string
-  resetAt?: string
-  provider?: string
-  rig?: string
-  step?: string
-  observedAt?: string
+  account: string;
+  cause: 'rate_limited' | 'quota';
+  until?: string;
+  resetAt?: string;
+  provider?: string;
+  rig?: string;
+  step?: string;
+  observedAt?: string;
 }
 
 export type ChainWalk =
   | { verdict: 'spawn'; index: number; entry: ChainEntry; skipped: ProviderWall[] }
   | {
-      verdict: 'park'
-      reason: 'policy' | 'exhausted'
-      index: number
-      entry: ChainEntry
-      wall: ProviderWall
-    }
+      verdict: 'park';
+      reason: 'policy' | 'exhausted';
+      index: number;
+      entry: ChainEntry;
+      wall: ProviderWall;
+    };
 
 export function walkChain(
   chain: ChainEntry[],
@@ -346,52 +343,52 @@ export function walkChain(
   from?: string
 ): ChainWalk {
   if (chain.length === 0) {
-    throw new SpawnError('fleet.routing chain must not be empty', 'config')
+    throw new SpawnError('fleet.routing chain must not be empty', 'config');
   }
-  const found = from === undefined ? -1 : chain.findIndex((entry) => entry.provider === from)
-  const start = found < 0 ? 0 : found
-  const wallFor = (entry: ChainEntry) => walls.find((wall) => wall.provider === entry.provider)
-  const startEntry = chain[start]!
-  const startWall = wallFor(startEntry)
+  const found = from === undefined ? -1 : chain.findIndex(entry => entry.provider === from);
+  const start = found < 0 ? 0 : found;
+  const wallFor = (entry: ChainEntry) => walls.find(wall => wall.provider === entry.provider);
+  const startEntry = chain[start]!;
+  const startWall = wallFor(startEntry);
   if (startWall === undefined) {
-    return { verdict: 'spawn', index: start, entry: startEntry, skipped: [] }
+    return { verdict: 'spawn', index: start, entry: startEntry, skipped: [] };
   }
   if (onWall === 'park') {
-    return { verdict: 'park', reason: 'policy', index: start, entry: startEntry, wall: startWall }
+    return { verdict: 'park', reason: 'policy', index: start, entry: startEntry, wall: startWall };
   }
-  const skipped = [startWall]
+  const skipped = [startWall];
   for (let index = start + 1; index < chain.length; index++) {
-    const entry = chain[index]!
-    const wall = wallFor(entry)
+    const entry = chain[index]!;
+    const wall = wallFor(entry);
     if (wall === undefined) {
-      return { verdict: 'spawn', index, entry, skipped }
+      return { verdict: 'spawn', index, entry, skipped };
     }
-    skipped.push(wall)
+    skipped.push(wall);
   }
-  const index = chain.length - 1
+  const index = chain.length - 1;
   return {
     verdict: 'park',
     reason: 'exhausted',
     index,
     entry: chain[index]!,
     wall: wallFor(chain[index]!) ?? startWall,
-  }
+  };
 }
 
 /** The spec's render: `<provider> [(account <account>)] walled — <cause>[ til <resetAt>]`. */
 export function wallText(w: ProviderWall): string {
-  const til = w.until === undefined ? '' : ` til ${w.until}`
+  const til = w.until === undefined ? '' : ` til ${w.until}`;
   const account =
-    w.account === undefined || w.account === w.provider ? '' : ` (account ${w.account})`
-  return `${w.provider}${account} walled — ${w.cause}${til}`
+    w.account === undefined || w.account === w.provider ? '' : ` (account ${w.account})`;
+  return `${w.provider}${account} walled — ${w.cause}${til}`;
 }
 
 /** Provider walls accumulate per provider — `quota` sticks (a stopped
  *  entry clears it, nothing else does); `rate` keeps the newest
  *  unstopped rate_limited death (spawnedAt — a respawn re-stamps it). */
 interface WallAcc {
-  quota?: WallRecord & { provider: string }
-  rate?: WallRecord & { provider: string }
+  quota?: WallRecord & { provider: string };
+  rate?: WallRecord & { provider: string };
 }
 
 /** A scannable death record — a live registry entry or one `attempts`
@@ -399,15 +396,15 @@ interface WallAcc {
  *  resetAt, spawnedAt, stopped verbatim). Only the scanned fields are
  *  contracted — everything else rides untyped. */
 interface WallRecord {
-  provider?: unknown
-  account?: unknown
-  stopped?: unknown
-  cause?: unknown
-  resetAt?: unknown
-  spawnedAt?: unknown
-  observedAt?: unknown
-  rig?: unknown
-  step?: unknown
+  provider?: unknown;
+  account?: unknown;
+  stopped?: unknown;
+  cause?: unknown;
+  resetAt?: unknown;
+  spawnedAt?: unknown;
+  observedAt?: unknown;
+  rig?: unknown;
+  step?: unknown;
 }
 
 /** A wallable death with provider provenance — `crash`/`auth`/`ok` say
@@ -421,20 +418,20 @@ function wallable(e: WallRecord): e is WallRecord & { provider: string } {
     e.provider !== '' &&
     e.stopped !== true &&
     (e.cause === 'rate_limited' || e.cause === 'quota')
-  )
+  );
 }
 
 function stamp(e: WallRecord): string {
-  return typeof e.spawnedAt === 'string' ? e.spawnedAt : ''
+  return typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
 }
 
 function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
   if (e.cause === 'quota') {
     if (acc.quota === undefined || stamp(e) > stamp(acc.quota)) {
-      acc.quota = e
+      acc.quota = e;
     }
   } else if (acc.rate === undefined || stamp(e) > stamp(acc.rate)) {
-    acc.rate = e
+    acc.rate = e;
   }
 }
 
@@ -444,17 +441,17 @@ function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
  *  lift. */
 function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | undefined {
   if (acc.quota !== undefined) {
-    const account = typeof acc.quota.account === 'string' ? acc.quota.account : acc.quota.provider
-    return { provider, account, cause: 'quota' }
+    const account = typeof acc.quota.account === 'string' ? acc.quota.account : acc.quota.provider;
+    return { provider, account, cause: 'quota' };
   }
-  const e = acc.rate
+  const e = acc.rate;
   if (e === undefined) {
-    return undefined // unreachable — a non-quota acc exists only via a rate death
+    return undefined; // unreachable — a non-quota acc exists only via a rate death
   }
-  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined
-  const t = until === undefined ? Number.NaN : Date.parse(until)
+  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined;
+  const t = until === undefined ? Number.NaN : Date.parse(until);
   if (until !== undefined && Number.isFinite(t) && t <= now) {
-    return undefined
+    return undefined;
   }
   return until === undefined
     ? {
@@ -462,12 +459,12 @@ function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | un
         account: typeof e.account === 'string' ? e.account : e.provider,
         cause: 'rate_limited',
       }
-      : {
-          provider,
-          account: typeof e.account === 'string' ? e.account : e.provider,
-          cause: 'rate_limited',
-          until,
-        }
+    : {
+        provider,
+        account: typeof e.account === 'string' ? e.account : e.provider,
+        cause: 'rate_limited',
+        until,
+      };
 }
 
 /** Derive walls from registry entries — `rate_limited`/`quota` deaths
@@ -487,7 +484,7 @@ export function deriveProviderWalls(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): ProviderWall[] {
-  const byProvider = new Map<string, WallAcc>()
+  const byProvider = new Map<string, WallAcc>();
   for (const e of Object.values(registry)) {
     // the entry's live fields plus each retained `attempts` record —
     // a re-dispatch appends the outgoing attempt verbatim, and a
@@ -495,26 +492,26 @@ export function deriveProviderWalls(
     // bro-1x7p); entries that never re-dispatched carry no list
     const records: WallRecord[] = Array.isArray(e.attempts)
       ? [e, ...(e.attempts as WallRecord[])]
-      : [e]
+      : [e];
     for (const rec of records) {
       if (!wallable(rec)) {
-        continue
+        continue;
       }
-      const acc = byProvider.get(rec.provider) ?? {}
-      foldEntry(acc, rec)
-      byProvider.set(rec.provider, acc)
+      const acc = byProvider.get(rec.provider) ?? {};
+      foldEntry(acc, rec);
+      byProvider.set(rec.provider, acc);
     }
   }
   return [...byProvider]
     .map(([provider, acc]) => accWall(provider, acc, now))
     .filter((w): w is ProviderWall => w !== undefined)
-    .sort((a, b) => a.provider.localeCompare(b.provider))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
 }
 
 /** Fold the same live registry deaths by account identity. Legacy rows
  *  use their provider name, preserving provider-scoped walls. */
 interface AccountWallAccumulator {
-  acc: WallAcc
+  acc: WallAcc;
 }
 
 function foldAccountWallRecord(
@@ -523,12 +520,12 @@ function foldAccountWallRecord(
   record: WallRecord
 ): void {
   if (!wallable(record)) {
-    return
+    return;
   }
-  const account = typeof record.account === 'string' ? record.account : record.provider
-  const row = byAccount.get(account) ?? { acc: {} }
-  foldEntry(row.acc, { ...record, step })
-  byAccount.set(account, row)
+  const account = typeof record.account === 'string' ? record.account : record.provider;
+  const row = byAccount.get(account) ?? { acc: {} };
+  foldEntry(row.acc, { ...record, step });
+  byAccount.set(account, row);
 }
 
 function accountWallFrom(
@@ -536,14 +533,14 @@ function accountWallFrom(
   { acc }: AccountWallAccumulator,
   now: number
 ): AccountWall | undefined {
-  const source = acc.quota ?? acc.rate
+  const source = acc.quota ?? acc.rate;
   if (source === undefined) {
-    return undefined
+    return undefined;
   }
-  const cause = acc.quota === undefined ? 'rate_limited' : 'quota'
-  const until = accountWallUntil(source, cause, now)
+  const cause = acc.quota === undefined ? 'rate_limited' : 'quota';
+  const until = accountWallUntil(source, cause, now);
   if (until === null) {
-    return undefined
+    return undefined;
   }
   return {
     account,
@@ -551,7 +548,7 @@ function accountWallFrom(
     cause,
     ...(until === undefined ? {} : { until }),
     ...accountWallMetadata(source),
-  }
+  };
 }
 
 function accountWallUntil(
@@ -560,17 +557,17 @@ function accountWallUntil(
   now: number
 ): string | null | undefined {
   if (cause === 'quota') {
-    return undefined
+    return undefined;
   }
-  const resetAt = source.resetAt
+  const resetAt = source.resetAt;
   if (typeof resetAt !== 'string' || resetAt === '') {
-    return undefined
+    return undefined;
   }
-  const resetMs = Date.parse(resetAt)
+  const resetMs = Date.parse(resetAt);
   if (Number.isFinite(resetMs) && resetMs <= now) {
-    return null
+    return null;
   }
-  return resetAt
+  return resetAt;
 }
 
 function accountWallMetadata(
@@ -581,29 +578,29 @@ function accountWallMetadata(
       ? source.observedAt
       : typeof source.spawnedAt === 'string'
         ? source.spawnedAt
-        : undefined
+        : undefined;
   return {
     ...(typeof source.step === 'string' ? { step: source.step } : {}),
     ...(observedAt === undefined ? {} : { observedAt }),
     ...(typeof source.rig === 'string' ? { rig: source.rig } : {}),
-  }
+  };
 }
 
 export function deriveAccountWalls(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): AccountWall[] {
-  const byAccount = new Map<string, AccountWallAccumulator>()
+  const byAccount = new Map<string, AccountWallAccumulator>();
   for (const [step, entry] of Object.entries(registry)) {
     const records: WallRecord[] = Array.isArray(entry.attempts)
       ? [entry, ...(entry.attempts as WallRecord[])]
-      : [entry]
+      : [entry];
     for (const rec of records) {
-      foldAccountWallRecord(byAccount, step, rec)
+      foldAccountWallRecord(byAccount, step, rec);
     }
   }
   return [...byAccount]
     .map(([account, row]) => accountWallFrom(account, row, now))
     .filter((wall): wall is AccountWall => wall !== undefined)
-    .sort((a, b) => a.account.localeCompare(b.account))
+    .sort((a, b) => a.account.localeCompare(b.account));
 }
