@@ -20,7 +20,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /** Whether a URL's origin may carry the session token: https anywhere,
  *  cleartext only to this machine. */
-export function tokenSafeOrigin(url: URL): boolean {
+function tokenSafeOrigin(url: URL): boolean {
   if (url.protocol === 'https:') {
     return true;
   }
