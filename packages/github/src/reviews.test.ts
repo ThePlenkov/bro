@@ -456,6 +456,22 @@ describe('githubReview', { skip: WIN32 }, () => {
     });
   });
 
+  test('mergedPrs state=closed adds is:unmerged — merged rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'closed' });
+      const lines = readFileSync(log, 'utf8');
+      assert.match(lines, /pr list .*--state closed/);
+      assert.match(lines, /--search is:unmerged\n/);
+    });
+  });
+
+  test('mergedPrs state=all adds is:closed — open rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'all' });
+      assert.match(readFileSync(log, 'utf8'), /--search is:closed\n/);
+    });
+  });
+
   test('mergedPrs explicit ids keeps partial results and warns with the gh error', () => {
     withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '8' }, () => {
       const errs: string[] = [];

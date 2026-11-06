@@ -437,6 +437,17 @@ function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolea
   return primary !== undefined && primary.model !== undefined;
 }
 
+/** The argv worker's opt-in MCP descriptors — bulk data that rides the
+ *  worker payload → a 0600 artifact at commitSpawn + the BRO_MCP_FILE
+ *  pin. Never argv: a stdio server's `env` credentials would be
+ *  world-readable in ps/procfs. Helper keeps resolveSpawnProvider flat
+ *  (Sonar cognitive budget). */
+function argvMcpServersExtra(entry: { mcpServers?: unknown[] }): { mcpServers?: unknown[] } {
+  return Array.isArray(entry.mcpServers) && entry.mcpServers.length > 0
+    ? { mcpServers: entry.mcpServers }
+    : {};
+}
+
 /** Resolve the spawn's provider into a worker payload. `sel` carries
  *  the explicit fields already merged over the profile's piecewise;
  *  `backend` is the RESOLVED connector name (a profile's `backend`
@@ -532,6 +543,7 @@ export async function resolveSpawnProvider(
             sessionRm: entry.sessionRm,
           }),
           cliName: commandCliName(entry.command),
+          ...argvMcpServersExtra(entry),
         },
       };
     }
@@ -960,6 +972,9 @@ const AGENT_PIN_KEYS = new Set([
   // registry never recorded, and `bro trace` only catches a claim it
   // can compare
   'BRO_FORMULA',
+  // the MCP-servers artifact path is connector-owned too — a caller-
+  // supplied BRO_MCP_FILE would point the worker at a planted file
+  'BRO_MCP_FILE',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -1070,6 +1085,17 @@ const agentEnvPins = (
   }
   if (spec.delegatedBy !== undefined) {
     pins.push(['BRO_DELEGATED_BY', spec.delegatedBy]);
+  }
+  // an argv worker carrying MCP descriptors gets its artifact pin —
+  // the 0600 file commitSpawn writes next to the prompt. The
+  // descriptors never ride argv: a stdio server's `env` credentials
+  // would be world-readable in ps/procfs.
+  if (
+    spec.worker?.kind === 'argv' &&
+    Array.isArray(spec.worker.mcpServers) &&
+    spec.worker.mcpServers.length > 0
+  ) {
+    pins.push(['BRO_MCP_FILE', join(dirname(promptFile), `${agentId}.mcp.json`)]);
   }
   return pins;
 };
@@ -2264,6 +2290,25 @@ function outgoingAttemptOf(
   };
 }
 
+/** An argv worker's MCP descriptors land as a 0600 artifact — the
+ *  worker reads them via the BRO_MCP_FILE pin (agentEnvPins). Never
+ *  argv: a stdio server's `env` credentials would be world-readable in
+ *  ps/procfs. A respawn over an entry whose config dropped the servers
+ *  clears the stale file — secrets don't linger unreferenced. Helper
+ *  keeps commitSpawn under the Sonar cognitive budget. */
+function commitMcpArtifact(home: string, agentId: string, spec: SpawnSpec): void {
+  const mcpFile = join(home, `${agentId}.mcp.json`);
+  const mcpServers =
+    spec.worker?.kind === 'argv' && Array.isArray(spec.worker.mcpServers)
+      ? spec.worker.mcpServers
+      : undefined;
+  if (mcpServers !== undefined && mcpServers.length > 0) {
+    writePrivateFileSync(mcpFile, JSON.stringify(mcpServers));
+  } else {
+    rmSync(mcpFile, { force: true });
+  }
+}
+
 /** The write phase of a spawn — prompt/log/exit files, the registry
  *  row, then claim bookkeeping. Split from the guard/admission phase
  *  so a refused spawn leaves no half-state and a caller-side
@@ -2321,6 +2366,7 @@ function commitSpawn(
   if (stderrLog !== undefined) {
     appendPrivateFileSync(stderrLog, '');
   }
+  commitMcpArtifact(home, agentId, spec);
   const logFrom = logSizeOrZero(log);
   const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
   const outgoingAttempt = outgoingAttemptOf(spec, existing);

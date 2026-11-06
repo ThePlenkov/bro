@@ -1,13 +1,13 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { agent } from '@agentclientprotocol/sdk'
-import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
-import { RequestError } from '@agentclientprotocol/sdk'
-import { JudgeUnavailable } from '@broject/core'
-import type { JudgeQuestion, ProviderEntry } from '@broject/core'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { agent } from '@agentclientprotocol/sdk';
+import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
+import { JudgeUnavailable } from '@broject/core';
+import type { JudgeQuestion, ProviderEntry } from '@broject/core';
 import {
   acpChildEnv,
   acpClient,
@@ -17,12 +17,12 @@ import {
   acpSessionRetain,
   isSystemoneFamily,
   shellWords,
-} from './acp.ts'
-import { providerClient } from './registry.ts'
-import { otelJournal } from './otel.ts'
-import { fakeAcpAgent } from './testkit.ts'
+} from './acp.ts';
+import { providerClient } from './registry.ts';
+import { otelJournal } from './otel.ts';
+import { fakeAcpAgent } from './testkit.ts';
 
-type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
+type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
 const QUESTIONS: Record<string, JudgeQuestion> = {
   route: {
@@ -31,7 +31,7 @@ const QUESTIONS: Record<string, JudgeQuestion> = {
     criteria: { a: 'option a', b: 'option b' },
   },
   blocks: { type: 'noul', instructions: 'blocking?' },
-}
+};
 
 const TYPED_REPLY = JSON.stringify({
   model: 'typesafe/jev-1.13',
@@ -44,7 +44,7 @@ const TYPED_REPLY = JSON.stringify({
     },
     blocks: { type: 'noul', noul: 0.7 },
   },
-})
+});
 
 const MODEL_OPTION: SessionConfigOption = {
   type: 'select',
@@ -56,234 +56,273 @@ const MODEL_OPTION: SessionConfigOption = {
     { value: 'typesafe/jev-1.13', name: 'jev' },
     { value: 'qwen3-coder', name: 'qwen' },
   ],
-}
+};
 
-const deadline = (ms = 10_000): number => Date.now() + ms
+const deadline = (ms = 10_000): number => Date.now() + ms;
 
 describe('shellWords', () => {
   test('splits whitespace, honors quotes and escapes, no expansion', () => {
-    assert.deepEqual(shellWords('kilo --acp'), ['kilo', '--acp'])
-    assert.deepEqual(shellWords('  a   b  '), ['a', 'b'])
-    assert.deepEqual(shellWords(`bin "arg with spaces" x`), ['bin', 'arg with spaces', 'x'])
-    assert.deepEqual(shellWords(`bin 'a b'`), ['bin', 'a b'])
-    assert.deepEqual(shellWords(String.raw`bin a\ b`), ['bin', 'a b'])
-    assert.deepEqual(shellWords('bin "" tail'), ['bin', '', 'tail'])
+    assert.deepEqual(shellWords('kilo --acp'), ['kilo', '--acp']);
+    assert.deepEqual(shellWords('  a   b  '), ['a', 'b']);
+    assert.deepEqual(shellWords(`bin "arg with spaces" x`), ['bin', 'arg with spaces', 'x']);
+    assert.deepEqual(shellWords(`bin 'a b'`), ['bin', 'a b']);
+    assert.deepEqual(shellWords(String.raw`bin a\ b`), ['bin', 'a b']);
+    assert.deepEqual(shellWords('bin "" tail'), ['bin', '', 'tail']);
     // no shell: metacharacters stay literal argv, never re-parse
     assert.deepEqual(shellWords('bin $HOME; rm -rf / | cat'), [
-      'bin', '$HOME;', 'rm', '-rf', '/', '|', 'cat',
-    ])
-  })
+      'bin',
+      '$HOME;',
+      'rm',
+      '-rf',
+      '/',
+      '|',
+      'cat',
+    ]);
+  });
   test('unclosed quote and empty command are config errors', async () => {
-    assert.throws(() => shellWords(`bin 'oops`), /unclosed/)
+    assert.throws(() => shellWords(`bin 'oops`), /unclosed/);
     await assert.rejects(
-      acpClient('provider:x', { type: 'acp', command: '   ' }).chat!(
-        'p',
-        deadline()
-      ),
+      acpClient('provider:x', { type: 'acp', command: '   ' }).chat!('p', deadline()),
       /command is empty/
-    )
-  })
-})
+    );
+  });
+});
 
 describe('isSystemoneFamily', () => {
   test('typesafe/jev-* and bare jev-* are family; others and absent are not', () => {
-    assert.equal(isSystemoneFamily('typesafe/jev-1.13'), true)
-    assert.equal(isSystemoneFamily('jev-1.13.0'), true)
-    assert.equal(isSystemoneFamily('jev-latest'), true)
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13'), true);
+    assert.equal(isSystemoneFamily('jev-1.13.0'), true);
+    assert.equal(isSystemoneFamily('jev-latest'), true);
     // router-prefixed ids kilo serves — the upstream jev model reached
     // through orcarouter is still the typed contract
-    assert.equal(isSystemoneFamily('kilo/orcarouter/typesafe/jev-1.13'), true)
+    assert.equal(isSystemoneFamily('kilo/orcarouter/typesafe/jev-1.13'), true);
     // jev-router is a router product, not a jev model — never family
-    assert.equal(isSystemoneFamily('kilo/typesafe/jev-router'), false)
-    assert.equal(isSystemoneFamily('typesafe/jev-router'), false)
+    assert.equal(isSystemoneFamily('kilo/typesafe/jev-router'), false);
+    assert.equal(isSystemoneFamily('typesafe/jev-router'), false);
     // 'latest' is the same trap — jev-latest-router is a product name,
     // not the model pin; the segment must complete
-    assert.equal(isSystemoneFamily('typesafe/jev-latest-router'), false)
-    assert.equal(isSystemoneFamily('jev-latest-router'), false)
+    assert.equal(isSystemoneFamily('typesafe/jev-latest-router'), false);
+    assert.equal(isSystemoneFamily('jev-latest-router'), false);
     // the version token needs a boundary too — jev-1.13-router is a
     // suffixed product id, not the jev-1.13 pin
-    assert.equal(isSystemoneFamily('typesafe/jev-1.13-router'), false)
-    assert.equal(isSystemoneFamily('jev-2-router'), false)
-    assert.equal(isSystemoneFamily('qwen3-coder'), false)
-    assert.equal(isSystemoneFamily('other/jev-1'), false)
-    assert.equal(isSystemoneFamily(undefined), false)
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13-router'), false);
+    assert.equal(isSystemoneFamily('jev-2-router'), false);
+    assert.equal(isSystemoneFamily('qwen3-coder'), false);
+    assert.equal(isSystemoneFamily('other/jev-1'), false);
+    assert.equal(isSystemoneFamily(undefined), false);
     // a `[<size>]` context opt-in is the same model under a modifier
     // (bro-0g2l3); non-size brackets stay part of the id
-    assert.equal(isSystemoneFamily('typesafe/jev-1.13[1m]'), true)
-    assert.equal(isSystemoneFamily('jev-latest[500k]'), true)
-    assert.equal(isSystemoneFamily('typesafe/jev-router[1m]'), false)
-    assert.equal(isSystemoneFamily('typesafe/jev-1.13[custom]'), false)
-  })
-})
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13[1m]'), true);
+    assert.equal(isSystemoneFamily('jev-latest[500k]'), true);
+    assert.equal(isSystemoneFamily('typesafe/jev-router[1m]'), false);
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13[custom]'), false);
+  });
+});
 
 describe('acpClient surface split', () => {
-  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp' }
+  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp' };
 
   test('a systemone-family model binds the typed call surface', () => {
-    const client = acpClient('provider:kilo', { ...entry, model: 'typesafe/jev-1.13' })
-    assert.equal(typeof client.call, 'function')
-    assert.equal(client.chat, undefined)
-  })
+    const client = acpClient('provider:kilo', { ...entry, model: 'typesafe/jev-1.13' });
+    assert.equal(typeof client.call, 'function');
+    assert.equal(client.chat, undefined);
+  });
 
   test('a prose model binds the chat surface', () => {
-    const client = acpClient('provider:kilo', { ...entry, model: 'qwen3-coder' })
-    assert.equal(typeof client.chat, 'function')
-    assert.equal(client.call, undefined)
-  })
+    const client = acpClient('provider:kilo', { ...entry, model: 'qwen3-coder' });
+    assert.equal(typeof client.chat, 'function');
+    assert.equal(client.call, undefined);
+  });
 
   test('no model pin → prose — an unknown model is never trusted typed', () => {
-    const client = acpClient('provider:kilo', entry)
-    assert.equal(typeof client.chat, 'function')
-    assert.equal(client.call, undefined)
-  })
+    const client = acpClient('provider:kilo', entry);
+    assert.equal(typeof client.chat, 'function');
+    assert.equal(client.call, undefined);
+  });
 
   test('opts.model wins over the entry pin for the grade decision', () => {
-    const client = acpClient('provider:kilo', { ...entry, model: 'typesafe/jev-1.13' }, {
-      model: 'qwen3-coder',
-      acp: { peer: fakeAcpAgent().app },
-    })
-    assert.equal(client.chat !== undefined, true)
-    assert.equal(client.call, undefined)
-  })
-})
+    const client = acpClient(
+      'provider:kilo',
+      { ...entry, model: 'typesafe/jev-1.13' },
+      {
+        model: 'qwen3-coder',
+        acp: { peer: fakeAcpAgent().app },
+      }
+    );
+    assert.equal(client.chat !== undefined, true);
+    assert.equal(client.call, undefined);
+  });
+});
 
 describe('acp call surface — typed mode', () => {
   const entry: AcpEntry = {
     type: 'acp',
     command: 'kilo --acp',
     model: 'typesafe/jev-1.13',
-  }
+  };
 
   test('a typed reply maps to typed answers stamped provider:<name>', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       { note: 'state' },
       QUESTIONS,
       deadline()
-    )
-    assert.equal(res.answers.route!.type, 'choice')
-    assert.equal(res.answers.route!.decidedBy, 'provider:kilo')
-    assert.equal(res.answers.route!.confidence, 0.85)
-    assert.equal(res.answers.blocks!.type, 'noul')
+    );
+    assert.equal(res.answers.route!.type, 'choice');
+    assert.equal(res.answers.route!.decidedBy, 'provider:kilo');
+    assert.equal(res.answers.route!.confidence, 0.85);
+    assert.equal(res.answers.blocks!.type, 'noul');
     // the reply's own model report wins over the observed pin
-    assert.equal(res.model, 'typesafe/jev-1.13')
-  })
+    assert.equal(res.model, 'typesafe/jev-1.13');
+  });
 
   test('the prompt carries the typed contract + {state, questions} as JSON', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] });
     await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       'the-state',
       QUESTIONS,
       deadline()
-    )
-    const [preamble, body] = fake.prompts[0]!.split('BODY:\n')
-    assert.match(preamble!, /System One decision endpoint/)
-    const sent = JSON.parse(body!) as Record<string, unknown>
-    assert.equal(sent.state, 'the-state')
-    assert.deepEqual(Object.keys(sent.questions as object), ['route', 'blocks'])
-  })
+    );
+    const [preamble, body] = fake.prompts[0]!.split('BODY:\n');
+    assert.match(preamble!, /System One decision endpoint/);
+    const sent = JSON.parse(body!) as Record<string, unknown>;
+    assert.equal(sent.state, 'the-state');
+    assert.deepEqual(Object.keys(sent.questions as object), ['route', 'blocks']);
+  });
 
   test('the model rides session/set_config_option on the category:model option', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] });
     await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       's',
       QUESTIONS,
       deadline()
-    )
-    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'typesafe/jev-1.13' }])
-  })
+    );
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'typesafe/jev-1.13' }]);
+  });
 
   test('a requested model with no advertised option fails — never silently unpinned', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       (e: unknown) =>
         e instanceof Error &&
         !(e instanceof JudgeUnavailable) &&
         /provider:kilo/.test(e.message) &&
         /typesafe\/jev-1\.13/.test(e.message) &&
         /no model config option/.test(e.message)
-    )
-    assert.equal(fake.prompts.length, 0)
-  })
+    );
+    assert.equal(fake.prompts.length, 0);
+  });
 
   test('advertised authMethods do not gate the call — stored creds may already cover it', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' } as AuthMethod],
       replyText: TYPED_REPLY,
       configOptions: [MODEL_OPTION],
-    })
+    });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       's',
       QUESTIONS,
       deadline()
-    )
-    assert.equal(res.answers.blocks!.type, 'noul')
-    assert.equal(fake.prompts.length, 1)
-  })
+    );
+    assert.equal(res.answers.blocks!.type, 'noul');
+    assert.equal(fake.prompts.length, 1);
+  });
 
   test('a prompt-time auth failure is a startup error naming the methods', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' } as AuthMethod],
       configOptions: [MODEL_OPTION],
       failPrompt: 'auth',
-    })
+    });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       (e: unknown) =>
         e instanceof Error && !(e instanceof JudgeUnavailable) && /oauth/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('a non-auth prompt failure stays JudgeUnavailable — backend flake, not config', async () => {
     const fake = fakeAcpAgent({
       configOptions: [MODEL_OPTION],
       failPrompt: 'generic',
-    })
+    });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       JudgeUnavailable
-    )
-  })
+    );
+  });
 
   test('an auth-worded gateway outage stays JudgeUnavailable — 504 is availability, not config', async () => {
     const fake = fakeAcpAgent({
       configOptions: [MODEL_OPTION],
       failPrompt: 'auth-gateway-504',
-    })
+    });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       JudgeUnavailable
-    )
-  })
+    );
+  });
 
   test('a non-end_turn stop fails open — JudgeUnavailable, never a verdict', async () => {
-    const fake = fakeAcpAgent({ stopReason: 'refusal', replyText: 'no', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({
+      stopReason: 'refusal',
+      replyText: 'no',
+      configOptions: [MODEL_OPTION],
+    });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       (e: unknown) => e instanceof JudgeUnavailable && /refusal/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('a non-JSON reply is JudgeUnavailable — prose is not a typed answer', async () => {
-    const fake = fakeAcpAgent({ replyText: 'looks fine to me', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'looks fine to me', configOptions: [MODEL_OPTION] });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       JudgeUnavailable
-    )
-  })
+    );
+  });
 
   test('a malformed typed answer fails open naming the question', async () => {
-    const bad = JSON.stringify({ answers: { route: { type: 'noul', noul: 0.5 } } })
-    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] })
+    const bad = JSON.stringify({ answers: { route: { type: 'noul', noul: 0.5 } } });
+    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] });
     await assert.rejects(
-      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
       (e: unknown) => e instanceof JudgeUnavailable && /route/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('an already-spent deadline fails before any session work', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -291,16 +330,16 @@ describe('acp call surface — typed mode', () => {
         Date.now() - 1
       ),
       JudgeUnavailable
-    )
-    assert.equal(fake.sessions.length, 0)
-  })
+    );
+    assert.equal(fake.sessions.length, 0);
+  });
 
   test('an agent reporting another family is refused — a swap never parses typed', async () => {
     const fake = fakeAcpAgent({
       replyText: TYPED_REPLY,
       configOptions: [MODEL_OPTION],
       reportedModel: 'qwen3-coder',
-    })
+    });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -312,29 +351,29 @@ describe('acp call surface — typed mode', () => {
         !(e instanceof JudgeUnavailable) &&
         /qwen3-coder/.test(e.message) &&
         /model-family swap/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('a same-family model report canonicalizes — provenance carries it', async () => {
     const fake = fakeAcpAgent({
       replyText: TYPED_REPLY,
       configOptions: [MODEL_OPTION],
       reportedModel: 'typesafe/jev-2.0',
-    })
+    });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       's',
       QUESTIONS,
       deadline()
-    )
-    assert.equal(res.model, 'typesafe/jev-1.13')
-  })
+    );
+    assert.equal(res.model, 'typesafe/jev-1.13');
+  });
 
   test('a peer refusal of set_config_option is a config error naming the model', async () => {
     const fake = fakeAcpAgent({
       replyText: TYPED_REPLY,
       configOptions: [MODEL_OPTION],
       failConfig: 'refuse',
-    })
+    });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -345,15 +384,15 @@ describe('acp call surface — typed mode', () => {
         e instanceof Error &&
         !(e instanceof JudgeUnavailable) &&
         /refused model 'typesafe\/jev-1\.13'/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('a cancelled set_config_option fails open — availability, not config', async () => {
     const fake = fakeAcpAgent({
       replyText: TYPED_REPLY,
       configOptions: [MODEL_OPTION],
       failConfig: 'cancel',
-    })
+    });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -361,16 +400,16 @@ describe('acp call surface — typed mode', () => {
         deadline()
       ),
       (e: unknown) => e instanceof JudgeUnavailable
-    )
-  })
+    );
+  });
 
   test('choice probabilities keyed off the asked options are drift — fail open', async () => {
     const bad = JSON.stringify({
       answers: {
         route: { type: 'choice', choice: 'a', probabilities: { other: 1 } },
       },
-    })
-    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] })
+    });
+    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -378,8 +417,8 @@ describe('acp call surface — typed mode', () => {
         deadline()
       ),
       (e: unknown) => e instanceof JudgeUnavailable && /route/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('score probabilities keyed off the level range are drift — fail open', async () => {
     const questions: Record<string, JudgeQuestion> = {
@@ -388,11 +427,11 @@ describe('acp call surface — typed mode', () => {
         instructions: 'rate?',
         criteria: ['low', 'mid', 'high'],
       },
-    }
+    };
     const bad = JSON.stringify({
       answers: { rate: { type: 'score', score: 1, probabilities: { x: 1 } } },
-    })
-    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] })
+    });
+    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] });
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
         's',
@@ -400,61 +439,60 @@ describe('acp call surface — typed mode', () => {
         deadline()
       ),
       (e: unknown) => e instanceof JudgeUnavailable && /rate/.test(e.message)
-    )
-  })
+    );
+  });
 
   test('a "__proto__" question id lands as an own answer key', async () => {
     const questions = Object.fromEntries([
       ['__proto__', { type: 'noul', instructions: 'blocking?' } as JudgeQuestion],
-    ])
+    ]);
     const body = JSON.stringify({
       model: 'typesafe/jev-1.13',
-      answers: Object.fromEntries([
-        ['__proto__', { type: 'noul', noul: 0.6 }],
-      ]),
-    })
-    const fake = fakeAcpAgent({ replyText: body, configOptions: [MODEL_OPTION] })
+      answers: Object.fromEntries([['__proto__', { type: 'noul', noul: 0.6 }]]),
+    });
+    const fake = fakeAcpAgent({ replyText: body, configOptions: [MODEL_OPTION] });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       's',
       questions,
       deadline()
-    )
-    assert.equal(Object.hasOwn(res.answers, '__proto__'), true)
-    assert.equal(res.answers['__proto__' as keyof typeof res.answers]?.type, 'noul')
-  })
-})
+    );
+    assert.equal(Object.hasOwn(res.answers, '__proto__'), true);
+    assert.equal(res.answers['__proto__' as keyof typeof res.answers]?.type, 'noul');
+  });
+});
 
 describe('acp chat surface — prose mode', () => {
-  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder' }
+  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder' };
 
   test('the rendered prompt goes in; the agent text comes out raw', async () => {
     const fake = fakeAcpAgent({
       replyText: '{"answers":{"route":{"type":"choice","choice":"b","confidence":0.6}}}',
       configOptions: [MODEL_OPTION],
-    })
+    });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).chat!(
       'rendered prompt text',
       deadline()
-    )
-    assert.equal(fake.prompts[0], 'rendered prompt text')
-    assert.match(res.content, /"route"/)
+    );
+    assert.equal(fake.prompts[0], 'rendered prompt text');
+    assert.match(res.content, /"route"/);
     // currentValue observed after set_config_option is the provenance
-    assert.equal(res.model, 'qwen3-coder')
-  })
+    assert.equal(res.model, 'qwen3-coder');
+  });
 
   test('no model pin → no set_config_option; the session value is provenance', async () => {
-    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] })
-    const res = await acpClient('provider:kilo', { type: 'acp', command: 'kilo --acp' }, { acp: { peer: fake.app } }).chat!(
-      'p',
-      deadline()
-    )
-    assert.equal(fake.configSets.length, 0)
-    assert.equal(res.model, 'typesafe/jev-1.13')
-  })
-})
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] });
+    const res = await acpClient(
+      'provider:kilo',
+      { type: 'acp', command: 'kilo --acp' },
+      { acp: { peer: fake.app } }
+    ).chat!('p', deadline());
+    assert.equal(fake.configSets.length, 0);
+    assert.equal(res.model, 'typesafe/jev-1.13');
+  });
+});
 
 describe('acp streaming surface — acp.onUpdate (bro-d6mcd)', () => {
-  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder' }
+  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder' };
 
   test('every session/update reaches the sink in order; the turn still resolves whole', async () => {
     const fake = fakeAcpAgent({
@@ -470,35 +508,35 @@ describe('acp streaming surface — acp.onUpdate (bro-d6mcd)', () => {
         { sessionUpdate: 'tool_call_update', toolCallId: 'tc-1', status: 'completed' } as never,
       ],
       configOptions: [MODEL_OPTION],
-    })
-    const seen: string[] = []
+    });
+    const seen: string[] = [];
     const res = await acpClient('provider:kilo', entry, {
-      acp: { peer: fake.app, onUpdate: (u) => seen.push(u.sessionUpdate) },
-    }).chat!('p', deadline())
-    assert.equal(res.content, 'hello world')
+      acp: { peer: fake.app, onUpdate: u => seen.push(u.sessionUpdate) },
+    }).chat!('p', deadline());
+    assert.equal(res.content, 'hello world');
     assert.deepEqual(seen, [
       'tool_call',
       'agent_message_chunk',
       'agent_message_chunk',
       'tool_call_update',
-    ])
-  })
+    ]);
+  });
 
   test('no sink — the whole-turn contract is unchanged', async () => {
-    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] });
     const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).chat!(
       'p',
       deadline()
-    )
-    assert.equal(res.content, 'answer')
-  })
-})
+    );
+    assert.equal(res.content, 'answer');
+  });
+});
 
 describe('spawn path — a real child process on stdio', () => {
   test('node script serving ACP answers a typed turn; the child is reaped', async () => {
     // lives under the package dir so the SDK resolves from node_modules
-    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'))
-    const script = join(dir, 'agent.mjs')
+    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'));
+    const script = join(dir, 'agent.mjs');
     writeFileSync(
       script,
       `import { agent, ndJsonStream } from '@agentclientprotocol/sdk'
@@ -546,7 +584,7 @@ await agent({ name: 'fake' })
   })
   .connectWith(stream, () => new Promise(() => {}))
 `
-    )
+    );
     try {
       const res = await acpClient(
         'provider:fake',
@@ -556,20 +594,20 @@ await agent({ name: 'fake' })
           model: 'typesafe/jev-1.13',
         },
         {}
-      ).call!('s', QUESTIONS, deadline(30_000))
-      const route = res.answers.route!
-      assert.ok(route.type === 'choice')
-      assert.equal(route.choice, 'a')
-      assert.equal(res.model, 'typesafe/jev-1.13')
+      ).call!('s', QUESTIONS, deadline(30_000));
+      const route = res.answers.route!;
+      assert.ok(route.type === 'choice');
+      assert.equal(route.choice, 'a');
+      assert.equal(res.model, 'typesafe/jev-1.13');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('the spawned child carries BRO_HOOKS=0 — session hooks no-op in its tree (bro-ddksm)', async () => {
-    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'))
-    const script = join(dir, 'agent.mjs')
-    const envOut = join(dir, 'env.out')
+    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'));
+    const script = join(dir, 'agent.mjs');
+    const envOut = join(dir, 'env.out');
     writeFileSync(
       script,
       `import { agent, ndJsonStream } from '@agentclientprotocol/sdk'
@@ -583,34 +621,31 @@ await agent({ name: 'fake' })
   })
   .connectWith(stream, () => new Promise(() => {}))
 `
-    )
+    );
     try {
       const peer = await acpOpen(
         'conductor:fake',
         { type: 'acp', command: `"${process.execPath}" "${script}"` },
         {},
         deadline(30_000)
-      )
+      );
       try {
-        assert.equal(readFileSync(envOut, 'utf8'), '0')
+        assert.equal(readFileSync(envOut, 'utf8'), '0');
       } finally {
-        peer.close()
+        peer.close();
       }
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a missing binary is a config error naming the provider', async () => {
     await assert.rejects(
-      acpClient(
-        'provider:kilo',
-        { type: 'acp', command: 'definitely-not-a-real-bin-xyz' },
-        {}
-      ).chat!('p', deadline()),
+      acpClient('provider:kilo', { type: 'acp', command: 'definitely-not-a-real-bin-xyz' }, {})
+        .chat!('p', deadline()),
       /cannot exec acp command/
-    )
-  })
+    );
+  });
 
   test('acpOpen maps a missing binary to the same config error', async () => {
     await assert.rejects(
@@ -621,34 +656,34 @@ await agent({ name: 'fake' })
         deadline()
       ),
       /cannot exec acp command/
-    )
-  })
-})
+    );
+  });
+});
 
 describe('acpOpen teardown — the pool abort seam', () => {
   test('an abort cancels a pending handshake — no wait for the deadline', async () => {
-    const ctl = new AbortController()
+    const ctl = new AbortController();
     // an agent whose initialize never answers — the open settles only
     // through the signal, never the reply
     const hanging = agent({ name: 'hang' }).onRequest(
       'initialize',
       () => new Promise<never>(() => {})
-    )
-    const t0 = Date.now()
+    );
+    const t0 = Date.now();
     const pending = acpOpen(
       'conductor:hang',
       { type: 'acp', command: 'x' },
       { acp: { peer: hanging, signal: ctl.signal } },
       deadline(30_000)
-    )
-    ctl.abort()
-    await assert.rejects(pending, /closed|cancelled/i)
-    assert.ok(Date.now() - t0 < 10_000, 'the open waited out its deadline')
-  })
+    );
+    ctl.abort();
+    await assert.rejects(pending, /closed|cancelled/i);
+    assert.ok(Date.now() - t0 < 10_000, 'the open waited out its deadline');
+  });
 
   test('an already-aborted signal refuses the open outright', async () => {
-    const ctl = new AbortController()
-    ctl.abort()
+    const ctl = new AbortController();
+    ctl.abort();
     await assert.rejects(
       acpOpen(
         'conductor:x',
@@ -657,32 +692,32 @@ describe('acpOpen teardown — the pool abort seam', () => {
         deadline()
       ),
       /cancelled/
-    )
-  })
-})
+    );
+  });
+});
 
 describe('acpChildEnv', () => {
   test('pins BRO_HOOKS=0; an explicit ambient value wins', () => {
-    const prev = process.env.BRO_HOOKS
+    const prev = process.env.BRO_HOOKS;
     try {
-      delete process.env.BRO_HOOKS
-      assert.equal(acpChildEnv().BRO_HOOKS, '0')
-      process.env.BRO_HOOKS = '1'
-      assert.equal(acpChildEnv().BRO_HOOKS, '1')
+      delete process.env.BRO_HOOKS;
+      assert.equal(acpChildEnv().BRO_HOOKS, '0');
+      process.env.BRO_HOOKS = '1';
+      assert.equal(acpChildEnv().BRO_HOOKS, '1');
     } finally {
-      if (prev === undefined) delete process.env.BRO_HOOKS
-      else process.env.BRO_HOOKS = prev
+      if (prev === undefined) delete process.env.BRO_HOOKS;
+      else process.env.BRO_HOOKS = prev;
     }
-  })
-})
+  });
+});
 
 describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
   // a summarizer-shaped agent advertises no configOptions at all — the
   // pin IS the provenance; there is nothing to apply or verify against
-  const TOOLLESS: AcpEntry = { type: 'acp', command: 'dv acp --agent-type summarizer' }
+  const TOOLLESS: AcpEntry = { type: 'acp', command: 'dv acp --agent-type summarizer' };
 
   test('acpConverse serves the entry pin as the model label — no option to apply', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const fake = fakeAcpAgent({ replyText: 'sum' });
     const r = await acpConverse(
       'conductor:sum',
       { ...TOOLLESS, model: 'claude-sum' },
@@ -690,14 +725,14 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
       'p',
       () => {},
       deadline()
-    )
-    assert.equal(r.text, 'sum')
-    assert.equal(r.model, 'claude-sum')
-    assert.deepEqual(fake.configSets, [])
-  })
+    );
+    assert.equal(r.text, 'sum');
+    assert.equal(r.model, 'claude-sum');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   test('a wire-level pin (env) labels the same way', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const fake = fakeAcpAgent({ replyText: 'sum' });
     const r = await acpConverse(
       'conductor:sum',
       TOOLLESS,
@@ -705,12 +740,12 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
       'p',
       () => {},
       deadline()
-    )
-    assert.equal(r.model, 'env-pin')
-  })
+    );
+    assert.equal(r.model, 'env-pin');
+  });
 
   test('unpinned tool-less answers "unknown" — nothing to report', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const fake = fakeAcpAgent({ replyText: 'sum' });
     const r = await acpConverse(
       'conductor:sum',
       TOOLLESS,
@@ -718,18 +753,13 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
       'p',
       () => {},
       deadline()
-    )
-    assert.equal(r.model, 'unknown')
-  })
+    );
+    assert.equal(r.model, 'unknown');
+  });
 
   test('a request pin on a tool-less backend never launders the served label', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum' })
-    const peer = await acpOpen(
-      'conductor:sum',
-      TOOLLESS,
-      { acp: { peer: fake.app } },
-      deadline()
-    )
+    const fake = fakeAcpAgent({ replyText: 'sum' });
+    const peer = await acpOpen('conductor:sum', TOOLLESS, { acp: { peer: fake.app } }, deadline());
     try {
       const r = await acpPooledTurn(
         peer,
@@ -738,35 +768,31 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
         'p',
         deadline(),
         { by: 'conductor:sum', requestModel: 'devin-acp/other-model' }
-      )
-      assert.equal(r.model, 'claude-sum')
-      assert.deepEqual(fake.configSets, [])
+      );
+      assert.equal(r.model, 'claude-sum');
+      assert.deepEqual(fake.configSets, []);
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a request pin the backend CAN serve still resolves through its catalog', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:kilo', TOOLLESS, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'sum', configOptions: [MODEL_OPTION] });
+    const peer = await acpOpen('conductor:kilo', TOOLLESS, { acp: { peer: fake.app } }, deadline());
     try {
-      const r = await acpPooledTurn(
-        peer,
-        TOOLLESS,
-        { acp: { peer: fake.app } },
-        'p',
-        deadline(),
-        { by: 'conductor:kilo', requestModel: 'kilo/qwen3-coder' }
-      )
-      assert.equal(r.model, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      const r = await acpPooledTurn(peer, TOOLLESS, { acp: { peer: fake.app } }, 'p', deadline(), {
+        by: 'conductor:kilo',
+        requestModel: 'kilo/qwen3-coder',
+      });
+      assert.equal(r.model, 'qwen3-coder');
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('the judge path still refuses a pin with no option — the laundering guard holds', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY });
     await assert.rejects(
       acpClient(
         'provider:sum',
@@ -774,15 +800,15 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
         { acp: { peer: fake.app } }
       ).call!('s', QUESTIONS, deadline()),
       /no model config option/
-    )
-  })
-})
+    );
+  });
+});
 
 // bro-0g2l3 — a `model[1m]` context pin is the same model under a
 // client-side opt-in: every pin source normalizes to the base id
 // before the catalog match.
 describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
-  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' }
+  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' };
   const THOUGHT_OPTION: SessionConfigOption = {
     type: 'select',
     id: 'thought',
@@ -793,7 +819,7 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       { value: 'low', name: 'low' },
       { value: 'max', name: 'max' },
     ],
-  }
+  };
   /** A model select — the session reports `currentValue` while its
    *  catalog advertises `leaves` (a spawn-level `model[<size>]` pin
    *  reports verbatim what the catalog only knows stripped). */
@@ -803,8 +829,8 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
     name: 'Model',
     category: 'model',
     currentValue,
-    options: leaves.map((v) => ({ value: v, name: v })),
-  })
+    options: leaves.map(v => ({ value: v, name: v })),
+  });
   /** acpOpen → one pooled turn → close; the reported model out, the
    *  fake's configSets stay assertable after. */
   const turn = async (
@@ -812,7 +838,7 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
     entryModel?: string,
     requestModel?: string
   ): Promise<string> => {
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
       const r = await acpPooledTurn(
         peer,
@@ -821,99 +847,97 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
         'p',
         deadline(),
         { by: 'conductor:t', requestModel }
-      )
-      return r.model
+      );
+      return r.model;
     } finally {
-      peer.close()
+      peer.close();
     }
-  }
+  };
 
   test('a request pin carrying the suffix resolves to the base id', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder[1m]'), 'qwen3-coder')
-    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
-  })
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder[1m]'), 'qwen3-coder');
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
+  });
 
   test('a configured pin carrying the suffix resolves the same', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder')
-    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
-  })
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder');
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
+  });
 
   test('a composite -level[1m] pin still parses the level off the base', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
       configOptions: [MODEL_OPTION, THOUGHT_OPTION],
-    })
-    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder-max[1m]'), 'qwen3-coder-max')
+    });
+    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder-max[1m]'), 'qwen3-coder-max');
     assert.deepEqual(fake.configSets, [
       { configId: 'model-pick', value: 'qwen3-coder' },
       { configId: 'thought', value: 'max' },
-    ])
-  })
+    ]);
+  });
 
   test('a [1m] repin on a live session resolves to the base id', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
-      const m = await live.repin('dv/qwen3-coder[1m]', deadline())
-      assert.equal(m, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
-      live.dispose()
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline());
+      const m = await live.repin('dv/qwen3-coder[1m]', deadline());
+      assert.equal(m, 'qwen3-coder');
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
+      live.dispose();
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a non-context bracket stays in the id — the miss is still loud', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
     await assert.rejects(
       turn(fake, undefined, 'dv/qwen3-coder[custom]'),
       /qwen3-coder\[custom].*not in the agent's catalog/
-    )
-  })
+    );
+  });
 
   test('the one-shot client path strips the suffix before set_config_option', async () => {
-    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] });
     const res = await acpClient(
       'provider:kilo',
       { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder[1m]' },
       { acp: { peer: fake.app } }
-    ).chat!('p', deadline())
-    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
-    assert.equal(res.model, 'qwen3-coder')
-  })
+    ).chat!('p', deadline());
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
+    assert.equal(res.model, 'qwen3-coder');
+  });
 
   test('a suffixed judge pin still binds the typed call surface', async () => {
-    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] });
     const client = acpClient(
       'provider:kilo',
       { type: 'acp', command: 'kilo --acp', model: 'typesafe/jev-1.13[1m]' },
       { acp: { peer: fake.app } }
-    )
-    assert.equal(typeof client.call, 'function')
-    const res = await client.call!('s', QUESTIONS, deadline())
-    assert.equal(res.answers.route!.type, 'choice')
-    assert.deepEqual(fake.configSets, [
-      { configId: 'model-pick', value: 'typesafe/jev-1.13' },
-    ])
-  })
+    );
+    assert.equal(typeof client.call, 'function');
+    const res = await client.call!('s', QUESTIONS, deadline());
+    assert.equal(res.answers.route!.type, 'choice');
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'typesafe/jev-1.13' }]);
+  });
 
   test('a tool-less backend reports the base id as provenance, not the opt-in', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x' })
-    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder')
-    assert.deepEqual(fake.configSets, [])
-  })
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   test('a spawn-level pin the session reports verbatim satisfies the base ask', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
       configOptions: [{ ...MODEL_OPTION, currentValue: 'custom[1m]' }],
-    })
-    assert.equal(await turn(fake, 'custom[1m]', 'dv/custom'), 'custom')
-    assert.deepEqual(fake.configSets, [])
-  })
+    });
+    assert.equal(await turn(fake, 'custom[1m]', 'dv/custom'), 'custom');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   // the base id hitting the catalog must NOT re-pin a session already
   // serving the raw suffixed ask — the set would silently drop the
@@ -922,138 +946,138 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
       configOptions: [modelOption('custom[1m]', ['custom', 'other'])],
-    })
+    });
     // the configured pin and an aliased request pin both match verbatim
-    assert.equal(await turn(fake, 'custom[1m]'), 'custom[1m]')
-    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]')
-    assert.deepEqual(fake.configSets, [])
-  })
+    assert.equal(await turn(fake, 'custom[1m]'), 'custom[1m]');
+    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   test('a namespaced suffixed pin the session reports verbatim is kept too', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
       configOptions: [modelOption('acme/custom[1m]', ['acme/custom', 'other'])],
-    })
-    assert.equal(await turn(fake, 'acme/custom[1m]'), 'acme/custom[1m]')
-    assert.deepEqual(fake.configSets, [])
-  })
+    });
+    assert.equal(await turn(fake, 'acme/custom[1m]'), 'acme/custom[1m]');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   test('the one-shot path keeps a served spawn-level suffix — no base re-pin', async () => {
     const fake = fakeAcpAgent({
       replyText: 'answer',
       configOptions: [modelOption('custom[1m]', ['custom', 'other'])],
-    })
+    });
     const res = await acpClient(
       'provider:kilo',
       { type: 'acp', command: 'kilo --acp', model: 'custom[1m]' },
       { acp: { peer: fake.app } }
-    ).chat!('p', deadline())
-    assert.equal(res.model, 'custom[1m]')
-    assert.deepEqual(fake.configSets, [])
-  })
+    ).chat!('p', deadline());
+    assert.equal(res.model, 'custom[1m]');
+    assert.deepEqual(fake.configSets, []);
+  });
 
   test('an agent-advertised `model[1m]` leaf is selectable verbatim', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
       configOptions: [modelOption('other', ['custom[1m]', 'other'])],
-    })
-    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]')
-    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'custom[1m]' }])
-  })
-})
+    });
+    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]');
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'custom[1m]' }]);
+  });
+});
 
 // bro-whn25 — a conductor conversation is N anthropic turns over ONE
 // acp session: session/new once, prompt per turn, dispose on eviction.
 describe('acpSessionRetain — one session, many turns', () => {
-  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' }
+  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' };
 
   test('two prompts ride one session/new; dispose ends it', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
-      assert.equal(live.sessionId, 'sess-1')
-      const r1 = await live.prompt('first', deadline())
-      const r2 = await live.prompt('second', deadline())
-      assert.equal(r1.text, 'ok')
-      assert.equal(r2.stopReason, 'end_turn')
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline());
+      assert.equal(live.sessionId, 'sess-1');
+      const r1 = await live.prompt('first', deadline());
+      const r2 = await live.prompt('second', deadline());
+      assert.equal(r1.text, 'ok');
+      assert.equal(r2.stopReason, 'end_turn');
       // one session/new carried both prompts — the pooled path pays
       // open+dispose per turn, the retained path pays once
-      assert.equal(fake.sessions.length, 1)
-      assert.equal(fake.prompts.length, 2)
-      live.dispose()
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(fake.prompts.length, 2);
+      live.dispose();
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a differing request model re-pins on the live session', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
-      await live.prompt('a', deadline())
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline());
+      await live.prompt('a', deadline());
       const r = await live.prompt('b', deadline(), {
         requestModel: 'kilo/qwen3-coder',
-      })
-      assert.equal(r.model, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      });
+      assert.equal(r.model, 'qwen3-coder');
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
       // resubmitting the same request id does NOT re-set — the open
       // already resolved it (raw-vs-raw compare, spec bro-whn25)
-      fake.configSets.length = 0
-      await live.prompt('c', deadline(), { requestModel: 'kilo/qwen3-coder' })
-      assert.deepEqual(fake.configSets, [])
+      fake.configSets.length = 0;
+      await live.prompt('c', deadline(), { requestModel: 'kilo/qwen3-coder' });
+      assert.deepEqual(fake.configSets, []);
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a failed turn disposes the session and surfaces JudgeUnavailable', async () => {
-    const fake = fakeAcpAgent({ failPrompt: 'generic' })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ failPrompt: 'generic' });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
-      await assert.rejects(live.prompt('x', deadline()), JudgeUnavailable)
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline());
+      await assert.rejects(live.prompt('x', deadline()), JudgeUnavailable);
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a wrapped upstream error keeps its cause — the wire code survives', async () => {
-    const fake = fakeAcpAgent({ failPrompt: 'auth' })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ failPrompt: 'auth' });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline());
       await assert.rejects(live.prompt('x', deadline()), (e: unknown) => {
         // AcpConfigError wraps the agent's auth_required — the brokered
         // transport's asWireError unwraps by cause
         for (let c: unknown = e; c instanceof Error; c = c.cause) {
-          if (c instanceof RequestError && c.code === -32000) return true
+          if (c instanceof RequestError && c.code === -32000) return true;
         }
-        return false
-      })
+        return false;
+      });
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('acpPooledTurn forwards a verbatim sessionRequest too', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok' })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
       await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
         sessionRequest: { cwd: '/client/dir', mcpServers: [] },
-      })
+      });
       // the field can't promise a verbatim open on one path and drop it
       // on the other
-      assert.equal(fake.sessionRequests[0]?.cwd, '/client/dir')
+      assert.equal(fake.sessionRequests[0]?.cwd, '/client/dir');
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('fs clientCapabilities without a bridge are refused, never advertised', async () => {
-    const fake = fakeAcpAgent()
+    const fake = fakeAcpAgent();
     await assert.rejects(
       acpOpen(
         'conductor:t',
@@ -1070,7 +1094,7 @@ describe('acpSessionRetain — one session, many turns', () => {
         deadline()
       ),
       /clientCapabilities advertises fs without acp\.bridge/
-    )
+    );
     // terminal:true unbridged is legal — AcpTerminals serves it locally
     const peer = await acpOpen(
       'conductor:t',
@@ -1082,10 +1106,10 @@ describe('acpSessionRetain — one session, many turns', () => {
         },
       },
       deadline()
-    )
-    peer.close()
-  })
-})
+    );
+    peer.close();
+  });
+});
 
 describe('providerClient wiring', () => {
   test('an acp entry binds through the registry — call or chat by model', () => {
@@ -1093,137 +1117,131 @@ describe('providerClient wiring', () => {
       type: 'acp',
       command: 'kilo --acp',
       model: 'typesafe/jev-1.13',
-    })
-    assert.equal(typeof typed.call, 'function')
-    const prose = providerClient('kilo', { type: 'acp', command: 'kilo --acp' })
-    assert.equal(typeof prose.chat, 'function')
-  })
+    });
+    assert.equal(typeof typed.call, 'function');
+    const prose = providerClient('kilo', { type: 'acp', command: 'kilo --acp' });
+    assert.equal(typeof prose.chat, 'function');
+  });
 
   test('a cli entry binds the prose chat surface', () => {
-    const client = providerClient('d', { type: 'cli', command: 'devin -p' })
-    assert.equal(typeof client.chat, 'function')
-    assert.equal(client.call, undefined)
-  })
-})
+    const client = providerClient('d', { type: 'cli', command: 'devin -p' });
+    assert.equal(typeof client.chat, 'function');
+    assert.equal(client.call, undefined);
+  });
+});
 
 describe('acp terminal plane (bro-z7afs)', () => {
-  const ENTRY: AcpEntry = { type: 'acp', command: 'agent --acp' }
+  const ENTRY: AcpEntry = { type: 'acp', command: 'agent --acp' };
 
   test('clientCapabilities advertise terminal: true', async () => {
-    const fake = fakeAcpAgent({ replyText: '{}' })
-    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!(
-      'p',
-      deadline()
-    )
-    const caps = fake.clientCapabilities as { terminal?: boolean }
-    assert.equal(caps.terminal, true)
-  })
+    const fake = fakeAcpAgent({ replyText: '{}' });
+    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!('p', deadline());
+    const caps = fake.clientCapabilities as { terminal?: boolean };
+    assert.equal(caps.terminal, true);
+  });
 
   test('agent terminal/* calls run a real host-side child — create, wait, output, release', async () => {
-    const fake = fakeAcpAgent({ replyText: '{}', askTerminal: 'echo host-side-terminal' })
-    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!(
-      'p',
-      deadline()
-    )
-    assert.equal(fake.terminalResult?.exitCode, 0)
-    assert.match(fake.terminalResult?.output ?? '', /host-side-terminal/)
-  })
+    const fake = fakeAcpAgent({ replyText: '{}', askTerminal: 'echo host-side-terminal' });
+    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!('p', deadline());
+    assert.equal(fake.terminalResult?.exitCode, 0);
+    assert.match(fake.terminalResult?.output ?? '', /host-side-terminal/);
+  });
 
   test('the pooled path (acpOpen) registers the same handlers', async () => {
-    const fake = fakeAcpAgent({ replyText: 'sum', askTerminal: 'echo pooled-terminal' })
-    const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+    const fake = fakeAcpAgent({ replyText: 'sum', askTerminal: 'echo pooled-terminal' });
+    const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline());
     try {
-      await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
-      assert.equal(fake.terminalResult?.exitCode, 0)
-      assert.match(fake.terminalResult?.output ?? '', /pooled-terminal/)
+      await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline());
+      assert.equal(fake.terminalResult?.exitCode, 0);
+      assert.match(fake.terminalResult?.output ?? '', /pooled-terminal/);
     } finally {
-      peer.close()
+      peer.close();
     }
-  })
+  });
 
   test('a permission ask is denied LOUDLY — deny outcome plus an acp.denied_call journal row (spec bro-mfruo)', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'))
-    const journal = join(dir, 'turns.jsonl')
-    otelJournal(journal)
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'));
+    const journal = join(dir, 'turns.jsonl');
+    otelJournal(journal);
     try {
       const fake = fakeAcpAgent({
         replyText: 'sum',
         askPermission: [{ optionId: 'deny-1', name: 'Deny', kind: 'reject_once' }],
-      })
-      const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+      });
+      const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline());
       try {
-        await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+        await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline());
       } finally {
-        peer.close()
+        peer.close();
       }
-      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' });
       const denied = readFileSync(journal, 'utf8')
         .trim()
         .split('\n')
-        .map((l) => JSON.parse(l) as Record<string, unknown>)
-        .find((r) => r.event === 'acp.denied_call')
-      assert.ok(denied, 'the denial announced itself on the journal')
-      assert.equal(denied.by, 'conductor:x')
-      assert.equal(denied.method, 'session/request_permission')
-      assert.equal(denied.what, 'run tests')
+        .map(l => JSON.parse(l) as Record<string, unknown>)
+        .find(r => r.event === 'acp.denied_call');
+      assert.ok(denied, 'the denial announced itself on the journal');
+      assert.equal(denied.by, 'conductor:x');
+      assert.equal(denied.method, 'session/request_permission');
+      assert.equal(denied.what, 'run tests');
     } finally {
-      otelJournal(undefined)
-      rmSync(dir, { recursive: true, force: true })
+      otelJournal(undefined);
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('an unadvertised agent→client call answers method-not-found and journals the attempt', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'))
-    const journal = join(dir, 'turns.jsonl')
-    otelJournal(journal)
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'));
+    const journal = join(dir, 'turns.jsonl');
+    otelJournal(journal);
     try {
       const fake = fakeAcpAgent({
         replyText: 'sum',
         probeClient: async (client, sessionId) => {
           try {
-            await client.request('elicitation/create', { sessionId })
-            return {}
+            await client.request('elicitation/create', { sessionId });
+            return {};
           } catch (err) {
-            const e = err as { code?: unknown; message?: unknown }
+            const e = err as { code?: unknown; message?: unknown };
             return {
               ...(typeof e.code === 'number' ? { code: e.code } : {}),
               message: typeof e.message === 'string' ? e.message : String(err),
-            }
+            };
           }
         },
-      })
-      const errLines: string[] = []
-      const origWrite = process.stderr.write
+      });
+      const errLines: string[] = [];
+      const origWrite = process.stderr.write;
       process.stderr.write = ((chunk: string | Uint8Array) => {
-        errLines.push(String(chunk))
-        return true
-      }) as typeof process.stderr.write
+        errLines.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
       try {
-        const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+        const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline());
         try {
-          await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+          await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline());
         } finally {
-          peer.close()
+          peer.close();
         }
       } finally {
-        process.stderr.write = origWrite
+        process.stderr.write = origWrite;
       }
-      assert.equal((fake.probeResult as { code?: number } | undefined)?.code, -32601)
+      assert.equal((fake.probeResult as { code?: number } | undefined)?.code, -32601);
       const denied = readFileSync(journal, 'utf8')
         .trim()
         .split('\n')
-        .map((l) => JSON.parse(l) as Record<string, unknown>)
-        .find((r) => r.event === 'acp.denied_call' && r.method === 'elicitation/create')
-      assert.ok(denied, 'the unserved call announced itself on the journal')
-      const line = errLines.find((l) => l.includes('elicitation/create'))
-      assert.match(line ?? '', /method-not-found/, 'the stderr line names the real cause')
+        .map(l => JSON.parse(l) as Record<string, unknown>)
+        .find(r => r.event === 'acp.denied_call' && r.method === 'elicitation/create');
+      assert.ok(denied, 'the unserved call announced itself on the journal');
+      const line = errLines.find(l => l.includes('elicitation/create'));
+      assert.match(line ?? '', /method-not-found/, 'the stderr line names the real cause');
       assert.ok(
         !line?.includes('non-interactive pin'),
         'an unadvertised call does not blame the permission pin'
-      )
+      );
     } finally {
-      otelJournal(undefined)
-      rmSync(dir, { recursive: true, force: true })
+      otelJournal(undefined);
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});

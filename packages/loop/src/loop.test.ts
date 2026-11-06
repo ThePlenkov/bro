@@ -29,6 +29,13 @@ describe('loopSection', () => {
     assert.equal(cfg.maxItems, 0);
   });
 
+  test('everySec — the supervised re-scan cadence; a sub-second busy loop falls back', () => {
+    assert.equal(loopSection({ everySec: 120 }).everySec, 120);
+    assert.equal(loopSection({ everySec: 0.5 }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+    assert.equal(loopSection({ everySec: -1 }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+    assert.equal(loopSection({ everySec: 'fast' }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+  });
+
   test('zero timeouts fall back — 0 would park every gate instantly', () => {
     const cfg = loopSection({ stallMin: 0, mergeTimeoutMin: 0, maxItems: 0 });
     assert.equal(cfg.stallMin, DEFAULT_LOOP_CONFIG.stallMin);
@@ -49,6 +56,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
+      everySec: 120,
       stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
@@ -70,6 +78,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
+      everySec: 120,
       stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
