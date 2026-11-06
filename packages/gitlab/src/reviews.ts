@@ -493,7 +493,9 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     if (state === 'closed') {
       return rows.filter(row => row.state !== 'merged').map(toMergedPr);
     }
-    return rows.map(toMergedPr);
+    // 'all' adds open/locked MRs — the facade contract is terminal
+    // states only, so drop them here rather than in every caller
+    return rows.filter(row => row.state === 'closed' || row.state === 'merged').map(toMergedPr);
   }
 
   /** One named-id fetch → MergedPr | null (warned skips). `acceptClosed`

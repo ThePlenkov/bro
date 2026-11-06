@@ -281,6 +281,14 @@ async function cmdCollect(
   if (args.dryRun || args.listOnly) {
     return;
   }
+  refreshDebtLedger();
+}
+
+/** Post-collect bookkeeping — refresh the summary and project into
+ *  beads when configured. Every ledger-writing collect path runs this;
+ *  a caller that collects rows and skips it leaves them jsonl-only —
+ *  invisible to `debt status`/summary and unprojected for bd stores. */
+export function refreshDebtLedger(): void {
   const totalRows = readDebtRecords().length;
   if (totalRows > 0) {
     writeSummary(buildSummary(readDebtRecords()));

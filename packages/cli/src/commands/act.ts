@@ -73,7 +73,7 @@ import {
 import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
 import { coveredBeadIds } from '@broject/loop';
 import { githubPrWake } from '@broject/github';
-import { collectReviewThreads, type CollectArgs } from './debt.ts';
+import { collectReviewThreads, refreshDebtLedger, type CollectArgs } from './debt.ts';
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
@@ -1287,6 +1287,9 @@ async function harvestClosedPr(rev: ReviewFacade, t: PrTarget, state: string): P
       sources: null,
       includeClosed: true,
     } as CollectArgs);
+    // same tail cmdCollect runs — without it the harvested rows stay
+    // ledger-only: no summary refresh, no beads projection
+    refreshDebtLedger();
   } catch (err) {
     console.error(
       `act: debt harvest failed for closed PR — ${err instanceof Error ? err.message : err}`

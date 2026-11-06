@@ -371,16 +371,30 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   if (q.label) {
     args.push('--label', q.label);
   }
+  const search: string[] = [];
   if (q.mergedSince && state === 'merged') {
     // server-side cutoff — the list caps by recency, so a mergedAt
     // filter applied after the cap would lose eligible PRs. The
     // merged: qualifier takes a YYYY-MM-DD date — slice the ISO stamp;
     // the over-inclusive day edge is fine, callers filter exactly.
-    args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`);
+    search.push(`merged:>=${q.mergedSince.slice(0, 10)}`);
   } else if (q.mergedSince) {
     // 'closed'/'all': closedAt covers closed-unmerged and merged rows
     // alike — `merged:` would exclude the closed half of 'all'
-    args.push('--search', `closed:>=${q.mergedSince.slice(0, 10)}`);
+    search.push(`closed:>=${q.mergedSince.slice(0, 10)}`);
+  }
+  // `--state closed` returns merged rows and `--state all` returns open
+  // rows — both eat the listing cap before the client filter below
+  // drops them, so merged/open history can crowd the whole window out.
+  // The search qualifier moves the drop server-side, where the limit
+  // counts only rows the caller keeps.
+  if (state === 'closed') {
+    search.push('is:unmerged');
+  } else if (state === 'all') {
+    search.push('is:closed');
+  }
+  if (search.length > 0) {
+    args.push('--search', search.join(' '));
   }
   const rows = ghJson<MergedPrRow[]>(args);
   if (state === 'merged') {

@@ -134,8 +134,14 @@ export function resolveHarvestPrs(
           limit,
           state: 'closed',
         });
-      } catch {
-        closed = [];
+      } catch (err) {
+        // a swallowed failure reads as "no closed PRs" — the merged-only
+        // result then reports as a complete scan. Surface the hole and
+        // fail the run instead of collecting a partial window.
+        console.error(
+          `debt collect: closed PR listing failed — closed-unmerged PRs were not scanned (${err instanceof Error ? err.message : String(err)})`
+        );
+        process.exitCode = 1;
       }
     }
     candidates = [...merged, ...closed];
