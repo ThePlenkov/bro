@@ -66,6 +66,8 @@ export {
   ALL_SOURCES,
   assertTokenSafeHost,
   COLLECTORS,
+  collectForSource,
+  dedupeForSource,
   DEBT_SOURCES,
   dedupeByThreads,
   parseSources,

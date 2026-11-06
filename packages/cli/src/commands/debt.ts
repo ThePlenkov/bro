@@ -58,11 +58,11 @@ import {
   writeHarvestFile,
   writeSummary,
   ALL_SOURCES,
-  COLLECTORS,
+  collectForSource,
   DEBT_SOURCES,
   parseSources,
+  dedupeForSource,
   resolvedThreadIds,
-  SOURCE_DEDUPES,
   SourceSkipped,
   type DebtPrState,
   type DebtRecord,
@@ -301,7 +301,8 @@ function collectSourceRecordsDebt(
   harvestedAt: string
 ): DebtRecord[] | undefined {
   try {
-    return COLLECTORS[source](
+    return collectForSource(
+      source,
       {
         repo: args.repo,
         runId: args.runId,
@@ -325,7 +326,7 @@ function applyDebtDedupe(
   source: DebtSource,
   records: DebtRecord[]
 ): { records: DebtRecord[]; existing: DebtRecord[]; dupedIds: Set<string>; coveredBy: Map<string, string> } {
-  const dedupe = SOURCE_DEDUPES[source]
+  const dedupe = dedupeForSource(source)
   let existing: DebtRecord[] = []
   let dupedIds = new Set<string>()
   let coveredBy = new Map<string, string>()
@@ -383,7 +384,7 @@ function collectOneSource(
     }
     return
   }
-  if (SOURCE_DEDUPES[source] !== undefined) {
+  if (dedupeForSource(source) !== undefined) {
     syncDedupeOverlays(source, dedupe.existing, records, dedupe.dupedIds, dedupe.coveredBy)
   }
   if (records.length > 0) {
@@ -1356,20 +1357,6 @@ function cmdSync(argv: string[]): void {
 
 // --- entry -----------------------------------------------------------------
 
-const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
-  collect: cmdCollect,
-  status: cmdStatus,
-  stats: cmdStats,
-  trend: cmdTrend,
-  prs: cmdPrs,
-  list: cmdList,
-  mark: cmdMark,
-  set: cmdSet,
-  sync: cmdSync,
-  next: cmdNext,
-  watch: cmdWatch,
-}
-
 // Whether the invocation wrote ledger state — the post-run data-ref
 // publish fires only then. Read-only variants write nothing: collect
 // --dry-run/--list-only, sync --dry-run, and bare `next` (only --claim
@@ -1427,12 +1414,45 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0)
   }
-  const handler = COMMANDS[cmd!]
-  if (!handler) {
-    console.error(`unknown command: ${cmd}`)
-    usage()
+  switch (cmd!) {
+    case 'collect':
+      await cmdCollect(rest)
+      break
+    case 'status':
+      cmdStatus()
+      break
+    case 'stats':
+      cmdStats(rest)
+      break
+    case 'trend':
+      cmdTrend(rest)
+      break
+    case 'prs':
+      cmdPrs(rest)
+      break
+    case 'list':
+      cmdList(rest)
+      break
+    case 'mark':
+      cmdMark(rest)
+      break
+    case 'set':
+      cmdSet(rest)
+      break
+    case 'sync':
+      cmdSync(rest)
+      break
+    case 'next':
+      cmdNext(rest)
+      break
+    case 'watch':
+      await cmdWatch(rest)
+      break
+    default:
+      console.error(`unknown command: ${cmd}`)
+      usage()
+      return
   }
-  await handler(rest)
   if (commandMutatedLedger(cmd!, rest)) {
     maybeDataRefSync()
   }
