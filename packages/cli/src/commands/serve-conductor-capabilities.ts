@@ -11,41 +11,40 @@
 import type { ClientTool } from './serve-conductor-tools.ts';
 
 /** The ACP kinds → the client tools that do the same thing, in order.
- *  The first candidate whose required properties the call covers wins. */
-const CAPABILITY: Record<string, string[]> = {
-  execute: ['bash', 'shell', 'terminal', 'run_command'],
-  read: ['read', 'view', 'cat'],
-  edit: ['edit', 'write', 'apply_patch'],
-  search: ['grep', 'glob', 'search'],
-  fetch: ['webfetch', 'fetch', 'websearch'],
-};
+ *  The first candidate whose required properties the call covers wins.
+ *  A Map, not a plain object: the kind is the agent's own string, and a
+ *  lookup by it must not reach into a prototype ("toString", "constructor")
+ *  nor into a key the caller controls — a Map has neither. */
+const CAPABILITY = new Map<string, string[]>([
+  ['execute', ['bash', 'shell', 'terminal', 'run_command']],
+  ['read', ['read', 'view', 'cat']],
+  ['edit', ['edit', 'write', 'apply_patch']],
+  ['search', ['grep', 'glob', 'search']],
+  ['fetch', ['webfetch', 'fetch', 'websearch']],
+]);
 
 /** The raw input's field names → the client's — the agent's shape differs
  *  from the client's, the schema is the contract. A field can have more
  *  than one spelling on the client's side (the agent says `path`, the
  *  client says `file_path` — and the other way round); the exact match
  *  wins, then the alias the tool actually exposes. */
-const ALIAS: Record<string, string[]> = {
-  path: ['file_path'],
-  filepath: ['file_path'],
-  file: ['file_path'],
-  file_path: ['path'],
-  cmd: ['command'],
-  oldstring: ['old_string'],
-  newstring: ['new_string'],
-  old_text: ['old_string'],
-  new_text: ['new_string'],
-};
+const ALIAS = new Map<string, string[]>([
+  ['path', ['file_path']],
+  ['filepath', ['file_path']],
+  ['file', ['file_path']],
+  ['file_path', ['path']],
+  ['cmd', ['command']],
+  ['oldstring', ['old_string']],
+  ['newstring', ['new_string']],
+  ['old_text', ['old_string']],
+  ['new_text', ['new_string']],
+]);
 
 /** The capability the agent named — undefined when it names one this client
- *  does not have. The lookup is OWN-property only: the kind is the agent's
- *  string, and a plain object's prototype carries names of its own
- *  ("toString", "constructor") that are not capabilities. */
+ *  does not have. */
 export function capabilityOf(kind: unknown): string[] | undefined {
   if (typeof kind !== 'string') return undefined;
-  if (!Object.hasOwn(CAPABILITY, kind)) return undefined;
-  const wanted = CAPABILITY[kind];
-  return Array.isArray(wanted) ? wanted : undefined;
+  return CAPABILITY.get(kind);
 }
 
 /** The client's tools that answer the capability — in the capability's own
@@ -70,7 +69,7 @@ export function matchingTools(
 export function propertyFor(tool: ClientTool, key: string): string | undefined {
   const hit = tool.properties.find(p => p.toLowerCase() === key.toLowerCase());
   if (hit !== undefined) return hit;
-  const alias = ALIAS[key.toLowerCase()];
+  const alias = ALIAS.get(key.toLowerCase());
   if (alias === undefined) return undefined;
   return alias.find(candidate => tool.properties.includes(candidate));
 }

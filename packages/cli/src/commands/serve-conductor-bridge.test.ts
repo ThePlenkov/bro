@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { clientCall } from './serve-conductor-bridge.ts';
+import { capabilityOf } from './serve-conductor-capabilities.ts';
 import { clientTools } from './serve-conductor-tools.ts';
 
 const CLAUDE_TOOLS = clientTools([
@@ -262,4 +263,31 @@ test("the vocabulary reads the request's own definitions", () => {
   assert.deepEqual(tools[0]?.required, ['command']);
   assert.deepEqual(tools[0]?.properties, ['command']);
   assert.deepEqual(clientTools(undefined), []);
+});
+
+test("a property the client names __proto__ is an ordinary entry, not a prototype swap", () => {
+  const tools = clientTools([
+    {
+      name: 'read',
+      input_schema: JSON.parse('{"properties":{"__proto__":{"type":"string"}},"required":[]}'),
+    },
+  ]);
+  const types = tools[0]?.types ?? {};
+  assert.equal(Object.getPrototypeOf(types), null);
+  // an OWN entry, with the type the client declared for it
+  assert.deepEqual(Object.getOwnPropertyDescriptor(types, '__proto__')?.value, ['string']);
+  // and nothing else — a name the client never declared has no answer to
+  // give, the table has no prototype to fall back on
+  assert.deepEqual(Object.keys(types), ['__proto__']);
+});
+
+test('a kind that is not a capability is not one', () => {
+  // a plain object's prototype carries names of its own — "toString",
+  // "constructor" — and none of them is a capability
+  assert.equal(capabilityOf('toString'), undefined);
+  assert.equal(capabilityOf('constructor'), undefined);
+  assert.equal(capabilityOf('__proto__'), undefined);
+  assert.equal(capabilityOf(42), undefined);
+  assert.equal(capabilityOf(undefined), undefined);
+  assert.deepEqual(capabilityOf('read'), ['read', 'view', 'cat']);
 });

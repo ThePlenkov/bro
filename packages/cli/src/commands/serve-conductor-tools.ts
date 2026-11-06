@@ -62,7 +62,8 @@ function schemaOf(schema: unknown): {
   properties: string[];
   types: Record<string, string[]>;
 } {
-  const empty = { required: [], properties: [], types: {} };
+  const types: Record<string, string[]> = Object.create(null);
+  const empty = { required: [], properties: [], types };
   if (typeof schema !== 'object' || schema === null) return empty;
   const s = schema as { required?: unknown; properties?: unknown };
   const props =
@@ -82,9 +83,11 @@ function requiredOf(declared: unknown): string[] {
   return declared.filter((v): v is string => typeof v === 'string');
 }
 
-/** The type each property declares — one name, a list of names, or none. */
+/** The type each property declares — one name, a list of names, or none.
+ *  The table has NO prototype: a property the client names `__proto__` is an
+ *  ordinary own entry, not a swap of the table's prototype. */
 function typesOf(props: Record<string, unknown>): Record<string, string[]> {
-  const types: Record<string, string[]> = {};
+  const types: Record<string, string[]> = Object.create(null);
   for (const [name, shape] of Object.entries(props)) {
     types[name] = declaredType((shape as { type?: unknown } | undefined)?.type);
   }
