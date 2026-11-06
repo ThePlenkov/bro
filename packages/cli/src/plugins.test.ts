@@ -443,6 +443,30 @@ describe('external plugin/connector validation', () => {
       'runPlan without planSchema rejected',
       `export default { name: 'bad6', summary: 'x', run: () => {}, runPlan: () => {} }`,
     ],
+    [
+      'connector optIn must be boolean',
+      `export default { name: 'bad7', summary: 'x', run: () => {}, connectors: [{ name: 'c7', optIn: 'yes' }] }`,
+    ],
+    [
+      'connector callback field must be a function',
+      `export default { name: 'bad8', summary: 'x', run: () => {}, connectors: [{ name: 'c8', matchRemote: 'x' }] }`,
+    ],
+    [
+      'plugin group must be a string',
+      `export default { name: 'bad9', summary: 'x', run: () => {}, group: 1 }`,
+    ],
+    [
+      'plugin aliasOf must be a string',
+      `export default { name: 'bad10', summary: 'x', run: () => {}, aliasOf: 2 }`,
+    ],
+    [
+      'plugin hidden must be a boolean',
+      `export default { name: 'bad11', summary: 'x', run: () => {}, hidden: 'y' }`,
+    ],
+    [
+      'sparse optInFacades holes rejected',
+      `export default { name: 'bad12', summary: 'x', run: () => {}, connectors: [{ name: 'c12', optInFacades: [,'tasks'] }] }`,
+    ],
   ];
 
   for (const [title, source] of rejectionCases) {

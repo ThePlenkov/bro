@@ -1101,7 +1101,11 @@ function hasValidConnectorFlags(c: unknown): boolean {
   if (c.optInFacades === undefined) {
     return true;
   }
-  return Array.isArray(c.optInFacades) && c.optInFacades.every(f => isValidFacadeKey(f));
+  return (
+    Array.isArray(c.optInFacades) &&
+    !c.optInFacades.includes(undefined) &&
+    c.optInFacades.every(f => isValidFacadeKey(f))
+  );
 }
 
 function isConnector(c: unknown): boolean {
