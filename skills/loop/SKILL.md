@@ -94,7 +94,7 @@ prepares passes the external-agent exclusion first: while an agent this
 rig does not own is actively working on the host (an interactive devin
 or opencode session, a foreign worker, a live copilot task, a session
 that armed `.work`/`.task` markers here), the pass refuses `cap` —
-`external agent active — <plane>: <detail>` — and holds for the next
+`external agent active — <kind>: <detail>` — and holds for the next
 tick. The session goes idle after `spawn.externalIdleSec` (default
 480s) of no proven activity; `spawn.externalBlock: false` opts out.
 The quota lanes (`agents.<kind>.maxSessions/maxWorkers/
