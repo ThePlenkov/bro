@@ -38,6 +38,13 @@ function withoutTrailingSlashes(text: string): string {
   return text.slice(0, end);
 }
 
+/** The URL as an error may show it: the origin and the path, never the
+ *  credentials and never the query — a refused url can carry a
+ *  password, and a log is a place a password must not land. */
+function urlForError(url: URL): string {
+  return `${url.protocol}//${url.host}${url.pathname}`;
+}
+
 /** The router's URL, checked against the credential it carries.
  *
  *  The base carries a PATH and nothing else: the catalog read appends
@@ -47,11 +54,17 @@ function withoutTrailingSlashes(text: string): string {
 export function routerUrl(raw: string): string {
   const url = URL.parse(raw);
   if (url === null) {
-    throw new Error(`the router's url "${raw}" is not a valid URL`);
+    throw new Error(`the router's url is not a valid URL`);
+  }
+  if (url.username || url.password) {
+    // a url with credentials in it: the token would ride to a host that
+    // asks for a password, and the password would land in every log
+    // that prints the refusal
+    throw new Error(`the router's url carries credentials — a router url never carries a password`);
   }
   if (!tokenSafeOrigin(url)) {
     throw new Error(
-      `the router's url ${raw} cannot carry the session token — https or a loopback router ` +
+      `the router's url ${urlForError(url)} cannot carry the session token — https or a loopback router ` +
         `(http://127.0.0.1:<port>) only; a plain-http host would carry it cleartext`
     );
   }
