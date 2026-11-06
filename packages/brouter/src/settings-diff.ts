@@ -37,7 +37,10 @@ function summarize(value: unknown): string {
   if (value === null) return 'null';
   if (typeof value === 'object') return 'an object';
   if (typeof value === 'string') return `"${value}"`;
-  return String(value);
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  return 'a value';
 }
 
 /** One key's change — undefined when the key did not change. */

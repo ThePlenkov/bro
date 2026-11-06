@@ -39,7 +39,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   CLAUDE_CODE_BEHAVES_AS,
   claudeCodeAdapter,
@@ -53,6 +53,27 @@ import {
 
 /** The prompt — the agent must run a tool, or the loop is never tested. */
 const TOOL_PROMPT = 'Run the command `echo bro-live-check` and then answer with its output.';
+
+/** The directories the client may run its own tools from — fixed, never the
+ *  shell's PATH: a tampered PATH must not decide what the client executes. */
+const FIXED_PATH = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'];
+
+/** The client binary — an ABSOLUTE path, found once, so the child needs no
+ *  PATH to find it and no PATH can swap it for something else. */
+function clientBinary(): string {
+  const dirs = (process.env.PATH ?? '').split(':').filter(dir => dir !== '');
+  for (const dir of dirs) {
+    const candidate = join(dir, 'claude');
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error('the claude client was not found on PATH');
+}
+
+/** The child's PATH — the fixed directories, plus the client's own one (a
+ *  wrapper script needs the interpreter that sits next to it). */
+function clientPath(binary: string): string {
+  return [dirname(binary), ...FIXED_PATH].join(':');
+}
 
 /** The flags the check reads. */
 type Flag = '--url' | '--token' | '--config-dir' | '--keep';
@@ -251,15 +272,21 @@ function readTranscript(text: string): Transcript {
 /** The client, for real — a scratch cwd, the scratch config, a base URL. */
 function runClient(live: Live, prompt: string, extra: string[], baseUrl: string): ClientRun {
   const before = new Set(transcriptFiles(live));
+  const binary = clientBinary();
+  // the parent's PATH is dropped, not inherited: the child runs with the
+  // fixed directories only, and the client binary by its absolute path
+  const env = { ...process.env };
+  delete env.PATH;
   const result = spawnSync(
-    'claude',
+    binary,
     ['-p', prompt, ...extra, '--permission-mode', 'bypassPermissions'],
     {
       cwd: live.workDir,
       encoding: 'utf8',
       timeout: 300_000,
       env: {
-        ...process.env,
+        ...env,
+        PATH: clientPath(binary),
         CLAUDE_CONFIG_DIR: live.configDir,
         ANTHROPIC_BASE_URL: baseUrl,
         ANTHROPIC_AUTH_TOKEN: live.endpoint.token,
