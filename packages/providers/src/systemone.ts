@@ -71,19 +71,11 @@ function runtimeKey(entry: ApiTarget): string | undefined {
   return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey
 }
 
-/** The key this call authenticates with — the runtime key wins (it was
- *  handed to THIS call on purpose), then the secret-store command, then
- *  the configured env var; a non-NAME apiKeyEnv is a config bug (throws,
- *  never echoed); a missing var is fail-open, and the message names the
- *  config FIELD, never the value. */
-function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
-  const runtime = runtimeKey(entry)
-  if (runtime !== undefined) {
-    return runtime
-  }
-  if (entry.apiKeyCommand !== undefined) {
-    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
-  }
+/** The key from the configured env var — the var must be NAMED (a
+ *  non-NAME apiKeyEnv is a config bug: throws, never echoed), and it must
+ *  hold something (a missing var is fail-open, and the message names the
+ *  config FIELD, never the value). */
+function envKey(entry: ApiTarget, keyField: string): string {
   if (entry.apiKeyEnv === undefined) {
     throw new Error(`${keyField} is not set — the provider has no key to authenticate with`)
   }
@@ -97,6 +89,20 @@ function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
     )
   }
   return key
+}
+
+/** The key this call authenticates with — the runtime key wins (it was
+ *  handed to THIS call on purpose), then the secret-store command, then
+ *  the configured env var. */
+function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
+  const runtime = runtimeKey(entry)
+  if (runtime !== undefined) {
+    return runtime
+  }
+  if (entry.apiKeyCommand !== undefined) {
+    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
+  }
+  return envKey(entry, keyField)
 }
 
 /** System One's error contract → the throw the caller sees: 401/403 auth is
