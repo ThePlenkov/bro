@@ -3,13 +3,14 @@ import type { ContractDump } from './contract-dump.ts';
 import { isRecord, own, type ContractProblem } from './contract-shared.ts';
 
 /** The ops a transport can actually serve: every named read plus the
- *  `mcpVerbs` allowlist — the only write surface today. Declared verbs
- *  outside `mcpVerbs` are declared-but-unwired (their exec throws
- *  PlaneUnavailable), so they serve nothing yet and need no twin until
- *  a spec exposes one. Deduped — an op named in both lists is one
- *  exposure, so its missing twin is one problem, not two. */
+ *  per-transport verb allowlists (`mcpVerbs` for tools, `restVerbs` for
+ *  POST routes). Declared verbs outside every allowlist are
+ *  declared-but-unwired (their exec throws PlaneUnavailable), so they
+ *  serve nothing yet and need no twin until a spec exposes one.
+ *  Deduped — an op named in more than one list is one exposure, so its
+ *  missing twin is one problem, not two. */
 function exposedOps(plane: PlaneDescriptor): string[] {
-  return [...new Set([...plane.reads, ...(plane.mcpVerbs ?? [])])];
+  return [...new Set([...plane.reads, ...(plane.mcpVerbs ?? []), ...(plane.restVerbs ?? [])])];
 }
 
 /** Every transport-exposed plane op mirrors a CLI contract entry — the

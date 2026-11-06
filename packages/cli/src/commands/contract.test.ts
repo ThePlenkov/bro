@@ -418,6 +418,24 @@ describe('planeParityProblems', () => {
       ['planes.p.shown']
     );
   });
+
+  test('restVerbs are exposed ops too — a REST-only verb still needs a twin', () => {
+    const orphan = [fakePlane({ name: 'p', reads: [], verbs: ['shown'], restVerbs: ['shown'] })];
+    assert.deepEqual(
+      planeParityProblems(orphan, live).map(p => p.path),
+      ['planes.p.shown']
+    );
+    const twinned = [
+      fakePlane({
+        name: 'p',
+        reads: [],
+        verbs: ['shown'],
+        restVerbs: ['shown'],
+        cli: { shown: 'doctor' },
+      }),
+    ];
+    assert.deepEqual(planeParityProblems(twinned, live), []);
+  });
 });
 
 describe('parseBreaking', () => {

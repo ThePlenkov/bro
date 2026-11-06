@@ -178,6 +178,7 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
     reads: Object.keys(reads),
     verbs: VERBS,
     mcpVerbs: [DELEGATE],
+    restVerbs: [DELEGATE],
     /** CLI twins — `bro agents status`, `bro fleet`, `bro fleet
      *  delegate` (spec bro-xiq2m). */
     cli: { backends: 'agents', fleet: 'fleet', [DELEGATE]: 'delegate' },
