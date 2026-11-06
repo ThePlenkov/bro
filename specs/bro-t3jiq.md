@@ -15,12 +15,12 @@ push re-runs the heavy review over all of it.
 What is left is **four unrelated concerns**, each with its own shape, its
 own risk and its own review weight:
 
-| | concern | shape | review weight |
-|---|---|---|---|
-| 1 | the command-base arc's code-health debt | mechanical, 13 + 14 + 17 findings | heavy bots, mechanical diff |
-| 2 | the proxied decision model's token in `process.env` | a contract change in `@broject/providers` | every consumer of the api kind |
-| 3 | the Claude Code loop — the conductor answers in text, the client repeats | a protocol bridge, the largest unknown | the whole client contract |
-| 4 | the claude-code client writes its model block — and the client must recognize it | a write outside the repo, needs proof | small diff, live verification |
+| layer | concern                                                                          | shape                                     | review weight                  |
+| ----- | -------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------ |
+| 1     | the command-base arc's code-health debt                                          | mechanical, 13 + 14 + 17 findings         | heavy bots, mechanical diff    |
+| 2     | the proxied decision model's token in `process.env`                              | a contract change in `@broject/providers` | every consumer of the api kind |
+| 3     | the Claude Code loop — the conductor answers in text, the client repeats         | a protocol bridge, the largest unknown    | the whole client contract      |
+| 4     | the claude-code client writes its model block — and the client must recognize it | a write outside the repo, needs proof     | small diff, live verification  |
 
 One PR mixes them: a protocol bridge lands next to a mechanical refactor and
 neither reads as itself. Four PRs without a stack make the operator rebase
@@ -32,14 +32,18 @@ it proves.
 
 ### The stack
 
-```
+```text
 main
  └── feat/router-routes            PR #922 (draft) — smart routes + explain
       └── stack/router/1-code-health   PR #923 — bro-dzrzn
-           └── stack/router/2-token    PR #924 — bro-aaxiu
-                └── stack/router/3-tool-use   PR #925 — bro-sy4q3
-                     └── stack/router/4-client   PR #926 — bro-lzj2f
+           └── stack/router/2-token    PR #925 — bro-aaxiu
+                └── stack/router/3-tool-use   PR #936 — bro-sy4q3
+                     └── stack/router/4-client   PR #942 — bro-lzj2f
 ```
+
+Layer 4's first PR (#941) was closed by an outside action before the stack
+landed; the layer itself lives in #942, on the same branch and the same
+content.
 
 The branches live in the repo's own stack namespace (`stack/<name>/<n>-<slug>`),
 so `bro stack list` reads the chain, `bro stack sync` retargets the child PRs
