@@ -166,6 +166,22 @@ function assertBothInStack(f: Fixture, id: number): void {
   assert.equal(stacks?.['stack/s/2-fx-b'], id)
 }
 
+/** The post-tool hook's own event — a worker's `gh pr create` landing in
+ *  the worktree that created it. */
+function prCreateHook(f: Fixture, cwd: string): CliResult {
+  return runCli(['hooks', 'post-tool'], {
+    cwd,
+    input: JSON.stringify({
+      session_id: 's1',
+      cwd,
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr create --fill' },
+      tool_response: { success: true },
+    }),
+    env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+  })
+}
+
 describe('bro stack e2e', () => {
   test('push creates stack/<name>/<n>-<slug> worktrees off the tip and claims beads', () => {
     const f = stackFixture([
@@ -652,17 +668,7 @@ describe('bro stack e2e', () => {
       const { wa } = openPair(f)
       // the worker opens the member's PR — bro's post-tool hook sees the
       // very command and registers the chain behind it
-      const r = runCli(['hooks', 'post-tool'], {
-        cwd: wa,
-        input: JSON.stringify({
-          session_id: 's1',
-          cwd: wa,
-          tool_name: 'Bash',
-          tool_input: { command: 'gh pr create --fill' },
-          tool_response: { success: true },
-        }),
-        env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
-      })
+      const r = prCreateHook(f, wa)
       assert.equal(r.code, 0, r.stderr)
       // the registration is detached — the hook never waits for it
       const deadline = Date.now() + 20_000
@@ -679,17 +685,7 @@ describe('bro stack e2e', () => {
     const f = stackFixture()
     await insideAsync(f.main, f.root, async () => {
       openPair(f)
-      const r = runCli(['hooks', 'post-tool'], {
-        cwd: f.main,
-        input: JSON.stringify({
-          session_id: 's1',
-          cwd: f.main,
-          tool_name: 'Bash',
-          tool_input: { command: 'gh pr create --fill' },
-          tool_response: { success: true },
-        }),
-        env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
-      })
+      const r = prCreateHook(f, f.main)
       assert.equal(r.code, 0, r.stderr)
       // give a would-be registration the time to land — it must not
       await new Promise((resolve) => setTimeout(resolve, 2_000))

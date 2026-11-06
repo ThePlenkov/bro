@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { maybeSpawnStackPublish, stackNameOfBranch } from './stack-publish.ts'
 import { join } from 'node:path'
+import { maybeSpawnStackPublish, stackNameOfBranch } from './stack-publish.ts'
 import { git, initRepo, inside } from './testrepo.ts'
 
 describe('stackNameOfBranch', () => {
@@ -17,11 +17,18 @@ describe('stackNameOfBranch', () => {
   })
 })
 
+/** A repo checked out on a stack member's branch — the shape the hook
+ *  sees when a worker opens that member's PR. */
+function memberRepo(prefix: string): { root: string; main: string } {
+  const { root, main } = initRepo(prefix)
+  git(['checkout', '-q', '-b', 'stack/router/1-bro-aaa'], main)
+  return { root, main }
+}
+
 describe('maybeSpawnStackPublish', () => {
   test("a member's branch spawns the registration", () => {
-    const { root, main } = initRepo('bro-stack-publish-')
+    const { root, main } = memberRepo('bro-stack-publish-')
     inside(main, root, () => {
-      git(['checkout', '-q', '-b', 'stack/router/1-bro-aaa'], main)
       const calls: Array<[string, string, string]> = []
       maybeSpawnStackPublish(
         main,
@@ -73,9 +80,8 @@ describe('maybeSpawnStackPublish', () => {
   })
 
   test('a missing entry spawns nothing', () => {
-    const { root, main } = initRepo('bro-stack-publish-')
+    const { root, main } = memberRepo('bro-stack-publish-')
     inside(main, root, () => {
-      git(['checkout', '-q', '-b', 'stack/router/1-bro-aaa'], main)
       const calls: string[] = []
       maybeSpawnStackPublish(main, (_e, _d, name) => calls.push(name), '/nonexistent/bro-entry')
       assert.deepEqual(calls, [])
