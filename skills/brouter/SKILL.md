@@ -52,12 +52,12 @@ client's own vocabulary, written into the client's own settings.
 `--explain` answers WHY a request went where it went. The vocabulary is
 SLICES, not levels — the user asks questions, so the flag names them:
 
-| Slice    | What it answers                                                       |
-| -------- | --------------------------------------------------------------------- |
-| `route`  | the route, the chain, the candidates, every reject with its reason    |
-| `model`  | the model that serves, and who pinned it (you, the route, the entry)  |
-| `health` | what the router knew at decision time — the walls, the sessions       |
-| `cost`   | the turn's context and cost, and the ledger's window counters         |
+| Slice    | What it answers                                                      |
+| -------- | -------------------------------------------------------------------- |
+| `route`  | the route, the chain, the candidates, every reject with its reason   |
+| `model`  | the model that serves, and who pinned it (you, the route, the entry) |
+| `health` | what the router knew at decision time — the walls, the sessions      |
+| `cost`   | the turn's context and cost, and the ledger's window counters        |
 
 - `--explain` — every slice. `--explain=route,model` — only those.
 - `brouter route --explain` → stdout (the explanation IS the output).
