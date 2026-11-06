@@ -34,13 +34,24 @@ function summarize(value: unknown): string {
   const rows = rowCount(value);
   if (rows !== undefined) return `${rows} model row(s)`;
   if (Array.isArray(value)) return `${value.length} item(s)`;
-  if (value === null) return 'null';
-  if (typeof value === 'object') return 'an object';
-  if (typeof value === 'string') return `"${value}"`;
-  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
-    return String(value);
+  return scalarSummary(value);
+}
+
+/** The scalars, said in a few words — the object is named BEFORE any
+ *  stringifier sees it, so nothing ever prints "[object Object]". */
+function scalarSummary(value: unknown): string {
+  switch (typeof value) {
+    case 'string':
+      return `"${value}"`;
+    case 'number':
+    case 'boolean':
+    case 'bigint':
+      return String(value);
+    case 'object':
+      return value === null ? 'null' : 'an object';
+    default:
+      return 'a value';
   }
-  return 'a value';
 }
 
 /** One key's change — undefined when the key did not change. */
