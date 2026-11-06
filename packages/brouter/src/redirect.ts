@@ -19,18 +19,25 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 /** The hops a read may follow before the answer is a loop. */
 const MAX_HOPS = 5;
 
-/** The redirect's target — resolved against the hop it came from, and
- *  checked against the guard: a hop may not carry the session token to
- *  a host the router's own URL could not name. */
-function redirectTarget(from: string, location: string): string {
-  const target = new URL(location, from);
-  if (!tokenSafeOrigin(target)) {
+/** The hop's URL — the guard's own answer, and the URL comes back WHOLE:
+ *  a redirect's query and fragment are the router's answer, not a base
+ *  the catalog path is appended to. A hop that leaves the guard is an
+ *  error, and the error names the host the token would have crossed
+ *  to. */
+function hopUrl(raw: string): string {
+  const target = URL.parse(raw);
+  if (!target || !tokenSafeOrigin(target)) {
     throw new Error(
-      `the router redirected to ${target.origin} — a redirect may not carry the session token ` +
-        `to a host the guard does not know (https or a loopback router only)`
+      `the catalog read cannot carry the session token to ${raw} — https or a loopback router ` +
+        `(http://127.0.0.1:<port>) only; a plain-http host would carry it cleartext`
     );
   }
-  return target.toString();
+  return raw;
+}
+
+/** The redirect's target — resolved against the hop it came from. */
+function redirectTarget(from: string, location: string): string {
+  return new URL(location, from).toString();
 }
 
 /** The catalog's answer — the router's, or the one a redirect points
@@ -43,10 +50,10 @@ export async function fetchTokenSafe(
 ): Promise<Response> {
   let current = url;
   for (let hop = 0; hop < MAX_HOPS; hop += 1) {
-    const res = await fetch(current, { headers, signal, redirect: 'manual' });
+    const res = await fetch(hopUrl(current), { headers, signal, redirect: 'manual' });
     if (!REDIRECT_STATUSES.has(res.status)) return res;
     const location = res.headers.get('location');
-    if (location === null) return res;
+    if (!location) return res;
     await res.text();
     current = redirectTarget(current, location);
   }
