@@ -91,9 +91,9 @@ export async function readCatalog(
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
   const limit = opts.limit ?? 1000;
-  const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
   const res = await fetchTokenSafe(
-    url,
+    endpoint,
+    limit,
     {
       'x-api-key': endpoint.token,
       authorization: `Bearer ${endpoint.token}`,
