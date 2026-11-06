@@ -349,6 +349,23 @@ describe('runAcpWorker', () => {
     }
   });
 
+  test('a malformed stdio env entry fails before session/new — values never echoed', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', env: [{ name: 'K', value: 42 }] }],
+    });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 1);
+      const msg = lines.join('\n');
+      assert.match(msg, /mcpServers\[0\]\.env\[0\].*\{name, value\}/);
+      assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('advertised authMethods are an offer — stored credentials still open a session', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' }],

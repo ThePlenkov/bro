@@ -164,6 +164,10 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
     }
     const t = typeof v.type === 'string' ? v.type : 'stdio';
     if (t === 'stdio') {
+      const envErr = stdioEnvShapeErr(v, i, by);
+      if (envErr !== undefined) {
+        throw envErr;
+      }
       out.push(v);
       continue;
     }
@@ -177,6 +181,39 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
     );
   }
   return out;
+}
+
+/** A stdio descriptor's `env`, when present, is `[{name, value}]`
+ *  string pairs — a numeric/bare value would fail obscurely inside
+ *  session/new, so it is refused here with an index. Values are never
+ *  echoed into the message. */
+function stdioEnvShapeErr(
+  v: Record<string, unknown>,
+  i: number,
+  by: string
+): AcpWorkerError | undefined {
+  if (v.env === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(v.env)) {
+    return new AcpWorkerError(
+      `${by}: mcpServers[${i}].env must be an array of {name, value} pairs`
+    );
+  }
+  for (let j = 0; j < v.env.length; j++) {
+    const e = v.env[j];
+    if (
+      !isPlainObject(e) ||
+      typeof e.name !== 'string' ||
+      e.name === '' ||
+      typeof e.value !== 'string'
+    ) {
+      return new AcpWorkerError(
+        `${by}: mcpServers[${i}].env[${j}] must be a {name, value} string pair`
+      );
+    }
+  }
+  return undefined;
 }
 
 /** `session/request_permission` policy — the headless default-deny:

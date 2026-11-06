@@ -586,6 +586,10 @@ function acpMcpServersFor(
     }
     const t = typeof v.type === 'string' ? v.type : 'stdio';
     if (t === 'stdio') {
+      const envErr = stdioEnvShapeErr(v, i);
+      if (envErr !== undefined) {
+        return { err: envErr };
+      }
       out.push(v);
       continue;
     }
@@ -599,6 +603,31 @@ function acpMcpServersFor(
     };
   }
   return { mcpServers: out };
+}
+
+/** A stdio descriptor's `env`, when present, is `[{name, value}]`
+ *  string pairs — anything else (a numeric value, a bare string, a
+ *  non-array) fails obscurely inside session/new, so it is refused
+ *  here with an index. Values are never echoed into the message. */
+function stdioEnvShapeErr(v: Record<string, unknown>, i: number): string | undefined {
+  if (v.env === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(v.env)) {
+    return `mcpServers[${i}].env must be an array of {name, value} pairs`;
+  }
+  for (let j = 0; j < v.env.length; j++) {
+    const e = v.env[j];
+    if (
+      !isPlainObject(e) ||
+      typeof e.name !== 'string' ||
+      e.name === '' ||
+      typeof e.value !== 'string'
+    ) {
+      return `mcpServers[${i}].env[${j}] must be a {name, value} string pair`;
+    }
+  }
+  return undefined;
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var

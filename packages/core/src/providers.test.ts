@@ -541,6 +541,15 @@ describe('parseProviderEntry', () => {
     assert.match(stderr, /stdio descriptor/);
     assert.doesNotMatch(stderr, /SECRET/);
 
+    // a malformed env shape fails loud at parse — a numeric value would
+    // otherwise die obscurely inside session/new
+    const badEnv = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo acp',
+      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', env: [{ name: 'K', value: 42 }] }],
+    });
+    assert.equal(badEnv, null);
+
     const absent = parseProviderEntry('p', { type: 'acp', command: 'kilo acp' });
     assert.equal((absent as { mcpServers?: unknown[] } | null)?.mcpServers, undefined);
   });
