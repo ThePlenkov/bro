@@ -886,19 +886,16 @@ function rebaseStep(
  *  rewritten, so the member ABOVE it rides a base that moved. */
 type SyncOutcome = 'ok' | 'rebased' | 'failed'
 
-/** One member's cascade step. 'failed' when the chain's base==prev-head
- *  invariant broke (a dirty member, a failed move) — the caller drops
- *  the publish tail instead of feeding the host's stack tool a
- *  reject. */
-function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
-  const m = item.member
-  if (m.prState === 'MERGED') {
-    retireMerged(m, ctx.root, ctx.lines)
-    return 'ok'
-  }
-  // The base's head may have moved while the cascade ran — the plan was
-  // made BEFORE it, and the plan cannot know. The invariant decides
-  // here: the branch must carry the head of the base it stands on.
+/** The invariant's verdict BEFORE the move: 'ok' when the branch may
+ *  move, 'failed' when the base's head cannot be read or the member is
+ *  skipped. The plan was made BEFORE the cascade ran, so it cannot
+ *  know whether the base's head moved — the branch must carry the head
+ *  of the base it stands on, and that is read here. */
+function baseVerdict(
+  m: MemberView,
+  item: SyncPlanItem<MemberView>,
+  ctx: SyncCtx
+): 'ok' | 'failed' {
   const carries = carriesBaseHead(m.branch, item.desiredBase, ctx.root)
   if (carries === undefined) {
     // an unknown head is not a success — the chain is not attested
@@ -915,10 +912,42 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
     ctx.lines.push(`  ${m.branch} skipped — ${item.skip}`)
     return 'failed'
   }
-  if (!item.rebase && !item.retarget) {
-    return 'ok' // in sync — don't even touch the edge file
+  return 'ok'
+}
+
+/** The base's head AFTER the move: the platform rewrites a child when
+ *  its parent MERGES — but a base that moved by a PUSH is not a merge,
+ *  and the platform leaves the child where it was. The invariant
+ *  decides, not the assumption. */
+function settleBase(
+  item: SyncPlanItem<MemberView>,
+  m: MemberView,
+  ctx: SyncCtx
+): SyncOutcome {
+  if (carriesBaseHead(m.branch, item.desiredBase, ctx.root) === false) {
+    if (!rebaseMember(item, ctx.lines)) {
+      return 'failed'
+    }
+    return 'rebased'
   }
-  const cascade = ctx.stacks?.cascade?.(m) ?? MANUAL_CASCADE
+  return item.rebase ? 'rebased' : 'ok'
+}
+
+/** The cascade this member's connector owns — the default when the
+ *  connector has no opinion (a plain rebase, no platform rewrite). */
+function cascadeFor(m: MemberView, ctx: SyncCtx): StackCascade {
+  return ctx.stacks?.cascade?.(m) ?? MANUAL_CASCADE
+}
+
+/** The move's own phase: the branch is rewritten, the edge moves, and
+ *  the PR is retargeted — by the platform when it owns the chain, by
+ *  bro otherwise. */
+function moveMember(
+  item: SyncPlanItem<MemberView>,
+  m: MemberView,
+  ctx: SyncCtx
+): SyncOutcome {
+  const cascade = cascadeFor(m, ctx)
   // The edge is the fork truth planSync reads — it moves only after
   // the member's local work landed. Recording it before a rebase or
   // remote-follow would read a failed rewrite as synced and never
@@ -926,24 +955,38 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
   if (!rebaseStep(item, cascade, ctx.lines)) {
     return 'failed'
   }
-  let rebased = item.rebase
-  // the platform rewrites a child when its parent MERGES — but a base that
-  // moved by a PUSH is not a merge, and the platform leaves the child where
-  // it was. The invariant decides, not the assumption.
-  if (carriesBaseHead(m.branch, item.desiredBase, ctx.root) === false) {
-    if (!rebaseMember(item, ctx.lines)) {
-      return 'failed'
-    }
-    rebased = true
+  const moved = settleBase(item, m, ctx)
+  if (moved === 'failed') {
+    return 'failed'
   }
   updateEdge(m, item.desiredBase, ctx.trunk)
   if (!cascade.retarget) {
-    return retargetMember(item, ctx.rev, ctx.lines) ? (rebased ? 'rebased' : 'ok') : 'failed'
+    return retargetMember(item, ctx.rev, ctx.lines) ? moved : 'failed'
   }
   if (item.retarget && m.pr !== undefined) {
     ctx.lines.push(`  ${m.branch} PR retarget → ${item.desiredBase} (platform)`)
   }
-  return rebased ? 'rebased' : 'ok'
+  return moved
+}
+
+/** One member's cascade step. 'failed' when the chain's base==prev-head
+ *  invariant broke (a dirty member, a failed move) — the caller drops
+ *  the publish tail instead of feeding the host's stack tool a
+ *  reject. */
+function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
+  const m = item.member
+  if (m.prState === 'MERGED') {
+    retireMerged(m, ctx.root, ctx.lines)
+    return 'ok'
+  }
+  const preflight = baseVerdict(m, item, ctx)
+  if (preflight !== 'ok') {
+    return preflight
+  }
+  if (!item.rebase && !item.retarget) {
+    return 'ok' // in sync — don't even touch the edge file
+  }
+  return moveMember(item, m, ctx)
 }
 
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
