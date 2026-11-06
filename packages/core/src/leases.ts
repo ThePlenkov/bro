@@ -12,6 +12,7 @@ import {
 import { hostname, homedir } from 'node:os'
 import { join } from 'node:path'
 import { withFileLock } from './filelock.ts'
+import { pidAlive } from './proc.ts'
 
 export interface LeaseHolder {
   host: string
@@ -141,15 +142,9 @@ function readLease(path: string): Lease | undefined {
 }
 
 function systemPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false
-  }
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
+  // proc.ts pidAlive rejects unreaped zombies (state 'Z') — kill(pid,0)
+  // alone would report a zombie as live and block the host's lease forever
+  return pidAlive(pid)
 }
 
 function makeDependencies(
