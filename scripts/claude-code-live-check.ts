@@ -29,6 +29,7 @@
  */
 import { spawn } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -361,10 +362,13 @@ function modelUnderTest(models: ServedModel[]): ServedModel {
 function prepareConfig(live: Live): void {
   mkdirSync(live.workDir, { recursive: true });
   const block = claudeCodeAdapter.renderModelBlock(live.models);
-  writeFileSync(
-    join(live.configDir, 'settings.json'),
-    `${JSON.stringify({ modelPicker: block }, null, 2)}\n`
-  );
+  const settings = join(live.configDir, 'settings.json');
+  // a directory the operator named may hold the settings they actually
+  // use — the block overwrites them, so a copy goes back first
+  if (existsSync(settings)) {
+    copyFileSync(settings, `${settings}.bak`);
+  }
+  writeFileSync(settings, `${JSON.stringify({ modelPicker: block }, null, 2)}\n`);
 }
 
 /** One message, as the client asked for it — the body when the client wants
@@ -563,7 +567,11 @@ async function main(): Promise<void> {
     throw new Error('the router serves no models — there is nothing to check');
   }
   const underTest = modelUnderTest(models);
-  const configDir = flagOf(args, '--config-dir') ?? mkdtempSync(join(tmpdir(), 'bro-cc-live-'));
+  const named = flagOf(args, '--config-dir');
+  const configDir = named ?? mkdtempSync(join(tmpdir(), 'bro-cc-live-'));
+  // the script owns only what it created — a directory the operator named
+  // is THEIRS, and the teardown must never delete it
+  const owned = named === undefined;
   const live: Live = {
     args,
     endpoint,
@@ -595,7 +603,9 @@ async function main(): Promise<void> {
   console.log('');
   printFindings(findings);
 
-  if (!hasFlag(args, '--keep')) {
+  if (!owned) {
+    console.log(`kept: ${configDir} (the operator's own — the check deletes only what it created)`);
+  } else if (!hasFlag(args, '--keep')) {
     rmSync(configDir, { recursive: true, force: true });
   } else {
     console.log(`kept: ${configDir}`);
