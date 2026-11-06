@@ -1470,6 +1470,13 @@ function releaseEntryLease(
       store.release(lease);
       return;
     }
+    // the entry names a lease identity nothing live matched — the row
+    // a stale token would free belongs to a successor; a blind
+    // forceRelease re-opens the double-spawn window the token check
+    // exists to close, so a token-carrying mismatch releases nothing
+    if (typeof entry?.leaseToken === 'string') {
+      return;
+    }
     const key = typeof entry?.leaseKey === 'string' ? entry.leaseKey : fallbackKey;
     if (key !== undefined) {
       store.forceRelease(key);
