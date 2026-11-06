@@ -182,13 +182,13 @@ contract.
 One responsibility per package — the router's ledger, the router's
 table, the decision model, the CLI:
 
-| Package                     | Owns                                                        |
-| --------------------------- | ----------------------------------------------------------- |
-| `@broject/router-store`     | the ledger: the drizzle schema, the migrations, the API, the health read-model |
-| `@broject/router-routes`    | the route table: the TOML schema, the candidates, the resolver |
-| `@broject/judge`            | `routePick` — the decision model, beside `routeClass`       |
-| `@broject/brouter`          | the CLI surfaces: `store`, `routes`, `health`, `route`       |
-| `@broject/cli`              | the spawn path: the loop asks the table for the bead's route |
+| Package                  | Owns                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `@broject/router-store`  | the ledger: the drizzle schema, the migrations, the API, the health read-model |
+| `@broject/router-routes` | the route table: the TOML schema, the candidates, the resolver                 |
+| `@broject/judge`         | `routePick` — the decision model, beside `routeClass`                          |
+| `@broject/brouter`       | the CLI surfaces: `store`, `routes`, `health`, `route`                         |
+| `@broject/cli`           | the spawn path: the loop asks the table for the bead's route                   |
 
 `core` holds the shared contract (the health types, the wall policy,
 the chain entry). Nothing reaches back: the store knows no routing, the

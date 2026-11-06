@@ -146,7 +146,7 @@ the reader reports what it dropped.
 
 ### The CLI
 
-```
+```text
 brouter models [--json]              the served catalog
 brouter clients [--json]              the client adapters
 brouter client <id> [--write] [--settings <path>] [--json]
