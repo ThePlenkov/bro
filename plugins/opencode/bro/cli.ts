@@ -149,6 +149,7 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
     try {
       child = spawn(cmd, args, {
         stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
         detached: process.platform !== 'win32',
       })
     } catch {
@@ -220,6 +221,7 @@ function exec(
       child = spawn(command.cmd, [...command.args, ...args], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
         detached: process.platform !== 'win32',
       })
     } catch {

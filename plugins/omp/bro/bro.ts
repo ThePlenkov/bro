@@ -73,6 +73,7 @@ async function exitsZero(cmd, args) {
 				"ignore",
 				"ignore"
 			],
+			windowsHide: true,
 			detached: process.platform !== "win32"
 		});
 	} catch {
@@ -143,6 +144,7 @@ async function callHook(command, event, payload, cwd, timeoutMs) {
 				"pipe",
 				"ignore"
 			],
+			windowsHide: true,
 			detached: process.platform !== "win32"
 		});
 	} catch {
@@ -236,6 +238,7 @@ async function statusJson(command, cwd) {
 				"pipe",
 				"ignore"
 			],
+			windowsHide: true,
 			detached: process.platform !== "win32"
 		});
 	} catch {
@@ -657,6 +660,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 				"pipe",
 				"pipe"
 			],
+			windowsHide: true,
 			detached: process.platform !== "win32"
 		});
 	} catch {

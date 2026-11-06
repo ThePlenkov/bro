@@ -50,6 +50,7 @@ export function git(args: string[]): string {
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     env: repoEnv(args),
   });
@@ -73,6 +74,7 @@ export function gitTry(
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     env: repoEnv(args),
     timeout: timeoutMs,
@@ -714,6 +716,7 @@ export function gitLogPathRecords(
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     timeout: opts?.timeoutMs ?? LOG_SCAN_TIMEOUT_MS,
     maxBuffer: 256 * 1024 * 1024,
