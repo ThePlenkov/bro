@@ -14,6 +14,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
+import { routerUrl } from './endpoint.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
 /** The gitdir a `.git` FILE names — a linked worktree's gitdir. The
@@ -60,7 +61,9 @@ export function routerStatePath(dir: string): string | undefined {
 }
 
 /** The endpoint the router published — undefined when there is no
- *  state file or it is torn (a half-written record is not a router). */
+ *  state file or it is torn (a half-written record is not a router).
+ *  A record whose URL cannot carry the token is NOT "no router": the
+ *  router is running and bro refuses it, loudly. */
 export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
   const path = routerStatePath(dir);
   if (path === undefined) return undefined;
@@ -75,7 +78,7 @@ export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
   const url = typeof bag.url === 'string' ? bag.url.trim() : '';
   const token = typeof bag.token === 'string' ? bag.token.trim() : '';
   if (url === '' || token === '') return undefined;
-  return { url: url.replace(/\/+$/, ''), token };
+  return { url: routerUrl(url), token };
 }
 
 /** The catalog, read from the router. A router that is not up is an
@@ -85,7 +88,7 @@ export async function readCatalog(
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
   const limit = opts.limit ?? 1000;
-  const url = `${endpoint.url}/v1/models?limit=${limit}`;
+  const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
   const res = await fetch(url, {
     headers: {
       'x-api-key': endpoint.token,

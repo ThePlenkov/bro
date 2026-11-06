@@ -64,4 +64,5 @@ export {
   readRouterEndpoint,
   routerStatePath,
 } from './gateway.ts';
+export { routerUrl } from './endpoint.ts';
 export { expandHome, readSettings, writeSettings } from './settings.ts';

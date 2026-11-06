@@ -2,11 +2,11 @@
 
 bro's Code Health policy, expressed as code. Three files carry it:
 
-| File                           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| File                           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `code-health-rules.json`       | The numeric bar. bro's ceilings are pinned as **warning** thresholds: function CC ≤ 8, file mean CC ≤ 4, function LoC ≤ 50, nesting ≤ 4, bumpy road ≤ 1 bump at depth 2, function args ≤ 4, constructor args ≤ 5, duplication < 10 LoC @ 75 %. A pinned threshold is the value at which the rule **fires** — CodeScene's own wording for the CC rule is "a cyclomatic complexity lower than 9", so the pinned 9 makes cc 9 a finding and the clean bar is one below it. The **alert** thresholds stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a wave decision, not a default. |
-| `custom-quality-gates.json`    | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates.                                                                                                                                                                                                                                                                                                                              |
-| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt.                                                                                                                                                                                                                                                                                                                                                                                                |
+| `custom-quality-gates.json`    | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## The ladder
 
@@ -52,7 +52,7 @@ Wave 1 covered `packages/cli/src/commands/serve-conductor.ts` — `conductorConf
 Bumpy Road → four helpers). The file's critical-rule findings went to zero, so
 it graduated from the floor to rung 2. The wave also shipped the ladder itself.
 
-## Three traps worth knowing
+## Four traps worth knowing
 
 **A partial threshold list is not a partial bar.** Omitting a threshold does
 not fall back to CodeScene's default — it falls back to a stricter one.
@@ -82,6 +82,22 @@ with loose strings fired Primitive Obsession at 36 % of the functions;
 the same split carrying one `Invocation` (the argv and the pieces the
 dispatch reads out of it) fired nothing. The split must be measured on
 the FILE, not on the function it touched.
+
+**A file's mean complexity speaks from seven functions.** Overall Code
+Complexity reads the file's MEAN cyclomatic complexity (bro pins the
+threshold at 4), but the rule only fires from SEVEN functions in the
+file. Measured on `gateway.ts`: six functions carrying a mean of 4.5 and
+no finding; a seventh function — mean 4.57 — fires the rule at once.
+A probe file of six functions at cc 5 (mean 5.0) is still silent, so the
+trigger is the function COUNT, not the average. A seventh function is
+not a free helper: it puts the file's average on the scale.
+
+The counting is not the textbook one: **every `throw` is a decision
+point** (measured: four `if`s and four `throw`s are cc 9, two `if`s and
+two `throw`s are cc 5, one `if` with an `||` and one `throw` are cc 4).
+A guard that refuses a value twice — "not a URL" and "a URL that cannot
+carry the token" — pays a rung for the second refusal. Two guards in two
+files cost less than one guard with two mouths.
 
 ## Who enforces the ladder
 

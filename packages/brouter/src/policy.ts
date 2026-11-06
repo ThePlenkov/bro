@@ -8,7 +8,8 @@
  * second implementation.
  */
 import { flag } from '@broject/core';
-import { readRouterEndpoint, routerUrl } from './gateway.ts';
+import { readRouterEndpoint } from './gateway.ts';
+import { routerUrl } from './endpoint.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
 /** What a host may inject — the POLICY the router's commands read. */
@@ -35,9 +36,7 @@ export const VALUE_FLAGS = new Set([
 ]);
 
 /** The router's endpoint — the flags win over the state file, so an
- *  operator can point the client half at any router. A router url the
- *  token may not cross to is refused here, not at the fetch: the
- *  endpoint travels further than the catalog read. */
+ *  operator can point the client half at any router. */
 export function defaultEndpoint(argv: string[]): RouterEndpoint {
   const url = flag(argv, '--url');
   const token = flag(argv, '--token');
