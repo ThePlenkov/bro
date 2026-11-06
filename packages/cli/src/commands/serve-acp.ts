@@ -26,10 +26,10 @@
  *  params.sessionId.
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
-import { agent, RequestError } from '@agentclientprotocol/sdk'
-import { AcpServer } from '@agentclientprotocol/sdk/experimental/server'
-import { createNodeHttpHandler } from '@agentclientprotocol/sdk/experimental/node'
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { agent, RequestError } from '@agentclientprotocol/sdk';
+import { AcpServer } from '@agentclientprotocol/sdk/experimental/server';
+import { createNodeHttpHandler } from '@agentclientprotocol/sdk/experimental/node';
 import type {
   AgentContext,
   AgentRequestContext,
@@ -38,33 +38,33 @@ import type {
   InitializeRequest,
   InitializeResponse,
   NewSessionRequest,
-} from '@agentclientprotocol/sdk'
-import { acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers'
+} from '@agentclientprotocol/sdk';
+import { acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers';
 import type {
   AcpClientBridge,
   AcpPeer,
   AcpRetainedSession,
   ProviderWireOpts,
-} from '@broject/providers'
-import { acpLinkPool, disposeQuiet, type ConductorConfig } from './serve-conductor.ts'
-import { peerAttrs } from './peer.ts'
+} from '@broject/providers';
+import { acpLinkPool, disposeQuiet, type ConductorConfig } from './serve-conductor.ts';
+import { peerAttrs } from './peer.ts';
 
 /** A session one downstream connection owns — the retained upstream
  *  handle, the peer it lives on, and the connection state back-pointer
  *  so teardown clears both indexes and every sessionId-taking handler
  *  can verify the CALLER owns the session (the map is transport-wide). */
 interface BrokeredSession {
-  retained: AcpRetainedSession
-  peer: AcpPeer
-  client: AgentContext
-  conn: ConnState
+  retained: AcpRetainedSession;
+  peer: AcpPeer;
+  client: AgentContext;
+  conn: ConnState;
   /** A prompt turn is in flight — a second concurrent prompt is an
    *  error: the update queue is per-session single-reader, a second
    *  pump would steal the first turn's updates (spec §wire table). */
-  busy: boolean
+  busy: boolean;
   /** The sweep's TTL + LRU cursor — touched on every hit so an idle
    *  session ages out but a working one doesn't. */
-  lastSeen: number
+  lastSeen: number;
 }
 
 /** Per-connection state — minted inside `buildAgent` so it is exactly
@@ -73,11 +73,11 @@ interface BrokeredSession {
  *  per-connection app closure can). */
 interface ConnState {
   /** initialize's clientInfo.name — otel attribution. */
-  clientName: string
-  sessions: Set<string>
+  clientName: string;
+  sessions: Set<string>;
   /** conn.closed settled and dropConn ran — a session/new still mid-
    *  retain lands with no cleanup path left but this flag. */
-  dropped: boolean
+  dropped: boolean;
 }
 
 /** What the brokered link advertises upstream: the union — every
@@ -90,7 +90,7 @@ const BROKER_CLIENT_CAPS: ClientCapabilities = {
   // the bridge serves elicitation/create — advertise both modes or a
   // conforming agent will never send one and the route goes unused
   elicitation: { form: {}, url: {} },
-}
+};
 
 /** Session-capability flags the brokered surface cannot back —
  *  session/list · delete · resume · fork stay unregistered here, so
@@ -106,35 +106,34 @@ function maskAgentCapabilities(
     nes: _n,
     sessionCapabilities: sc,
     ...rest
-  } = agentCapabilities as Record<string, unknown>
+  } = agentCapabilities as Record<string, unknown>;
   if (typeof sc !== 'object' || sc === null) {
-    return rest as InitializeResponse['agentCapabilities']
+    return rest as InitializeResponse['agentCapabilities'];
   }
-  const { list: _a, delete: _b, resume: _c, fork: _d, ...kept } = sc as Record<
-    string,
-    unknown
-  >
-  const hasAny = Object.values(kept).some((v) => v !== undefined && v !== null)
-  return (hasAny ? { ...rest, sessionCapabilities: kept } : rest) as InitializeResponse['agentCapabilities']
+  const { list: _a, delete: _b, resume: _c, fork: _d, ...kept } = sc as Record<string, unknown>;
+  const hasAny = Object.values(kept).some(v => v !== undefined && v !== null);
+  return (
+    hasAny ? { ...rest, sessionCapabilities: kept } : rest
+  ) as InitializeResponse['agentCapabilities'];
 }
 
 /** Server-defined (-32000..-32099 is implementation's): the session
  *  exists but is mid-turn — a caller-side conflict a client can retry,
  *  not the broker breaking (-32603) and not auth_required (-32000) or
  *  resource_not_found (-32002), which the SDK already assigns. */
-const SESSION_BUSY = -32001
+const SESSION_BUSY = -32001;
 
 /** A brokered turn is session-scoped — thinking, tool calls, subagents
  *  routinely run past the per-request `timeoutMs` the conductor gives
  *  one Messages-API call. The floor keeps a wedged agent from parking
  *  the turn forever; client cancel/disconnect still cuts it short. */
-const TURN_TIMEOUT_MS = 30 * 60_000
+const TURN_TIMEOUT_MS = 30 * 60_000;
 
 /** The conductor's conversation-map posture, mirrored: a brokered
  *  session pins real upstream context + cost, so the map can't grow
  *  unbounded — TTL first, then oldest-out to the cap. */
-const SESS_TTL_MS = 10 * 60_000
-const SESS_CAP = 32
+const SESS_TTL_MS = 10 * 60_000;
+const SESS_CAP = 32;
 
 /** Thrown handler errors land on the wire as JSON-RPC errors — a plain
  *  Error becomes "Internal error" and loses the detail. Provider
@@ -145,39 +144,39 @@ const SESS_CAP = 32
 function asWireError(err: unknown): never {
   for (let e: unknown = err; e instanceof Error; e = e.cause) {
     if (e instanceof RequestError) {
-      throw e
+      throw e;
     }
   }
-  throw new RequestError(-32603, err instanceof Error ? err.message : String(err))
+  throw new RequestError(-32603, err instanceof Error ? err.message : String(err));
 }
 
 const idOf = (params: Record<string, unknown>): string | undefined =>
-  typeof params.sessionId === 'string' ? params.sessionId : undefined
+  typeof params.sessionId === 'string' ? params.sessionId : undefined;
 
 /** Error codes a session/close rejection may carry that still mean
  *  "closed" — method-not-found (the agent never implemented close) and
  *  resource-not-found (the session is already gone). Everything else
  *  may be transient; the caller keeps the mapping for a retry. */
-const GONE_CLOSE_CODES: ReadonlySet<number> = new Set([-32601, -32002])
+const GONE_CLOSE_CODES: ReadonlySet<number> = new Set([-32601, -32002]);
 
 const closeMeansGone = (err: unknown): boolean =>
-  err instanceof RequestError && GONE_CLOSE_CODES.has(err.code)
+  err instanceof RequestError && GONE_CLOSE_CODES.has(err.code);
 
 export function acpTransport(
   cfg: ConductorConfig,
   opts: ProviderWireOpts = {}
 ): ((req: IncomingMessage, res: ServerResponse) => void) & { dispose: () => void } {
-  const by = `acp-transport:${cfg.backend}`
+  const by = `acp-transport:${cfg.backend}`;
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
-  const sessions = new Map<string, BrokeredSession>()
+  const sessions = new Map<string, BrokeredSession>();
   /** Touch a session for LRU — insertion order IS the sweep's LRU
    *  order (delete + reinsert moves it to the end). */
   const touchSession = (sid: string, sess: BrokeredSession): void => {
-    sess.lastSeen = Date.now()
-    sessions.delete(sid)
-    sessions.set(sid, sess)
-  }
+    sess.lastSeen = Date.now();
+    sessions.delete(sid);
+    sessions.set(sid, sess);
+  };
 
   /** `conn` scopes the hit to the owning connection — the map is
    *  transport-wide, so an unscoped lookup would let one connection
@@ -187,49 +186,49 @@ export function acpTransport(
     params: Record<string, unknown>,
     conn?: ConnState
   ): BrokeredSession | undefined => {
-    const sid = idOf(params)
+    const sid = idOf(params);
     if (sid === undefined) {
-      return undefined
+      return undefined;
     }
-    const sess = sessions.get(sid)
+    const sess = sessions.get(sid);
     if (sess === undefined) {
-      return undefined
+      return undefined;
     }
     if (conn !== undefined && sess.conn !== conn) {
-      return undefined
+      return undefined;
     }
-    touchSession(sid, sess)
-    return sess
-  }
+    touchSession(sid, sess);
+    return sess;
+  };
 
   /** Agent→client calls arrive on the link's bridge — route by
    *  params.sessionId to the owning connection and let the downstream
    *  client answer (or refuse; the error rides back upstream). */
   const bridge: AcpClientBridge = {
     request: (method, params, signal) => {
-      const sess = sessionOf(params)
+      const sess = sessionOf(params);
       if (sess === undefined) {
         // the method exists — the SESSION doesn't; a method-not-found
         // tells the agent to stop calling, not that a session died
-        throw RequestError.resourceNotFound(idOf(params))
+        throw RequestError.resourceNotFound(idOf(params));
       }
-      return sess.client.request(method, params, { cancellationSignal: signal })
+      return sess.client.request(method, params, { cancellationSignal: signal });
     },
     notify: (method, params) => {
-      const sess = sessionOf(params)
+      const sess = sessionOf(params);
       if (sess === undefined) {
-        return
+        return;
       }
       sess.client.notify(method, params).catch(() => {
         // a dead downstream stream is not the agent's problem — the
         // conn.closed cleanup drops the session anyway
-      })
+      });
     },
-  }
+  };
 
   // teardown handle for a link still mid-handshake — dispose aborts it
   // (conductorProxy's poolAbort convention)
-  const poolAbort = new AbortController()
+  const poolAbort = new AbortController();
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
@@ -240,21 +239,21 @@ export function acpTransport(
       ...opts.acp,
       bridge,
     },
-  }
-  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs)
+  };
+  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs);
 
   /** Out of every index + the local handle dropped — the caller owns
    *  whether upstream gets a session/close first (it can't once the
    *  link itself is dead). */
   const release = (sid: string): void => {
-    const sess = sessions.get(sid)
+    const sess = sessions.get(sid);
     if (sess === undefined) {
-      return
+      return;
     }
-    sessions.delete(sid)
-    sess.conn.sessions.delete(sid)
-    disposeQuiet(sess.retained)
-  }
+    sessions.delete(sid);
+    sess.conn.sessions.delete(sid);
+    disposeQuiet(sess.retained);
+  };
 
   /** Best-effort upstream close, then release — shared by disconnect
    *  teardown, the sweep, a failed turn's eviction, and a session that
@@ -263,39 +262,35 @@ export function acpTransport(
    *  request budget (peer.req is a deadline, not a hang). */
   const closeUpstream = (sess: BrokeredSession, sid: string): void => {
     void sess.peer.ctx
-      .request(
-        'session/close',
-        { sessionId: sid },
-        sess.peer.req(Date.now() + cfg.timeoutMs)
-      )
+      .request('session/close', { sessionId: sid }, sess.peer.req(Date.now() + cfg.timeoutMs))
       .catch(() => {
         // dead upstream — the local drop is the point
-      })
-    release(sid)
-  }
+      });
+    release(sid);
+  };
 
   const shouldEvict = (s: BrokeredSession, now: number, overflow: number): boolean => {
-    if (s.busy) return false
-    const expired = now - s.lastSeen > SESS_TTL_MS
-    return expired || overflow > 0
-  }
+    if (s.busy) return false;
+    const expired = now - s.lastSeen > SESS_TTL_MS;
+    return expired || overflow > 0;
+  };
 
   /** Idle-beyond-TTL and oldest-over-cap eviction — the same posture
    *  the conductor's sweepSessions takes. Runs where the map grows
    *  (session/new); a mid-turn session is off-limits — its own failure
    *  path evicts it. */
   const sweep = (): void => {
-    const now = Date.now()
+    const now = Date.now();
     // expired always goes, and its freed slot counts toward the cap —
     // then oldest-out until one slot is free for the session/new in
     // flight (the +1 reservation a bare cap check misses)
-    let overflow = sessions.size - SESS_CAP + 1
+    let overflow = sessions.size - SESS_CAP + 1;
     for (const [sid, s] of sessions) {
-      if (!shouldEvict(s, now, overflow)) continue
-      closeUpstream(s, sid)
-      overflow--
+      if (!shouldEvict(s, now, overflow)) continue;
+      closeUpstream(s, sid);
+      overflow--;
     }
-  }
+  };
 
   /** Client disconnect (DELETE, socket death, the SDK's output-stall
    *  close) → close each owned session upstream best-effort, then drop
@@ -304,29 +299,29 @@ export function acpTransport(
     // re-entry must never re-close upstream sessions already dropped —
     // the flag also tells a still-landing session/new it has no owner
     if (st.dropped) {
-      return
+      return;
     }
-    st.dropped = true
+    st.dropped = true;
     for (const sid of st.sessions) {
-      const sess = sessions.get(sid)
+      const sess = sessions.get(sid);
       if (sess === undefined) {
-        continue
+        continue;
       }
-      closeUpstream(sess, sid)
+      closeUpstream(sess, sid);
     }
-    st.sessions.clear()
-  }
+    st.sessions.clear();
+  };
 
   // link death ⇒ every session it carried is dead weight — drop them
   // all (the conductor's dropSessions convention); the next client
   // request respawns the link
   pool.onDeath(() => {
     for (const [sid, sess] of sessions) {
-      sessions.delete(sid)
-      sess.conn.sessions.delete(sid)
-      disposeQuiet(sess.retained)
+      sessions.delete(sid);
+      sess.conn.sessions.delete(sid);
+      disposeQuiet(sess.retained);
     }
-  })
+  });
 
   /** A session-scoped method forwarded verbatim — set_config_option and
    *  set_mode ride the session's own peer. */
@@ -335,30 +330,27 @@ export function acpTransport(
     params: Record<string, unknown>,
     conn: ConnState
   ): Promise<unknown> => {
-    const sess = sessionOf(params, conn)
+    const sess = sessionOf(params, conn);
     if (sess === undefined) {
-      throw RequestError.resourceNotFound(idOf(params))
+      throw RequestError.resourceNotFound(idOf(params));
     }
     try {
       // every forwarded request rides the same per-request budget the
       // provider mints — a wedged peer fails fast instead of parking
       // the JSON-RPC call forever
       return (
-        (await sess.peer.ctx.request(
-          method,
-          params,
-          sess.peer.req(Date.now() + cfg.timeoutMs)
-        )) ?? {}
-      )
+        (await sess.peer.ctx.request(method, params, sess.peer.req(Date.now() + cfg.timeoutMs))) ??
+        {}
+      );
     } catch (err) {
-      asWireError(err)
+      asWireError(err);
     }
-  }
+  };
 
   /** Raw passthrough — the identity parser keeps client params
    *  byte-for-byte (a typed registration would run the SDK schema and
    *  could strip fields newer than this binding knows). */
-  const raw = (p: unknown): Record<string, unknown> => p as Record<string, unknown>
+  const raw = (p: unknown): Record<string, unknown> => p as Record<string, unknown>;
 
   /** initialize → the upstream handshake verbatim, with the capability
    *  flags masked to what the broker actually registers — a flag a
@@ -367,36 +359,36 @@ export function acpTransport(
     st: ConnState,
     params: Record<string, unknown>
   ): Promise<InitializeResponse> => {
-    const req = params as unknown as InitializeRequest
-    st.clientName = req.clientInfo?.name ?? ''
+    const req = params as unknown as InitializeRequest;
+    st.clientName = req.clientInfo?.name ?? '';
     try {
-      const peer = await pool.link()
+      const peer = await pool.link();
       otelEvent('acp.transport.connect', {
         backend: cfg.backend,
         'acp.client': st.clientName,
-      })
+      });
       return {
         ...peer.init,
         agentCapabilities: maskAgentCapabilities(peer.init.agentCapabilities),
-      }
+      };
     } catch (err) {
-      asWireError(err)
+      asWireError(err);
     }
-  }
+  };
 
   /** Displace a previous brokered session that collided on the same id
    *  (e.g. upstream reissues ids across a link death+respawn). */
   const displacePrevious = (sid: string): void => {
-    const prev = sessions.get(sid)
-    if (prev === undefined) return
-    prev.conn.sessions.delete(sid)
-    disposeQuiet(prev.retained)
-  }
+    const prev = sessions.get(sid);
+    if (prev === undefined) return;
+    prev.conn.sessions.delete(sid);
+    disposeQuiet(prev.retained);
+  };
 
   const extractBead = (params: Record<string, unknown>): string | undefined => {
-    const beadCwd = typeof params.cwd === 'string' ? params.cwd : ''
-    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1]
-  }
+    const beadCwd = typeof params.cwd === 'string' ? params.cwd : '';
+    return /--([a-z0-9]+-[a-z0-9]+)/i.exec(beadCwd)?.[1];
+  };
 
   /** session/new → retain one upstream session per brokered id. The
    *  client's params pass verbatim (cwd, mcpServers, _meta) — the model
@@ -408,20 +400,20 @@ export function acpTransport(
     client: AgentContext
   ): Promise<unknown> => {
     try {
-      sweep()
-      const peer = await pool.link()
+      sweep();
+      const peer = await pool.link();
       const retained = await acpSessionRetain(
         peer,
         cfg.entry,
         wireOpts,
         Date.now() + cfg.timeoutMs,
         { by, sessionRequest: params as NewSessionRequest }
-      )
+      );
       // upstream reissues ids across a link death+respawn — a
       // colliding set must not leak the displaced handle (and the
       // old owner must not later close the NEW session under the
       // reused id)
-      displacePrevious(retained.sessionId)
+      displacePrevious(retained.sessionId);
       const brokered: BrokeredSession = {
         retained,
         peer,
@@ -429,30 +421,30 @@ export function acpTransport(
         conn: st,
         busy: false,
         lastSeen: Date.now(),
-      }
-      sessions.set(retained.sessionId, brokered)
-      st.sessions.add(retained.sessionId)
+      };
+      sessions.set(retained.sessionId, brokered);
+      st.sessions.add(retained.sessionId);
       // conn.closed may have settled mid-retain — dropConn already
       // ran and can never see this session: close it upstream +
       // drop the handle now or it orphans on a dead connection
       if (st.dropped) {
-        closeUpstream(brokered, retained.sessionId)
+        closeUpstream(brokered, retained.sessionId);
       }
       // a bro--<bead-id>-shaped session cwd attributes the
       // session (dirs are named <repo>--<beadId>, the bead id
       // itself is <prefix>-<slug>)
-      const bead = extractBead(params)
+      const bead = extractBead(params);
       otelEvent('acp.transport.session', {
         backend: cfg.backend,
         'acp.client': st.clientName,
         'acp.session_id': retained.sessionId,
         ...(bead !== undefined ? { bead } : {}),
-      })
-      return retained.newSessionResponse
+      });
+      return retained.newSessionResponse;
     } catch (err) {
-      asWireError(err)
+      asWireError(err);
     }
-  }
+  };
 
   /** A failed turn's cleanup — retained.prompt already dropped its
    *  handle, so the brokered entry is dead weight: close upstream
@@ -460,9 +452,9 @@ export function acpTransport(
    *  session whose context the agent already forgot. */
   const evictDeadTurn = (sid: string | undefined, sess: BrokeredSession): void => {
     if (sid !== undefined && sessions.get(sid) === sess) {
-      closeUpstream(sess, sid)
+      closeUpstream(sess, sid);
     }
-  }
+  };
 
   /** Forward updates from the upstream turn to the owning downstream
    *  client — backpressure lives on the peer's per-request streams; this
@@ -471,12 +463,12 @@ export function acpTransport(
     // forward each update as it arrives — notify queues onto the session's
     // SSE stream and the SDK's buffered-bytes/output-stall limits are the
     // backpressure contract
-    if (sid === undefined) return
+    if (sid === undefined) return;
     sess.client.notify('session/update', { sessionId: sid, update }).catch(() => {
       // the client went away mid-turn — conn.closed
       // cleanup owns the session drop
-    })
-  }
+    });
+  };
 
   /** session/prompt → the turn on the session's own retained handle —
    *  updates fan out as they arrive. A second concurrent prompt is an
@@ -486,15 +478,15 @@ export function acpTransport(
     params: Record<string, unknown>,
     signal: AbortSignal | undefined
   ): Promise<unknown> => {
-    const sid = idOf(params)
-    const sess = sessionOf(params, st)
+    const sid = idOf(params);
+    const sess = sessionOf(params, st);
     if (sess === undefined) {
-      throw RequestError.resourceNotFound(sid)
+      throw RequestError.resourceNotFound(sid);
     }
     if (sess.busy) {
-      throw new RequestError(SESSION_BUSY, `session ${sid} is mid-turn — one prompt at a time`)
+      throw new RequestError(SESSION_BUSY, `session ${sid} is mid-turn — one prompt at a time`);
     }
-    sess.busy = true
+    sess.busy = true;
     try {
       const r = await sess.retained.prompt(
         params.prompt as ContentBlock[],
@@ -507,145 +499,130 @@ export function acpTransport(
           by,
           onUpdate: forwardUpdate(sess, sid),
         }
-      )
-      return r.response
+      );
+      return r.response;
     } catch (err) {
-      evictDeadTurn(sid, sess)
-      asWireError(err)
+      evictDeadTurn(sid, sess);
+      asWireError(err);
     } finally {
-      sess.busy = false
+      sess.busy = false;
       // a just-finished turn isn't "idle since prompt start" —
       // reset the TTL cursor or the next sweep evicts a live
       // session that merely ran long
-      sess.lastSeen = Date.now()
+      sess.lastSeen = Date.now();
     }
-  }
+  };
 
   /** session/close → forwarded upstream; the brokered handle is done
    *  either way — the close IS the release. */
   const onClose = async (st: ConnState, params: Record<string, unknown>): Promise<unknown> => {
-    const sid = idOf(params)
-    const sess = sessionOf(params, st)
+    const sid = idOf(params);
+    const sess = sessionOf(params, st);
     if (sess === undefined) {
-      throw RequestError.resourceNotFound(sid)
+      throw RequestError.resourceNotFound(sid);
     }
     const releaseKnown = (): void => {
       if (sid !== undefined) {
-        release(sid)
+        release(sid);
       }
-    }
+    };
     try {
       const r = await sess.peer.ctx.request(
         'session/close',
         params,
         sess.peer.req(Date.now() + cfg.timeoutMs)
-      )
+      );
       // the close IS the release — but only once upstream confirms it:
       // on failure the mapping stays so the client's retry can land
-      releaseKnown()
-      return r ?? {}
+      releaseKnown();
+      return r ?? {};
     } catch (err) {
       // a session already gone upstream IS closed — not-found and
       // not-implemented answer as success and drop the handle; any
       // other error may be transient, so keep the mapping mapped
       if (closeMeansGone(err)) {
-        releaseKnown()
-        return {}
+        releaseKnown();
+        return {};
       }
-      asWireError(err)
+      asWireError(err);
     }
-  }
+  };
 
   /** authenticate → a client-level call, not a session's — it rides
    *  the link itself. */
   const onAuthenticate = async (params: Record<string, unknown>): Promise<unknown> => {
     try {
-      const peer = await pool.link()
+      const peer = await pool.link();
       return (
-        (await peer.ctx.request(
-          'authenticate',
-          params,
-          peer.req(Date.now() + cfg.timeoutMs)
-        )) ?? {}
-      )
+        (await peer.ctx.request('authenticate', params, peer.req(Date.now() + cfg.timeoutMs))) ?? {}
+      );
     } catch (err) {
-      asWireError(err)
+      asWireError(err);
     }
-  }
+  };
 
-  const attachDisconnectHandler = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
+  const attachDisconnectHandler = (app: ReturnType<typeof agent>, st: ConnState): void => {
     // AcpServer runs onConnect after initialize answers — the
     // disconnect cleanup attaches there. Settle-either-way: a rejected
     // `closed` still means the connection is gone — no session leaks.
-    app.onConnect((conn) => {
+    app.onConnect(conn => {
       void conn.closed.then(
         () => {
-          dropConn(st)
+          dropConn(st);
         },
         () => {
-          dropConn(st)
+          dropConn(st);
         }
-      )
-    })
-  }
+      );
+    });
+  };
 
-  const registerAgentRequests = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
+  const registerAgentRequests = (app: ReturnType<typeof agent>, st: ConnState): void => {
     const req = (
       method: string,
       handler: (ctx: AgentRequestContext<Record<string, unknown>>) => unknown
     ): void => {
-      app.onRequest<Record<string, unknown>, unknown>(method, raw, handler)
-    }
-    req('initialize', (ctx) => onInitialize(st, ctx.params))
-    req('session/new', (ctx) => onSessionNew(st, ctx.params, ctx.client))
-    req('session/prompt', (ctx) => onPrompt(st, ctx.params, ctx.signal))
-    req('session/close', (ctx) => onClose(st, ctx.params))
-    req('session/set_config_option', (ctx) =>
+      app.onRequest<Record<string, unknown>, unknown>(method, raw, handler);
+    };
+    req('initialize', ctx => onInitialize(st, ctx.params));
+    req('session/new', ctx => onSessionNew(st, ctx.params, ctx.client));
+    req('session/prompt', ctx => onPrompt(st, ctx.params, ctx.signal));
+    req('session/close', ctx => onClose(st, ctx.params));
+    req('session/set_config_option', ctx =>
       forwardSession('session/set_config_option', ctx.params, st)
-    )
-    req('session/set_mode', (ctx) => forwardSession('session/set_mode', ctx.params, st))
-    req('authenticate', (ctx) => onAuthenticate(ctx.params))
-  }
+    );
+    req('session/set_mode', ctx => forwardSession('session/set_mode', ctx.params, st));
+    req('authenticate', ctx => onAuthenticate(ctx.params));
+  };
 
-  const registerAgentNotifications = (
-    app: ReturnType<typeof agent>,
-    st: ConnState
-  ): void => {
-    app.onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
-      const sess = sessionOf(ctx.params, st)
-      sess?.peer.ctx
-        .notify<Record<string, unknown>>('session/cancel', ctx.params)
-        .catch(() => {})
-    })
+  const registerAgentNotifications = (app: ReturnType<typeof agent>, st: ConnState): void => {
+    app.onNotification<Record<string, unknown>>('session/cancel', raw, ctx => {
+      const sess = sessionOf(ctx.params, st);
+      sess?.peer.ctx.notify<Record<string, unknown>>('session/cancel', ctx.params).catch(() => {});
+    });
     // session/load · resume · fork · list · delete · providers_* ·
     // logout · nes_* · document_* stay unregistered — the SDK answers
     // method-not-found and advertised capabilities never offer them
-  }
+  };
 
   /** One agent app per accepted downstream connection — `st` is that
    *  connection's state for its whole life (the SDK gives handlers a
    *  fresh AgentContext wrapper per request, so the app closure is the
    *  only stable conn-scope). */
   const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
-    const app = agent({ name: 'bro-acp' })
-    attachDisconnectHandler(app, st)
-    registerAgentRequests(app, st)
-    registerAgentNotifications(app, st)
-    return app
-  }
+    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false };
+    const app = agent({ name: 'bro-acp' });
+    attachDisconnectHandler(app, st);
+    registerAgentRequests(app, st);
+    registerAgentNotifications(app, st);
+    return app;
+  };
 
-  const handle = createNodeHttpHandler(new AcpServer({ createAgent: buildAgent }))
+  const handle = createNodeHttpHandler(new AcpServer({ createAgent: buildAgent }));
   return Object.assign(
     (req: IncomingMessage, res: ServerResponse) => {
-      const t0 = Date.now()
-      const method = req.method ?? 'GET'
+      const t0 = Date.now();
+      const method = req.method ?? 'GET';
       const httpSpan = otelSpan(
         `serve.http ${method} /api/v1/acp`,
         {
@@ -655,28 +632,28 @@ export function acpTransport(
           ...peerAttrs(req.socket),
         },
         { parent: otelParent(req.headers.traceparent) }
-      )
+      );
       // a GET SSE stream stays open for the connection's life — 'close'
       // fires on finish AND on a dropped socket, so it bounds both
       res.once('close', () => {
         httpSpan.end(
           { 'http.status': res.statusCode, 'http.duration_ms': Date.now() - t0 },
           res.statusCode >= 500 ? 'error' : 'ok'
-        )
+        );
         otelEvent('serve.request', {
           route: `${method} /api/v1/acp`,
           status: res.statusCode,
           duration_ms: Date.now() - t0,
           backend: cfg.backend,
-        })
-      })
-      handle(req, res)
+        });
+      });
+      handle(req, res);
     },
     {
       dispose: (): void => {
-        poolAbort.abort()
-        pool.dispose()
+        poolAbort.abort();
+        pool.dispose();
       },
     }
-  )
+  );
 }

@@ -71,6 +71,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
   js,
   loadConfig,
   loadConfigLayers,
@@ -127,13 +128,16 @@ export {
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
+  walkChain,
   wallText,
 } from './routing.ts';
 export type {
   ChainEntry,
+  ChainWalk,
   FleetRouter,
   OnWall,
   ProviderWall,
@@ -249,6 +253,8 @@ export type {
 } from './lifecycle.ts';
 export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
+export { parseTaskSpecBody, taskSpecFacade } from './taskspec.ts';
+export type { TaskSpec, TaskSpecFacade } from './taskspec.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
@@ -329,6 +335,7 @@ export {
   sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
@@ -418,6 +425,7 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
@@ -454,6 +462,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
@@ -548,7 +557,16 @@ export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
 export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
-export { handleOwner, markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export {
+  groupMemberAlive,
+  handleOwner,
+  markerLive,
+  markerOwner,
+  pidAlive,
+  procStat,
+  scanProc,
+} from './proc.ts';
+export type { ProcEntry } from './proc.ts';
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
