@@ -9,7 +9,7 @@ import { runClient } from './commands.ts';
 import { modelFamily, servedModels } from './catalog.ts';
 import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
-import { routerUrl } from './endpoint.ts';
+import { routerUrl } from './router-url.ts';
 import { clientById, clientIds } from './registry.ts';
 import { configuredProviders } from './providers.ts';
 import { clientInventory, connectorInventory, isInstalled } from './agents.ts';

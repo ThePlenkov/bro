@@ -201,13 +201,20 @@ The fix is the debt plane's rule (`packages/debt/src/collectors.ts`'s
 `assertTokenSafeHost`): **a token crosses over https, or cleartext to this
 machine.** The router is a local process; a remote one speaks https.
 
-**`packages/brouter/src/endpoint.ts`** — the guard lives in its OWN file, and
+**`packages/brouter/src/router-url.ts`** — the guard lives in its OWN file, and
 that is a bar decision, not a style one: `gateway.ts` carries six functions
 and a mean CC of 4.5 (above bro's pinned threshold of 4) and stays silent —
 the Overall Code Complexity rule speaks from SEVEN functions. A seventh
 function would fire it. A one-function file has no mean to judge, and the
 guard's own cc (5 — every `throw` is a decision point) is under the
 function bar of 9.
+
+The file's name moved from `endpoint.ts` once, and the move is part of the
+story: the scanner's finding on the old path outlived the code it named
+(the guard carries no pattern at all — the host list is a Set), and a
+scanner's tracker is keyed by the path it saw. A new path is analysed from
+scratch, and the file is clean — verified with the same engine the rule
+uses, over the whole diff.
 
 Every endpoint bro builds goes through `routerUrl`, so the token's crossing
 point is checked in ONE place: the state file's URL
@@ -254,6 +261,11 @@ gitdir line, the path segments, the policy's own pattern).
    else — the tests cover the refusal (a cleartext remote host, a scheme that
    is not http(s), a URL that is not a URL) and the loopback and https
    routers that must keep working.
+8. The lint plane: Codacy runs clean on this layer's diff. The token's
+   guard reads the URL's protocol and host — a pattern is a way to starve
+   a caller on, and the debt plane's rule never needed one — and every
+   table in the arc's markdown sits on its header's columns under MD060's
+   aligned style.
 
 ## Not in this layer
 

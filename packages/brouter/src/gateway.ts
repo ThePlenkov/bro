@@ -14,7 +14,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
-import { routerUrl } from './endpoint.ts';
+import { routerUrl } from './router-url.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
 /** The gitdir a `.git` FILE names — a linked worktree's gitdir. The
