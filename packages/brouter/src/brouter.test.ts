@@ -204,22 +204,19 @@ test('the catalog read asks the models path — not the base URL\'s query', asyn
   }
 });
 
-test('a redirect is followed by hand — the token rides the hop the guard allows', async () => {
+test('a redirect is refused — the session token rides no hop', async () => {
+  const hops: string[] = [];
   const seen: Array<string | undefined> = [];
   const target = createServer((req, res) => {
     seen.push(req.headers['x-api-key'] as string);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        object: 'list',
-        data: [{ type: 'model', id: 'devin-acp/swe-2-high', display_name: 'devin-acp/SWE-2' }],
-      })
-    );
+    res.end(JSON.stringify({ object: 'list', data: [] }));
   });
   await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve));
   const targetAddress = target.address();
   const targetPort = typeof targetAddress === 'object' && targetAddress !== null ? targetAddress.port : 0;
-  const origin = createServer((_req, res) => {
+  const origin = createServer((req, res) => {
+    hops.push(req.url ?? '');
     res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/v1/models` });
     res.end();
   });
@@ -227,16 +224,20 @@ test('a redirect is followed by hand — the token rides the hop the guard allow
   const originAddress = origin.address();
   const originPort = typeof originAddress === 'object' && originAddress !== null ? originAddress.port : 0;
   try {
-    const { models } = await readCatalog({ url: `http://127.0.0.1:${originPort}`, token: 'tok' });
-    assert.equal(models.length, 1);
-    assert.equal(seen[0], 'tok');
+    await assert.rejects(
+      () => readCatalog({ url: `http://127.0.0.1:${originPort}`, token: 'tok' }),
+      /does not follow redirects/
+    );
+    // the hop was never asked — the token never crossed to the target
+    assert.equal(hops.length, 1);
+    assert.equal(seen.length, 0);
   } finally {
     origin.close();
     target.close();
   }
 });
 
-test('a redirect that leaves the guard stops the token — the hop is refused, not followed', async () => {
+test('the refused redirect names its target — the read never leaves the router', async () => {
   const hops: string[] = [];
   const origin = createServer((req, res) => {
     hops.push(req.url ?? '');
@@ -249,28 +250,9 @@ test('a redirect that leaves the guard stops the token — the hop is refused, n
   try {
     await assert.rejects(
       () => readCatalog({ url: `http://127.0.0.1:${port}`, token: 'tok' }),
-      /cannot carry the session token to http:\/\/router\.example\.com/
+      /redirect to http:\/\/router\.example\.com\/v1\/models/
     );
     assert.equal(hops.length, 1);
-  } finally {
-    origin.close();
-  }
-});
-
-test('a redirect loop is an error — not a read that never ends', async () => {
-  let port = 0;
-  const origin = createServer((_req, res) => {
-    res.writeHead(302, { location: `http://127.0.0.1:${port}/v1/models` });
-    res.end();
-  });
-  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
-  const address = origin.address();
-  port = typeof address === 'object' && address !== null ? address.port : 0;
-  try {
-    await assert.rejects(
-      () => readCatalog({ url: `http://127.0.0.1:${port}`, token: 'tok' }),
-      /redirected more than/
-    );
   } finally {
     origin.close();
   }
