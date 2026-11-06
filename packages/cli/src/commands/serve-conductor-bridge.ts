@@ -55,11 +55,22 @@ const ALIAS: Record<string, string> = {
   new_text: 'new_string',
 };
 
+/** The capability the agent named — undefined when it names one this client
+ *  does not have. The lookup is OWN-property only: the kind is the agent's
+ *  string, and a plain object's prototype carries names of its own
+ *  ("toString", "constructor") that are not capabilities. */
+function capabilityOf(kind: unknown): string[] | undefined {
+  if (typeof kind !== 'string') return undefined;
+  if (!Object.hasOwn(CAPABILITY, kind)) return undefined;
+  const wanted = CAPABILITY[kind];
+  return Array.isArray(wanted) ? wanted : undefined;
+}
+
 /** The ACP tool call → the client's tool call — undefined when the client
  *  offers no tool that can run it. */
 export function clientCall(u: AcpToolCall, tools: ClientTool[]): ClientCall | undefined {
   if (u.sessionUpdate !== 'tool_call') return undefined;
-  const wanted = typeof u.kind === 'string' ? CAPABILITY[u.kind] : undefined;
+  const wanted = capabilityOf(u.kind);
   if (wanted === undefined) return undefined;
   const raw = recordOf(u.rawInput);
   if (raw === undefined) return undefined;
