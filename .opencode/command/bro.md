@@ -1,6 +1,6 @@
 ---
-
-## description: bro dispatcher — orient on the board, then hand off to the named bro family and its skill
+description: bro dispatcher — orient on the board, then hand off to the named bro family and its skill
+---
 
 <!-- GENERATED from skills/bro/SKILL.md — edit the skill, then `npm run gen:plugins` -->
 
