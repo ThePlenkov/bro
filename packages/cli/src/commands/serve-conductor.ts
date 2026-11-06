@@ -1542,7 +1542,7 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
     )
   }
   const view = views[0]
-  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1)
+  const refusal = conductorSessionRefusal(view, env.sessions.size, env.pendingOpens.size, view?.starts ?? 1)
   if (refusal !== undefined) {
     throw new Error(refusal)
   }

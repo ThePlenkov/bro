@@ -181,7 +181,8 @@ describe('conductorSessionRefusal', () => {
     const view = sessionCapViews('nope', { fake: { maxSessions: 3 } })[0]
     assert.equal(conductorSessionRefusal(undefined, 5), undefined)
     const v = { kind: 'fake', live: 1, cap: 3, starts: 1 }
-    assert.equal(conductorSessionRefusal(v, 1), undefined)
-    assert.ok(conductorSessionRefusal(v, 2) !== undefined)
+    assert.equal(conductorSessionRefusal(v, 1, 0), undefined)
+    assert.equal(conductorSessionRefusal(v, 0, 2), undefined)
+    assert.ok(conductorSessionRefusal(v, 1, 2) !== undefined)
   })
 })

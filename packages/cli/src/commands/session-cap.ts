@@ -179,18 +179,21 @@ export function sessionCapRefusalForHook(
  *
  *  The plane counts live devin PROCESSES; the conductor's retained
  *  conversations share one peer process, so the plane sees one where
- *  the conductor holds many. The conductor adds its own count on top
- *  (the shared peer is already in the plane's count, so the budget errs
- *  low, never high). */
+ *  the conductor holds many. The conductor counts its own retained and
+ *  in-flight opens; the shared peer is already in the plane's count, so
+ *  subtract one when any are present to avoid double counting it. */
 export function conductorSessionRefusal(
   view: SessionCapView | undefined,
   retained: number,
+  inFlight = 0,
   starts = 1
 ): string | undefined {
   if (view === undefined) {
     return undefined
   }
-  return sessionCapRefusal({ ...view, live: view.live + retained, starts })
+  const total = retained + inFlight
+  const live = view.live + (total > 0 ? total - 1 : 0)
+  return sessionCapRefusal({ ...view, live, starts })
 }
 
 /** The connector — the guard plane's veto for a session start. */
