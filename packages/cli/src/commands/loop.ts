@@ -70,6 +70,10 @@ import {
   routeStepClass,
   type SpawnSpec,
   SpawnError,
+  releaseSessionStart,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionPlane,
   specStore,
   stampPrOwnership,
   stepClassInfo,
@@ -1344,9 +1348,11 @@ async function runFixRound(
     return;
   }
   let templateReservation: string | undefined;
+  const crossKindReservations: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
   const fixKey = `loop-fix-${leadFix.id}`;
+  const fixWorkerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' };
   try {
     const templateQuota = sessionQuotaOf(
       ctx.env,
@@ -1356,7 +1362,7 @@ async function runFixRound(
         molStep: leadFix.id,
         prompt,
         repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
+        env: fixWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -1364,14 +1370,54 @@ async function runFixRound(
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmd =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusal = sessionCapRefusalFor(spawnedCmd, ctx.env.agents, fixWorkerEnv);
+    if (crossRefusal !== undefined) {
+      throw new SpawnError(crossRefusal, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmd, ctx.env.agents, fixWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: fixKey,
+          molStep: leadFix.id,
+          workerEnv: fixWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservations.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: fixKey,
         molStep: leadFix.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: fixWorkerEnv,
       });
     }
   } catch (err) {
+    // every cross-kind claim this round holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservations);
+    crossKindReservations.length = 0;
     console.error(
       `loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
     );
@@ -1395,6 +1441,7 @@ async function runFixRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservations);
   }
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
@@ -1850,8 +1897,13 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // the registry spawn so the fleet/session planes agree on live workers
   // (spec bro-9h86l / bro-0fbdp)
   let templateReservation: string | undefined;
+  const crossKindReservationsPush: string[] = [];
   const templateReservationKey = `loop-${lead.id}`;
   const templateCommand = laneCommand(ctx, lane);
+  const pushWorkerEnv = {
+    ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
+    [BATCH_MARKER_ENV]: '1',
+  };
   try {
     const templateQuota = sessionQuotaOf(
       ctx.env,
@@ -1861,10 +1913,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
         molStep: lead.id,
         prompt,
         repoRoot: item.worktreeDir,
-        env: {
-          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
-          [BATCH_MARKER_ENV]: '1',
-        },
+        env: pushWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -1872,17 +1921,54 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmdPush =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusalPush = sessionCapRefusalFor(spawnedCmdPush, ctx.env.agents, pushWorkerEnv);
+    if (crossRefusalPush !== undefined) {
+      throw new SpawnError(crossRefusalPush, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmdPush, ctx.env.agents, pushWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: templateReservationKey,
+          molStep: lead.id,
+          workerEnv: pushWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservationsPush.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: templateReservationKey,
         molStep: lead.id,
-        workerEnv: {
-          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
-          [BATCH_MARKER_ENV]: '1',
-        },
+        workerEnv: pushWorkerEnv,
       });
     }
   } catch (err) {
+    // every cross-kind claim this push holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservationsPush);
+    crossKindReservationsPush.length = 0;
     endLoopRun(ctx.root, loopSlug(lead.id));
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof SpawnError && err.kind === 'cap') {
@@ -1915,11 +2001,13 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservationsPush);
     throw err;
   }
   if (templateReservation !== undefined) {
     releaseSessionSlot(templateReservation);
   }
+  releaseSessionStart(crossKindReservationsPush);
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt;
@@ -2487,9 +2575,11 @@ async function runRebaseRound(
     return;
   }
   let templateReservation: string | undefined;
+  const crossKindReservationsRb: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
   const rebaseKey = `loop-rebase-${leadRb.id}`;
+  const rebaseWorkerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' };
   try {
     const templateQuota = sessionQuotaOf(
       ctx.env,
@@ -2499,7 +2589,7 @@ async function runRebaseRound(
         molStep: leadRb.id,
         prompt,
         repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
+        env: rebaseWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -2507,14 +2597,54 @@ async function runRebaseRound(
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmdRb =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusalRb = sessionCapRefusalFor(spawnedCmdRb, ctx.env.agents, rebaseWorkerEnv);
+    if (crossRefusalRb !== undefined) {
+      throw new SpawnError(crossRefusalRb, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmdRb, ctx.env.agents, rebaseWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: rebaseKey,
+          molStep: leadRb.id,
+          workerEnv: rebaseWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservationsRb.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: rebaseKey,
         molStep: leadRb.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: rebaseWorkerEnv,
       });
     }
   } catch (err) {
+    // every cross-kind claim this round holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservationsRb);
+    crossKindReservationsRb.length = 0;
     console.error(
       `loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
     );
@@ -2535,6 +2665,7 @@ async function runRebaseRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservationsRb);
   }
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
