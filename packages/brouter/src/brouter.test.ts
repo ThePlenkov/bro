@@ -249,7 +249,7 @@ test('a redirect that leaves the guard stops the token — the hop is refused, n
   try {
     await assert.rejects(
       () => readCatalog({ url: `http://127.0.0.1:${port}`, token: 'tok' }),
-      /redirected to http:\/\/router\.example\.com/
+      /cannot carry the session token to http:\/\/router\.example\.com/
     );
     assert.equal(hops.length, 1);
   } finally {
