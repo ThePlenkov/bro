@@ -11,10 +11,10 @@
  *   report                                    published reports under drill.report.dir
  *   distill ID                                bd mol distill: tree → proto
  */
-import { createInterface } from 'node:readline/promises'
-import { relative, resolve } from 'node:path'
-import { gitTry, hasHelpFlag, loadConfig, printUsage } from '@broject/core'
-import type { ExitCode } from '@broject/core'
+import { createInterface } from 'node:readline/promises';
+import { relative, resolve } from 'node:path';
+import { gitTry, hasHelpFlag, loadConfig, printUsage } from '@broject/core';
+import type { ExitCode } from '@broject/core';
 import {
   checkBeads,
   childrenOf,
@@ -35,16 +35,17 @@ import {
   type DrillConfig,
   type DrillPlan,
   type DrillRow,
-} from '@broject/drill'
-import { flag, flagAll, positionals } from './args.ts'
+} from '@broject/drill';
+import { flag, flagAll, positionals } from './args.ts';
 
 const flagZone = (argv: string[]): string[] => {
-  const end = argv.indexOf('--')
-  return end === -1 ? argv : argv.slice(0, end)
-}
+  const end = argv.indexOf('--');
+  return end === -1 ? argv : argv.slice(0, end);
+};
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(`Usage: bro drill <command> [args…]
+  printUsage(
+    `Usage: bro drill <command> [args…]
 
 Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
@@ -59,7 +60,9 @@ Commands:
   report                                         List published drill reports
   distill ID                                     Extract a reusable proto from a drill epic
 
-  bro unwind …                                   alias for \`bro drill up\``, exitCode)
+  bro unwind …                                   alias for \`bro drill up\``,
+    exitCode
+  );
 }
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -72,29 +75,29 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--description',
   '--id',
   '--wake',
-])
+]);
 
-const drillPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
+const drillPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS);
 
 function parsePriority(raw: string | undefined): number | undefined {
-  const priority = raw ? Number(raw) : undefined
+  const priority = raw ? Number(raw) : undefined;
   if (raw !== undefined && (raw.trim() === '' || !Number.isInteger(priority))) {
-    console.error(`error: --priority must be an integer, got "${raw}"`)
-    process.exit(2)
+    console.error(`error: --priority must be an integer, got "${raw}"`);
+    process.exit(2);
   }
-  return priority
+  return priority;
 }
 
 // parse* helpers are pure validation + extraction — they run before
 // checkBeads() so a syntax error always beats a beads setup error.
 
 function parseDown(rest: string[]) {
-  const title = drillPositionals(rest).join(' ')
+  const title = drillPositionals(rest).join(' ');
   if (!title?.trim()) {
-    console.error('error: drill down requires a title')
-    process.exit(2)
+    console.error('error: drill down requires a title');
+    process.exit(2);
   }
-  const head = flagZone(rest)
+  const head = flagZone(rest);
   return {
     title,
     opts: {
@@ -104,38 +107,38 @@ function parseDown(rest: string[]) {
       priority: parsePriority(flag(rest, '--priority')),
       description: flag(rest, '--description'),
     },
-  }
+  };
 }
 
 function parseUp(rest: string[]) {
-  const result = flag(rest, '--result')
+  const result = flag(rest, '--result');
   if (!result) {
-    console.error('error: drill up requires --result — a frame must return a curated finding')
-    process.exit(2)
+    console.error('error: drill up requires --result — a frame must return a curated finding');
+    process.exit(2);
   }
-  const head = flagZone(rest)
+  const head = flagZone(rest);
   return {
     id: flag(rest, '--id'),
     result,
     prevent: flagAll(rest, '--prevent'),
     evidence: flagAll(rest, '--evidence'),
     report: head.includes('--report'),
-  }
+  };
 }
 
 function parseDistill(rest: string[]): string {
-  const ids = drillPositionals(rest)
+  const ids = drillPositionals(rest);
   if (ids.length !== 1) {
-    console.error('error: drill distill requires exactly one epic/bead id')
-    process.exit(2)
+    console.error('error: drill distill requires exactly one epic/bead id');
+    process.exit(2);
   }
-  return ids[0]!
+  return ids[0]!;
 }
 
 function cmdDown(rest: string[]): void {
-  const { title, opts } = parseDown(rest)
-  const row = drillDown(title, opts)
-  console.log(`drill ↓ ${row.id} ${row.title}`)
+  const { title, opts } = parseDown(rest);
+  const row = drillDown(title, opts);
+  console.log(`drill ↓ ${row.id} ${row.title}`);
 }
 
 /** Materialize a drill plan (`bro run drill.toml`): the root frame plus
@@ -146,17 +149,17 @@ function cmdDown(rest: string[]): void {
  *  claimFrame/drillUp convention): a retry converges instead of
  *  duplicating the tree. */
 export function applyDrillPlan(plan: DrillPlan): void {
-  checkBeads()
-  const created: string[] = []
+  checkBeads();
+  const created: string[] = [];
   try {
-    const root = drillDown(plan.title, { root: true })
-    created.push(root.id)
-    console.log(`drill ↓ ${root.id} ${root.title} (plan root)`)
-    const ids = new Map<number, string>()
+    const root = drillDown(plan.title, { root: true });
+    created.push(root.id);
+    console.log(`drill ↓ ${root.id} ${root.title} (plan root)`);
+    const ids = new Map<number, string>();
     plan.steps.forEach((s, i) => {
-      const under = s.under === undefined ? root.id : ids.get(s.under)
+      const under = s.under === undefined ? root.id : ids.get(s.under);
       if (under === undefined) {
-        throw new Error(`steps[${i}]: under=${s.under} has no materialized step`)
+        throw new Error(`steps[${i}]: under=${s.under} has no materialized step`);
       }
       const row = drillDown(s.title, {
         under,
@@ -164,29 +167,28 @@ export function applyDrillPlan(plan: DrillPlan): void {
         description: s.description,
         priority: s.priority,
         type: s.type,
-      })
-      created.push(row.id)
-      ids.set(i, row.id)
-      console.log(`  step → ${row.id} ${row.title}`)
-    })
+      });
+      created.push(row.id);
+      ids.set(i, row.id);
+      console.log(`  step → ${row.id} ${row.title}`);
+    });
   } catch (err) {
-    const orphans: string[] = []
+    const orphans: string[] = [];
     // children first — bd refuses to delete a frame with open children
     for (const id of [...created].reverse()) {
       try {
-        taskStore().remove(id)
+        taskStore().remove(id);
       } catch {
-        orphans.push(id)
+        orphans.push(id);
       }
     }
     if (orphans.length === 0) {
-      throw err
+      throw err;
     }
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(
-      `${msg} — cleanup incomplete: frame(s) left behind: ${orphans.join(', ')}`,
-      { cause: err },
-    )
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`${msg} — cleanup incomplete: frame(s) left behind: ${orphans.join(', ')}`, {
+      cause: err,
+    });
   }
 }
 
@@ -194,49 +196,49 @@ export function applyDrillPlan(plan: DrillPlan): void {
  *  worktree root so the report rides the branch like any file. */
 function reportConfig(): { dir: string; mode: DrillConfig['report']['mode'] } {
   const cfg = loadConfig(process.cwd(), { drill: drillSection }) as {
-    drill?: DrillConfig
-  }
-  const rep = cfg.drill?.report ?? DEFAULT_DRILL_CONFIG.report
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-  return { dir: resolve(root, rep.dir), mode: rep.mode }
+    drill?: DrillConfig;
+  };
+  const rep = cfg.drill?.report ?? DEFAULT_DRILL_CONFIG.report;
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
+  return { dir: resolve(root, rep.dir), mode: rep.mode };
 }
 
 /** Best-effort frame lookup for the report decision — a miss just means
  *  no prompt; drillUp produces the authoritative error. */
 function safeRow(id: string): DrillRow | undefined {
   try {
-    return taskStore().get<DrillRow>(id)
+    return taskStore().get<DrillRow>(id);
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
-const openish = (r: DrillRow): boolean => r.status !== 'closed' && r.status !== 'done'
+const openish = (r: DrillRow): boolean => r.status !== 'closed' && r.status !== 'done';
 
 /** Whether this `drill up` writes a report: explicit --report always does;
  *  mode 'always' covers persistent frames (ephemeral wisps still need the
  *  flag); 'prompt' asks on a TTY and degrades to off without one. */
 async function resolveReportDir(args: ReturnType<typeof parseUp>): Promise<string | undefined> {
-  const rc = reportConfig()
+  const rc = reportConfig();
   if (args.report) {
-    return rc.dir
+    return rc.dir;
   }
   if (rc.mode === 'off') {
-    return undefined
+    return undefined;
   }
-  const target = args.id ? safeRow(args.id) : currentFrame()
+  const target = args.id ? safeRow(args.id) : currentFrame();
   if (!target) {
-    return undefined
+    return undefined;
   }
   // ephemeral wisps need the explicit flag, whatever the mode
   if (target.ephemeral) {
-    return undefined
+    return undefined;
   }
   if (rc.mode === 'always') {
-    return rc.dir
+    return rc.dir;
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    return undefined
+    return undefined;
   }
   // don't ask when the up can't succeed anyway — a Y followed by "not an
   // open drill frame"/"open child issues" is a misleading prompt; drillUp
@@ -246,112 +248,116 @@ async function resolveReportDir(args: ReturnType<typeof parseUp>): Promise<strin
     !(target.labels?.includes('drill') ?? false) ||
     childrenOf(target.id).some(openish)
   ) {
-    return undefined
+    return undefined;
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = await rl.question(
       `publish drill report → ${relative(process.cwd(), rc.dir) || '.'}/${target.id}.md? [Y/n] `
-    )
-    const a = answer.trim()
-    return a === '' || /^y(es)?$/i.test(a) ? rc.dir : undefined
+    );
+    const a = answer.trim();
+    return a === '' || /^y(es)?$/i.test(a) ? rc.dir : undefined;
   } finally {
-    rl.close()
+    rl.close();
   }
 }
 
 async function cmdUp(rest: string[]): Promise<void> {
-  const args = parseUp(rest)
-  const reportDir = await resolveReportDir(args)
-  const res = drillUp({ ...args, reportDir })
-  console.log(`drill ↑ ${res.closed} closed`)
+  const args = parseUp(rest);
+  const reportDir = await resolveReportDir(args);
+  const res = drillUp({ ...args, reportDir });
+  console.log(`drill ↑ ${res.closed} closed`);
   for (const id of res.preventionIds) {
-    console.log(`  prevention → ${id}`)
+    console.log(`  prevention → ${id}`);
   }
   if (res.reportPath) {
-    const rel = relative(process.cwd(), res.reportPath)
-    console.log(`  report → ${rel.startsWith('..') ? res.reportPath : rel}`)
+    const rel = relative(process.cwd(), res.reportPath);
+    console.log(`  report → ${rel.startsWith('..') ? res.reportPath : rel}`);
   }
   if (res.reportError) {
-    console.error(`  report write failed (frame is closed): ${res.reportError}`)
+    console.error(`  report write failed (frame is closed): ${res.reportError}`);
   }
 }
 
 function cmdReport(): void {
-  const { dir } = reportConfig()
-  const rows = listReports(dir)
+  const { dir } = reportConfig();
+  const rows = listReports(dir);
   if (rows.length === 0) {
-    console.log('no drill reports')
-    return
+    console.log('no drill reports');
+    return;
   }
   for (const row of rows) {
-    const rel = relative(process.cwd(), row.path)
-    console.log(`${row.id}\t${row.title}\t${rel.startsWith('..') ? row.path : rel}`)
+    const rel = relative(process.cwd(), row.path);
+    console.log(`${row.id}\t${row.title}\t${rel.startsWith('..') ? row.path : rel}`);
   }
 }
 
 function cmdCurrent(): void {
-  const frame = currentFrame()
+  const frame = currentFrame();
   if (!frame) {
-    console.log('no open drill frame')
-    process.exitCode = 1
-    return
+    console.log('no open drill frame');
+    process.exitCode = 1;
+    return;
   }
-  const parent = frame.parentId ? ` parent=${frame.parentId}` : ''
-  console.log(`${frame.id} ${frame.title} [depth=${frame.depth}${parent}]`)
+  const parent = frame.parentId ? ` parent=${frame.parentId}` : '';
+  console.log(`${frame.id} ${frame.title} [depth=${frame.depth}${parent}]`);
 }
 
 function cmdList(): void {
-  const rows = listDrills().filter((r) => r.status !== 'closed' && r.status !== 'done')
+  const rows = listDrills().filter(r => r.status !== 'closed' && r.status !== 'done');
   if (rows.length === 0) {
-    console.log('no open drill frames')
-    return
+    console.log('no open drill frames');
+    return;
   }
   for (const row of rows) {
-    const state = (row.labels ?? []).includes(WAITING_LABEL) ? 'waiting' : row.status
-    console.log(`${row.id}\t${state}\t${row.title}`)
+    const state = (row.labels ?? []).includes(WAITING_LABEL) ? 'waiting' : row.status;
+    console.log(`${row.id}\t${state}\t${row.title}`);
   }
 }
 
 function parsePark(rest: string[]): { id?: string; wake: string } {
-  const wake = flag(rest, '--wake')
+  const wake = flag(rest, '--wake');
   if (!wake?.trim()) {
-    console.error('error: drill park requires --wake — a parked frame owes a resume predicate')
-    process.exit(2)
+    console.error('error: drill park requires --wake — a parked frame owes a resume predicate');
+    process.exit(2);
   }
-  return { id: flag(rest, '--id'), wake }
+  return { id: flag(rest, '--id'), wake };
 }
 
 function cmdPark(rest: string[]): void {
-  const { id, wake } = parsePark(rest)
-  const row = parkFrame(id, wake)
-  console.log(`parked ${row.id} — wake: ${wake}`)
+  const { id, wake } = parsePark(rest);
+  const row = parkFrame(id, wake);
+  console.log(`parked ${row.id} — wake: ${wake}`);
 }
 
 function cmdWake(rest: string[]): void {
-  const ids = drillPositionals(rest)
+  const ids = drillPositionals(rest);
   if (ids.length > 1) {
-    console.error('error: drill wake takes at most one frame id')
-    process.exit(2)
+    console.error('error: drill wake takes at most one frame id');
+    process.exit(2);
   }
   try {
-    const row = wakeFrame(ids[0])
-    console.log(`woken ${row.id} ${row.title}`)
+    const row = wakeFrame(ids[0]);
+    console.log(`woken ${row.id} ${row.title}`);
   } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : err}`)
-    process.exit(1)
+    console.error(`error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
   }
 }
 
 function cmdWaiting(): void {
-  const rows = waitingFrames()
+  const rows = waitingFrames();
   if (rows.length === 0) {
-    console.log('no waiting frames')
-    return
+    console.log('no waiting frames');
+    return;
   }
   for (const row of rows) {
-    const wake = row.notes?.split('\n').find((l) => l.startsWith('WAKE: '))?.slice(6) ?? ''
-    console.log(`${row.id}\t${wake || 'waiting'}\t${row.title}`)
+    const wake =
+      row.notes
+        ?.split('\n')
+        .find(l => l.startsWith('WAKE: '))
+        ?.slice(6) ?? '';
+    console.log(`${row.id}\t${wake || 'waiting'}\t${row.title}`);
   }
 }
 
@@ -367,22 +373,20 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
   list: new Set(),
   report: new Set(),
   distill: new Set(),
-}
+};
 
 function rejectUnknownFlags(sub: string, argv: string[]): void {
   // own-key lookup — an inherited key like `toString` is not a subcommand
-  const known = Object.hasOwn(KNOWN_FLAGS, sub) ? KNOWN_FLAGS[sub] : undefined
+  const known = Object.hasOwn(KNOWN_FLAGS, sub) ? KNOWN_FLAGS[sub] : undefined;
   if (!known) {
-    return
+    return;
   }
-  const sep = argv.indexOf('--')
-  const head = sep === -1 ? argv : argv.slice(0, sep)
-  for (const arg of head) {
+  for (const arg of flagZone(argv)) {
     // single-dash typos too — `-p 3` silently becoming a title is worse
     // than an error (no drill flag uses one dash; bare "-" stays a title)
     if (arg.length > 1 && arg.startsWith('-') && !known.has(arg)) {
-      console.error(`error: unknown option "${arg}" for drill ${sub}`)
-      process.exit(2)
+      console.error(`error: unknown option "${arg}" for drill ${sub}`);
+      process.exit(2);
     }
   }
 }
@@ -391,88 +395,88 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
  *  with a setup error — flag names, stray positionals, and the
  *  command-specific operand/flag-value parses. */
 function validateDrillSyntax(sub: string, rest: string[]): void {
-  rejectUnknownFlags(sub, rest)
+  rejectUnknownFlags(sub, rest);
   // these subs take no positional args — a stray one is a typo, not input
-  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
-  const extras = drillPositionals(rest)
+  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting']);
+  const extras = drillPositionals(rest);
   if (noPositionals.has(sub) && extras.length > 0) {
-    console.error(`error: unexpected argument "${extras[0]}"`)
-    process.exit(2)
+    console.error(`error: unexpected argument "${extras[0]}"`);
+    process.exit(2);
   }
   if (sub === 'down') {
-    parseDown(rest)
+    parseDown(rest);
   } else if (sub === 'up') {
-    parseUp(rest)
+    parseUp(rest);
   } else if (sub === 'distill') {
-    parseDistill(rest)
+    parseDistill(rest);
   }
 }
 
 export async function runDrillCommand(argv: string[]): Promise<void> {
-  const [sub, ...rest] = argv
+  const [sub, ...rest] = argv;
   // zero-arg magic: bare `bro drill` shows where the descent stands
   if (!sub) {
-    checkBeads()
-    cmdCurrent()
-    return
+    checkBeads();
+    cmdCurrent();
+    return;
   }
   if (sub === '--help' || sub === '-h') {
-    usage(0)
+    usage(0);
   }
   // Validate before checkBeads — `bro drill bogus` must report a syntax
   // error even where beads isn't initialized.
   if (!Object.hasOwn(KNOWN_FLAGS, sub)) {
-    usage()
+    usage();
   }
   if (hasHelpFlag(rest)) {
-    usage(0)
+    usage(0);
   }
-  validateDrillSyntax(sub, rest)
+  validateDrillSyntax(sub, rest);
   // `report` lists files only — a missing/uninitialized bd must not
   // block reading published reports
   if (sub !== 'report') {
-    checkBeads()
+    checkBeads();
   }
 
   switch (sub) {
     case 'down':
-      cmdDown(rest)
-      return
+      cmdDown(rest);
+      return;
     case 'up':
-      await cmdUp(rest)
-      return
+      await cmdUp(rest);
+      return;
     case 'current':
-      cmdCurrent()
-      return
+      cmdCurrent();
+      return;
     case 'tree':
-      console.log(drillTree())
-      return
+      console.log(drillTree());
+      return;
     case 'list':
-      cmdList()
-      return
+      cmdList();
+      return;
     case 'park': {
       try {
-        cmdPark(rest)
+        cmdPark(rest);
       } catch (err) {
-        console.error(`error: ${err instanceof Error ? err.message : err}`)
-        process.exit(1)
+        console.error(`error: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
       }
-      return
+      return;
     }
     case 'wake':
-      cmdWake(rest)
-      return
+      cmdWake(rest);
+      return;
     case 'waiting':
-      cmdWaiting()
-      return
+      cmdWaiting();
+      return;
     case 'report':
-      cmdReport()
-      return
+      cmdReport();
+      return;
     case 'distill': {
-      process.stdout.write(bd(['mol', 'distill', parseDistill(rest)]))
-      return
+      process.stdout.write(bd(['mol', 'distill', parseDistill(rest)]));
+      return;
     }
     default:
-      usage()
+      usage();
   }
 }

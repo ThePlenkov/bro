@@ -223,8 +223,6 @@ for (let i = 0; i < args.length; i++) {
       flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
     } else if (valueFlagsShort.has(k)) {
       fail('create -' + k + ' requires a value')
-    } else if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
-      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
     } else {
       flags[k] = true
     }
@@ -340,7 +338,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
     }
     save(db)
-    jsonOut({ id })
+    // real bd answers create with the created row — callers read
+    // title/status back off it, not just the id
+    jsonOut(row(id))
     break
   }
   case 'update': {
