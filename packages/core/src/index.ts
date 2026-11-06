@@ -71,6 +71,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
   js,
   loadConfig,
   loadConfigLayers,
@@ -249,6 +250,8 @@ export type {
 } from './lifecycle.ts';
 export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
+export { parseTaskSpecBody, taskSpecFacade } from './taskspec.ts';
+export type { TaskSpec, TaskSpecFacade } from './taskspec.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
@@ -329,6 +332,7 @@ export {
   sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
@@ -418,6 +422,7 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
@@ -454,6 +459,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,

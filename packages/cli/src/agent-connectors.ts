@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn, spawnSync, type SpawnOptions } from 'node:child_process';
+import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -33,43 +33,62 @@ import {
 } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
+  type AgentCause,
+  type AgentConnector,
+  type AgentInfo,
   AgentNotFound,
+  type AgentRegistryEntry,
+  type AgentState,
+  admitSessionSlot,
   agentEntryBlocked,
   agentExitFileName,
   agentsSection,
-  bdActor,
-  admitSessionSlot,
+  appendPrivateFileSync,
   BATCH_MARKER_ENV,
-  isBatchSpawn,
+  type BrouterConfig,
+  BrouterConfigError,
+  bdActor,
+  brouterStaticCatalog,
+  type ConnectorCtx,
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
-  appendPrivateFileSync,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
+  type DiscoveredSession,
   deriveProviderWalls,
   emitLifecycle,
   entryRunId,
+  type FleetProfile,
+  type FleetRouter,
   ghHost,
   gitTry,
   groupMemberAlive,
   handleOwner,
   isAgentCause,
+  isBatchSpawn,
+  isQualifiedRouteId,
   JudgeUnavailable,
+  type ListResult,
   loadConfig,
+  type ModelRoute,
   mintAgentId,
   mintRunId,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  type ProcEntry,
+  type ProviderEntry,
+  ProviderSurfaceError,
+  type ProviderWall,
   patchAgentRegistry,
   pidAlive,
   probeStep,
   procStat,
   providerCallGrade,
-  brouterStaticCatalog,
-  BrouterConfigError,
-  isQualifiedRouteId,
+  type ResolvedClass,
+  type RoutingTable,
+  readAgentRegistry,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
@@ -77,42 +96,23 @@ import {
   resolveStepClass,
   scanProc,
   SESSION_SLOT_TTL_MS,
+  type SessionPlane,
+  SpawnError,
+  type SpawnSpec,
+  type SpawnWorker,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
   sessionSlotsDir,
-  SpawnError,
   stepParent,
-  ProviderSurfaceError,
-  readAgentRegistry,
   UnknownProviderError,
   withAgentRegistryLock,
   writeAgentRegistry,
   writePrivateFileSync,
-  type AgentCause,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type AgentState,
-  type BrouterConfig,
-  type ConnectorCtx,
-  type DiscoveredSession,
-  type FleetProfile,
-  type FleetRouter,
-  type ListResult,
-  type ModelRoute,
-  type ProcEntry,
-  type ProviderEntry,
-  type ProviderWall,
-  type ResolvedClass,
-  type RoutingTable,
-  type SessionPlane,
-  type SpawnSpec,
-  type SpawnWorker,
 } from '@broject/core';
-import { otelEvent } from '@broject/providers';
+import { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
 import type { AcpSeam, FetchFn } from '@broject/providers';
-import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
+import { otelEvent } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
@@ -126,7 +126,6 @@ import {
   devinSessionPlane,
 } from '@broject/devin';
 import './session-planes/copilot.ts';
-import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
 import {
@@ -135,6 +134,7 @@ import {
   laneGateTake,
   reconcileLanePauseForRegistry,
 } from './lane.ts';
+import { writeCopilotCount } from './session-planes/copilot.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -882,6 +882,11 @@ const AGENT_PIN_KEYS = new Set([
   // delegation provenance is connector-owned too — a caller-supplied
   // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
   'BRO_DELEGATED_BY',
+  // pipeline provenance is connector-owned too (spec bro-7d5nb) — a
+  // caller-supplied BRO_FORMULA would let a commit claim a formula the
+  // registry never recorded, and `bro trace` only catches a claim it
+  // can compare
+  'BRO_FORMULA',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -913,6 +918,10 @@ function isAllowedByEnvPolicy(
   // (spec bro-9h86l), so fromSpec decides it, before trusted-host's
   // blanket pass-through
   if (key === BATCH_MARKER_ENV) return fromSpec;
+  // the customer-channel HMAC key is never a worker credential — a
+  // worker holding it can mint customer verdicts (spec bro-7d5nb
+  // trust model), so it's denied in every mode: ambient AND spec.env
+  if (key === 'BRO_PIPELINE_KEY') return false;
   if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
   // strict mode: only allowlisted
   if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
@@ -955,13 +964,24 @@ const agentEnvPins = (
     ['BRO_BEAD_ID', spec.molStep],
     ['BRO_AGENT_ID', agentId],
     ['BRO_PROMPT_FILE', promptFile],
-    ['BRO_SESSION_ID', agentId],
+    // a pipeline spawn may attest a session id the driver knows
+    // (spec bro-7d5nb) — the pin and the registry's session_id carry
+    // the same value so the BRO-Session trailer verifies; absent the
+    // override the agentId stays the session, as before
+    ['BRO_SESSION_ID', spec.pipeline?.sessionId ?? agentId],
   ];
   if (agentCli !== undefined && agentCli !== '') {
     pins.push(['BRO_AGENT', agentCli]);
   }
   if (mol !== undefined) {
     pins.push(['BRO_MOL_ID', mol]);
+  }
+  // pipeline provenance pin (spec bro-7d5nb) — `<id>@<sha>` verbatim;
+  // the prepare-commit-msg hook emits the BRO-Formula trailer from it.
+  // No stage pin: stage names are pipeline vocabulary the worker must
+  // never see (spec invariant 1)
+  if (spec.pipeline !== undefined) {
+    pins.push(['BRO_FORMULA', `${spec.pipeline.formula}@${spec.pipeline.formulaSha}`]);
   }
   // provenance pins (spec bro-5hx1.1) — BRO_AGENT_MODEL doubles as
   // MODEL_ENV[0] so the Agent-Model: commit trailer lands the day a
@@ -1833,6 +1853,15 @@ function commitSpawn(
     // which agent asked for this spawn — same provenance write; a
     // respawn re-stamps (clears when the respawn wasn't delegated)
     delegatedBy: spec.delegatedBy,
+    // pipeline provenance (spec bro-7d5nb §traceability) — same
+    // provenance write: a non-formula respawn clears the previous
+    // run's stamps rather than keeping a formula it never ran under.
+    // session_id mirrors the BRO_SESSION_ID pin — the session the run
+    // attests, agentId unless the driver named one
+    formula: spec.pipeline?.formula,
+    formula_sha: spec.pipeline?.formulaSha,
+    pipeline_stage: spec.pipeline?.stage,
+    session_id: spec.pipeline === undefined ? undefined : (spec.pipeline.sessionId ?? agentId),
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
@@ -3321,7 +3350,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
                 spec,
                 env,
                 policy,
-                Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+                Object.hasOwn(spec.env ?? {}, e[0])
               )
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
@@ -4706,7 +4735,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
           spec,
           env ?? { agents: {}, connectors: {} },
           policy,
-          Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+          Object.hasOwn(spec.env ?? {}, e[0])
         )
       ) {
         return false;

@@ -41,6 +41,7 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
 import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
 import { otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
@@ -437,6 +438,18 @@ async function acpOp(
   }
 }
 
+/** The in-process agent this op talks to — the seam names it outright
+ *  or resolves it per spawn label, so a multi-provider gateway hands
+ *  each lane its own agent. */
+function seamPeer(
+  opts: ProviderWireOpts,
+  by: string
+): import('@agentclientprotocol/sdk').AgentApp | undefined {
+  const peer = opts.acp?.peer;
+  if (peer === undefined) return undefined;
+  return typeof peer === 'function' ? peer(by) : peer;
+}
+
 /** One connected ACP operation — `opts.acp.peer` is the in-process
  *  test seam; production execs the tokenized `entry.command` argv
  *  (profile as a separate arg — no shell) and kills the child when
@@ -452,7 +465,7 @@ async function withAcp<T>(
   const app = terminals.register(
     client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
   );
-  const peer = opts.acp?.peer;
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   let spawnError: string | undefined;
@@ -581,7 +594,8 @@ export async function acpConverse(
         signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
@@ -673,6 +687,28 @@ function tracedUpdates(
  *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
  *  so the plane observer is attached once, not per transport. `cwd`
  *  anchors the bus socket + the per-agent .events.jsonl archive. */
+/** `string | ContentBlock[]` → the journaled prompt text. Text blocks
+ *  carry their text, links and embedded resources their URI, media a
+ *  `[type]` marker — the archive row says what was asked, it is not a
+ *  byte-exact request echo. */
+export const promptText = (prompt: string | ContentBlock[]): string => {
+  if (typeof prompt === 'string') return prompt;
+  return prompt
+    .map(b => {
+      switch (b.type) {
+        case 'text':
+          return b.text;
+        case 'resource_link':
+          return b.uri;
+        case 'resource':
+          return b.resource.uri;
+        default:
+          return `[${b.type}]`;
+      }
+    })
+    .join('\n');
+};
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -682,11 +718,12 @@ export async function pumpTurn(
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx,
-  cwd?: string
+  cwd?: string,
+  drainTimeoutMs?: number
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
-  plane.start();
+  plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
@@ -729,7 +766,7 @@ export async function pumpTurn(
   } finally {
     // the acp-worker driver exits right after the turn — settle the
     // queued publishes first or the turn's last events die with it
-    await plane.drain();
+    await plane.drain(drainTimeoutMs);
   }
 }
 
@@ -909,7 +946,7 @@ export async function acpOpen(
   }
   const terminals = new AcpTerminals();
   const app = pooledClientApp(opts, terminals);
-  const peer = opts.acp?.peer;
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   // spawn's 'error' event is async — the getter reads it whenever the
@@ -1171,7 +1208,8 @@ export async function acpPooledTurn(
         turn.signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       endSession();
       end({
@@ -1410,7 +1448,7 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
  *  even ran tools in dogfooding). The preamble states the shapes
  *  mapAnswer validates — field names are the wire's, not aliases. */
 const TYPED_PREAMBLE = [
-  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  `You are a ${JUDGE_PROMPT_MARK}. The user message below is a JSON body {state, questions}.`,
   'Reply with STRICT JSON only — no prose, no markdown fences:',
   '{"answers": {"<question-id>": <answer>, ...}}',
   'Answer shape per question type — copy the question\'s "type":',

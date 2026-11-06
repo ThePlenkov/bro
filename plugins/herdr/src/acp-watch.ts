@@ -25,7 +25,7 @@ import {
   type PermissionRequestLike,
   type SessionUpdateLike,
   safe,
-} from './acp-render.ts';
+} from '../../../packages/acp/session/src/index.ts';
 import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;
