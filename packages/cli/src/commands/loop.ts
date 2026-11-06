@@ -2550,6 +2550,34 @@ function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
   }
 }
 
+/** Supervised mode — `daemon run --loop` and `loop install` reach
+ *  `runLoopCommand` through the marker; `--every` is the outer re-scan
+ *  cadence (the queue drains, the pass sleeps, the next pass rescans),
+ *  while `--interval` stays the in-run gate poll. The same arming guard
+ *  as `bro drive --every` applies — spawned workers never own a
+ *  supervisor cadence; the orchestrator session does. */
+function everySecArg(argv: string[]): number | undefined {
+  const everyRaw = flag(argv, '--every');
+  if (everyRaw === undefined) {
+    return undefined;
+  }
+  const everySec = Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+    );
+    process.exit(2);
+  }
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+        'the orchestrator session owns the cadence'
+    );
+    process.exit(2);
+  }
+  return everySec;
+}
+
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
@@ -2569,30 +2597,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     return;
   }
   rejectStrayArgs(argv);
-  // supervised mode — `daemon run --loop` and `loop install` reach
-  // here through the marker; `--every` is the outer re-scan cadence
-  // (the queue drains, the pass sleeps, the next pass rescans), while
-  // `--interval` stays the in-run gate poll
-  const everyRaw = flag(argv, '--every');
-  let everySec: number | undefined;
-  if (everyRaw !== undefined) {
-    everySec = Number(everyRaw);
-    if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
-      console.error(
-        `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
-      );
-      process.exit(2);
-    }
-    // same arming guard as `bro drive --every` — spawned workers never
-    // own a supervisor cadence; the orchestrator session does
-    if (!isOrchestratorSession()) {
-      console.error(
-        'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
-          'the orchestrator session owns the cadence'
-      );
-      process.exit(2);
-    }
-  }
+  const everySec = everySecArg(argv);
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
@@ -2610,19 +2615,21 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       ? () => {}
       : await awaitFileLock(loopLock, {
           label: 'loop supervisor lock',
-          onStandby: pid =>
-            say(
-              ctx,
-              `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
+          onStandby: pid => {
+            const by = pid === null ? '' : ` by pid ${pid}`;
+            say(ctx, `loop: already supervised${by} — standing by`);
+          },
         });
   try {
     if (everySec === undefined) {
       await guardedRun(ctx);
     } else {
+      // supervised passes are strictly sequential — a pass drains the
+      // queue, then the supervisor sleeps until the next re-scan; the
+      // awaits must stay inside the loop, not fan out
       for (;;) {
-        await guardedRun(ctx);
-        await sleep(everySec * 1000);
+        await guardedRun(ctx); // NOSONAR — sequential-by-design supervised passes
+        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
       }
     }
   } finally {

@@ -98,9 +98,8 @@ const RECORD_TRUST_MS = 120_000;
  *  watchdog's "daemon died" signal. */
 export function daemonStatePath(dir: string, opts: { loop?: boolean } = {}): string | null {
   const common = gitCommonDir(dir);
-  return common === null
-    ? null
-    : join(common, 'bro', opts.loop === true ? 'daemon-loop.json' : 'daemon.json');
+  const file = opts.loop === true ? 'daemon-loop.json' : 'daemon.json';
+  return common === null ? null : join(common, 'bro', file);
 }
 
 export function daemonLogPath(dir: string): string | null {
@@ -306,12 +305,13 @@ function supervisionProcs(dir: string): number[] {
   }
   let pids: number[];
   try {
+    // pgrep is a required runtime dep; env below pins PATH to fixed
+    // unwriteable dirs — the default inherited PATH can contain
+    // user-writable dirs (sonar S4036)
     const out = execFileSync('pgrep', ['-f', '(daemon run|drive|loop) --every'], {
-      // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
+      // NOSONAR
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      // fixed, unwriteable PATH for the binary lookup — the default
-      // inherited PATH can contain user-writable dirs (sonar S4036)
       env: { PATH: '/usr/bin:/bin' },
     });
     pids = out
@@ -643,6 +643,32 @@ export interface DriveSchedDeps {
 /** The loop installer's seams — the same supervisor verbs, loop kind. */
 export type LoopSchedDeps = DriveSchedDeps;
 
+/** The install detail's supervisor fragment — one wording for both
+ *  install kinds (drive and loop). */
+function installSupLine(up: SupervisorUp, everySec: number): string {
+  if (up.kind === 'spawned') {
+    return `supervisor up — pid ${up.pid} every ${everySec}s`;
+  }
+  if (up.kind === 'already') {
+    return `already supervising (pid ${up.pid})`;
+  }
+  if (up.kind === 'disarmed') {
+    return 'supervisor not spawned — a racing uninstall disarmed it';
+  }
+  return 'supervisor spawn refused — workers never arm it';
+}
+
+/** The arm verb in an install detail — armed / re-armed / already armed. */
+function armVerb(state: 'armed' | 'updated' | 'already'): string {
+  if (state === 'already') {
+    return 'already armed';
+  }
+  if (state === 'updated') {
+    return 're-armed';
+  }
+  return 'armed';
+}
+
 /** `bro drive install` — arm the want-marker, then bring the supervisor
  *  up (enable --now): the merge path is on from this call, not the next
  *  checkpoint. A failed spawn doesn't roll the marker back — the next
@@ -677,19 +703,11 @@ export function installDrive(
     const up = (deps.up ?? supervisorUp)(dir, opts.everySec, process.env, {
       requireMarker: true,
     });
-    sup =
-      up.kind === 'spawned'
-        ? `supervisor up — pid ${up.pid} every ${opts.everySec}s`
-        : up.kind === 'already'
-          ? `already supervising (pid ${up.pid})`
-          : up.kind === 'disarmed'
-            ? 'supervisor not spawned — a racing uninstall disarmed it'
-            : 'supervisor spawn refused — workers never arm it';
+    sup = installSupLine(up, opts.everySec);
   } catch (err) {
     sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`;
   }
-  const verb =
-    arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed';
+  const verb = armVerb(arm.state);
   return {
     state: arm.state === 'armed' ? 'installed' : arm.state,
     detail: `drive install ${verb} (every ${opts.everySec}s) — ${sup}; session checkpoints rearm a dead supervisor`,
@@ -826,19 +844,11 @@ export function installLoop(
       requireMarker: true,
       loop: true,
     });
-    sup =
-      up.kind === 'spawned'
-        ? `supervisor up — pid ${up.pid} every ${opts.everySec}s`
-        : up.kind === 'already'
-          ? `already supervising (pid ${up.pid})`
-          : up.kind === 'disarmed'
-            ? 'supervisor not spawned — a racing uninstall disarmed it'
-            : 'supervisor spawn refused — workers never arm it';
+    sup = installSupLine(up, opts.everySec);
   } catch (err) {
     sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`;
   }
-  const verb =
-    arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed';
+  const verb = armVerb(arm.state);
   return {
     state: arm.state === 'armed' ? 'installed' : arm.state,
     detail: `loop install ${verb} (every ${opts.everySec}s) — ${sup}; session checkpoints rearm a dead supervisor`,

@@ -293,10 +293,11 @@ function agentsLine(a: AgentsReport): string | null {
     return null;
   }
   const ids = a.dead.map(d => `${d.id}:${d.state}`).join(', ');
+  const plural = a.dead.length === 1 ? 'y' : 'ies';
   const dead =
     a.dead.length === 0
       ? 'no dead registry entries'
-      : `${a.dead.length} dead registry entr${a.dead.length === 1 ? 'y' : 'ies'} (${ids}) — \`bro fleet agents prune\` sweeps, \`bro fleet agents up <step>\` respawns`;
+      : `${a.dead.length} dead registry entr${plural} (${ids}) — \`bro fleet agents prune\` sweeps, \`bro fleet agents up <step>\` respawns`;
   const deg = a.degraded.length === 0 ? '' : `; degraded: ${a.degraded.join('; ')}`;
   return `resume: agents — ${dead}${deg}`;
 }
