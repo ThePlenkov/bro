@@ -40,6 +40,29 @@ planned onto `main`: the root member read as "retarget me". The root
 is now the first member's own base (its PR's declared base, else its
 recorded edge, else the default), and the plan follows it.
 
+The chain's root and the repo's DEFAULT branch are two different
+things, and the edge file knows the difference: a member's edge goes
+only when the member stands on the trunk. A member rooted on the
+chain's own base keeps its edge — that edge IS the root, and a later
+sync without PR data would otherwise lose it.
+
+One resolution, everywhere: the branch a member stands on is its
+recorded edge (the fork truth the plan reads), else its PR's declared
+base, else the chain's previous member. The head check and the plan
+must not read different bases — or a stale child looks current in one
+place and stale in the other.
+
+## The cascade re-checks what it rewrote
+
+The plan is made BEFORE the cascade runs. A member that is rewritten
+mid-pass moves the base of the member above it, and the plan — made
+earlier — cannot know that. The cascade refreshes the flag: a member
+whose base was rewritten in this pass is re-checked, and rides it.
+
+The invariant the host's stack registration demands (every member
+carries the member below it) is then true by construction, not by
+luck.
+
 ## The fork is patch-aware
 
 A parent rewritten under its child leaves the child holding the

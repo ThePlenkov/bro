@@ -387,6 +387,51 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('a fix that landed below rides the whole chain', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      // three members, each on the one below
+      for (const slug of ['fx-a', 'fx-b', 'fx-c']) {
+        assert.equal(f.run(['push', slug, '--name', 's']).code, 0);
+      }
+      const wa = join(f.root, 'main--fx-a');
+      const wb = join(f.root, 'main--fx-b');
+      const wc = join(f.root, 'main--fx-c');
+      commitIn(wa, 'a.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      commitIn(wb, 'b.txt');
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb);
+      commitIn(wc, 'c.txt');
+      git(['push', '-q', 'origin', 'stack/s/3-fx-c'], wc);
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+          'stack/s/3-fx-c': { number: 13, state: 'OPEN', baseRef: 'stack/s/2-fx-b' },
+        },
+      });
+      // a fix lands BELOW the chain — the bottom member's branch moves
+      commitIn(wa, 'fix.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      // the middle rides the moved bottom…
+      const midHead = git(['rev-parse', 'stack/s/2-fx-b'], f.main).trim();
+      assert.equal(
+        git(['merge-base', 'stack/s/1-fx-a', 'stack/s/2-fx-b'], f.main).trim(),
+        git(['rev-parse', 'stack/s/1-fx-a'], f.main).trim()
+      );
+      // …and the TOP rides the middle: the plan is made before the
+      // cascade, so a member that is rewritten mid-pass is re-checked
+      // against the base it now stands on
+      assert.equal(
+        git(['merge-base', 'stack/s/2-fx-b', 'stack/s/3-fx-c'], f.main).trim(),
+        midHead,
+        'the member above a rewritten one rides it'
+      );
+    });
+  });
+
   test('a merged member with no worktree loses its branch on sync', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {

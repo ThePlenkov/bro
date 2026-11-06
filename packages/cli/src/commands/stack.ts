@@ -494,10 +494,13 @@ function retireMerged(
   )
 }
 
-/** The branch a member stands on — its PR's declared base, else the
- *  recorded edge, else the chain's previous member. */
+/** The branch a member stands on — its recorded edge (the fork truth
+ *  the plan reads), else its PR's declared base, else the chain's
+ *  previous member. The order matches `planSync`'s own resolution: one
+ *  answer, or the head check and the planner read different bases and
+ *  disagree about whether the member is current. */
 function baseOf(m: MemberView, prev: string): string {
-  return m.prBase ?? m.edgeBase ?? prev
+  return m.edgeBase ?? m.prBase ?? prev
 }
 
 /**
@@ -635,8 +638,8 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
 /** Move the member's recorded edge to its new base — the edge is the
  *  fork truth, so it updates even when the PR retarget is refused (a
  *  stale edge would re-schedule the rewrite on every later sync). */
-function updateEdge(m: MemberView, desiredBase: string, defaultBase: string): void {
-  if (desiredBase === defaultBase) {
+function updateEdge(m: MemberView, desiredBase: string, trunk: string): void {
+  if (desiredBase === trunk) {
     removeStackEdge(m.branch)
   } else {
     recordStackEdge(m.branch, desiredBase)
@@ -840,6 +843,11 @@ interface SyncCtx {
   root: string
   rev: { repo: string; facade: ReviewFacade } | undefined
   stacks: StackFacade | undefined
+  /** The repo's DEFAULT branch — a member's edge goes only when the
+   *  member stands on it. The chain's own root is a different branch,
+   *  and its edge is the root the chain is built on. */
+  trunk: string
+  /** The base the plan targets — the chain's own root. */
   defaultBase: string
   lines: string[]
 }
@@ -861,22 +869,26 @@ function rebaseStep(
   return rebaseMember(item, lines)
 }
 
-/** One member's cascade step. False when the chain's base==prev-head
+/** How a member's cascade step ended — 'rebased' means its branch was
+ *  rewritten, so the member ABOVE it rides a base that moved. */
+type SyncOutcome = 'ok' | 'rebased' | 'failed'
+
+/** One member's cascade step. 'failed' when the chain's base==prev-head
  *  invariant broke (a dirty member, a failed move) — the caller drops
  *  the publish tail instead of feeding the host's stack tool a
  *  reject. */
-function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
+function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
   const m = item.member
   if (m.prState === 'MERGED') {
     retireMerged(m, ctx.root, ctx.lines)
-    return true
+    return 'ok'
   }
   if (item.skip) {
     ctx.lines.push(`  ${m.branch} skipped — ${item.skip}`)
-    return false
+    return 'failed'
   }
   if (!item.rebase && !item.retarget) {
-    return true // in sync — don't even touch the edge file
+    return 'ok' // in sync — don't even touch the edge file
   }
   const cascade = ctx.stacks?.cascade?.(m) ?? MANUAL_CASCADE
   // The edge is the fork truth planSync reads — it moves only after
@@ -884,24 +896,26 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
   // remote-follow would read a failed rewrite as synced and never
   // reschedule it.
   if (!rebaseStep(item, cascade, ctx.lines)) {
-    return false
+    return 'failed'
   }
+  let rebased = item.rebase
   // the platform rewrites a child when its parent MERGES — but a base that
   // moved by a PUSH is not a merge, and the platform leaves the child where
   // it was. The invariant decides, not the assumption.
   if (item.rebase && !carriesBaseHead(m.branch, item.desiredBase, ctx.root)) {
     if (!rebaseMember(item, ctx.lines)) {
-      return false
+      return 'failed'
     }
+    rebased = true
   }
-  updateEdge(m, item.desiredBase, ctx.defaultBase)
+  updateEdge(m, item.desiredBase, ctx.trunk)
   if (!cascade.retarget) {
-    return retargetMember(item, ctx.rev, ctx.lines)
+    return retargetMember(item, ctx.rev, ctx.lines) ? (rebased ? 'rebased' : 'ok') : 'failed'
   }
   if (item.retarget && m.pr !== undefined) {
     ctx.lines.push(`  ${m.branch} PR retarget → ${item.desiredBase} (platform)`)
   }
-  return true
+  return rebased ? 'rebased' : 'ok'
 }
 
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
@@ -922,23 +936,41 @@ export function syncStack(
   status?: { publishFailed: boolean }
 ): string[] {
   const main = mainWorktree()
+  const trunk = defaultBranchName() ?? main.branch ?? 'main'
   const ctx: SyncCtx = {
     root,
     rev: resolveReview(root),
     stacks: resolveStacks(root),
-    defaultBase: defaultBranchName() ?? main.branch ?? 'main',
+    trunk,
+    defaultBase: trunk,
     lines: [],
   }
   const members = collectMembers(name, root, ctx.rev)
-  ctx.defaultBase = chainRootBase(members, ctx.defaultBase)
+  ctx.defaultBase = chainRootBase(members, ctx.trunk)
   markBaseHeads(members, root, ctx.defaultBase)
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the
   // host's stack registration demands. A dirty member or a failed move
   // breaks it: defer publish instead of feeding the tool a reject.
   let intact = true
-  for (const item of planSync(members, ctx.defaultBase)) {
-    if (!syncMember(item, ctx)) {
+  // the members rewritten in this pass — the member above one of them
+  // rides a base that moved while the cascade ran
+  const rewritten = new Set<string>()
+  const plan = planSync(members, ctx.defaultBase)
+  for (const [index, item] of plan.entries()) {
+    // The plan was made BEFORE the cascade: a member below that was
+    // rewritten moved its base, and the member above has to ride it. The
+    // plan cannot know that — the cascade does.
+    const below = plan[index - 1]
+    if (below !== undefined && rewritten.has(below.member.branch)) {
+      item.rebase = true
+      item.skip = item.member.rebaseable ? undefined : (item.member.blocked ?? 'not rebaseable')
+    }
+    const outcome = syncMember(item, ctx)
+    if (outcome === 'rebased') {
+      rewritten.add(item.member.branch)
+    }
+    if (outcome === 'failed') {
       intact = false
     }
   }
