@@ -14,6 +14,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
+import { fetchTokenSafe } from './redirect.ts';
 import { routerUrl } from './router-url.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
@@ -82,23 +83,27 @@ export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
 }
 
 /** The catalog, read from the router. A router that is not up is an
- *  honest error — never an empty catalog that reads like a whole one. */
+ *  honest error — never an empty catalog that reads like a whole one.
+ *  The read follows redirects by hand: every hop is checked before the
+ *  session token rides it (see redirect.ts). */
 export async function readCatalog(
   endpoint: RouterEndpoint,
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
   const limit = opts.limit ?? 1000;
   const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
-  const res = await fetch(url, {
-    headers: {
+  const res = await fetchTokenSafe(
+    url,
+    {
       'x-api-key': endpoint.token,
       authorization: `Bearer ${endpoint.token}`,
       'anthropic-version': '2023-06-01',
     },
-    signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
-  });
+    AbortSignal.timeout(opts.timeoutMs ?? 20_000)
+  );
   if (!res.ok) {
-    throw new Error(`the router answered ${res.status} on ${url}`);
+    // the hop that answered, not the one the read started at
+    throw new Error(`the router answered ${res.status} on ${res.url}`);
   }
   return servedModels(await res.json());
 }
