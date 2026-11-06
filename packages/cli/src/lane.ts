@@ -30,6 +30,7 @@ import { randomBytes } from 'node:crypto';
 import {
   agentRegistryPath,
   deriveProviderWalls,
+  groupMemberAlive,
   isBatchSpawn,
   laneGateDir,
   laneGateLevel,
@@ -47,7 +48,7 @@ import {
   type SpawnSpec,
 } from '@broject/core';
 
-import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
+import { providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
 
 // charge and its refund share the take — re-exported for the spawn path
 export { laneGateTake };

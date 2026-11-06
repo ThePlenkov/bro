@@ -62,6 +62,10 @@ which agent CLI answers.
   `<turn role="user|assistant">` segments. `tool_use` blocks serialize
   back as `<tool_call>{json}</tool_call>`; `tool_result` as
   `<tool_result for="<id>">`.
+- A `role:'system'` turn inside `messages` is CONTEXT, not a speaker
+  (claude 2.1.309 sends its environment block that way) — it joins the
+  system slot as its own `<system>` block, the same claim the chat and
+  responses dialects make for their system/developer messages.
 - Reply → content blocks in order: text segments become `text` blocks;
   each `<tool_call>{json}</tool_call>` becomes `tool_use` with a
   `toolu_*` id. stop_reason `tool_use` when any call parsed, else

@@ -1,5 +1,8 @@
 {
   "$schema": "https://unpkg.com/@broject/bro/schemas/bro.config.schema.json",
+  "loop": {
+    "autoMerge": true
+  },
   "act": {
     "ignoreChecks": ["kilo", "github-advanced-security"],
     "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
