@@ -20,7 +20,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /** Whether a URL's origin may carry the session token: https anywhere,
  *  cleartext only to this machine. */
-function tokenSafeOrigin(url: URL): boolean {
+export function tokenSafeOrigin(url: URL): boolean {
   if (url.protocol === 'https:') {
     return true;
   }
@@ -38,7 +38,12 @@ function withoutTrailingSlashes(text: string): string {
   return text.slice(0, end);
 }
 
-/** The router's URL, checked against the credential it carries. */
+/** The router's URL, checked against the credential it carries.
+ *
+ *  The base carries a PATH and nothing else: the catalog read appends
+ *  `/v1/models` to it, so a query or a fragment left in place would
+ *  land in the middle of that path — the read would ask for
+ *  `/?trace=1/v1/models`. */
 export function routerUrl(raw: string): string {
   const url = URL.parse(raw);
   if (url === null) {
@@ -50,5 +55,7 @@ export function routerUrl(raw: string): string {
         `(http://127.0.0.1:<port>) only; a plain-http host would carry it cleartext`
     );
   }
+  url.search = '';
+  url.hash = '';
   return withoutTrailingSlashes(url.toString());
 }
