@@ -64,6 +64,7 @@ import {
   type FleetRouter,
   ghHost,
   gitTry,
+  groupMemberAlive,
   handleOwner,
   isAgentCause,
   isBatchSpawn,
@@ -76,6 +77,7 @@ import {
   mintRunId,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  type ProcEntry,
   type ProviderEntry,
   ProviderSurfaceError,
   type ProviderWall,
@@ -93,6 +95,7 @@ import {
   requireProviderSurface,
   resolveModelRoute,
   resolveStepClass,
+  scanProc,
   SESSION_SLOT_TTL_MS,
   type SessionPlane,
   SpawnError,
@@ -2403,107 +2406,13 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
 /** The wrapper's death is not its unit's death: a TERM-resistant
  *  descendant survives the group signal, so the stop may only record
  *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
- *  alone (bro-l8c4f.3). kill(-pgid, 0) gates — ESRCH is a group that
- *  no longer exists (ESRCH-or-hard-failure reads dead, the rule
- *  pidAlive applies; EPERM is a live group we cannot signal) — but it
- *  also counts the unreaped wrapper's own zombie, so live members are
- *  read from /proc the way procStat reads one process: state 'Z' is
- *  nobody. `minStart` (the wrapper's recorded pidStart) bounds a
- *  member's /proc starttime from below — our descendants forked after
- *  the wrapper, so a member older than it belongs to a pgid the kernel
- *  recycled after our group died, not to this unit.
- *
- *  Two edges where the probe cannot answer, and the answer differs by
- *  platform: on Linux a vanished /proc, or a member stat that fails
- *  for any reason but ENOENT, stays fail-open (pidAlive's rule: never
- *  a false "the unit is dead"); off Linux /proc never exists at all,
- *  so the group probe cannot tell the wrapper's zombie from a live
- *  member — there the caller's pid check is the probe, and a
+ *  alone (bro-l8c4f.3). The probes live in core — pidAlive for the
+ *  wrapper, groupMemberAlive (over one shared scanProc) for the group.
+ *  Off /proc the group probe cannot tell the wrapper's zombie from a
+ *  live member — there the caller's pid check is the probe, and a
  *  descendant that outlives its wrapper is a documented blind spot
  *  (failing open would spin the whole kill-wait on EVERY stop and the
  *  `stopped` marker would never land). */
-/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
- *  procStat does (index 0 = state/field 3). */
-interface ProcEntry {
-  pid: number;
-  state: string;
-  ppid: number;
-  pgrp: number;
-  start: string;
-}
-
-/** One shared scan of /proc for the group and tree probes — `null`
- *  when /proc itself is unreadable; `unverified` marks at least one
- *  non-ENOENT stat failure (a process we could not inspect). */
-function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
-  let names: string[];
-  try {
-    names = readdirSync('/proc');
-  } catch {
-    return null;
-  }
-  const entries: ProcEntry[] = [];
-  let unverified = false;
-  for (const name of names) {
-    const pid = Number(name);
-    if (!Number.isInteger(pid) || pid <= 0) {
-      continue;
-    }
-    let stat: string;
-    try {
-      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    } catch (e) {
-      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
-      // else (EACCES under hidepid, …) is a process we could not inspect
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        unverified = true;
-      }
-      continue;
-    }
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    // rest: state, ppid, pgrp, … — the same split procStat uses
-    entries.push({
-      pid,
-      state: rest[0] ?? '',
-      ppid: Number(rest[1]),
-      pgrp: Number(rest[2]),
-      start: rest[19] ?? '',
-    });
-  }
-  return { entries, unverified };
-}
-
-export function groupMemberAlive(pgid: number, minStart?: string): boolean {
-  if (!Number.isInteger(pgid) || pgid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(-pgid, 0);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
-      return false;
-    }
-  }
-  const scan = scanProc();
-  if (scan === null) {
-    return process.platform === 'linux';
-  }
-  const min = minStart === undefined ? Number.NaN : Number(minStart);
-  for (const e of scan.entries) {
-    if (e.state === 'Z' || e.pgrp !== pgid) {
-      continue;
-    }
-    const start = Number(e.start);
-    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
-      return true;
-    }
-  }
-  // no confirmed member — but a process we could not inspect might be
-  // one: fail open, never a false "the unit is dead"
-  return scan.unverified;
-}
-
 /** The wrapper's process-TREE snapshot — every descendant pid plus its
  *  /proc starttime, walked over ppid links. A descendant that escaped
  *  the process GROUP (setsid, its own session) is invisible to

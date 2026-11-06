@@ -22,12 +22,12 @@ That is not a hypothetical. Drill `bro-gblja` (2026-10-28) audited every
 `spawnStepAgent` call site after devin hit repeated `rate_limited`
 walls:
 
-| Call site | Marked? | Verdict |
-| --- | --- | --- |
-| delegate.ts, drive.ts, loop pins | `env[BRO_BATCH]` | correct — fleet |
-| convoy-run.ts runner spawns | nothing | **bug** — fleet fan-out, fixed in [#757](https://github.com/ThePlenkov/bro/pull/757) |
-| dogfood.ts:505 + :602 (runner, analyst) | nothing | **bug** — fleet work, still unmarked (bead bro-42rfh) |
-| agents.ts (`bro agents up`, `agents run`), serve.ts:1927 | nothing | correct — operator/API surface, spec bro-9h86l |
+| Call site                                                | Marked?          | Verdict                                                                              |
+| -------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------ |
+| delegate.ts, drive.ts, loop pins                         | `env[BRO_BATCH]` | correct — fleet                                                                      |
+| convoy-run.ts runner spawns                              | nothing          | **bug** — fleet fan-out, fixed in [#757](https://github.com/ThePlenkov/bro/pull/757) |
+| dogfood.ts:505 + :602 (runner, analyst)                  | nothing          | **bug** — fleet work, still unmarked (bead bro-42rfh)                                |
+| agents.ts (`bro agents up`, `agents run`), serve.ts:1927 | nothing          | correct — operator/API surface, spec bro-9h86l                                       |
 
 The convoy fix marks that one path. It does not close the class: the
 next spawn path added to the codebase will again silently inherit
@@ -56,12 +56,12 @@ today's bug the first time someone forgets it.
 
 The alternatives were considered:
 
-- *default `batch` + interactive opt-out* — forgetting errs toward
+- _default `batch` + interactive opt-out_ — forgetting errs toward
   restraint, but it makes the marker a lie by default: an unlabeled
   operator spawn would be counted and walled as fleet work. Restraint
   is the safe failure for the ACCOUNT but the wrong truth for the
   registry.
-- *keep `env[BRO_BATCH]` as the interface* — today's design; proven
+- _keep `env[BRO_BATCH]` as the interface_ — today's design; proven
   forgettable twice already.
 
 ### The marker is derived, never written by callers
@@ -153,7 +153,7 @@ makes that path's lane un-forgettable.
 
 The one deliberate exception is the loop's registry spawn path
 (loop.ts `spawnWorker`): it calls `AgentConnector.spawn` directly but is
-a *registered* worker (claim under the registry lock, `.exit` record in
+a _registered_ worker (claim under the registry lock, `.exit` record in
 `<git-common>/bro/agents/`), and it writes `BATCH_MARKER_ENV` itself.
 It is preserved as-is by this spec; a lane-aware migration of that path
 is deferred, and until then its marker write remains the only
