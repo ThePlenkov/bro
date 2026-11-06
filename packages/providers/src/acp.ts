@@ -1479,7 +1479,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`;
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
+  opts: { model?: string; autoApprove?: boolean; sessionRm?: string; mcpServers?: unknown[] } = {}
 ): string[] {
   const command =
     entry.profile === undefined
@@ -1496,6 +1496,10 @@ export function acpWorkerArgv(
   const sessionRm = opts.sessionRm ?? entry.sessionRm;
   if (sessionRm !== undefined) {
     argv.push('--session-rm', sessionRm);
+  }
+  const mcpServers = opts.mcpServers ?? (entry as { mcpServers?: unknown[] }).mcpServers;
+  if (Array.isArray(mcpServers) && mcpServers.length > 0) {
+    argv.push('--mcp-servers', JSON.stringify(mcpServers));
   }
   return argv;
 }

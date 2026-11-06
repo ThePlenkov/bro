@@ -99,6 +99,9 @@ export type ProviderEntry =
        *  by default a derived provider wall SIGSTOPs the lane's live
        *  workers until the reported reset. */
       wallPause?: boolean;
+      /** MCP servers to pass to ACP worker sessions (opt-in). Stdio
+       *  descriptors are supported; broker/relay not advertised. */
+      mcpServers?: unknown[];
     }
   | {
       type: 'cli';
@@ -488,10 +491,15 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   if ('err' in gateRes) {
     return fail(gateRes.err);
   }
+  const mcpRes = acpMcpServersFor(kind, name, (raw as Record<string, unknown>).mcpServers);
+  if ('err' in mcpRes) {
+    return fail(mcpRes.err);
+  }
   return withProviderExtras(
     { type: kind, ...picked } as ProviderEntry,
     modelsRes.models,
-    gateRes.rateGate
+    gateRes.rateGate,
+    mcpRes.mcpServers
   );
 }
 
@@ -500,7 +508,8 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
 function withProviderExtras(
   entry: ProviderEntry,
   models?: Record<string, ApiWire>,
-  rateGate?: LaneRateGate
+  rateGate?: LaneRateGate,
+  mcpServers?: unknown[]
 ): ProviderEntry {
   const bag = entry as Record<string, unknown>;
   if (models !== undefined) {
@@ -508,6 +517,9 @@ function withProviderExtras(
   }
   if (rateGate !== undefined) {
     bag.rateGate = rateGate;
+  }
+  if (mcpServers !== undefined && mcpServers.length > 0) {
+    bag.mcpServers = mcpServers;
   }
   return entry;
 }
@@ -546,6 +558,44 @@ function laneGateFor(
     return { err: gate.err };
   }
   return { rateGate: gate.rateGate };
+}
+
+/** ACP worker MCP servers (opt-in). Start with stdio descriptors;
+ *  HTTP/SSE/remote transports require negotiated capability we do not
+ *  wire in the headless worker, so they are rejected with remediation.
+ *  Diagnostics never echo env/header/secret values. */
+function acpMcpServersFor(
+  kind: ProviderKind,
+  name: string,
+  raw: unknown
+): { err: string } | { mcpServers?: unknown[] } {
+  if (kind !== 'acp' || raw === undefined) {
+    return {};
+  }
+  if (!Array.isArray(raw)) {
+    return { err: 'mcpServers must be an array of MCP server descriptors' };
+  }
+  const out: unknown[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (!isPlainObject(v)) {
+      return { err: `mcpServers[${i}] must be an object descriptor` };
+    }
+    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    if (t === 'stdio') {
+      out.push(v);
+      continue;
+    }
+    if (t === 'http' || t === 'sse' || t === 'streamable-http') {
+      return {
+        err: `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`,
+      };
+    }
+    return {
+      err: `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`,
+    };
+  }
+  return { mcpServers: out };
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var

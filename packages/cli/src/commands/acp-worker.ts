@@ -6,29 +6,43 @@
  * apply to it directly. The ACP session id is diagnostic only; the
  * fleet's own registry identity stands.
  */
-import { flag, positionals } from './args.ts'
-import { patchAgentRegistry } from '@broject/core'
+import { flag, positionals } from './args.ts';
+import { patchAgentRegistry } from '@broject/core';
 
 export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
-  const command = flag(argv, '--command')
-  const model = flag(argv, '--model')
-  const autoApprove = argv.includes('--auto-approve')
-  const sessionRm = flag(argv, '--session-rm')
-  const pos = positionals(argv, new Set(['--command', '--model', '--session-rm']))
+  const command = flag(argv, '--command');
+  const model = flag(argv, '--model');
+  const autoApprove = argv.includes('--auto-approve');
+  const sessionRm = flag(argv, '--session-rm');
+  const mcpServersRaw = flag(argv, '--mcp-servers');
+  let mcpServers: unknown[] | undefined;
+  if (mcpServersRaw !== undefined) {
+    try {
+      const parsed = JSON.parse(mcpServersRaw);
+      if (Array.isArray(parsed)) {
+        mcpServers = parsed;
+      }
+    } catch {
+      console.error('bro acp-worker: --mcp-servers must be valid JSON array');
+      process.exit(2);
+    }
+  }
+  const pos = positionals(argv, new Set(['--command', '--model', '--session-rm', '--mcp-servers']));
   if (command === undefined || pos.length !== 1) {
     console.error(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] <promptFile>'
-    )
-    process.exit(2)
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] [--mcp-servers <json>] <promptFile>'
+    );
+    process.exit(2);
   }
-  const promptFile = pos[0]!
-  const { runAcpWorker } = await import('@broject/providers')
-  const molStep = process.env.BRO_BEAD_ID
+  const promptFile = pos[0]!;
+  const { runAcpWorker } = await import('@broject/providers');
+  const molStep = process.env.BRO_BEAD_ID;
   const code = await runAcpWorker({
     command,
     model,
     autoApprove,
     sessionRm,
+    mcpServers,
     promptFile,
     cwd: process.cwd(),
     provider: process.env.BRO_AGENT_PROVIDER,
@@ -38,13 +52,13 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
     record:
       molStep === undefined
         ? undefined
-        : (patch) => {
+        : patch => {
             try {
-              patchAgentRegistry(process.cwd(), molStep, patch)
+              patchAgentRegistry(process.cwd(), molStep, patch);
             } catch {
               // advisory
             }
           },
-  })
-  process.exit(code)
+  });
+  process.exit(code);
 }
