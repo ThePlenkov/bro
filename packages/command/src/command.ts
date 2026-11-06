@@ -221,13 +221,13 @@ async function runPlugin(
   command: Command,
   plugin: CommandPlugin,
   inv: Invocation
-): Promise<boolean> {
+): Promise<void> {
   const nested = command.commands.find((c) => c.name === inv.head);
   if (nested !== undefined) {
     const member = memberOf(nested, inv, plugin);
     if (member !== undefined) {
       await runMember(command, nested.name, member, inv.rest.slice(1));
-      return true;
+      return;
     }
   }
   if (plugin.deprecated !== undefined) {
@@ -242,7 +242,6 @@ async function runPlugin(
     );
   }
   await plugin.run(helpFirst([...(plugin.argvPrefix ?? []), ...inv.rest]));
-  return true;
 }
 
 /** A nested command reached by argv — its member table when argv asks
@@ -251,14 +250,13 @@ async function runNested(
   command: Command,
   nested: Command,
   inv: Invocation
-): Promise<boolean> {
+): Promise<void> {
   const first = inv.rest[0];
   if (first === undefined || HELP_TOKENS.has(first)) {
     printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
-    return true;
+    return;
   }
   await runCommand(nested, inv.rest);
-  return true;
 }
 
 /** Resolve one argv against a command: a plugin, a nested command, or
@@ -269,11 +267,13 @@ async function resolve(command: Command, inv: Invocation): Promise<boolean> {
   }
   const plugin = pluginsOf(command).find((p) => p.name === inv.head);
   if (plugin !== undefined) {
-    return runPlugin(command, plugin, inv);
+    await runPlugin(command, plugin, inv);
+    return true;
   }
   const nested = command.commands.find((c) => c.name === inv.head);
   if (nested !== undefined) {
-    return runNested(command, nested, inv);
+    await runNested(command, nested, inv);
+    return true;
   }
   return false;
 }
@@ -305,9 +305,10 @@ function helpFirst(argv: readonly string[]): string[] {
   const sep = argv.indexOf('--');
   const head = sep === -1 ? argv : argv.slice(0, sep);
   const tail = sep === -1 ? [] : argv.slice(sep);
-  const token = head.find((a) => HELP_TOKENS.has(a));
-  if (token === undefined) return [...argv];
-  return [token, ...head.filter((a) => a !== token), ...tail];
+  const at = head.findIndex((a) => HELP_TOKENS.has(a));
+  if (at === -1) return [...argv];
+  const rest = head.filter((a) => !HELP_TOKENS.has(a));
+  return [head[at] ?? '--help', ...rest, ...tail];
 }
 
 /** The bare command — the failure code every bro-family CLI used (1),
