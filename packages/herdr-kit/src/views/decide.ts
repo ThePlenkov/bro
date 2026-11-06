@@ -9,16 +9,28 @@ export interface PaneInfo {
   label?: string;
 }
 
-/** A recorded session-pane binding — one managed worktree's record. */
+/** A recorded session-pane binding — one managed worktree's record.
+ *  `agent_id` pins the archive the pane was armed with; a later pass
+ *  resolving a DIFFERENT live agent rebinds rather than tailing the
+ *  dead journal forever. */
 export interface SessionRec {
   workspace: string;
   worktree: string;
   pane_id: string;
+  agent_id?: string;
+  /** Epoch ms before which a failed rebind is not retried — a `pane
+   *  run` that keeps failing must not churn a fresh split+close every
+   *  converge pass. */
+  retryAt?: number;
+  /** Panes a rebind failed to close — retried each pass so stale
+   *  archives do not linger beside their replacements. */
+  closePending?: string[];
 }
 
 /** What one ensure-pass should do — the caller executes and records. */
 export type SessionAction =
   | { kind: 'rearm'; paneId: string; adopted: boolean }
+  | { kind: 'rebind'; paneId: string }
   | { kind: 'arm'; paneId: string; adopted: boolean }
   | { kind: 'split'; targetId?: string }
   | { kind: 'none' };
@@ -54,9 +66,19 @@ export function decideSession(input: {
   broLabels: Set<string>;
   exists: (paneId: string) => boolean;
   idle: (paneId: string) => boolean;
+  /** The live agent the caller resolved for this pass — when the
+   *  recorded binding points at a different archive the pane is
+   *  closed and re-armed (a running tail never restarts itself). An
+   *  UNRESOLVED pass (`agent` absent) never rebinds: a transient
+   *  registry miss must not close a live view — the pane keeps its
+   *  current binding until a replacement is actually resolved. */
+  agent?: { id: string };
 }): SessionAction {
   const { rec } = input;
   if (rec !== undefined && input.exists(rec.pane_id)) {
+    if (input.agent !== undefined && rec.agent_id !== input.agent.id) {
+      return { kind: 'rebind', paneId: rec.pane_id };
+    }
     if (!input.idle(rec.pane_id)) return { kind: 'none' };
     return { kind: 'rearm', paneId: rec.pane_id, adopted: true };
   }

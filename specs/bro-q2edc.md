@@ -349,8 +349,10 @@ Spike artifacts: `vendor/acp-tui` (submodule @ `70b8a6d`),
 
 The spike's recommendation landed as a **parallel implementation
 behind a seam**, not a refactor — per the brief's amendment, nothing
-was deleted and `legacy` stays the default until the `acp` impl
-proves itself in the live pane.
+was deleted and `legacy` stayed the default until the `acp` impl
+proved itself in the live pane. That live review landed: the default
+flipped to `acp` (`--impl legacy`/`BRO_TUI_IMPL` keep it reachable —
+the unflagged `--dump` path now loads `acp-model` too).
 
 ### The seam contract (`tui/impl.ts`)
 
@@ -372,9 +374,10 @@ The seam's currency is the `Op` stream `state.ts` already consumes —
 `app.tsx`, the writer, and the key bindings are impl-agnostic by
 construction; a third impl registers one factory in `IMPLS` and
 nothing else moves. Selection resolves `--impl <name>` >
-`BRO_TUI_IMPL` > `'legacy'` (`pickImpl`/`implArg`), and the `acp`
-factory lazy-imports `acp-model` so Node tests and the `--dump`
-path never touch it. The impl's `fold` reaches the fold as
+`BRO_TUI_IMPL` > `'acp'` (`pickImpl`/`implArg`), and the `acp`
+factory lazy-imports `acp-model` so a run that never selects `acp`
+never loads it — tests that do select it (`impl.test.ts`) load it
+too. The impl's `fold` reaches the fold as
 `PaneState.foldAll` via `mountPane`/`emptyState` — `legacy` keeps
 the COLLAPSE_AT heuristic, `folded` collapses every card body (the
 vendored view-model's `expanded(item) === false` baseline — the
@@ -486,9 +489,8 @@ re-runs the check on any archive.
   the full readout; the fold is pane state, not model state.
 
 Dogfood: `bun run plugins/herdr/tui/main.ts <wt> --impl acp` in a
-pane (or `BRO_TUI_IMPL=acp` for a whole attach). `default stays
-legacy` is load-bearing — flipping the default is a one-line
-`pickImpl` change after live review.
+pane (or `BRO_TUI_IMPL=acp` for a whole attach). The one-line
+`pickImpl` flip landed after live review — `acp` is the default.
 
 ## Phase 3 — own control kit, the prompt, and the audit
 

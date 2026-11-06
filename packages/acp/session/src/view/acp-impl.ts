@@ -10,8 +10,8 @@
  * "other"` (observed activity, the readonly posture). `turn stop`
  * rows map to `prompt_response` (the turn_end marker; duration 0 —
  * the archive never records prompt_sent); `turn start` maps to
- * nothing rather than fabricate a user message; permission rows map
- * to `permission_opened`.
+ * `turn_started` — the lifecycle half only, never a fabricated user
+ * message; permission rows map to `permission_opened`.
  *
  * Their session is immutable and delta-free, so `drain()` diffs the
  * item maps and emits our ops — a changed item re-projects whole.
@@ -33,7 +33,7 @@ import {
   type ToolCallItem,
 } from '@broject/acp-model';
 import type { ArchiveRow, PaneLed } from '../archive/index.ts';
-import { fmtUsage, headBy, isInternalBy, TimeGutter } from '../model/fmt.ts';
+import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../model/fmt.ts';
 import {
   dumpContent,
   dumpItems,
@@ -75,12 +75,21 @@ const at = (row: ArchiveRow): number => {
 };
 
 /** One archive row → the ModelEvents it means (usually one; `turn
- *  start` maps to none — `prompt_sent` would fabricate a user
- *  message the archive does not carry). */
+ *  start` maps to `turn_started` — `prompt_sent` would fabricate a
+ *  user message the archive does not carry). */
 function eventsOf(row: ArchiveRow): ModelEvent[] {
   const t = at(row);
   if (row.kind === 'update' && row.update !== undefined) {
     return [{ type: 'session_update', update: row.update as SessionUpdate, at: t }];
+  }
+  if (row.kind === 'turn' && row.phase === 'start') {
+    // the archive's turn-open marker — `prompt_sent` would fabricate a
+    // user message the journal does not carry; `turn_started` is the
+    // lifecycle half only, but it is what lets the LED reach running.
+    // A stamp-less start (t === 0) must not anchor the turn at epoch —
+    // the matching stop would render an epoch-sized duration
+    if (t === 0) return [];
+    return [{ type: 'turn_started', at: t }];
   }
   if (row.kind === 'turn' && row.phase === 'stop') {
     const events: ModelEvent[] = [
@@ -568,6 +577,11 @@ export class AcpImpl implements PaneImpl {
   /** sid → is the storm's leader — leadership flips re-project like
    *  run grouping does. */
   private readonly stormLeads = new Map<string, boolean>();
+  /** The last turn stop's journal ts — the "idle since" stamp the
+   *  verdict mode paints (a silent agent's idle clock starts at its
+   *  last closed turn, not at pane open). */
+  private lastStopTs: string | undefined;
+  private lastStopError = false;
   /** leader sid → the `origin|error` keys its storm already rowed —
    *  N identical failures print ONE `── turn failed ──` and stay
    *  members (the tally still counts every one). */
@@ -623,7 +637,13 @@ export class AcpImpl implements PaneImpl {
         this.curBy = headBy(row.by);
         this.curShortBy = shortBy(row.by);
         this.curInternal = isInternalBy(row.by);
-      } else if (row.phase === 'stop') this.judgeNow = false;
+      } else if (row.phase === 'stop') {
+        this.judgeNow = false;
+        this.lastStopTs = row.ts;
+        // a failed stop row is the archive's 'turn error' — the LED
+        // must not read idle over a crashed turn
+        this.lastStopError = row.error !== undefined && row.error !== '';
+      }
     }
     // the arg stash — their items drop rawInput, our header wants it
     if (row.kind === 'update' && row.update !== undefined) {
@@ -689,12 +709,25 @@ export class AcpImpl implements PaneImpl {
       case 'requires_action':
         return { led: { state: 'blocked' }, mode: 'permission' };
       case 'running':
-        return { led: { state: 'working' }, mode: 'turn' };
-      default:
         return {
-          led: { state: 'idle' },
-          mode: s.stopReason !== null ? 'turn complete' : 'idle',
+          led: { state: 'working' },
+          mode:
+            s.turn !== null && s.turn.startedAt > 0
+              ? `turn since ${fmtWhen(s.turn.startedAt)}`
+              : 'turn',
         };
+      default: {
+        if (this.lastStopError) {
+          return { led: { state: 'blocked' }, mode: 'turn error' };
+        }
+        let mode = 'idle';
+        if (this.lastStopTs !== undefined) {
+          mode = `since ${fmtWhen(this.lastStopTs)}`;
+        } else if (s.stopReason !== null) {
+          mode = 'turn complete';
+        }
+        return { led: { state: 'idle' }, mode };
+      }
     }
   }
 

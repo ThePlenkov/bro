@@ -13,7 +13,6 @@ import {
   paneList,
   type StatusAgent,
 } from './lib.ts';
-import { laneOf } from './lanes.ts';
 import { ensureMirror, type MirrorCtx, type MirrorSource } from './mirror-pane.ts';
 import type { Planes } from './planes.ts';
 
@@ -43,12 +42,12 @@ export function retireMirror(step: string, ctx: MirrorCtx): void {
  *  the worker still runs). On the acp lane the mirror retires
  *  outright — the session pane is the lane's one pane, exit marker
  *  or not (spec bro-l8wqu). */
-export function markExitedMirrors(p: Planes, state: PluginState): void {
+export function markExitedMirrors(p: Planes, state: PluginState, sessionLive: Set<string>): void {
   const live = new Map(p.status.fleet.agents.map(a => [a.id, a]));
   for (const [step, rec] of Object.entries(state.mirrors)) {
-    // an acp-lane worktree has exactly one pane — its mirror record
-    // retires outright, never lingers as an exit marker
-    if (laneOf(p.lanes, rec.worktree) === 'acp') {
+    // a worktree whose session pane is live has exactly one pane —
+    // its mirror record retires outright, never an exit marker
+    if (sessionLive.has(rec.worktree)) {
       retireMirror(step, { ws: rec.workspace, worktreePath: rec.worktree, state });
       continue;
     }
@@ -116,17 +115,18 @@ export function convergeMirrors(
   p: Planes,
   wsForPath: Map<string, string>,
   openByPath: Map<string, string>,
-  state: PluginState
+  state: PluginState,
+  sessionLive: Set<string>
 ): void {
   for (const a of p.status.fleet.agents) {
     const job = mirrorJobFor(a, p);
     if (job === undefined) continue;
     const ws = wsForPath.get(job.worktreePath) ?? openByPath.get(job.worktreePath);
     if (ws === undefined) continue;
-    // the acp lane shows exactly one pane — the session view folds
+    // a live session pane shows exactly one pane — the view folds
     // the native-log tail in (spec bro-l8wqu)
     const ctx = { ws, worktreePath: job.worktreePath, state };
-    if (laneOf(p.lanes, job.worktreePath) === 'acp') retireMirror(a.id, ctx);
+    if (sessionLive.has(job.worktreePath)) retireMirror(a.id, ctx);
     else ensureMirror(job, ctx);
   }
 }

@@ -213,11 +213,19 @@ for (let i = 0; i < args.length; i++) {
   if (t === '--json') continue
   if (t.startsWith('--')) {
     const k = t.slice(2)
-    if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
+    const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
-  } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+  } else if (/^-\\w$/.test(t)) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (valueFlagsShort.has(k)) {
+      fail('create -' + k + ' requires a value')
+    } else {
+      flags[k] = true
+    }
   } else pos.push(t)
 }
 // real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
@@ -281,7 +289,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       (r) => r.status === 'open' && !(r.labels || []).some((l) => ex.includes(l))
     )
     rows.sort((a, b) => (a.priority - b.priority) || String(a.created_at).localeCompare(String(b.created_at)))
-    jsonOut(rows)
+    // real bd truncates a deep queue to its page — tests can opt in
+    // with db.readyLimit to prove callers do not rely on membership
+    const lim = db.readyLimit
+    jsonOut(typeof lim === 'number' ? rows.slice(0, lim) : rows)
     break
   }
   case 'show': {
@@ -311,7 +322,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: flags.title || '',
+      title: typeof flags.title === 'string' ? flags.title : (flags.title === true ? fail('create --title requires a value') : (flags.title ? String(flags.title) : '')),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
@@ -327,7 +338,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
     }
     save(db)
-    jsonOut({ id })
+    // real bd answers create with the created row — callers read
+    // title/status back off it, not just the id
+    jsonOut(row(id))
     break
   }
   case 'update': {
@@ -429,8 +442,30 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       const r = row(pos[2])
       if (!r) fail('not found: ' + pos[2])
       db.deps = db.deps || []
-      db.deps.push({ from: pos[2], to: pos[3] })
+      // --type persists with the edge — a hydrated dep list filters
+      // on it, and bd's default is 'blocks'
+      db.deps.push({ from: pos[2], to: pos[3], type: flags.type || 'blocks' })
       save(db)
+      break
+    }
+    if (pos[1] === 'list' && pos.length === 3) {
+      // real bd answers a single-id dep list with hydrated neighbor
+      // rows carrying dependency_type; bare and multi-id queries keep
+      // the raw edge records (wiring asserts read those)
+      const want = pos[2]
+      const rels = flags.t === undefined ? undefined : [].concat(flags.t)
+      const up = Object.keys(flags).includes('direction=up')
+      const out = []
+      for (const e of db.deps || []) {
+        const from = e.issue_id !== undefined ? e.issue_id : e.from
+        const to = e.depends_on_id !== undefined ? e.depends_on_id : e.to
+        const other = up ? (to === want ? from : undefined) : (from === want ? to : undefined)
+        if (other === undefined) continue
+        if (rels !== undefined && !rels.includes(e.type)) continue
+        const r = row(other)
+        if (r !== undefined) out.push({ ...r, dependency_type: e.type })
+      }
+      jsonOut(out)
       break
     }
     jsonOut(db.deps || [])

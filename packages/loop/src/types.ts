@@ -50,6 +50,13 @@ export interface LoopConfig {
   mergeTimeoutMin: number;
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
   fixRounds: number;
+  /** The worker's merge mode: true arms GitHub auto-merge on its PR
+   *  (`gh pr merge --auto --squash --delete-branch`) and the order ends
+   *  there — no orchestrator gate, no fix rounds; false keeps the
+   *  order's 'do not merge' rule (the supervisor drives the act gate).
+   *  Withheld when `act.requireApproval` is set — a human sign-off
+   *  must still gate the land. */
+  autoMerge: boolean;
   /** Max beads per `bro loop` run — 0 = until the queue is gated/idle. */
   maxItems: number;
   /** Max open PRs the run's gate stack may hold — at cap pushes stop
@@ -101,6 +108,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   crashExitMs: 10_000,
   mergeTimeoutMin: 45,
   fixRounds: 3,
+  autoMerge: false,
   maxItems: 0,
   maxOpen: 3,
   worktreeMb: 400,

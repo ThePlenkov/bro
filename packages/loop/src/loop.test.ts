@@ -61,6 +61,7 @@ describe('loopSection', () => {
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
+      autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
       worktreeMb: 350,
@@ -82,6 +83,7 @@ describe('loopSection', () => {
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
+      autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
       worktreeMb: 350,
@@ -189,6 +191,35 @@ describe('prompts', () => {
     assert.match(p, /git push -u origin HEAD/);
     // the PR step keeps its own push so post-verify fixes reach the branch
     assert.match(p, /- Push, then `gh pr create`/);
+  });
+
+  test('work prompt orders a litter close-out and forbids sibling respawns', () => {
+    const p = buildWorkPrompt(bead, 'loop/bro-x1');
+    assert.match(p, /bro work prune --loop/);
+    assert.match(p, /respawns are the supervisor's job/);
+    const batch = buildWorkPrompt([bead, { ...bead, id: 'bro-x2' }], 'loop/bro-x1');
+    assert.match(batch, /bro work prune --loop/);
+    assert.match(batch, /respawns are the supervisor's job/);
+  });
+
+  test('work prompt arms GitHub auto-merge when loop.autoMerge is set', () => {
+    const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'beads', true);
+    assert.match(p, /gh pr merge --auto --squash --delete-branch/);
+    assert.doesNotMatch(p, /Do NOT merge/);
+    // mergeRule() ends in a literal newline — the next bullet stays on
+    // its own line (kilo review on #881 claimed a glued concat)
+    assert.match(p, /on reviewers\.\n- Report verdicts/);
+    const batch = buildWorkPrompt(
+      [bead, { ...bead, id: 'bro-x2' }],
+      'loop/bro-x1',
+      undefined,
+      undefined,
+      'beads',
+      true
+    );
+    assert.match(batch, /gh pr merge --auto --squash --delete-branch/);
+    assert.doesNotMatch(batch, /Do NOT merge/);
+    assert.match(batch, /on reviewers\.\n- Beads you cannot finish/);
   });
 
   test("work prompt uses the backend's own close verb", () => {
