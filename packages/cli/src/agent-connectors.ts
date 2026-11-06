@@ -2331,12 +2331,11 @@ function ensureExitCause(
   // bro-e2ec0) — provider walls the child prints on stderr classify from
   // the capture, the event stream no longer carries them. The tails
   // classify INDEPENDENTLY — a joined read could fabricate a wall token
-  // across the boundary ('…4' + '29…' → '429')
+  // across the boundary ('…4' + '29…' → '429'). A remote backend records
+  // no stderr capture — readLogTail maps the missing path to an empty
+  // tail, the same verdict an unwritten file gets
   const c = classifyExitCauseParts(
-    [
-      readLogTail(entry.log, entry.logFrom),
-      typeof entry.stderrLog === 'string' ? readLogTail(entry.stderrLog, entry.stderrFrom) : '',
-    ],
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
     entry.exitStatus
   );
   // the tails were read off-lock — a respawn stamping the entry between
