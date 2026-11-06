@@ -3398,7 +3398,7 @@ describe('fleet chain walk spawn integration', () => {
           err instanceof SpawnError &&
           /fx-1 class "free" parked — onWall park/.test(err.message) &&
           /A walled — rate_limited til/.test(err.message) &&
-          /bro agents down fx-1/.test(err.message)
+          /held by fx-1/.test(err.message)
       );
     } finally {
       cleanup(f);
@@ -3422,7 +3422,7 @@ describe('fleet chain walk spawn integration', () => {
           err instanceof SpawnError &&
           /fx-1 class "free" chain exhausted/.test(err.message) &&
           /B walled — rate_limited til/.test(err.message) &&
-          /bro agents down fx-1/.test(err.message)
+          /held by fx-2/.test(err.message)
       );
     } finally {
       cleanup(f);

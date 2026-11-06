@@ -84,6 +84,7 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
+  providerWallOwners,
   type ResolvedClass,
   type RoutingTable,
   readAgentRegistry,
@@ -423,7 +424,7 @@ function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolea
 export async function resolveSpawnProvider(
   env: AgentConnectorEnv,
   backend: string,
-  sel: { provider?: string; model?: string; autoApprove?: boolean },
+  sel: { provider?: string; model?: string; autoApprove?: boolean; modelConfig?: boolean },
   /** Where the provider name came from — a flag's typo is caller
    *  'input'; a name in config (profile preset, backend knob) is
    *  'config'. Used only for the SpawnError kind. */
@@ -474,7 +475,7 @@ export async function resolveSpawnProvider(
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
               'its command has no {model} placeholder',
-            modelFromExplicitConfig ? 'config' : 'input'
+            modelFromExplicitConfig || sel.modelConfig === true ? 'config' : 'input'
           ),
         () =>
           new SpawnError(
@@ -532,6 +533,9 @@ export async function resolveSpawnRoute(
             provider: entry.provider,
             model: index === 0 ? (sel.model ?? entry.model ?? sel.modelFallback) : entry.model,
             autoApprove: sel.autoApprove,
+            // a chain pin/modelFallback is config content — a {model}
+            // refusal on it is a server defect (500), not caller input
+            modelConfig: index === 0 ? sel.model === undefined : true,
           },
           namedBy
         );
@@ -1675,12 +1679,23 @@ function applySpawnRoute(
   const now = Date.now();
   const walls = spawnWalls(dir, registry, now);
   const chain = route.candidates.map(({ provider, model }) => ({ provider, model }));
-  const walk = walkChain(chain, route.onWall, walls, existing?.provider);
+  const walk = walkChain(
+    chain,
+    route.onWall,
+    walls,
+    existing?.provider,
+    typeof existing?.routeIndex === 'number' ? existing.routeIndex : undefined
+  );
   if (walk.verdict === 'park') {
     const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted';
+    // the wall belongs to the steps whose records hold it, not
+    // necessarily to this one — `down` on the wrong step clears nothing
+    const owners = providerWallOwners(registry, walk.wall.provider);
     throw new SpawnError(
       `${spec.molStep} class "${route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
-        `\`bro agents down ${spec.molStep}\` lifts the block`,
+        (owners.length === 0
+          ? 'no registry record holds it — the wall lifts when the provider resets'
+          : `held by ${owners.join(', ')} — \`bro agents down <step>\` on each lifts it`),
       'cap'
     );
   }
@@ -1690,6 +1705,7 @@ function applySpawnRoute(
   spec.model = picked.model;
   spec.worker = picked.worker;
   spec.class = route.class;
+  spec.routeIndex = walk.index;
   return { now, walls };
 }
 
@@ -1722,8 +1738,11 @@ function prepareSpawn(
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
      *  host-wide mutex (the repo's registry lock can't serialize
      *  cross-repo), still before any write — a refused spawn leaves no
-     *  half-state. */
-    sessionQuota?: SessionQuotaLane | undefined;
+     *  half-state. Pass a thunk when the lane reads spec.worker: a
+     *  routed spawn's chain walk rewrites it inside, and admission
+     *  must bill the SELECTED worker's plane — the head worker's quota
+     *  would reserve the wrong lane (or skip the fallback's cap). */
+    sessionQuota?: SessionQuotaLane | (() => SessionQuotaLane | undefined) | undefined;
   }
 ): {
   agentId: string;
@@ -1759,13 +1778,13 @@ function prepareSpawn(
   for (const [step, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, step, entry);
   }
-  const routed = applySpawnRoute(dir, spec, registry, existing);
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
+  const routed = applySpawnRoute(dir, spec, registry, existing);
   const wallRefusal =
     routed === undefined
       ? batchWallRefusal(registry, spec)
@@ -1793,14 +1812,18 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend);
-  // session-kind admission — count + slot claim under ONE host-wide
-  // mutex: the registry lock above is per-repo and cannot serialize a
-  // cross-repo check-then-reserve. A refusal leaves no half-spawned
-  // state; an admit means the next spawn anywhere sees the slot taken.
+  // session-kind admission — resolved AFTER the route walk swapped
+  // spec.worker, so the lane billed is the selected worker's; count +
+  // slot claim under ONE host-wide mutex: the registry lock above is
+  // per-repo and cannot serialize a cross-repo check-then-reserve. A
+  // refusal leaves no half-spawned state; an admit means the next
+  // spawn anywhere sees the slot taken.
+  const sessionQuota =
+    typeof opts.sessionQuota === 'function' ? opts.sessionQuota() : opts.sessionQuota;
   const reservation =
-    opts.sessionQuota === undefined
+    sessionQuota === undefined
       ? undefined
-      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
+      : admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
           key: agentId,
           molStep: spec.molStep,
           workerEnv: spec.env,
@@ -1834,7 +1857,7 @@ function prepareSpawn(
         home,
         backend,
         spec,
-        opts,
+        { ...opts, sessionQuota },
         agentId,
         {
           claimed,
@@ -1967,6 +1990,10 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // the chain position the walk admitted at — a respawn's resume
+    // point when the chain repeats a provider; an unrouted (re)spawn
+    // clears a stale pin
+    routeIndex: spec.routeIndex,
     // which agent asked for this spawn — same provenance write; a
     // respawn re-stamps (clears when the respawn wasn't delegated)
     delegatedBy: spec.delegatedBy,
@@ -2326,7 +2353,9 @@ function findAgentEntry(
  *  nonexistent worktree, or an unanchorable agents home. Returns the
  *  shared artifacts dir on success. */
 function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
-  if (command === '' && spec.worker === undefined) {
+  // a declared route carries its own workers — the walk picks one
+  // inside prepareSpawn, so the legacy-command check can't refuse it
+  if (command === '' && spec.worker === undefined && spec.route === undefined) {
     throw new SpawnError(
       `no agent command configured — set agents.${backend}.command, agents.${backend}.provider, or loop.agent in bro.config.json`,
       'config'
@@ -2990,7 +3019,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
           }
         );
         // the launcher crashed after the reservation — registry+claim
@@ -3531,7 +3560,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             entry: id => ({ session: `bro-${id}` }),
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
           }
         );
         const session = `bro-${agentId}`;
@@ -4296,7 +4325,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           env,
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
-          sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
+          sessionQuota: () =>
+            sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
         });
         let sessionId: string | undefined;
         try {
@@ -5084,7 +5114,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             entry: id => ({ container: `bro-${id}`, containerId: undefined }),
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
           }
         );
         const name = `bro-${agentId}`;

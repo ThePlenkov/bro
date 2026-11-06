@@ -275,6 +275,11 @@ export interface SpawnSpec {
     onWall: OnWall;
     candidates: Array<{ provider: string; model?: string; worker: SpawnWorker }>;
   };
+  /** The chain position the walk selected — prepareSpawn stamps it so
+   *  commitSpawn can pin the resume point (a respawn of a chain that
+   *  repeats a provider must continue from ITS occurrence). Callers
+   *  never set it; absent on unrouted spawns. */
+  routeIndex?: number;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
    *  worktree under the registry lock before the claim lands, so
@@ -425,6 +430,10 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string;
+  /** The chain position the routed run was admitted at — the resume
+   *  point the next chain walk reads when the chain repeats this
+   *  provider (spec bro-1x7p). Absent on unrouted entries. */
+  routeIndex?: number;
   /** agentId of the delegating agent (spec bro-z8tng) — same
    *  provenance role as provider/model; absent on direct spawns. */
   delegatedBy?: string;

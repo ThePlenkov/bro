@@ -450,7 +450,7 @@ export async function resolveLoopLane(
   if (sel.agent !== undefined && !agentIsProvider) {
     return templateEscape(sel, cfg, env);
   }
-  const { provider, model, autoApprove, profileSourced } = lanePicks(
+  const { provider, model, autoApprove, profileSourced, flagProvider } = lanePicks(
     env,
     sel,
     cfg,
@@ -464,10 +464,15 @@ export async function resolveLoopLane(
     pickTier(sel, agentIsProvider, profileSourced)
   );
   const lane = providerLaneOrEmpty(pick, model, autoApprove);
+  // a flag-named profile's provider is an explicit pick — outranks the
+  // table like --provider/--agent, so matching the chain head must not
+  // arm the walk. A config-named profile is the standing default and
+  // keeps routing (same tiers as lanePicks' provider order)
   const routeSpec =
     route !== undefined &&
     sel.provider === undefined &&
     !agentIsProvider &&
+    flagProvider === undefined &&
     provider === route.provider
       ? await resolveSpawnRoute(
           env,
@@ -477,6 +482,9 @@ export async function resolveLoopLane(
             model:
               sel.model ??
               (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
+            // the effective lane model — a config profile/loop.model
+            // the head would otherwise lose to the provider default
+            modelFallback: model,
             autoApprove,
           },
           pickTier(sel, agentIsProvider, profileSourced)
@@ -501,7 +509,15 @@ function lanePicks(
   cfg: LoopConfig,
   route: ResolvedClass | undefined,
   agentIsProvider: boolean
-): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
+): {
+  provider?: string;
+  model?: string;
+  autoApprove?: boolean;
+  profileSourced: boolean;
+  /** The flag-named (`--profile`) preset's provider — an explicit
+   *  pick that outranks the table; routing must not arm on it. */
+  flagProvider?: string;
+} {
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined);
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined;
   const flagProfile = sel.profile !== undefined ? profile : undefined;
@@ -527,6 +543,7 @@ function lanePicks(
     model,
     autoApprove: sel.autoApprove ?? profile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
+    flagProvider: flagProfile?.provider,
   };
 }
 

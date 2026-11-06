@@ -128,6 +128,7 @@ export {
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,

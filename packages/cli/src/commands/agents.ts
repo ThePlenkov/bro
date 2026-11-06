@@ -739,8 +739,15 @@ export function spawnStepAgent(
       },
       namedBy
     ).then(async pick => {
+      // a flag-named profile's provider is an explicit pick — it
+      // outranks the table like --provider does, so matching the chain
+      // head must not arm the walk (a provider-less profile only
+      // presets fields; routing stays armed for it)
       const routeSpec =
-        route !== undefined && req.provider === undefined && provider === route.provider
+        route !== undefined &&
+        req.provider === undefined &&
+        profile?.provider === undefined &&
+        provider === route.provider
           ? await resolveSpawnRoute(
               env,
               conn.name,
@@ -785,7 +792,15 @@ export function spawnStepAgent(
           enter: resolved.enter,
         })
         .then(r => {
-          span.end({ 'agent.id': String(r.id ?? ''), 'agent.pid': r.pid ?? 0 });
+          // the registry's stamped provenance is what ran — a chain
+          // walk can move the spawn off the head pick the span opened
+          // with, so end-attrs overwrite them
+          span.end({
+            'agent.id': String(r.id ?? ''),
+            'agent.pid': r.pid ?? 0,
+            'agent.provider': r.provider ?? '',
+            'agent.model': r.model ?? '',
+          });
           return r;
         });
     });
