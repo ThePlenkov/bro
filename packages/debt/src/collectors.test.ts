@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -9,8 +9,10 @@ import {
   collectFailedCi,
   collectSecretScanning,
   collectStalePrs,
+  collectSverka,
   parseSources,
   resolvedThreadIds,
+  SourceSkipped,
 } from './collectors.ts'
 import type { DebtRecord } from './types.ts'
 
@@ -218,5 +220,89 @@ describe('resolvedThreadIds', () => {
     const other = { ...rec('x:1'), source: 'code-scanning' }
     const done = rec('dependabot:3', 'done')
     assert.deepEqual(resolvedThreadIds([other, done], 'dependabot', []), [])
+  })
+})
+
+describe('collectSverka', () => {
+  test('imports SARIF results with stable thread_id (idempotent)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      const sarif = {
+        runs: [
+          {
+            tool: { driver: { name: 'eslint' } },
+            results: [
+              {
+                ruleId: 'no-unused-vars',
+                level: 'warning',
+                message: { text: 'x is unused' },
+                locations: [{ physicalLocation: { artifactLocation: { uri: 'src/a.ts' }, region: { startLine: 3 } } }],
+              },
+            ],
+          },
+        ],
+      }
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'r.sarif'), JSON.stringify(sarif))
+      const ctx = { repo: 'acme/widgets', runId: 't', harvestedAt: '2026-01-02T00:00:00Z', dir }
+      const a = collectSverka(ctx)
+      const b = collectSverka(ctx)
+      assert.equal(a.length, 1)
+      assert.equal(b.length, 1)
+      assert.equal(a[0]!.thread_id, b[0]!.thread_id)
+      assert.equal(a[0]!.source, 'sverka')
+      assert.equal(a[0]!.path, 'src/a.ts')
+      assert.equal(a[0]!.author, 'eslint')
+      assert.match(a[0]!.thread_id, /^sverka:eslint:no-unused-vars:/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('missing artifacts dir skips (no resolve sweep risk)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-empty-'))
+    try {
+      assert.throws(
+        () => collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir }),
+        (e: unknown) => e instanceof SourceSkipped
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('invalid SARIF refuses partial snapshot', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-bad-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'bad.sarif'), '{not json')
+      assert.throws(
+        () => collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir }),
+        (e: unknown) => e instanceof SourceSkipped
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('two runs in same SARIF produce distinct records by fingerprint/location', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-multi-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      writeFileSync(
+        join(dir, '.sverka', 'artifacts', 'r.sarif'),
+        JSON.stringify({
+          runs: [
+            { tool: { driver: { name: 't' } }, results: [{ ruleId: 'R1', message: { text: 'a' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'f.ts' }, region: { startLine: 1 } } }] }] },
+            { tool: { driver: { name: 't' } }, results: [{ ruleId: 'R2', message: { text: 'b' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'f.ts' }, region: { startLine: 2 } } }] }] },
+          ],
+        })
+      )
+      const rows = collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir })
+      assert.equal(rows.length, 2)
+      assert.notEqual(rows[0]!.thread_id, rows[1]!.thread_id)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

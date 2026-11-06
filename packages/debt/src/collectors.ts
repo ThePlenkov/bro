@@ -6,7 +6,7 @@
  * so `bro debt sync` labels beads `debt:<source>`.
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ghJson } from '@broject/core'
@@ -25,6 +25,7 @@ export const DEBT_SOURCES = [
   'sonarcloud',
   'codacy',
   'codescene',
+  'sverka',
 ] as const
 export type DebtSource = (typeof DEBT_SOURCES)[number]
 
@@ -252,6 +253,140 @@ export function baseRecord(
     notes: null,
     source: opts.source,
   }
+}
+
+// --- sverka ------------------------------------------------------------------
+
+interface SarifResult {
+  ruleId?: string
+  level?: string
+  message?: { text?: string }
+  locations?: Array<{
+    physicalLocation?: {
+      artifactLocation?: { uri?: string }
+      region?: { startLine?: number }
+    }
+  }>
+}
+
+interface SarifRun {
+  tool?: { driver?: { name?: string } }
+  results?: SarifResult[]
+}
+
+interface SarifLog {
+  runs?: SarifRun[]
+}
+
+function sarifLevelToPriority(level?: string): DebtPriority {
+  switch ((level ?? '').toLowerCase()) {
+    case 'error':
+      return 'blocking'
+    case 'warning':
+      return 'scan'
+    case 'note':
+    case 'none':
+      return 'nit'
+    default:
+      return 'scan'
+  }
+}
+
+function findSarifFiles(root: string): { files: string[]; complete: boolean; reason?: string } {
+  const candidates = [
+    join(root, '.sverka', 'artifacts'),
+    join(root, '.sverka', 'sarif'),
+  ]
+  const out: string[] = []
+  let sawDir = false
+  for (const dir of candidates) {
+    try {
+      if (!existsSync(dir)) continue
+      sawDir = true
+      const entries = readdirSync(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.sarif')) {
+          out.push(join(dir, entry.name))
+        }
+      }
+    } catch (err) {
+      return {
+        files: [],
+        complete: false,
+        reason: `cannot read SARIF directory ${dir} — ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+  }
+  if (!sawDir) {
+    return {
+      files: [],
+      complete: false,
+      reason:
+        'no .sverka/artifacts or .sverka/sarif directory found — import a completed sverka run first (bro check --evaluate or copy *.sarif into .sverka/artifacts)',
+    }
+  }
+  return { files: [...new Set(out)], complete: true }
+}
+
+export function collectSverka(ctx: CollectCtx): DebtRecord[] {
+  const root = ctx.dir ?? process.cwd()
+  const found = findSarifFiles(root)
+  if (!found.complete) {
+    throw new SourceSkipped(found.reason ?? 'incomplete sverka SARIF snapshot')
+  }
+  const out: DebtRecord[] = []
+  for (const file of found.files) {
+    let raw: string
+    try {
+      raw = readFileSync(file, 'utf8')
+    } catch (err) {
+      throw new SourceSkipped(
+        `failed reading SARIF ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
+      )
+    }
+    let log: SarifLog
+    try {
+      log = JSON.parse(raw) as SarifLog
+    } catch (err) {
+      throw new SourceSkipped(
+        `invalid SARIF JSON in ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
+      )
+    }
+    if (!Array.isArray(log.runs)) {
+      throw new SourceSkipped(`SARIF in ${file} has no runs array — refusing partial snapshot`)
+    }
+    const runs = log.runs
+    for (const run of runs) {
+      const tool = run.tool?.driver?.name ?? 'sverka'
+      const results = Array.isArray(run.results) ? run.results : []
+      for (const res of results) {
+        if (!res || typeof res !== 'object') continue
+        const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown'
+        const loc = res.locations?.[0]?.physicalLocation
+        const uri = loc?.artifactLocation?.uri ?? ''
+        const line = typeof loc?.region?.startLine === 'number' ? loc.region.startLine : null
+        const msg =
+          typeof res.message?.text === 'string' && res.message.text !== '' ? res.message.text : ruleId
+        // Stable identity: source + tool + rule + file/line + fingerprint of message/body.
+        // external_ref in beads = thread_id; ledger upserts by thread_id.
+        const threadId = `sverka:${tool}:${ruleId}:${uri}:${line ?? 0}:${fingerprint({ body: msg, path: uri })}`
+        out.push(
+          baseRecord(ctx, {
+            threadId,
+            url: file,
+            priority: sarifLevelToPriority(res.level),
+            path: uri,
+            line,
+            author: tool,
+            body: `[${res.level ?? 'warning'}] ${ruleId}: ${msg}`,
+            createdAt: ctx.harvestedAt,
+            source: 'sverka',
+          })
+        )
+      }
+    }
+  }
+  return out
 }
 
 // --- dependabot -------------------------------------------------------------
@@ -483,6 +618,7 @@ export const COLLECTORS: Record<
     collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] }),
   codacy: (ctx) => collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] }),
   codescene: (ctx) => collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] }),
+  sverka: (ctx) => collectSverka(ctx),
 }
 
 /**
