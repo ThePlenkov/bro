@@ -128,13 +128,16 @@ export {
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
+  walkChain,
   wallText,
 } from './routing.ts';
 export type {
   ChainEntry,
+  ChainWalk,
   FleetRouter,
   OnWall,
   ProviderWall,

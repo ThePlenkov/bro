@@ -84,6 +84,7 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
+  providerWallOwners,
   type ResolvedClass,
   type RoutingTable,
   readAgentRegistry,
@@ -103,6 +104,8 @@ import {
   sessionSlotsDir,
   stepParent,
   UnknownProviderError,
+  walkChain,
+  wallText,
   withAgentRegistryLock,
   writeAgentRegistry,
   writePrivateFileSync,
@@ -421,7 +424,7 @@ function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolea
 export async function resolveSpawnProvider(
   env: AgentConnectorEnv,
   backend: string,
-  sel: { provider?: string; model?: string; autoApprove?: boolean },
+  sel: { provider?: string; model?: string; autoApprove?: boolean; modelConfig?: boolean },
   /** Where the provider name came from — a flag's typo is caller
    *  'input'; a name in config (profile preset, backend knob) is
    *  'config'. Used only for the SpawnError kind. */
@@ -472,7 +475,7 @@ export async function resolveSpawnProvider(
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
               'its command has no {model} placeholder',
-            modelFromExplicitConfig ? 'config' : 'input'
+            modelFromExplicitConfig || sel.modelConfig === true ? 'config' : 'input'
           ),
         () =>
           new SpawnError(
@@ -510,6 +513,44 @@ export async function resolveSpawnProvider(
         'config'
       );
   }
+}
+
+export async function resolveSpawnRoute(
+  env: AgentConnectorEnv,
+  backend: string,
+  route: ResolvedClass,
+  sel: { model?: string; modelFallback?: string; autoApprove?: boolean },
+  namedBy: 'flag' | 'profile' | 'backend' = 'backend'
+): Promise<NonNullable<SpawnSpec['route']>> {
+  const candidates = await Promise.all(
+    route.chain.map(async (entry, index) => {
+      const label = `fleet.routing.${route.class} provider "${entry.provider}"`;
+      try {
+        const pick = await resolveSpawnProvider(
+          env,
+          backend,
+          {
+            provider: entry.provider,
+            model: index === 0 ? (sel.model ?? entry.model ?? sel.modelFallback) : entry.model,
+            autoApprove: sel.autoApprove,
+            // a chain pin/modelFallback is config content — a {model}
+            // refusal on it is a server defect (500), not caller input
+            modelConfig: index === 0 ? sel.model === undefined : true,
+          },
+          namedBy
+        );
+        if (pick.provider === undefined || pick.worker === undefined) {
+          throw new SpawnError('provider did not resolve a spawn worker', 'config');
+        }
+        return { provider: pick.provider, model: pick.model, worker: pick.worker };
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const kind = err instanceof SpawnError ? err.kind : 'config';
+        throw new SpawnError(`${label} — ${detail}`, kind);
+      }
+    })
+  );
+  return { class: route.class, onWall: route.onWall, candidates };
 }
 
 /** The fleet router's spawn seam (spec bro-1x7p, M7) — fires only on
@@ -1498,6 +1539,7 @@ function guardExistingEntry(
   opts: {
     isLive: (existing: AgentRegistryEntry) => boolean;
     liveDetail?: (existing: AgentRegistryEntry) => string;
+    allowBlocked?: boolean;
   }
 ): void {
   if (existing === undefined) {
@@ -1518,7 +1560,7 @@ function guardExistingEntry(
   // (backends whose isLive doesn't walk the death ladder never saw it)
   // and refuse respawn into the same exhausted budget (bro-7xgk.2)
   ensureExitCause(dir, home, spec.molStep, existing);
-  if (agentEntryBlocked(existing)) {
+  if (opts.allowBlocked !== true && agentEntryBlocked(existing)) {
     throw new SpawnError(
       `respawn of ${spec.molStep} refused — ${blockedRespawnDetail(existing)}; \`bro agents down ${spec.molStep}\` clears the block`
     );
@@ -1595,12 +1637,15 @@ function guardClaim(
 export function batchWallRefusal(
   registry: Record<string, AgentRegistryEntry>,
   spec: { provider?: string; env?: Record<string, string>; molStep?: string },
-  now: number = Date.now()
+  now: number = Date.now(),
+  walls?: ProviderWall[]
 ): SpawnError | undefined {
   if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
     return undefined;
   }
-  const wall = deriveProviderWalls(registry, now).find(w => w.provider === spec.provider);
+  const wall = (walls ?? deriveProviderWalls(registry, now)).find(
+    w => w.provider === spec.provider
+  );
   if (wall === undefined) {
     return undefined;
   }
@@ -1611,6 +1656,59 @@ export function batchWallRefusal(
       (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
     'cap'
   );
+}
+
+function spawnWalls(
+  _dir: string,
+  registry: Record<string, AgentRegistryEntry>,
+  now: number
+): ProviderWall[] {
+  return deriveProviderWalls(registry, now);
+}
+
+function applySpawnRoute(
+  dir: string,
+  spec: SpawnSpec,
+  registry: Record<string, AgentRegistryEntry>,
+  existing: AgentRegistryEntry | undefined
+): { now: number; walls: ProviderWall[] } | undefined {
+  const route = spec.route;
+  if (route === undefined) {
+    return undefined;
+  }
+  const now = Date.now();
+  const walls = spawnWalls(dir, registry, now);
+  const chain = route.candidates.map(({ provider, model }) => ({ provider, model }));
+  const walk = walkChain(
+    chain,
+    route.onWall,
+    walls,
+    existing?.provider,
+    // a hand-edited entry can carry a malformed index — only an integer
+    // is a chain position; anything else falls back to the provider lookup
+    Number.isInteger(existing?.routeIndex) ? existing?.routeIndex : undefined
+  );
+  if (walk.verdict === 'park') {
+    const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted';
+    // the wall belongs to the steps whose records hold it, not
+    // necessarily to this one — `down` on the wrong step clears nothing
+    const owners = providerWallOwners(registry, walk.wall.provider);
+    throw new SpawnError(
+      `${spec.molStep} class "${route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
+        (owners.length === 0
+          ? 'no registry record holds it — the wall lifts when the provider resets'
+          : `held by ${owners.join(', ')} — \`bro agents down <step>\` on each lifts it`),
+      'cap'
+    );
+  }
+  const picked = route.candidates[walk.index]!;
+  // prepareSpawn rewrites these under the registry lock; callers read them only after it returns.
+  spec.provider = picked.provider;
+  spec.model = picked.model;
+  spec.worker = picked.worker;
+  spec.class = route.class;
+  spec.routeIndex = walk.index;
+  return { now, walls };
 }
 
 function prepareSpawn(
@@ -1642,8 +1740,11 @@ function prepareSpawn(
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
      *  host-wide mutex (the repo's registry lock can't serialize
      *  cross-repo), still before any write — a refused spawn leaves no
-     *  half-state. */
-    sessionQuota?: SessionQuotaLane | undefined;
+     *  half-state. Pass a thunk when the lane reads spec.worker: a
+     *  routed spawn's chain walk rewrites it inside, and admission
+     *  must bill the SELECTED worker's plane — the head worker's quota
+     *  would reserve the wrong lane (or skip the fallback's cap). */
+    sessionQuota?: SessionQuotaLane | (() => SessionQuotaLane | undefined);
   }
 ): {
   agentId: string;
@@ -1667,7 +1768,11 @@ function prepareSpawn(
   // death walls the provider for every fleet spawn, not just the agent
   // that died. The interactive lane is not blocked — a wall the fleet hit
   // is the fleet's problem (spec bro-9h86l).
-  guardExistingEntry(dir, home, backend, spec, existing, opts);
+  guardExistingEntry(dir, home, backend, spec, existing, {
+    isLive: opts.isLive,
+    liveDetail: opts.liveDetail,
+    allowBlocked: spec.route !== undefined,
+  });
   // The wall is derived from the registry — so the registry must carry
   // the CAUSE: an agent that died with a rate limit but whose .exit
   // was not harvested yet reads as cause-less, and the fleet walks into
@@ -1681,7 +1786,11 @@ function prepareSpawn(
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
-  const wallRefusal = batchWallRefusal(registry, spec);
+  const routed = applySpawnRoute(dir, spec, registry, existing);
+  const wallRefusal =
+    routed === undefined
+      ? batchWallRefusal(registry, spec)
+      : batchWallRefusal(registry, spec, routed.now, routed.walls);
   if (wallRefusal !== undefined) {
     // The wall stops the whole lane, not just this admission (spec
     // bro-y3jvd): while a provider wall holds, the live workers that
@@ -1705,14 +1814,18 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend);
-  // session-kind admission — count + slot claim under ONE host-wide
-  // mutex: the registry lock above is per-repo and cannot serialize a
-  // cross-repo check-then-reserve. A refusal leaves no half-spawned
-  // state; an admit means the next spawn anywhere sees the slot taken.
+  // session-kind admission — resolved AFTER the route walk swapped
+  // spec.worker, so the lane billed is the selected worker's; count +
+  // slot claim under ONE host-wide mutex: the registry lock above is
+  // per-repo and cannot serialize a cross-repo check-then-reserve. A
+  // refusal leaves no half-spawned state; an admit means the next
+  // spawn anywhere sees the slot taken.
+  const sessionQuota =
+    typeof opts.sessionQuota === 'function' ? opts.sessionQuota() : opts.sessionQuota;
   const reservation =
-    opts.sessionQuota === undefined
+    sessionQuota === undefined
       ? undefined
-      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
+      : admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
           key: agentId,
           molStep: spec.molStep,
           workerEnv: spec.env,
@@ -1741,11 +1854,20 @@ function prepareSpawn(
     enterSpawnTree(spec);
     return {
       agentId,
-      ...commitSpawn(dir, home, backend, spec, opts, agentId, {
-        claimed,
-        actor,
-        phantom,
-      }),
+      ...commitSpawn(
+        dir,
+        home,
+        backend,
+        spec,
+        { ...opts, sessionQuota },
+        {
+          agentId,
+          claimed,
+          actor,
+          phantom,
+          existing,
+        }
+      ),
       reservation,
     };
   } catch (err) {
@@ -1763,6 +1885,26 @@ function prepareSpawn(
   }
 }
 
+function outgoingAttemptOf(
+  spec: SpawnSpec,
+  existing: AgentRegistryEntry | undefined
+): Record<string, unknown> | undefined {
+  if (spec.route === undefined || existing === undefined) {
+    return undefined;
+  }
+  if (!isAgentCause(existing.cause) && existing.provider === spec.provider) {
+    return undefined;
+  }
+  return {
+    ...(existing.provider === undefined ? {} : { provider: existing.provider }),
+    ...(existing.model === undefined ? {} : { model: existing.model }),
+    ...(existing.cause === undefined ? {} : { cause: existing.cause }),
+    ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
+    ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
+    ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
+  };
+}
+
 /** The write phase of a spawn — prompt/log/exit files, the registry
  *  row, then claim bookkeeping. Split from the guard/admission phase
  *  so a refused spawn leaves no half-state and a caller-side
@@ -1777,8 +1919,15 @@ function commitSpawn(
     claimAs?: string;
     sessionQuota?: SessionQuotaLane | undefined;
   },
-  agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+  /** The run's write facts — the minted id, the claim verdict, and the
+   *  registry row this spawn replaces. */
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    existing: AgentRegistryEntry | undefined;
+  }
 ): {
   promptFile: string;
   log: string;
@@ -1787,6 +1936,7 @@ function commitSpawn(
   runId: string;
 } {
   mkdirPrivateSync(home);
+  const { agentId, existing } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
   const stderrLog = join(home, `${agentId}.stderr`);
@@ -1810,6 +1960,17 @@ function commitSpawn(
   appendPrivateFileSync(stderrLog, '');
   const logFrom = logSizeOrZero(log);
   const stderrFrom = logSizeOrZero(stderrLog);
+  const outgoingAttempt = outgoingAttemptOf(spec, existing);
+  // `down` cleared this step's walls — a respawn over a stopped entry
+  // must not resurrect the pre-stop attempt records: carried over they'd
+  // re-wall the provider the moment the fresh entry's stopped flips false
+  const attempts =
+    existing?.stopped === true
+      ? []
+      : Array.isArray(existing?.attempts)
+        ? (existing.attempts as unknown[])
+        : [];
+  const nextAttempts = outgoingAttempt === undefined ? attempts : [...attempts, outgoingAttempt];
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1847,6 +2008,10 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // the chain position the walk admitted at — a respawn's resume
+    // point when the chain repeats a provider; an unrouted (re)spawn
+    // clears a stale pin
+    routeIndex: spec.routeIndex,
     // which agent asked for this spawn — same provenance write; a
     // respawn re-stamps (clears when the respawn wasn't delegated)
     delegatedBy: spec.delegatedBy,
@@ -1862,6 +2027,13 @@ function commitSpawn(
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
+    resumeSessionId:
+      spec.route !== undefined && existing !== undefined && existing.provider !== spec.provider
+        ? undefined
+        : existing?.resumeSessionId,
+    // always write the list — an empty one still has to evict a stale
+    // record set (undefined drops out of the serialized registry)
+    attempts: nextAttempts.length === 0 ? undefined : nextAttempts,
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
     sessionKind: opts.sessionQuota?.plane.kind,
@@ -1870,7 +2042,7 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  recordSpawnClaim(dir, spec, agentId, backend, run, opts.claimAs, { runId, log });
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 
@@ -2201,7 +2373,9 @@ function findAgentEntry(
  *  nonexistent worktree, or an unanchorable agents home. Returns the
  *  shared artifacts dir on success. */
 function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
-  if (command === '' && spec.worker === undefined) {
+  // a declared route carries its own workers — the walk picks one
+  // inside prepareSpawn, so the legacy-command check can't refuse it
+  if (command === '' && spec.worker === undefined && spec.route === undefined) {
     throw new SpawnError(
       `no agent command configured — set agents.${backend}.command, agents.${backend}.provider, or loop.agent in bro.config.json`,
       'config'
@@ -2865,7 +3039,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
           }
         );
         // the launcher crashed after the reservation — registry+claim
@@ -3406,7 +3580,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             entry: id => ({ session: `bro-${id}` }),
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
           }
         );
         const session = `bro-${agentId}`;
@@ -4171,7 +4345,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           env,
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
-          sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
+          sessionQuota: () =>
+            sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
         });
         let sessionId: string | undefined;
         try {
@@ -4959,7 +5134,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             entry: id => ({ container: `bro-${id}`, containerId: undefined }),
             cap: { max: fleetCapOf(env), env },
             env,
-            sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+            sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
           }
         );
         const name = `bro-${agentId}`;

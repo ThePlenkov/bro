@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ConfigSection } from './config.ts';
+import type { OnWall } from './routing.ts';
 import { acquireFileLock } from './filelock.ts';
 import { BD_NO_STORE } from './bd.ts';
 import { gitTry } from './git.ts';
@@ -265,6 +266,20 @@ export interface SpawnSpec {
   pipeline?: PipelineProvenance;
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
+  /** Pre-resolved fleet-routing candidates, in declared chain order.
+   *  prepareSpawn rewrites provider/model/worker/class from the walked
+   *  candidate under the registry lock; callers read them only after
+   *  prepareSpawn returns. */
+  route?: {
+    class: string;
+    onWall: OnWall;
+    candidates: Array<{ provider: string; model?: string; worker: SpawnWorker }>;
+  };
+  /** The chain position the walk selected — prepareSpawn stamps it so
+   *  commitSpawn can pin the resume point (a respawn of a chain that
+   *  repeats a provider must continue from ITS occurrence). Callers
+   *  never set it; absent on unrouted spawns. */
+  routeIndex?: number;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
    *  worktree under the registry lock before the claim lands, so
@@ -415,6 +430,10 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string;
+  /** The chain position the routed run was admitted at — the resume
+   *  point the next chain walk reads when the chain repeats this
+   *  provider (spec bro-1x7p). Absent on unrouted entries. */
+  routeIndex?: number;
   /** agentId of the delegating agent (spec bro-z8tng) — same
    *  provenance role as provider/model; absent on direct spawns. */
   delegatedBy?: string;
