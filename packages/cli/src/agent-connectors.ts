@@ -1759,7 +1759,7 @@ function prepareSpawn(
   agentId: string;
   promptFile: string;
   log: string;
-  stderrLog: string;
+  stderrLog?: string;
   exitFile: string;
   /** The attempt token — scopes this run's handle/go/exit artifacts. */
   runId: string;
@@ -2003,7 +2003,7 @@ function commitSpawn(
 ): {
   promptFile: string;
   log: string;
-  stderrLog: string;
+  stderrLog?: string;
   exitFile: string;
   runId: string;
 } {
@@ -2011,7 +2011,8 @@ function commitSpawn(
   const { agentId, existing } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
-  const stderrLog = join(home, `${agentId}.stderr`);
+  const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
+  const stderrLog = captureStderr ? join(home, `${agentId}.stderr`) : undefined;
   // every attempt mints its own runId — respawns reuse the agentId but
   // never the attempt artifacts: an old wrapper's late writes land in
   // its own runId's files, never the live run's (spec bro-l8c4f.5)
@@ -2029,9 +2030,11 @@ function commitSpawn(
   // `umask 077` subshell pins it at write time instead.
   writePrivateFileSync(promptFile, spec.prompt);
   appendPrivateFileSync(log, '');
-  appendPrivateFileSync(stderrLog, '');
+  if (stderrLog !== undefined) {
+    appendPrivateFileSync(stderrLog, '');
+  }
   const logFrom = logSizeOrZero(log);
-  const stderrFrom = logSizeOrZero(stderrLog);
+  const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
   const outgoingAttempt = outgoingAttemptOf(spec, existing);
   // `down` cleared this step's walls — a respawn over a stopped entry
   // must not resurrect the pre-stop attempt records: carried over they'd
@@ -2059,7 +2062,11 @@ function commitSpawn(
     logFrom,
     // the worker's stderr lands in a sibling capture, never the .log —
     // the .log stays the agent-updates stream; the classifier still
-    // reads this tail so provider walls classify (spec bro-e2ec0)
+    // reads this tail so provider walls classify (spec bro-e2ec0).
+    // Written unconditionally: remote backends carry no capture and the
+    // explicit undefined must evict a respawned entry's stale stderrLog —
+    // the registry patch is a shallow merge, so omitting the keys would
+    // keep the old run's tail advertised (and read) under the new run
     stderrLog,
     stderrFrom,
     stopped: false,
@@ -2326,7 +2333,10 @@ function ensureExitCause(
   // classify INDEPENDENTLY — a joined read could fabricate a wall token
   // across the boundary ('…4' + '29…' → '429')
   const c = classifyExitCauseParts(
-    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    [
+      readLogTail(entry.log, entry.logFrom),
+      typeof entry.stderrLog === 'string' ? readLogTail(entry.stderrLog, entry.stderrFrom) : '',
+    ],
     entry.exitStatus
   );
   // the tails were read off-lock — a respawn stamping the entry between
@@ -3008,28 +3018,21 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           runId,
           reservation,
           crossKindReservations,
-        } = prepareSpawn(
-          dir,
-          home,
-          'native',
-          spec,
-          {
-            // 'spawned' counts as live for dedup: inside the handoff
-            // window a pid-less entry may still be a worker about to
-            // publish its handle — a respawn beside it is the
-            // crash-window bug (spec bro-l8c4f.5)
-            isLive: e => {
-              const s = nativeState(dir, home, spec.molStep, e);
-              return s === 'running' || s === 'spawned';
-            },
-            liveDetail: e =>
-              typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
-            cap: { max: fleetCapOf(env), env },
-            env,
-            sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
-            spawnCommand: command,
-          }
-        );
+        } = prepareSpawn(dir, home, 'native', spec, {
+          // 'spawned' counts as live for dedup: inside the handoff
+          // window a pid-less entry may still be a worker about to
+          // publish its handle — a respawn beside it is the
+          // crash-window bug (spec bro-l8c4f.5)
+          isLive: e => {
+            const s = nativeState(dir, home, spec.molStep, e);
+            return s === 'running' || s === 'spawned';
+          },
+          liveDetail: e => (typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight'),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
+          spawnCommand: command,
+        });
         // the launcher crashed after the reservation — registry+claim
         // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
         maybeAbandonSpawn('reservation');
@@ -3044,7 +3047,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let spawned: AgentRegistryEntry;
         try {
           fd = openPrivateAppendSync(log);
-          errFd = openPrivateAppendSync(stderrLog);
+          if (stderrLog !== undefined) {
+            errFd = openPrivateAppendSync(stderrLog);
+          }
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // The write targets the literal quoted path, never $out: a
@@ -3153,10 +3158,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             // .exit; left alone the row would read 'lost' with no record
             // and the reservation would idle out its TTL. Retry the plain
             // spawn over the same attempt artifacts.
-            appendPrivateFileSync(
-              stderrLog,
-              'bro: systemd-run refused the scope — respawned without the wrap\n'
-            );
+            if (stderrLog !== undefined) {
+              appendPrivateFileSync(
+                stderrLog,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            } else {
+              appendPrivateFileSync(
+                log,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            }
             // the discarded child may still emit 'error' (the ENOENT
             // path) — an unlistened error event takes the whole CLI down
             child.on('error', () => {
@@ -3549,39 +3561,33 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           exitFile,
           reservation,
           crossKindReservations,
-        } = prepareSpawn(
-          dir,
-          home,
-          'tmux',
-          spec,
-          {
-            isLive: e => {
-              const n = tmuxSessionName(e);
-              if (n === undefined) {
-                return false;
-              }
-              const p = tmuxProbe(socket, n);
-              if (p.live === 'unknown') {
-                // an unverifiable liveness probe must not let a duplicate
-                // spawn kill-session a worker that may still be alive
-                throw new SpawnError(
-                  `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
-                  'unavailable'
-                );
-              }
-              if (p.live === 'running') {
-                touchWorkMarker(dir, e.agentId);
-              }
-              return p.live === 'running';
-            },
-            liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
-            entry: id => ({ session: `bro-${id}` }),
-            cap: { max: fleetCapOf(env), env },
-            env,
-            sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
-            spawnCommand: command,
-          }
-        );
+        } = prepareSpawn(dir, home, 'tmux', spec, {
+          isLive: e => {
+            const n = tmuxSessionName(e);
+            if (n === undefined) {
+              return false;
+            }
+            const p = tmuxProbe(socket, n);
+            if (p.live === 'unknown') {
+              // an unverifiable liveness probe must not let a duplicate
+              // spawn kill-session a worker that may still be alive
+              throw new SpawnError(
+                `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
+                'unavailable'
+              );
+            }
+            if (p.live === 'running') {
+              touchWorkMarker(dir, e.agentId);
+            }
+            return p.live === 'running';
+          },
+          liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
+          entry: id => ({ session: `bro-${id}` }),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
+          spawnCommand: command,
+        });
         const session = `bro-${agentId}`;
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -3639,7 +3645,11 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command);
         const runLine = workerRunLine(worker, command, promptFile);
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`;
+        // stderr splits into its own capture when the backend records
+        // one; without a capture it folds into the stdout tee so the
+        // worker's noise still lands in the .log (docker does the same)
+        const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
         const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -4174,7 +4184,6 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
-      stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
     };
   };
 
@@ -5121,39 +5130,33 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           exitFile,
           reservation,
           crossKindReservations,
-        } = prepareSpawn(
-          dir,
-          home,
-          'docker',
-          spec,
-          {
-            isLive: e => {
-              const n = dockerContainerName(e);
-              if (n === undefined) {
-                return false;
-              }
-              const p = dockerInspect(n);
-              if (p.live === 'unknown') {
-                // an unverifiable liveness probe must not let a duplicate
-                // spawn run beside a worker that may still be alive
-                throw new SpawnError(
-                  `cannot verify ${spec.molStep}'s container — ${p.err}`,
-                  'unavailable'
-                );
-              }
-              if (p.live === 'running') {
-                touchWorkMarker(dir, e.agentId);
-              }
-              return p.live === 'running';
-            },
-            liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
-            entry: id => ({ container: `bro-${id}`, containerId: undefined }),
-            cap: { max: fleetCapOf(env), env },
-            env,
-            sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
-            spawnCommand: command,
-          }
-        );
+        } = prepareSpawn(dir, home, 'docker', spec, {
+          isLive: e => {
+            const n = dockerContainerName(e);
+            if (n === undefined) {
+              return false;
+            }
+            const p = dockerInspect(n);
+            if (p.live === 'unknown') {
+              // an unverifiable liveness probe must not let a duplicate
+              // spawn run beside a worker that may still be alive
+              throw new SpawnError(
+                `cannot verify ${spec.molStep}'s container — ${p.err}`,
+                'unavailable'
+              );
+            }
+            if (p.live === 'running') {
+              touchWorkMarker(dir, e.agentId);
+            }
+            return p.live === 'running';
+          },
+          liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
+          entry: id => ({ container: `bro-${id}`, containerId: undefined }),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
+          spawnCommand: command,
+        });
         const name = `bro-${agentId}`;
         const envFile = join(home, `${agentId}.env`);
         let containerId = '';
@@ -5172,7 +5175,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`;
+          const wrapper =
+            stderrLog !== undefined
+              ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+              : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
           const res = dockerRun(
             dockerRunArgv(
               name,
