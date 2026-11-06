@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { maybeSpawnStackPublish, stackNameOfBranch } from './stack-publish.ts'
 import { git, initRepo, inside } from './testrepo.ts'
 
@@ -57,6 +58,19 @@ describe('maybeSpawnStackPublish', () => {
       assert.equal(calls.length, 1)
       assert.equal(calls[0]![1], main)
       assert.equal(calls[0]![2], 'router')
+    })
+  })
+
+  test('the entry is absolute — the child runs in another worktree', () => {
+    const { root, main } = memberRepo('bro-stack-publish-')
+    inside(main, root, () => {
+      writeFileSync(join(main, 'bro'), 'x')
+      const calls: Array<[string, string, string]> = []
+      // a relative entry would be resolved against the MAIN worktree,
+      // where the CLI is not
+      maybeSpawnStackPublish(main, (entry, cwd, name) => calls.push([entry, cwd, name]), './bro')
+      assert.equal(calls.length, 1)
+      assert.ok(isAbsolute(calls[0]![0]), 'the entry the child gets is absolute')
     })
   })
 

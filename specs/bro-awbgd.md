@@ -25,8 +25,11 @@ the host, so nobody adds the PRs to the stack by hand.
 member's branch still carry the head of the branch it stands on? The
 CLI answers it with `git merge-base --is-ancestor <base head> <member
 head>`; the pure planner in `@broject/stack` reads the flag and
-schedules a rebase when it is false. A head that cannot be read reads
-as "carries": an unknown truth never schedules a rewrite.
+schedules a rebase when it is false.
+
+A head that cannot be read is UNKNOWN, and unknown is not a success:
+the member is skipped with a reason and the chain is not attested. A
+chain whose base is unreadable is not a chain that passed.
 
 The base's NAME still decides the retarget — a PR whose base branch
 changed is a different thing from a base branch whose commits changed.

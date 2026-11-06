@@ -251,10 +251,13 @@ export function readCodexInstructions(pluginRoot: string | undefined): string | 
 /** Which gh lifecycle a shell command belongs to, if any. `gh` must sit at
  * a command position — `echo "gh pr merge"` is text, not a merge. */
 export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | null {
-  if (/(^|[;&|]\s*)gh\s+pr\s+merge\b/.test(cmd)) {
+  // the global flags gh takes BEFORE the subcommand (`gh -R owner/repo pr
+  // create`) are part of the same command — a PR opened that way is a PR
+  const flags = '(?:\\s+-{1,2}[\\w-]+(?:[= ]\\S+)?)*';
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+merge\\b`).test(cmd)) {
     return 'pr-merge';
   }
-  if (/(^|[;&|]\s*)gh\s+pr\s+create\b/.test(cmd)) {
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+create\\b`).test(cmd)) {
     return 'pr-create';
   }
   return null;

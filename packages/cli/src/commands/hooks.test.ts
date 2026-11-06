@@ -136,6 +136,14 @@ describe('classifyExecCommand', () => {
     assert.equal(classifyExecCommand('cd x && gh pr merge --auto'), 'pr-merge');
   });
 
+  test('detects a PR opened with gh’s global flags', () => {
+    // `gh -R owner/repo pr create` opens a PR like any other — the
+    // registration the hook does must not miss it
+    assert.equal(classifyExecCommand('gh -R owner/repo pr create'), 'pr-create');
+    assert.equal(classifyExecCommand('gh --repo owner/repo pr create --fill'), 'pr-create');
+    assert.equal(classifyExecCommand('gh -R owner/repo pr merge 7'), 'pr-merge');
+  });
+
   test('detects gh pr create', () => {
     assert.equal(classifyExecCommand('gh pr create --fill'), 'pr-create');
   });

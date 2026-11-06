@@ -15,6 +15,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { gitTry } from '@broject/core'
 import { parseStackBranch } from '@broject/stack'
 
@@ -60,10 +61,12 @@ export function maybeSpawnStackPublish(
     if (name === undefined) {
       return
     }
+    // the child runs in the MAIN worktree — a relative entry would be
+    // resolved against THAT directory, and the child would find no CLI
     if (entry === undefined || !existsSync(entry)) {
       return
     }
-    spawnFn(entry, mainWorktreeDir(dir), name)
+    spawnFn(resolve(entry), mainWorktreeDir(dir), name)
   } catch {
     // registration never affects the agent — silence is the contract
   }

@@ -508,10 +508,13 @@ function baseOf(m: MemberView, prev: string): string {
  * chain's base==prev-head invariant, read from the git truth. A fix that
  * landed BELOW the member moves that head while the base's NAME stays
  * the same — the name alone reads as "in sync", the head says otherwise,
- * and without this the operator rebases the chain by hand. An unreadable
- * head reads as "carries": an unknown truth never schedules a rewrite.
+ * and without this the operator rebases the chain by hand.
+ *
+ * `undefined` when a head cannot be read: an UNKNOWN truth is not
+ * "carries" — the chain is not attested, and the caller skips the member
+ * rather than claiming a success it cannot prove.
  */
-function carriesBaseHead(branch: string, base: string, root: string): boolean {
+function carriesBaseHead(branch: string, base: string, root: string): boolean | undefined {
   const baseHead = gitTry([
     '-C',
     root,
@@ -529,17 +532,21 @@ function carriesBaseHead(branch: string, base: string, root: string): boolean {
     `refs/heads/${branch}`,
   ]).out.trim()
   if (baseHead === '' || memberHead === '') {
-    return true
+    return undefined
   }
   return gitTry(['-C', root, 'merge-base', '--is-ancestor', baseHead, memberHead]).code === 0
 }
 
-/** The heads the plan reads — one flag per member. */
+/** The heads the plan reads — one flag per member. A merged member
+ *  leaves the chain: the member above it stands on the one below the
+ *  merged one, exactly as `planSync`'s own live tip walks. */
 function markBaseHeads(members: MemberView[], root: string, defaultBase: string): void {
   let prev = defaultBase
   for (const m of members) {
-    m.containsBaseHead = carriesBaseHead(m.branch, baseOf(m, prev), root)
-    prev = m.branch
+    if (m.prState !== 'MERGED') {
+      m.containsBaseHead = carriesBaseHead(m.branch, baseOf(m, prev), root)
+      prev = m.branch
+    }
   }
 }
 
@@ -591,6 +598,12 @@ export function forkPoint(base: string, wt: string): string {
   const cherry = gitTry(['-C', wt, 'cherry', base, 'HEAD']).out.trim()
   let fork = ''
   for (const line of cherry.split('\n')) {
+    // The cherry list runs OLDEST first: the equivalent commits the
+    // child carries come before the child's own work. The fork is the
+    // LAST equivalent before that work starts — a later equivalent
+    // would push the fork past the child's own commits and drop them
+    // from the replay.
+    if (line.startsWith('+ ')) break
     if (line.startsWith('- ')) {
       fork = line.slice(2).trim()
     }
@@ -883,6 +896,21 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
     retireMerged(m, ctx.root, ctx.lines)
     return 'ok'
   }
+  // The base's head may have moved while the cascade ran — the plan was
+  // made BEFORE it, and the plan cannot know. The invariant decides
+  // here: the branch must carry the head of the base it stands on.
+  const carries = carriesBaseHead(m.branch, item.desiredBase, ctx.root)
+  if (carries === undefined) {
+    // an unknown head is not a success — the chain is not attested
+    ctx.lines.push(`  ${m.branch} skipped — the head of ${item.desiredBase} cannot be read`)
+    return 'failed'
+  }
+  if (!carries) {
+    item.rebase = true
+    if (!m.rebaseable) {
+      item.skip = m.blocked ?? 'not rebaseable'
+    }
+  }
   if (item.skip) {
     ctx.lines.push(`  ${m.branch} skipped — ${item.skip}`)
     return 'failed'
@@ -902,7 +930,7 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
   // the platform rewrites a child when its parent MERGES — but a base that
   // moved by a PUSH is not a merge, and the platform leaves the child where
   // it was. The invariant decides, not the assumption.
-  if (item.rebase && !carriesBaseHead(m.branch, item.desiredBase, ctx.root)) {
+  if (carriesBaseHead(m.branch, item.desiredBase, ctx.root) === false) {
     if (!rebaseMember(item, ctx.lines)) {
       return 'failed'
     }
@@ -953,23 +981,9 @@ export function syncStack(
   // host's stack registration demands. A dirty member or a failed move
   // breaks it: defer publish instead of feeding the tool a reject.
   let intact = true
-  // the members rewritten in this pass — the member above one of them
-  // rides a base that moved while the cascade ran
-  const rewritten = new Set<string>()
   const plan = planSync(members, ctx.defaultBase)
-  for (const [index, item] of plan.entries()) {
-    // The plan was made BEFORE the cascade: a member below that was
-    // rewritten moved its base, and the member above has to ride it. The
-    // plan cannot know that — the cascade does.
-    const below = plan[index - 1]
-    if (below !== undefined && rewritten.has(below.member.branch)) {
-      item.rebase = true
-      item.skip = item.member.rebaseable ? undefined : (item.member.blocked ?? 'not rebaseable')
-    }
+  for (const item of plan) {
     const outcome = syncMember(item, ctx)
-    if (outcome === 'rebased') {
-      rewritten.add(item.member.branch)
-    }
     if (outcome === 'failed') {
       intact = false
     }
