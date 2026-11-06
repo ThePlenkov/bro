@@ -61,22 +61,36 @@ function schemaOf(schema: unknown): {
   const empty = { required: [], properties: [], types: {} };
   if (typeof schema !== 'object' || schema === null) return empty;
   const s = schema as { required?: unknown; properties?: unknown };
-  const required = Array.isArray(s.required)
-    ? s.required.filter((v): v is string => typeof v === 'string')
-    : [];
   const props =
     typeof s.properties === 'object' && s.properties !== null && !Array.isArray(s.properties)
       ? (s.properties as Record<string, unknown>)
       : {};
-  const properties = Object.keys(props);
+  return {
+    required: requiredOf(s.required),
+    properties: Object.keys(props),
+    types: typesOf(props),
+  };
+}
+
+/** The schema's required properties — the strings among them. */
+function requiredOf(declared: unknown): string[] {
+  if (!Array.isArray(declared)) return [];
+  return declared.filter((v): v is string => typeof v === 'string');
+}
+
+/** The type each property declares — one name, a list of names, or none. */
+function typesOf(props: Record<string, unknown>): Record<string, string[]> {
   const types: Record<string, string[]> = {};
   for (const [name, shape] of Object.entries(props)) {
-    const declared = (shape as { type?: unknown } | undefined)?.type;
-    types[name] = Array.isArray(declared)
-      ? declared.filter((t): t is string => typeof t === 'string')
-      : typeof declared === 'string'
-        ? [declared]
-        : [];
+    types[name] = declaredType((shape as { type?: unknown } | undefined)?.type);
   }
-  return { required, properties, types };
+  return types;
+}
+
+/** A declared type as a list — a name, a list of names, or none. */
+function declaredType(declared: unknown): string[] {
+  if (Array.isArray(declared)) {
+    return declared.filter((t): t is string => typeof t === 'string');
+  }
+  return typeof declared === 'string' ? [declared] : [];
 }
