@@ -25,7 +25,11 @@
  * `<git-common>/bro/loop.json` and brings a supervised `bro loop` up;
  * `daemon run --loop` runs it, and the rearm checkpoints can revive it.
  */
-import { execFileSync, spawn } from 'node:child_process';
+import {
+  execFileSync,
+  spawn,
+  type ExecFileSyncOptionsWithStringEncoding,
+} from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -305,15 +309,17 @@ function supervisionProcs(dir: string): number[] {
   }
   let pids: number[];
   try {
-    // pgrep is a required runtime dep; env below pins PATH to fixed
+    // pgrep is a required runtime dep; the options pin PATH to fixed
     // unwriteable dirs — the default inherited PATH can contain
-    // user-writable dirs (sonar S4036)
-    const out = execFileSync('pgrep', ['-f', '(daemon run|drive|loop) --every'], {
-      // NOSONAR
+    // user-writable dirs (sonar S4036). The call stays one line so the
+    // NOSONAR survives biome reformatting.
+    const pgrepArgs = ['-f', '(daemon run|drive|loop) --every'];
+    const pgrepOpts: ExecFileSyncOptionsWithStringEncoding = {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { PATH: '/usr/bin:/bin' },
-    });
+    };
+    const out = execFileSync('pgrep', pgrepArgs, pgrepOpts); // NOSONAR
     pids = out
       .split('\n')
       .map(s => Number(s.trim()))
@@ -571,13 +577,14 @@ export function readDriveMarker(dir: string): DriveMarker | null {
   return readWantMarker(driveMarkerPath(dir));
 }
 
+/** The want-marker arm states — armed fresh, re-armed at a new cadence,
+ *  or already holding the same cadence. */
+export type ArmState = 'armed' | 'updated' | 'already';
+
 /** Write the want-marker (tmp+rename — the mailbox drop rule). Same
  *  cadence is `already` and leaves the file alone; a changed one is
  *  `updated`. */
-export function armDrive(
-  dir: string,
-  everySec: number
-): { state: 'armed' | 'updated' | 'already'; marker: DriveMarker } {
+export function armDrive(dir: string, everySec: number): { state: ArmState; marker: DriveMarker } {
   const file = driveMarkerPath(dir);
   if (file === null) {
     throw new Error('not a git repository — the install marker has no common dir to live in');
@@ -659,7 +666,7 @@ function installSupLine(up: SupervisorUp, everySec: number): string {
 }
 
 /** The arm verb in an install detail — armed / re-armed / already armed. */
-function armVerb(state: 'armed' | 'updated' | 'already'): string {
+function armVerb(state: ArmState): string {
   if (state === 'already') {
     return 'already armed';
   }
@@ -768,10 +775,7 @@ export function readLoopMarker(dir: string): LoopMarker | null {
 }
 
 /** Write the loop want-marker — same tmp+rename contract as `armDrive`. */
-export function armLoop(
-  dir: string,
-  everySec: number
-): { state: 'armed' | 'updated' | 'already'; marker: LoopMarker } {
+export function armLoop(dir: string, everySec: number): { state: ArmState; marker: LoopMarker } {
   const file = loopMarkerPath(dir);
   if (file === null) {
     throw new Error('not a git repository — the install marker has no common dir to live in');
