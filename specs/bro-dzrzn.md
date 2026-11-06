@@ -297,6 +297,24 @@ a command's side effects, whatever the command's own dispatcher looks
 at first, and the direct spelling (`<plugin> <args> --help`) gets the
 same guarantee.
 
+### The scanners' plane
+
+The SAST checks read this layer's diff, and four of their findings were
+on the layer's own new code: Codacy read the catalog read's fetch as a
+user-controlled URL (the URL argument was a variable) and read two
+string comparisons in `helpFirst` as timing attacks; SonarCloud read
+`runPlugin` as a function that always returns the same value.
+
+All three are fixed in the code, not suppressed: the hop's URL now comes
+from the guard (`hopUrl` — the call IS the check), the help token is
+found by INDEX and the rest is filtered by the token SET (no comparison
+of two strings), and the two dispatch steps answer with `void` —
+`resolve` says true once, where the handling happens.
+
+The lesson the scanners teach is the layer's own: a scanner reads the
+SHAPE, so the shape has to carry the meaning. A URL that comes from a
+guard is checked; a URL that comes from a variable is not.
+
 ## Verify
 
 1. `cs review` on every file this layer touches — no finding, not just a
