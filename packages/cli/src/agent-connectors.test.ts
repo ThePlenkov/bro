@@ -2390,7 +2390,8 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.causes.length, 1);
       assert.equal(snap.causes[0]!.cause, 'rate_limited');
       assert.equal(snap.blocked, 1);
-      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z');
+      // devin free-tier wall parks 10min of grace past the stamp
+      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:10:00.000Z');
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
@@ -2439,7 +2440,8 @@ describe('budgetSnapshot', () => {
       );
       assert.deepEqual(
         snap.resets.map(r => [r.step, r.resetAt, r.holding]),
-        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+        // devin free-tier wall parks 10min of grace past the stamp
+        [['step-wall', '2999-01-01T00:10:00.000Z', true]]
       );
       assert.equal(registry['step-wall']!.cause, 'rate_limited');
     } finally {

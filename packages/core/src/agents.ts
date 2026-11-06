@@ -146,9 +146,20 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
-/** Provider reset extraction across the known header/prose forms. */
+const DEVIN_RATE_LIMIT_RE = /reached free model rate limit/i;
+const RATE_LIMIT_GRACE_MS = 10 * 60 * 1000;
+
+/** Provider reset extraction across the known header/prose forms. A
+ *  Devin free-tier wall (`Reached free model rate limit …`) parks a
+ *  grace beat past the advertised reset — the window is a rolling
+ *  refill, so spawning exactly at the stamp re-drains it half-empty. */
 function parseResetAt(text: string, now: number): string | undefined {
-  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  const base = relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  if (base === undefined || !DEVIN_RATE_LIMIT_RE.test(text)) {
+    return base;
+  }
+  const t = Date.parse(base);
+  return Number.isFinite(t) ? toIso(t + RATE_LIMIT_GRACE_MS) : base;
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
