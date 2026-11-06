@@ -377,6 +377,22 @@ describe('loadConfig fleet', () => {
     }
   });
 
+  test('fleet wall TTLs default and drop invalid values independently', () => {
+    assert.deepEqual(load().fleet.walls, { rateTtlMinutes: 15, quotaTtlMinutes: 360 });
+    assert.deepEqual(
+      load({ fleet: { walls: { rateTtlMinutes: 5, quotaTtlMinutes: 'bad' } } }).fleet.walls,
+      { rateTtlMinutes: 5, quotaTtlMinutes: 360 }
+    );
+  });
+
+  test('fleet lease TTLs default and drop invalid values independently', () => {
+    assert.deepEqual(load().fleet.leases, { roleTtlSeconds: 60, workTtlMinutes: 360 })
+    assert.deepEqual(
+      load({ fleet: { leases: { roleTtlSeconds: 15, workTtlMinutes: 'bad' } } }).fleet.leases,
+      { roleTtlSeconds: 15, workTtlMinutes: 360 }
+    )
+  })
+
   test('non-object fleet section falls back to defaults', () => {
     assert.equal(load({ fleet: 'wide' }).fleet.maxConcurrent, 3);
   });

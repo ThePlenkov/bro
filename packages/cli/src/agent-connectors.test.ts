@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
@@ -26,8 +26,13 @@ import {
   type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
+  BATCH_MARKER_ENV,
   deriveProviderWalls,
   handleOwner,
+  localLeaseStore,
+  projectId,
+  readLedgerWalls,
+  recordWall,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -77,6 +82,17 @@ import { VERSION } from './version.ts';
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
+const previousLeaseStateHome = process.env.XDG_STATE_HOME;
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-agent-lease-state-'));
+process.env.XDG_STATE_HOME = leaseStateHome;
+after(() => {
+  if (previousLeaseStateHome === undefined) {
+    delete process.env.XDG_STATE_HOME;
+  } else {
+    process.env.XDG_STATE_HOME = previousLeaseStateHome;
+  }
+  rmSync(leaseStateHome, { recursive: true, force: true });
+});
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -137,6 +153,9 @@ if (args[0] === 'list-sessions') {
   fs.writeSync(1, live.join('\\n') + '\\n'); process.exit(0)
 }
 if (args[0] === 'list-panes') {
+  // TMUX_FAKE_NOPANE: a server that can't report pane pids — the spawn
+  // must still land, and its lease must not die with the spawner
+  if (process.env.TMUX_FAKE_NOPANE) { console.error('pane pid unavailable'); process.exit(1) }
   const s = load().sessions[target()]
   if (!s || !alive(s.pid)) { console.error('no session'); process.exit(1) }
   fs.writeSync(1, s.pid + '\\n'); process.exit(0)
@@ -478,6 +497,74 @@ function connectorContract(b: BackendCase): void {
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true });
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env);
   const kill = (f: Fixture, info: AgentInfo) => killRun(f.main, info);
+
+  if (b.name === 'native') {
+    test('a project work lease refuses a spawn held by another clone', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const held = localLeaseStore(projectId(f.main)).acquire(
+          'bead/fx-1',
+          { host: 'other-host', pid: 9876, rig: 'other-rig', agentId: 'other-agent' },
+          60_000
+        );
+        assert.equal(held.ok, true);
+        await assert.rejects(
+          conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) => {
+            assert.ok(err instanceof SpawnError);
+            assert.equal(err.kind, 'cap');
+            assert.match(err.message, /bead\/fx-1 leased by other-rig@other-host pid 9876 until/);
+            return true;
+          }
+        );
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a respawn reuses its matching live lease token', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      const store = localLeaseStore(projectId(f.main));
+      try {
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        const entry = readAgentRegistry(f.main)['fx-1']!;
+        const lease = store.read('bead/fx-1');
+        assert.equal(entry.leaseToken, lease?.token);
+        assert.ok(lease !== undefined);
+        assert.ok(store.rebind(lease, { pid: process.pid }));
+        kill(f, first);
+        await until(() => !pidAlive(first.pid!));
+        assert.equal(store.read('bead/fx-1')?.token, lease.token);
+        const second = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.leaseToken, lease.token);
+        await c.stop(second.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a local backend rebinds the work lease to the worker pid', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      try {
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+        assert.ok(lease !== undefined);
+        // a local worker keeps the lease pid-governed — its death frees
+        // the key without waiting out the TTL
+        assert.equal(lease.holder.host, hostname());
+        assert.equal(lease.holder.pid, info.pid);
+        await c.stop(info.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+  }
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
@@ -1007,6 +1094,9 @@ function connectorContract(b: BackendCase): void {
       assert.equal(st.state, 'blocked');
       assert.equal(st.cause, 'rate_limited');
       assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now());
+      // the exit harvested the lease too — a dead run never holds the
+      // key (forceRelease reports nothing to free)
+      assert.equal(localLeaseStore(projectId(f.main)).forceRelease('bead/fx-1'), false);
       // the registry carries the cause
       const entry = readAgentRegistry(f.main)['fx-1']!;
       assert.equal(entry.cause, 'rate_limited');
@@ -1759,6 +1849,29 @@ describe('tmux connector', () => {
     }
   });
 
+  test('a missing pane pid stamps the work lease foreign — the TTL, not the spawner pid, backs it', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
+    const prevNoPane = process.env.TMUX_FAKE_NOPANE;
+    process.env.TMUX_FAKE_NOPANE = '1';
+    try {
+      const c = makeTmuxConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // pidAlive:()=>false plays the spawner already gone — a local
+      // stamp would read dead and free the key for a duplicate while
+      // the pane still runs; a foreign holder is TTL-governed (spec:
+      // a foreign-host pid is ignored until expiry)
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevNoPane === undefined) delete process.env.TMUX_FAKE_NOPANE;
+      else process.env.TMUX_FAKE_NOPANE = prevNoPane;
+      cleanup(f);
+    }
+  });
+
   test('a failing tmux binary degrades list() and refuses spawn', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
     try {
@@ -1811,6 +1924,50 @@ describe('docker connector', () => {
       );
       await n.stop(first.id);
     } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a remote daemon stamps the work lease foreign — the spawner exit frees nothing', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = 'tcp://daemon-remote:2375';
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // the daemon's State.Pid names ITS host — no local probe sees it;
+      // the lease must hold by TTL, not die with the spawner's own pid
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      cleanup(f);
+    }
+  });
+
+  test('a local daemon binds the work lease to the container pid', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    const prevCtx = process.env.DOCKER_CONTEXT;
+    delete process.env.DOCKER_HOST;
+    delete process.env.DOCKER_CONTEXT;
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.equal(lease.holder.host, hostname());
+      assert.equal(lease.holder.pid, info.pid);
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      if (prevCtx === undefined) delete process.env.DOCKER_CONTEXT;
+      else process.env.DOCKER_CONTEXT = prevCtx;
       cleanup(f);
     }
   });
@@ -2233,7 +2390,8 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.causes.length, 1);
       assert.equal(snap.causes[0]!.cause, 'rate_limited');
       assert.equal(snap.blocked, 1);
-      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z');
+      // devin free-tier wall parks 10min of grace past the stamp
+      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:10:00.000Z');
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
@@ -2282,7 +2440,8 @@ describe('budgetSnapshot', () => {
       );
       assert.deepEqual(
         snap.resets.map(r => [r.step, r.resetAt, r.holding]),
-        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+        // devin free-tier wall parks 10min of grace past the stamp
+        [['step-wall', '2999-01-01T00:10:00.000Z', true]]
       );
       assert.equal(registry['step-wall']!.cause, 'rate_limited');
     } finally {
@@ -3265,10 +3424,63 @@ describe('fleet chain walk spawn integration', () => {
     onWall,
     candidates: ['A', 'B'].map(provider => ({
       provider,
+      account: provider,
       model: `model-${provider}`,
       worker: { kind: 'template', command: 'node {promptFile}' },
     })),
   });
+  const withStateHome = async <T>(root: string, fn: () => Promise<T>): Promise<T> => {
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, 'state');
+    try {
+      return await fn();
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+    }
+  };
+  const withLedgerFixture = async <T>(fn: (f: Fixture) => Promise<T>): Promise<T> => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    return withStateHome(f.root, async () => {
+      try {
+        return await fn(f);
+      } finally {
+        cleanup(f);
+      }
+    });
+  };
+  const routeForAccounts = (
+    candidates: Array<{ provider: string; account: string }>
+  ): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall: 'fallthrough',
+    candidates: candidates.map(({ provider, account }) => ({
+      provider,
+      account,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  });
+  const spawnRouted = (
+    f: Fixture,
+    route: NonNullable<SpawnSpec['route']>,
+    prompt = 'setTimeout(() => {}, 30000)'
+  ) => conn(f).spawn({ ...SPEC(f.main, f.beadsDir, 'fx-1', prompt), route });
+  const recordTestWall = (
+    overrides: Partial<Parameters<typeof recordWall>[0]> = {},
+    opts?: Parameters<typeof recordWall>[1]
+  ) =>
+    recordWall(
+      {
+        account: overrides.account ?? 'shared-account',
+        cause: overrides.cause ?? 'quota',
+        observedAt: overrides.observedAt ?? new Date().toISOString(),
+        provider: overrides.provider ?? 'A',
+        rig: overrides.rig ?? 'repo',
+        ...(overrides.resetAt === undefined ? {} : { resetAt: overrides.resetAt }),
+        ...(overrides.step === undefined ? {} : { step: overrides.step }),
+      },
+      opts
+    );
   const death = (provider: string): AgentRegistryEntry => ({
     agentId: `native-${provider.toLowerCase()}-dead`,
     backend: 'native',
@@ -3297,6 +3509,7 @@ describe('fleet chain walk spawn integration', () => {
       const attempts = entry.attempts as unknown[];
       assert.deepEqual(attempts[0], {
         provider: 'A',
+        account: 'A',
         model: 'model-A',
         cause: 'rate_limited',
         resetAt: future,
@@ -3339,6 +3552,7 @@ describe('fleet chain walk spawn integration', () => {
       assert.equal(entry.provider, 'B');
       assert.deepEqual((entry.attempts as unknown[])[0], {
         provider: 'A',
+        account: 'A',
         model: 'model-A',
         spawnedAt: oldSpawn,
         stopped: false,
@@ -3387,6 +3601,7 @@ describe('fleet chain walk spawn integration', () => {
       assert.deepEqual(entry.attempts, [
         {
           provider: 'B',
+          account: 'B',
           model: 'model-B',
           cause: 'rate_limited',
           resetAt: future,
@@ -3404,9 +3619,24 @@ describe('fleet chain walk spawn integration', () => {
   test('fallback provider uses its own model instead of the chain-head selection', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
     f.env.providers = {
-      A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
-      B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
-      C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      A: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'a-default',
+        account: 'acct-a',
+      },
+      B: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'b-default',
+        account: 'acct-b',
+      },
+      C: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'c-default',
+        account: 'acct-c',
+      },
     };
     try {
       patchAgentRegistry(f.main, 'fx-1', death('A'));
@@ -3418,6 +3648,10 @@ describe('fleet chain walk spawn integration', () => {
         model: 'a1',
       };
       const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' });
+      assert.deepEqual(
+        route.candidates.map(candidate => candidate.account),
+        ['acct-a', 'acct-b', 'acct-c']
+      );
       assert.deepEqual(
         route.candidates.map(candidate => candidate.model),
         ['x', 'b-default', 'c1']
@@ -3498,6 +3732,133 @@ describe('fleet chain walk spawn integration', () => {
     } finally {
       cleanup(f);
     }
+  });
+
+  test('provider aliases sharing an account are skipped together', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-2', { ...death('kiloA'), account: 'kilo' });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'kiloA', account: 'kilo' },
+          { provider: 'kiloB', account: 'kilo' },
+          { provider: 'or', account: 'or' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'or');
+      await conn(f).stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a host ledger wall skips an account with no local registry entry', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({
+        account: 'openrouter',
+        cause: 'rate_limited',
+        resetAt: future,
+        provider: 'other-repo-provider',
+        rig: 'other-repo',
+      });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'backup');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('an expired host ledger wall does not skip its provider', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall(
+        {
+          account: 'openrouter',
+          cause: 'rate_limited',
+          resetAt: '2020-01-01T00:00:00.000Z',
+          observedAt: '2019-01-01T00:00:00.000Z',
+          provider: 'other-repo-provider',
+          rig: 'other-repo',
+        },
+        { now: Date.parse('2019-01-01T00:00:00.000Z') }
+      );
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'openrouter');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('classification writes a wall to the host ledger using entry account', async () => {
+    await withLedgerFixture(async f => {
+      const log = join(f.root, 'rate-limit.log');
+      writeFileSync(log, 'HTTP 429 Too Many Requests');
+      patchAgentRegistry(f.main, 'fx-1', {
+        ...death('A'),
+        account: 'shared-account',
+        cause: undefined,
+        resetAt: undefined,
+        exitStatus: 1,
+        log,
+      });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'A', account: 'shared-account' },
+          { provider: 'B', account: 'backup' },
+        ])
+      );
+      const row = readLedgerWalls().find(wall => wall.account === 'shared-account');
+      assert.equal(row?.provider, 'A');
+      assert.equal(row?.cause, 'rate_limited');
+      assert.equal(row?.step, 'fx-1');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('stopping an agent does not clear its host ledger wall', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({ step: 'fx-1' });
+      const info = await conn(f).spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      );
+      await conn(f).stop(info.id);
+      assert.equal(
+        readLedgerWalls().some(wall => wall.account === 'shared-account'),
+        true
+      );
+    });
+  });
+
+  test('an unrouted batch spawn refuses a ledger-walled account', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({ provider: 'other-repo-provider' });
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          provider: 'candidate',
+          account: 'shared-account',
+          env: { [BATCH_MARKER_ENV]: '1' },
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /candidate \(account shared-account\) walled/.test(err.message)
+      );
+    });
   });
 
   test('a live entry still refuses a routed spawn', async () => {

@@ -38,7 +38,7 @@ import {
 } from '@broject/providers';
 import { randomUUID } from 'node:crypto';
 import { reserveSessionStart, sessionCapViews } from '@broject/core';
-import { conductorSessionRefusal } from './session-cap.ts';
+import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
 import type { AcpTerminals, Toolish } from '@broject/providers';
 import type {
   AcpContentBlock,
@@ -1584,7 +1584,9 @@ interface TurnEnv {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  /** key → when its session's slot claim was taken — the cap counts
+   *  an open only after that claim outlives SESSION_SLOT_TTL_MS */
+  pendingOpens: Map<string, number>;
   key: string | undefined;
   /** request's stop settings — hashed into the conversation proofs so
    *  changed markers never replay a reply cut under different ones */
@@ -1706,7 +1708,15 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
     );
   }
   const view = views[0];
-  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1);
+  // in-flight opens still inside their claim's TTL are already counted
+  // — their reservation sits in view.live; only an open that outlived
+  // its claim is added here (fresh claims double-count, #926 review)
+  const refusal = conductorSessionRefusal(
+    view,
+    env.sessions.size,
+    pendingOpensBeyondClaim(env.pendingOpens),
+    view?.starts ?? 1
+  );
   if (refusal !== undefined) {
     throw new Error(refusal);
   }
@@ -1764,8 +1774,10 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose
-  // loser leaks out of the map (codeant #569)
-  env.pendingOpens.add(key);
+  // loser leaks out of the map (codeant #569). The timestamp is the
+  // claim's: assertSessionCap just took the slot, so the cap check
+  // knows when the reservation covering this open expires
+  env.pendingOpens.set(key, Date.now());
   let live: AcpRetainedSession | undefined;
   try {
     live = await acpSessionRetain(env.peer, env.cfg.entry, env.opts, env.deadline, {
@@ -1892,7 +1904,7 @@ interface ProviderLane {
   opts: ProviderWireOpts;
   pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  pendingOpens: Map<string, number>;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -4180,7 +4192,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // keys whose first session/new is in flight — a concurrent
       // same-key request must not open a twin (the loser would leak
       // unmapped)
-      pendingOpens: new Set<string>(),
+      pendingOpens: new Map<string, number>(),
     });
   };
   addLane(cfg.backend, cfg.entry, cfg, {

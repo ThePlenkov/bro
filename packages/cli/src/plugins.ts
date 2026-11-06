@@ -336,7 +336,11 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'fleet',
     group: 'fleet',
-    summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
+    summary:
+      // no `a|b` alternation in this summary — gen-command-docs'
+      // signature() would extract it as subcommands; the arg lists use
+      // spaced pipes so the generated page prints the prose only
+      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]',
     run: runFleetCommand,
     contract: {
       flags: {

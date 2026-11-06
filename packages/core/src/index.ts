@@ -104,6 +104,7 @@ export {
   modelBase,
   parseProviderEntry,
   providerCallGrade,
+  providerAccount,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -127,6 +128,10 @@ export {
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
+  fleetLeases,
+  fleetWalls,
+  deriveAccountWalls,
+  DEFAULT_FLEET_LEASE_TTLS,
   ON_WALL,
   providerWallOwners,
   resolveStepClass,
@@ -135,9 +140,19 @@ export {
   walkChain,
   wallText,
 } from './routing.ts';
+export {
+  clearLedgerWalls,
+  readLedgerWalls,
+  recordWall,
+  wallLedgerPath,
+} from './wall-ledger.ts';
+export type { WallLedgerOptions, WallObservation } from './wall-ledger.ts';
 export type {
   ChainEntry,
   ChainWalk,
+  AccountWall,
+  FleetLeaseTtls,
+  FleetWallTtls,
   FleetRouter,
   OnWall,
   ProviderWall,
@@ -336,11 +351,22 @@ export {
   stackHost,
   stopGateContributions,
   taskFinishProbes,
+  remoteUrl,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
+export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts';
+export type {
+  HoldRoleLeaseOptions,
+  Lease,
+  LeaseAcquire,
+  LeaseHolder,
+  LeaseStore,
+  LocalLeaseStoreOptions,
+} from './leases.ts';
+export { normalizeRemote, projectId } from './project-id.ts';
 export {
   GUARD_DEFAULT_BUDGET,
   GUARD_EVENTS,
