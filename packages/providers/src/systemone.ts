@@ -64,16 +64,22 @@ export interface ProviderWireOpts {
   acp?: AcpSeam
 }
 
+/** The runtime key — an EMPTY string is no key: the request carried
+ *  none, and an empty credential would go out instead of the configured
+ *  one. */
+function runtimeKey(entry: ApiTarget): string | undefined {
+  return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey
+}
+
 /** The key this call authenticates with — the runtime key wins (it was
  *  handed to THIS call on purpose), then the secret-store command, then
  *  the configured env var; a non-NAME apiKeyEnv is a config bug (throws,
  *  never echoed); a missing var is fail-open, and the message names the
  *  config FIELD, never the value. */
 function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
-  // an EMPTY runtime key is no key — the request carried none, and an
-  // empty credential would go out instead of the configured one
-  if (entry.apiKey !== undefined && entry.apiKey !== '') {
-    return entry.apiKey
+  const runtime = runtimeKey(entry)
+  if (runtime !== undefined) {
+    return runtime
   }
   if (entry.apiKeyCommand !== undefined) {
     return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
