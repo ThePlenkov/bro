@@ -290,12 +290,18 @@ that reads its own first argument as a sub-command ran the sub-command
 instead of answering with its help.
 
 The fix is one rule at the two boundaries where a plugin's or a
-member's argv is handed over: the help token LEADS that argv
-(`helpFirst`). The token counts only before a `--` separator — after it
-everything is verbatim payload. So a help request can no longer reach
-a command's side effects, whatever the command's own dispatcher looks
-at first, and the direct spelling (`<plugin> <args> --help`) gets the
-same guarantee.
+member's argv is handed over: the help token LEADS the args
+(`helpFirst`), and the plugin's PREFIX keeps its place in front of it
+(`pluginArgv`) — a plugin that selects a sub-command with a prefix must
+still answer for that sub-command, not for its own root. The token
+counts only before a `--` separator: after it everything is verbatim
+payload.
+
+The rule is the repo's own convention — the token leads, and a plugin
+reads it where every dispatcher looks first. A plugin that ignores the
+token is the plugin's own bug, and the telemetry plane was one:
+`bro telemetry --help` ran the perf report. The hooks plane now reads
+the token before the event does, and answers with its usage.
 
 ### The scanners' plane
 
@@ -341,7 +347,8 @@ guard is checked; a URL that comes from a variable is not.
    read asks `/v1/models?limit=N` — not the base URL's query.
 10. The help request: `help <plugin>` and `<plugin> <args> --help` answer
     with the plugin's help and never run the plugin; the same for a member
-    reached through its group.
+    reached through its group, and a plugin that selects its sub-command with
+    a prefix still answers for that sub-command.
 11. The lint plane: Codacy runs clean on this layer's diff. The token's
     guard reads the URL's protocol and host — a pattern is a way to starve
     a caller on, and the debt plane's rule never needed one — and every

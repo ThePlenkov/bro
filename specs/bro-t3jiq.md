@@ -52,6 +52,13 @@ the chain as the host's server-side stack. Layer 1 bases on `feat/router-routes`
 explicitly — the stack roots on PR #922, not on `main`, because the arc's code
 exists only there.
 
+**The sync that keeps that root is not in this branch.** The sync in this tree
+roots every chain on `main`: after layer 1 merges it would retarget layer 2 to
+`main` and pull #922's changes into the layer's diff. The chain-rooted sync is
+PR #947 (`bro-awbgd`), and it lands on `main` before the layers do. Until then
+the layers are rebased and retargeted by hand against `feat/router-routes`, and
+`bro stack sync` is not run on this stack.
+
 ### The rules
 
 - **Draft PRs, human merges.** The operator tries the feature; the act gate is
@@ -113,8 +120,13 @@ key from the environment at call time, so the token has to live in the
 environment — and the token is the router's own, read from the repo's state
 file. Today one process handles one repo, so one token, so the write is
 idempotent; the shape is still wrong, and the race needs two tokens in one
-process to bite (the failure would be a 401 and a fail-open decision — never a
-leak to a third party).
+process to bite.
+
+The failure is not only a 401. The environment holds ONE token for the whole
+process: resolving a second repo's router overwrites the first, and the first
+router then receives the SECOND router's token in its `Authorization` header.
+That is a disclosure of one repo's session token to another repo's router, and
+a 401 does not undo it — the header was already sent.
 
 The fix is a seam, not a patch: the key travels with the request.
 
