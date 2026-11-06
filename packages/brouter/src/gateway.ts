@@ -14,9 +14,11 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
-import { fetchTokenSafe } from './redirect.ts';
 import { routerUrl } from './router-url.ts';
 import type { RouterEndpoint } from './adapter.ts';
+
+/** The statuses that carry a redirect — the read refuses them. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /** The gitdir a `.git` FILE names — a linked worktree's gitdir. The
  *  name is absolute as written, relative to the directory that holds
@@ -84,25 +86,37 @@ export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
 
 /** The catalog, read from the router. A router that is not up is an
  *  honest error — never an empty catalog that reads like a whole one.
- *  The read follows redirects by hand: every hop is checked before the
- *  session token rides it (see redirect.ts). */
+ *
+ *  The read asks ONE url — the router's own /v1/models — and it does
+ *  not follow redirects: the client carries the request's headers to
+ *  the hop's target, so the session token would ride to a host the
+ *  guard never checked, over cleartext if the hop chose it. A redirect
+ *  is an error that names its target. */
 export async function readCatalog(
   endpoint: RouterEndpoint,
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
   const limit = opts.limit ?? 1000;
-  const res = await fetchTokenSafe(
-    endpoint,
-    limit,
-    {
+  const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
+  const res = await fetch(url, {
+    headers: {
       'x-api-key': endpoint.token,
       authorization: `Bearer ${endpoint.token}`,
       'anthropic-version': '2023-06-01',
     },
-    AbortSignal.timeout(opts.timeoutMs ?? 20_000)
-  );
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
+    // never auto-follow — the session token would ride to a host the
+    // guard never checked
+    redirect: 'manual',
+  });
+  if (REDIRECT_STATUSES.has(res.status)) {
+    const location = res.headers.get('location') ?? '';
+    throw new Error(
+      `the router answered ${res.status} with a redirect to ${location} — the catalog read does not ` +
+        `follow redirects: the session token would ride to a host the guard never checked`
+    );
+  }
   if (!res.ok) {
-    // the hop that answered, not the one the read started at
     throw new Error(`the router answered ${res.status} on ${res.url}`);
   }
   return servedModels(await res.json());

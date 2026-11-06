@@ -259,18 +259,18 @@ http://elsewhere.example.com/` would have carried `x-api-key` there —
 over cleartext if the hop chose it. The guard checked the FIRST url
 only.
 
-The fix is `packages/brouter/src/redirect.ts` — the read does not
-follow redirects at all. The read asks ONE url (the router's own
-`/v1/models`), and a redirect names ANOTHER url, so the answer is an
-error that names the target: `redirect: 'manual'`, and the token
-crosses to the router and nowhere else. The rule the debt plane states
-holds for every request the read makes, because there is only one.
+The fix is the read itself: it asks ONE url — the router's own
+`/v1/models` — and it does not follow redirects. `redirect: 'manual'`,
+and a redirect is an error that names its target. The token crosses to
+the router and nowhere else, and the rule the debt plane states holds
+for every request the read makes, because there is only one.
 
 The alternative was built and measured: following the hop by hand and
 checking every one of them. The hop's URL comes from the answer, and
 the scanner reads a URL that comes from an answer as the operator's
 own input — so the stricter rule is also the simpler one: a read that
-cannot check a hop does not make it.
+cannot check a hop does not make it. The rule sits in `gateway.ts`,
+where the read's URL is built: the read is the file's own business.
 
 ### The base URL that kept its query
 
