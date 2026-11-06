@@ -63,8 +63,22 @@ export interface Command {
   readonly fallback?: (cmd: string, rest: string[]) => Promise<boolean>;
 }
 
+/** One invocation — the pieces the dispatch reads out of the argv. The
+ *  strings ARE the domain of a command line, so they travel together
+ *  instead of as loose arguments. */
+interface Invocation {
+  /** the first token — the command's own name */
+  readonly head: string | undefined;
+  /** the tokens after the head */
+  readonly rest: string[];
+}
+
 /** Identity helper — typed declaration sites, same role as definePlugin. */
-export function defineCommand(spec: CommandSpec, parentPath?: string, rootPath?: string): Command {
+export function defineCommand(
+  spec: CommandSpec,
+  parentPath?: string,
+  rootPath?: string
+): Command {
   const path = parentPath === undefined ? spec.name : `${parentPath} ${spec.name}`;
   const root = rootPath ?? path;
   return {
@@ -73,7 +87,7 @@ export function defineCommand(spec: CommandSpec, parentPath?: string, rootPath?:
     rootPath: root,
     ...(spec.summary === undefined ? {} : { summary: spec.summary }),
     plugins: spec.plugins ?? [],
-    commands: (spec.commands ?? []).map(c => defineCommand(c, path, root)),
+    commands: (spec.commands ?? []).map((c) => defineCommand(c, path, root)),
     ...(spec.usageLines === undefined ? {} : { usageLines: spec.usageLines }),
     ...(spec.examples === undefined ? {} : { examples: spec.examples }),
     ...(spec.version === undefined ? {} : { version: spec.version }),
@@ -93,7 +107,10 @@ export function pluginsOf(command: Command): CommandPlugin[] {
 export function membersOf(command: Command): CommandPlugin[] {
   const seen = new Set<string>();
   const out: CommandPlugin[] = [];
-  for (const p of [...pluginsOf(command), ...command.commands.flatMap(c => pluginsOf(c))]) {
+  for (const p of [
+    ...pluginsOf(command),
+    ...command.commands.flatMap((c) => pluginsOf(c)),
+  ]) {
     if (seen.has(p.name)) continue;
     seen.add(p.name);
     out.push(p);
@@ -103,8 +120,8 @@ export function membersOf(command: Command): CommandPlugin[] {
 
 function memberList(members: CommandPlugin[]): string {
   return members
-    .filter(p => !p.hidden)
-    .map(p => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
+    .filter((p) => !p.hidden)
+    .map((p) => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
     .join(' ');
 }
 
@@ -115,8 +132,8 @@ function memberLabel(p: CommandPlugin): string {
 /** The member table of a command — what a bare or unknown member asks for. */
 export function groupTable(command: Command, group: CommandPlugin[]): string {
   const rows = group
-    .filter(p => !p.hidden)
-    .map(p => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
+    .filter((p) => !p.hidden)
+    .map((p) => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
     .join('\n');
   return (
     `${command.path} — ${command.summary ?? ''}\n\n` +
@@ -128,13 +145,16 @@ export function groupTable(command: Command, group: CommandPlugin[]): string {
 /** The help text of a command. */
 export function usageText(command: Command): string {
   const groups = command.commands
-    .filter(c => membersOf(c).some(p => !p.hidden))
-    .map(c => `  ${c.name.padEnd(8)} ${c.summary ?? ''}\n             ${memberList(membersOf(c))}`)
+    .filter((c) => membersOf(c).some((p) => !p.hidden))
+    .map(
+      (c) =>
+        `  ${c.name.padEnd(8)} ${c.summary ?? ''}\n             ${memberList(membersOf(c))}`
+    )
     .join('\n');
   // a grouped plugin belongs to its group's table, not the top-level one
   const commands = pluginsOf(command)
-    .filter(p => !p.hidden && !p.aliasOf && !p.group)
-    .map(p => `  ${p.name.padEnd(12)} ${p.summary}`)
+    .filter((p) => !p.hidden && !p.aliasOf && !p.group)
+    .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
     .join('\n');
   const usage = command.usageLines ?? [];
   const examples = command.examples ?? [];
@@ -155,7 +175,7 @@ Options:
   --help       This text (also: ${command.path} help, ${command.path} help <cmd>)
 
 Examples:
-${examples.map(e => `  ${e}`).join('\n')}`;
+${examples.map((e) => `  ${e}`).join('\n')}`
 }
 
 /** Runs a member reached via `<cli> <group> <member>`. */
@@ -171,79 +191,96 @@ async function runMember(
   await member.run([...(member.argvPrefix ?? []), ...args]);
 }
 
-function isFlatDeprecated(command: Command, plugin: CommandPlugin): boolean {
+/** The member a nested command's own table names — the host plugin
+ *  never matches itself (its own name is the command's name). */
+function memberOf(
+  nested: Command,
+  inv: Invocation,
+  host: CommandPlugin
+): CommandPlugin | undefined {
+  return pluginsOf(nested).find((p) => p.name === inv.rest[0] && p.name !== host.name);
+}
+
+/** Is this a flat invocation the group spelling retires? FLAT means the
+ *  CLI's OWN top-level table: inside a nested command the plugin was
+ *  reached through its group, which is the spelling the warning points
+ *  at. A group host has no better spelling than itself. */
+function isFlatRetirement(command: Command, plugin: CommandPlugin): boolean {
   if (command.path !== command.rootPath) return false;
   if (plugin.deprecated !== undefined) return false;
   if (plugin.flatDeprecated === undefined) return false;
   if (plugin.group === undefined) return false;
-  if (plugin.group === plugin.name) return false;
-  return true;
+  return plugin.group !== plugin.name;
 }
 
-/** Resolve one argv against a command: a plugin, a nested command, or
- *  the command's member table. */
-async function handleBareNested(nested: Command, rest: string[]): Promise<void> {
-  const first = rest[0];
-  if (first === undefined) {
-    printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
-    return;
-  }
-  if (first === '-h') {
-    printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
-    return;
-  }
-  if (first === '--help') {
-    printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
-    return;
-  }
-  await runCommand(nested, rest);
-}
-
-function findNestedMember(info: {
-  nested: Command | undefined;
-  rest: string[];
-  head: string;
-}): CommandPlugin | undefined {
-  if (info.nested === undefined) return undefined;
-  return pluginsOf(info.nested).find(p => {
-    if (p.name !== info.rest[0]) return false;
-    return p.name !== info.head;
-  });
-}
-
-async function resolve(command: Command, argv: string[]): Promise<boolean> {
-  const [head, ...rest] = argv;
-  if (head === undefined) {
-    return false;
-  }
-  const plugin = pluginsOf(command).find(p => p.name === head);
-  const nested = command.commands.find(c => c.name === head);
-  if (plugin === undefined) {
-    if (nested === undefined) {
-      return false;
+/** The plugin argv names — the host case first: a nested command's own
+ *  members win when argv names one. */
+async function runPlugin(
+  command: Command,
+  plugin: CommandPlugin,
+  inv: Invocation
+): Promise<boolean> {
+  const nested = command.commands.find((c) => c.name === inv.head);
+  if (nested !== undefined) {
+    const member = memberOf(nested, inv, plugin);
+    if (member !== undefined) {
+      await runMember(command, nested.name, member, inv.rest.slice(1));
+      return true;
     }
-    await handleBareNested(nested, rest);
-    return true;
-  }
-  const member = findNestedMember({ nested, rest, head });
-  if (member !== undefined) {
-    await runMember(command, nested!.name, member, rest.slice(1));
-    return true;
   }
   if (plugin.deprecated !== undefined) {
     warnDeprecated(`'${command.path} ${plugin.name}'`, plugin.deprecated);
   }
-  if (isFlatDeprecated(command, plugin)) {
+  // flat-spelling retirement: only a truly flat invocation warns —
+  // `<cli> <host> <member>` resolves the member above and stays silent.
+  if (isFlatRetirement(command, plugin)) {
     warnDeprecated(
       `'${command.path} ${plugin.name}'`,
       `${plugin.flatDeprecated} — prefer '${command.path} ${plugin.group} ${plugin.name}'`
     );
   }
-  await plugin.run([...(plugin.argvPrefix ?? []), ...rest]);
+  await plugin.run([...(plugin.argvPrefix ?? []), ...inv.rest]);
   return true;
 }
 
-function normalizeHelp(argv: string[]): string[] {
+/** A nested command reached by argv — its member table when argv asks
+ *  for help, the command itself otherwise. */
+async function runNested(
+  command: Command,
+  nested: Command,
+  inv: Invocation
+): Promise<boolean> {
+  const first = inv.rest[0];
+  if (first === undefined || HELP_TOKENS.has(first)) {
+    printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
+    return true;
+  }
+  await runCommand(nested, inv.rest);
+  return true;
+}
+
+/** Resolve one argv against a command: a plugin, a nested command, or
+ *  the command's member table. */
+async function resolve(command: Command, inv: Invocation): Promise<boolean> {
+  if (inv.head === undefined) {
+    return false;
+  }
+  const plugin = pluginsOf(command).find((p) => p.name === inv.head);
+  if (plugin !== undefined) {
+    return runPlugin(command, plugin, inv);
+  }
+  const nested = command.commands.find((c) => c.name === inv.head);
+  if (nested !== undefined) {
+    return runNested(command, nested, inv);
+  }
+  return false;
+}
+
+/** The argv the command sees — `help` is the help spelling: `<cli> help`
+ *  is `<cli> --help`, and `<cli> help <cmd>…` is `<cli> <cmd>… --help` —
+ *  one spelling for explicit help whichever side of the command it sits
+ *  on. */
+function helpArgs(argv: string[]): string[] {
   if (argv[0] !== 'help') return argv;
   const tail = argv.slice(1);
   const sep = tail.indexOf('--');
@@ -251,37 +288,35 @@ function normalizeHelp(argv: string[]): string[] {
   return head.length === 0 ? ['--help'] : [...head, '--help'];
 }
 
-function printBareMemberTable(command: Command, opts: { mounted?: boolean }): void {
-  if (opts.mounted === true) return;
-  if (membersOf(command).length === 0) return;
-  printUsage(groupTable(command, membersOf(command)), EXIT.ok);
+/** The token that asks for the version. */
+const VERSION_TOKENS = new Set(['--version', '-v']);
+
+/** The tokens that ask for the help text. */
+const HELP_TOKENS = new Set(['--help', '-h']);
+
+/** The bare command — the failure code every bro-family CLI used (1),
+ *  not the usage code (2). A nested command with members asks for its
+ *  table instead: the member list IS its help. */
+function printBareUsage(command: Command, opts: { mounted?: boolean }): never {
+  if (opts.mounted !== true && membersOf(command).length > 0) {
+    printUsage(groupTable(command, membersOf(command)), EXIT.ok);
+  }
+  printUsage(usageText(command), EXIT.error);
 }
 
-async function tryFallback(command: Command, cmd: string, rest: string[]): Promise<boolean> {
-  if (command.fallback === undefined) return false;
-  return command.fallback(cmd, rest);
-}
-
-function printUnknownMemberTable(
+/** The UNKNOWN token is argv[0] here — it is what makes this a usage
+ *  error rather than a bare command. */
+function printUnknown(
   command: Command,
-  opts: { mounted?: boolean },
-  members: CommandPlugin[]
-): void {
-  if (opts.mounted === true) return;
-  if (members.length === 0) return;
-  printUsage(groupTable(command, members), EXIT.usage);
-}
-
-async function handleVersionOrHelp(command: Command, cmd: string | undefined): Promise<boolean> {
-  if (cmd === '--version' || cmd === '-v') {
-    console.log(command.version ?? '');
-    return true;
+  inv: Invocation,
+  opts: { mounted?: boolean }
+): never {
+  const members = membersOf(command);
+  if (opts.mounted !== true && members.length > 0) {
+    printUsage(groupTable(command, members), EXIT.usage);
   }
-  if (cmd === '--help' || cmd === '-h') {
-    printUsage(usageText(command), EXIT.ok);
-    return true;
-  }
-  return false;
+  console.error(`unknown command: ${inv.head}`);
+  printUsage(usageText(command), EXIT.usage);
 }
 
 /** Run one command over argv. `mounted` marks the CLI's root: its
@@ -292,35 +327,28 @@ export async function runCommand(
   argv: string[],
   opts: { mounted?: boolean } = {}
 ): Promise<void> {
-  // `<cli> help` is `<cli> --help`; `<cli> help <cmd>…` is
-  // `<cli> <cmd>… --help` — one spelling for explicit help whichever
-  // side of the command it sits on
-  const args = normalizeHelp(argv);
+  const args = helpArgs(argv);
   const [cmd, ...rest] = args;
+  const inv: Invocation = { head: cmd, rest };
 
   await command.prepare?.(args);
 
-  if (await handleVersionOrHelp(command, cmd)) {
+  if (VERSION_TOKENS.has(cmd)) {
+    console.log(command.version ?? '');
     return;
+  }
+  if (HELP_TOKENS.has(cmd)) {
+    printUsage(usageText(command), EXIT.ok);
   }
   if (!cmd) {
-    // bare `<cli>` — the failure code every bro-family CLI used (1),
-    // not the usage code (2). A nested command with members asks for
-    // its table instead: the member list IS its help.
-    printBareMemberTable(command, opts);
-    printUsage(usageText(command), EXIT.error);
+    printBareUsage(command, opts);
   }
 
-  if (await resolve(command, args)) {
+  if (await resolve(command, inv)) {
     return;
   }
-  if (await tryFallback(command, cmd, rest)) {
+  if (command.fallback && (await command.fallback(cmd, rest))) {
     return;
   }
-  const members = membersOf(command);
-  // the UNKNOWN token is argv[0] here — it is what makes this a usage
-  // error rather than a bare command
-  printUnknownMemberTable(command, opts, members);
-  console.error(`unknown command: ${cmd}`);
-  printUsage(usageText(command), EXIT.usage);
+  printUnknown(command, inv, opts);
 }

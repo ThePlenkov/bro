@@ -16,36 +16,37 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
+/** The gitdir a `.git` FILE names — a linked worktree's gitdir. The
+ *  name is absolute as written, relative to the directory that holds
+ *  the `.git` file. undefined when the file names none. */
+function gitDirFromFile(dot: string): string | undefined {
+  const stat = statSync(dot, { throwIfNoEntry: false });
+  if (stat?.isFile() !== true) return undefined;
+  const named = /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'));
+  if (named?.[1] === undefined) return undefined;
+  const path = named[1].trim();
+  return isAbsolute(path) ? path : resolve(dirname(dot), path);
+}
+
+/** A worktree's gitdir → the common dir every linked worktree shares.
+ *  A gitdir that is not a worktree's IS the common dir. */
+function commonFromGitDir(gitdir: string): string {
+  const parent = dirname(gitdir);
+  return basename(parent) === 'worktrees' ? dirname(parent) : gitdir;
+}
+
 /** The git common dir — the directory every linked worktree shares.
  *  Pure: walk up for `.git`; a directory IS the common dir, a file (a
  *  linked worktree) names the worktree's gitdir, whose `worktrees/`
  *  parent holds the common dir. */
-function gitCommonFromDot(dot: string, current: string): string | undefined {
-  const stat = statSync(dot, { throwIfNoEntry: false });
-  if (stat === undefined) return undefined;
-  if (stat.isDirectory()) return dot;
-  if (!stat.isFile()) return undefined;
-  const text = readFileSync(dot, 'utf8');
-  const named = /^gitdir:\s*(.+)$/m.exec(text);
-  if (named === null) return undefined;
-  const raw = named[1].trim();
-  if (raw === '') return undefined;
-  let gitdir: string;
-  if (isAbsolute(raw)) {
-    gitdir = raw;
-  } else {
-    gitdir = resolve(current, raw);
-  }
-  const parent = dirname(gitdir);
-  if (basename(parent) === 'worktrees') return dirname(parent);
-  return gitdir;
-}
-
 export function gitCommonDir(dir: string): string | undefined {
   let current = resolve(dir);
   for (;;) {
-    const found = gitCommonFromDot(join(current, '.git'), current);
-    if (found !== undefined) return found;
+    const dot = join(current, '.git');
+    const stat = statSync(dot, { throwIfNoEntry: false });
+    if (stat?.isDirectory()) return dot;
+    const gitdir = gitDirFromFile(dot);
+    if (gitdir !== undefined) return commonFromGitDir(gitdir);
     const up = dirname(current);
     if (up === current) return undefined;
     current = up;

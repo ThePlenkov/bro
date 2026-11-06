@@ -56,22 +56,22 @@ interface CatalogPayload {
   data?: unknown;
 }
 
-/** The catalog rows → the served models. A row without a usable id is
- *  not a model: it is dropped, and the count of what was dropped rides
- *  the answer (a short catalog must be distinguishable from a whole
- *  one). */
-function readString(bag: Record<string, unknown>, key: string): string {
-  const value = bag[key];
-  return typeof value === 'string' ? value.trim() : '';
+/** A row's text field — trimmed, or empty when the row names no
+ *  string there. */
+function trimmedField(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim();
 }
 
-function toServedModel(row: unknown): ServedModel | null {
-  if (typeof row !== 'object' || row === null) return null;
+/** One catalog row → the served model it names, or undefined when the
+ *  row names none. A row without a usable id is not a model. */
+function servedRow(row: unknown): ServedModel | undefined {
+  if (typeof row !== 'object' || row === null) return undefined;
   const bag = row as Record<string, unknown>;
-  const id = readString(bag, 'id');
-  if (id === '') return null;
-  const label = readString(bag, 'display_name');
-  const description = readString(bag, 'description');
+  const id = trimmedField(bag.id);
+  if (id === '') return undefined;
+  const label = trimmedField(bag.display_name);
+  const description = trimmedField(bag.description);
   const source = modelSource(id);
   return {
     id,
@@ -81,18 +81,22 @@ function toServedModel(row: unknown): ServedModel | null {
   };
 }
 
+/** The catalog rows → the served models. A row without a usable id is
+ *  not a model: it is dropped, and the count of what was dropped rides
+ *  the answer (a short catalog must be distinguishable from a whole
+ *  one). */
 export function servedModels(payload: unknown): { models: ServedModel[]; dropped: number } {
   const body = (payload ?? {}) as CatalogPayload;
   const rows = Array.isArray(body.data) ? body.data : [];
   const models: ServedModel[] = [];
   let dropped = 0;
   for (const row of rows) {
-    const model = toServedModel(row);
-    if (model === null) {
+    const model = servedRow(row);
+    if (model === undefined) {
       dropped++;
-    } else {
-      models.push(model);
+      continue;
     }
+    models.push(model);
   }
   return { models, dropped };
 }

@@ -8,9 +8,31 @@
  *   plan           → prints "plan-host"  (the host itself)
  *   group          → prints the member table
  */
-import { defineCommand, definePlugin, runCommand, type CommandPlugin } from '../index.ts';
+import { defineCommand, definePlugin, runCommand, type Command, type CommandPlugin } from '../index.ts';
 
 const seen: string[] = [];
+
+/** A command with ONE member — the shape `db` and `group` share. The
+ *  member prints its own name. */
+const singleMember = (spec: {
+  name: string;
+  summary: string;
+  member: string;
+  memberSummary: string;
+}): Command =>
+  defineCommand({
+    name: spec.name,
+    summary: spec.summary,
+    plugins: [
+      definePlugin({
+        name: spec.member,
+        summary: spec.memberSummary,
+        run: () => {
+          console.log(spec.member);
+        },
+      }),
+    ],
+  });
 
 const flat = definePlugin({
   name: 'flat',
@@ -37,38 +59,18 @@ const planRun = definePlugin({
   },
 });
 
-function oneMemberCommand(spec: {
-  name: string;
-  summary: string;
-  memberName: string;
-  memberSummary: string;
-  run: () => void;
-}): ReturnType<typeof defineCommand> {
-  return defineCommand({
-    name: spec.name,
-    summary: spec.summary,
-    plugins: [definePlugin({ name: spec.memberName, summary: spec.memberSummary, run: spec.run })],
-  });
-}
-
-const db = oneMemberCommand({
+const db = singleMember({
   name: 'db',
   summary: 'the database plane',
-  memberName: 'migrate',
+  member: 'migrate',
   memberSummary: 'run the migrations',
-  run: () => {
-    console.log('migrate');
-  },
 });
 
-const group = oneMemberCommand({
+const group = singleMember({
   name: 'group',
   summary: 'a group of things',
-  memberName: 'member',
+  member: 'member',
   memberSummary: 'a member',
-  run: () => {
-    console.log('member');
-  },
 });
 
 /** The late-joining group — its member list is a RESOLVER, because the
