@@ -198,17 +198,17 @@ export function dedupeByThreads(
 
 /** Sources whose findings a PR-decorating bot may have already landed
  *  via the review-threads sweep — dedupe before landing, then ride the
- *  shared duplicate/reopen overlay bookkeeping in the CLI. */
-export const SOURCE_DEDUPES: Partial<
-  Record<
-    DebtSource,
-    (records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }
-  >
-> = {
-  sonarcloud: dedupeReviewThreads,
-  codacy: dedupeCodacyThreads,
-  codescene: dedupeCodesceneThreads,
-};
+ *  shared duplicate/reopen overlay bookkeeping in the CLI. A Map keeps
+ *  the lookup off dynamic object indexing — a runtime-keyed
+ *  `table[source]` retrieval-then-call trips object-injection rules. */
+export const SOURCE_DEDUPES: ReadonlyMap<
+  DebtSource,
+  (records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }
+> = new Map([
+  ['sonarcloud', dedupeReviewThreads],
+  ['codacy', dedupeCodacyThreads],
+  ['codescene', dedupeCodesceneThreads],
+]);
 
 export function baseRecord(
   ctx: CollectCtx,

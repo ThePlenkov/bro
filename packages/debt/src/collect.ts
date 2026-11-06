@@ -191,5 +191,15 @@ export async function collectPr(
   const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha)
   const harvestedAt = new Date().toISOString()
   const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr })
-  return collectThreads({ ...opts, meta, threads, harvestedAt })
+  return collectThreads({
+    ...opts,
+    meta: {
+      title: meta.title,
+      url: meta.url,
+      mergedAt: meta.mergedAt ?? meta.closedAt ?? '',
+      mergeSha: meta.mergeSha,
+    },
+    threads,
+    harvestedAt,
+  })
 }
