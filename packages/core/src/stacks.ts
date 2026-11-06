@@ -228,6 +228,18 @@ function primaryWorktree(dir: string): { path: string; branch?: string } | undef
   return { path, branch: branch === '' ? undefined : branch }
 }
 
+/** Merge commits inside a `fork..head` rev range. The rebase replay
+ *  can't preserve merge resolutions, so any nonzero count refuses;
+ *  `undefined` means git itself couldn't count (bad range, repo error)
+ *  — also a refusal, worded by the caller. */
+function countMergesInRange(path: string, range: string): number | undefined {
+  const r = gitTry(['-C', path, 'rev-list', '--merges', '--count', range])
+  if (r.code !== 0 || r.out.trim() === '') {
+    return undefined
+  }
+  return Number(r.out.trim())
+}
+
 /** The plain-git stacks facade — the same verbs with no forge at all:
  *  no review hints, a manual cascade, and a local merge cascade that
  *  lands each member into the trunk inside the primary worktree. */
@@ -281,17 +293,10 @@ export function gitStacks(dir: string): StackFacade {
             break
           }
           const head = m.branch
-          const mergeCount = gitTry([
-            '-C',
-            main.path,
-            'rev-list',
-            '--merges',
-            '--count',
-            `${fork}..${head}`,
-          ]).out.trim()
-          if (mergeCount === '' || Number(mergeCount) > 0) {
+          const mergeCount = countMergesInRange(main.path, `${fork}..${head}`)
+          if (mergeCount === undefined || mergeCount > 0) {
             lines.push(
-              mergeCount === ''
+              mergeCount === undefined
                 ? `  ${m.branch} — could not count merge commits in range; merge aborted`
                 : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
             )
@@ -313,17 +318,10 @@ export function gitStacks(dir: string): StackFacade {
           const picks = pickResult.out.split('\n').filter(Boolean)
           // Re-check for merge commits to close a race where the branch advances
           // between the initial count and building the pick list.
-          const mergeCountAfter = gitTry([
-            '-C',
-            main.path,
-            'rev-list',
-            '--merges',
-            '--count',
-            `${fork}..${head}`,
-          ]).out.trim()
-          if (mergeCountAfter === '' || Number(mergeCountAfter) > 0) {
+          const mergeCountAfter = countMergesInRange(main.path, `${fork}..${head}`)
+          if (mergeCountAfter === undefined || mergeCountAfter > 0) {
             lines.push(
-              mergeCountAfter === ''
+              mergeCountAfter === undefined
                 ? `  ${m.branch} — could not re-validate merge commits; merge aborted`
                 : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
             )
