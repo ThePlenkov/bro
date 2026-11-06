@@ -550,6 +550,17 @@ describe('parseProviderEntry', () => {
     });
     assert.equal(badEnv, null);
 
+    // required stdio wire fields fail loud at parse for the same reason —
+    // ACP session/new would reject them as an opaque session-start error
+    for (const mcpServers of [
+      [{ type: 'stdio', name: 'x', args: [] }], // no command
+      [{ type: 'stdio', name: 'x', command: 7, args: [] }], // numeric command
+      [{ type: 'stdio', name: 'x', command: 'c', args: 'mcp' }], // string args
+      [{ type: 'stdio', name: 'x', command: 'c', args: ['ok', 3] }], // non-string arg
+    ]) {
+      assert.equal(parseProviderEntry('p', { type: 'acp', command: 'kilo acp', mcpServers }), null);
+    }
+
     const absent = parseProviderEntry('p', { type: 'acp', command: 'kilo acp' });
     assert.equal((absent as { mcpServers?: unknown[] } | null)?.mcpServers, undefined);
   });

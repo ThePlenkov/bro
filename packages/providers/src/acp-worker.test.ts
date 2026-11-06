@@ -353,7 +353,9 @@ describe('runAcpWorker', () => {
     const fake = fakeAcpAgent({ replyText: 'done' });
     const { spec, lines, dir } = workerSpec({
       peer: fake.app,
-      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', env: [{ name: 'K', value: 42 }] }],
+      mcpServers: [
+        { type: 'stdio', name: 'x', command: 'c', args: [], env: [{ name: 'K', value: 42 }] },
+      ],
     });
     try {
       const code = await runAcpWorker(spec);

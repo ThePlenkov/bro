@@ -585,24 +585,41 @@ function acpMcpServersFor(
       return { err: `mcpServers[${i}] must be an object descriptor` };
     }
     const t = typeof v.type === 'string' ? v.type : 'stdio';
-    if (t === 'stdio') {
-      const envErr = stdioEnvShapeErr(v, i);
-      if (envErr !== undefined) {
-        return { err: envErr };
-      }
-      out.push(v);
-      continue;
+    if (t !== 'stdio') {
+      return { err: mcpTransportErr(t, i) };
     }
-    if (t === 'http' || t === 'sse' || t === 'streamable-http') {
-      return {
-        err: `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`,
-      };
+    const dErr = stdioDescriptorErr(v, i);
+    if (dErr !== undefined) {
+      return { err: dErr };
     }
-    return {
-      err: `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`,
-    };
+    out.push(v);
   }
   return { mcpServers: out };
+}
+
+/** The non-stdio transports all fail at parse — HTTP-family ones carry
+ *  the negotiated-capability remediation, unknown names the accepted
+ *  shape. Helper so the descriptor loop stays flat (CodeScene: a bumpy
+ *  road needs no nested conditionals to read). */
+function mcpTransportErr(t: string, i: number): string {
+  if (t === 'http' || t === 'sse' || t === 'streamable-http') {
+    return `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`;
+  }
+  return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+}
+
+/** A stdio descriptor is `{command, args, env?}` — ACP session/new
+ *  validates the same wire shape, but a missing or mistyped field dies
+ *  there as an opaque session-start failure instead of naming the bad
+ *  config key. Values are never echoed into messages. */
+function stdioDescriptorErr(v: Record<string, unknown>, i: number): string | undefined {
+  if (typeof v.command !== 'string' || v.command === '') {
+    return `mcpServers[${i}].command must be a non-empty string`;
+  }
+  if (!Array.isArray(v.args) || v.args.some(a => typeof a !== 'string')) {
+    return `mcpServers[${i}].args must be an array of strings`;
+  }
+  return stdioEnvShapeErr(v, i);
 }
 
 /** A stdio descriptor's `env`, when present, is `[{name, value}]`

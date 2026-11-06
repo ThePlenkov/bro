@@ -23,8 +23,11 @@ function mcpServersFromFile(argv: string[]): unknown[] | undefined {
   try {
     parsed = JSON.parse(readFileSync(mcpFile, 'utf8'));
   } catch (err) {
+    // SyntaxError text can quote the offending source slice — the file
+    // carries env credentials, so a parse failure must never echo
+    // parser details into an aggregated stderr log.
     console.error(
-      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof Error ? err.message : String(err)}`
+      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof SyntaxError ? 'invalid JSON' : err instanceof Error ? err.message : String(err)}`
     );
     process.exit(2);
   }

@@ -115,6 +115,30 @@ describe('collectDependabot', () => {
     );
   });
 
+  test('an open PR for a digit-suffix package name does not suppress this alert', () => {
+    const lodash = {
+      ...DEPENDABOT_ALERT,
+      security_vulnerability: {
+        ...DEPENDABOT_ALERT.security_vulnerability,
+        package: { name: 'lodash' },
+      },
+    };
+    withFakeGh(
+      {
+        'dependabot/alerts': JSON.stringify([lodash]),
+        // `lodash-` is a prefix of `lodash-2fa` — the digit after the
+        // dash is a NAME segment there, not a version start; matching
+        // on it would silence a distinct package's alert
+        'pr list': JSON.stringify([
+          { number: 44, headRefName: 'dependabot/npm_and_yarn/lodash-2fa-1.0.0', url: 'u' },
+        ]),
+      },
+      () => {
+        assert.equal(collectDependabot(CTX).length, 1);
+      }
+    );
+  });
+
   test('medium severity maps to scan priority', () => {
     const a = {
       ...DEPENDABOT_ALERT,
@@ -361,6 +385,15 @@ describe('collectSverka', () => {
     assertSverkaSkipped({ 'r.sarif': JSON.stringify({ runs: [null] }) });
     assertSverkaSkipped({
       'r.sarif': JSON.stringify({ runs: [{ tool: { driver: { name: 't' } }, results: [] }, 42] }),
+    });
+  });
+
+  test('a null result element refuses the snapshot — dropping it could resolve its ledger row', () => {
+    assertSverkaSkipped({
+      'r.sarif': sarifRun('eslint', [RESULT, null]),
+    });
+    assertSverkaSkipped({
+      'r.sarif': sarifRun('eslint', [42]),
     });
   });
 

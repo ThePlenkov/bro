@@ -420,9 +420,7 @@ function sarifRunRecords(
     );
   }
   const results = run.results ?? [];
-  return results
-    .map(res => sarifResultRecord(ctx, tool, res, relFile, root))
-    .filter((r): r is DebtRecord => r !== null);
+  return results.map(res => sarifResultRecord(ctx, tool, res, relFile, root));
 }
 
 function sarifResultRecord(
@@ -431,8 +429,15 @@ function sarifResultRecord(
   res: SarifResult,
   relFile: string,
   root: string
-): DebtRecord | null {
-  if (res === null || typeof res !== 'object') return null;
+): DebtRecord {
+  // a null/primitive result element is malformed like the run/results
+  // guards above — dropping it would read as "finding fixed upstream"
+  // to the resolve sweep and could retire its ledger row
+  if (res === null || typeof res !== 'object') {
+    throw new SourceSkipped(
+      `SARIF result in ${relFile} is not an object — refusing partial snapshot`
+    );
+  }
   const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown';
   const loc = res.locations?.[0]?.physicalLocation;
   const uri = sarifUriToPath(loc?.artifactLocation?.uri ?? '', root);
@@ -504,20 +509,20 @@ function dependabotOpenPrs(
 }
 
 /** `<pkg>-<ver>` inside a `dependabot/.../` head ref needs BOTH
- *  boundaries: `/` before the name (segment start) and a dash that
- *  opens the VERSION — `v?\d`. A bare `ember-` substring eats
- *  `ember-cli-1.0`'s own name dash; `ember-v…` names the same trap,
- *  so the `v` must be followed by a digit too. Scoped pkgs keep
- *  their `/` (`babel/core` matches `.../babel/core-1.0`). */
+ *  boundaries AND a real version tail: `/` before the name (segment
+ *  start) and the whole remainder parses as `v?\d+\.\d+…`. A bare
+ *  `ember-` substring eats `ember-cli-1.0`'s own name dash; a digit-
+ *  opening name segment (`lodash-2fa-…`, `eslint-8-…`) eats the
+ *  version check when only the first char is inspected — the dotted
+ *  stem refuses both. Scoped pkgs keep their `/` (`babel/core` matches
+ *  `.../babel/core-1.0`). Bias: a false keep lists debt noise, a false
+ *  suppression hides a security alert. */
+const DEPENDABOT_VERSION_TAIL = /^v?\d+\.\d+([-+.][0-9A-Za-z.-]*)?$/;
 function dependabotRefMatchesPkg(headRef: string, pkg: string): boolean {
   const needle = `/${pkg}-`;
   let i = headRef.indexOf(needle);
   while (i !== -1) {
-    let next = headRef.charAt(i + needle.length);
-    if (next === 'v') {
-      next = headRef.charAt(i + needle.length + 1);
-    }
-    if (next >= '0' && next <= '9') {
+    if (DEPENDABOT_VERSION_TAIL.test(headRef.slice(i + needle.length))) {
       return true;
     }
     i = headRef.indexOf(needle, i + 1);
