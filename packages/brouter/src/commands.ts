@@ -4,10 +4,11 @@
  */
 import type { ClientAdapter, RouterEndpoint } from './adapter.ts';
 import { mergeSettings } from './adapter.ts';
+import type { ServedModel } from './catalog.ts';
 import { readCatalog } from './gateway.ts';
 import { clientById, clientIds } from './registry.ts';
 import { expandHome, readSettings, writeSettings } from './settings.ts';
-import type { ServedModel } from './catalog.ts';
+import { type SettingsChange, settingsDiff } from './settings-diff.ts';
 
 /** A client's request — what a CLI parses into. */
 export interface ClientRequest {
@@ -33,6 +34,10 @@ export interface ClientOutcome {
   written?: string;
   /** the wiring (env) the client needs to reach the router */
   wiring: Record<string, unknown>;
+  /** the settings file the block lands in */
+  path: string;
+  /** the diff — what the write changes (empty when nothing changes) */
+  changes: SettingsChange[];
 }
 
 /** The adapter for a client id — an unknown id is an error naming the
@@ -48,7 +53,11 @@ export function requireClient(id: string): ClientAdapter {
 
 /** Render the model block for a client and, with `write`, merge it into
  *  the client's settings file. The merge is non-destructive: every
- *  other key survives. */
+ *  other key survives.
+ *
+ *  The diff is computed BEFORE the write — the dry-run and the write
+ *  read the same file and say the same thing, so what the operator
+ *  saw is what landed. */
 export async function runClient(
   request: ClientRequest,
   endpoint: RouterEndpoint
@@ -57,10 +66,18 @@ export async function runClient(
   const { models } = await readCatalog(endpoint);
   const block = client.renderModelBlock(models);
   const wiring = client.wire(endpoint);
-  const outcome: ClientOutcome = { block, models, wiring };
-  if (!request.write) return outcome;
   const path = expandHome(request.settings ?? client.defaultSettingsPath);
-  writeSettings(path, mergeSettings(readSettings(path), client.settingsKey, block));
+  const current = readSettings(path);
+  const planned = mergeSettings(current, client.settingsKey, block);
+  const outcome: ClientOutcome = {
+    block,
+    models,
+    wiring,
+    path,
+    changes: settingsDiff(current, planned),
+  };
+  if (!request.write) return outcome;
+  writeSettings(path, planned);
   outcome.written = path;
   return outcome;
 }
