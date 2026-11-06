@@ -35,7 +35,10 @@ function authHeaders(
   keyField: string,
   deadline: number
 ): Record<string, string> {
-  if (entry.apiKey !== undefined) {
+  // an EMPTY runtime key is no key — the request carried none, and an
+  // empty Bearer would go out as a malformed credential instead of the
+  // configured one
+  if (entry.apiKey !== undefined && entry.apiKey !== '') {
     return { authorization: `Bearer ${entry.apiKey}` }
   }
   if (entry.apiKeyCommand !== undefined) {

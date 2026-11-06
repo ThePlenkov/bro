@@ -70,13 +70,18 @@ export interface ProviderWireOpts {
  *  never echoed); a missing var is fail-open, and the message names the
  *  config FIELD, never the value. */
 function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
-  if (entry.apiKey !== undefined) {
+  // an EMPTY runtime key is no key — the request carried none, and an
+  // empty credential would go out instead of the configured one
+  if (entry.apiKey !== undefined && entry.apiKey !== '') {
     return entry.apiKey
   }
   if (entry.apiKeyCommand !== undefined) {
     return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
   }
-  if (entry.apiKeyEnv === undefined || !isEnvName(entry.apiKeyEnv)) {
+  if (entry.apiKeyEnv === undefined) {
+    throw new Error(`${keyField} is not set — the provider has no key to authenticate with`)
+  }
+  if (!isEnvName(entry.apiKeyEnv)) {
     throw new Error(`${keyField} is not a valid environment variable name`)
   }
   const key = process.env[entry.apiKeyEnv]
