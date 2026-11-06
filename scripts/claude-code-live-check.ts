@@ -27,7 +27,7 @@
  * The router's endpoint comes from the router's own state file unless
  * the operator names one. The token is never printed.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -35,6 +35,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, type Server } from 'node:http';
@@ -111,6 +112,8 @@ interface RequestShape {
 interface AssistantMessage {
   blocks: string[];
   text: string;
+  /** the tool calls this message carries — their ids, in order */
+  toolIds: string[];
 }
 
 /** The client's own record of what it did. */
@@ -121,6 +124,8 @@ interface Transcript {
   messages: AssistantMessage[];
   /** how many tool results the client sent back */
   toolResults: number;
+  /** every tool call the client received, in order — the same id twice is a replay */
+  toolIds: string[];
 }
 
 /** What the client said, and what it recorded. */
@@ -158,6 +163,12 @@ function flagOf(args: Args, flag: Flag): string | undefined {
   return value === undefined || value.startsWith('--') ? undefined : value;
 }
 
+/** A flag that IS its own answer — "--keep" carries no value, so reading it
+ *  as a value finds nothing and the flag reads as absent. */
+function hasFlag(args: Args, flag: Flag): boolean {
+  return args.argv.includes(flag);
+}
+
 /** The router's endpoint — the flags win over the state file. */
 function endpointOf(args: Args): RouterEndpoint {
   const url = flagOf(args, '--url');
@@ -178,6 +189,9 @@ function transcriptFiles(live: Live): string[] {
   return readdirSync(live.projectsDir)
     .flatMap(project => {
       const dir = join(live.projectsDir, project);
+      // the client's project dir holds directories — a stray file beside
+      // them is not a transcript and has no entries to read
+      if (!statSync(dir).isDirectory()) return [];
       return readdirSync(dir)
         .filter(entry => entry.endsWith('.jsonl'))
         .map(entry => join(dir, entry));
@@ -185,11 +199,15 @@ function transcriptFiles(live: Live): string[] {
     .sort();
 }
 
-/** One content block — its type and its text. */
-function blockInfo(part: unknown): { type: string; text: string } {
-  const block = part as { type?: string; text?: string };
+/** One content block — its type, its text, and the id of a tool call. */
+function blockInfo(part: unknown): { type: string; text: string; id?: string } {
+  const block = part as { type?: string; text?: string; id?: string };
   const type = block.type ?? '';
-  return { type, text: type === 'text' ? (block.text ?? '') : '' };
+  return {
+    type,
+    text: type === 'text' ? (block.text ?? '') : '',
+    id: type === 'tool_use' ? block.id : undefined,
+  };
 }
 
 /** One request's shape — the model's own handling, as sent. */
@@ -233,7 +251,11 @@ function assistantMessageOf(row: Record<string, unknown>): AssistantMessage | un
   const content = (row.message as { content?: unknown } | undefined)?.content;
   const parts = Array.isArray(content) ? content : [];
   const blocks = parts.map(blockInfo);
-  return { blocks: blocks.map(b => b.type), text: blocks.map(b => b.text).join('') };
+  return {
+    blocks: blocks.map(b => b.type),
+    text: blocks.map(b => b.text).join(''),
+    toolIds: blocks.map(b => b.id).filter((id): id is string => id !== undefined),
+  };
 }
 
 /** The assistant messages the client received. */
@@ -266,42 +288,63 @@ function readTranscript(text: string): Transcript {
     requests: rows.filter(row => row.type === 'api-request').map(requestShape),
     messages: assistantMessagesOf(rows),
     toolResults: toolResultCount(rows),
+    toolIds: assistantMessagesOf(rows).flatMap(m => m.toolIds),
   };
 }
 
-/** The client, for real — a scratch cwd, the scratch config, a base URL. */
-function runClient(live: Live, prompt: string, extra: string[], baseUrl: string): ClientRun {
+/** The client, for real — a scratch cwd, the scratch config, a base URL.
+ *
+ *  The client is spawned ASYNCHRONOUSLY on purpose: the probe's echo server
+ *  lives in THIS process, and a synchronous spawn would block the event loop
+ *  that server answers on — the client would wait for an answer that can
+ *  never come. */
+function runClient(
+  live: Live,
+  prompt: string,
+  extra: string[],
+  baseUrl: string
+): Promise<ClientRun> {
   const before = new Set(transcriptFiles(live));
   const binary = clientBinary();
   // the parent's PATH is dropped, not inherited: the child runs with the
   // fixed directories only, and the client binary by its absolute path
   const env = { ...process.env };
   delete env.PATH;
-  const result = spawnSync(
-    binary,
-    ['-p', prompt, ...extra, '--permission-mode', 'bypassPermissions'],
-    {
-      cwd: live.workDir,
-      encoding: 'utf8',
-      timeout: 300_000,
-      env: {
-        ...env,
-        PATH: clientPath(binary),
-        CLAUDE_CONFIG_DIR: live.configDir,
-        ANTHROPIC_BASE_URL: baseUrl,
-        ANTHROPIC_AUTH_TOKEN: live.endpoint.token,
-      },
-    }
-  );
-  const fresh = transcriptFiles(live).filter(file => !before.has(file));
-  const newest = fresh.at(-1);
-  const transcript =
-    newest === undefined ? readTranscript('') : readTranscript(readFileSync(newest, 'utf8'));
-  return {
-    code: result.status,
-    output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
-    transcript,
-  };
+  return new Promise<ClientRun>((resolve, reject) => {
+    const child = spawn(
+      binary,
+      ['-p', prompt, ...extra, '--permission-mode', 'bypassPermissions'],
+      {
+        cwd: live.workDir,
+        // the client reads stdin in print mode: an open pipe is a prompt
+        // that never comes, and the client says so out loud
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...env,
+          PATH: clientPath(binary),
+          CLAUDE_CONFIG_DIR: live.configDir,
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_AUTH_TOKEN: live.endpoint.token,
+        },
+      }
+    );
+    let output = '';
+    child.stdout?.on('data', chunk => (output += String(chunk)));
+    child.stderr?.on('data', chunk => (output += String(chunk)));
+    const timer = setTimeout(() => child.kill('SIGKILL'), 300_000);
+    child.on('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      const fresh = transcriptFiles(live).filter(file => !before.has(file));
+      const newest = fresh.at(-1);
+      const transcript =
+        newest === undefined ? readTranscript('') : readTranscript(readFileSync(newest, 'utf8'));
+      resolve({ code, output, transcript });
+    });
+  });
 }
 
 /** The served id under test — one the client does not know by its tail,
@@ -324,9 +367,61 @@ function prepareConfig(live: Live): void {
   );
 }
 
+/** One message, as the client asked for it — the body when the client wants
+ *  one answer, the events when it wants a stream. */
+function echoBody(model: string): string {
+  return JSON.stringify({
+    id: 'msg_echo',
+    type: 'message',
+    role: 'assistant',
+    model,
+    content: [{ type: 'text', text: 'pong' }],
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 1, output_tokens: 1 },
+  });
+}
+
+/** The same answer, as the events a streaming client waits for. */
+function echoEvents(model: string): string {
+  const send = (event: string, data: unknown): string =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  return [
+    send('message_start', {
+      type: 'message_start',
+      message: {
+        id: 'msg_echo',
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    send('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    }),
+    send('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: 'pong' },
+    }),
+    send('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    send('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 1 },
+    }),
+    send('message_stop', { type: 'message_stop' }),
+  ].join('');
+}
+
 /** A local echo — the probe that measures the client's own handling of a
  *  model it knows, without spending the router's budget. */
-function echoServer(): { url: string; close: () => void } {
+async function echoServer(): Promise<{ url: string; close: () => void }> {
   const server: Server = createServer((req, res) => {
     let body = '';
     req.on('data', c => (body += c));
@@ -336,29 +431,34 @@ function echoServer(): { url: string; close: () => void } {
         res.end('{}');
         return;
       }
-      let parsed: { model?: string } = {};
+      let parsed: { model?: string; stream?: boolean } = {};
       try {
         parsed = JSON.parse(body);
       } catch {
         // the body is the client's; an unparsable one is the client's fault
       }
+      const model = parsed.model ?? 'unknown';
+      // the client streams: a body where it waits for events is a request
+      // it never finishes, and the probe measures nothing
+      if (parsed.stream === true) {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        res.end(echoEvents(model));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          id: 'msg_echo',
-          type: 'message',
-          role: 'assistant',
-          model: parsed.model ?? 'unknown',
-          content: [{ type: 'text', text: 'pong' }],
-          stop_reason: 'end_turn',
-          usage: { input_tokens: 1, output_tokens: 1 },
-        })
-      );
+      res.end(echoBody(model));
     });
   });
-  server.listen(0, '127.0.0.1');
+  // the port is known only once the server is listening: address() answers
+  // null before that, and port 0 is no URL to call
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
+  if (port === 0) throw new Error('the echo server bound no port');
   return { url: `http://127.0.0.1:${port}`, close: () => server.close() };
 }
 
@@ -370,6 +470,7 @@ function findingsOf(
   probe: RequestShape
 ): Findings {
   const messages = routerRun.transcript.messages;
+  const toolIds = routerRun.transcript.toolIds;
   const shapes = routerRun.transcript.requests;
   const first = shapes[0];
   const texts = messages.map(m => m.text).filter(t => t !== '');
@@ -388,7 +489,10 @@ function findingsOf(
     warned: routerRun.output.includes("isn't recognized"),
     ranTool: toolUse >= 0,
     toolAnswered: answered > toolUse && toolUse >= 0,
-    repeated: texts.some((text, i) => i > 0 && texts[i - 1] === text),
+    // the loop is the REPLAYED tool call: the conductor answers with the
+    // same tool_use twice, and the client runs it twice. Two answers that
+    // merely read alike are the model's formatting, not a loop.
+    repeated: toolIds.length !== new Set(toolIds).size,
     served: live.models.some(m => m.id === live.model),
   };
 }
@@ -396,6 +500,7 @@ function findingsOf(
 /** The facts, said one by one. */
 function printFindings(findings: Findings): void {
   console.log(`client exit: ${findings.code ?? 'killed'}`);
+  console.log(`served by the router: ${findings.served ? 'yes' : 'NO'}`);
   console.log(`model sent: ${[...new Set(findings.sent)].join(', ')}`);
   console.log(
     `handling: effort ${findings.effort} / cap ${findings.cap} (borrowed model: effort ${findings.borrowedEffort} / cap ${findings.borrowedCap})`
@@ -404,7 +509,7 @@ function printFindings(findings: Findings): void {
   console.log(`"isn't recognized" warning: ${findings.warned ? 'YES' : 'no'}`);
   console.log(`tool ran: ${findings.ranTool ? 'yes' : 'no'}`);
   console.log(`tool answered: ${findings.toolAnswered ? 'yes' : 'no'}`);
-  console.log(`repeated answer: ${findings.repeated ? 'YES — the loop is back' : 'no'}`);
+  console.log(`tool replayed: ${findings.repeated ? 'YES — the loop is back' : 'no'}`);
 }
 
 /** The failures — what the check refuses to pass. */
@@ -423,6 +528,9 @@ function exitFailures(findings: Findings): string[] {
 /** The client must send the served id and treat it as the borrowed one. */
 function recognitionFailures(findings: Findings): string[] {
   const failures: string[] = [];
+  if (!findings.served) {
+    failures.push("the model under test is not in the router's served catalog");
+  }
   if (!findings.sent.includes(findings.model)) {
     failures.push('the client did not send the served id verbatim');
   }
@@ -440,7 +548,7 @@ function loopFailures(findings: Findings): string[] {
   const failures: string[] = [];
   if (!findings.ranTool) failures.push('no tool ran — the client never got a tool_use');
   if (!findings.toolAnswered) failures.push('the tool result was never answered');
-  if (findings.repeated) failures.push('the client repeated the same answer — the loop is back');
+  if (findings.repeated) failures.push('the tool call was replayed — the loop is back');
   return failures;
 }
 
@@ -448,7 +556,9 @@ function loopFailures(findings: Findings): string[] {
 async function main(): Promise<void> {
   const args: Args = { argv: process.argv.slice(2) };
   const endpoint = endpointOf(args);
-  const { models } = await readCatalog(endpoint);
+  // the router is a shared process: its catalog can take seconds when it is
+  // busy, and a check that gives up is a false negative
+  const { models } = await readCatalog(endpoint, { timeoutMs: 60_000 });
   if (models.length === 0) {
     throw new Error('the router serves no models — there is nothing to check');
   }
@@ -472,12 +582,12 @@ async function main(): Promise<void> {
   console.log(`asking with: ${live.model} (borrows ${live.borrowed})`);
 
   // the router run — the tool, and whether the answer repeats
-  const routerRun = runClient(live, TOOL_PROMPT, ['--model', live.model], endpoint.url);
+  const routerRun = await runClient(live, TOOL_PROMPT, ['--model', live.model], endpoint.url);
   // the picker run — the router's own label comes back
-  const listRun = runClient(live, `/model ${live.model}`, [], endpoint.url);
+  const listRun = await runClient(live, `/model ${live.model}`, [], endpoint.url);
   // the probe — the borrowed model's own handling, measured locally
-  const echo = echoServer();
-  const probeRun = runClient(live, 'ping', ['--model', live.borrowed], echo.url);
+  const echo = await echoServer();
+  const probeRun = await runClient(live, 'ping', ['--model', live.borrowed], echo.url);
   echo.close();
   const probe = probeRun.transcript.requests[0] ?? {};
 
@@ -485,7 +595,7 @@ async function main(): Promise<void> {
   console.log('');
   printFindings(findings);
 
-  if (flagOf(args, '--keep') === undefined) {
+  if (!hasFlag(args, '--keep')) {
     rmSync(configDir, { recursive: true, force: true });
   } else {
     console.log(`kept: ${configDir}`);
