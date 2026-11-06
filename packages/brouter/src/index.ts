@@ -55,7 +55,16 @@ export {
   readRouterEndpoint,
   routerStatePath,
 } from './gateway.ts';
+export { runHealthCommand } from './health-cmd.ts';
+export { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
+export { type RouterPolicy, routerPlugins } from './plugins.ts';
+export { configuredProviders, type ProviderRow } from './providers.ts';
+export { CLIENTS, clientById, clientIds } from './registry.ts';
+export { runRouteCommand } from './route-cmd.ts';
+export { decideRoute, type TaskDecision } from './route-decide.ts';
+export { routePlugins } from './route-plugins.ts';
 export { routerUrl } from './router-url.ts';
+export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';
 export { expandHome, readSettings, writeSettings } from './settings.ts';
 export {
   formatSettingsDiff,
