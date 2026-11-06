@@ -62,7 +62,10 @@ export function filterByMergedDate(
     throw new Error(`Invalid --merged-until date: ${until}`)
   }
   return prs.filter((pr) => {
-    const mergedMs = new Date(pr.mergedAt).getTime()
+    const ts = pr.mergedAt ?? pr.closedAt ?? null
+    if (!ts) { return true }
+    const mergedMs = new Date(ts).getTime()
+    if (Number.isNaN(mergedMs)) { return true }
     return (sinceMs === null || mergedMs >= sinceMs) && (untilMs === null || mergedMs <= untilMs)
   })
 }
@@ -79,14 +82,18 @@ export function filterByLabels(prs: MergedPr[], required: string[]): MergedPr[] 
 }
 
 export function applyLastN(prs: MergedPr[], lastN: number | null): MergedPr[] {
-  const sorted = [...prs].sort((a, b) => b.mergedAt.localeCompare(a.mergedAt))
+  const sorted = [...prs].sort((a, b) => {
+    const ta = a.mergedAt ?? a.closedAt ?? ''
+    const tb = b.mergedAt ?? b.closedAt ?? ''
+    return tb.localeCompare(ta)
+  })
   if (lastN === null || !Number.isFinite(lastN) || lastN <= 0) {
     return sorted
   }
   return sorted.slice(0, lastN)
 }
 
-/** Merged-PR candidates for harvest — the connector answers the host
+/** PR candidates for harvest — the connector answers the host
  *  query (explicit ids win over list filters); date/label/lastN shaping
  *  stays here, domain-side. */
 export function resolveHarvestPrs(
@@ -95,6 +102,7 @@ export function resolveHarvestPrs(
     repo: string
     filters: HarvestPrFilters
     listLimit?: number
+    includeClosed?: boolean
   }
 ): MergedPr[] {
   const limit = opts.listLimit ?? 100
@@ -103,11 +111,25 @@ export function resolveHarvestPrs(
   if (opts.filters.prIds.length > 0) {
     candidates = rev.mergedPrs(opts.repo, { ids: opts.filters.prIds })
   } else {
-    candidates = rev.mergedPrs(opts.repo, {
+    const merged = rev.mergedPrs(opts.repo, {
       author: opts.filters.prAuthor ?? undefined,
       label: opts.filters.labels[0],
       limit,
     })
+    let closed: MergedPr[] = []
+    if (opts.includeClosed) {
+      try {
+        closed = rev.mergedPrs(opts.repo, {
+          author: opts.filters.prAuthor ?? undefined,
+          label: opts.filters.labels[0],
+          limit,
+          state: 'closed',
+        })
+      } catch {
+        closed = []
+      }
+    }
+    candidates = [...merged, ...closed]
     candidates = filterByLabels(candidates, opts.filters.labels)
   }
 

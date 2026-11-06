@@ -89,7 +89,8 @@ Commands:
   collect [OWNER REPO] [filters]  Collect findings from unprocessed merged PRs
                                   Filters: --pr-ids, --merged-since, --merged-until,
                                   --last, --pr-author, --labels, --thread-author
-                                  Flags: --dry-run, --list-only, --reharvest, --no-label
+                                  Flags: --dry-run, --list-only, --reharvest, --no-label,
+                                  --closed
                                   Sources: debt.sources config — default review-threads;
                                   opt in: ${DEBT_SOURCES.join(', ')}
                                   debt.stale_days tunes stale-prs (default 14)
@@ -115,7 +116,7 @@ Commands:
 
 // --- collect ---------------------------------------------------------------
 
-interface CollectArgs {
+export interface CollectArgs {
   repo: string
   filters: HarvestPrFilters
   threadAuthor: string | null
@@ -126,6 +127,7 @@ interface CollectArgs {
   noLabel: boolean
   /** --source override — replaces debt.sources for this run. */
   sources: string[] | null
+  includeClosed: boolean
 }
 
 function parsePositiveInt(flag: string, value: string): number {
@@ -137,7 +139,7 @@ function parsePositiveInt(flag: string, value: string): number {
   return n
 }
 
-function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
+export function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   const positional: string[] = []
   const filters: HarvestPrFilters = {
     prIds: [],
@@ -150,12 +152,13 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   let threadAuthor: string | null = null
   let runId = 'local'
   let sources: string[] | null = null
-  const bools = { dryRun: false, listOnly: false, reharvest: false, noLabel: false }
+  const bools = { dryRun: false, listOnly: false, reharvest: false, noLabel: false, includeClosed: false }
   const boolFlags: Record<string, keyof typeof bools> = {
     '--dry-run': 'dryRun',
     '--list-only': 'listOnly',
     '--reharvest': 'reharvest',
     '--no-label': 'noLabel',
+    '--closed': 'includeClosed',
   }
   const valueFlags: Record<string, (v: string) => void> = {
     // An all-invalid --pr-ids parses to [] — which reads as "no explicit
@@ -817,13 +820,14 @@ async function harvestTargets(
   return { rows, labeled, failed }
 }
 
-async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
+export async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100)
   const matched = resolveHarvestPrs(rev, {
     repo: args.repo,
     filters: args.filters,
     listLimit,
+    includeClosed: args.includeClosed || args.filters.prIds.length > 0,
   })
   const { targets, staleCount, processedCount } = selectTargets(matched, args)
 

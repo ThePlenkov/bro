@@ -306,6 +306,7 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     mergedAt: string | null
     mergeCommit?: { oid: string }
     state: string
+    closedAt?: string | null
   }>([
     'pr',
     'view',
@@ -313,20 +314,25 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     '--repo',
     t.repo,
     '--json',
-    'title,url,mergedAt,mergeCommit,state',
+    'title,url,mergedAt,mergeCommit,state,closedAt',
   ])
 
-  if (viewed.state !== 'MERGED') {
-    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged (state=${viewed.state})`)
+  if (viewed.state !== 'MERGED' && viewed.state !== 'CLOSED') {
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged or closed (state=${viewed.state})`)
   }
-  if (!viewed.mergedAt) {
+  if (viewed.state === 'MERGED' && !viewed.mergedAt) {
     throw new Error(`PR ${prLink(t.repo, t.pr)} is MERGED but reports no mergedAt`)
+  }
+  if (viewed.state === 'CLOSED' && !viewed.mergedAt && !viewed.closedAt) {
+    // still allow, but better to have some timestamp
   }
   return {
     title: viewed.title,
     url: viewed.url,
-    mergedAt: viewed.mergedAt,
+    mergedAt: viewed.mergedAt ?? viewed.closedAt ?? '',
     mergeSha: mergeSha || viewed.mergeCommit?.oid || '',
+    state: viewed.state,
+    closedAt: viewed.closedAt ?? null,
   }
 }
 
@@ -339,30 +345,34 @@ interface MergedPrRow {
   labels?: Array<{ name: string }>
   headRefName?: string
   headRefOid?: string
+  closedAt?: string | null
 }
 
-const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
+const toMergedPr = (row: MergedPrRow): MergedPr => ({
   number: row.number,
-  mergedAt: row.mergedAt,
+  mergedAt: row.mergedAt ?? row.closedAt ?? null,
   updatedAt: row.updatedAt,
   author: row.author?.login ?? 'unknown',
   labels: (row.labels ?? []).map((l) => l.name),
   headRef: row.headRefName ?? '',
   headSha: row.headRefOid ?? '',
+  state: row.state,
+  closedAt: row.closedAt ?? null,
 })
 
 function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
+  const state = q.state ?? 'merged'
   const args = [
     'pr',
     'list',
     '--repo',
     repo,
     '--state',
-    'merged',
+    state,
     '--limit',
     String(q.limit ?? 100),
     '--json',
-    'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid',
+    'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid,state,closedAt',
   ]
   if (q.author) {
     args.push('--author', q.author)
@@ -370,16 +380,29 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   if (q.label) {
     args.push('--label', q.label)
   }
-  if (q.mergedSince) {
+  if (q.mergedSince && state !== 'closed') {
     // server-side cutoff — the list caps by recency, so a mergedAt
     // filter applied after the cap would lose eligible PRs. The
     // merged: qualifier takes a YYYY-MM-DD date — slice the ISO stamp;
     // the over-inclusive day edge is fine, callers filter exactly.
     args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`)
+  } else if (q.mergedSince && state === 'closed') {
+    args.push('--search', `closed:>=${q.mergedSince.slice(0, 10)}`)
   }
-  return ghJson<MergedPrRow[]>(args)
-    .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
-    .map(toMergedPr)
+  const rows = ghJson<MergedPrRow[]>(args)
+  if (state === 'merged') {
+    return rows
+      .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
+      .map(toMergedPr)
+  }
+  // closed (and maybe all) - keep closed unmerged; if mergedAt exists it's merged but we asked for closed? depends
+  if (state === 'closed') {
+    return rows
+      .filter((row) => row.state !== 'MERGED') // only unmerged closed PRs for debt harvest
+      .map(toMergedPr)
+  }
+  // all - keep both
+  return rows.map(toMergedPr)
 }
 
 function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
@@ -399,13 +422,23 @@ function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
         '--repo',
         repo,
         '--json',
-        'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid',
+        'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid,closedAt',
       ])
-      if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
-        console.error(`warning: PR ${link} is not merged — skipped`)
+      if (viewed.state === 'MERGED') {
+        if (!viewed.mergedAt) {
+          console.error(`warning: PR ${link} is merged but missing mergedAt — skipped`)
+          continue
+        }
+        out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }))
         continue
       }
-      out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }))
+      if (viewed.state === 'CLOSED') {
+        // closed unmerged - harvestable for debt
+        out.push(toMergedPr(viewed))
+        continue
+      }
+      console.error(`warning: PR ${link} is not merged or closed — skipped`)
+      continue
     } catch (err) {
       failures.push(err)
       console.error(
@@ -1225,9 +1258,11 @@ interface ScanNode {
   title?: string
   url?: string
   mergedAt?: string | null
+  closedAt?: string | null
   updatedAt?: string | null
   mergeCommit?: { oid?: string }
   labels?: { nodes?: Array<{ name?: string }> }
+  state?: string
   reviewThreads?: {
     pageInfo?: { hasNextPage?: boolean }
     nodes?: ThreadPage['nodes']
@@ -1254,7 +1289,7 @@ function parseAliasedPrs<T extends object>(
 }
 
 const SCAN_PR_FIELDS = `
-  title url mergedAt updatedAt
+  title url mergedAt closedAt updatedAt state
   mergeCommit { oid }
   labels(first: 50) { nodes { name } }
   reviewThreads(first: 100) {
@@ -1302,8 +1337,17 @@ async function scanMergedPrs(
     }
     for (const [i, t] of chunk.entries()) {
       const node = rows[i]
-      // Non-merged / missing PRs stay out — the serial fallback decides.
-      if (!node?.mergedAt) {
+      // Non-merged / missing PRs stay out unless closed unmerged — the serial fallback decides.
+      const state = node?.state?.toUpperCase()
+      const mergedAt = node?.mergedAt ?? null
+      const closedAt = node?.closedAt ?? null
+      if (state === 'MERGED' && !mergedAt) {
+        continue
+      }
+      if (state === 'CLOSED' && mergedAt) {
+        // treat as merged? probably not if state is CLOSED but has mergedAt; but better to be defensive
+      }
+      if (!mergedAt && !(state === 'CLOSED' && closedAt)) {
         continue
       }
       let threads = toReviewThreads(node.reviewThreads?.nodes ?? [])
@@ -1319,8 +1363,10 @@ async function scanMergedPrs(
         info: {
           title: node.title ?? '',
           url: node.url ?? `https://github.com/${t.repo}/pull/${t.pr}`,
-          mergedAt: node.mergedAt,
+          mergedAt: mergedAt ?? closedAt ?? '',
           mergeSha: node.mergeCommit?.oid ?? '',
+          state: node.state,
+          closedAt: closedAt ?? null,
         },
         threads,
         labels: (node.labels?.nodes ?? []).map((l) => l.name ?? ''),

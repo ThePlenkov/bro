@@ -78,6 +78,7 @@ import {
 } from '@broject/judge'
 import { coveredBeadIds } from '@broject/loop'
 import { githubPrWake } from '@broject/github'
+import { collectReviewThreads, type CollectArgs } from './debt.ts'
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro act <command> [args…]
@@ -414,6 +415,28 @@ async function settleWait(
     }
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state)
+    if (!res.timedOut && res.state.state === 'CLOSED') {
+      const prevExit = process.exitCode
+      try {
+        await collectReviewThreads(rev, {
+          repo: t.repo,
+          filters: { prIds: [t.pr], mergedSince: null, mergedUntil: null, lastN: null, prAuthor: null, labels: [] },
+          threadAuthor: null,
+          runId: 'local',
+          dryRun: false,
+          listOnly: false,
+          reharvest: false,
+          noLabel: false,
+          sources: null,
+          includeClosed: true,
+        } as CollectArgs)
+      } catch (err) {
+        console.error(
+          `act: debt harvest failed for closed PR — ${err instanceof Error ? err.message : err}`
+        )
+      }
+      process.exitCode = prevExit
+    }
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
@@ -1063,6 +1086,24 @@ async function cmdMerge(argv: string[]): Promise<void> {
       // already landed still discharges the claim — the race where the
       // PR merged between the wait's last green poll and this fetch
       closeBeadIfLanded(argv, rev, t, state.state)
+      if (state.state === 'CLOSED') {
+        const prevExit = process.exitCode
+        try {
+          await collectReviewThreads(rev, {
+            repo: t.repo,
+            filters: { prIds: [t.pr], mergedSince: null, mergedUntil: null, lastN: null, prAuthor: null, labels: [] },
+            threadAuthor: null,
+            runId: 'local',
+            dryRun: false,
+            listOnly: false,
+            reharvest: false,
+            noLabel: false,
+            sources: null,
+            includeClosed: true,
+          } as CollectArgs)
+        } catch {}
+        process.exitCode = prevExit
+      }
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       )

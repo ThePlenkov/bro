@@ -151,6 +151,7 @@ interface MrRow {
   description?: string
   updated_at?: string | null
   merged_at?: string | null
+  closed_at?: string | null
   merge_commit_sha?: string | null
   squash_commit_sha?: string | null
   /** Current diff refs — a note whose position.head_sha differs from
@@ -206,14 +207,16 @@ function toMergeState(mr: MrRow): string {
 const isDraft = (mr: MrRow): boolean =>
   mr.draft === true || mr.work_in_progress === true || /^draft:/i.test(mr.title ?? '')
 
-const toMergedPr = (row: MrRow & { merged_at: string }): MergedPr => ({
+const toMergedPr = (row: MrRow): MergedPr => ({
   number: row.iid,
-  mergedAt: row.merged_at,
+  mergedAt: row.merged_at ?? row.closed_at ?? null,
   updatedAt: row.updated_at ?? null,
   author: row.author?.username ?? 'unknown',
   labels: row.labels ?? [],
   headRef: row.source_branch ?? '',
   headSha: row.sha ?? '',
+  state: row.state?.toUpperCase(),
+  closedAt: row.closed_at ?? null,
 })
 
 // --- threads: discussions -----------------------------------------------------
@@ -439,36 +442,50 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
 
   function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     const mr = getMr(t)
-    if (mr.state !== 'merged') {
-      throw new Error(`MR ${link(t.repo, t.pr)} is not merged (state=${mr.state})`)
+    if (mr.state !== 'merged' && mr.state !== 'closed') {
+      throw new Error(`MR ${link(t.repo, t.pr)} is not merged or closed (state=${mr.state})`)
     }
-    if (!mr.merged_at) {
+    if (mr.state === 'merged' && !mr.merged_at) {
       throw new Error(`MR ${link(t.repo, t.pr)} is merged but reports no merged_at`)
     }
+    const ts = mr.merged_at ?? mr.closed_at ?? ''
     return {
       title: mr.title ?? '',
       url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
-      mergedAt: mr.merged_at,
+      mergedAt: ts || '',
       mergeSha: mergeSha || mr.merge_commit_sha || mr.squash_commit_sha || '',
+      state: mr.state?.toUpperCase(),
+      closedAt: mr.closed_at ?? null,
     }
   }
 
   function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
-    let endpoint = api(repo, 'merge_requests?state=merged&order_by=updated_at')
+    const state = q.state ?? 'merged'
+    const glState = state === 'merged' ? 'merged' : state === 'closed' ? 'closed' : 'all'
+    let endpoint = api(repo, `merge_requests?state=${glState}&order_by=updated_at`)
     if (q.author) {
       endpoint += `&author_username=${encodeURIComponent(q.author)}`
     }
     if (q.label) {
       endpoint += `&labels=${encodeURIComponent(q.label)}`
     }
-    if (q.mergedSince) {
+    if (q.mergedSince && state !== 'closed') {
       // server-side cutoff — the list caps by updated_at, so a
       // merged_at filter applied after the cap would lose eligible MRs
       endpoint += `&merged_after=${encodeURIComponent(q.mergedSince)}`
+    } else if (q.mergedSince && state === 'closed') {
+      endpoint += `&updated_after=${encodeURIComponent(q.mergedSince)}`
     }
-    return glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 })
-      .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
-      .map(toMergedPr)
+    const rows = glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 })
+    if (state === 'merged') {
+      return rows
+        .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
+        .map((r) => toMergedPr({ ...r, merged_at: r.merged_at }))
+    }
+    if (state === 'closed') {
+      return rows.filter((row) => row.state !== 'merged').map(toMergedPr)
+    }
+    return rows.map(toMergedPr)
   }
 
   function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
@@ -480,11 +497,20 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     for (const number of unique) {
       try {
         const mr = getMr({ repo, pr: number })
-        if (mr.state !== 'merged' || !mr.merged_at) {
-          console.error(`warning: MR ${link(repo, number)} is not merged — skipped`)
+        if (mr.state === 'merged') {
+          if (!mr.merged_at) {
+            console.error(`warning: MR ${link(repo, number)} is merged but missing merged_at — skipped`)
+            continue
+          }
+          out.push(toMergedPr({ ...mr, merged_at: mr.merged_at } as MrRow))
           continue
         }
-        out.push(toMergedPr({ ...mr, merged_at: mr.merged_at }))
+        if (mr.state === 'closed') {
+          out.push(toMergedPr(mr))
+          continue
+        }
+        console.error(`warning: MR ${link(repo, number)} is not merged or closed — skipped`)
+        continue
       } catch (err) {
         failures.push(err)
         console.error(
@@ -527,8 +553,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     await pooled(targets, opts?.concurrency ?? 4, async (t) => {
       try {
         const mr = await glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts())
-        // non-merged/missing MRs stay out — the serial fallback decides
-        if (mr.state !== 'merged' || !mr.merged_at) {
+        // non-merged/missing MRs stay out unless closed unmerged — the serial fallback decides
+        const stateU = (mr.state ?? '').toUpperCase()
+        if (stateU === 'MERGED') {
+          if (!mr.merged_at) {
+            return
+          }
+        } else if (stateU === 'CLOSED') {
+          // closed unmerged ok
+        } else {
           return
         }
         const threads = toThreads(
@@ -539,12 +572,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           t,
           mr.diff_refs?.head_sha
         )
+        const ts = mr.merged_at ?? mr.closed_at ?? ''
         out.set(t.pr, {
           info: {
             title: mr.title ?? '',
             url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
-            mergedAt: mr.merged_at,
+            mergedAt: ts,
             mergeSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? '',
+            state: mr.state?.toUpperCase(),
+            closedAt: mr.closed_at ?? null,
           },
           threads,
           labels: mr.labels ?? [],
