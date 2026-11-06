@@ -19,7 +19,17 @@
  * The check never touches the operator's own settings: the block lands
  * in a scratch config dir and the client is pointed at it with
  * CLAUDE_CONFIG_DIR. The operator's ~/.claude/settings.json is read at
- * most, never written.
+ * most, never written. A directory the operator NAMES with --config-dir
+ * is theirs: the check never deletes it, and the settings it overwrites
+ * are copied back first.
+ *
+ * TRUST: the client runs with `--permission-mode bypassPermissions` — the
+ * check asks the model to run a command, and a print-mode client cannot
+ * answer a permission prompt. That makes the SERVED MODEL a trusted
+ * caller: whatever the router answers can run commands as this user.
+ * The check therefore points at the operator's own router and runs in a
+ * scratch workdir — against a third-party endpoint this flag lets that
+ * endpoint run anything the operator can.
  *
  *   node scripts/claude-code-live-check.ts [--url <url> --token <token>]
  *                                           [--config-dir <dir>] [--keep]
@@ -556,6 +566,45 @@ function loopFailures(findings: Findings): string[] {
   return failures;
 }
 
+/** The scratch config — the directory the block lands in, and whether the
+ *  script owns it: only what the script created is ever deleted. */
+function scratchConfig(args: Args): { configDir: string; owned: boolean } {
+  const named = flagOf(args, '--config-dir');
+  return {
+    configDir: named ?? mkdtempSync(join(tmpdir(), 'bro-cc-live-')),
+    owned: named === undefined,
+  };
+}
+
+/** The three turns the check makes — the tool run, the picker, and the
+ *  probe against the local echo server. */
+async function runTurns(
+  live: Live,
+  endpoint: RouterEndpoint
+): Promise<{ routerRun: ClientRun; listRun: ClientRun; probe: RequestShape }> {
+  // the router run — the tool, and whether the answer repeats
+  const routerRun = await runClient(live, TOOL_PROMPT, ['--model', live.model], endpoint.url);
+  // the picker run — the router's own label comes back
+  const listRun = await runClient(live, `/model ${live.model}`, [], endpoint.url);
+  // the probe — the borrowed model's own handling, measured locally
+  const echo = await echoServer();
+  const probeRun = await runClient(live, 'ping', ['--model', live.borrowed], echo.url);
+  echo.close();
+  return { routerRun, listRun, probe: probeRun.transcript.requests[0] ?? {} };
+}
+
+/** The teardown — the scratch directory goes, unless it is the
+ *  operator's own or --keep says to keep it. */
+function teardown(configDir: string, owned: boolean, args: Args): void {
+  if (!owned) {
+    console.log(`kept: ${configDir} (the operator's own — the check deletes only what it created)`);
+  } else if (!hasFlag(args, '--keep')) {
+    rmSync(configDir, { recursive: true, force: true });
+  } else {
+    console.log(`kept: ${configDir}`);
+  }
+}
+
 /** The check — the facts, one by one. */
 async function main(): Promise<void> {
   const args: Args = { argv: process.argv.slice(2) };
@@ -567,11 +616,7 @@ async function main(): Promise<void> {
     throw new Error('the router serves no models — there is nothing to check');
   }
   const underTest = modelUnderTest(models);
-  const named = flagOf(args, '--config-dir');
-  const configDir = named ?? mkdtempSync(join(tmpdir(), 'bro-cc-live-'));
-  // the script owns only what it created — a directory the operator named
-  // is THEIRS, and the teardown must never delete it
-  const owned = named === undefined;
+  const { configDir, owned } = scratchConfig(args);
   const live: Live = {
     args,
     endpoint,
@@ -589,27 +634,11 @@ async function main(): Promise<void> {
   console.log(`block: ${models.length} row(s) → ${configDir}/settings.json`);
   console.log(`asking with: ${live.model} (borrows ${live.borrowed})`);
 
-  // the router run — the tool, and whether the answer repeats
-  const routerRun = await runClient(live, TOOL_PROMPT, ['--model', live.model], endpoint.url);
-  // the picker run — the router's own label comes back
-  const listRun = await runClient(live, `/model ${live.model}`, [], endpoint.url);
-  // the probe — the borrowed model's own handling, measured locally
-  const echo = await echoServer();
-  const probeRun = await runClient(live, 'ping', ['--model', live.borrowed], echo.url);
-  echo.close();
-  const probe = probeRun.transcript.requests[0] ?? {};
-
+  const { routerRun, listRun, probe } = await runTurns(live, endpoint);
   const findings = findingsOf(live, routerRun, listRun.output, probe);
   console.log('');
   printFindings(findings);
-
-  if (!owned) {
-    console.log(`kept: ${configDir} (the operator's own — the check deletes only what it created)`);
-  } else if (!hasFlag(args, '--keep')) {
-    rmSync(configDir, { recursive: true, force: true });
-  } else {
-    console.log(`kept: ${configDir}`);
-  }
+  teardown(configDir, owned, args);
 
   const failures = failuresOf(findings);
   if (failures.length > 0) {
