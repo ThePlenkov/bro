@@ -11,7 +11,9 @@
  *    (exit 0 for `--help`, exit 2 for an unknown member);
  *  - the flat-spelling retirement warning fires only for a truly flat
  *    invocation;
- *  - `help <cmd>` is `<cmd> --help`.
+ *  - `help <cmd>` is `<cmd> --help`;
+ *  - a help request never RUNS the command it names — the help token
+ *    leads the argv a plugin or a member receives.
  */
 import { EXIT, printUsage, warnDeprecated, type ExitCode } from './exits.ts';
 import type { CommandPlugin } from './plugin.ts';
@@ -188,7 +190,7 @@ async function runMember(
   if (member.deprecated) {
     warnDeprecated(`'${command.path} ${via} ${member.name}'`, member.deprecated);
   }
-  await member.run([...(member.argvPrefix ?? []), ...args]);
+  await member.run(helpFirst([...(member.argvPrefix ?? []), ...args]));
 }
 
 /** The member a nested command's own table names — the host plugin
@@ -239,7 +241,7 @@ async function runPlugin(
       `${plugin.flatDeprecated} — prefer '${command.path} ${plugin.group} ${plugin.name}'`
     );
   }
-  await plugin.run([...(plugin.argvPrefix ?? []), ...inv.rest]);
+  await plugin.run(helpFirst([...(plugin.argvPrefix ?? []), ...inv.rest]));
   return true;
 }
 
@@ -293,6 +295,20 @@ const VERSION_TOKENS = new Set(['--version', '-v']);
 
 /** The tokens that ask for the help text. */
 const HELP_TOKENS = new Set(['--help', '-h']);
+
+/** The help token that LEADS the argv a plugin or a member receives.
+ *  A help request must never RUN the command it names — so the token
+ *  leads, where every dispatcher looks first. The token counts only
+ *  before a `--` separator: everything after it is verbatim payload
+ *  (notify text, pulse commands), never a flag. */
+function helpFirst(argv: readonly string[]): string[] {
+  const sep = argv.indexOf('--');
+  const head = sep === -1 ? argv : argv.slice(0, sep);
+  const tail = sep === -1 ? [] : argv.slice(sep);
+  const token = head.find((a) => HELP_TOKENS.has(a));
+  if (token === undefined) return [...argv];
+  return [token, ...head.filter((a) => a !== token), ...tail];
+}
 
 /** The bare command — the failure code every bro-family CLI used (1),
  *  not the usage code (2). A nested command with members asks for its
