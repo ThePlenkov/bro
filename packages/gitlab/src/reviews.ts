@@ -557,6 +557,47 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
 
   // --- bulk probes ----------------------------------------------------------------
 
+  /** One MR → MergedPrScan | null. Non-terminal MRs stay out —
+   *  merged rows carry merged_at, closed-unmerged rows carry
+   *  state=closed + a closed_at stamp (an undated close would poison
+   *  downstream date sorting); the caller's serial path reports them. */
+  async function scanOneMr(t: PrTarget): Promise<MergedPrScan | null> {
+    const mr = await glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts());
+    const stateU = (mr.state ?? '').toUpperCase();
+    if (stateU === 'MERGED') {
+      if (!mr.merged_at) {
+        return null;
+      }
+    } else if (stateU === 'CLOSED') {
+      if (!mr.closed_at) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    const threads = toThreads(
+      await glabPagedAsync<GlDiscussion>(
+        api(t.repo, `merge_requests/${t.pr}/discussions`),
+        gopts()
+      ),
+      t,
+      mr.diff_refs?.head_sha
+    );
+    return {
+      info: {
+        title: mr.title ?? '',
+        url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
+        mergedAt: mr.merged_at ?? mr.closed_at ?? '',
+        mergeSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? '',
+        state: mr.state?.toUpperCase(),
+        closedAt: mr.closed_at ?? null,
+      },
+      threads,
+      labels: mr.labels ?? [],
+      updatedAt: mr.updated_at ?? null,
+    };
+  }
+
   /** Pooled REST probe — GitLab has no aliased bulk query, but the pool
    *  still overlaps each MR's meta+discussions pair. Misses stay out of
    *  the map — the caller's serial per-MR path reports them properly. */
@@ -568,47 +609,10 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     let done = 0;
     await pooled(targets, opts?.concurrency ?? 4, async t => {
       try {
-        const mr = await glabJsonAsync<MrRow>(
-          ['api', api(t.repo, `merge_requests/${t.pr}`)],
-          gopts()
-        );
-        // non-merged/missing MRs stay out unless closed unmerged — the serial fallback decides
-        const stateU = (mr.state ?? '').toUpperCase();
-        if (stateU === 'MERGED') {
-          if (!mr.merged_at) {
-            return;
-          }
-        } else if (stateU === 'CLOSED') {
-          // closed-unmerged needs its timestamp — an undated close
-          // would poison downstream date sorting
-          if (!mr.closed_at) {
-            return;
-          }
-        } else {
-          return;
+        const scan = await scanOneMr(t);
+        if (scan !== null) {
+          out.set(t.pr, scan);
         }
-        const threads = toThreads(
-          await glabPagedAsync<GlDiscussion>(
-            api(t.repo, `merge_requests/${t.pr}/discussions`),
-            gopts()
-          ),
-          t,
-          mr.diff_refs?.head_sha
-        );
-        const ts = mr.merged_at ?? mr.closed_at ?? '';
-        out.set(t.pr, {
-          info: {
-            title: mr.title ?? '',
-            url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
-            mergedAt: ts,
-            mergeSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? '',
-            state: mr.state?.toUpperCase(),
-            closedAt: mr.closed_at ?? null,
-          },
-          threads,
-          labels: mr.labels ?? [],
-          updatedAt: mr.updated_at ?? null,
-        });
       } catch (err) {
         console.error(
           `warning: bulk scan of ${link(t.repo, t.pr)} failed — ` +

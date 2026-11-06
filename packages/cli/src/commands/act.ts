@@ -1620,15 +1620,18 @@ function cmdReply(argv: string[]): void {
   dropActState();
 }
 
-const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
-  status: cmdStatus,
-  wait: cmdWait,
-  merge: cmdMerge,
-  rearm: cmdRearm,
-  threads: cmdThreads,
-  resolve: cmdResolve,
-  reply: cmdReply,
-};
+// a Map keeps the dispatch table off dynamic object indexing — a
+// runtime-keyed `COMMANDS[cmd]` retrieval-then-call trips
+// object-injection scanners
+const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
+  ['status', cmdStatus],
+  ['wait', cmdWait],
+  ['merge', cmdMerge],
+  ['rearm', cmdRearm],
+  ['threads', cmdThreads],
+  ['resolve', cmdResolve],
+  ['reply', cmdReply],
+]);
 
 /** Defer a thread into a debt bead — the skill's mechanics as code:
  *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
@@ -1743,7 +1746,7 @@ export async function runActCommand(argv: string[]): Promise<void> {
   if (cmd === '--help' || cmd === '-h') {
     usage(0);
   }
-  const handler = COMMANDS[cmd];
+  const handler = COMMANDS.get(cmd);
   if (!handler) {
     console.error(`unknown command: ${cmd}`);
     usage();

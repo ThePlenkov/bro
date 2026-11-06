@@ -343,7 +343,7 @@ function collectOneSource(
   // PR-decorating sources dedupe against open review-thread rows — the
   // service's PR comments already landed those findings via the merged-PR
   // sweep.
-  const dedupe = SOURCE_DEDUPES[source];
+  const dedupe = SOURCE_DEDUPES.get(source);
   let existing: DebtRecord[] = [];
   let dupedIds = new Set<string>();
   let coveredBy = new Map<string, string>();
@@ -1357,19 +1357,22 @@ function cmdSync(argv: string[]): void {
 
 // --- entry -----------------------------------------------------------------
 
-const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
-  collect: cmdCollect,
-  status: cmdStatus,
-  stats: cmdStats,
-  trend: cmdTrend,
-  prs: cmdPrs,
-  list: cmdList,
-  mark: cmdMark,
-  set: cmdSet,
-  sync: cmdSync,
-  next: cmdNext,
-  watch: cmdWatch,
-};
+// a Map keeps the dispatch table off dynamic object indexing — a
+// runtime-keyed `COMMANDS[cmd]` retrieval-then-call trips
+// object-injection scanners
+const COMMANDS = new Map<string, (argv: string[]) => void | Promise<void>>([
+  ['collect', cmdCollect],
+  ['status', cmdStatus],
+  ['stats', cmdStats],
+  ['trend', cmdTrend],
+  ['prs', cmdPrs],
+  ['list', cmdList],
+  ['mark', cmdMark],
+  ['set', cmdSet],
+  ['sync', cmdSync],
+  ['next', cmdNext],
+  ['watch', cmdWatch],
+]);
 
 // Whether the invocation wrote ledger state — the post-run data-ref
 // publish fires only then. Read-only variants write nothing: collect
@@ -1426,7 +1429,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  const handler = COMMANDS[cmd!];
+  const handler = COMMANDS.get(cmd!);
   if (!handler) {
     console.error(`unknown command: ${cmd}`);
     usage();

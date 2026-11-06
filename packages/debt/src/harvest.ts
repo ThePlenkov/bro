@@ -63,7 +63,7 @@ export function filterByMergedDate(
   }
   return prs.filter(pr => {
     const ts = pr.mergedAt ?? pr.closedAt ?? null;
-    const mergedMs = ts === null ? NaN : new Date(ts).getTime();
+    const mergedMs = ts === null ? Number.NaN : new Date(ts).getTime();
     // no usable timestamp: a set bound must not let undated rows (e.g.
     // closed-unmerged PRs) bypass the window — only an unbounded query
     // keeps them
