@@ -218,7 +218,7 @@
     "fleet": {
       "name": "fleet",
       "group": "fleet",
-      "summary": "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]",
+      "summary": "Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]",
       "spellings": ["fleet"],
       "aliases": [],
       "hidden": false,
