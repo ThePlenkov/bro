@@ -3387,7 +3387,12 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
       typeof m.content === 'string'
         ? m.content
         : chatContent(m.content)
-            .map(b => (b.type === 'text' ? (b as { text: string }).text : ''))
+            .map(b => {
+              // same contract as chatContent above — a silent drop would
+              // let the model answer about content it never received
+              if (b.type === 'text') return (b as { text: string }).text;
+              throw new Error('tool messages support text content only');
+            })
             .join('');
     return [
       {
