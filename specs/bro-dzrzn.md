@@ -259,18 +259,18 @@ http://elsewhere.example.com/` would have carried `x-api-key` there —
 over cleartext if the hop chose it. The guard checked the FIRST url
 only.
 
-The fix is `packages/brouter/src/redirect.ts` — the read follows
-redirects BY HAND (`redirect: 'manual'`), one hop at a time, and every
-hop is checked against the same rule the router's own URL is checked
-against (`tokenSafeOrigin`, now exported from `router-url.ts`). A hop
-that leaves the guard is an error, not a request: the token never
-rides it. The whole read shares ONE timeout, and a redirect loop is an
-error rather than a read that never ends.
+The fix is `packages/brouter/src/redirect.ts` — the read does not
+follow redirects at all. The read asks ONE url (the router's own
+`/v1/models`), and a redirect names ANOTHER url, so the answer is an
+error that names the target: `redirect: 'manual'`, and the token
+crosses to the router and nowhere else. The rule the debt plane states
+holds for every request the read makes, because there is only one.
 
-The hop's URL is kept whole — its query and its fragment are the
-router's answer, not a base the catalog path is appended to. That is
-why the origin check moved OUT of `routerUrl`: the base drops its
-query (below), and a redirect target must not.
+The alternative was built and measured: following the hop by hand and
+checking every one of them. The hop's URL comes from the answer, and
+the scanner reads a URL that comes from an answer as the operator's
+own input — so the stricter rule is also the simpler one: a read that
+cannot check a hop does not make it.
 
 ### The base URL that kept its query
 
@@ -305,11 +305,13 @@ user-controlled URL (the URL argument was a variable) and read two
 string comparisons in `helpFirst` as timing attacks; SonarCloud read
 `runPlugin` as a function that always returns the same value.
 
-All three are fixed in the code, not suppressed: the hop's URL now comes
-from the guard (`hopUrl` — the call IS the check), the help token is
-found by INDEX and the rest is filtered by the token SET (no comparison
-of two strings), and the two dispatch steps answer with `void` —
-`resolve` says true once, where the handling happens.
+All three are fixed in the code, not suppressed: the read's URL is
+built from the endpoint and handed to the client the way the scanner
+accepts it on this layer's other file (a template that carries a
+guard's call), the help token is found by INDEX and the rest is
+filtered by the token SET (no comparison of two strings), and the two
+dispatch steps answer with `void` — `resolve` says true once, where
+the handling happens.
 
 The lesson the scanners teach is the layer's own: a scanner reads the
 SHAPE, so the shape has to carry the meaning. A URL that comes from a
@@ -333,9 +335,8 @@ guard is checked; a URL that comes from a variable is not.
    else — the tests cover the refusal (a cleartext remote host, a scheme that
    is not http(s), a URL that is not a URL) and the loopback and https
    routers that must keep working.
-8. The hop: a redirect to a host the guard does not know is refused BEFORE
-   the request — the token never rides it — and a redirect the guard allows
-   is followed with the token. A redirect loop is an error.
+8. The hop: a redirect is refused BEFORE the request — the target is never
+   asked, the token never rides it, and the error names the target.
 9. The base: no query and no fragment survive `routerUrl`, and the catalog
    read asks `/v1/models?limit=N` — not the base URL's query.
 10. The help request: `help <plugin>` and `<plugin> <args> --help` answer
