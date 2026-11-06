@@ -20,6 +20,9 @@ export interface ClientTool {
   required: string[];
   /** the schema's property names */
   properties: string[];
+  /** the schema's property types — the JSON types the client accepts.
+   *  A property the schema says nothing about accepts anything. */
+  types: Record<string, string[]>;
 }
 
 /** The request's tool definitions, as the client spelled them. */
@@ -35,19 +38,45 @@ export function clientTools(raw: RawClientTool[] | undefined): ClientTool[] {
   for (const t of raw ?? []) {
     if (typeof t.name !== 'string' || t.name === '') continue;
     const shape = schemaOf(t.input_schema);
-    out.push({ name: t.name, required: shape.required, properties: shape.properties });
+    out.push({
+      name: t.name,
+      required: shape.required,
+      properties: shape.properties,
+      types: shape.types,
+    });
   }
   return out;
 }
 
-/** The schema's required properties and its property names. */
-function schemaOf(schema: unknown): { required: string[]; properties: string[] } {
-  if (typeof schema !== 'object' || schema === null) return { required: [], properties: [] };
+/**
+ * The schema's required properties, its property names, and the type each
+ * property declares. A schema's `properties` is an OBJECT — an array or a
+ * string there is not a property map, and its keys are not property names.
+ */
+function schemaOf(schema: unknown): {
+  required: string[];
+  properties: string[];
+  types: Record<string, string[]>;
+} {
+  const empty = { required: [], properties: [], types: {} };
+  if (typeof schema !== 'object' || schema === null) return empty;
   const s = schema as { required?: unknown; properties?: unknown };
   const required = Array.isArray(s.required)
     ? s.required.filter((v): v is string => typeof v === 'string')
     : [];
-  const properties =
-    typeof s.properties === 'object' && s.properties !== null ? Object.keys(s.properties) : [];
-  return { required, properties };
+  const props =
+    typeof s.properties === 'object' && s.properties !== null && !Array.isArray(s.properties)
+      ? (s.properties as Record<string, unknown>)
+      : {};
+  const properties = Object.keys(props);
+  const types: Record<string, string[]> = {};
+  for (const [name, shape] of Object.entries(props)) {
+    const declared = (shape as { type?: unknown } | undefined)?.type;
+    types[name] = Array.isArray(declared)
+      ? declared.filter((t): t is string => typeof t === 'string')
+      : typeof declared === 'string'
+        ? [declared]
+        : [];
+  }
+  return { required, properties, types };
 }

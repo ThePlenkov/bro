@@ -21,11 +21,29 @@
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { estimateTokens, gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
+import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
+import {
+  estimateTokens,
+  gitCommonDir,
+  isIntegerIndexKey,
+  loadConfig,
+  reserveSessionStart,
+  sessionCapViews,
+} from '@broject/core';
+import type {
+  AcpContentBlock,
+  AcpPeer,
+  AcpRetainedSession,
+  AcpTerminals,
+  OtelCtx,
+  PooledTurnOpts,
+  ProviderWireOpts,
+  Toolish,
+} from '@broject/providers';
 import {
   acpOpen,
   acpPooledTurn,
@@ -36,23 +54,11 @@ import {
   otelSpan,
   toolPayload,
 } from '@broject/providers';
-import { randomUUID } from 'node:crypto';
-import { reserveSessionStart, sessionCapViews } from '@broject/core';
 import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
-import type { AcpTerminals, Toolish } from '@broject/providers';
-import type {
-  AcpContentBlock,
-  AcpPeer,
-  AcpRetainedSession,
-  OtelCtx,
-  PooledTurnOpts,
-  ProviderWireOpts,
-} from '@broject/providers';
 import { peerAttrs } from './peer.ts';
-import { catalogModels, type CatalogModel } from './providers.ts';
-import { clientCall } from './serve-conductor-bridge.ts';
-import { clientTools, type ClientTool } from './serve-conductor-tools.ts';
-import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
+import { type CatalogModel, catalogModels } from './providers.ts';
+import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
+import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -381,6 +387,17 @@ function toolContract(
     ...(must !== undefined ? [must] : []),
     '</tools>',
   ].join('\n');
+}
+
+/** The request's tool choice → the contract the BRIDGE honours: may a
+ *  call be bridged at all, and which tool did the request name? The
+ *  contract TEXT above is the agent's half; this is the client's. */
+function clientToolContract(choice: MessagesRequest['tool_choice']): ToolContract {
+  if (choice?.type === 'none') return { allowed: false };
+  if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    return { allowed: true, name: choice.name };
+  }
+  return { allowed: true };
 }
 
 /** tool_choice → the MUST clause of the injected contract — the one
@@ -1036,17 +1053,22 @@ function tagSuffix(s: string, tag: string): number {
  *  is swallowed (generation stops — the wire's own semantics). */
 class StopFilter {
   private tail = '';
-  private out = '';
-  /** The turn's tool calls, in the agent's own markup — the buffered
-   *  leg's answer reads them like the agent's (bro-sy4q3). */
-  calls = '';
+  /** The turn's text and its tool calls, in the order they arrived — the
+   *  buffered leg's answer reads them like the agent's (bro-sy4q3), and a
+   *  call keeps its place between the words. */
+  private readonly chunks: string[] = [];
+  /** the turn's text landed — the settle path does not feed it twice */
+  sawText = false;
   hit: string | undefined;
 
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
     const o = this.cut(s);
-    this.out += o;
+    if (o !== '') {
+      this.chunks.push(o);
+      this.sawText = true;
+    }
     return o;
   }
 
@@ -1085,15 +1107,24 @@ class StopFilter {
   flush(): string {
     const t = this.hit === undefined ? this.tail : '';
     this.tail = '';
-    this.out += t;
+    if (t !== '') {
+      this.chunks.push(t);
+      this.sawText = true;
+    }
     return t;
+  }
+
+  /** The agent's own markup for a call the bridge made — it rides the
+   *  same order the text does. */
+  addCall(markup: string): void {
+    this.chunks.push(markup);
   }
 
   /** Everything the filter let through — byte-identical to what the
    *  client saw, whatever the delta boundaries were. The recorded
    *  reply comes from this, never from a re-run of the raw text. */
   get emitted(): string {
-    return this.out + this.calls;
+    return this.chunks.join('');
   }
 }
 
@@ -1217,7 +1248,8 @@ class LiveTurn extends TagPump {
     private readonly stops: StopFilter | undefined,
     pingMs?: number,
     tools = true,
-    clientTools: ClientTool[] = []
+    clientTools: ClientTool[] = [],
+    private readonly contract: ToolContract = OPEN_CONTRACT
   ) {
     super(tools);
     this.clientTools = clientTools;
@@ -1252,7 +1284,10 @@ class LiveTurn extends TagPump {
     }
     // the agent's tool call, in the CLIENT's vocabulary: the client
     // executes it, the wire stops at tool_use (bro-sy4q3)
-    const bridged = clientCall(u, this.clientTools);
+    // a stop_sequence hit ends the turn: a call that arrives after the cut
+    // is not bridged — the client must not run what the cut withheld
+    const bridged =
+      this.stops?.hit === undefined ? clientCall(u, this.clientTools, this.contract) : undefined;
     if (bridged !== undefined) {
       if (bridged.toolCallId !== undefined) {
         // the call is DONE from the client's view — the agent's own
@@ -2260,11 +2295,18 @@ function messagesStreamOpener(
     // the buffered leg writes no stream — it collects the calls the
     // bridge made, in the agent's own markup, so the answer parses
     // them like the agent's (bro-sy4q3)
+    const contract = clientToolContract(body.tool_choice);
     return () => u => {
-      const call = clientCall(u, tools);
+      if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+        // the text lands WITH the calls, in the order they arrived — a
+        // call keeps its place between the words
+        stops.feed(u.content.text);
+        return;
+      }
+      const call = clientCall(u, tools, contract);
       if (call === undefined) return;
       const payload = JSON.stringify({ name: call.name, input: call.input });
-      stops.calls += `${OPEN_TAG}${payload}${CLOSE_TAG}`;
+      stops.addCall(`${OPEN_TAG}${payload}${CLOSE_TAG}`);
     };
   }
   return inputTokens => {
@@ -2284,7 +2326,8 @@ function messagesStreamOpener(
       stops,
       lane.cfg.keepaliveMs ?? 10_000,
       body.tool_choice?.type !== 'none',
-      tools
+      tools,
+      clientToolContract(body.tool_choice)
     );
     set(live);
     return live.onUpdate;
@@ -2350,8 +2393,9 @@ async function messages(
   // let through — byte-identical to the client's own view
   live?.finish(canonicalStopReason(reply.stopReason));
   if (live === undefined) {
-    // the buffered leg's cut lands post-hoc through the same filter
-    stops.feed(reply.text);
+    // the buffered leg's cut lands post-hoc through the same filter —
+    // unless its text already landed with the calls, in order
+    if (!stops.sawText) stops.feed(reply.text);
     stops.flush();
   }
   const view: ReplyView = {

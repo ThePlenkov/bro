@@ -113,6 +113,81 @@ test('a call the client cannot run is not invented', () => {
   );
 });
 
+test("the request's contract decides the call — none bridged, none named", () => {
+  // tool_choice: none — the request withheld its tools
+  assert.equal(
+    clientCall(
+      { sessionUpdate: 'tool_call', kind: 'execute', rawInput: { command: 'ls' } },
+      CLAUDE_TOOLS,
+      { allowed: false }
+    ),
+    undefined
+  );
+  // a request that named its tool asked for THAT tool — another tool of
+  // the same capability is a different contract
+  assert.equal(
+    clientCall(
+      { sessionUpdate: 'tool_call', kind: 'execute', rawInput: { command: 'ls' } },
+      CLAUDE_TOOLS,
+      { allowed: true, name: 'Read' }
+    ),
+    undefined
+  );
+  const named = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: { path: '/tmp/x' } },
+    CLAUDE_TOOLS,
+    { allowed: true, name: 'Read' }
+  );
+  assert.equal(named?.name, 'Read');
+});
+
+test('the schema shapes the input — a number where it says string is dropped', () => {
+  // the client's Bash schema says command is a string
+  assert.equal(
+    clientCall(
+      { sessionUpdate: 'tool_call', kind: 'execute', rawInput: { command: 42 } },
+      CLAUDE_TOOLS
+    ),
+    undefined
+  );
+  // null is a value the schema allows — the client validates its own input
+  const nullable = clientTools([
+    {
+      name: 'read',
+      input_schema: {
+        properties: { path: { type: 'string' }, offset: { type: ['number', 'null'] } },
+        required: ['path'],
+      },
+    },
+  ]);
+  const withNull = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: { path: '/tmp/x', offset: null } },
+    nullable
+  );
+  assert.deepEqual(withNull?.input, { path: '/tmp/x', offset: null });
+});
+
+test('the property names cannot reshape what we send', () => {
+  const tools = clientTools([
+    {
+      name: 'read',
+      input_schema: JSON.parse('{"properties":{"__proto__":{"type":"string"}},"required":[]}'),
+    },
+  ]);
+  const call = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: JSON.parse('{"__proto__":"x"}') },
+    tools
+  );
+  assert.equal(call, undefined);
+});
+
+test('a call with no input still runs a tool that takes no arguments', () => {
+  const tools = clientTools([{ name: 'read', input_schema: { properties: {}, required: [] } }]);
+  const call = clientCall({ sessionUpdate: 'tool_call', kind: 'read', rawInput: {} }, tools);
+  assert.equal(call?.name, 'read');
+  assert.deepEqual(call?.input, {});
+});
+
 test("the kind is the agent's — an inherited name is not a capability", () => {
   // every object carries "toString" and "constructor": a plain lookup finds
   // the prototype's function there and hands it to the tool matcher
