@@ -72,9 +72,11 @@ providers map.
 - Shape: `{ version: 1, walls: { [account]: WallObservation } }`.
   `WallObservation = { cause: 'rate_limited'|'quota', resetAt?, observedAt, provider, rig, step? }`.
 - API: `recordWall(obs, opts?)`, `readLedgerWalls(now, ttls?)` (live
-  `AccountWall[]` only), and `clearLedgerWalls(account | 'all')`, which
-  returns the number of removed rows. Tests inject the clock and path
-  through options; production uses no global fakes.
+  `AccountWall[]` only), and `clearLedgerWalls(account | undefined)`,
+  which returns the number of live walls lifted. `undefined` is the
+  clear-all sentinel (`--all`) — a literal account named 'all' clears
+  only its own row. Tests inject the clock and path through options;
+  production uses no global fakes.
 - Merge: newest observation wins, except a live `quota` row is not
   replaced by a `rate_limited` row. Expired rows are pruned on write.
 - Recovery: unreadable or corrupt data is an empty ledger on reads, with
@@ -122,9 +124,12 @@ own. Phase 2 can put the ledger on a git ref if a real need shows up.
 ### Project identity
 
 `projectId = sha256(normalizeRemote(origin))[:16]`, where normalize does
-lowercase host, strip `.git`, scp→url, drop userinfo/token, and drop the
-proxy prefix (`git-manager…/proxy/`). With no origin, it falls back to
-`sha256(realpath(git-common))`. Every clone of one repo gets one id.
+lowercase host, strip `.git`, scp→url, drop userinfo/token, drop the
+proxy prefix (`git-manager…/proxy/`), and drop the scheme — `ssh://`,
+`https://`, and `git://` all reduce to `host/path` so an SSH clone and
+an HTTPS clone of one repo hash to the same id and share its lease.
+With no origin, it falls back to `sha256(realpath(git-common))`. Every
+clone of one repo gets one id.
 
 ### Store (interface first, local impl now)
 

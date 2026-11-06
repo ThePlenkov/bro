@@ -1425,7 +1425,7 @@ export function providerWallsFor(
   const registry = readAgentRegistry(dir);
   const home = agentsHome(dir);
   for (const [molStep, entry] of Object.entries(registry)) {
-    ensureExitCause(dir, home, molStep, entry);
+    ensureExitCause(dir, home, molStep, entry, env.fleet?.walls);
   }
   const walls = [
     ...deriveProviderWalls(registry),
@@ -1464,7 +1464,7 @@ export function fleetWallRowsFor(
   const registry = readAgentRegistry(dir);
   const home = agentsHome(dir);
   for (const [step, entry] of Object.entries(registry)) {
-    ensureExitCause(dir, home, step, entry);
+    ensureExitCause(dir, home, step, entry, env.fleet?.walls);
   }
   const now = Date.now();
   const local = deriveAccountWalls(registry, now).map(wall => ({
@@ -1619,6 +1619,9 @@ function guardExistingEntry(
     isLive: (existing: AgentRegistryEntry) => boolean;
     liveDetail?: (existing: AgentRegistryEntry) => string;
     allowBlocked?: boolean;
+    /** `fleet.walls` TTLs for the death-ladder classification — the
+     *  caller's loaded env so the ledger write skips a config read. */
+    wallTtls?: Partial<FleetWallTtls>;
   }
 ): void {
   if (existing === undefined) {
@@ -1638,7 +1641,7 @@ function guardExistingEntry(
   // a recorded death can carry a respawn-blocking cause — classify now
   // (backends whose isLive doesn't walk the death ladder never saw it)
   // and refuse respawn into the same exhausted budget (bro-7xgk.2)
-  ensureExitCause(dir, home, spec.molStep, existing);
+  ensureExitCause(dir, home, spec.molStep, existing, opts.wallTtls);
   if (opts.allowBlocked !== true && agentEntryBlocked(existing)) {
     throw new SpawnError(
       `respawn of ${spec.molStep} refused — ${blockedRespawnDetail(existing)}; \`bro agents down ${spec.molStep}\` clears the block`
@@ -1746,6 +1749,18 @@ export function batchWallRefusal(
   );
 }
 
+/** Which wall holds longer — quota outranks rate_limited (the registry
+ *  fold's own dominance rule), and within a cause the later `until`
+ *  wins, an absent one meaning indefinite. */
+function moreRestrictive(a: ProviderWall, b: ProviderWall): ProviderWall {
+  if (a.cause !== b.cause) {
+    return a.cause === 'quota' ? a : b;
+  }
+  const ta = a.until === undefined ? Number.POSITIVE_INFINITY : Date.parse(a.until);
+  const tb = b.until === undefined ? Number.POSITIVE_INFINITY : Date.parse(b.until);
+  return ta >= tb ? a : b;
+}
+
 function spawnWalls(
   _dir: string,
   registry: Record<string, AgentRegistryEntry>,
@@ -1760,18 +1775,25 @@ function spawnWalls(
   ];
   const byProvider = new Map(walls.map(wall => [wall.provider, wall]));
   for (const candidate of candidates) {
-    if (byProvider.has(candidate.provider)) {
+    const accountWall = accounts.find(wall => wall.account === candidate.account);
+    if (accountWall === undefined) {
       continue;
     }
-    const accountWall = accounts.find(wall => wall.account === candidate.account);
-    if (accountWall !== undefined) {
-      byProvider.set(candidate.provider, {
-        provider: candidate.provider,
-        account: candidate.account,
-        cause: accountWall.cause,
-        ...(accountWall.until === undefined ? {} : { until: accountWall.until }),
-      });
-    }
+    const mapped: ProviderWall = {
+      provider: candidate.provider,
+      account: candidate.account,
+      cause: accountWall.cause,
+      ...(accountWall.until === undefined ? {} : { until: accountWall.until }),
+    };
+    // a registry wall on the provider and a ledger wall on the
+    // candidate's account coexist — the wall that holds longer is the
+    // verdict the refusal reports (a stale registry reset must not
+    // admit the spawn before the ledger's later reset)
+    const existing = byProvider.get(candidate.provider);
+    byProvider.set(
+      candidate.provider,
+      existing === undefined ? mapped : moreRestrictive(existing, mapped)
+    );
   }
   return [...byProvider.values()];
 }
@@ -1883,18 +1905,23 @@ function prepareSpawn(
   // derived, not stored) and it is an ACCOUNT fact: one rate-limited
   // death walls the provider for every fleet spawn, not just the agent
   // that died. The interactive lane is not blocked — a wall the fleet hit
-  // is the fleet's problem (spec bro-9h86l).
+  // is the fleet's problem (spec bro-9h86l). The env is loaded once up
+  // front — the death-ladder sweep below classifies (and ledger-writes)
+  // inside this lock, so it rides these TTLs instead of re-reading
+  // bro.config.json per fresh death.
+  const env = opts.env ?? opts.cap?.env ?? loadAgentEnv(dir);
   guardExistingEntry(dir, home, backend, spec, existing, {
     isLive: opts.isLive,
     liveDetail: opts.liveDetail,
     allowBlocked: spec.route !== undefined,
+    wallTtls: env.fleet?.walls,
   });
   // The wall is derived from the registry — so the registry must carry
   // the CAUSE: an agent that died with a rate limit but whose .exit
   // was not harvested yet reads as cause-less, and the fleet walks into
   // the wall it just hit. Harvest first, then derive.
   for (const [step, entry] of Object.entries(registry)) {
-    ensureExitCause(dir, home, step, entry);
+    ensureExitCause(dir, home, step, entry, env.fleet?.walls);
   }
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
@@ -1902,7 +1929,6 @@ function prepareSpawn(
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
-  const env = opts.env ?? opts.cap?.env ?? loadAgentEnv(dir);
   const now = Date.now();
   const candidates =
     spec.route?.candidates ??
@@ -2436,7 +2462,12 @@ function recordClassifiedWall(
   molStep: string,
   entry: AgentRegistryEntry,
   cause: string,
-  resetAt: string | undefined
+  resetAt: string | undefined,
+  /** The caller's `fleet.walls` TTLs — the spawn sweep already holds
+   *  the env, so classification under its registry lock never re-reads
+   *  bro.config.json per death. Callers without one loaded fall back
+   *  to a lazy read here (once per newly-classified death). */
+  wallTtls?: Partial<FleetWallTtls>
 ): void {
   if ((cause !== 'rate_limited' && cause !== 'quota') || typeof entry.provider !== 'string') {
     return;
@@ -2456,7 +2487,7 @@ function recordClassifiedWall(
       },
       {
         now: Date.parse(observedAt),
-        ttls: loadAgentEnv(dir).fleet?.walls,
+        ttls: wallTtls ?? loadAgentEnv(dir).fleet?.walls,
       }
     );
   } catch (err) {
@@ -2548,7 +2579,11 @@ function ensureExitCause(
   dir: string,
   home: string | null,
   molStep: string,
-  entry: AgentRegistryEntry
+  entry: AgentRegistryEntry,
+  /** `fleet.walls` TTLs when the caller already loaded the env —
+   *  classification writes the host ledger with them instead of paying
+   *  a config read inside the caller's registry lock. */
+  wallTtls?: Partial<FleetWallTtls>
 ): void {
   if (entry.exitStatus === undefined && home !== null) {
     const exitStatus = readExitFile(home, entry.agentId, entryRunId(entry));
@@ -2581,7 +2616,7 @@ function ensureExitCause(
   entry.cause = c.cause;
   entry.resetAt = c.resetAt;
   emitProviderWall(entry, molStep, c.cause, c.resetAt);
-  recordClassifiedWall(dir, molStep, entry, c.cause, c.resetAt);
+  recordClassifiedWall(dir, molStep, entry, c.cause, c.resetAt, wallTtls);
   emitClassifiedExitLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
   persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, c.resetAt);
 }

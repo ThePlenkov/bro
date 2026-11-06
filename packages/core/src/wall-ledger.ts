@@ -36,7 +36,11 @@ interface LedgerState {
   walls: Partial<Record<string, LedgerRow>>;
 }
 
-let warnedUnreadable = false;
+/** Warn-once per ledger path — a process can manage several ledgers
+ *  (tests, multi-repo), and one path's corruption must not suppress or
+ *  re-arm the warning for another. A successful read/write on a path
+ *  re-arms that path only. */
+const warnedUnreadablePaths = new Set<string>();
 
 export function wallLedgerPath(stateHome = process.env.XDG_STATE_HOME): string {
   return join(stateHome || join(homedir(), '.local', 'state'), 'bro', 'walls.json');
@@ -53,9 +57,9 @@ function emptyState(): LedgerState {
   return { version: 1, walls: Object.create(null) as Partial<Record<string, LedgerRow>> };
 }
 
-function warnUnreadable(): void {
-  if (!warnedUnreadable) {
-    warnedUnreadable = true;
+function warnUnreadable(path: string): void {
+  if (!warnedUnreadablePaths.has(path)) {
+    warnedUnreadablePaths.add(path);
     console.error('bro: host wall ledger is unreadable or corrupt — treating it as empty');
   }
 }
@@ -144,7 +148,7 @@ function readLedgerText(path: string): string | undefined {
     return readFileSync(path, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      warnUnreadable();
+      warnUnreadable(path);
     }
     return undefined;
   }
@@ -186,15 +190,15 @@ function readState(path: string): LedgerState {
   }
   const json = parseJson(text);
   if (json === undefined) {
-    warnUnreadable();
+    warnUnreadable(path);
     return emptyState();
   }
   const state = parseLedger(json);
   if (state === undefined) {
-    warnUnreadable();
+    warnUnreadable(path);
     return emptyState();
   }
-  warnedUnreadable = false;
+  warnedUnreadablePaths.delete(path);
   return state;
 }
 
@@ -240,7 +244,7 @@ function writeState(path: string, state: LedgerState): void {
     chmodSync(tmp, 0o600);
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths are the local ledger and its temporary sibling
     renameSync(tmp, path);
-    warnedUnreadable = false;
+    warnedUnreadablePaths.delete(path);
   } catch (err) {
     if (fd !== undefined) {
       closeSync(fd);
@@ -328,23 +332,32 @@ export function readLedgerWalls(
     .sort((a, b) => a.account.localeCompare(b.account));
 }
 
-export function clearLedgerWalls(account: string, opts: WallLedgerOptions = {}): number {
+/** Clear host ledger walls — `account` names one row; `undefined` is
+ *  the clear-all sentinel (`--all`), never an account name, so an
+ *  account literally called 'all' still clears only its own row.
+ *  Returns the number of LIVE walls lifted: expired rows still on disk
+ *  are swept by the prune either way but were blocking nothing, so
+ *  they do not inflate the count the caller prints. */
+export function clearLedgerWalls(
+  account: string | undefined,
+  opts: WallLedgerOptions = {}
+): number {
   const path = opts.path ?? wallLedgerPath();
   const now = opts.now ?? Date.now();
   const ttls = ttlsOf(opts.ttls);
   return updateLedger(path, state => {
+    pruneExpired(state, now, ttls);
     const removed =
-      account === 'all'
+      account === undefined
         ? Object.keys(state.walls).length
         : Object.hasOwn(state.walls, account)
           ? 1
           : 0;
-    if (account === 'all') {
+    if (account === undefined) {
       state.walls = Object.create(null) as Partial<Record<string, LedgerRow>>;
     } else {
       removeLedgerRow(state, account);
     }
-    pruneExpired(state, now, ttls);
     writeState(path, state);
     return removed;
   });

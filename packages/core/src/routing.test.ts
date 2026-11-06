@@ -369,6 +369,48 @@ describe('deriveAccountWalls', () => {
       },
     ]);
   });
+
+  test('a stopped entry scans empty — down lifts the account wall its attempts held', () => {
+    // `bro agents down` stamps the entry stopped; a registry written
+    // directly can still carry an unflagged attempt record — the fold
+    // must not resurrect it (same rule deriveProviderWalls walks)
+    const walls = deriveAccountWalls({
+      step: entry({
+        provider: 'kilo-cli',
+        account: 'kilo',
+        stopped: true,
+        attempts: [
+          {
+            provider: 'kilo-cli',
+            account: 'kilo',
+            cause: 'quota',
+            spawnedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      }),
+    });
+    assert.deepEqual(walls, []);
+  });
+
+  test('a record carrying its own step keeps it over the containing key', () => {
+    const [wall] = deriveAccountWalls({
+      current: entry({
+        provider: 'kilo-cli',
+        account: 'kilo',
+        cause: 'quota',
+        attempts: [
+          {
+            provider: 'kilo-cli',
+            account: 'kilo',
+            cause: 'quota',
+            step: 'origin-step',
+            spawnedAt: '2026-01-01T12:00:00Z',
+          },
+        ],
+      }),
+    });
+    assert.equal(wall?.step, 'origin-step');
+  });
 });
 
 describe('wallText', () => {

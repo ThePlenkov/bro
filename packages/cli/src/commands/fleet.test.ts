@@ -604,7 +604,9 @@ describe('fleet walls command', () => {
     } finally {
       console.log = original;
     }
-    assert.deepEqual(output, ['cleared 1 host wall', 'cleared 2 host walls']);
+    // 'expired' was swept from disk but counted nothing — the clear
+    // reports live walls lifted, not rows deleted
+    assert.deepEqual(output, ['cleared 1 host wall', 'cleared 1 host wall']);
   });
 
   test('rejects wall arguments outside the allowlist', () => {

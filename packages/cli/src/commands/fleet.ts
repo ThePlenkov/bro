@@ -621,7 +621,11 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError);
 }
 
-type FleetWallsAction = { kind: 'list'; json: boolean } | { kind: 'clear'; account: string };
+type FleetWallsAction =
+  | { kind: 'list'; json: boolean }
+  // undefined = clear every wall (`--all`); a string clears that one
+  // account — an account literally named 'all' stays clearable alone
+  | { kind: 'clear'; account: string | undefined };
 
 function fleetWallsAction(argv: string[]): FleetWallsAction {
   if (argv.length === 0) {
@@ -635,7 +639,7 @@ function fleetWallsAction(argv: string[]): FleetWallsAction {
   }
   const account = argv[1]!;
   if (account === '--all') {
-    return { kind: 'clear', account: 'all' };
+    return { kind: 'clear', account: undefined };
   }
   const trimmed = account.trim();
   if (trimmed === '' || trimmed.startsWith('-')) {

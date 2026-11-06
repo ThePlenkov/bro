@@ -559,7 +559,10 @@ function foldAccountWallRecord(
   }
   const account = typeof record.account === 'string' ? record.account : record.provider;
   const row = byAccount.get(account) ?? { acc: {} };
-  foldEntry(row.acc, { ...record, step });
+  // the containing step is the fallback label — a record that carries
+  // its own `step` (a retained attempt re-dispatched from elsewhere)
+  // keeps its real provenance instead of inheriting this entry's key
+  foldEntry(row.acc, { step, ...record });
   byAccount.set(account, row);
 }
 
@@ -627,10 +630,11 @@ export function deriveAccountWalls(
 ): AccountWall[] {
   const byAccount = new Map<string, AccountWallAccumulator>();
   for (const [step, entry] of Object.entries(registry)) {
-    const records: WallRecord[] = Array.isArray(entry.attempts)
-      ? [entry, ...(entry.attempts as WallRecord[])]
-      : [entry];
-    for (const rec of records) {
+    // wallRecords, not a raw attempts scan — a stopped entry scans
+    // empty so `bro agents down` lifts the account wall its retained
+    // attempts would otherwise keep holding (same rule
+    // deriveProviderWalls walks)
+    for (const rec of wallRecords(entry)) {
       foldAccountWallRecord(byAccount, step, rec);
     }
   }

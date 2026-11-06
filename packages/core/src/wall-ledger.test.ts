@@ -140,21 +140,43 @@ describe('host wall ledger', () => {
       assert.equal(clearLedgerWalls('live', { path: t.path, now: base + 16 * 60_000 }), 1);
       recordWall(observation('a', 'quota'), { path: t.path, now: base });
       recordWall(observation('b', 'quota'), { path: t.path, now: base });
-      assert.equal(clearLedgerWalls('all', { path: t.path, now: base }), 2);
+      assert.equal(clearLedgerWalls(undefined, { path: t.path, now: base }), 2);
       assert.deepEqual(readLedgerWalls(base, undefined, { path: t.path }), []);
     } finally {
       t.done();
     }
   });
 
-  test('counts expired rows removed from the ledger', () => {
+  test('expired rows are swept but do not inflate the cleared count', () => {
     const t = tempLedger();
     try {
       recordWall(observation('one'), { path: t.path, now: base });
-      assert.equal(clearLedgerWalls('one', { path: t.path, now: base + 16 * 60_000 }), 1);
+      // 'one' rate-limited at base is dead by +16m — the row still gets
+      // swept, but 'cleared N host walls' counts live walls lifted
+      assert.equal(clearLedgerWalls('one', { path: t.path, now: base + 16 * 60_000 }), 0);
       recordWall(observation('two'), { path: t.path, now: base });
       recordWall(observation('three'), { path: t.path, now: base });
-      assert.equal(clearLedgerWalls('all', { path: t.path, now: base + 16 * 60_000 }), 2);
+      recordWall(observation('live', 'quota'), { path: t.path, now: base + 16 * 60_000 });
+      assert.equal(clearLedgerWalls(undefined, { path: t.path, now: base + 16 * 60_000 }), 1);
+      assert.deepEqual(readLedgerWalls(base, undefined, { path: t.path }), []);
+    } finally {
+      t.done();
+    }
+  });
+
+  test("an account literally named 'all' clears only its own row", () => {
+    const t = tempLedger();
+    try {
+      recordWall(observation('all', 'quota'), { path: t.path, now: base });
+      recordWall(observation('other', 'quota'), { path: t.path, now: base });
+      assert.equal(clearLedgerWalls('all', { path: t.path, now: base }), 1);
+      assert.deepEqual(
+        readLedgerWalls(base, undefined, { path: t.path }).map(w => w.account),
+        ['other']
+      );
+      // undefined is the clear-all sentinel — 'all' as a name is not
+      assert.equal(clearLedgerWalls(undefined, { path: t.path, now: base }), 1);
+      assert.deepEqual(readLedgerWalls(base, undefined, { path: t.path }), []);
     } finally {
       t.done();
     }
