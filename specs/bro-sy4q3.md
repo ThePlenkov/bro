@@ -87,6 +87,15 @@ request did not offer is a tool the client cannot run.
   narrated edge. An EMPTY input is not a rejection: a tool that takes no
   arguments runs it.
 
+### The capability tables — `packages/cli/src/commands/serve-conductor-capabilities.ts`
+
+The two vocabularies and the lookups between them: the ACP kind → the
+client's tools that answer it, and the raw field → the client's property
+that holds it. Both tables are `Map`s: the kind and the field name are the
+agent's own strings, and a lookup by one must not reach into a prototype
+("toString", "constructor") nor into a key the caller controls — a `Map` has
+neither, and its `get` says honestly when the table has no such entry.
+
 ### The conductor — `packages/cli/src/commands/serve-conductor.ts`
 
 The streamed turn (`LiveTurn`) asks the bridge first: a call the client can
