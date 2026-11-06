@@ -12,6 +12,7 @@
  * The wire never invents a call the client cannot execute, and it never
  * drops one it can.
  */
+import { validateSchemaValue, type JsonSchema } from '@broject/core';
 import { capabilityOf, matchingTools, propertyFor } from './serve-conductor-capabilities.ts';
 import type { ClientTool } from './serve-conductor-tools.ts';
 
@@ -108,7 +109,17 @@ function toolInput(
   // arguments; a call whose fields did not map is a call we cannot shape
   if (Object.keys(input).length === 0 && Object.keys(raw).length > 0) return undefined;
   const missing = tool.required.filter(p => !Object.hasOwn(input, p));
-  return missing.length === 0 ? input : undefined;
+  if (missing.length > 0) return undefined;
+  return schemaAccepts(tool, input) ? input : undefined;
+}
+
+/** The client's own schema has the last word — the wire sends no call the
+ *  client cannot run, and the client's schema is what decides that. A
+ *  number below the tool's minimum is such a call. */
+function schemaAccepts(tool: ClientTool, input: Record<string, unknown>): boolean {
+  const schema = tool.schema;
+  if (typeof schema !== 'object' || schema === null) return true;
+  return validateSchemaValue(input, schema as JsonSchema, 'input').length === 0;
 }
 
 /** The value's type against the schema's own — a call the client cannot run

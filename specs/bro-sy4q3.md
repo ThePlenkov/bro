@@ -82,8 +82,10 @@ request did not offer is a tool the client cannot run.
   the rest are dropped — the client's schema, not the agent's, decides what
   the client receives.
 - **A call the client cannot run is never invented.** No matching tool, a
-  missing required property, an empty input, a raw input that is not an
-  object → undefined, and the edge stays what it was: a narrated edge.
+  missing required property, a value the client's own schema rejects, a raw
+  input that is not an object → undefined, and the edge stays what it was: a
+  narrated edge. An EMPTY input is not a rejection: a tool that takes no
+  arguments runs it.
 
 ### The conductor — `packages/cli/src/commands/serve-conductor.ts`
 

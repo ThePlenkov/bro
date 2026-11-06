@@ -23,6 +23,9 @@ export interface ClientTool {
   /** the schema's property types — the JSON types the client accepts.
    *  A property the schema says nothing about accepts anything. */
   types: Record<string, string[]>;
+  /** the client's own input schema — the contract the call is validated
+   *  against before it reaches the client. */
+  schema?: unknown;
 }
 
 /** The request's tool definitions, as the client spelled them. */
@@ -43,6 +46,7 @@ export function clientTools(raw: RawClientTool[] | undefined): ClientTool[] {
       required: shape.required,
       properties: shape.properties,
       types: shape.types,
+      schema: t.input_schema,
     });
   }
   return out;

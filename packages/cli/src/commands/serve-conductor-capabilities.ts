@@ -21,16 +21,20 @@ const CAPABILITY: Record<string, string[]> = {
 };
 
 /** The raw input's field names → the client's — the agent's shape differs
- *  from the client's, the schema is the contract. */
-const ALIAS: Record<string, string> = {
-  path: 'file_path',
-  filepath: 'file_path',
-  file: 'file_path',
-  cmd: 'command',
-  oldstring: 'old_string',
-  newstring: 'new_string',
-  old_text: 'old_string',
-  new_text: 'new_string',
+ *  from the client's, the schema is the contract. A field can have more
+ *  than one spelling on the client's side (the agent says `path`, the
+ *  client says `file_path` — and the other way round); the exact match
+ *  wins, then the alias the tool actually exposes. */
+const ALIAS: Record<string, string[]> = {
+  path: ['file_path'],
+  filepath: ['file_path'],
+  file: ['file_path'],
+  file_path: ['path'],
+  cmd: ['command'],
+  oldstring: ['old_string'],
+  newstring: ['new_string'],
+  old_text: ['old_string'],
+  new_text: ['new_string'],
 };
 
 /** The capability the agent named — undefined when it names one this client
@@ -68,5 +72,5 @@ export function propertyFor(tool: ClientTool, key: string): string | undefined {
   if (hit !== undefined) return hit;
   const alias = ALIAS[key.toLowerCase()];
   if (alias === undefined) return undefined;
-  return tool.properties.includes(alias) ? alias : undefined;
+  return alias.find(candidate => tool.properties.includes(candidate));
 }

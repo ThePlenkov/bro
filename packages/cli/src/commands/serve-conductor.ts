@@ -1030,6 +1030,13 @@ function emitBlocks(res: ServerResponse, view: ReplyView): void {
 const OPEN_TAG = '<tool_call>';
 const CLOSE_TAG = '</tool_call>';
 
+/** The markup's payload — `<` escaped, so a value that carries the tag
+ *  cannot close the call early and truncate the JSON the parser reads.
+ *  JSON's own escape keeps the payload valid. */
+function callPayload(name: string, input: Record<string, unknown>): string {
+  return JSON.stringify({ name, input }).replaceAll('<', '\\u003c');
+}
+
 /** Narration label — a tool_call title can carry a whole command
  *  string; first line only, capped. */
 function shortLabel(s: string): string {
@@ -1064,10 +1071,15 @@ class StopFilter {
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
+    // the input ARRIVED — the turn's text landed, even when the cut holds
+    // it back as a stop-sequence prefix. The settle path must not feed it
+    // a second time: the text is already in the filter, held or emitted.
+    if (s !== '') {
+      this.sawText = true;
+    }
     const o = this.cut(s);
     if (o !== '') {
       this.chunks.push(o);
-      this.sawText = true;
     }
     return o;
   }
@@ -1115,8 +1127,14 @@ class StopFilter {
   }
 
   /** The agent's own markup for a call the bridge made — it rides the
-   *  same order the text does. */
+   *  same order the text does. The text held back as a stop-sequence
+   *  prefix belongs BEFORE the call: it was the agent's, and the call
+   *  interrupted it. */
   addCall(markup: string): void {
+    if (this.tail !== '') {
+      this.chunks.push(this.tail);
+      this.tail = '';
+    }
     this.chunks.push(markup);
   }
 
@@ -1290,6 +1308,12 @@ class LiveTurn extends TagPump {
       this.stops?.hit === undefined ? clientCall(u, this.clientTools, this.contract) : undefined;
     if (bridged !== undefined) {
       if (bridged.toolCallId !== undefined) {
+        // a repeated tool_call must not reach the client twice — the
+        // client would run the call again
+        if (this.bridged.has(bridged.toolCallId)) {
+          return;
+        }
+        this.bridged.add(bridged.toolCallId);
         // the call is DONE from the client's view — the agent's own
         // terminal edge must not narrate it a second time
         this.toolDone.add(bridged.toolCallId);
@@ -1320,6 +1344,9 @@ class LiveTurn extends TagPump {
 
   private readonly toolStarted = new Set<string>();
   private readonly toolDone = new Set<string>();
+  /** The calls the bridge already sent to the client — a repeated
+   *  tool_call must not become a second tool_use the client runs again. */
+  private readonly bridged = new Set<string>();
   private readonly toolLabels = new Map<string, string>();
 
   /** Structured twin of the narration edges (bro-btccj): a named
@@ -1720,6 +1747,12 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     // a tool answer is NEVER replayed — the client would execute the
     // call a second time; the retry asks the agent afresh (bro-sy4q3)
     if (toolAnswer(cand.lastReply.blocks)) {
+      // a CHAINED retry cannot be answered afresh: evicting the
+      // predecessor would break the chain the client's next request rides
+      // on — it would find the predecessor gone. Fail loudly instead.
+      if (env.chained === true) {
+        throw new ChainBroken('previous_response_id carries a tool answer — the retry is empty');
+      }
       evict(env.sessions, env.key, cand);
       return freshTurn(env, false);
     }
@@ -2296,6 +2329,9 @@ function messagesStreamOpener(
     // bridge made, in the agent's own markup, so the answer parses
     // them like the agent's (bro-sy4q3)
     const contract = clientToolContract(body.tool_choice);
+    // the bridged ids — a repeated tool_call must not reach the client
+    // twice: the client would run the call again
+    const bridged = new Set<string>();
     return () => u => {
       if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
         // the text lands WITH the calls, in the order they arrived — a
@@ -2303,10 +2339,16 @@ function messagesStreamOpener(
         stops.feed(u.content.text);
         return;
       }
+      // a stop_sequence hit ends the turn: a call that arrives after the
+      // cut is not part of the answer
+      if (stops.hit !== undefined) return;
       const call = clientCall(u, tools, contract);
       if (call === undefined) return;
-      const payload = JSON.stringify({ name: call.name, input: call.input });
-      stops.addCall(`${OPEN_TAG}${payload}${CLOSE_TAG}`);
+      if (call.toolCallId !== undefined) {
+        if (bridged.has(call.toolCallId)) return;
+        bridged.add(call.toolCallId);
+      }
+      stops.addCall(`${OPEN_TAG}${callPayload(call.name, call.input)}${CLOSE_TAG}`);
     };
   }
   return inputTokens => {
