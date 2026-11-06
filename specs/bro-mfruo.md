@@ -44,10 +44,13 @@ helper builds the client registration shared by `withAcp` and `acpOpen`:
   `UNADVERTISED_METHODS`, minus `terminal/*`, which `AcpTerminals`
   serves here).
 
-The hint names the trap, not one agent's knob: "the agent is prompting —
-its non-interactive pin is missing from the provider command/env".
-Per-agent env names rot; the operator reading `conductor:<backend>` knows
-which `providers.<name>` entry to inspect.
+The hint names the trap, not one agent's knob — and it is
+permission-ask-specific: "the agent is prompting — its non-interactive
+pin is missing from the provider command/env". Per-agent env names rot;
+the operator reading `conductor:<backend>` knows which
+`providers.<name>` entry to inspect. An unserved call gets a different
+why — "never advertised by this client — method-not-found by design" —
+because blaming the pin there sends the operator to the wrong config.
 
 ## Plan
 

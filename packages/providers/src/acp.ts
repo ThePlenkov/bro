@@ -141,13 +141,17 @@ function stderrTail(child: ChildProcess): () => string {
 /** A denied/unserved agent→client call announces itself — one stderr
  *  line for whoever tails the process, plus an `acp.denied_call`
  *  journal/OTLP row for the store-side evidence trail (spec bro-mfruo).
- *  Silent denial is the trap: a peer that prompts at all is an agent
- *  whose env dropped its non-interactive pin, and an unserved method
- *  reads as method-not-found only on the agent's side — neither names
- *  the config fault unless this line does. */
+ *  Silent denial is the trap, and the why differs per case: a
+ *  permission prompt means the agent's env dropped its non-interactive
+ *  pin, while an unserved method was never advertised — method-not-found
+ *  is the honest answer, and blaming the pin there sends the operator
+ *  to the wrong config. */
 function deniedCall(by: string, method: string, what: string): void {
-  const hint = `${by}: ${method} (${what}) denied — the agent is prompting, so its non-interactive pin is missing from the provider command/env`;
-  process.stderr.write(`${hint}\n`);
+  const why =
+    method === 'session/request_permission'
+      ? 'the agent is prompting, so its non-interactive pin is missing from the provider command/env'
+      : 'never advertised by this client — method-not-found by design';
+  process.stderr.write(`${by}: ${method} (${what}) denied — ${why}\n`);
   otelEvent('acp.denied_call', { by, method, what });
 }
 

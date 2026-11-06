@@ -1192,11 +1192,21 @@ describe('acp terminal plane (bro-z7afs)', () => {
           }
         },
       })
-      const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+      const errLines: string[] = []
+      const origWrite = process.stderr.write
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        errLines.push(String(chunk))
+        return true
+      }) as typeof process.stderr.write
       try {
-        await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+        const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+        try {
+          await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+        } finally {
+          peer.close()
+        }
       } finally {
-        peer.close()
+        process.stderr.write = origWrite
       }
       assert.equal((fake.probeResult as { code?: number } | undefined)?.code, -32601)
       const denied = readFileSync(journal, 'utf8')
@@ -1205,6 +1215,12 @@ describe('acp terminal plane (bro-z7afs)', () => {
         .map((l) => JSON.parse(l) as Record<string, unknown>)
         .find((r) => r.event === 'acp.denied_call' && r.method === 'elicitation/create')
       assert.ok(denied, 'the unserved call announced itself on the journal')
+      const line = errLines.find((l) => l.includes('elicitation/create'))
+      assert.match(line ?? '', /method-not-found/, 'the stderr line names the real cause')
+      assert.ok(
+        !line?.includes('non-interactive pin'),
+        'an unadvertised call does not blame the permission pin'
+      )
     } finally {
       otelJournal(undefined)
       rmSync(dir, { recursive: true, force: true })
