@@ -22,8 +22,13 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
+import {
+  agentsJson as kitAgentsJson,
+  type SessionRec,
+} from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
+export const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? 'bro.fleet';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 // The plugin and the CLI ship from one repo — prefer the checkout's own
 // build over a possibly stale `bro` on PATH (a linked dev worktree must
@@ -230,15 +235,7 @@ export interface AgentEntry {
 
 export function agentsJson(repo: string): Record<string, AgentEntry> {
   const gd = gitCommonDir(repo);
-  if (gd === null) return {};
-  try {
-    const v = JSON.parse(readFileSync(join(gd, 'bro', 'agents.json'), 'utf8')) as unknown;
-    return typeof v === 'object' && v !== null && !Array.isArray(v)
-      ? (v as Record<string, AgentEntry>)
-      : {};
-  } catch {
-    return {};
-  }
+  return gd === null ? {} : kitAgentsJson(gd);
 }
 
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
@@ -246,26 +243,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-function procStart(pid: number): string | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const close = stat.lastIndexOf(')');
-    return stat.slice(close + 2).split(' ')[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function pidAlive(pid: number, start?: string): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-  if (start === undefined || start === '') return true;
-  const st = procStart(pid);
-  return st === null || st === start;
-}
+export { pidAlive, workerLedState } from '../../../packages/herdr-kit/src/index.ts';
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */
@@ -430,6 +408,7 @@ export function boundPaneIds(state: PluginState): Set<string> {
   for (const r of Object.values(state.statuses)) ids.add(r.pane_id);
   for (const r of Object.values(state.sessions)) ids.add(r.pane_id);
   for (const r of Object.values(state.mirrors)) ids.add(r.pane_id);
+  for (const r of Object.values(state.liveViews ?? {})) ids.add(r.pane_id);
   return ids;
 }
 
@@ -509,8 +488,12 @@ export interface PluginState {
   /** worktree path → the status-pane record (one per managed ws). */
   statuses: Record<string, StatusPaneRec>;
   /** worktree path → the session-pane record (one per managed ws —
-   *  spec bro-nwl5g's `bro herdr session-view` renderer). */
-  sessions: Record<string, StatusPaneRec>;
+   *  spec bro-nwl5g's `bro herdr session-view` renderer; carries the
+   *  bound agent's id so a new worker rebinds the pane). */
+  sessions: Record<string, SessionRec>;
+  /** agentId → the plugin-owned live view (addendum 17) — an agent
+   *  outside armed worktrees gets its own `🤖 view:<id>` workspace. */
+  liveViews?: Record<string, { workspace: string; pane_id: string; owned?: boolean }>;
   /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
   gone: Record<string, number>;
 }
@@ -529,6 +512,16 @@ function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
 }
 
+/** The sync loop publishes its pid here so the startup/action path
+ *  probes liveness on a number it wrote itself — never argv matching:
+ *  a launcher that rewrites argv (absolute path, a non-node runtime)
+ *  slips a literal `pgrep` and a live pane would be re-opened every
+ *  pass. Scoped like the state file so repos never see each other's
+ *  loop pid. */
+export function syncPidPath(scope: string): string {
+  return join(STATE_DIR, `sync-${scope}.pid`);
+}
+
 export function loadState(scope: string): PluginState {
   try {
     const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
@@ -538,6 +531,7 @@ export function loadState(scope: string): PluginState {
       renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
       statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
       sessions: typeof v.sessions === 'object' && v.sessions !== null ? v.sessions : {},
+      liveViews: typeof v.liveViews === 'object' && v.liveViews !== null ? v.liveViews : {},
       gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
     };
   } catch {
@@ -547,6 +541,7 @@ export function loadState(scope: string): PluginState {
       renderers: {},
       statuses: {},
       sessions: {},
+      liveViews: {},
       gone: {},
     };
   }

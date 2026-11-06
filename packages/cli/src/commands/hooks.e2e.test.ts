@@ -2218,6 +2218,50 @@ describe('hooks e2e — native payload conformance (bro-l8c4f.8)', () => {
     });
   });
 
+  test('a fresh-process host gets ONE block — the repeat demotes to a hint (devin loop)', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const wt = linked(f, true);
+      arm(f, 's1', 'work');
+      // devin's run.sh fires every stop in a fresh process, so
+      // stop_hook_active stays false — the portable one-shot
+      // (takeStopGateBlock) is the only thing between a blocked stop
+      // and an infinite block → answer → block ping-pong
+      const stop = () =>
+        hook(
+          f,
+          'stop',
+          { session_id: 's1', stop_hook_active: false, last_assistant_message: 'done' },
+          wt
+        );
+      const first = stop();
+      assert.equal(first.code, 0);
+      assert.match(first.stdout, BLOCK);
+      assert.match(first.stdout, /uncommitted/);
+      // the blocked stop re-wakes as a new turn whose stop is the same
+      // armed gate — no second decision:block, but the gate reason is
+      // still shown as a hint
+      const second = stop();
+      assert.equal(second.code, 0);
+      assert.doesNotMatch(second.stdout, BLOCK);
+      assert.match(second.stdout, /uncommitted/);
+      // and the unchanged hint is deduped — the session can end quietly
+      const third = stop();
+      assert.equal(third.code, 0);
+      assert.doesNotMatch(third.stdout, BLOCK);
+      assert.doesNotMatch(third.stdout, /uncommitted/);
+      // a different session keeps its own shot at the same gate
+      arm(f, 's2', 'work');
+      const other = hook(
+        f,
+        'stop',
+        { session_id: 's2', stop_hook_active: false, last_assistant_message: 'done' },
+        wt
+      );
+      assert.match(other.stdout, BLOCK);
+    });
+  });
+
   test('a SubagentStop-shaped payload is tolerated, never a session stall', () => {
     const f = hookFixture();
     inside(f.main, f.root, () => {

@@ -86,7 +86,9 @@
     "@kilocode/plugin": "^7.8.3",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@broject/acp-session": "^0.3.0",
+    "@broject/herdr-kit": "^0.3.0"
   },
   "license": "MIT",
   "repository": {
