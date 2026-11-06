@@ -4,12 +4,12 @@ parent: bro-9rls
 scope:
 - packages/core/src/planes.ts
 - packages/cli/src/planes/
-- packages/cli/src/commands/mcp.ts
-- packages/cli/src/commands/serve.ts
-- packages/mcp/src/tools.ts
+- packages/cli/src/commands/contract-parity.ts
+- packages/cli/src/commands/contract-cli.ts
 - packages/cli/src/commands/contract.ts
-- contract/cli.json
-- scripts/check-contract.ts
+- packages/cli/src/commands/contract.test.ts
+- packages/cli/src/planes/planes.test.ts
+- skills/mcp/SKILL.md
 
 ---
 
@@ -23,35 +23,51 @@ Planes expose operations via descriptors (reads, verbs) and transports project t
 
 ## Design
 
-### The mapping
+### The mapping — the catalog declares its CLI twin
 
-Every plane operation must map to a CLI contract entry. Define the mapping:
-- A plane's named read `read(name)` exposed via transports corresponds to CLI affordance for that plane/read.
-- A plane verb exposed via transports (MCP verb in mcpVerbs, or any verb that REST/MCP exposes) must correspond to a CLI contract entry.
+Every plane operation must map to a CLI contract entry. `PlaneDescriptor` gains an optional `cli?: Record<string, string>` field — op name → plugin name in `contract/cli.json` (`'next'`, `'act'`, `'convoy'`…). The declaration lives on the descriptor because the catalog is the contract: a plane author adding a named read declares its CLI twin in the same edit, and a missing entry is visible in the one place a reviewer looks.
 
-We need a parity check: enumerate all plane ops from the catalog (reads + mcpVerbs/exposed verbs across all registered planes) and assert each has a corresponding CLI contract entry. The CLI contract is the committed `contract/cli.json` plus the dump.
+Current twins (from each read's own doc-comment equivalent):
 
-### Implementation
+| plane.op           | CLI contract entry |
+| ------------------ | ------------------ |
+| `work.ready`       | `next`             |
+| `work.status`      | `status`           |
+| `agents.backends`  | `agents`           |
+| `agents.fleet`     | `fleet`            |
+| `agents.delegate`  | `delegate`         |
+| `queue.next`       | `convoy`           |
+| `gates.status`     | `act`              |
+| `gates.threads`    | `act`              |
+| `events.tail`      | `bus`              |
+| `events.lifecycle` | `bus`              |
+| `events.activity`  | `watch`            |
+| `judge.stats`      | `judge`            |
+| `debt.next`        | `debt`             |
+| `debt.summary`     | `debt`             |
+| `learn.probe`      | `learn`            |
 
-Add a parity check function. Options:
-1. Add to `bro contract check` — extend the existing contract gate to also verify plane parity.
-2. Add a separate check script (e.g. `scripts/check-plane-parity.ts`) and wire into CI/package.json.
-3. Add to `scripts/check-contract.ts` or create a new check integrated into tests.
+### The checked surface — reads ∪ mcpVerbs
 
-The task says "verify like CI before opening the PR" - probably need to add a check that runs in CI. Let us look up how checks are done. Also look up package.json - there's `check:contract` already. Maybe add `check:planes` or extend `check:contract`?
+The parity check enumerates `reads` and `mcpVerbs` — the ops a transport can actually serve. `verbs` outside `mcpVerbs` are declared-but-unwired: every transport path (MCP tool generation, REST `POST …/<verb>` gate, `exec`) dead-ends them in `PlaneUnavailable`/`PlaneVerbError`, so they serve nothing and need no twin. When a spec wires a verb it lands in `mcpVerbs` (or an equivalent exposure list) and the twin requirement applies. `list`/`get` are the universal read pair — identical shape on every plane — and stay out of the per-op map; their CLI twins are the same table/row commands the named reads use.
 
-Also look up the full picture of tests - maybe add a test for parity. Let us look up existing patterns.
+### The check — inside the contract gate
 
-### Contract entries for plane ops
+`planeParityProblems(catalog, live)` in `packages/cli/src/commands/contract-parity.ts` is pure: for each exposed op it reports a `breaking` problem at `planes.<plane>.<op>` when `cli[op]` is undeclared or names a command absent from the live dump's `commands` map. `cmdGate` appends the result after `reconcileContract`, so:
 
-Need to define what counts as a "CLI contract entry". The CLI contract (`contract/cli.json`) is built from registry plugins via `bro contract dump`. Each plugin/command has entries in the contract. Planes are not CLI commands - they're a different abstraction (served by `bro serve` and `bro mcp`). But the requirement says "every MCP/REST plane op maps to a CLI contract entry" - so there must be CLI commands/contract entries that correspond to accessing/manipulating those plane operations.
+- `bro contract check` (CI step `check:contract` → `scripts/check-contract.ts`) fails on orphan ops — no new CI wiring.
+- `bro contract gen` refuses — a missing twin is breaking, not stale; regenerating the file can never paper a forked surface.
+- `--dump` fixtures get the same verdict — parity is judged against whatever surface is being checked.
+- `breaking` (not `stale`/`ledger`) is the kind: a parity miss is fixed by code (declare the twin or add the command), never by regen or a BREAKING.md bullet.
 
-Alternatively, maybe each plane operation must have a corresponding CLI command? Let us look up how planes are consumed. For example, `bro fleet` relates to agents plane, `bro status`/work plane operations, etc. Or maybe the CLI contract needs to include plane operation mappings.
+Checking `live` rather than the committed file is sufficient: a mapped command that exists only live is already stale drift; a committed entry naming a deleted command is breaking drift. The catalog comes from `planes(process.cwd())` — `contract-cli.ts` imports `../planes/index.ts` for the registration side effect, so the module stays self-contained (the same seam `mcp.ts`/`serve.ts` use).
 
-Alternatively, looking up the architecture again: "planes declare what bro serves a client. Transports (REST, SSE, MCP) are generated projections of this catalog" and "Transports must stay adapters over the CLI/plane contract (owner decision). Without a parity check MCP/REST can grow ops the CLI lacks and the contract forks."
+### The `--json` schema clause
 
-So the CLI contract (the command contract) is the source of truth - transports must be adapters over it. That means plane operations must derive from/match CLI contract entries. So we need to enforce that mapping.
+The bead's "compatible --json schema (A2)" rides on bro-pbfdp's contract work, which seeded schemas for the agent-facing reads (`next`, `status`, `act.status`, `fleet`, `agents.status`, `debt.next`). Twins without a declared schema today (`convoy`, `bus`, `watch`, `judge`, `learn`) are pre-existing schema gaps, not parity violations — the parity gate checks existence of the contract entry; deepening it to schema-compatibility is follow-up debt once the `--json` surface is fully declared.
 
-Let us look up the codebase more. Also look up how others interpret this - maybe look up similar naming in specs. Also look up bro-9rls more - the planes are facades out of bro; CLI commands are the primary interface. Maybe each plane op needs to be exposed via CLI commands and tracked in the CLI contract?
+## Verify
 
-Alternatively, let us look up the full test expectations by looking up how tests might expect this. Let us search more.
+- `npx tsx --test packages/cli/src/commands/contract.test.ts` — `planeParityProblems` unit coverage (unmapped op, absent twin, mcpVerbs enumerated, unwired verbs skipped) plus an `orphan` fixture plane failing `runContractCommand check` with exit 1 at `planes.orphan.zap`.
+- `npx tsx --test packages/cli/src/planes/planes.test.ts` — the real catalog is parity-clean against `buildDump(PLUGINS, GROUP_META)` (the rot-guard: a new read/mcpVerb without a twin fails here before CI does).
+- `npm run check:contract` stays green on the committed contract.

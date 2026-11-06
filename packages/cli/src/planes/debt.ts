@@ -2,16 +2,11 @@
  *  `bro debt summary`. Rows are Finding keyed on thread_id; a missing
  *  ledger is an empty store (valid zero), never an unavailable one
  *  (specs/bro-9rls.1.md). */
-import {
-  verbsNotWired,
-  type Finding,
-  type PlaneCtx,
-  type PlaneDescriptor,
-} from '@broject/core'
-import { buildSummary, readDebtRecords, type DebtRecord } from '@broject/debt'
-import { argString, dispatchRead } from './helpers.ts'
+import { verbsNotWired, type Finding, type PlaneCtx, type PlaneDescriptor } from '@broject/core';
+import { buildSummary, readDebtRecords, type DebtRecord } from '@broject/debt';
+import { argString, dispatchRead } from './helpers.ts';
 
-const VERBS = ['collect', 'set']
+const VERBS = ['collect', 'set'];
 
 /** cmdNext's ranking — priority first, oldest within a tier. Kept in
  *  lockstep with commands/debt.ts: the plane never invents its own
@@ -22,7 +17,7 @@ const PRIORITY_RANK: Record<DebtRecord['priority'], number> = {
   nit: 2,
   scan: 3,
   noise: 4,
-}
+};
 
 const toFinding = (r: DebtRecord): Finding => ({
   id: r.thread_id,
@@ -39,47 +34,52 @@ const toFinding = (r: DebtRecord): Finding => ({
   harvested_at: r.harvested_at,
   fix_pr: r.fix_pr,
   fixed_at: r.fixed_at,
-})
+});
 
 const openRank = (a: DebtRecord, b: DebtRecord): number =>
   PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
-  a.harvested_at.localeCompare(b.harvested_at)
+  a.harvested_at.localeCompare(b.harvested_at);
 
 export function debtPlane(ctx: PlaneCtx): PlaneDescriptor {
-  const dir = ctx.dir
-  const records = () => readDebtRecords(dir)
+  const dir = ctx.dir;
+  const records = () => readDebtRecords(dir);
   const filtered = (a?: Record<string, unknown>): Finding[] => {
-    const status = argString(a, 'status')
-    const area = argString(a, 'area')
-    const author = argString(a, 'author')
+    const status = argString(a, 'status');
+    const area = argString(a, 'area');
+    const author = argString(a, 'author');
     return records()
       .filter(
-        (r) =>
+        r =>
           (status === undefined || r.status === status) &&
           (area === undefined || r.area === area) &&
           (author === undefined || r.author === author)
       )
-      .map(toFinding)
-  }
+      .map(toFinding);
+  };
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     /** `bro debt next` (without --claim) — the top open finding under
      *  the command's ranking, or null when the ledger has none. */
-    next: (a) => {
-      const area = argString(a, 'area')
-      const author = argString(a, 'author')
+    next: a => {
+      const area = argString(a, 'area');
+      const author = argString(a, 'author');
       const row = records()
-        .filter((r) => r.status === 'open')
-        .filter((r) => (area === undefined || r.area === area) && (author === undefined || r.author === author))
-        .sort(openRank)[0]
-      return row === undefined ? null : toFinding(row)
+        .filter(r => r.status === 'open')
+        .filter(
+          r =>
+            (area === undefined || r.area === area) && (author === undefined || r.author === author)
+        )
+        .sort(openRank)[0];
+      return row === undefined ? null : toFinding(row);
     },
     /** `bro debt summary` — the ledger rollup the command prints. */
     summary: () => buildSummary(records()),
-  }
+  };
   return {
     name: 'debt',
     reads: Object.keys(reads),
     verbs: VERBS,
+    /** CLI twins — `bro debt next` / `bro debt summary` (spec bro-xiq2m). */
+    cli: { next: 'debt', summary: 'debt' },
     readArgs: {
       list: {
         type: 'object',
@@ -97,13 +97,16 @@ export function debtPlane(ctx: PlaneCtx): PlaneDescriptor {
       summary: { type: 'object', properties: {} },
     },
     capabilities: async () => ({ read: true, collect: false, set: false }),
-    list: async (f) => {
-      const rows = filtered(f)
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined
-      return limit === undefined ? rows : rows.slice(0, limit)
+    list: async f => {
+      const rows = filtered(f);
+      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
+      return limit === undefined ? rows : rows.slice(0, limit);
     },
-    get: async (ref) => records().map(toFinding).find((r) => r.id === ref),
+    get: async ref =>
+      records()
+        .map(toFinding)
+        .find(r => r.id === ref),
     read: (name, args) => dispatchRead('debt', reads, name, args),
     exec: verbsNotWired('debt', VERBS),
-  }
+  };
 }

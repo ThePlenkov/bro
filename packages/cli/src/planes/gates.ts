@@ -13,27 +13,36 @@ import {
   type PlaneDescriptor,
   type PrTarget,
   type ReviewFacade,
-} from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache, resolveLedger, type ExitGate, type PrActState, type PrStateCache } from '@broject/act'
-import { argBool, argNumber, dispatchRead, inRepo } from './helpers.ts'
+} from '@broject/core';
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  prStateCache,
+  resolveLedger,
+  type ExitGate,
+  type PrActState,
+  type PrStateCache,
+} from '@broject/act';
+import { argBool, argNumber, dispatchRead, inRepo } from './helpers.ts';
 
-const VERBS = ['resolve', 'reply', 'merge']
+const VERBS = ['resolve', 'reply', 'merge'];
 
 /** resolvePr's plane twin — an explicit number or the current branch's
  *  OPEN PR; `null` when the branch has none (absence, not an error). */
 function resolveTarget(rev: ReviewFacade, args?: Record<string, unknown>): PrTarget | null {
-  const repo = rev.resolveRepo([])
-  const raw = args?.pr ?? args?.ref
+  const repo = rev.resolveRepo([]);
+  const raw = args?.pr ?? args?.ref;
   if (raw === undefined) {
-    const cur = rev.currentPr()
-    return cur !== null && cur.state === 'OPEN' ? { repo, pr: cur.pr } : null
+    const cur = rev.currentPr();
+    return cur !== null && cur.state === 'OPEN' ? { repo, pr: cur.pr } : null;
   }
-  const pr = typeof raw === 'number' ? raw : Number(argNumber({ pr: raw }, 'pr') ?? Number.NaN)
+  const pr = typeof raw === 'number' ? raw : Number(argNumber({ pr: raw }, 'pr') ?? Number.NaN);
   if (!Number.isInteger(pr) || pr <= 0) {
-    const shown = typeof raw === 'string' ? raw : JSON.stringify(raw)
-    throw new PlaneVerbError('gates', 'get', `invalid pr "${shown}"`)
+    const shown = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    throw new PlaneVerbError('gates', 'get', `invalid pr "${shown}"`);
   }
-  return { repo, pr }
+  return { repo, pr };
 }
 
 async function stateOf(
@@ -42,10 +51,10 @@ async function stateOf(
   t: PrTarget,
   cache: PrStateCache | null
 ): Promise<{
-  state: PrActState
-  gate: ExitGate
+  state: PrActState;
+  gate: ExitGate;
 }> {
-  const act = loadConfig(ctx.dir).act
+  const act = loadConfig(ctx.dir).act;
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
     checkHistory: checkHistory(ctx.dir),
@@ -56,8 +65,8 @@ async function stateOf(
     approvers: act.approvers,
     stateCache: cache,
     resolveLedger: resolveLedger(ctx.dir),
-  })
-  return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
+  });
+  return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) };
 }
 
 const gateRow = (state: PrActState, gate: ExitGate): Gate => ({
@@ -73,64 +82,68 @@ const gateRow = (state: PrActState, gate: ExitGate): Gate => ({
   sastPending: gate.sast_pending,
   blockers: gate.blockers,
   alerts: gate.alerts,
-})
+});
 
 export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
-  const dir = ctx.dir
+  const dir = ctx.dir;
   // the shared feed — every plane read is observe-only (bro-0tcrl)
-  const cache = prStateCache(dir)
+  const cache = prStateCache(dir);
   /** null = no review host serves this repo — honest absence */
   const host = (): ReviewFacade | null => {
     try {
-      return reviewHost(dir, ctx.connectors)
+      return reviewHost(dir, ctx.connectors);
     } catch {
-      return null
+      return null;
     }
-  }
+  };
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     /** `bro act status --json` — full state + the exit gate, or null
      *  when no open PR resolves (absence, not an error). */
-    status: async (a) => {
-      const rev = host()
+    status: async a => {
+      const rev = host();
       if (rev === null) {
-        throw new PlaneUnavailable('gates', 'no review connector serves this repo')
+        throw new PlaneUnavailable('gates', 'no review connector serves this repo');
       }
-      const t = resolveTarget(rev, a)
+      const t = resolveTarget(rev, a);
       if (t === null) {
-        return null
+        return null;
       }
-      const { state, gate } = await stateOf(ctx, rev, t, cache)
-      return { pr: state, gate }
+      const { state, gate } = await stateOf(ctx, rev, t, cache);
+      return { pr: state, gate };
     },
     /** `bro act threads` — unresolved threads by default; `all: true`
      *  includes resolved/outdated for archaeology. */
-    threads: async (a) => {
-      const rev = host()
+    threads: async a => {
+      const rev = host();
       if (rev === null) {
-        throw new PlaneUnavailable('gates', 'no review connector serves this repo')
+        throw new PlaneUnavailable('gates', 'no review connector serves this repo');
       }
-      const t = resolveTarget(rev, a)
+      const t = resolveTarget(rev, a);
       if (t === null) {
-        return null
+        return null;
       }
-      const threads = await rev.reviewThreads(t)
-      return argBool(a, 'all') === true ? threads : threads.filter((th) => !th.resolved)
+      const threads = await rev.reviewThreads(t);
+      return argBool(a, 'all') === true ? threads : threads.filter(th => !th.resolved);
     },
-  }
+  };
   return {
     name: 'gates',
     reads: Object.keys(reads),
     verbs: VERBS,
+    /** CLI twin — `bro act status` / `bro act threads` (spec bro-xiq2m). */
+    cli: { status: 'act', threads: 'act' },
     readArgs: {
       list: { type: 'object', properties: {} },
       status: {
         type: 'object',
-        properties: { pr: { type: 'integer', description: 'PR number; default: current branch\'s open PR' } },
+        properties: {
+          pr: { type: 'integer', description: "PR number; default: current branch's open PR" },
+        },
       },
       threads: {
         type: 'object',
         properties: {
-          pr: { type: 'integer', description: 'PR number; default: current branch\'s open PR' },
+          pr: { type: 'integer', description: "PR number; default: current branch's open PR" },
           all: { type: 'boolean', description: 'include resolved/outdated threads' },
         },
       },
@@ -144,30 +157,30 @@ export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
       merge: false,
     }),
     list: async () => {
-      const rev = host()
+      const rev = host();
       if (rev === null) {
-        throw new PlaneUnavailable('gates', 'no review connector serves this repo')
+        throw new PlaneUnavailable('gates', 'no review connector serves this repo');
       }
-      const t = resolveTarget(rev)
+      const t = resolveTarget(rev);
       if (t === null) {
-        return []
+        return [];
       }
-      const { state, gate } = await stateOf(ctx, rev, t, cache)
-      return [gateRow(state, gate)]
+      const { state, gate } = await stateOf(ctx, rev, t, cache);
+      return [gateRow(state, gate)];
     },
-    get: async (ref) => {
-      const rev = host()
+    get: async ref => {
+      const rev = host();
       if (rev === null) {
-        throw new PlaneUnavailable('gates', 'no review connector serves this repo')
+        throw new PlaneUnavailable('gates', 'no review connector serves this repo');
       }
-      const t = resolveTarget(rev, { pr: ref })
+      const t = resolveTarget(rev, { pr: ref });
       if (t === null) {
-        return undefined
+        return undefined;
       }
-      const { state, gate } = await stateOf(ctx, rev, t, cache)
-      return gateRow(state, gate)
+      const { state, gate } = await stateOf(ctx, rev, t, cache);
+      return gateRow(state, gate);
     },
     read: (name, args) => dispatchRead('gates', reads, name, args),
     exec: verbsNotWired('gates', VERBS),
-  }
+  };
 }

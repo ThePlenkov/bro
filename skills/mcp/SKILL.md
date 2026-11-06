@@ -17,6 +17,29 @@ per declared named read (`bro_work_ready`, `bro_queue_next`,
 `bro_events_tail`, `bro_judge_stats`, `bro_debt_next`,
 `bro_debt_summary`, `bro_learn_probe`).
 
+**Every tool mirrors a CLI command** — the transport is an adapter
+over the CLI contract, never a parallel surface (spec bro-xiq2m). Each
+plane op declares its twin in the descriptor's `cli` map, and
+`bro contract check` fails CI on an op without one:
+
+| Tool                   | CLI equivalent       |
+| ---------------------- | -------------------- |
+| `bro_work_ready`       | `bro next --list`    |
+| `bro_work_status`      | `bro status`         |
+| `bro_agents_backends`  | `bro agents status`  |
+| `bro_agents_fleet`     | `bro fleet`          |
+| `bro_agents_delegate`  | `bro fleet delegate` |
+| `bro_queue_next`       | `bro convoy next`    |
+| `bro_gates_status`     | `bro act status`     |
+| `bro_gates_threads`    | `bro act threads`    |
+| `bro_events_tail`      | `bro bus subscribe`  |
+| `bro_events_lifecycle` | `bro bus subscribe`  |
+| `bro_events_activity`  | `bro watch`          |
+| `bro_judge_stats`      | `bro judge stats`    |
+| `bro_debt_next`        | `bro debt next`      |
+| `bro_debt_summary`     | `bro debt summary`   |
+| `bro_learn_probe`      | `bro learn probe`    |
+
 **Read-only except spec-assigned verbs.** Write verbs stay unexposed
 until a spec assigns one to this transport through the descriptor's
 `mcpVerbs` allowlist — generation is the only path, so a verb cannot

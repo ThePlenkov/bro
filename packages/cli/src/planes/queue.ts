@@ -8,7 +8,7 @@ import {
   type PlaneCtx,
   type PlaneDescriptor,
   type Run,
-} from '@broject/core'
+} from '@broject/core';
 import {
   listMolecules,
   loadMolecule,
@@ -16,20 +16,15 @@ import {
   resolveMolecule,
   stepInputs,
   stepsOf,
-} from '@broject/convoy'
-import type { ConvoyStep, Molecule } from '@broject/convoy'
-import { argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts'
+} from '@broject/convoy';
+import type { ConvoyStep, Molecule } from '@broject/convoy';
+import { argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts';
 
 /** A mol whose own read fails is a row in error — never a fake
  *  'blocked' the whole list would have to carry, and never a thrown
  *  list. Covers nextStep() inside molRow and loadMolecule() in list —
  *  a mol that vanishes between listing and loading lands here. */
-const molErrorRow = (
-  id: string,
-  title: string,
-  status: string,
-  err: unknown
-): Run => ({
+const molErrorRow = (id: string, title: string, status: string, err: unknown): Run => ({
   id,
   title,
   status,
@@ -40,11 +35,11 @@ const molErrorRow = (
   inProgress: [],
   blocked: [],
   stuck: [],
-})
+});
 
 const molRow = (mol: Molecule): Run => {
   try {
-    const n = nextStep(mol)
+    const n = nextStep(mol);
     return {
       id: mol.root.id,
       title: mol.root.title,
@@ -55,27 +50,29 @@ const molRow = (mol: Molecule): Run => {
       inProgress: n.inProgress,
       blocked: n.blocked,
       stuck: n.stuck,
-    }
+    };
   } catch (err) {
-    return molErrorRow(mol.root.id, mol.root.title, mol.root.status, err)
+    return molErrorRow(mol.root.id, mol.root.title, mol.root.status, err);
   }
-}
+};
 
 export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
-  const dir = ctx.dir
+  const dir = ctx.dir;
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     /** `bro convoy next --json` — the mol's own ConvoyNext plus the
      *  closed-dependency handoff (inputs), verbatim. */
-    next: (a) => {
-      const mol = resolveMolecule(argString(a, 'mol'))
-      const n = nextStep(mol)
-      return n.step === undefined ? n : { ...n, inputs: stepInputs(mol, n.step.id) }
+    next: a => {
+      const mol = resolveMolecule(argString(a, 'mol'));
+      const n = nextStep(mol);
+      return n.step === undefined ? n : { ...n, inputs: stepInputs(mol, n.step.id) };
     },
-  }
+  };
   return {
     name: 'queue',
     reads: Object.keys(reads),
     verbs: ['pour', 'claim', 'done'],
+    /** CLI twin — `bro convoy next` (spec bro-xiq2m). */
+    cli: { next: 'convoy' },
     readArgs: {
       list: {
         type: 'object',
@@ -83,7 +80,9 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
       },
       next: {
         type: 'object',
-        properties: { mol: { type: 'string', description: 'molecule id; default: the single open mol' } },
+        properties: {
+          mol: { type: 'string', description: 'molecule id; default: the single open mol' },
+        },
       },
     },
     capabilities: async () => ({
@@ -94,48 +93,48 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
       claim: false,
       done: false,
     }),
-    list: async (f) => {
+    list: async f => {
       if (!inRepo(dir)) {
-        throw new PlaneUnavailable('queue', 'not a git repo')
+        throw new PlaneUnavailable('queue', 'not a git repo');
       }
-      let mols
+      let mols;
       try {
-        mols = listMolecules()
+        mols = listMolecules();
       } catch (err) {
-        throw new PlaneUnavailable('queue', err instanceof Error ? err.message : String(err))
+        throw new PlaneUnavailable('queue', err instanceof Error ? err.message : String(err));
       }
-      const rows = mols.map((m) => {
+      const rows = mols.map(m => {
         try {
-          return molRow(loadMolecule(m.id))
+          return molRow(loadMolecule(m.id));
         } catch (err) {
-          return molErrorRow(m.id, m.title, m.status, err)
+          return molErrorRow(m.id, m.title, m.status, err);
         }
-      })
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined
-      return limit === undefined ? rows : rows.slice(0, limit)
+      });
+      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
+      return limit === undefined ? rows : rows.slice(0, limit);
     },
-    get: async (ref) => {
+    get: async ref => {
       if (!inRepo(dir)) {
-        throw new PlaneUnavailable('queue', 'not a git repo')
+        throw new PlaneUnavailable('queue', 'not a git repo');
       }
-      let mol: Molecule
+      let mol: Molecule;
       try {
-        mol = loadMolecule(ref)
+        mol = loadMolecule(ref);
       } catch (err) {
         if (isBdNotFound(err)) {
-          return undefined
+          return undefined;
         }
-        throw new PlaneUnavailable('queue', err instanceof Error ? err.message : String(err))
+        throw new PlaneUnavailable('queue', err instanceof Error ? err.message : String(err));
       }
-      const row = molRow(mol)
-      const n = nextStep(mol)
+      const row = molRow(mol);
+      const n = nextStep(mol);
       return {
         ...row,
         steps: stepsOf(mol),
         inputs: n.step === undefined ? undefined : stepInputs(mol, n.step.id),
-      }
+      };
     },
     read: (name, args) => dispatchRead('queue', reads, name, args),
     exec: verbsNotWired('queue', ['pour', 'claim', 'done']),
-  }
+  };
 }
