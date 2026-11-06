@@ -96,6 +96,14 @@ Developing bro itself: see CONTRIBUTING.md.
   mirrors the merge target: draft iff a human merges (`merge=human`);
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
+- **Work the user wants to TRY stays a draft** — a draft cannot auto-merge,
+  so the merge waits for a human by construction. No `gh pr merge --auto`
+  and no `bro act wait --merge` on such a PR: a label that says "a human
+  merges" must never carry a machine that merges it. And the live runtime
+  is not rebuilt or redeployed until the user merges the PR or says go —
+  the running service is the machine they are using, and a change lands
+  there only after they chose it. Auto-merge, the act gate, and a redeploy
+  belong to work the user asked to SHIP (bead bro-l4mzg).
 - **Auto-merge is armed at PR creation** — `gh pr merge --auto
   --squash` right after `gh pr create`, every PR: it lands the merge
   once GitHub's required checks pass. What auto-merge does NOT see:
