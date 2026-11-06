@@ -216,6 +216,12 @@ export type SpawnWorker =
       /** Display/agent-cli name for pins and trailers — the wrapped
        *  agent's own cli name, not the driver's. */
       cliName?: string;
+      /** ACP worker MCP server descriptors (opt-in). Bulk data rides
+       *  the payload — never argv, where a stdio server's `env`
+       *  credentials would be world-readable in ps/procfs. The backend
+       *  lands it as a 0600 artifact the worker reads via the
+       *  BRO_MCP_FILE pin. */
+      mcpServers?: unknown[];
     };
 
 /** The pipeline context a formula-driven spawn carries (spec

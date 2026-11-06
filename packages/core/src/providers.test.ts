@@ -502,6 +502,68 @@ describe('parseProviderEntry', () => {
     );
     assert.throws(() => resolveApiModel({ ...entry, model: undefined }, undefined), /name one/);
   });
+
+  test('acp mcpServers opt-in parses stdio descriptors and rejects unsupported transports with remediation', () => {
+    const e = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo acp',
+      mcpServers: [{ type: 'stdio', name: 'bro', command: 'bro', args: ['mcp'], env: [] }],
+    });
+    assert.equal(e?.type, 'acp');
+    assert.deepEqual((e as { mcpServers?: unknown[] } | null)?.mcpServers, [
+      { type: 'stdio', name: 'bro', command: 'bro', args: ['mcp'], env: [] },
+    ]);
+
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => {
+      errs.push(a.map(String).join(' '));
+    };
+    try {
+      const http = parseProviderEntry('p', {
+        type: 'acp',
+        command: 'kilo acp',
+        mcpServers: [
+          {
+            type: 'http',
+            name: 'x',
+            url: 'https://x',
+            headers: [{ name: 'Authorization', value: 'SECRET' }],
+          },
+        ],
+      });
+      assert.equal(http, null);
+    } finally {
+      console.error = orig;
+    }
+    const stderr = errs.join('\n');
+    assert.match(stderr, /transport 'http'/);
+    assert.match(stderr, /stdio descriptor/);
+    assert.doesNotMatch(stderr, /SECRET/);
+
+    // a malformed env shape fails loud at parse — a numeric value would
+    // otherwise die obscurely inside session/new
+    const badEnv = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo acp',
+      mcpServers: [{ type: 'stdio', name: 'x', command: 'c', env: [{ name: 'K', value: 42 }] }],
+    });
+    assert.equal(badEnv, null);
+
+    // required stdio wire fields fail loud at parse for the same reason —
+    // ACP session/new would reject them as an opaque session-start error
+    for (const mcpServers of [
+      [{ type: 'stdio', name: 'x', args: [] }], // no command
+      [{ type: 'stdio', name: 'x', command: 7, args: [] }], // numeric command
+      [{ type: 'stdio', name: 'x', command: 'c', args: 'mcp' }], // string args
+      [{ type: 'stdio', name: 'x', command: 'c', args: ['ok', 3] }], // non-string arg
+    ]) {
+      assert.equal(parseProviderEntry('p', { type: 'acp', command: 'kilo acp', mcpServers }), null);
+    }
+
+    const absent = parseProviderEntry('p', { type: 'acp', command: 'kilo acp' });
+    assert.equal((absent as { mcpServers?: unknown[] } | null)?.mcpServers, undefined);
+  });
 });
 
 describe('providerCallGrade — the RESOLVED grade (spec bro-1x7p M7)', () => {

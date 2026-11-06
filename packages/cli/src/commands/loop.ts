@@ -69,7 +69,6 @@ import {
   facadeName,
   getTasks,
   gitBranchLog,
-  gitCommonDir,
   gitTry,
   holdRoleLease,
   localLeaseStore,
@@ -183,8 +182,9 @@ import {
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
-import { MIN_INTERVAL_SEC } from './drive-config.ts';
-
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
+import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -273,6 +273,9 @@ const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
     `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+       bro loop [--every SEC]        run in supervised loop mode
+       bro loop install [--every N] [--print]
+       bro loop uninstall
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -299,6 +302,7 @@ function usage(exitCode: ExitCode = 2): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
+  --every SEC                    supervised loop cadence, ≥${MIN_INTERVAL_SEC}s
   --interval SEC                 gate poll interval, ≥0.1s (60)`,
     exitCode
   );
@@ -2680,6 +2684,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--disk-min-slots',
   '--batch',
   '--interval',
+  '--every',
   '--label',
   '--stack',
   '--provider',
@@ -2687,19 +2692,119 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print']);
+
+function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
+  // install arms and uninstall disarms — both are the orchestrator's
+  // own authority over the supervisor cadence; a spawned worker owns
+  // neither side of it
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never own the supervisor; ' +
+        'the orchestrator session owns it'
+    );
+    process.exit(2);
+  }
+  // a typo'd flag (`--evry`) or a stray positional must not silently
+  // install the configured cadence — whitelist each verb's argv before
+  // any mutation
+  const installArgv = argv[0] === 'install';
+  const stray = positionals(argv.slice(1), installArgv ? new Set(['--every']) : new Set(), {
+    boolFlags: installArgv
+      ? new Set(['--print', '--dry-run', '--help'])
+      : new Set(['--dry-run', '--help']),
+    strict: true,
+  });
+  if (stray.length > 0) {
+    console.error(`error: unexpected argument '${stray[0]}'`);
+    process.exit(2);
+  }
+  if (argv[0] === 'uninstall') {
+    if (argv.includes('--dry-run')) {
+      const marker = readLoopMarker(dir);
+      console.log(
+        marker === null
+          ? 'loop uninstall — no install marker; nothing would be disarmed'
+          : `loop uninstall — would disarm the marker (every ${marker.everySec}s) and SIGTERM the loop supervisor`
+      );
+      return;
+    }
+    const r = uninstallLoop(dir);
+    console.log(r.detail);
+    if (r.state === 'error') {
+      process.exit(1);
+    }
+    return;
+  }
+  const everyRaw = flag(argv, '--every');
+  const everySec = everyRaw === undefined ? loopCfg.everySec : Number(everyRaw);
+  // the marker cadence bounds are the want-marker's — the same
+  // MIN/MAX_INTERVAL_SEC every supervised entrypoint validates against
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    );
+    process.exit(2);
+  }
+  // --dry-run is the preview verb here just like --print: plan, don't arm
+  const print = argv.includes('--print') || argv.includes('--dry-run');
+  const r = installLoop(dir, { everySec, print });
+  console.log(r.detail);
+  if (r.state === 'error') {
+    process.exit(1);
+  }
+}
+
+/** Supervised mode — `daemon run --loop` and `loop install` reach
+ *  `runLoopCommand` through the marker; `--every` is the outer re-scan
+ *  cadence (the queue drains, the pass sleeps, the next pass rescans),
+ *  while `--interval` stays the in-run gate poll. The same arming guard
+ *  as `bro drive --every` applies — spawned workers never own a
+ *  supervisor cadence; the orchestrator session does. */
+function everySecArg(argv: string[]): number | undefined {
+  const everyRaw = flag(argv, '--every');
+  if (everyRaw === undefined) {
+    return undefined;
+  }
+  const everySec = Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+    );
+    process.exit(2);
+  }
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+        'the orchestrator session owns the cadence'
+    );
+    process.exit(2);
+  }
+  return everySec;
+}
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  rejectStrayArgs(argv);
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim();
   if (!root) {
     console.error('bro loop: not inside a git worktree');
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
+  const loopCfg = broCfg.loop as LoopConfig;
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // install validates the configured tasks backend — a github-tasks
+    // rig has no beads to check; previews (--print/--dry-run) stay pure
+    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+      ensureTasksBackend(root, broCfg.connectors);
+    }
+    runLoopSched(argv, root, loopCfg);
+    return;
+  }
+  rejectStrayArgs(argv);
+  const everySec = everySecArg(argv);
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
@@ -2739,17 +2844,30 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       (ctx.env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
       { signal: abort.signal, onLost: () => releaseSupervisor() }
     );
-    const loopLock = gitCommonDir(root);
+    const loopLock = loopLockPath(root);
     if (loopLock !== null) {
-      releaseSupervisor = await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+      releaseSupervisor = await awaitFileLock(loopLock, {
         label: 'loop supervisor lock',
-        onStandby: pid =>
-          say(ctx, `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`),
+        onStandby: pid => {
+          const by = pid === null ? '' : ` by pid ${pid}`;
+          say(ctx, `loop: already supervised${by} — standing by`);
+        },
       });
     }
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
-    await guardedRun(ctx, releaseAll);
+    if (everySec === undefined) {
+      await guardedRun(ctx, releaseAll);
+    } else {
+      // supervised passes are strictly sequential — a pass drains the
+      // queue, then the supervisor sleeps until the next re-scan; the
+      // awaits must stay inside the loop, not fan out
+      for (;;) {
+        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
+      }
+    }
   } finally {
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
