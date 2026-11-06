@@ -31,9 +31,9 @@ export type DecisionProvider =
  *  calibrated judgment.
  *
  *  The token RIDES the entry: the api kind reads its key from the
- *  environment at call time, and a token in the process env is a token
- *  another decision can read — two repos, two routers, one process, and
- *  one request answers 401 for the other's endpoint. */
+ *  entry, and a token in the process env is a token another decision
+ *  can read — two repos, two routers, one process, and one request
+ *  answers 401 for the other's endpoint. */
 function proxiedEntry(model: string, url: string, token: string): ProviderEntry {
   return {
     type: 'api',
