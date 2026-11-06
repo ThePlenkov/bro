@@ -32,6 +32,10 @@ export interface ClientCall {
   toolCallId?: string;
 }
 
+/** The property names no input may carry — they decide an object's
+ *  shape, not its content. */
+const UNSHAPEABLE = ['__proto__', 'constructor', 'prototype'];
+
 /** The ACP kinds → the client tools that do the same thing, in order.
  *  The first candidate whose required properties the call covers wins. */
 const CAPABILITY: Record<string, string[]> = {
@@ -66,15 +70,34 @@ function capabilityOf(kind: unknown): string[] | undefined {
   return Array.isArray(wanted) ? wanted : undefined;
 }
 
+/** The request's tool contract — what the client allowed. A request that
+ *  withheld its tools (tool_choice: none) allows no call at all; a request
+ *  that NAMED a tool allows that one and no other. */
+export interface ToolContract {
+  /** false when the request withheld the tool contract */
+  allowed: boolean;
+  /** the tool the request named — undefined when it named none */
+  name?: string;
+}
+
+/** The contract of a request that said nothing about its tools. */
+export const OPEN_CONTRACT: ToolContract = { allowed: true };
+
 /** The ACP tool call → the client's tool call — undefined when the client
- *  offers no tool that can run it. */
-export function clientCall(u: AcpToolCall, tools: ClientTool[]): ClientCall | undefined {
+ *  offers no tool that can run it, or when the request's own contract
+ *  allows no call. */
+export function clientCall(
+  u: AcpToolCall,
+  tools: ClientTool[],
+  contract: ToolContract = OPEN_CONTRACT
+): ClientCall | undefined {
+  if (!contract.allowed) return undefined;
   if (u.sessionUpdate !== 'tool_call') return undefined;
   const wanted = capabilityOf(u.kind);
   if (wanted === undefined) return undefined;
   const raw = recordOf(u.rawInput);
   if (raw === undefined) return undefined;
-  for (const tool of matchingTools(wanted, tools)) {
+  for (const tool of matchingTools(wanted, tools, contract.name)) {
     const input = toolInput(tool, raw);
     if (input !== undefined) return { name: tool.name, input, toolCallId: u.toolCallId };
   }
@@ -83,10 +106,13 @@ export function clientCall(u: AcpToolCall, tools: ClientTool[]): ClientCall | un
 
 /** The client's tools that answer the capability — in the capability's own
  *  order, so "edit" prefers the client's Edit over its Write. */
-function matchingTools(wanted: string[], tools: ClientTool[]): ClientTool[] {
+function matchingTools(wanted: string[], tools: ClientTool[], named?: string): ClientTool[] {
+  // a request that named its tool asked for THAT tool: another tool of the
+  // same capability is a different contract
+  const offered = named === undefined ? tools : tools.filter(t => t.name === named);
   const out: ClientTool[] = [];
   for (const candidate of wanted) {
-    out.push(...tools.filter(t => t.name.toLowerCase() === candidate));
+    out.push(...offered.filter(t => t.name.toLowerCase() === candidate));
   }
   return out;
 }
@@ -102,12 +128,34 @@ function toolInput(
   for (const [key, value] of Object.entries(raw)) {
     const prop = propertyFor(tool, key);
     if (prop === undefined) continue;
-    if (value === undefined || value === null) continue;
+    // the property names come from the client's own schema, and a schema
+    // that declares one of these must not decide what the object we send
+    // inherits or becomes
+    if (UNSHAPEABLE.includes(prop)) continue;
+    if (value === undefined) continue;
+    // null is a value: the schema decides whether it is allowed, and the
+    // client validates its own input
+    if (!typeFits(tool, prop, value)) continue;
     input[prop] = value;
   }
-  if (Object.keys(input).length === 0) return undefined;
-  const missing = tool.required.filter(p => input[p] === undefined);
+  // a call with no input at all can still run a tool that takes no
+  // arguments; a call whose fields did not map is a call we cannot shape
+  if (Object.keys(input).length === 0 && Object.keys(raw).length > 0) return undefined;
+  const missing = tool.required.filter(p => !Object.hasOwn(input, p));
   return missing.length === 0 ? input : undefined;
+}
+
+/** The value's type against the schema's own — a call the client cannot run
+ *  never reaches it, and a number where the schema says string is such a
+ *  call. */
+function typeFits(tool: ClientTool, prop: string, value: unknown): boolean {
+  const declared = tool.types[prop];
+  if (declared === undefined || declared.length === 0) return true;
+  const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  if (declared.includes(actual)) return true;
+  // an integer is a number that counts
+  if (actual === 'number' && declared.includes('integer')) return Number.isInteger(value);
+  return false;
 }
 
 /** The raw input's field → the client's property — the schema's own name
