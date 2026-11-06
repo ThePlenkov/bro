@@ -113,6 +113,17 @@ test('a call the client cannot run is not invented', () => {
   );
 });
 
+test("the kind is the agent's — an inherited name is not a capability", () => {
+  // every object carries "toString" and "constructor": a plain lookup finds
+  // the prototype's function there and hands it to the tool matcher
+  for (const kind of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+    assert.equal(
+      clientCall({ sessionUpdate: 'tool_call', kind, rawInput: { command: 'ls' } }, CLAUDE_TOOLS),
+      undefined
+    );
+  }
+});
+
 test("the schema's own shape wins — the extra fields are dropped", () => {
   const call = clientCall(
     {
