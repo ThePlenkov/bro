@@ -83,11 +83,8 @@ export class RouteTableError extends Error {
   /** every problem, in the order they were found */
   readonly problems: string[];
 
-  constructor(problems: string[], source?: string) {
-    super(
-      `${source ?? 'route table'}: ${problems.length} problem(s)\n` +
-        problems.map(p => `  ${p}`).join('\n')
-    );
+  constructor(problems: string[], source: string = 'route table') {
+    super(`${source}: ${problems.length} problem(s)\n` + problems.map(p => `  ${p}`).join('\n'));
     this.name = 'RouteTableError';
     this.problems = problems;
   }
@@ -193,50 +190,70 @@ function match(raw: unknown, at: TablePath, problems: RouteProblems): RouteMatch
   return out;
 }
 
-/** The optional model of a chain entry — a present-but-bad model drops
- *  the entry. */
-function chainModel(raw: unknown, at: TablePath, problems: RouteProblems): string | undefined {
+/** The optional model of a chain entry — three cases, three answers:
+ *  absent (undefined), present and valid (the model), present and bad
+ *  (null). An absent model is a bare provider; a bad one drops the entry. */
+function chainModel(
+  raw: unknown,
+  at: TablePath,
+  problems: RouteProblems
+): string | null | undefined {
   if (raw === undefined) {
     return undefined;
   }
   if (typeof raw !== 'string') {
     problems.add(at.child('model'), 'must be a non-empty string');
-    return undefined;
+    return null;
   }
   const model = raw.trim();
   if (model === '') {
     problems.add(at.child('model'), 'must be a non-empty string');
-    return undefined;
+    return null;
   }
   return model;
 }
 
-/** One chain entry — a bare provider, or a table with the model. */
-function chainEntry(raw: unknown, at: TablePath, problems: RouteProblems): ChainEntry | undefined {
-  if (typeof raw === 'string') {
-    const provider = raw.trim();
-    if (provider === '') {
-      problems.add(at, 'must name a provider');
-      return undefined;
-    }
-    return { provider };
-  }
-  if (!isRecord(raw)) {
-    problems.add(at, 'must be a provider name or a table');
+/** A bare provider entry — the chain names a provider and no model. */
+function bareProvider(raw: string, at: TablePath, problems: RouteProblems): ChainEntry | undefined {
+  const provider = raw.trim();
+  if (provider === '') {
+    problems.add(at, 'must name a provider');
     return undefined;
   }
+  return { provider };
+}
+
+/** A chain entry that carries a model — the provider, and the model when
+ *  the route pinned one. */
+function tableEntry(
+  raw: Record<string, unknown>,
+  at: TablePath,
+  problems: RouteProblems
+): ChainEntry | undefined {
   const provider = typeof raw.provider === 'string' ? raw.provider.trim() : '';
   if (provider === '') {
     problems.add(at.child('provider'), 'must be a non-empty string');
     return undefined;
   }
   const model = chainModel(raw.model, at, problems);
-  if (raw.model !== undefined && model === undefined) {
+  if (model === null) {
     // the model was there and was bad: the entry is dropped, never
     // degraded into a bare provider — that would change the route
     return undefined;
   }
   return model === undefined ? { provider } : { provider, model };
+}
+
+/** One chain entry — a bare provider, or a table with the model. */
+function chainEntry(raw: unknown, at: TablePath, problems: RouteProblems): ChainEntry | undefined {
+  if (typeof raw === 'string') {
+    return bareProvider(raw, at, problems);
+  }
+  if (!isRecord(raw)) {
+    problems.add(at, 'must be a provider name or a table');
+    return undefined;
+  }
+  return tableEntry(raw, at, problems);
 }
 
 /** The chain — the models a request on this route lands on, in order. */

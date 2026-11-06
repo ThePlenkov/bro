@@ -79,6 +79,15 @@ test('a bare provider name is a chain entry', () => {
   assert.deepEqual(table.routes[0]?.chain, [{ provider: 'devin-acp' }]);
 });
 
+test('a chain entry with a bad model is an error — the entry is dropped, not degraded', () => {
+  const found = problems({
+    ...VALID,
+    routes: { edit: { chain: [{ provider: 'p', model: 42 }] } },
+  });
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /routes\.edit\.chain\[0\]\.model/);
+});
+
 test('an unknown onWall is an error naming the two words', () => {
   const found = problems({ ...VALID, routes: { edit: { chain: ['p'], onWall: 'skip' } } });
   assert.equal(found.length, 1);
