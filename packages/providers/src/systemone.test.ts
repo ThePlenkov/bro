@@ -78,6 +78,17 @@ describe('systemoneCall', () => {
       )
     }))
 
+  test('the runtime key wins over the env — the key travels with the call', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      await systemoneCall('b', { ...ENTRY, apiKey: 'runtime-key' }, { fetch })(
+        's',
+        QUESTIONS,
+        DEADLINE()
+      )
+      assert.equal(calls[0]!.init.headers?.authorization, 'Bearer runtime-key')
+    }))
+
   test('a missing key fails open naming the config FIELD, never the env name', () =>
     withKey(async () => {
       delete process.env.SYSTEMONE_TEST_KEY

@@ -17,10 +17,6 @@ import { isSystemoneFamily, loadConfig } from '@broject/core';
 import type { FleetRouter, ProviderEntry } from '@broject/core';
 import { readRouterEndpoint } from './gateway.ts';
 
-/** The env var the router's token rides in for a proxied call — the api
- *  kind reads its key from the environment. */
-const ROUTER_TOKEN_ENV = 'BRO_ROUTER_TOKEN';
-
 /** Where the decision model's provider points. */
 export type DecisionProvider =
   | { kind: 'lane'; name: string; entry: ProviderEntry }
@@ -32,15 +28,19 @@ export type DecisionProvider =
  *  /v1/chat/completions, /v1/messages, /v1/responses, /v1/models. The
  *  native typed judgment (the systemone wire) is NOT on its routes, so
  *  a proxied model answers in prose — prose-grade evidence, never a
- *  calibrated judgment. */
+ *  calibrated judgment.
+ *
+ *  The token RIDES the entry: the api kind reads its key from the
+ *  environment at call time, and a token in the process env is a token
+ *  another decision can read — two repos, two routers, one process, and
+ *  one request answers 401 for the other's endpoint. */
 function proxiedEntry(model: string, url: string, token: string): ProviderEntry {
-  process.env[ROUTER_TOKEN_ENV] = token;
   return {
     type: 'api',
     baseUrl: url,
     models: { [model]: 'openai-compat' },
     model,
-    apiKeyEnv: ROUTER_TOKEN_ENV,
+    apiKey: token,
   };
 }
 

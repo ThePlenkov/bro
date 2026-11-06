@@ -24,16 +24,20 @@ import type { ApiTarget, ProviderWireOpts } from './systemone.ts'
 /** The openai-compat wire needs baseUrl — the api kind's host root. */
 type OpenAiCompatEntry = ApiTarget & { baseUrl: string }
 
-/** Auth headers from the configured env var — a non-NAME apiKeyEnv is
- *  a config bug (throws, never echoed); a missing var is fail-open,
- *  and its message names the config FIELD, never the value — an
- *  all-caps pasted key passes isEnvName and would echo the secret
- *  verbatim. */
+/** Auth headers from the entry — the runtime key wins (it was handed to
+ *  THIS call on purpose), then the secret-store command, then the
+ *  configured env var; a non-NAME apiKeyEnv is a config bug (throws,
+ *  never echoed); a missing var is fail-open, and its message names the
+ *  config FIELD, never the value — an all-caps pasted key passes
+ *  isEnvName and would echo the secret verbatim. */
 function authHeaders(
   entry: OpenAiCompatEntry,
   keyField: string,
   deadline: number
 ): Record<string, string> {
+  if (entry.apiKey !== undefined) {
+    return { authorization: `Bearer ${entry.apiKey}` }
+  }
   if (entry.apiKeyCommand !== undefined) {
     return { authorization: `Bearer ${runKeyCommand(entry.apiKeyCommand, keyField, deadline)}` }
   }
@@ -44,7 +48,7 @@ function authHeaders(
     throw new Error(`${keyField} is not a valid environment variable name`)
   }
   const key = process.env[entry.apiKeyEnv]
-  if (key === undefined || key === '') {
+  if (!key) {
     throw new JudgeUnavailable(`the env var named by ${keyField} is not set — export it for the provider`)
   }
   return { authorization: `Bearer ${key}` }
