@@ -136,6 +136,40 @@ const member = (over: Partial<SyncMemberInput> & { n: number; slug: string }): S
 })
 
 describe('planSync', () => {
+  it('a base whose HEAD moved under the member schedules a rebase', () => {
+    // the base's NAME is the same, its commits are not: the member's
+    // branch no longer carries the base's head — a fix landed below
+    const plan = planSync(
+      [
+        member({ n: 1, slug: 'a', prState: 'OPEN', prBase: 'main', containsBaseHead: true }),
+        member({
+          n: 2,
+          slug: 'b',
+          edgeBase: 'stack/s/1-a',
+          prState: 'OPEN',
+          prBase: 'stack/s/1-a',
+          containsBaseHead: false,
+        }),
+      ],
+      'main'
+    )
+    assert.equal(plan[0]!.rebase, false)
+    assert.equal(plan[1]!.rebase, true)
+    // the retarget is not owed — the base's name did not change
+    assert.equal(plan[1]!.retarget, false)
+  })
+
+  it('an unknown head never schedules a rewrite', () => {
+    const plan = planSync(
+      [
+        member({ n: 1, slug: 'a', prState: 'OPEN', prBase: 'main' }),
+        member({ n: 2, slug: 'b', edgeBase: 'stack/s/1-a', prState: 'OPEN', prBase: 'stack/s/1-a' }),
+      ],
+      'main'
+    )
+    assert.equal(plan[1]!.rebase, false)
+  })
+
   it('in-sync stack produces no actions', () => {
     const plan = planSync(
       [

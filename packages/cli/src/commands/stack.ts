@@ -494,6 +494,107 @@ function retireMerged(
   )
 }
 
+/** The branch a member stands on — its PR's declared base, else the
+ *  recorded edge, else the chain's previous member. */
+function baseOf(m: MemberView, prev: string): string {
+  return m.prBase ?? m.edgeBase ?? prev
+}
+
+/**
+ * Does the branch still carry the head of the base it stands on? The
+ * chain's base==prev-head invariant, read from the git truth. A fix that
+ * landed BELOW the member moves that head while the base's NAME stays
+ * the same — the name alone reads as "in sync", the head says otherwise,
+ * and without this the operator rebases the chain by hand. An unreadable
+ * head reads as "carries": an unknown truth never schedules a rewrite.
+ */
+function carriesBaseHead(branch: string, base: string, root: string): boolean {
+  const baseHead = gitTry([
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${base}`,
+  ]).out.trim()
+  const memberHead = gitTry([
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${branch}`,
+  ]).out.trim()
+  if (baseHead === '' || memberHead === '') {
+    return true
+  }
+  return gitTry(['-C', root, 'merge-base', '--is-ancestor', baseHead, memberHead]).code === 0
+}
+
+/** The heads the plan reads — one flag per member. */
+function markBaseHeads(members: MemberView[], root: string, defaultBase: string): void {
+  let prev = defaultBase
+  for (const m of members) {
+    m.containsBaseHead = carriesBaseHead(m.branch, baseOf(m, prev), root)
+    prev = m.branch
+  }
+}
+
+/**
+ * The chain's ROOT base — the branch its first member stands on. A chain
+ * that roots on something other than the default branch (the router's arc
+ * roots on its own PR) must not be planned onto the default: the root is
+ * the chain's own, and the plan follows it.
+ */
+function chainRootBase(members: MemberView[], defaultBase: string): string {
+  const first = members[0]
+  if (first === undefined) return defaultBase
+  return first.prBase ?? first.edgeBase ?? defaultBase
+}
+
+/**
+ * Where the child's own work starts — the fork point for a rebase onto a
+ * base whose history moved. The plain merge-base is right when the child
+ * was built on the base's CURRENT tip. When the base was REWRITTEN under
+ * the child (a fix landed below and the parent was rebased), the
+ * merge-base is the parent's old root and the replay would carry the
+ * parent's old commits — and their conflicts — along.
+ *
+ * Three answers, in order of how well they know the truth:
+ *
+ * 1. git's OWN fork point — the base's reflog remembers the tip the
+ *    child was built on, so this is exact even when the rewrite changed
+ *    the parent's CONTENT (an amend that adds a file is not patch-
+ *    equivalent, and only the reflog still knows where the child began).
+ * 2. the child's last commit the new base already holds BY PATCH — the
+ *    rewritten parent looks patch-equivalent to git.
+ * 3. the merge-base — the blunt answer, and the one that replays the
+ *    parent's old commits when nothing better is known.
+ */
+export function forkPoint(base: string, wt: string): string {
+  const mergeBase = gitTry(['-C', wt, 'merge-base', base, 'HEAD']).out.trim()
+  if (mergeBase === '') {
+    return mergeBase
+  }
+  // the base's tip is already inside the child — the merge-base IS the fork
+  if (gitTry(['-C', wt, 'merge-base', '--is-ancestor', base, 'HEAD']).code === 0) {
+    return mergeBase
+  }
+  // git's own answer — the base's reflog, not a guess
+  const forked = gitTry(['-C', wt, 'merge-base', '--fork-point', base, 'HEAD']).out.trim()
+  if (forked !== '') {
+    return forked
+  }
+  const cherry = gitTry(['-C', wt, 'cherry', base, 'HEAD']).out.trim()
+  let fork = ''
+  for (const line of cherry.split('\n')) {
+    if (line.startsWith('- ')) {
+      fork = line.slice(2).trim()
+    }
+  }
+  return fork === '' ? mergeBase : fork
+}
+
 /** Rebase a member's branch onto its new base and force-push the result
  *  when a PR rides it. The fork point is the recorded old base — under
  *  squash merges a merge-base can predate the parent's commits and
@@ -506,7 +607,7 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
     gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', `refs/heads/${item.oldBase}`]).code === 0
       ? item.oldBase
       : undefined
-  const fork = oldRef ?? gitTry(['-C', wt.path, 'merge-base', item.desiredBase, 'HEAD']).out.trim()
+  const fork = oldRef ?? forkPoint(item.desiredBase, wt.path)
   const rb =
     fork === ''
       ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
@@ -785,6 +886,14 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
   if (!rebaseStep(item, cascade, ctx.lines)) {
     return false
   }
+  // the platform rewrites a child when its parent MERGES — but a base that
+  // moved by a PUSH is not a merge, and the platform leaves the child where
+  // it was. The invariant decides, not the assumption.
+  if (item.rebase && !carriesBaseHead(m.branch, item.desiredBase, ctx.root)) {
+    if (!rebaseMember(item, ctx.lines)) {
+      return false
+    }
+  }
   updateEdge(m, item.desiredBase, ctx.defaultBase)
   if (!cascade.retarget) {
     return retargetMember(item, ctx.rev, ctx.lines)
@@ -821,6 +930,8 @@ export function syncStack(
     lines: [],
   }
   const members = collectMembers(name, root, ctx.rev)
+  ctx.defaultBase = chainRootBase(members, ctx.defaultBase)
+  markBaseHeads(members, root, ctx.defaultBase)
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the
   // host's stack registration demands. A dirty member or a failed move
