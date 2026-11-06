@@ -36,6 +36,10 @@ export interface ApiTarget {
   baseUrl?: string
   apiKeyEnv?: string
   apiKeyCommand?: string
+  /** The key for THIS call — runtime-only: the config never holds a key
+   *  value, it names a source. It travels with the entry, so two calls in
+   *  one process cannot read each other's key. */
+  apiKey?: string
   model: string
 }
 
@@ -60,11 +64,15 @@ export interface ProviderWireOpts {
   acp?: AcpSeam
 }
 
-/** The configured key — apiKeyCommand (secret-store lookup) wins over
- *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
- *  echoed); a missing var is fail-open, and every message names the
+/** The key this call authenticates with — the runtime key wins (it was
+ *  handed to THIS call on purpose), then the secret-store command, then
+ *  the configured env var; a non-NAME apiKeyEnv is a config bug (throws,
+ *  never echoed); a missing var is fail-open, and the message names the
  *  config FIELD, never the value. */
 function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
+  if (entry.apiKey !== undefined) {
+    return entry.apiKey
+  }
   if (entry.apiKeyCommand !== undefined) {
     return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
   }
@@ -72,7 +80,7 @@ function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
     throw new Error(`${keyField} is not a valid environment variable name`)
   }
   const key = process.env[entry.apiKeyEnv]
-  if (key === undefined || key === '') {
+  if (!key) {
     throw new JudgeUnavailable(
       `the env var named by ${keyField} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
     )
