@@ -22,7 +22,7 @@
  *    lands in.
  */
 import { defineCommand, runCommand } from '@broject/command';
-import { routerPlugins } from '@broject/brouter';
+import { routerPlugins, routerUrl } from '@broject/brouter';
 import type { RouterEndpoint } from '@broject/brouter';
 import { flag } from './args.ts';
 import { loadBroConfig } from '../plugins.ts';
@@ -33,14 +33,14 @@ function broEndpoint(argv: string[]): RouterEndpoint {
   const url = flag(argv, '--url');
   const token = flag(argv, '--token');
   if (url !== undefined && token !== undefined) {
-    return { url: url.replace(/\/+$/, ''), token };
+    return { url: routerUrl(url), token };
   }
   const live = liveServeState(process.cwd());
   if (live === undefined) {
     console.error('error: no live gateway — start one with `bro serve`');
     process.exit(1);
   }
-  return { url: live.url, token: live.token };
+  return { url: routerUrl(live.url), token: live.token };
 }
 
 /** The settings path the operator pinned for a client —

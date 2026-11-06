@@ -21,19 +21,19 @@ them — not suppressed, not deferred again.
 Measured with `cs review` over the arc's tree (`cs delta origin/main HEAD`
 for the gate verdict). The thirteen the gate blocks on:
 
-| file | finding | function |
-|---|---|---|
-| `packages/command/src/command.ts` | Complex Method ×2 | `resolve` (cc 16), `runCommand` (cc 17) |
-| | Complex Conditional, Bumpy Road Ahead | `resolve` |
-| | Overall Code Complexity | the file (mean 5.70 over 10 functions) |
-| `packages/core/src/cli-args.ts` | Complex Method, Complex Conditional, Bumpy Road Ahead | `positionals` (cc 11) |
-| | Complex Conditional | `flagValue` |
-| | Bumpy Road Ahead | `flagAll` |
-| `packages/brouter/src/gateway.ts` | Complex Method, Bumpy Road Ahead | `gitCommonDir` (cc 11) |
-| `packages/brouter/src/catalog.ts` | Complex Method | `servedModels` (cc 12) |
-| `packages/brouter/src/settings.ts` | Complex Conditional | `readSettings` |
-| `packages/command/src/fixtures/cli.ts` | Code Duplication | `db`, `group` |
-| `packages/core/src/config.ts` | Complex Conditional (degraded 10.5 → 12.5) | `serveClients` (cc 18) |
+| file                                   | finding                                               | function                                |
+| -------------------------------------- | ----------------------------------------------------- | --------------------------------------- |
+| `packages/command/src/command.ts`      | Complex Method ×2                                     | `resolve` (cc 16), `runCommand` (cc 17) |
+|                                        | Complex Conditional, Bumpy Road Ahead                 | `resolve`                               |
+|                                        | Overall Code Complexity                               | the file (mean 5.70 over 10 functions)  |
+| `packages/core/src/cli-args.ts`        | Complex Method, Complex Conditional, Bumpy Road Ahead | `positionals` (cc 11)                   |
+|                                        | Complex Conditional                                   | `flagValue`                             |
+|                                        | Bumpy Road Ahead                                      | `flagAll`                               |
+| `packages/brouter/src/gateway.ts`      | Complex Method, Bumpy Road Ahead                      | `gitCommonDir` (cc 11)                  |
+| `packages/brouter/src/catalog.ts`      | Complex Method                                        | `servedModels` (cc 12)                  |
+| `packages/brouter/src/settings.ts`     | Complex Conditional                                   | `readSettings`                          |
+| `packages/command/src/fixtures/cli.ts` | Code Duplication                                      | `db`, `group`                           |
+| `packages/core/src/config.ts`          | Complex Conditional (degraded 10.5 → 12.5)            | `serveClients` (cc 18)                  |
 
 **SonarCloud (14, the same files)** rides the same files: an unused import,
 a nested template literal, cognitive complexity 16–20, an async function
@@ -41,8 +41,11 @@ without await, promise chains where top-level await belongs, and four
 super-linear regexes. The splits below answer most of them — a split
 function is a shorter function — and the rest are their own small edits.
 
-**Codacy (17 added)** — the per-file list needs the account
-(app.codacy.com); the PR's own check carries it.
+**Codacy (17 added)** — 16 of them markdownlint on the arc's own markdown
+(`skills/brouter/SKILL.md` and five specs: unaligned tables, fenced blocks
+without a language); the seventeenth is a code finding: the catalog read
+fetches a URL the state file names, and Codacy reads a computed URL as
+user-controlled. Both kinds are fixed below.
 
 ### The bar
 
@@ -184,6 +187,39 @@ client's own knobs become `serveClientConfig`, and the string fields become
 `trimmedString`. A malformed entry still drops ITS OWN fields, never the
 whole section.
 
+### The Codacy code finding — the token's crossing point
+
+`gateway.ts`'s catalog read fetched `${endpoint.url}/v1/models` with the
+router's session token in `x-api-key` and `Authorization: Bearer`. The URL
+is NOT bro's own: it comes from the router's state file OR from the
+operator's `--url` flag (`policy.ts`'s `defaultEndpoint`, the CLI's own
+`broEndpoint`). Codacy reads that as a user-controlled URL reaching an HTTP
+client, and it is right — a plain-http remote host would carry the session
+token in the clear.
+
+The fix is the debt plane's rule (`packages/debt/src/collectors.ts`'s
+`assertTokenSafeHost`): **a token crosses over https, or cleartext to this
+machine.** The router is a local process; a remote one speaks https.
+
+**`packages/brouter/src/endpoint.ts`** — the guard lives in its OWN file, and
+that is a bar decision, not a style one: `gateway.ts` carries six functions
+and a mean CC of 4.5 (above bro's pinned threshold of 4) and stays silent —
+the Overall Code Complexity rule speaks from SEVEN functions. A seventh
+function would fire it. A one-function file has no mean to judge, and the
+guard's own cc (5 — every `throw` is a decision point) is under the
+function bar of 9.
+
+Every endpoint bro builds goes through `routerUrl`, so the token's crossing
+point is checked in ONE place: the state file's URL
+(`readRouterEndpoint`), the operator's flag (`policy.ts`, the CLI's
+`broEndpoint`), and the catalog read itself (`readCatalog` — a hand-built
+endpoint cannot sneak past it).
+
+A router bro REFUSES is not a router bro did not find: the record is
+readable and the router is running, so `readRouterEndpoint` throws with the
+reason instead of answering "no router". The message names the fix
+(`https`, or a loopback router on `http://127.0.0.1:<port>`).
+
 ### The Sonar findings that are not CodeScene's
 
 The same files carry Sonar's own list: the unused import, the nested template
@@ -214,6 +250,10 @@ gitdir line, the path segments, the policy's own pattern).
 6. The behaviour: every test that covered the arc's behaviour before the split
    still passes, untouched. A refactor that needs its expectations rewritten
    was not a refactor.
+7. The guard: the token crosses over https or to this machine and nowhere
+   else — the tests cover the refusal (a cleartext remote host, a scheme that
+   is not http(s), a URL that is not a URL) and the loopback and https
+   routers that must keep working.
 
 ## Not in this layer
 
