@@ -211,6 +211,46 @@ test("the schema's own shape wins — the extra fields are dropped", () => {
   assert.deepEqual(call?.input, { command: 'ls', description: 'list it' });
 });
 
+test("the client's own spelling wins — 'file_path' is the client's 'path'", () => {
+  // the agent says file_path, the client's tool calls the property path:
+  // a call the client CAN run must not be dropped for the spelling
+  const tools = clientTools([
+    {
+      name: 'read',
+      input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    },
+  ]);
+  const call = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: { file_path: '/tmp/x' } },
+    tools
+  );
+  assert.equal(call?.name, 'read');
+  assert.deepEqual(call?.input, { path: '/tmp/x' });
+});
+
+test("the client's own schema decides — a value below its minimum is not sent", () => {
+  const tools = clientTools([
+    {
+      name: 'read',
+      input_schema: {
+        type: 'object',
+        properties: { path: { type: 'string' }, offset: { type: 'number', minimum: 0 } },
+        required: ['path'],
+      },
+    },
+  ]);
+  const bad = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: { path: '/tmp/x', offset: -5 } },
+    tools
+  );
+  assert.equal(bad, undefined, 'the client would reject the call — the wire sends no such call');
+  const good = clientCall(
+    { sessionUpdate: 'tool_call', kind: 'read', rawInput: { path: '/tmp/x', offset: 5 } },
+    tools
+  );
+  assert.deepEqual(good?.input, { path: '/tmp/x', offset: 5 });
+});
+
 test("the vocabulary reads the request's own definitions", () => {
   const tools = clientTools([
     { name: 'Bash', input_schema: { properties: { command: {} }, required: ['command'] } },

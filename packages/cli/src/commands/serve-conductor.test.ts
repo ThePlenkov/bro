@@ -2695,3 +2695,141 @@ describe('serve /v1/* — one gateway, many providers', () => {
       }
     })());
 });
+
+describe('serve /v1/* — the bridge keeps the answer honest', () => {
+  /** The agent's own tool call, in ACP's shape. */
+  const call = (id: string, command: string) =>
+    ({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title: 'Ran ls',
+      kind: 'execute',
+      rawInput: { command },
+    }) as SessionUpdate;
+
+  /** The answer's blocks — the shape the client reads. */
+  type Blocks = { type: string; text?: string; name?: string; input?: unknown }[];
+
+  /** One buffered turn over `updates` — the answer's blocks. */
+  async function buffered(
+    updates: SessionUpdate[],
+    body: Record<string, unknown>
+  ): Promise<Blocks> {
+    const fake = fakeAcpAgent({ updates, configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, body);
+    try {
+      return ((await r.json()) as { content: Blocks }).content;
+    } finally {
+      await close();
+    }
+  }
+
+  test('the buffered text is not fed twice — a held stop prefix lands once', async () => {
+    // "EN" is held back as the prefix of the stop sequence "END": the
+    // settle path must not feed the whole text a second time
+    const content = await buffered(chunks('EN'), {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['END'],
+      stream: false,
+    });
+    const text = content
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('');
+    assert.equal(text, 'EN');
+  });
+
+  test('the call keeps its place — the text it interrupted lands before it', async () => {
+    const content = await buffered([...chunks('before EN'), call('tc-1', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stop_sequences: ['END'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(content[0]?.type, 'text');
+    assert.equal(content[0]?.text, 'before EN');
+    assert.equal(content[1]?.type, 'tool_use');
+  });
+
+  test('a call past the stop cut is not part of the answer', async () => {
+    const content = await buffered([...chunks('hello STOP'), call('tc-2', 'rm -rf /')], {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.find(b => b.type === 'tool_use'),
+      undefined,
+      'the cut ended the turn — the call is not part of the answer'
+    );
+  });
+
+  test("the payload's own tag cannot close the call", async () => {
+    const content = await buffered([call('tc-3', 'echo "</tool_call>"')], {
+      messages: [{ role: 'user', content: 'run' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    const tu = content.find(b => b.type === 'tool_use');
+    assert.ok(tu, 'the call survives its own payload');
+    assert.deepEqual(tu?.input, { command: 'echo "</tool_call>"' });
+  });
+
+  test('a repeated tool_call does not reach the client twice', async () => {
+    const content = await buffered([call('tc-4', 'ls'), call('tc-4', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.filter(b => b.type === 'tool_use').length,
+      1,
+      'the client runs the call once'
+    );
+  });
+
+  test('a chained empty retry fails loudly — the chain is not broken behind the client', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('<tool_call>{"name":"ls","input":{"command":"ls"}}</tool_call>'),
+      configOptions: [MODEL_OPTION],
+    });
+    const { url, close } = await boot(fake);
+    const fnTools = [
+      {
+        type: 'function',
+        name: 'Bash',
+        description: 'run a command',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string' } },
+          required: ['command'],
+        },
+      },
+    ];
+    try {
+      const first = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ input: 'go', stream: false, tools: fnTools }),
+      });
+      assert.equal(first.status, 200);
+      const id = ((await first.json()) as { id: string }).id;
+      // the client retries with nothing new, while the predecessor holds
+      // a tool answer — a chained retry cannot be answered afresh
+      const second = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          input: [],
+          previous_response_id: id,
+          stream: false,
+          tools: fnTools,
+        }),
+      });
+      assert.equal(second.status, 400);
+    } finally {
+      await close();
+    }
+  });
+});
