@@ -503,6 +503,28 @@ function dependabotOpenPrs(
   ]);
 }
 
+/** `<pkg>-<ver>` inside a `dependabot/.../` head ref needs BOTH
+ *  boundaries: `/` before the name (segment start) and a dash that
+ *  opens the VERSION — `v?\d`. A bare `ember-` substring eats
+ *  `ember-cli-1.0`'s own name dash; `ember-v…` names the same trap,
+ *  so the `v` must be followed by a digit too. Scoped pkgs keep
+ *  their `/` (`babel/core` matches `.../babel/core-1.0`). */
+function dependabotRefMatchesPkg(headRef: string, pkg: string): boolean {
+  const needle = `/${pkg}-`;
+  let i = headRef.indexOf(needle);
+  while (i !== -1) {
+    let next = headRef.charAt(i + needle.length);
+    if (next === 'v') {
+      next = headRef.charAt(i + needle.length + 1);
+    }
+    if (next >= '0' && next <= '9') {
+      return true;
+    }
+    i = headRef.indexOf(needle, i + 1);
+  }
+  return false;
+}
+
 export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const alerts = ghJsonAll<DependabotAlert>(
     `repos/${ctx.repo}/dependabot/alerts?state=open&per_page=100`
@@ -511,10 +533,7 @@ export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const out: DebtRecord[] = [];
   for (const a of alerts) {
     const pkg = a.security_vulnerability?.package?.name?.replace(/^@/, '') ?? '';
-    const fixRe = pkg
-      ? new RegExp(`/${pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-v?\\d`)
-      : undefined;
-    const fixPr = fixRe ? prs.find(p => fixRe.test(p.headRefName)) : undefined;
+    const fixPr = pkg ? prs.find(p => dependabotRefMatchesPkg(p.headRefName, pkg)) : undefined;
     if (fixPr) continue; // linked PR is the work item — see bead bro-8gk
     const severity = a.security_vulnerability?.severity ?? 'medium';
     const body =
