@@ -26,17 +26,17 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-} from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { facade, gitTry, loadConfig, markerLive } from '@broject/core'
-import { agentOwner } from './proc-owner.ts'
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { facade, gitTry, loadConfig, markerLive } from '@broject/core';
+import { agentOwner } from './proc-owner.ts';
 import {
   REFGUARD_HOOK_MARK,
   REFGUARD_HOOK_NAME,
   REFGUARD_LOCAL_HOOK,
   refGuardShim,
-} from './refguard.ts'
+} from './refguard.ts';
 
 /** The CLI's own version — baked into the installed shim's npx
  *  fallback so the hook runs the bro that installed it. Walks up from
@@ -44,50 +44,50 @@ import {
  *  packages/cli, dist bundle → packages/cli the same way); '0' is the
  *  major-pin fallback, matching how hooks.json npx-pins. */
 export function cliVersion(): string {
-  let dir = dirname(fileURLToPath(import.meta.url))
+  let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
     try {
       const pj = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
-        name?: string
-        version?: string
-      }
+        name?: string;
+        version?: string;
+      };
       if (pj.name === '@broject/bro' && typeof pj.version === 'string') {
-        return pj.version
+        return pj.version;
       }
     } catch {
       // keep walking
     }
-    const up = dirname(dir)
+    const up = dirname(dir);
     if (up === dir) {
-      break
+      break;
     }
-    dir = up
+    dir = up;
   }
-  return '0'
+  return '0';
 }
 
 /** Markers older than this are residue, not a live session — same
  *  window the parallel-work nudge uses. */
-const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
+const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
 /** `<slug>` that names a bead — `bro-fzot`, `fx-9`, `bro-mol-h7cp`.
  *  Bead-ish enough for provenance; a worktree slug that isn't a bead
  *  just skips the fallback, it never invents one. */
-const BEAD_ID = /^[a-z]\w*-[\w.]+$/i
+const BEAD_ID = /^[a-z]\w*-[\w.]+$/i;
 
 export interface CommitProvenance {
-  agent?: string
-  model?: string
-  session?: string
-  bead?: string
-  molecule?: string
+  agent?: string;
+  model?: string;
+  session?: string;
+  bead?: string;
+  molecule?: string;
 }
 
 /** `AI_AGENT=devin_3000-11-3_agent` → `devin` — the runtime badges the
  *  versioned binary name; the trailer wants the cli. */
 function normalizeAgentCli(raw: string): string {
-  const first = raw.trim().split(/[\s_]/)[0] ?? ''
-  return first.toLowerCase()
+  const first = raw.trim().split(/[\s_]/)[0] ?? '';
+  return first.toLowerCase();
 }
 
 const MODEL_ENV = [
@@ -97,7 +97,7 @@ const MODEL_ENV = [
   'OPENAI_MODEL',
   'AI_MODEL',
   'CLAUDE_MODEL',
-] as const
+] as const;
 
 const SESSION_ENV = [
   'BRO_SESSION_ID',
@@ -105,40 +105,40 @@ const SESSION_ENV = [
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',
-] as const
+] as const;
 
 const firstEnv = (env: NodeJS.ProcessEnv, keys: readonly string[]): string | undefined => {
   for (const k of keys) {
-    const v = env[k]?.trim()
+    const v = env[k]?.trim();
     if (v) {
-      return v
+      return v;
     }
   }
-  return undefined
-}
+  return undefined;
+};
 
 /** The env-marker half — everything a session pins on itself. */
 export function envProvenance(env: NodeJS.ProcessEnv): CommitProvenance {
-  const p: CommitProvenance = {}
-  const agent = env.BRO_AGENT?.trim() ?? env.AI_AGENT?.trim()
+  const p: CommitProvenance = {};
+  const agent = env.BRO_AGENT?.trim() ?? env.AI_AGENT?.trim();
   if (agent) {
-    p.agent = normalizeAgentCli(agent)
+    p.agent = normalizeAgentCli(agent);
   }
-  const model = firstEnv(env, MODEL_ENV)
+  const model = firstEnv(env, MODEL_ENV);
   if (model) {
-    p.model = model
+    p.model = model;
   }
-  const session = firstEnv(env, SESSION_ENV)
+  const session = firstEnv(env, SESSION_ENV);
   if (session) {
-    p.session = session
+    p.session = session;
   }
   if (env.BRO_BEAD_ID?.trim()) {
-    p.bead = env.BRO_BEAD_ID.trim()
+    p.bead = env.BRO_BEAD_ID.trim();
   }
   if (env.BRO_MOL_ID?.trim()) {
-    p.molecule = env.BRO_MOL_ID.trim()
+    p.molecule = env.BRO_MOL_ID.trim();
   }
-  return p
+  return p;
 }
 
 /** One marker file → its session + aspect, or null when it isn't a
@@ -149,19 +149,19 @@ function markerInfo(
   now: number
 ): { session: string; isTask: boolean } | null {
   try {
-    const st = statSync(path)
-    const dot = file.lastIndexOf('.')
+    const st = statSync(path);
+    const dot = file.lastIndexOf('.');
     // hinted/, trace/ subdirs are not markers; neither are extensionless files
     if (!st.isFile() || dot <= 0) {
-      return null
+      return null;
     }
-    const head = readFileSync(path, 'utf8').split('\n')[0]
+    const head = readFileSync(path, 'utf8').split('\n')[0];
     if (!markerLive(head, st.mtimeMs, LIVE_SESSION_MS, now)) {
-      return null
+      return null;
     }
-    return { session: file.slice(0, dot), isTask: file.endsWith('.task') }
+    return { session: file.slice(0, dot), isTask: file.endsWith('.task') };
   } catch {
-    return null // unreadable marker — skip
+    return null; // unreadable marker — skip
   }
 }
 
@@ -175,28 +175,28 @@ export function liveSessionClaims(
   hooksDir: string,
   now: number = Date.now()
 ): Map<string, string[]> {
-  const live = new Set<string>()
-  const taskFiles: string[] = []
-  let files: string[]
+  const live = new Set<string>();
+  const taskFiles: string[] = [];
+  let files: string[];
   try {
-    files = readdirSync(hooksDir)
+    files = readdirSync(hooksDir);
   } catch {
-    return new Map()
+    return new Map();
   }
   for (const f of files) {
-    const info = markerInfo(join(hooksDir, f), f, now)
+    const info = markerInfo(join(hooksDir, f), f, now);
     if (info !== null) {
-      live.add(info.session)
+      live.add(info.session);
       if (info.isTask) {
-        taskFiles.push(f)
+        taskFiles.push(f);
       }
     }
   }
-  const out = new Map<string, string[]>()
+  const out = new Map<string, string[]>();
   for (const f of taskFiles) {
-    const session = f.slice(0, -'.task'.length)
+    const session = f.slice(0, -'.task'.length);
     if (!live.has(session)) {
-      continue
+      continue;
     }
     try {
       const beads = [
@@ -204,16 +204,16 @@ export function liveSessionClaims(
           readFileSync(join(hooksDir, f), 'utf8')
             .split('\n')
             .slice(1)
-            .map((l) => l.trim())
-            .filter((l) => BEAD_ID.test(l))
+            .map(l => l.trim())
+            .filter(l => BEAD_ID.test(l))
         ),
-      ]
-      out.set(session, beads)
+      ];
+      out.set(session, beads);
     } catch {
       // unreadable — no claims for this session
     }
   }
-  return out
+  return out;
 }
 
 /** Every session with at least one live marker — the any-aspect
@@ -221,20 +221,20 @@ export function liveSessionClaims(
  *  want "who is here", not "who claimed what". Same markerInfo scan,
  *  same live bar. */
 export function liveSessionIds(hooksDir: string, now: number = Date.now()): Set<string> {
-  const live = new Set<string>()
-  let files: string[]
+  const live = new Set<string>();
+  let files: string[];
   try {
-    files = readdirSync(hooksDir)
+    files = readdirSync(hooksDir);
   } catch {
-    return live
+    return live;
   }
   for (const f of files) {
-    const info = markerInfo(join(hooksDir, f), f, now)
+    const info = markerInfo(join(hooksDir, f), f, now);
     if (info !== null) {
-      live.add(info.session)
+      live.add(info.session);
     }
   }
-  return live
+  return live;
 }
 
 /** `work/bro-fzot` / `loop/fx-9` → the bead — bro's own worktree
@@ -242,8 +242,8 @@ export function liveSessionIds(hooksDir: string, now: number = Date.now()): Set<
  *  shell. Only those two prefixes count: `feature/user-login` is prose,
  *  not a bead, and must not fabricate a trailer. */
 export function branchBead(branch: string): string | undefined {
-  const tail = /^(?:work|loop)\/(.+)$/.exec(branch)?.[1] ?? ''
-  return BEAD_ID.test(tail) ? tail : undefined
+  const tail = /^(?:work|loop)\/(.+)$/.exec(branch)?.[1] ?? '';
+  return BEAD_ID.test(tail) ? tail : undefined;
 }
 
 /** The bead's molecule parent — `parent` on mol steps. Best-effort:
@@ -252,10 +252,10 @@ function beadMolecule(bead: string, cwd: string): string | undefined {
   try {
     const parent = facade('tasks', { dir: cwd }, { prefer: loadConfig(cwd).connectors }).get(
       bead
-    )?.parent
-    return typeof parent === 'string' && parent !== '' ? parent : undefined
+    )?.parent;
+    return typeof parent === 'string' && parent !== '' ? parent : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -270,19 +270,19 @@ export function inAgentSession(env: NodeJS.ProcessEnv): boolean {
     env.BRO_AGENT_ID !== undefined ||
     env.AI_AGENT !== undefined ||
     agentOwner() !== null
-  )
+  );
 }
 
 interface TrailersOpts {
-  env: NodeJS.ProcessEnv
-  cwd: string
+  env: NodeJS.ProcessEnv;
+  cwd: string;
   /** Injectable for tests — defaults to the real marker dir under cwd's
    *  git-common-dir; null skips the marker fallback. */
-  hooksDir?: string | null
-  branch?: string
-  moleculeOf?: (bead: string) => string | undefined
+  hooksDir?: string | null;
+  branch?: string;
+  moleculeOf?: (bead: string) => string | undefined;
   /** Injectable agent-ancestor verdict — tests can't shape /proc. */
-  agentProc?: boolean
+  agentProc?: boolean;
 }
 
 /** Single-live-session fallback — fills only fields env/branch left
@@ -294,51 +294,68 @@ function markerFallback(
   bead: string | undefined
 ): { session: string | undefined; bead: string | undefined } {
   const hooksDir =
-    opts.hooksDir === undefined ? defaultHooksDir(opts.cwd) : (opts.hooksDir ?? undefined)
+    opts.hooksDir === undefined ? defaultHooksDir(opts.cwd) : (opts.hooksDir ?? undefined);
   if (hooksDir === undefined || (session !== undefined && bead !== undefined)) {
-    return { session, bead }
+    return { session, bead };
   }
-  const claims = liveSessionClaims(hooksDir)
+  const claims = liveSessionClaims(hooksDir);
   if (claims.size !== 1) {
-    return { session, bead }
+    return { session, bead };
   }
-  const [id, beads] = [...claims.entries()][0]!
+  const [id, beads] = [...claims.entries()][0]!;
   return {
     session: session ?? id,
     bead: bead ?? (beads.length === 1 ? beads[0] : undefined),
-  }
+  };
 }
 
 /** All trailers for this commit — empty when no agent identity
  *  resolves (a human commit stays clean). Fallbacks fill only fields
  *  env didn't pin, and only unambiguous ones. */
 export function commitTrailers(opts: TrailersOpts): [string, string][] {
-  const env = envProvenance(opts.env)
+  const env = envProvenance(opts.env);
   if (
     env.agent === undefined &&
     opts.env.BRO_AGENT_ID === undefined &&
     !(opts.agentProc ?? agentOwner() !== null)
   ) {
-    return []
+    return [];
   }
-  const beadFromBranch = opts.branch !== undefined ? branchBead(opts.branch) : undefined
-  const { session, bead } = markerFallback(opts, env.session, env.bead ?? beadFromBranch)
-  const moleculeOf = opts.moleculeOf ?? ((b: string) => beadMolecule(b, opts.cwd))
-  const molecule = env.molecule ?? (bead !== undefined ? moleculeOf(bead) : undefined)
-  const out: [string, string][] = [['Agent', env.agent ?? 'agent']]
+  const beadFromBranch = opts.branch !== undefined ? branchBead(opts.branch) : undefined;
+  const { session, bead } = markerFallback(opts, env.session, env.bead ?? beadFromBranch);
+  const moleculeOf = opts.moleculeOf ?? ((b: string) => beadMolecule(b, opts.cwd));
+  const molecule = env.molecule ?? (bead !== undefined ? moleculeOf(bead) : undefined);
+  const out: [string, string][] = [['Agent', env.agent ?? 'agent']];
   if (env.model !== undefined) {
-    out.push(['Agent-Model', env.model])
+    out.push(['Agent-Model', env.model]);
   }
   if (session !== undefined) {
-    out.push(['Session', session])
+    out.push(['Session', session]);
   }
   if (bead !== undefined) {
-    out.push(['Bead', bead])
+    out.push(['Bead', bead]);
   }
   if (molecule !== undefined) {
-    out.push(['Molecule', molecule])
+    out.push(['Molecule', molecule]);
   }
-  return out
+  // pipeline attestation (spec bro-7d5nb §traceability) — the trio
+  // lands iff the connector pinned BRO_FORMULA on this worker: the
+  // formula claim is what marks a commit pipeline-produced, and the
+  // run/session fields are the hops `bro trace` verifies against the
+  // registry. Env pins only, never marker/branch fallbacks — a guessed
+  // run id would be a forged stamp, not a weak one
+  const formula = opts.env.BRO_FORMULA?.trim();
+  if (formula !== undefined && formula !== '') {
+    const run = opts.env.BRO_AGENT_ID?.trim();
+    if (run !== undefined && run !== '') {
+      out.push(['BRO-Run', run]);
+    }
+    out.push(['BRO-Formula', formula]);
+    if (env.session !== undefined) {
+      out.push(['BRO-Session', env.session]);
+    }
+  }
+  return out;
 }
 
 // --- message-file mutation ----------------------------------------------------
@@ -348,14 +365,14 @@ export function commitTrailers(opts: TrailersOpts): [string, string][] {
  *  provenance and a committer's own trailer is never clobbered. */
 export function applyTrailers(msgFile: string, trailers: [string, string][], cwd: string): void {
   if (trailers.length === 0) {
-    return
+    return;
   }
-  const args = ['-C', cwd, 'interpret-trailers', '--in-place', '--if-exists', 'doNothing']
+  const args = ['-C', cwd, 'interpret-trailers', '--in-place', '--if-exists', 'doNothing'];
   for (const [k, v] of trailers) {
-    args.push('--trailer', `${k}: ${v}`)
+    args.push('--trailer', `${k}: ${v}`);
   }
-  args.push(msgFile)
-  gitTry(args)
+  args.push(msgFile);
+  gitTry(args);
 }
 
 /** git-hook entrypoint — `prepare-commit-msg <file> [source] [sha]`.
@@ -363,18 +380,18 @@ export function applyTrailers(msgFile: string, trailers: [string, string][], cwd
  *  and the caller (`bro hooks`) already gates on bro-enabled repos. */
 export function emitCommitTrailers(argv: string[]): void {
   try {
-    const msgFile = argv[0]
+    const msgFile = argv[0];
     if (msgFile === undefined || !existsSync(msgFile)) {
-      return
+      return;
     }
-    const cwd = process.cwd()
-    const branch = gitTry(['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'])
+    const cwd = process.cwd();
+    const branch = gitTry(['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']);
     const trailers = commitTrailers({
       env: process.env,
       cwd,
       branch: branch.code === 0 ? branch.out.trim() : undefined,
-    })
-    applyTrailers(msgFile, trailers, cwd)
+    });
+    applyTrailers(msgFile, trailers, cwd);
   } catch {
     // a provenance failure must never block a commit
   }
@@ -384,10 +401,10 @@ export function emitCommitTrailers(argv: string[]): void {
 
 /** Recognizes bro's shim — install is idempotent on it, uninstall
  *  refuses to touch a hook it didn't write. */
-export const BRO_HOOK_MARK = '# bro: prepare-commit-msg — commit provenance'
+export const BRO_HOOK_MARK = '# bro: prepare-commit-msg — commit provenance';
 
-const LOCAL_HOOK = 'prepare-commit-msg.local'
-const HOOK_NAME = 'prepare-commit-msg'
+const LOCAL_HOOK = 'prepare-commit-msg.local';
+const HOOK_NAME = 'prepare-commit-msg';
 
 /** The shim: a pre-existing hook (renamed .local) runs first and keeps
  *  its veto — a nonzero exit propagates, aborting the commit the way
@@ -406,7 +423,7 @@ elif command -v npx >/dev/null 2>&1; then
   npx -y --prefer-offline "@broject/bro@${version}" hooks prepare-commit-msg "$@" || true
 fi
 exit 0
-`
+`;
 }
 
 /** Directory prepare-commit-msg lands in: `core.hooksPath` when the
@@ -416,48 +433,48 @@ exit 0
  *  git runs the hook), not cwd — installing from a repo subdirectory
  *  must land the same hook. */
 export function gitHooksDir(cwd: string): string | null {
-  const hp = gitTry(['-C', cwd, 'config', '--get', 'core.hooksPath'])
+  const hp = gitTry(['-C', cwd, 'config', '--get', 'core.hooksPath']);
   if (hp.code === 0 && hp.out.trim() !== '') {
-    const p = hp.out.trim()
+    const p = hp.out.trim();
     if (p.startsWith('/')) {
-      return p
+      return p;
     }
-    const top = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel'])
+    const top = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel']);
     if (top.code !== 0 || top.out.trim() === '') {
-      return null
+      return null;
     }
-    return resolve(top.out.trim(), p)
+    return resolve(top.out.trim(), p);
   }
-  const common = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir'])
+  const common = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir']);
   if (common.code !== 0 || common.out.trim() === '') {
-    return null
+    return null;
   }
-  const p = common.out.trim()
-  return join(p.startsWith('/') ? p : resolve(cwd, p), 'hooks')
+  const p = common.out.trim();
+  return join(p.startsWith('/') ? p : resolve(cwd, p), 'hooks');
 }
 
 function defaultHooksDir(cwd: string): string | undefined {
-  const common = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir'])
+  const common = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir']);
   if (common.code !== 0 || common.out.trim() === '') {
-    return undefined
+    return undefined;
   }
-  const p = common.out.trim()
-  return join(p.startsWith('/') ? p : resolve(cwd, p), 'bro', 'hooks')
+  const p = common.out.trim();
+  return join(p.startsWith('/') ? p : resolve(cwd, p), 'bro', 'hooks');
 }
 
 export type InstallResult =
   | { state: 'installed' | 'already' | 'chained' | 'removed' | 'restored' | 'absent'; path: string }
-  | { state: 'error'; err: string }
+  | { state: 'error'; err: string };
 
 export interface HookShimSpec {
   /** The git hook name — the file under hooksDir. */
-  name: string
+  name: string;
   /** A pre-existing hook renamed to this rides inside bro's shim. */
-  localName: string
+  localName: string;
   /** Marker line the shim carries — recognizes bro's own on
    *  re-install/uninstall, never touches a foreign hook. */
-  mark: string
-  shim: string
+  mark: string;
+  shim: string;
 }
 
 /** The chained-shim install shared by every bro git hook: a foreign
@@ -465,48 +482,48 @@ export interface HookShimSpec {
  *  survives), a stale bro shim refreshes in place, and a failed write
  *  restores the original — nothing may strand a user's hook. */
 function installHookShim(cwd: string, spec: HookShimSpec): InstallResult {
-  const dir = gitHooksDir(cwd)
+  const dir = gitHooksDir(cwd);
   if (dir === null) {
-    return { state: 'error', err: 'not a git repository' }
+    return { state: 'error', err: 'not a git repository' };
   }
-  const hook = join(dir, spec.name)
-  const local = join(dir, spec.localName)
+  const hook = join(dir, spec.name);
+  const local = join(dir, spec.localName);
   try {
     if (existsSync(hook)) {
-      const cur = readFileSync(hook, 'utf8')
+      const cur = readFileSync(hook, 'utf8');
       if (cur.includes(spec.mark)) {
         if (cur === spec.shim) {
-          return { state: 'already', path: hook }
+          return { state: 'already', path: hook };
         }
         // stale bro shim — refresh in place (a .local chain survives)
-        writeFileSync(hook, spec.shim)
-        chmodSync(hook, 0o755)
-        return { state: 'installed', path: hook }
+        writeFileSync(hook, spec.shim);
+        chmodSync(hook, 0o755);
+        return { state: 'installed', path: hook };
       }
       if (existsSync(local)) {
         return {
           state: 'error',
           err: `${spec.localName} already exists — refusing to chain a second hook; uninstall it or merge manually`,
-        }
+        };
       }
-      renameSync(hook, local)
+      renameSync(hook, local);
       try {
-        writeFileSync(hook, spec.shim)
-        chmodSync(hook, 0o755)
+        writeFileSync(hook, spec.shim);
+        chmodSync(hook, 0o755);
       } catch (e) {
         // restore — a failed shim write must not strand the user's hook
         // as .local-only, where git would never run it again
-        renameSync(local, hook)
-        throw e
+        renameSync(local, hook);
+        throw e;
       }
-      return { state: 'chained', path: hook }
+      return { state: 'chained', path: hook };
     }
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(hook, spec.shim)
-    chmodSync(hook, 0o755)
-    return { state: 'installed', path: hook }
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(hook, spec.shim);
+    chmodSync(hook, 0o755);
+    return { state: 'installed', path: hook };
   } catch (e) {
-    return { state: 'error', err: (e as Error).message }
+    return { state: 'error', err: (e as Error).message };
   }
 }
 
@@ -518,27 +535,27 @@ function uninstallHookShim(
   localName: string,
   mark: string
 ): InstallResult {
-  const dir = gitHooksDir(cwd)
+  const dir = gitHooksDir(cwd);
   if (dir === null) {
-    return { state: 'error', err: 'not a git repository' }
+    return { state: 'error', err: 'not a git repository' };
   }
-  const hook = join(dir, name)
-  const local = join(dir, localName)
+  const hook = join(dir, name);
+  const local = join(dir, localName);
   try {
-    const had = existsSync(hook)
+    const had = existsSync(hook);
     if (had) {
       if (!readFileSync(hook, 'utf8').includes(mark)) {
-        return { state: 'error', err: `${name} is not bro's — refusing to remove it` }
+        return { state: 'error', err: `${name} is not bro's — refusing to remove it` };
       }
-      rmSync(hook)
+      rmSync(hook);
     }
     if (existsSync(local)) {
-      renameSync(local, hook)
-      return { state: 'restored', path: hook }
+      renameSync(local, hook);
+      return { state: 'restored', path: hook };
     }
-    return { state: had ? 'removed' : 'absent', path: hook }
+    return { state: had ? 'removed' : 'absent', path: hook };
   } catch (e) {
-    return { state: 'error', err: (e as Error).message }
+    return { state: 'error', err: (e as Error).message };
   }
 }
 
@@ -548,11 +565,11 @@ export function installCommitHook(cwd: string, version: string): InstallResult {
     localName: LOCAL_HOOK,
     mark: BRO_HOOK_MARK,
     shim: hookShim(version),
-  })
+  });
 }
 
 export function uninstallCommitHook(cwd: string): InstallResult {
-  return uninstallHookShim(cwd, HOOK_NAME, LOCAL_HOOK, BRO_HOOK_MARK)
+  return uninstallHookShim(cwd, HOOK_NAME, LOCAL_HOOK, BRO_HOOK_MARK);
 }
 
 export function installRefGuardHook(cwd: string, version: string): InstallResult {
@@ -561,18 +578,18 @@ export function installRefGuardHook(cwd: string, version: string): InstallResult
     localName: REFGUARD_LOCAL_HOOK,
     mark: REFGUARD_HOOK_MARK,
     shim: refGuardShim(version),
-  })
+  });
 }
 
 export function uninstallRefGuardHook(cwd: string): InstallResult {
-  return uninstallHookShim(cwd, REFGUARD_HOOK_NAME, REFGUARD_LOCAL_HOOK, REFGUARD_HOOK_MARK)
+  return uninstallHookShim(cwd, REFGUARD_HOOK_NAME, REFGUARD_LOCAL_HOOK, REFGUARD_HOOK_MARK);
 }
 
 // --- post-merge freshness (bro-sovl3) ---------------------------------------------
 
-export const POSTMERGE_HOOK_MARK = '# bro: post-merge — install → build → patch'
-export const POSTMERGE_HOOK_NAME = 'post-merge'
-export const POSTMERGE_LOCAL_HOOK = 'post-merge.local'
+export const POSTMERGE_HOOK_MARK = '# bro: post-merge — install → build → patch';
+export const POSTMERGE_HOOK_NAME = 'post-merge';
+export const POSTMERGE_LOCAL_HOOK = 'post-merge.local';
 
 /** The shim: chained .local first (its veto survives), then bro's
  *  dispatcher — `bro hooks post-merge` returns immediately after
@@ -593,7 +610,7 @@ elif command -v npx >/dev/null 2>&1; then
   nohup npx -y --prefer-offline "@broject/bro@${version}" hooks post-merge "$@" </dev/null >/dev/null 2>&1 &
 fi
 exit 0
-`
+`;
 }
 
 export function installPostMergeHook(cwd: string, version: string): InstallResult {
@@ -602,9 +619,9 @@ export function installPostMergeHook(cwd: string, version: string): InstallResul
     localName: POSTMERGE_LOCAL_HOOK,
     mark: POSTMERGE_HOOK_MARK,
     shim: postMergeShim(version),
-  })
+  });
 }
 
 export function uninstallPostMergeHook(cwd: string): InstallResult {
-  return uninstallHookShim(cwd, POSTMERGE_HOOK_NAME, POSTMERGE_LOCAL_HOOK, POSTMERGE_HOOK_MARK)
+  return uninstallHookShim(cwd, POSTMERGE_HOOK_NAME, POSTMERGE_LOCAL_HOOK, POSTMERGE_HOOK_MARK);
 }

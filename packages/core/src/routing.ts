@@ -1,83 +1,82 @@
 /**
  * Fleet routing — task-class → ordered provider chain plus provider
  * walls derived from the agent registry (spec:
- * specs/fleet-routing/bro-1x7p.md). M2 scope: the routing config
- * sections, step-class resolution, and wall derivation rendered by
- * `bro fleet`/`bro watch`. The re-dispatch chain walk is M3 — an M2
- * spawn always lands on chain[0].
+ * specs/fleet-routing/bro-1x7p.md). The re-dispatch chain walk is
+ * performed under the spawn registry lock from provider walls derived
+ * from the registry.
  */
-import { SpawnError, type AgentRegistryEntry } from './agents.ts'
-import { taskStoreAt } from './tasks.ts'
+import { SpawnError, type AgentRegistryEntry } from './agents.ts';
+import { taskStoreAt } from './tasks.ts';
 import {
   ProviderSurfaceError,
   requireProviderSurface,
   UnknownProviderError,
   type ProviderEntry,
-} from './providers.ts'
+} from './providers.ts';
 
-export const ON_WALL = ['park', 'fallthrough'] as const
+export const ON_WALL = ['park', 'fallthrough'] as const;
 /** A walled step's verdict — `park` waits the current provider's wall
  *  out, `fallthrough` walks the chain to the next un-walled entry. */
-export type OnWall = (typeof ON_WALL)[number]
+export type OnWall = (typeof ON_WALL)[number];
 
 /** One chain link — a `providers.<name>` plus an optional inline model
  *  pin for where the bare string form isn't enough. */
 export interface ChainEntry {
-  provider: string
-  model?: string
+  provider: string;
+  model?: string;
 }
 
 /** One `fleet.routing.<class>` row — the ordered provider chain plus
  *  the class's wall policy. */
 export interface RoutingClass {
-  chain: ChainEntry[]
-  onWall?: OnWall
+  chain: ChainEntry[];
+  onWall?: OnWall;
 }
 
 /** `fleet.routing` — task class → routing row. */
-export type RoutingTable = Record<string, RoutingClass>
+export type RoutingTable = Record<string, RoutingClass>;
 
 /** `fleet.router` — the optional judge classifier (M7): a call-surface
  *  provider that picks which lane an unclassed step takes. `off` is
  *  the spelled-out absent — static classes only, same as no section. */
 export interface FleetRouter {
-  provider: string
-  mode: 'shadow' | 'enforce' | 'off'
+  provider: string;
+  mode: 'shadow' | 'enforce' | 'off';
 }
 
 const str = (v: unknown): string | undefined =>
-  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
 
 /** One chain entry — a bare provider name or {provider, model}.
  *  Bad entries drop with a warning; an empty surviving chain drops the
  *  whole class (providers.ts' field-vs-entry convention). */
 function chainEntry(cls: string, i: number, v: unknown): ChainEntry | null {
-  const key = `fleet.routing.${cls}.chain[${i}]`
+  const key = `fleet.routing.${cls}.chain[${i}]`;
   if (typeof v === 'string') {
-    const s = v.trim()
+    const s = v.trim();
     if (s !== '') {
-      return { provider: s }
+      return { provider: s };
     }
   } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-    const o = v as Record<string, unknown>
-    const provider = str(o.provider)
+    const o = v as Record<string, unknown>;
+    const provider = str(o.provider);
     if (provider === undefined) {
-      console.error(`bro.config: ${key} requires "provider" — entry dropped`)
-      return null
+      console.error(`bro.config: ${key} requires "provider" — entry dropped`);
+      return null;
     }
-    const e: ChainEntry = { provider }
+    const e: ChainEntry = { provider };
     if (o.model !== undefined) {
-      const model = str(o.model)
+      const model = str(o.model);
       if (model === undefined) {
-        console.error(`bro.config: ${key}.model must be a non-empty string — field dropped`)
+        console.error(`bro.config: ${key}.model must be a non-empty string — field dropped`);
       } else {
-        e.model = model
+        e.model = model;
       }
     }
-    return e
+    return e;
   }
-  console.error(`bro.config: ${key} must be a provider name or {provider, model} — entry dropped`)
-  return null
+  console.error(`bro.config: ${key} must be a provider name or {provider, model} — entry dropped`);
+  return null;
 }
 
 /** `fleet.routing` section parse — shape only; chain entries resolve
@@ -86,38 +85,38 @@ function chainEntry(cls: string, i: number, v: unknown): ChainEntry | null {
  *  config error naming class + key, not a parse-time drop). */
 export function fleetRouting(raw: unknown): RoutingTable {
   if (raw === undefined) {
-    return {}
+    return {};
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error('bro.config: fleet.routing must be an object — section dropped')
-    return {}
+    console.error('bro.config: fleet.routing must be an object — section dropped');
+    return {};
   }
-  const out: RoutingTable = {}
+  const out: RoutingTable = {};
   for (const [cls, v] of Object.entries(raw)) {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-      console.error(`bro.config: fleet.routing.${cls} must be an object — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls} must be an object — class dropped`);
+      continue;
     }
-    const o = v as Record<string, unknown>
+    const o = v as Record<string, unknown>;
     if (!Array.isArray(o.chain)) {
-      console.error(`bro.config: fleet.routing.${cls}.chain must be an array — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls}.chain must be an array — class dropped`);
+      continue;
     }
     const chain = o.chain
       .map((e, i) => chainEntry(cls, i, e))
-      .filter((e): e is ChainEntry => e !== null)
+      .filter((e): e is ChainEntry => e !== null);
     if (chain.length === 0) {
-      console.error(`bro.config: fleet.routing.${cls}.chain has no usable entries — class dropped`)
-      continue
+      console.error(`bro.config: fleet.routing.${cls}.chain has no usable entries — class dropped`);
+      continue;
     }
-    const rc: RoutingClass = { chain }
+    const rc: RoutingClass = { chain };
     if (o.onWall !== undefined) {
       if ((ON_WALL as readonly unknown[]).includes(o.onWall)) {
-        rc.onWall = o.onWall as OnWall
+        rc.onWall = o.onWall as OnWall;
       } else {
         console.error(
           `bro.config: fleet.routing.${cls}.onWall must be one of ${ON_WALL.join('|')} — field dropped`
-        )
+        );
       }
     }
     // defineProperty, not assignment — a class literally named
@@ -128,9 +127,9 @@ export function fleetRouting(raw: unknown): RoutingTable {
       enumerable: true,
       writable: true,
       configurable: true,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 /** `fleet.router` section parse — {provider, mode} or nothing; either
@@ -138,30 +137,27 @@ export function fleetRouting(raw: unknown): RoutingTable {
  *  provider is no router). */
 export function fleetRouter(raw: unknown): FleetRouter | undefined {
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
   const o = (typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<
     string,
     unknown
-  >
-  const provider = str(o.provider)
-  const mode = str(o.mode)
-  if (
-    provider === undefined ||
-    (mode !== 'shadow' && mode !== 'enforce' && mode !== 'off')
-  ) {
+  >;
+  const provider = str(o.provider);
+  const mode = str(o.mode);
+  if (provider === undefined || (mode !== 'shadow' && mode !== 'enforce' && mode !== 'off')) {
     console.error(
       'bro.config: fleet.router requires provider + mode (shadow|enforce|off) — section dropped'
-    )
-    return undefined
+    );
+    return undefined;
   }
-  return { provider, mode }
+  return { provider, mode };
 }
 
 // --- class resolution -----------------------------------------------------------
 
-export const DEFAULT_STEP_CLASS = 'default'
-export const CLASS_LABEL_PREFIX = 'class:'
+export const DEFAULT_STEP_CLASS = 'default';
+export const CLASS_LABEL_PREFIX = 'class:';
 
 /** The step bead's routing inputs — one `bd show` read: labels carry
  *  the `class:<name>` lane pin, priority feeds the onWall default, and
@@ -174,37 +170,36 @@ export function stepClassInfo(
   molStep: string
 ): { label?: string; priority?: number; title?: string; description?: string } {
   try {
-    const row = taskStoreAt(beadsDir).get(molStep)
-    const labels = Array.isArray(row?.labels) ? row.labels : []
+    const row = taskStoreAt(beadsDir).get(molStep);
+    const labels = Array.isArray(row?.labels) ? row.labels : [];
     const hit = labels.find(
       (l): l is string => typeof l === 'string' && l.startsWith(CLASS_LABEL_PREFIX)
-    )
-    const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim()
+    );
+    const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim();
     return {
       ...(name === undefined || name === '' ? {} : { label: name }),
       ...(typeof row?.priority === 'number' ? { priority: row.priority } : {}),
       ...(str(row?.title) === undefined ? {} : { title: str(row?.title) }),
       ...(str(row?.description) === undefined ? {} : { description: str(row?.description) }),
-    }
+    };
   } catch {
-    return {}
+    return {};
   }
 }
 
 /** The resolution verdict — the lane name, its declared chain, the
- *  effective wall policy, and where THIS spawn lands (chain[0] —
- *  the fallthrough walk is M3). */
+ *  effective wall policy, and the chain head's initial provider/model
+ *  pair. The spawn may walk forward from its current provider. */
 export interface ResolvedClass {
-  class: string
-  chain: ChainEntry[]
+  class: string;
+  chain: ChainEntry[];
   /** `entry.onWall` ?? priority default — P0/P1 park, P2+ fallthrough. */
-  onWall: OnWall
-  /** chain[0]'s slot — `provider`/`model` are a PAIR: the pin applies
-   *  only when the routed provider is the one used; a provider
-   *  override must not inherit this model (it belongs to chain[0]'s
-   *  provider, not the override's). */
-  provider: string
-  model?: string
+  onWall: OnWall;
+  /** The chain head's slot — `provider`/`model` are a PAIR: the pin
+   *  applies only when that provider is selected; an override must not
+   *  inherit this model. */
+  provider: string;
+  model?: string;
 }
 
 /** Total class resolution, first hit wins (spec §"Class resolution"):
@@ -219,27 +214,27 @@ export function resolveStepClass(
   providers: Record<string, ProviderEntry>,
   sel: { class?: string; label?: string; priority?: number } = {}
 ): ResolvedClass {
-  const cls = sel.class ?? sel.label ?? DEFAULT_STEP_CLASS
-  const row = Object.hasOwn(routing, cls) ? routing[cls] : undefined
+  const cls = sel.class ?? sel.label ?? DEFAULT_STEP_CLASS;
+  const row = Object.hasOwn(routing, cls) ? routing[cls] : undefined;
   if (row === undefined) {
     throw new SpawnError(
       `fleet.routing has no class "${cls}" — declare fleet.routing.${cls}.chain`,
       'config'
-    )
+    );
   }
   for (const [i, e] of row.chain.entries()) {
     try {
-      requireProviderSurface(providers, e.provider, 'spawn')
+      requireProviderSurface(providers, e.provider, 'spawn');
     } catch (err) {
       if (err instanceof UnknownProviderError || err instanceof ProviderSurfaceError) {
-        throw new SpawnError(`fleet.routing.${cls}.chain[${i}] — ${err.message}`, 'config')
+        throw new SpawnError(`fleet.routing.${cls}.chain[${i}] — ${err.message}`, 'config');
       }
-      throw err
+      throw err;
     }
   }
-  const onWall = row.onWall ?? ((sel.priority ?? 2) <= 1 ? 'park' : 'fallthrough')
-  const head = row.chain[0]!
-  return { class: cls, chain: row.chain, onWall, provider: head.provider, model: head.model }
+  const onWall = row.onWall ?? ((sel.priority ?? 2) <= 1 ? 'park' : 'fallthrough');
+  const head = row.chain[0]!;
+  return { class: cls, chain: row.chain, onWall, provider: head.provider, model: head.model };
 }
 
 /** The spawn-side seam — reads the bead for label/priority and
@@ -259,16 +254,16 @@ export function routeStepClass(
    *  read available. */
   info?: { label?: string; priority?: number }
 ): ResolvedClass | undefined {
-  const routing = fleet?.routing
+  const routing = fleet?.routing;
   if (routing === undefined || Object.keys(routing).length === 0) {
-    return undefined
+    return undefined;
   }
-  const read = info ?? (beadsDir === undefined ? {} : stepClassInfo(beadsDir, molStep))
+  const read = info ?? (beadsDir === undefined ? {} : stepClassInfo(beadsDir, molStep));
   return resolveStepClass(routing, providers, {
     class: explicitClass,
     label: read.label,
     priority: read.priority,
-  })
+  });
 }
 
 // --- provider walls ---------------------------------------------------------------
@@ -277,25 +272,87 @@ export function routeStepClass(
  *  wallable classified death, never stored (spec §"Provider walls —
  *  derived, not stored"). */
 export interface ProviderWall {
-  provider: string
-  cause: 'rate_limited' | 'quota'
+  provider: string;
+  cause: 'rate_limited' | 'quota';
   /** rate_limited only — the provider-reported reset the wall holds
    *  until; absent when none was reported (indefinite). */
-  until?: string
+  until?: string;
+}
+
+export type ChainWalk =
+  | { verdict: 'spawn'; index: number; entry: ChainEntry; skipped: ProviderWall[] }
+  | {
+      verdict: 'park';
+      reason: 'policy' | 'exhausted';
+      index: number;
+      entry: ChainEntry;
+      wall: ProviderWall;
+    };
+
+export function walkChain(
+  chain: ChainEntry[],
+  onWall: OnWall,
+  walls: ProviderWall[],
+  from?: string,
+  /** The chain position `from` was recorded at — a respawn resumes at
+   *  its own occurrence when the chain repeats a provider (spec
+   *  bro-1x7p). Only trusted while the entry still names `from`; a
+   *  redeclared chain falls back to the provider lookup. */
+  fromIndex?: number
+): ChainWalk {
+  if (chain.length === 0) {
+    throw new SpawnError('fleet.routing chain must not be empty', 'config');
+  }
+  let found = -1;
+  if (from !== undefined) {
+    // the recorded resume point stands while it still names `from` —
+    // a redeclared chain falls back to the provider lookup
+    found =
+      fromIndex !== undefined && chain[fromIndex]?.provider === from
+        ? fromIndex
+        : chain.findIndex(entry => entry.provider === from);
+  }
+  const start = Math.max(found, 0);
+  const wallFor = (entry: ChainEntry) => walls.find(wall => wall.provider === entry.provider);
+  const startEntry = chain[start]!;
+  const startWall = wallFor(startEntry);
+  if (startWall === undefined) {
+    return { verdict: 'spawn', index: start, entry: startEntry, skipped: [] };
+  }
+  if (onWall === 'park') {
+    return { verdict: 'park', reason: 'policy', index: start, entry: startEntry, wall: startWall };
+  }
+  const skipped = [startWall];
+  for (let index = start + 1; index < chain.length; index++) {
+    const entry = chain[index]!;
+    const wall = wallFor(entry);
+    if (wall === undefined) {
+      return { verdict: 'spawn', index, entry, skipped };
+    }
+    skipped.push(wall);
+  }
+  const index = chain.length - 1;
+  return {
+    verdict: 'park',
+    reason: 'exhausted',
+    index,
+    entry: chain[index]!,
+    wall: wallFor(chain[index]!) ?? startWall,
+  };
 }
 
 /** The spec's render: `<provider> walled — <cause>[ til <resetAt>]`. */
 export function wallText(w: ProviderWall): string {
-  const til = w.until === undefined ? '' : ` til ${w.until}`
-  return `${w.provider} walled — ${w.cause}${til}`
+  const til = w.until === undefined ? '' : ` til ${w.until}`;
+  return `${w.provider} walled — ${w.cause}${til}`;
 }
 
 /** Provider walls accumulate per provider — `quota` sticks (a stopped
  *  entry clears it, nothing else does); `rate` keeps the newest
  *  unstopped rate_limited death (spawnedAt — a respawn re-stamps it). */
 interface WallAcc {
-  quota: boolean
-  rate?: WallRecord & { provider: string }
+  quota: boolean;
+  rate?: WallRecord & { provider: string };
 }
 
 /** A scannable death record — a live registry entry or one `attempts`
@@ -303,11 +360,11 @@ interface WallAcc {
  *  resetAt, spawnedAt, stopped verbatim). Only the scanned fields are
  *  contracted — everything else rides untyped. */
 interface WallRecord {
-  provider?: unknown
-  stopped?: unknown
-  cause?: unknown
-  resetAt?: unknown
-  spawnedAt?: unknown
+  provider?: unknown;
+  stopped?: unknown;
+  cause?: unknown;
+  resetAt?: unknown;
+  spawnedAt?: unknown;
 }
 
 /** A wallable death with provider provenance — `crash`/`auth`/`ok` say
@@ -321,18 +378,47 @@ function wallable(e: WallRecord): e is WallRecord & { provider: string } {
     e.provider !== '' &&
     e.stopped !== true &&
     (e.cause === 'rate_limited' || e.cause === 'quota')
-  )
+  );
 }
 
 function stamp(e: WallRecord): string {
-  return typeof e.spawnedAt === 'string' ? e.spawnedAt : ''
+  return typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+}
+
+/** One entry's wall-scannable records — the live fields plus each
+ *  retained `attempts` record (a re-dispatch appends the outgoing
+ *  attempt verbatim, and a superseded death still walls the provider
+ *  it died on — spec bro-1x7p). A stopped entry scans as NOTHING:
+ *  `bro agents down` is the manual clear, and it must lift the step's
+ *  whole wall footprint — an attempt snapshot keeps its own
+ *  `stopped: false`, so without the entry-level rule a quota wall
+ *  recorded by a retained attempt could never be cleared. */
+function wallRecords(e: AgentRegistryEntry): WallRecord[] {
+  if (e.stopped === true) {
+    return [];
+  }
+  return Array.isArray(e.attempts) ? [e, ...(e.attempts as WallRecord[])] : [e];
+}
+
+/** The steps whose records hold `provider`'s wall — the `bro agents
+ *  down <step>` targets a wall refusal names. Every record must clear
+ *  before the wall lifts (quota dominates in accWall), so the clear
+ *  names them all. */
+export function providerWallOwners(
+  registry: Record<string, AgentRegistryEntry>,
+  provider: string
+): string[] {
+  return Object.entries(registry)
+    .filter(([, e]) => wallRecords(e).some(rec => wallable(rec) && rec.provider === provider))
+    .map(([step]) => step)
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
   if (e.cause === 'quota') {
-    acc.quota = true
+    acc.quota = true;
   } else if (acc.rate === undefined || stamp(e) > stamp(acc.rate)) {
-    acc.rate = e
+    acc.rate = e;
   }
 }
 
@@ -342,20 +428,20 @@ function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
  *  lift. */
 function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | undefined {
   if (acc.quota) {
-    return { provider, cause: 'quota' }
+    return { provider, cause: 'quota' };
   }
-  const e = acc.rate
+  const e = acc.rate;
   if (e === undefined) {
-    return undefined // unreachable — a non-quota acc exists only via a rate death
+    return undefined; // unreachable — a non-quota acc exists only via a rate death
   }
-  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined
-  const t = until === undefined ? Number.NaN : Date.parse(until)
+  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined;
+  const t = until === undefined ? Number.NaN : Date.parse(until);
   if (until !== undefined && Number.isFinite(t) && t <= now) {
-    return undefined
+    return undefined;
   }
   return until === undefined
     ? { provider, cause: 'rate_limited' }
-    : { provider, cause: 'rate_limited', until }
+    : { provider, cause: 'rate_limited', until };
 }
 
 /** Derive walls from registry entries — `rate_limited`/`quota` deaths
@@ -375,26 +461,19 @@ export function deriveProviderWalls(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): ProviderWall[] {
-  const byProvider = new Map<string, WallAcc>()
+  const byProvider = new Map<string, WallAcc>();
   for (const e of Object.values(registry)) {
-    // the entry's live fields plus each retained `attempts` record —
-    // a re-dispatch appends the outgoing attempt verbatim, and a
-    // superseded death still walls the provider it died on (spec
-    // bro-1x7p); entries that never re-dispatched carry no list
-    const records: WallRecord[] = Array.isArray(e.attempts)
-      ? [e, ...(e.attempts as WallRecord[])]
-      : [e]
-    for (const rec of records) {
+    for (const rec of wallRecords(e)) {
       if (!wallable(rec)) {
-        continue
+        continue;
       }
-      const acc = byProvider.get(rec.provider) ?? { quota: false }
-      foldEntry(acc, rec)
-      byProvider.set(rec.provider, acc)
+      const acc = byProvider.get(rec.provider) ?? { quota: false };
+      foldEntry(acc, rec);
+      byProvider.set(rec.provider, acc);
     }
   }
   return [...byProvider]
     .map(([provider, acc]) => accWall(provider, acc, now))
     .filter((w): w is ProviderWall => w !== undefined)
-    .sort((a, b) => a.provider.localeCompare(b.provider))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
 }

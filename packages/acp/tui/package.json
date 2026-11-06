@@ -1,0 +1,22 @@
+{
+  "name": "@broject/acp-tui",
+  "private": true,
+  "version": "0.3.0",
+  "description": "Bun/OpenTUI/Solid session-view shell for the ACP wire \u2014 serve() + mountPane",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "dependencies": {
+    "@opentui/core": "0.8.0",
+    "@opentui/solid": "0.8.0",
+    "solid-js": "^1.9.12",
+    "web-tree-sitter": "^0.25.10"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/acp/tui"
+  }
+}
