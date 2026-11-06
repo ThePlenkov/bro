@@ -581,6 +581,11 @@ export class AcpImpl implements PaneImpl {
    *  verdict mode paints (a silent agent's idle clock starts at its
    *  last closed turn, not at pane open). */
   private lastStopTs: string | undefined;
+  /** The newest journal ts seen at all — the status-entry stamp the
+   *  terminal verdict modes paint (an error stop's `since` is its own
+   *  ts; a permission ask or a disconnect has no dedicated stamp, so
+   *  last activity stands in for "entered this state at"). */
+  private lastActivityTs: string | undefined;
   private lastStopError = false;
   /** leader sid → the `origin|error` keys its storm already rowed —
    *  N identical failures print ONE `── turn failed ──` and stay
@@ -598,6 +603,7 @@ export class AcpImpl implements PaneImpl {
 
   feed(row: ArchiveRow): void /* NOSONAR typescript:S3776 */ {
     this.launchTs ??= row.ts;
+    if (row.ts !== undefined) this.lastActivityTs = row.ts;
     // the provider label is any `acp provider 'X'`/`provider:X` by —
     // conductor rows name the orchestrator, not the model
     if (row.by !== undefined && /^(?:acp provider|provider:)/.test(row.by)) {
@@ -701,13 +707,24 @@ export class AcpImpl implements PaneImpl {
    *  blocked, requires_action is the permission posture. */
   get verdict(): { led: PaneLed; mode: string } | undefined {
     const s = this.session;
+    // terminal postures carry the status-entry stamp — "since" is the
+    // question a finished/blocked row must answer (a live turn's clock
+    // is its own startedAt, already painted)
+    const since = (base: string, ts: string | undefined): string =>
+      ts === undefined ? base : `${base} · since ${fmtWhen(ts)}`;
     if (s.replaying) return { led: { state: 'working' }, mode: 'replaying' };
     if (s.connection === 'disconnected') {
-      return { led: { state: 'blocked' }, mode: 'agent exited' };
+      return {
+        led: { state: 'blocked' },
+        mode: since('agent exited', this.lastActivityTs ?? this.lastStopTs),
+      };
     }
     switch (s.state) {
       case 'requires_action':
-        return { led: { state: 'blocked' }, mode: 'permission' };
+        return {
+          led: { state: 'blocked' },
+          mode: since('permission', this.lastActivityTs),
+        };
       case 'running':
         return {
           led: { state: 'working' },
@@ -718,13 +735,16 @@ export class AcpImpl implements PaneImpl {
         };
       default: {
         if (this.lastStopError) {
-          return { led: { state: 'blocked' }, mode: 'turn error' };
+          return {
+            led: { state: 'blocked' },
+            mode: since('turn error', this.lastStopTs ?? this.lastActivityTs),
+          };
         }
         let mode = 'idle';
         if (this.lastStopTs !== undefined) {
           mode = `since ${fmtWhen(this.lastStopTs)}`;
         } else if (s.stopReason !== null) {
-          mode = 'turn complete';
+          mode = since('turn complete', this.lastActivityTs);
         }
         return { led: { state: 'idle' }, mode };
       }
