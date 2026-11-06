@@ -60,6 +60,7 @@ export const isSystemoneFamily = (model: string | undefined): boolean =>
 export type ProviderEntry =
   | {
       type: 'api';
+      account?: string;
       /** Host root — every model is served under it on its own wire. */
       baseUrl: string;
       /** The allowlist: served model id → resolved wire. Values in
@@ -76,6 +77,7 @@ export type ProviderEntry =
     }
   | {
       type: 'acp';
+      account?: string;
       command: string;
       profile?: string;
       model?: string;
@@ -99,9 +101,13 @@ export type ProviderEntry =
        *  by default a derived provider wall SIGSTOPs the lane's live
        *  workers until the reported reset. */
       wallPause?: boolean;
+      /** MCP servers to pass to ACP worker sessions (opt-in). Stdio
+       *  descriptors are supported; broker/relay not advertised. */
+      mcpServers?: unknown[];
     }
   | {
       type: 'cli';
+      account?: string;
       command: string;
       model?: string;
       /** Shell template emitting one model id per line — the catalog
@@ -159,20 +165,20 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     call: 'auto',
     spawn: false,
     required: ['baseUrl'],
-    optional: ['model', 'apiKeyEnv', 'apiKeyCommand'],
+    optional: ['model', 'apiKeyEnv', 'apiKeyCommand', 'account'],
   },
   acp: {
     call: 'auto',
     spawn: true,
     required: ['command'],
-    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
+    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm', 'account'],
     optionalBool: ['autoApprove', 'wallPause'],
   },
   cli: {
     call: 'prose',
     spawn: true,
     required: ['command'],
-    optional: ['model', 'models'],
+    optional: ['model', 'models', 'account'],
     optionalBool: ['wallPause'],
   },
 };
@@ -488,10 +494,15 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   if ('err' in gateRes) {
     return fail(gateRes.err);
   }
+  const mcpRes = acpMcpServersFor(kind, name, (raw as Record<string, unknown>).mcpServers);
+  if ('err' in mcpRes) {
+    return fail(mcpRes.err);
+  }
   return withProviderExtras(
     { type: kind, ...picked } as ProviderEntry,
     modelsRes.models,
-    gateRes.rateGate
+    gateRes.rateGate,
+    mcpRes.mcpServers
   );
 }
 
@@ -500,7 +511,8 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
 function withProviderExtras(
   entry: ProviderEntry,
   models?: Record<string, ApiWire>,
-  rateGate?: LaneRateGate
+  rateGate?: LaneRateGate,
+  mcpServers?: unknown[]
 ): ProviderEntry {
   const bag = entry as Record<string, unknown>;
   if (models !== undefined) {
@@ -508,6 +520,9 @@ function withProviderExtras(
   }
   if (rateGate !== undefined) {
     bag.rateGate = rateGate;
+  }
+  if (mcpServers !== undefined && mcpServers.length > 0) {
+    bag.mcpServers = mcpServers;
   }
   return entry;
 }
@@ -546,6 +561,90 @@ function laneGateFor(
     return { err: gate.err };
   }
   return { rateGate: gate.rateGate };
+}
+
+/** ACP worker MCP servers (opt-in). Start with stdio descriptors;
+ *  HTTP/SSE/remote transports require negotiated capability we do not
+ *  wire in the headless worker, so they are rejected with remediation.
+ *  Diagnostics never echo env/header/secret values. */
+function acpMcpServersFor(
+  kind: ProviderKind,
+  name: string,
+  raw: unknown
+): { err: string } | { mcpServers?: unknown[] } {
+  if (kind !== 'acp' || raw === undefined) {
+    return {};
+  }
+  if (!Array.isArray(raw)) {
+    return { err: 'mcpServers must be an array of MCP server descriptors' };
+  }
+  const out: unknown[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (!isPlainObject(v)) {
+      return { err: `mcpServers[${i}] must be an object descriptor` };
+    }
+    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    if (t !== 'stdio') {
+      return { err: mcpTransportErr(t, i) };
+    }
+    const dErr = stdioDescriptorErr(v, i);
+    if (dErr !== undefined) {
+      return { err: dErr };
+    }
+    out.push(v);
+  }
+  return { mcpServers: out };
+}
+
+/** The non-stdio transports all fail at parse — HTTP-family ones carry
+ *  the negotiated-capability remediation, unknown names the accepted
+ *  shape. Helper so the descriptor loop stays flat (CodeScene: a bumpy
+ *  road needs no nested conditionals to read). */
+function mcpTransportErr(t: string, i: number): string {
+  if (t === 'http' || t === 'sse' || t === 'streamable-http') {
+    return `mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`;
+  }
+  return `mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`;
+}
+
+/** A stdio descriptor is `{command, args, env?}` — ACP session/new
+ *  validates the same wire shape, but a missing or mistyped field dies
+ *  there as an opaque session-start failure instead of naming the bad
+ *  config key. Values are never echoed into messages. */
+function stdioDescriptorErr(v: Record<string, unknown>, i: number): string | undefined {
+  if (typeof v.command !== 'string' || v.command === '') {
+    return `mcpServers[${i}].command must be a non-empty string`;
+  }
+  if (!Array.isArray(v.args) || v.args.some(a => typeof a !== 'string')) {
+    return `mcpServers[${i}].args must be an array of strings`;
+  }
+  return stdioEnvShapeErr(v, i);
+}
+
+/** A stdio descriptor's `env`, when present, is `[{name, value}]`
+ *  string pairs — anything else (a numeric value, a bare string, a
+ *  non-array) fails obscurely inside session/new, so it is refused
+ *  here with an index. Values are never echoed into the message. */
+function stdioEnvShapeErr(v: Record<string, unknown>, i: number): string | undefined {
+  if (v.env === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(v.env)) {
+    return `mcpServers[${i}].env must be an array of {name, value} pairs`;
+  }
+  for (let j = 0; j < v.env.length; j++) {
+    const e = v.env[j];
+    if (
+      !isPlainObject(e) ||
+      typeof e.name !== 'string' ||
+      e.name === '' ||
+      typeof e.value !== 'string'
+    ) {
+      return `mcpServers[${i}].env[${j}] must be a {name, value} string pair`;
+    }
+  }
+  return undefined;
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var
@@ -671,6 +770,13 @@ export function getProvider(providers: Record<string, ProviderEntry>, name: stri
     throw new UnknownProviderError(name);
   }
   return entry;
+}
+
+/** Account identity is opaque to core; an omitted label keeps the
+ *  provider name as the account key. */
+export function providerAccount(providers: Record<string, ProviderEntry>, name: string): string {
+  const entry = Object.hasOwn(providers, name) ? providers[name] : undefined;
+  return entry?.account ?? name;
 }
 
 /** Lookup + surface assertion in one — `requireProviderSurface(cfg,

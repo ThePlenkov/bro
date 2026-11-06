@@ -484,8 +484,9 @@ interface DependabotAlert {
 
 /** Open dependabot PRs — an alert with a fix PR in flight isn't debt, the
  *  PR is the work item. Matched by head ref `dependabot/.../<pkg>-<ver>` —
- *  the trailing dash is the version boundary so `ember` can't match
- *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages.
+ *  the `/` before the name pins the segment start and the dash must open
+ *  the VERSION (`-v?\d`), so `ember` can't eat `ember-cli-1.0`'s own
+ *  name dash. Dependabot refs drop the `@` from scoped packages.
  *  Failure propagates: an empty list here would mark every covered alert
  *  as debt, so the caller skips the whole source on error. */
 function dependabotOpenPrs(

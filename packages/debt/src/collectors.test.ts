@@ -92,9 +92,8 @@ describe('collectDependabot', () => {
     );
   });
 
-  test('a dependabot PR for a different pkg does not suppress the alert', () => {
-    // 'ember' must not match 'ember-cli-…' — same-name prefix, different package
-    const emberAlert = {
+  test('an open PR for a LONGER package name does not suppress this alert', () => {
+    const ember = {
       ...DEPENDABOT_ALERT,
       security_vulnerability: {
         ...DEPENDABOT_ALERT.security_vulnerability,
@@ -103,22 +102,21 @@ describe('collectDependabot', () => {
     };
     withFakeGh(
       {
-        'dependabot/alerts': JSON.stringify([emberAlert]),
+        'dependabot/alerts': JSON.stringify([ember]),
+        // `ember-` is a prefix of `ember-cli` — matching on the raw
+        // substring would silence a distinct package's alert
         'pr list': JSON.stringify([
-          { number: 9, headRefName: 'dependabot/npm_and_yarn/ember-cli-4.3.0', url: 'u' },
+          { number: 43, headRefName: 'dependabot/npm_and_yarn/ember-cli-5.0.0', url: 'u' },
         ]),
       },
       () => {
-        const rows = collectDependabot(CTX);
-        assert.equal(rows.length, 1);
+        assert.equal(collectDependabot(CTX).length, 1);
       }
     );
   });
 
-  test('a digit-opening pkg suffix does not count as the version tail', () => {
-    // 'lodash-2fa-1.0.0' is package lodash-2fa, not lodash 2fa-1.0.0 —
-    // the tail must parse as a real dotted version stem
-    const lodashAlert = {
+  test('an open PR for a digit-suffix package name does not suppress this alert', () => {
+    const lodash = {
       ...DEPENDABOT_ALERT,
       security_vulnerability: {
         ...DEPENDABOT_ALERT.security_vulnerability,
@@ -127,14 +125,16 @@ describe('collectDependabot', () => {
     };
     withFakeGh(
       {
-        'dependabot/alerts': JSON.stringify([lodashAlert]),
+        'dependabot/alerts': JSON.stringify([lodash]),
+        // `lodash-` is a prefix of `lodash-2fa` — the digit after the
+        // dash is a NAME segment there, not a version start; matching
+        // on it would silence a distinct package's alert
         'pr list': JSON.stringify([
-          { number: 9, headRefName: 'dependabot/npm_and_yarn/lodash-2fa-1.0.0', url: 'u' },
+          { number: 44, headRefName: 'dependabot/npm_and_yarn/lodash-2fa-1.0.0', url: 'u' },
         ]),
       },
       () => {
-        const rows = collectDependabot(CTX);
-        assert.equal(rows.length, 1);
+        assert.equal(collectDependabot(CTX).length, 1);
       }
     );
   });
@@ -389,8 +389,12 @@ describe('collectSverka', () => {
   });
 
   test('a null result element refuses the snapshot — dropping it could resolve its ledger row', () => {
-    assertSverkaSkipped({ 'r.sarif': sarifRun('eslint', [RESULT, null]) });
-    assertSverkaSkipped({ 'r.sarif': sarifRun('eslint', [42]) });
+    assertSverkaSkipped({
+      'r.sarif': sarifRun('eslint', [RESULT, null]),
+    });
+    assertSverkaSkipped({
+      'r.sarif': sarifRun('eslint', [42]),
+    });
   });
 
   test('identical finding in two SARIF files keeps distinct thread_ids', () => {

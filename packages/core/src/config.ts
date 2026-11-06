@@ -34,10 +34,14 @@ import {
   type ProviderEntry,
 } from './providers.ts';
 import {
+  fleetLeases,
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  fleetWalls,
+  type FleetLeaseTtls,
   type FleetRouter,
+  type FleetWallTtls,
   type RoutingTable,
 } from './routing.ts';
 
@@ -403,6 +407,7 @@ const providerApiSchema = js.obj(
     model: js.str,
     apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
     apiKeyCommand: js.str,
+    account: js.str,
     // model → wire: a wire name, {wire}, or null (wire inferred).
     // minProperties: an empty map parses to a dropped provider —
     // "models": {} must not read as valid config
@@ -425,7 +430,9 @@ const providerAcpSchema = js.obj(
     model: js.str,
     apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
     sessionRm: js.str,
+    account: js.str,
     autoApprove: js.bool,
+    wallPause: js.bool,
   },
   { required: ['type', 'command'] }
 );
@@ -437,6 +444,8 @@ const providerCliSchema = js.obj(
     model: js.str,
     // a model-catalog command, not a map — one id per line on stdout
     models: js.str,
+    account: js.str,
+    wallPause: js.bool,
   },
   { required: ['type', 'command'] }
 );
@@ -1010,12 +1019,16 @@ export const fleetSection: ConfigSection<{
   maxConcurrent: number;
   profiles: Record<string, FleetProfile>;
   routing: RoutingTable;
+  walls: FleetWallTtls;
+  leases: FleetLeaseTtls;
   router?: FleetRouter;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown;
     profiles?: unknown;
     routing?: unknown;
+    walls?: unknown;
+    leases?: unknown;
     router?: unknown;
   };
   const router = fleetRouter(obj.router);
@@ -1028,6 +1041,8 @@ export const fleetSection: ConfigSection<{
         : DEFAULT_CONFIG.fleet.maxConcurrent,
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
+    walls: fleetWalls(obj.walls),
+    leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
   };
 };
@@ -1057,6 +1072,14 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  walls: js.obj({
+    rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+    quotaTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
+  leases: js.obj({
+    roleTtlSeconds: { type: 'number', exclusiveMinimum: 0 },
+    workTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
 });
 
 /** bro.config.json `query` section — `query`-plan defaults (spec
@@ -1332,6 +1355,8 @@ export interface BroConfig {
     maxConcurrent: number;
     profiles: Record<string, FleetProfile>;
     routing: RoutingTable;
+    walls: FleetWallTtls;
+    leases: FleetLeaseTtls;
     router?: FleetRouter;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
@@ -1398,7 +1423,13 @@ export const DEFAULT_CONFIG: BroConfig = {
   providers: {},
   brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
-  fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
+  fleet: {
+    maxConcurrent: 3,
+    profiles: {},
+    routing: {},
+    walls: { rateTtlMinutes: 15, quotaTtlMinutes: 360 },
+    leases: { roleTtlSeconds: 60, workTtlMinutes: 360 },
+  },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   mcp: {},
