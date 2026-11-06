@@ -15,7 +15,7 @@ is scanned twice, and sync open findings into beads.
 npm i @broject/debt
 ```
 
-Requires Node ≥ 22, authenticated `gh`, and a beads or jsonl store.
+Requires Node ≥ 22.18, authenticated `gh`, and a beads or jsonl store.
 ESM only.
 
 ## Surface

@@ -6,6 +6,7 @@ export {
   ghJsonAsync,
   ghTry,
   ghTryAsync,
+  issueLink,
   prLink,
   resolveRepo,
   resolveRepoAsync,
@@ -13,7 +14,10 @@ export {
 export {
   git,
   gitTry,
+  gitTryAsync,
   gitCommonDir,
+  gitCommonDirAsync,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,
   gitLogStamp,
@@ -21,12 +25,14 @@ export {
   gitIsAncestor,
   gitIsShallow,
   gitUpstreamBehind,
+  gitUpstreamBehindAsync,
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
   worktreeGitDir,
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
+export { getJson } from './http.ts';
 export {
   bd,
   BdCompatError,
@@ -36,6 +42,10 @@ export {
   bdJsonAsync,
   bdTry,
   bdTryAsync,
+  beadsDir,
+  beadsDirAsync,
+  beadsStoreStamp,
+  beadsStoreStampAsync,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
@@ -57,9 +67,12 @@ export {
   DEFAULT_GLOBAL_BEADS_DIR,
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+  brouterSection,
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
+  js,
   loadConfig,
   loadConfigLayers,
   mcpSection,
@@ -118,6 +131,7 @@ export {
   fleetWalls,
   deriveAccountWalls,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
@@ -143,6 +157,21 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
+export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
+export {
+  BrouterConfigError,
+  brouterStaticCatalog,
+  isQualifiedRouteId,
+  parseBrouter,
+  resolveModelRoute,
+} from './brouter.ts';
+export type {
+  BrouterConfig,
+  BrouterModels,
+  BrouterRoute,
+  ModelRoute,
+} from './brouter.ts';
 export {
   DATA_REF,
   dataRefCommit,
@@ -156,14 +185,24 @@ export type {
   ConfigLayerName,
   ConfigLayersResult,
   ConfigSection,
+  JsonSchema,
   MirrorPolicy,
   Personality,
   SddMode,
   StoreBackend,
 } from './config.ts';
+export {
+  configDiagnostics,
+  configPolicyErrors,
+  CONFIG_SCHEMA_URL,
+  configSchemaDocument,
+  jsonSchemasFor,
+  validateSchemaValue,
+} from './config-schema.ts';
+export type { ConfigDiagnostic, SchemaError } from './config-schema.ts';
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts';
 export { definePlugin } from './plugin.ts';
-export type { BroPlugin } from './plugin.ts';
+export type { BroPlugin, CliContract, CliSubContract } from './plugin.ts';
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts';
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts';
 export {
@@ -180,6 +219,7 @@ export {
   taskStoreAt,
 } from './tasks.ts';
 export type {
+  ClaimCapability,
   DepOpts,
   PublishResult,
   SlotAcquire,
@@ -195,13 +235,27 @@ export type {
 export {
   bridgeFetch,
   bridgePublish,
+  displayUrl,
+  DOLT_DATA_REF,
+  doltDirHealth,
+  doltHeadHealth,
+  doltRemoteSrc,
   doltSyncPlan,
   fileTargetPath,
   gitUpstream,
+  lastGoodDoltHead,
   listDoltRemotes,
+  manifestTables,
   mirrorPathFor,
+  probeDoltRemote,
 } from './dolt-bridge.ts';
-export type { BdProbe, DoltBridge, DoltRemote, DoltSyncPlan } from './dolt-bridge.ts';
+export type {
+  BdProbe,
+  DoltBridge,
+  DoltHeadHealth,
+  DoltRemote,
+  DoltSyncPlan,
+} from './dolt-bridge.ts';
 export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts';
 export type {
   LifecycleEvent,
@@ -209,7 +263,10 @@ export type {
   LifecycleKind,
   LifecycleRead,
 } from './lifecycle.ts';
+export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
+export { parseTaskSpecBody, taskSpecFacade } from './taskspec.ts';
+export type { TaskSpec, TaskSpecFacade } from './taskspec.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
@@ -231,6 +288,8 @@ export type {
   Verdict,
 } from './judge.ts';
 export type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   EnqueueOpts,
   MergeOpts,
@@ -270,6 +329,7 @@ export {
   facade,
   facadeAuth,
   facadeName,
+  facadeNameAsync,
   isOwnClaim,
   mergeQueueHost,
   parallelWorkLines,
@@ -284,9 +344,12 @@ export {
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
+  sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
   tasksAsync,
+  tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
@@ -374,20 +437,24 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
   AGENT_CAUSES,
   acquireAgentRegistryLock,
   agentEntryBlocked,
+  agentExitFileName,
   agentRegistryPath,
   agentsSection,
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
   commandCliName,
+  entryRunId,
   isAgentCause,
   mintAgentId,
+  mintRunId,
   patchAgentRegistry,
   probeStep,
   readAgentRegistry,
@@ -407,6 +474,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
@@ -420,6 +488,7 @@ export {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -433,6 +502,16 @@ export type {
   SessionPlane,
   SessionQuota,
 } from './session-planes.ts';
+export {
+  planeStartingSessions,
+  releaseSessionStart,
+  reserveSessionStart,
+  sessionCapRefusal,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionReservationsDir,
+} from './session-cap.ts';
+export type { SessionCapView } from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -471,6 +550,14 @@ export {
   type HeldLockOptions,
 } from './filelock.ts';
 export {
+  appendPrivateFileSync,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  writePrivateFileSync,
+} from './private-files.ts';
+export {
   fileBackedJanitorDeps,
   janitorBroDir,
   janitorDidWork,
@@ -480,7 +567,18 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
-export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export type { ExitCode, ExitCodeRow } from './exits.ts';
+export {
+  groupMemberAlive,
+  handleOwner,
+  markerLive,
+  markerOwner,
+  pidAlive,
+  procStat,
+  scanProc,
+} from './proc.ts';
+export type { ProcEntry } from './proc.ts';
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
@@ -494,6 +592,7 @@ export {
   busProbe,
   busPublish,
   busSocketPath,
+  busSocketPathForCommon,
   busStatePath,
   busStatus,
   busSubscribe,
@@ -528,4 +627,21 @@ export {
 export type { OrphanSweepReport, ProcRow } from './live-procs.ts';
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn } from './testkit.ts';
+export {
+  AMBIENT_GIT,
+  doltManifest,
+  doltStoreCommit,
+  scrubEnv,
+  testGit,
+  testGitEnv,
+  testGitSpawn,
+  testRepoInit,
+} from './testkit.ts';
+export {
+  checkSkillLock,
+  readSkillLock,
+  skillFolderHash,
+  type LockedSkill,
+  type SkillDrift,
+  type SkillLockLocation,
+} from './skills-lock.ts';

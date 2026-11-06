@@ -29,7 +29,7 @@ import {
 } from '@broject/core';
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge';
 import { fakeFetch } from '@broject/providers/testkit';
-import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts';
+import { capture, initRepo, installFakeBd, killRun, readBeads } from './testrepo.ts';
 import {
   collectDuplicateSuspects,
   discoverSessions,
@@ -107,20 +107,11 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
       // registry still points at before the tmpdir (and it) goes away
       try {
         for (const e of Object.values(readAgentRegistry(main))) {
-          // tests register pid: process.pid to fake 'running' — if this
-          // process led its own group, kill(-pid) would kill the runner
-          if (
-            typeof e.pid === 'number' &&
-            e.pid > 0 &&
-            e.pid !== process.pid &&
-            e.pid !== process.ppid
-          ) {
-            try {
-              process.kill(-e.pid, 'SIGKILL'); // detached → own process group
-            } catch {
-              // already gone
-            }
-          }
+          // tests register pid: process.pid to fake 'running' — killRun
+          // never signals self/parent; the handle's group dies beside
+          // the recorded one (they differ under a fork-style scope,
+          // bro-ybo8z)
+          killRun(main, { pid: e.pid, runId: e.runId, agentId: e.agentId });
         }
       } catch {
         // no readable registry — nothing spawned
@@ -1631,6 +1622,110 @@ describe('bro agents down <target>', () => {
     }
   });
 
+  /** Shared skeleton of the TERM-survival scenarios (bro-l8c4f.3):
+   *  spawn a native agent running `command`, run `down`, and assert the
+   *  common invariants — exit 1, no `stopped` line, no `stopped`
+   *  marker — before the caller checks its scenario-specific output. */
+  const surviveDown = async (fx: Fixture, command: string) => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({ agents: { native: { command } } })
+    );
+    const up = await agents([
+      'up',
+      'fx-1',
+      '--worktree',
+      fx.main,
+      '--beads-dir',
+      fx.beads,
+      '--prompt-file',
+      fx.promptFile(LONG_RUN),
+    ]);
+    assert.equal(up.code, 0);
+    const down = await agents(['down', 'fx-1']);
+    assert.equal(down.code, 1);
+    assert.doesNotMatch(down.out.join('\n'), /^stopped /m);
+    // no stopped marker — the live unit still owns the entry
+    assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true);
+    return { down, status: await agents(['status', 'fx-1']) };
+  };
+
+  test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', async () => {
+    // the wrapper records receipt of SIGTERM and keeps running — the
+    // marker file proves the signal actually landed, so a no-op stop()
+    // can't pass by never signaling (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const hitFile = join(fx.main, 'term-received');
+      const { down, status } = await surviveDown(
+        fx,
+        `trap 'touch "${hitFile}"' TERM; while :; do sleep 1; done # {promptFile}`
+      );
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/);
+      for (let i = 0; i < 40 && !existsSync(hitFile); i++) {
+        await new Promise(r => setTimeout(r, 50));
+      }
+      assert.ok(existsSync(hitFile), 'the wrapper never received SIGTERM');
+      assert.match(status.out.join('\n'), /state\s+running/);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('a dead wrapper with a live descendant is still-running, not stopped', async () => {
+    // the wrapper dies on SIGTERM while its descendant had TERM
+    // ignored before exec — a group probe, not the wrapper pid, is what
+    // stands between this unit and a `stopped` marker (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const { down, status } = await surviveDown(
+        fx,
+        '(trap "" TERM; exec sleep 30) & wait $! # {promptFile}'
+      );
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/);
+      // the live group member keeps the whole unit reading `running`
+      assert.match(status.out.join('\n'), /state\s+running/);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  test('a setsid-escaped descendant dies with the unit — the tree spans every group it leads', async () => {
+    // setsid moves the child into its own session AND process group —
+    // kill(-wrapperPgid) cannot reach it, but it is still a tree member,
+    // so the pre-signal snapshot's pgid set signals it directly
+    // (bro-ybo8z's fork-style scope hardening closes the escapee blind
+    // spot bro-l8c4f.3 documented).
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'setsid sleep 30 & wait $! # {promptFile}' } },
+        })
+      );
+      const up = await agents([
+        'up',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+        '--prompt-file',
+        fx.promptFile(LONG_RUN),
+      ]);
+      assert.equal(up.code, 0);
+      const agentId = readAgentRegistry(fx.main)['fx-1']!.agentId;
+      const down = await agents(['down', 'fx-1']);
+      assert.equal(down.code, 0);
+      assert.match(down.out.join('\n'), new RegExp(`stopped ${String(agentId)}`));
+      const status = await agents(['status', 'fx-1']);
+      assert.match(status.out.join('\n'), /state\s+stopped/);
+    } finally {
+      fx.restore();
+    }
+  });
+
   test("a status() that drops the pid renders 'unknown' in the respawn note", async () => {
     // a respawn between list() and status() reuses the agentId with a new
     // handle — but a connector can also just stop reporting a pid; the
@@ -1663,8 +1758,13 @@ describe('bro agents down <target>', () => {
     const fx = fixture();
     try {
       const r = await agents(['down', 'ag-1', '--connector', 'flaky-pid-agents-test']);
-      assert.equal(r.code, 0);
+      // stop() resolved but the backend still reads `running` — the
+      // post-stop probe refuses `stopped` (bro-l8c4f.3); the respawn
+      // note (bro-8ltl) still renders ahead of the refusal
+      assert.equal(r.code, 1);
       assert.match(r.err.join('\n'), /respawned since lookup \(pid 4242 → unknown\)/);
+      assert.match(r.err.join('\n'), /survived the stop signal — still running/);
+      assert.doesNotMatch(r.out.join('\n'), /^stopped /m);
       assert.equal(stopped, 'ag-1');
     } finally {
       dispose?.();
@@ -1684,16 +1784,26 @@ describe('bro agents down <target>', () => {
 });
 
 describe('discoverSessions', () => {
-  const envFor = (lockDir: string): AgentConnectorEnv => ({
-    agents: { devin: { lockDir } },
+  /** A fake /proc where this process reads as the devin cli — the live
+   *  session count checks the process identity (argv[0]). */
+  const devinProc = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'));
+    mkdirSync(join(dir, String(process.pid)), { recursive: true });
+    writeFileSync(join(dir, String(process.pid), 'cmdline'), 'devin\0');
+    return dir;
+  };
+
+  const envFor = (bag: { lockDir: string; procDir?: string }): AgentConnectorEnv => ({
+    agents: { devin: bag },
     connectors: {},
   });
 
   test('session-plane rows arrive tagged with the kind that saw them', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-disc-'));
+    const procDir = devinProc();
     try {
       writeFileSync(join(dir, 'sess.lock'), String(process.pid));
-      const { sessions, degraded } = discoverSessions(envFor(dir));
+      const { sessions, degraded } = discoverSessions(envFor({ lockDir: dir, procDir }));
       assert.equal(sessions.length, 1);
       assert.equal(sessions[0]!.kind, 'devin');
       assert.equal(sessions[0]!.name, 'sess');
@@ -1701,6 +1811,7 @@ describe('discoverSessions', () => {
       assert.deepEqual(degraded, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      rmSync(procDir, { recursive: true, force: true });
     }
   });
 
@@ -1711,7 +1822,7 @@ describe('discoverSessions', () => {
     const file = join(root, 'notdir');
     try {
       writeFileSync(file, 'x');
-      const { sessions, degraded } = discoverSessions(envFor(file));
+      const { sessions, degraded } = discoverSessions(envFor({ lockDir: file }));
       assert.deepEqual(sessions, []);
       assert.equal(degraded.length, 1);
       assert.match(degraded[0]!, /^devin: /);

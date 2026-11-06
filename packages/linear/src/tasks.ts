@@ -27,6 +27,7 @@
  * `relatedIssue`).
  */
 import type {
+  ClaimCapability,
   DepOpts,
   TaskDepEdge,
   TaskFilter,
@@ -660,12 +661,16 @@ function linkSync(from: string, to: string, rel: string): void {
 }
 
 /** claim = assign viewer → verify re-read. Single-assignee writes are
- *  last-writer-wins, so the verify settles races deterministically:
- *  whoever the read shows holds it — a loser sees the winner and
- *  throws. No label commit flag is needed (github needed one only
- *  because assignees are a *set* there). A `started`-but-unassigned
- *  issue is claimable — the assignee is the claim, and an abandoned
- *  start must not wedge the issue forever. */
+ *  last-writer-wins, so the verify settles MOST races
+ *  deterministically: whoever the read shows holds it — a loser sees
+ *  the winner and throws. It cannot promise a single winner though —
+ *  a loser's verify can still read before the winner's write commits
+ *  — so this is best-effort assignment, never a lease
+ *  (claimCapability says so, spec specs/bro-l8c4f.12). No label
+ *  commit flag is needed (github needed one only because assignees
+ *  are a *set* there). A `started`-but-unassigned issue is claimable
+ *  — the assignee is the claim, and an abandoned start must not
+ *  wedge the issue forever. */
 function claimSync(ref: string): void {
   const n = queryIssueSync(ref)
   if (n === undefined) {
@@ -957,6 +962,16 @@ function updateSync(id: string, patch: Record<string, string | number>): void {
 
 // --- the stores -------------------------------------------------------------------
 
+/** The remote claim's honest capability (spec specs/bro-l8c4f.12):
+ *  assign→verify-reread is a marker, never a lease — a residual
+ *  interleaving window can seat two winners, and every worker behind
+ *  the viewer credential claims as the same identity. */
+const CLAIM_CAPABILITY = {
+  strength: 'best-effort',
+  identity: 'viewer',
+  authority: 'service',
+} as const satisfies ClaimCapability
+
 function rowOrUndef(n: IssueNode | undefined): TaskRow | undefined {
   return n === undefined ? undefined : pub(toRow(n))
 }
@@ -983,6 +998,7 @@ export function linearTasks(_dir: string): TaskStore {
     create: (i) => pub(createSync(i)) as never,
     update: (id, patch) => updateSync(id, patch),
     claim: (id) => claimSync(issueRef(id)),
+    claimCapability: () => CLAIM_CAPABILITY,
     actor: () => actor(),
     reopen: (id) => reopenSync(issueRef(id)),
     close: (id, reason) => closeSync(issueRef(id), reason),

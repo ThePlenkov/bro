@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { facade, registerConnector, scrubEnv, testGit } from '@broject/core'
+import {
+  facade,
+  registerConnector,
+  scrubEnv,
+  testGit,
+  type ApprovalVerdict,
+} from '@broject/core'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector, gitlabReview } from './index.ts'
 
@@ -45,6 +51,7 @@ case "$1 $2" in
       *"/pipelines"*) echo '[{"id":11,"sha":"abc123","status":"success"}]' ;;
       *"/versions"*) echo '[{"head_commit_sha":"a1"},{"head_commit_sha":"a2"},{"head_commit_sha":"a1"}]' ;;
       *"/discussions"*) echo '${DISCUSSIONS}' ;;
+      *"/approvals"*) if [ "$FAKE_GLAB_APPROVALS_FAIL" = "1" ]; then echo 'glab api failed: 500' >&2; exit 1; fi; echo "\${FAKE_GLAB_APPROVALS:-{\\}}" ;;
       *"/merge_requests/"*)
         iid=$(echo "$2" | sed 's/.*merge_requests\\///; s/[^0-9].*//')
         case ",$FAKE_GLAB_MR_FAIL," in *",$iid,"*) echo 'glab api failed: 404 Not Found' >&2; exit 1 ;; esac
@@ -496,6 +503,74 @@ describe('gitlabReview', { skip: WIN32 }, () => {
       )
       // merge_method is project config, not a merge-endpoint param
       assert.doesNotMatch(lines, /merge_method/)
+    })
+  })
+})
+
+describe('gitlabReview humanApproved', { skip: WIN32 }, () => {
+  const approvals = (approved: boolean, users: { bot?: boolean; username?: string }[]) =>
+    JSON.stringify({ approved, approved_by: users.map((user) => ({ user })) })
+
+  const approved = (opts?: { approvers?: string[] }): ApprovalVerdict =>
+    gitlabReview().humanApproved!(target, opts) as ApprovalVerdict
+
+  test('a non-bot approver on the aggregate verdict satisfies the gate', () => {
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'alice' }]) },
+      () => {
+        assert.deepEqual(approved(), { approved: true, hostApproved: true })
+      }
+    )
+  })
+
+  test('bot-only approvals never satisfy it', () => {
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ bot: true, username: 'ci-bot' }]) },
+      () => {
+        const v = approved()
+        assert.equal(v.approved, false)
+        assert.match(v.reason!, /bot-only/)
+      }
+    )
+  })
+
+  test('the approvers allowlist narrows who counts', () => {
+    const env = {
+      FAKE_GLAB_APPROVALS: approvals(true, [
+        { username: 'bob' },
+        { bot: true, username: 'ci-bot' },
+      ]),
+    }
+    withFakeGlab(env, () => {
+      const denied = approved({ approvers: ['alice'] })
+      assert.equal(denied.approved, false)
+      assert.match(denied.reason!, /outside act\.approvers/)
+      assert.equal(approved({ approvers: ['BOB'] }).approved, true)
+    })
+  })
+
+  test('a generated bot username counts as a bot even without the flag', () => {
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'project_7_bot_ci' }]) },
+      () => {
+        const v = approved()
+        assert.equal(v.approved, false)
+        assert.match(v.reason!, /bot-only/)
+      }
+    )
+  })
+
+  test('an unapproved MR and a failed probe both read as not approved', () => {
+    withFakeGlab({ FAKE_GLAB_APPROVALS: approvals(false, [{ username: 'alice' }]) }, () => {
+      const v = approved()
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /unmet/)
+    })
+    // a FAILING glab read is 'unanswerable' — never a pass
+    withFakeGlab({ FAKE_GLAB_APPROVALS_FAIL: '1' }, () => {
+      const v = approved()
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /unanswerable/)
     })
   })
 })

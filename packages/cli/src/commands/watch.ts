@@ -41,6 +41,7 @@ import {
   busProbe,
   busSocketPath,
   dropMailbox,
+  emitWorkerSilent,
   git,
   gitTry,
   janitorDidWork,
@@ -48,16 +49,28 @@ import {
   mailboxDir,
   prOwnership,
   prOwnershipMark,
+  hasHelpFlag,
+  printUsage,
+  readAgentRegistry,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
   wallText,
+  type BroConfig,
   type JanitorReport,
   type PrOwnership,
   type ProviderWall,
   type ReviewFacade,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  resolveLedger,
+  prStateCache,
+  type FetchPrActStateOpts,
+  type PrStateCache,
+} from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
@@ -253,6 +266,16 @@ function agentAttention(rows: FleetRow[]): string[] {
   return out
 }
 
+/** A run's silence in whole minutes once it crosses loop.stallMin —
+ *  the shared predicate behind the attention line and the
+ *  `worker.silent` bus emit (bro-294hf); null when the run is dead,
+ *  unverifiable, or still under the bound. */
+export function silentRunMin(loop: WatchLoop, r: LoopRunView): number | null {
+  return loop.stallMin > 0 && r.state !== 'dead' && r.silentMs !== null && r.silentMs >= loop.stallMin * 60_000
+    ? Math.floor(r.silentMs / 60_000)
+    : null
+}
+
 /** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
  *  record whose pid is gone (a crashed loop's residue). Reported for the
  *  orchestrator's judgment; watch never stops or respawns anything. */
@@ -263,14 +286,9 @@ function loopAttention(loop: WatchLoop): string[] {
       out.push(`loop agent ${r.beadId} — pid ${r.pid ?? '?'} gone — crashed run's record`)
       continue
     }
-    if (
-      loop.stallMin > 0 &&
-      r.silentMs !== null &&
-      r.silentMs >= loop.stallMin * 60_000
-    ) {
-      out.push(
-        `loop agent ${r.beadId} — output silent ${Math.floor(r.silentMs / 60_000)}m — inspect?`
-      )
+    const silentMin = silentRunMin(loop, r)
+    if (silentMin !== null) {
+      out.push(`loop agent ${r.beadId} — output silent ${silentMin}m — inspect?`)
     }
   }
   return out
@@ -289,6 +307,80 @@ function prAttention(prs: WatchPrGate[]): string[] {
     }
   }
   return out
+}
+
+/** `worker.silent` on the bus — the silence computation already runs
+ *  every tick; a per-process Set turns it into transitions (loud→silent
+ *  emits once, a run that speaks again re-arms). No heartbeat poller is
+ *  invented — the --every cadence is the existing one (bro-294hf).
+ *  agentId resolves best-effort off the registry; a run the registry
+ *  never claimed still emits keyed on its beadId. */
+function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
+  pruneSilentSeen(snap.loop.runs, seen)
+  let reg: ReturnType<typeof readAgentRegistry> | undefined
+  const registry = (): ReturnType<typeof readAgentRegistry> => {
+    if (reg === undefined) {
+      try {
+        reg = readAgentRegistry(dir)
+      } catch {
+        reg = {} // a wedged registry is no agentId, never a dead tick
+      }
+    }
+    return reg
+  }
+  for (const r of snap.loop.runs) {
+    trackSilentTransition(dir, snap.loop, r, seen, registry)
+  }
+}
+
+/** A run that ended while silent leaves no row to re-clear its entry —
+ *  prune gone beads or a respawn on the same bead can never emit again. */
+function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
+  const live = new Set(runs.map(r => r.beadId))
+  for (const beadId of seen) {
+    if (!live.has(beadId)) {
+      seen.delete(beadId)
+    }
+  }
+}
+
+/** One run's edge: loud/dead re-arms, the first tick past stallMin
+ *  emits `worker.silent` once per silent stretch. */
+function trackSilentTransition(
+  dir: string,
+  loop: WatchLoop,
+  r: LoopRunView,
+  seen: Set<string>,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const silentMin = silentRunMin(loop, r)
+  if (silentMin === null) {
+    seen.delete(r.beadId)
+    return
+  }
+  if (seen.has(r.beadId)) {
+    return
+  }
+  seen.add(r.beadId)
+  emitRunSilent(dir, r, silentMin, registry)
+}
+
+/** One run past its silence bound → a keyed `worker.silent` envelope.
+ *  agentId resolves best-effort off the registry; a run the registry
+ *  never claimed still emits keyed on its beadId. */
+function emitRunSilent(
+  dir: string,
+  r: LoopRunView,
+  silentMin: number,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const entry = registry()[r.beadId]
+  emitWorkerSilent(dir, {
+    bead: r.beadId,
+    silentMin,
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
+    ...(r.log !== undefined ? { log: r.log } : {}),
+  })
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every
@@ -457,6 +549,27 @@ export function openPrTargets(
   return [...seen.entries()].map(([pr, link]) => ({ pr, link }))
 }
 
+/** The act section's fetch options for one heartbeat pass — hoisted so
+ *  every PR in the fan-out shares one literal (and the gate loop stays
+ *  small). */
+function gateStateOpts(
+  act: BroConfig['act'],
+  dir: string,
+  cache: PrStateCache | null
+): FetchPrActStateOpts {
+  return {
+    ignoreChecks: act.ignoreChecks,
+    checkHistory: checkHistory(dir),
+    maxRounds: act.maxRounds,
+    docsPaths: act.docsPaths,
+    docsMaxRounds: act.docsMaxRounds,
+    requireApproval: act.requireApproval,
+    approvers: act.approvers,
+    stateCache: cache,
+    resolveLedger: resolveLedger(dir),
+  }
+}
+
 /** The act exit gate per distinct fleet PR — probed in parallel so a
  *  large fleet doesn't serialize one heartbeat into a long blocking
  *  sequence. A failed probe is recorded per-PR (`error`), not folded
@@ -472,6 +585,7 @@ async function gateFleetPrs(
   // the shared feed — a heartbeat overlapping loop/drive/act-wait
   // passes serves the one in-flight fetch instead of duplicating it
   const cache = prStateCache(dir)
+  const stateOpts = gateStateOpts(act, dir, cache)
   const candidates = candidateBranches(dir)
   if (!candidates.complete) {
     lookupErrors.push('branch enumeration failed — the open-PR set may under-count')
@@ -480,15 +594,7 @@ async function gateFleetPrs(
   return Promise.all(
     targets.map(async ({ pr, link }) => {
       try {
-        const state = await fetchPrActState(rev, { repo, pr }, {
-          ignoreChecks: act.ignoreChecks,
-          checkHistory: checkHistory(dir),
-          maxRounds: act.maxRounds,
-          docsPaths: act.docsPaths,
-          docsMaxRounds: act.docsMaxRounds,
-          requireApproval: act.requireApproval,
-          stateCache: cache,
-        })
+        const state = await fetchPrActState(rev, { repo, pr }, stateOpts)
         const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
         // ownership marker — one extra labels read per PR; a failure
         // degrades the marker, never the gate row it rides on
@@ -505,6 +611,7 @@ async function gateFleetPrs(
           mergeable: state.mergeable,
           mergeState: state.mergeState,
           openThreads: state.openThreads,
+          reopenedThreads: state.reopenedThreads?.length ?? 0,
           ciPending: state.ciPending,
           ciFailing: state.ciFailing,
           reviewersPending: state.reviewersPending,
@@ -1003,9 +1110,24 @@ export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text
   return { snap, text: renderSnapshot(snap) }
 }
 
-export async function runWatchCommand(argv: string[]): Promise<void> {
+/** The help/install prelude — routed before the ticker path so
+ *  runWatchCommand stays a snapshot loop, not a dispatcher. */
+function dispatchWatchPrelude(argv: string[]): boolean {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro watch [--every SEC] [--for SEC] [--json] [--notify] | bro watch install|uninstall',
+      0
+    )
+  }
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    runWatchSched(argv.slice(1))
+    runWatchSched(argv)
+    return true
+  }
+  return false
+}
+
+export async function runWatchCommand(argv: string[]): Promise<void> {
+  if (dispatchWatchPrelude(argv)) {
     return
   }
   let args: ReturnType<typeof watchArgs>
@@ -1025,8 +1147,12 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // The dedup key is the snapshot minus its timestamp — --notify re-emits
   // only on transitions, a heartbeat reports change not noise.
   let lastNotified = ''
+  // beadIds already reported silent this process — the transition edge
+  // for worker.silent (cleared when a run goes loud or settles)
+  const silentSeen = new Set<string>()
   const tick = async (): Promise<void> => {
     const { snap, text } = await tickOnce(dir)
+    publishSilentTransitions(dir, snap, silentSeen)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
     try {
       // the durable heartbeat file — mailbox drops expire in an hour,

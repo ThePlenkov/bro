@@ -1,4 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // ES2024 lib for Promise.withResolvers — the engines floor (node
+    // >=22.18) has it; the base target stays ES2022 for emit. DOM stays
+    // in the set because the default lib for the target includes it, and
+    // dropping it would retype every DOM global the tests touch.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
   "include": ["src/**/*.ts", "tsdown.config.ts"]
 }

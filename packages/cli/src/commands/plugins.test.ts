@@ -81,10 +81,20 @@ describe('isBroAdapter', () => {
   })
 
   test('recognizes the pi extension sentinel', () => {
-    const src = new URL('../pi.ts', import.meta.url)
+    // the shipped adapter is the generated bundle (plugins/pi/bro/bro.ts);
+    // the source binding carries the same sentinel
+    const src = new URL('../adapter/pi.ts', import.meta.url)
     assert.ok(isBroAdapter(readFileSync(src, 'utf8')))
     assert.ok(isBroAdapter('const adapter={id:"bro",kind:"pi-extension"}\n'))
     assert.ok(!isBroAdapter('export default function x(){}\n'))
+  })
+
+  test('recognizes the omp extension sentinel', () => {
+    const src = new URL('../adapter/omp.ts', import.meta.url)
+    assert.ok(isBroAdapter(readFileSync(src, 'utf8')))
+    assert.ok(isBroAdapter('const adapter={id:"bro",kind:"omp-extension"}\n'))
+    // the kind token must be there too — the id claim alone is not ours
+    assert.ok(!isBroAdapter('export default {id:"bro"}\n'))
   })
 
   test('recognizes the opencode TUI module', () => {
@@ -143,6 +153,30 @@ describe('plugins install/uninstall/list', () => {
 
   /** sentinel-bearing but differing content — a stale/edited adapter */
   const staleAdapter = '// older bro build\nexport default {id:"bro",server:BroPlugin}\n'
+
+  test('the omp client installs into the agent extensions dir', () => {
+    const f = fixture()
+    // omp's agent dir is the user profile's config root — the fixture
+    // must not write the real one
+    const agentDir = join(f.opts.env.XDG_CONFIG_HOME!, 'omp-agent')
+    f.opts.env.PI_CODING_AGENT_DIR = agentDir
+
+    const out = installClient('omp', ['global', 'local'], f.opts)
+    const globalPath = join(agentDir, 'extensions', 'bro.ts')
+    const localPath = join(f.cwd, '.omp', 'extensions', 'bro.ts')
+    assert.deepEqual(
+      out.map((o) => `${o.action}:${o.path}`),
+      [`installed:${globalPath}`, `installed:${localPath}`]
+    )
+    // the shipped adapter carries bro's ownership sentinel
+    assert.ok(isBroAdapter(readFileSync(globalPath, 'utf8')))
+
+    const again = installClient('omp', ['global', 'local'], f.opts)
+    assert.deepEqual(
+      again.map((o) => o.action),
+      ['current', 'current']
+    )
+  })
 
   test('install on a stale adapter reports updated; list shows stale first', () => {
     const f = fixture()
@@ -286,8 +320,15 @@ describe('plugins install/uninstall/list', () => {
     const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts')
     assert.ok(existsSync(piGlobal))
     assert.ok(existsSync(piLocal))
-    const shipped = readFileSync(new URL('../pi.ts', import.meta.url), 'utf8')
-    assert.equal(readFileSync(piGlobal, 'utf8'), shipped)
+    // the installed adapter is a self-contained bundle — pi's jiti loads
+    // it with no node_modules to resolve against, and it must still be
+    // recognizable as bro's own
+    const installed = readFileSync(piGlobal, 'utf8')
+    assert.ok(isBroAdapter(installed))
+    assert.deepEqual(
+      [...installed.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map((m) => m[1] ?? ''),
+      []
+    )
   })
 })
 

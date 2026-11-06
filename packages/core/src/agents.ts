@@ -206,6 +206,27 @@ export type SpawnWorker =
       cliName?: string;
     };
 
+/** The pipeline context a formula-driven spawn carries (spec
+ *  bro-7d5nb §traceability). Set by the pipeline driver — never by the
+ *  worker: the registry stamps it verbatim and the commit trailers it
+ *  feeds (`BRO-Formula`) are driver-attested hints `bro trace`
+ *  verifies against the registry, so a forged stamp is reported, not
+ *  trusted. Absent on ad-hoc and legacy spawns — provenance is never
+ *  fabricated. */
+export interface PipelineProvenance {
+  /** The formula's identity — its logical/file name. */
+  formula: string;
+  /** sha256 over the formula's raw bytes — the version identity
+   *  (`formulaSha()` in @broject/pipeline computes it). */
+  formulaSha: string;
+  /** The pipeline stage that produced this spawn (e.g. `work`). */
+  stage?: string;
+  /** The session the run attests — pinned into the worker's
+   *  BRO_SESSION_ID and recorded as the registry's `session_id`.
+   *  Defaults to the spawn's agentId pin. */
+  sessionId?: string;
+}
+
 /** What a backend needs to start a worker. `beadsDir` is the resolved
  *  shared-store identity — connectors MUST claim there, never in a
  *  backend-private store. */
@@ -236,6 +257,15 @@ export interface SpawnSpec {
    *  spec bro-1x7p). Provenance like provider; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string;
+  /** The agentId of the agent that delegated this spawn
+   *  (`bro fleet delegate --detach` — spec bro-z8tng). Provenance like
+   *  provider; stamped into the registry and pinned into the worker's
+   *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
+  delegatedBy?: string;
+  /** Pipeline provenance — stamped into the registry and pinned into
+   *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
+   *  trailer). Absent on non-formula spawns. */
+  pipeline?: PipelineProvenance;
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
   /** Pre-resolved fleet-routing candidates, in declared chain order.
@@ -252,6 +282,11 @@ export interface SpawnSpec {
       worker: SpawnWorker;
     }>;
   };
+  /** The chain position the walk selected — prepareSpawn stamps it so
+   *  commitSpawn can pin the resume point (a respawn of a chain that
+   *  repeats a provider must continue from ITS occurrence). Callers
+   *  never set it; absent on unrouted spawns. */
+  routeIndex?: number;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
    *  worktree under the registry lock before the claim lands, so
@@ -274,6 +309,11 @@ export interface AgentInfo {
    *  spawnedAt, so a liveness verdict probed for one generation must
    *  not be inherited by the next. */
   spawnedAt?: string;
+  /** Per-attempt token — a respawn mints a fresh one, scoping the
+   *  attempt's artifacts (`<agentId>.<runId>.{handle,go,exit}`) so a
+   *  dead generation's late writes can't alias the live run's (spec
+   *  bro-l8c4f.5). Absent on pre-runId entries and remote backends. */
+  runId?: string;
   /** Backend-liveness handle; absent for remote backends. */
   pid?: number;
   molStep: string;
@@ -293,6 +333,9 @@ export interface AgentInfo {
   /** Routing lane the spawn resolved to (fleet.routing class) —
    *  absent on unrouted spawns. */
   class?: string;
+  /** agentId of the delegating agent — `bro fleet delegate --detach`
+   *  provenance; absent on direct spawns. */
+  delegatedBy?: string;
   worktree?: string;
   log?: string;
   /** The worker's stderr capture beside `log` — local backends split fd
@@ -397,6 +440,29 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string;
+  /** The chain position the routed run was admitted at — the resume
+   *  point the next chain walk reads when the chain repeats this
+   *  provider (spec bro-1x7p). Absent on unrouted entries. */
+  routeIndex?: number;
+  /** agentId of the delegating agent (spec bro-z8tng) — same
+   *  provenance role as provider/model; absent on direct spawns. */
+  delegatedBy?: string;
+  /** Per-attempt token minted at commitSpawn — names the attempt's
+   *  artifacts (`<agentId>.<runId>.{handle,go,exit}`, spec
+   *  bro-l8c4f.5). A respawn mints a fresh one; entries written before
+   *  the handshake contract carry none. */
+  runId?: string;
+  /** Pipeline provenance (spec bro-7d5nb §traceability) — the formula
+   *  the run was admitted under (id + sha256 over its raw bytes), the
+   *  stage that produced the spawn, and the session the run attests
+   *  (the pinned BRO_SESSION_ID value). Snake_case on purpose: these
+   *  are the spec's wire names, shared with the journal's `formula_sha`
+   *  rows, so every stamped surface speaks one vocabulary. Absent on
+   *  non-pipeline spawns. */
+  formula?: string;
+  formula_sha?: string;
+  session_id?: string;
+  pipeline_stage?: string;
   [key: string]: unknown;
 }
 
@@ -576,6 +642,31 @@ export function mintAgentId(backend: string): string {
   return `${backend}-${randomBytes(4).toString('hex')}`;
 }
 
+/** Fresh attempt id — minted on EVERY spawn (respawns included): it
+ *  scopes the attempt's artifacts (`<agentId>.<runId>.{handle,go,exit}`)
+ *  so a previous attempt's late writes land in files the live run never
+ *  reads (spec bro-l8c4f.5). */
+export function mintRunId(): string {
+  return randomBytes(4).toString('hex');
+}
+
+/** The attempt-scoped `.exit` name — `<agentId>.<runId>.exit` for a
+ *  runId'd entry, the legacy `<agentId>.exit` for entries written
+ *  before the handshake contract. */
+export function agentExitFileName(agentId: string, runId: string | undefined): string {
+  return runId === undefined ? `${agentId}.exit` : `${agentId}.${runId}.exit`;
+}
+
+/** The entry's attempt token — undefined on pre-handshake rows, which
+ *  keep the legacy `<agentId>.*` artifact names. Anything path-unsafe
+ *  (a hand-edited `'../x'` or a dotted value) reads as absent so the
+ *  scoped filenames it builds can never escape the agents home. */
+export function entryRunId(entry: AgentRegistryEntry): string | undefined {
+  return typeof entry.runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.runId)
+    ? entry.runId
+    : undefined;
+}
+
 // --- shared-store claims -------------------------------------------------------
 
 /** The store a shared-store claim addresses — BEADS_DIR-pinned via
@@ -678,3 +769,10 @@ export const agentsSection: ConfigSection<Record<string, Record<string, unknown>
   }
   return out;
 };
+
+// per-backend knob bags pass through verbatim — connector-owned keys
+// (command template, configDir, env, maxBatchWorkers, …) are not
+// enumerable here, so entries stay open. Literal, not `js.map` —
+// routing.ts imports this module and config.ts imports routing.ts, so
+// a runtime config.ts import would cycle.
+agentsSection.jsonSchema = { type: 'object', additionalProperties: { type: 'object' } };

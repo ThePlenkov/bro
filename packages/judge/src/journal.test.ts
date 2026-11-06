@@ -1,9 +1,10 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReviewComment, Verdict } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS } from '@broject/core'
 import {
   appendRow,
   commentKey,
@@ -18,6 +19,8 @@ import { scrubEnv, testGit } from '@broject/core'
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
+
+const WIN32 = process.platform === 'win32'
 
 const withRepo = async (fn: (dir: string) => void | Promise<void>): Promise<void> => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-judge-journal-'))
@@ -59,6 +62,22 @@ describe('journalPath', () => {
       assert.equal(journalPath(bare), null)
     } finally {
       rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
+  test('bounded: a wedged git probe fails fast — the stop-gate append must not stall', { skip: WIN32 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-judge-hanging-git-'))
+    const prevPath = process.env.PATH
+    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+    chmodSync(join(dir, 'git'), 0o755)
+    process.env.PATH = `${dir}:${prevPath}`
+    try {
+      const started = Date.now()
+      assert.equal(journalPath(dir), null)
+      assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000)
+    } finally {
+      process.env.PATH = prevPath
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

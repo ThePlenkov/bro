@@ -15,7 +15,7 @@ plans can fan out to Linear's GraphQL API next to github/gitlab/atlassian.
 npm i @broject/linear
 ```
 
-Requires Node ≥ 22 and `curl` on PATH for the sync task surface. ESM only.
+Requires Node ≥ 22.18 and `curl` on PATH for the sync task surface. ESM only.
 
 ## Configuration
 

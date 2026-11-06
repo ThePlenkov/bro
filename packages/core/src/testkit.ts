@@ -47,6 +47,31 @@ export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string 
   })
 }
 
+/** A fixture repo shaped like a real one on ANY host git. `init` alone
+ *  leaves HEAD unborn, and `worktree add -b` / `merge-base` against an
+ *  unborn head is a host-version dice-roll — the first commit makes the
+ *  repo complete. Identity rides as env vars and signing-off as a -c
+ *  pin, never a config file: a host ~/.gitconfig the env pins nulled
+ *  can't leak identity or gpgsign into the fixture in either direction. */
+export function testRepoInit(dir: string, branch = 'main'): void {
+  testGit(['init', '-q', '-b', branch, dir])
+  // identity as env, not -c: GIT_AUTHOR_*/GIT_COMMITTER_* outrank
+  // -c user.* and the ambient strip keeps them (fixtures set commit
+  // dates through them) — pin all four or a host-exported ident wins
+  testGit(
+    ['-C', dir, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'init', '--allow-empty'],
+    {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    }
+  )
+}
+
 /** spawnSync('git') under the same contract — for call sites that need
  *  the exit status instead of a throw. */
 export function testGitSpawn(
@@ -101,4 +126,39 @@ export function scrubEnv(extra: string[] = []): () => void {
       }
     }
   }
+}
+
+/** The noms manifest line for a fixture dolt store — v5 layout
+ *  `5:__DOLT__:<lock>:<root>:<extra>:` then name:count pairs (spec:
+ *  specs/bro-orcdv.md). */
+export function doltManifest(tables: Record<string, number> = {}): string {
+  const pairs = Object.entries(tables).flatMap(([n, c]) => [n, String(c)])
+  return `${['5', '__DOLT__', '0'.repeat(32), '1'.repeat(32), '0'.repeat(32), ...pairs].join(':')}\n`
+}
+
+/** Commit `files` into `dir`'s repo (bare or not) as the next
+ *  `refs/dolt/data` head — pure plumbing, no worktree needed. `parent`
+ *  chains history for last-good walks. Returns the head sha. */
+export function doltStoreCommit(
+  dir: string,
+  files: Record<string, string>,
+  parent?: string
+): string {
+  const blob = (content: string): string =>
+    testGit(['-C', dir, 'hash-object', '-w', '--stdin'], { input: content }).trim()
+  const entries = Object.entries(files)
+    .map(([name, c]) => `100644 blob ${blob(c)}\t${name}\0`)
+    .join('')
+  const tree = testGit(['-C', dir, 'mktree', '-z'], { input: entries }).trim()
+  const head = testGit(
+    [
+      '-C', dir,
+      '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit-tree', tree,
+      ...(parent === undefined ? [] : ['-p', parent]),
+      '-m', 'store',
+    ]
+  ).trim()
+  testGit(['-C', dir, 'update-ref', 'refs/dolt/data', head])
+  return head
 }

@@ -1,4 +1,3 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -8,41 +7,51 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
+  type AgentCapabilities,
+  type AgentConnector,
+  type AgentInfo,
+  AgentNotFound,
+  type AgentRegistryEntry,
+  agentExitFileName,
   agentRegistryPath,
   bdActor,
+  type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
   BATCH_MARKER_ENV,
   deriveProviderWalls,
+  handleOwner,
   readLedgerWalls,
   recordWall,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
-  scrubEnv,
-  SpawnError,
-  AgentNotFound,
-  testGitSpawn,
-  type AgentCapabilities,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type ConnectorCtx,
   type ResolvedClass,
+  SESSION_SLOT_TTL_MS,
+  SpawnError,
   type SpawnSpec,
+  scrubEnv,
+  testGitSpawn,
 } from '@broject/core';
+import { devinSessionPlane } from '@broject/devin';
 import {
+  type AgentConnectorEnv,
   agentConnectorNames,
+  armNativeSpawnTestSeam,
+  BUDGET_LIMITS,
+  type BudgetSnapshot,
+  batchWallRefusal,
   broSpawnArgv,
   budgetLines,
   budgetSnapshot,
-  BUDGET_LIMITS,
   dockerImageFor,
   eachAgentConnector,
   fleetOccupancy,
@@ -56,18 +65,16 @@ import {
   makeTmuxConnector,
   pidAlive,
   registerAgentConnector,
-  batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
+  SpawnAbandoned,
   sessionKindOf,
   sessionQuotaOf,
+  systemdScopeProbe,
   unregisterAgentConnector,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from './agent-connectors.ts';
-import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts';
-import { devinSessionPlane } from './session-planes/devin.ts';
+import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -360,20 +367,7 @@ function cleanup(fx: Fixture): void {
           { stdio: 'ignore' }
         );
       }
-      // never signal our own pid/pgid — a group-leader test process
-      // would take the whole runner down
-      if (
-        typeof e.pid === 'number' &&
-        e.pid > 0 &&
-        e.pid !== process.pid &&
-        e.pid !== process.ppid
-      ) {
-        try {
-          process.kill(-e.pid, 'SIGKILL'); // detached → own process group
-        } catch {
-          // already gone
-        }
-      }
+      killRun(fx.main, { pid: e.pid, runId: e.runId, agentId: e.agentId });
     }
   } catch {
     // no readable registry — nothing spawned
@@ -486,7 +480,7 @@ function connectorContract(b: BackendCase): void {
   const fx = (rows: Array<Record<string, unknown>>) =>
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true });
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env);
-  const kill = (info: AgentInfo) => process.kill(-info.pid!, 'SIGKILL');
+  const kill = (f: Fixture, info: AgentInfo) => killRun(f.main, info);
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
@@ -569,7 +563,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(f.dbRows().find(r => r.id === 'fx-2')!.status, 'open');
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       // a dead worker frees its slot — the same spawn now lands
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)'));
       assert.equal(second.state, 'running');
@@ -579,10 +573,21 @@ function connectorContract(b: BackendCase): void {
     }
   });
 
+  /** A fake /proc where this process reads as the devin cli — the live
+   *  session count checks the process identity (argv[0]): a lock's pid
+   *  must still BE the cli that wrote it. */
+  const devinProc = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'));
+    mkdirSync(join(dir, String(process.pid)), { recursive: true });
+    writeFileSync(join(dir, String(process.pid), 'cmdline'), 'devin\0');
+    return dir;
+  };
+
   test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'));
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'));
+    const procDir = devinProc();
     // one live devin session (this process) fills the cap of 1
     writeFileSync(join(lockDir, 'me.lock'), String(process.pid));
     const env: AgentConnectorEnv = {
@@ -594,7 +599,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 1, lockDir, reservationsDir },
+        devin: { maxSessions: 1, lockDir, reservationsDir, procDir },
       },
     };
     try {
@@ -609,6 +614,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true });
       rmSync(reservationsDir, { recursive: true, force: true });
+      rmSync(procDir, { recursive: true, force: true });
       cleanup(f);
     }
   });
@@ -620,6 +626,7 @@ function connectorContract(b: BackendCase): void {
     ]);
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'));
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'));
+    const procDir = devinProc();
     // cap 2: one live lock + one reservation = full — the second devin
     // spawn must refuse even though its own repo registry is empty
     writeFileSync(join(lockDir, 'other.lock'), String(process.pid));
@@ -630,7 +637,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 2, lockDir, reservationsDir },
+        devin: { maxSessions: 2, lockDir, reservationsDir, procDir },
       },
     };
     try {
@@ -650,6 +657,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true });
       rmSync(reservationsDir, { recursive: true, force: true });
+      rmSync(procDir, { recursive: true, force: true });
       cleanup(f);
     }
   });
@@ -813,7 +821,7 @@ function connectorContract(b: BackendCase): void {
       const c = conn(f);
       const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
       // kill -9 — no exit file written → 'lost'
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       const l = await c.list();
       assert.equal(l.agents[0]!.state, 'lost');
@@ -833,7 +841,7 @@ function connectorContract(b: BackendCase): void {
     try {
       const c = conn(f);
       const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       // someone else claimed the step while our worker was dead
       const rows = f.dbRows();
@@ -923,6 +931,51 @@ function connectorContract(b: BackendCase): void {
     }
   });
 
+  // owner-only artifacts (spec bro-l8c4f.4) — prompt/log/stderr land
+  // 0600 even under umask 022, the wrapper's scoped `umask 077` pins
+  // .exit, and a permissive legacy file is repaired on the next spawn.
+  // POSIX mode bits don't exist on win32 — there the profile ACL is the
+  // owner-only boundary and statSync().mode reports nothing meaningful
+  test('agent artifacts are owner-only — create pins 0600, respawn repairs 0644', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const home = join(f.main, '.git', 'bro', 'agents');
+      const modeOf = (p: string) => statSync(p).mode & 0o777;
+      const artifact = (id: string, n: string) => join(home, `${id}.${n}`);
+      // the .exit name is attempt-scoped (spec bro-l8c4f.5) — each
+      // spawn's record lands under its own runId
+      const exitOf = (i: { id: string; runId?: string }) =>
+        join(home, agentExitFileName(i.id, i.runId));
+      const prev = process.umask(0o022);
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'));
+      process.umask(prev);
+      await until(() => existsSync(exitOf(info)));
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n}`);
+      }
+      assert.equal(modeOf(exitOf(info)), 0o600, 'exit');
+      assert.equal(modeOf(home), 0o700, 'agents home');
+      // legacy permissive artifacts — repair rides the next write/append
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        chmodSync(artifact(info.id, n), 0o644);
+      }
+      const again = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'));
+      assert.equal(again.id, info.id);
+      await until(() => existsSync(exitOf(again)));
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n} repaired`);
+      }
+      // a per-attempt .exit needs no repair — the fresh run's record is
+      // pinned at create
+      assert.equal(modeOf(exitOf(again)), 0o600, 'exit pinned at create');
+    } finally {
+      cleanup(f);
+    }
+  });
+
   // the taxonomy contract (bro-7xgk.2): the same rc=1 splits on the log
   // tail — a crash is respawnable, a budget wall reads 'blocked' and
   // refuses respawn until the provider's reset (or `down` clears it).
@@ -930,7 +983,9 @@ function connectorContract(b: BackendCase): void {
   // (pid death can beat the write), and returns the classified status.
   const spawnRun = async (f: Fixture, c: AgentConnector, program: string) => {
     const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', program));
-    await until(() => existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.exit`)));
+    await until(() =>
+      existsSync(join(f.main, '.git', 'bro', 'agents', agentExitFileName(info.id, info.runId)))
+    );
     // the .exit file can beat the wrapper's death — a single read may
     // still report running/spawned, so poll for a terminal state
     let status = await c.status(info.id);
@@ -1158,6 +1213,512 @@ describe('native connector', () => {
   });
 });
 
+/** Credential scope for workers (spec bro-l8c4f.6): strict mode is
+ *  opt-in, the allowlist owns the worker env, and the fleet batch
+ *  marker rides only the caller's spec.env — an ambient one would class
+ *  the worker's own spawns as batch and charge the fleet budget
+ *  (bro-9h86l). Native-only: the contract suite runs per backend, but
+ *  only native can assert the spawned process's actual environ. */
+describe('native credential scope (bro-l8c4f.6)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+
+  test('ambient BRO_BATCH never reaches the worker — only the caller’s spec.env carries the fleet marker', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_BATCH = '1';
+    process.env.KEEP_ME = 'kept';
+    process.env.LEAK_ME = 'leaked';
+    const payload =
+      "require('fs').writeFileSync('env.out', [process.env.KEEP_ME ?? '', process.env.BRO_BATCH ?? '', process.env.LEAK_ME ?? ''].join('|'))";
+    try {
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'KEEP_ME'],
+      };
+      const c = conn(f);
+      // ambient only — the allowlisted KEEP_ME rides; the ambient
+      // marker and the sentinel credential do not
+      const a = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'kept||');
+      await c.stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // the caller's own marker rides even under strict scope; a
+      // spec.env sentinel is still refused by the allowlist
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_BATCH: '1', LEAK_ME: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'kept|1|');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_BATCH;
+      delete process.env.KEEP_ME;
+      delete process.env.LEAK_ME;
+      cleanup(f);
+    }
+  });
+
+  test('BRO_PIPELINE_KEY never reaches the worker — denied in trusted-host AND strict mode', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_PIPELINE_KEY = 'channel-key';
+    // the worker writes back what it saw — the customer-channel key is
+    // never a worker credential (a worker holding it mints verdicts)
+    const payload = "require('fs').writeFileSync('env.out', process.env.BRO_PIPELINE_KEY ?? '')";
+    try {
+      // trusted-host mode (no strictEnv): the blanket passthrough must
+      // still refuse it
+      const a = await conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await conn(f).stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // strict mode — denied too, even allowlisted AND spec.env'd
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'BRO_PIPELINE_KEY'],
+      };
+      const c = conn(f);
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_PIPELINE_KEY: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_PIPELINE_KEY;
+      cleanup(f);
+    }
+  });
+});
+
+/** The spawn-handshake crash windows (spec bro-l8c4f.5): deterministic
+ *  failpoints leave the exact half-state a dead launcher leaves —
+ *  reservation only, live self-publishing child, or a published pid
+ *  with no admission stamp. Every run mints a runId that scopes
+ *  <agentId>.<runId>.{handle,go,exit}; the worker holds on the go stamp
+ *  so an unadmitted survivor can never silently double a respawn. */
+describe('native spawn handshake (bro-l8c4f.5)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const agentsDir = (f: Fixture) => join(f.main, '.git', 'bro', 'agents');
+  const entryOf = (f: Fixture, step = 'fx-1') => readAgentRegistry(f.main)[step]!;
+  const runFile = (f: Fixture, id: string, runId: string, suffix: 'handle' | 'go') =>
+    join(agentsDir(f), `${id}.${runId}.${suffix}`);
+
+  test('spawn mints a per-attempt runId; worker self-publishes a handle, launcher admits with go', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.match(info.runId ?? '', /^[0-9a-f]{8}$/);
+      const entry = entryOf(f);
+      assert.equal(entry.runId, info.runId);
+      // the handle the worker published IS the launcher-patched pid —
+      // scoped or not: systemd-run --scope execs the payload in place,
+      // so the recorded pid keeps naming the worker (bro-ybo8z). The
+      // worker's /proc starttime rides beside it — the identity every
+      // reader verifies against pid reuse
+      const published = handleOwner(
+        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8')
+      );
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
+      assert.equal(handlePid, info.pid);
+      assert.equal(
+        published.start,
+        procStat(handlePid)?.start,
+        'the published starttime is this pid’s /proc starttime'
+      );
+      assert.ok(pidAlive(handlePid));
+      assert.ok(
+        existsSync(runFile(f, info.id, info.runId!, 'go')),
+        'the launcher admitted the run'
+      );
+      await c.stop(info.id);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('crash after reservation: no child ran — spawned in the window, lost past it, dedup holds', async () => {
+    armNativeSpawnTestSeam({ abandonAt: 'reservation' });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        e => e instanceof SpawnAbandoned && e.at === 'reservation'
+      );
+      const entry = entryOf(f);
+      assert.ok(entry.agentId !== undefined && entry.runId !== undefined);
+      assert.equal(entry.pid, undefined);
+      // inside the handoff window the row is 'spawned' — recoverable,
+      // never 'lost', and never a free step
+      assert.equal((await c.status(entry.agentId)).state, 'spawned');
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        SpawnError
+      );
+      // past the window a still-empty reservation reads 'lost' — and a
+      // respawn recovers the step
+      patchAgentRegistry(f.main, 'fx-1', {
+        spawnedAt: new Date(Date.now() - 3 * SESSION_SLOT_TTL_MS).toISOString(),
+      });
+      assert.equal((await c.status(entry.agentId)).state, 'lost');
+      armNativeSpawnTestSeam({});
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(second.id, entry.agentId);
+      assert.notEqual(second.runId, entry.runId);
+      assert.equal(second.state, 'running');
+      await c.stop(second.id);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('crash after OS spawn: survivor self-published a handle — status adopts it, down reaches it', async () => {
+    // a long admission window keeps the survivor waiting through the
+    // assertions — it must never run the payload without the go stamp
+    armNativeSpawnTestSeam({ abandonAt: 'os-spawn', goWaitTicks: 600 });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const sentinel = join(f.root, 'payload-ran');
+      await assert.rejects(
+        c.spawn(
+          SPEC(
+            f.main,
+            f.beadsDir,
+            'fx-1',
+            `require('fs').writeFileSync(${JSON.stringify(sentinel)},'x')`
+          )
+        ),
+        e => e instanceof SpawnAbandoned && e.at === 'os-spawn'
+      );
+      const entry = entryOf(f);
+      assert.equal(entry.pid, undefined, 'the pid patch never landed');
+      // the worker published its own handle before holding on admission
+      await until(() => existsSync(runFile(f, entry.agentId, entry.runId!, 'handle')));
+      const published = handleOwner(
+        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
+      );
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
+      assert.ok(pidAlive(handlePid, published.start), 'the survivor is live');
+      // status finds the survivor and adopts its handle into the registry
+      const st = await c.status(entry.agentId);
+      assert.equal(st.state, 'running');
+      assert.equal(st.pid, handlePid);
+      assert.equal(entryOf(f).pid, handlePid);
+      // no go stamp ever landed — the payload cannot have run
+      assert.ok(!existsSync(sentinel), 'unadmitted worker must not run the payload');
+      // dedup still refuses a second worker beside the survivor
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        SpawnError
+      );
+      // down reaches the survivor through the adopted handle
+      await c.stop(entry.agentId);
+      await until(() => !pidAlive(handlePid));
+      assert.equal((await c.status(entry.agentId)).state, 'stopped');
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a recycled pid in the handle never adopts — the published starttime must match', async () => {
+    // adoption used to take the handle pid's CURRENT starttime as its
+    // own identity, so a recycled pid passed its own check and `down`
+    // then signaled a stranger's tree — the starttime is the worker's
+    // to publish, and adoption verifies it before trusting the pid
+    armNativeSpawnTestSeam({ abandonAt: 'os-spawn', goWaitTicks: 600 });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    let survivor: number | undefined;
+    let stranger: number | undefined;
+    try {
+      const c = conn(f);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        e => e instanceof SpawnAbandoned && e.at === 'os-spawn'
+      );
+      const entry = entryOf(f);
+      const handleFile = runFile(f, entry.agentId, entry.runId!, 'handle');
+      await until(() => existsSync(handleFile));
+      const published = handleOwner(readFileSync(handleFile, 'utf8'));
+      assert.ok(published !== null && published.start !== undefined, 'pid + starttime published');
+      survivor = published.pid;
+      // the recycle: the handle's pid now runs a process that never
+      // published it — planted, because a kernel cannot be asked to
+      // hand a pid back on demand
+      const s = spawn('sleep', ['60'], { stdio: 'ignore', detached: true });
+      s.unref();
+      stranger = s.pid;
+      assert.ok(stranger !== undefined, 'the stranger spawned');
+      await until(() => pidAlive(stranger!));
+      assert.notEqual(
+        procStat(stranger)?.start,
+        published.start,
+        'the stranger carries another identity'
+      );
+      writeFileSync(handleFile, `${stranger} ${published.start}`);
+      // status must not adopt the stranger, and must not stamp it in
+      const st = await c.status(entry.agentId);
+      assert.notEqual(st.state, 'running', 'a recycled pid never adopts');
+      assert.equal(st.pid, undefined);
+      assert.equal(entryOf(f).pid, undefined, 'the registry must not stamp the stranger');
+      // down must not signal the stranger's tree either
+      await c.stop(entry.agentId);
+      assert.ok(pidAlive(stranger), 'the stop never touched the recycled pid');
+    } finally {
+      armNativeSpawnTestSeam({});
+      for (const p of [stranger, survivor]) {
+        if (p !== undefined) {
+          try {
+            process.kill(-p, 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }
+      }
+      cleanup(f);
+    }
+  });
+
+  test('crash after pid publication: registered survivor exits 75 unadmitted — recoverable, payload never ran', async () => {
+    // ~1s admission window so the go-timeout exit lands inside the test
+    armNativeSpawnTestSeam({ abandonAt: 'publication', goWaitTicks: 20 });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const sentinel = join(f.root, 'payload-ran');
+      await assert.rejects(
+        c.spawn(
+          SPEC(
+            f.main,
+            f.beadsDir,
+            'fx-1',
+            `require('fs').writeFileSync(${JSON.stringify(sentinel)},'x')`
+          )
+        ),
+        e => e instanceof SpawnAbandoned && e.at === 'publication'
+      );
+      const entry = entryOf(f);
+      const pubPid = entry.pid as number;
+      assert.equal(typeof pubPid, 'number', 'the handle was published');
+      const exitFile = join(agentsDir(f), agentExitFileName(entry.agentId, entry.runId));
+      assert.ok(
+        !existsSync(runFile(f, entry.agentId, entry.runId!, 'go')),
+        'admission never landed'
+      );
+      // the go timeout self-terminates the worker — a recorded death,
+      // never a payload run, never 'lost'
+      await until(() => existsSync(exitFile), 8000);
+      await until(() => !pidAlive(pubPid));
+      assert.equal(readFileSync(exitFile, 'utf8').trim(), '75');
+      assert.ok(!existsSync(sentinel), 'unadmitted worker must not run the payload');
+      const st = await c.status(entry.agentId);
+      assert.equal(st.state, 'exited');
+      assert.equal(entryOf(f).exitStatus, 75);
+      // the dead run releases the step — a fresh attempt respawns with
+      // a fresh runId whose artifacts are its own
+      armNativeSpawnTestSeam({});
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(second.id, entry.agentId);
+      assert.notEqual(second.runId, entry.runId);
+      assert.equal(second.state, 'running');
+      await c.stop(second.id);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a dead attempt’s late .exit write never aliases the live run — even on the legacy shared path', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'));
+      const firstExit = join(agentsDir(f), agentExitFileName(first.id, first.runId));
+      await until(() => existsSync(firstExit));
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(second.id, first.id);
+      assert.notEqual(second.runId, first.runId);
+      // the old attempt's record and the pre-handshake shared path both
+      // land — the live run reads only its own scoped file
+      writeFileSync(firstExit, '99');
+      writeFileSync(join(agentsDir(f), `${first.id}.exit`), '99');
+      const st = await c.status(second.id);
+      assert.equal(st.state, 'running');
+      // now kill the live run without a record — the harvest must not
+      // pick up either bogus file; dead-without-a-record reads 'lost'
+      killRun(f.main, second);
+      await until(() => !pidAlive(second.pid!));
+      const dead = await c.status(second.id);
+      assert.equal(dead.state, 'lost', 'the harvest reads only this run’s scoped .exit');
+      assert.equal(entryOf(f).exitStatus, undefined);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+});
+
+/** Per-worker systemd scopes (spec bro-ybo8z): `systemd-run --user
+ *  --scope` registers the child into its own `run-*.scope` — a sibling
+ *  of the supervisor's unit, so a `bro-loop.service` cgroup kill (crash
+ *  or `systemctl stop`) cannot reach it. systemd-run EXECS the payload
+ *  in place — the recorded pid IS the worker: `handle == pid`, the
+ *  liveness ladder and `down`'s group signal are all unchanged. */
+describe('native systemd scope (bro-ybo8z)', () => {
+  const scoped = systemdScopeProbe();
+  const gate = { skip: scoped ? false : 'no systemd user manager on this host' };
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const agentsDir = (f: Fixture) => join(f.main, '.git', 'bro', 'agents');
+  const entryOf = (f: Fixture, step = 'fx-1') => readAgentRegistry(f.main)[step]!;
+  const runFile = (f: Fixture, id: string, runId: string, suffix: string) =>
+    join(agentsDir(f), `${id}.${runId}.${suffix}`);
+  const handlePid = (f: Fixture, entry: AgentRegistryEntry): number => {
+    const owner = handleOwner(
+      readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
+    );
+    assert.ok(owner !== null, 'the handle file carries a pid');
+    return owner.pid;
+  };
+  const cgroupOf = (pid: number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim();
+
+  test(
+    'the worker lands in its own .scope cgroup — a sibling of the spawner, not its member',
+    gate,
+    async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const c = conn(f);
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        const entry = entryOf(f);
+        // pid continuity: systemd-run execs the payload, so the recorded
+        // pid and the self-published handle name the same live worker —
+        // moved into a cgroup the spawner's unit cannot wipe
+        const worker = handlePid(f, entry);
+        assert.equal(worker, info.pid);
+        await until(() => pidAlive(worker));
+        assert.match(cgroupOf(worker), /\.scope$/, 'the payload lives in a transient scope');
+        assert.notEqual(
+          cgroupOf(worker),
+          cgroupOf(process.pid),
+          'outside the spawner cgroup — the loop-crash/systemctl-stop isolation'
+        );
+        // still running: no .exit, registry reads running, `down` reaches it
+        assert.ok(!existsSync(join(agentsDir(f), agentExitFileName(entry.agentId, entry.runId))));
+        assert.equal((await c.status(entry.agentId)).state, 'running');
+        await c.stop(entry.agentId);
+        await until(() => !pidAlive(worker));
+        assert.equal((await c.status(entry.agentId)).state, 'stopped');
+      } finally {
+        armNativeSpawnTestSeam({});
+        cleanup(f);
+      }
+    }
+  );
+
+  test(
+    'an argv worker scopes too — provider-resolved spawns ride the same wrap',
+    gate,
+    async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const c = conn(f);
+        const info = await c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused — the worker owns the program'),
+          worker: { kind: 'argv', argv: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'] },
+        });
+        await until(() => pidAlive(info.pid!));
+        assert.match(cgroupOf(info.pid!), /\.scope$/);
+        assert.notEqual(cgroupOf(info.pid!), cgroupOf(process.pid));
+        await c.stop(entryOf(f).agentId);
+      } finally {
+        armNativeSpawnTestSeam({});
+        cleanup(f);
+      }
+    }
+  );
+
+  test('agents.native.systemdScope=false keeps the plain detached shape', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      f.env.agents['native']!['systemdScope'] = false;
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      // unwrapped the worker stays in the spawner's cgroup — compare
+      // against our own, which is never a run-*.scope either way
+      assert.equal(handlePid(f, entry), info.pid);
+      await until(() => pidAlive(info.pid!));
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('the seam pins the wrap off even when the host probe passes', gate, async () => {
+    armNativeSpawnTestSeam({ scope: false });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      assert.equal(handlePid(f, entry), info.pid);
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a refused scope retries unscoped — the row names a live worker, never a silent lost', async () => {
+    // no systemd needed — the seam's stand-in dies before the exec the
+    // way a user-manager refusal does; the fallback is the plain spawn
+    armNativeSpawnTestSeam({ scope: true, scopeRefused: true });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      // the retry keeps pid identity — handle, registry pid and the
+      // live worker are one, in the spawner's own cgroup (no wrap)
+      assert.equal(handlePid(f, entry), info.pid);
+      await until(() => pidAlive(info.pid!));
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      assert.equal((await c.status(entry.agentId)).state, 'running');
+      assert.match(
+        readFileSync(String(entry.stderrLog), 'utf8'),
+        /refused the scope — respawned without the wrap/
+      );
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+});
+
 describe('tmux connector', () => {
   connectorContract({
     name: 'tmux',
@@ -1345,6 +1906,47 @@ describe('docker connector', () => {
       // last-wins puts OUR --name/--workdir last — the contract holds
       assert.ok(db[`bro-${info.id}`], 'container must be named by the contract');
       assert.equal(db['evil'], undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('strict scope rejects env-passing runArgs — the allowlist owns the container env', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    try {
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        agents: {
+          docker: {
+            ...f.env.agents['docker'],
+            strictEnv: true,
+            envAllowlist: ['PATH'],
+            runArgs: [
+              '--env',
+              'SENTRY_TOKEN=leak',
+              '--env-file',
+              '/tmp/leak.env',
+              '--memory',
+              '1g',
+            ],
+          },
+        },
+      };
+      const c = makeDockerConnector({ dir: f.main }, env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const db = JSON.parse(
+        readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'containers.json'), 'utf8')
+      ) as Record<string, { argv: string[] }>;
+      const argv = db[`bro-${info.id}`]!.argv;
+      // the operator's env flags AND their operands are gone — bro's own
+      // allowlist-filtered --env-file is the only one left on the argv
+      assert.ok(!argv.includes('--env'));
+      assert.ok(!argv.includes('SENTRY_TOKEN=leak'));
+      assert.ok(!argv.includes('/tmp/leak.env'));
+      assert.equal(argv.filter(a => a === '--env-file').length, 1);
+      // non-env runArgs still ride
+      assert.ok(argv.includes('--memory'), 'non-env runArgs must survive');
       await c.stop(info.id);
     } finally {
       cleanup(f);
@@ -1954,6 +2556,144 @@ describe('resolveSpawnProvider', () => {
     });
   });
 
+  test('brouter: a bare --model resolves its declared provider when none is named', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: { native: { command: 'node {promptFile}' } },
+      connectors: {},
+      providers,
+      brouter: { models: { 'swe-2-medium': [{ provider: 'zen' }] } },
+    };
+    const pick = await resolveSpawnProvider(env2, 'native', { model: 'swe-2-medium' }, 'flag');
+    assert.equal(pick.provider, 'zen');
+    assert.equal(pick.model, 'swe-2-medium');
+    assert.deepEqual(pick.worker, {
+      kind: 'template',
+      command: "opencode run --model 'swe-2-medium' -f {promptFile}",
+    });
+  });
+
+  test('brouter: an alias carries its upstream model into the worker and provenance', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'zen', model: 'zen/pro' }] } },
+    };
+    const pick = await resolveSpawnProvider(env2, 'native', { model: 'cheap' }, 'flag');
+    assert.equal(pick.provider, 'zen');
+    assert.equal(pick.model, 'zen/pro');
+    assert.deepEqual(pick.worker, {
+      kind: 'template',
+      command: "opencode run --model 'zen/pro' -f {promptFile}",
+    });
+  });
+
+  test('brouter: explicit providers and empty/unresolved registries keep the label path', async () => {
+    // explicit provider wins — the registry is never consulted: the
+    // override lands on 'local' (which can't honor it) rather than
+    // routing to the declared 'kilo'
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { 'zen/pro': [{ provider: 'kilo' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env2, 'native', { provider: 'local', model: 'zen/pro' }, 'flag'),
+      (e: unknown) => e instanceof SpawnError && /cannot honor model 'zen\/pro'/.test(e.message)
+    );
+    // unresolved models stay a provenance label
+    assert.deepEqual(await resolveSpawnProvider(env2, 'native', { model: 'ghost' }, 'flag'), {
+      model: 'ghost',
+    });
+    // empty models map = registry off
+    const off: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: {} },
+    };
+    assert.deepEqual(await resolveSpawnProvider(off, 'native', { model: 'zen/pro' }, 'flag'), {
+      model: 'zen/pro',
+    });
+    // no brouter at all = off
+    const none: AgentConnectorEnv = { agents: {}, connectors: {}, providers };
+    assert.deepEqual(await resolveSpawnProvider(none, 'native', { model: 'zen/pro' }, 'flag'), {
+      model: 'zen/pro',
+    });
+  });
+
+  test('brouter: a declared route to an unknown or non-spawnable provider is a config error', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { x: [{ provider: 'nope' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env2, 'native', { model: 'x' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'config' && /brouter\.models\.x/.test(e.message)
+    );
+    const env3: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { x: [{ provider: 'typesafe' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env3, 'native', { model: 'x' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'config' && /no spawn surface/.test(e.message)
+    );
+  });
+
+  test('brouter: a refusal is config only when the model came from an explicit declared model', async () => {
+    // 'local' pins devin-1 in a command with no {model} placeholder —
+    // a route pinning another model can never reach the worker
+    const configured: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local', model: 'devin-2' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(configured, 'native', { model: 'cheap' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'config' &&
+        /cannot honor model 'devin-2'.*\{model\} placeholder/.test(e.message)
+    );
+    // a provider-only declaration routes the caller's own id — the model
+    // was named by the caller, so the refusal stays 'input'
+    const declared: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(declared, 'native', { model: 'cheap' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'input' &&
+        /cannot honor model 'cheap'/.test(e.message)
+    );
+    // a qualified id is the caller's string too — source 1 wins over the
+    // declaration, and the refusal stays 'input'
+    const qualified: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local', model: 'devin-2' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(qualified, 'native', { model: 'local/m2' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'input' && /cannot honor model 'm2'/.test(e.message)
+    );
+  });
+
   test('cli override a verbatim command cannot consume is a loud error — never a relabel', async () => {
     // 'local' pins devin-1 in a command with no {model}: reporting 'm2'
     // while devin-1 runs would be provenance the worker never ran
@@ -2022,17 +2762,18 @@ describe('broSpawnArgv', () => {
   test('bro on PATH wins; an empty PATH falls back to the npx shim', () => {
     const npxFallback = ['npx', '-y', `@broject/bro@${VERSION.split('.')[0]}`];
     assert.deepEqual(broSpawnArgv({ PATH: '' }), npxFallback);
-    // whatever dir holds this test's node binary doubles as a fake bin dir
-    const binDir = join(process.execPath, '..');
-    assert.deepEqual(broSpawnArgv({ PATH: binDir }), npxFallback);
-    // drop a `bro` shim next to it — PATH-first picks the plain name
-    const dir = mkdtempSync(join(tmpdir(), 'bro-bin-'));
+    // a dir with no bro in it falls back too — an empty temp dir, not
+    // the node bin dir: a developer machine may have bro installed
+    // globally, and the PATH scan would then find it
+    const emptyDir = mkdtempSync(join(tmpdir(), 'bro-bin-'));
     try {
-      writeFileSync(join(dir, 'bro'), '#!/bin/sh\n');
-      chmodSync(join(dir, 'bro'), 0o755);
-      assert.deepEqual(broSpawnArgv({ PATH: dir }), ['bro']);
+      assert.deepEqual(broSpawnArgv({ PATH: emptyDir }), npxFallback);
+      // drop a `bro` shim next to it — PATH-first picks the plain name
+      writeFileSync(join(emptyDir, 'bro'), '#!/bin/sh\n');
+      chmodSync(join(emptyDir, 'bro'), 0o755);
+      assert.deepEqual(broSpawnArgv({ PATH: emptyDir }), ['bro']);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(emptyDir, { recursive: true, force: true });
     }
   });
 });
@@ -2154,6 +2895,77 @@ describe('provider-resolved spawns', () => {
       assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'local|none');
       // and the env file itself never carried the forged key
       assert.equal(existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.env`)), false);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: pipeline provenance pins BRO_FORMULA + session, stamps the registry (spec bro-7d5nb)', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = 'f'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipeline', formulaSha: sha, stage: 'work', sessionId: 'sess-9' },
+        // ambient forgery attempts are pin-filtered like every other
+        // provenance key
+        env: { BRO_FORMULA: 'forged@bad', BRO_SESSION_ID: 'forged-session' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipeline@${sha}|sess-9`);
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, 'pipeline');
+      assert.equal(entry.formula_sha, sha);
+      assert.equal(entry.pipeline_stage, 'work');
+      assert.equal(entry.session_id, 'sess-9');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a pipeline spawn without a sessionId pins agentId as the attested session', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = '0'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipe', formulaSha: sha },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipe@${sha}|${entry.agentId}`);
+      assert.equal(entry.session_id, entry.agentId);
+      assert.equal(entry.pipeline_stage, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a non-pipeline spawn writes no formula stamps', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, undefined);
+      assert.equal(entry.formula_sha, undefined);
+      assert.equal(entry.pipeline_stage, undefined);
+      assert.equal(entry.session_id, undefined);
       await c.stop(info.id);
     } finally {
       cleanup(f);
@@ -2595,6 +3407,59 @@ describe('fleet chain walk spawn integration', () => {
     }
   });
 
+  test('a respawn over a stopped entry does not resurrect its attempt walls', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-b-dead',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'B',
+        model: 'model-B',
+        cause: 'rate_limited',
+        resetAt: future,
+        // `bro agents down` — the manual clear. The retained attempt
+        // would re-wall A the moment the respawn flips stopped:false
+        stopped: true,
+        attempts: [
+          {
+            provider: 'A',
+            model: 'model-A',
+            cause: 'rate_limited',
+            resetAt: future,
+            spawnedAt: oldSpawn,
+            stopped: false,
+          },
+        ],
+      });
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      // the pre-stop attempt list is evicted — only the outgoing
+      // (stopped:true, never wallable) record remains
+      assert.deepEqual(entry.attempts, [
+        {
+          provider: 'B',
+          account: 'B',
+          model: 'model-B',
+          cause: 'rate_limited',
+          resetAt: future,
+          spawnedAt: oldSpawn,
+          stopped: true,
+        },
+      ]);
+      assert.deepEqual(deriveProviderWalls(registry, Date.now()), []);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('fallback provider uses its own model instead of the chain-head selection', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
     f.env.providers = {
@@ -2663,7 +3528,7 @@ describe('fleet chain walk spawn integration', () => {
           err instanceof SpawnError &&
           /fx-1 class "free" parked — onWall park/.test(err.message) &&
           /A walled — rate_limited til/.test(err.message) &&
-          /bro agents down fx-1/.test(err.message)
+          /held by fx-1/.test(err.message)
       );
     } finally {
       cleanup(f);
@@ -2687,7 +3552,7 @@ describe('fleet chain walk spawn integration', () => {
           err instanceof SpawnError &&
           /fx-1 class "free" chain exhausted/.test(err.message) &&
           /B walled — rate_limited til/.test(err.message) &&
-          /bro agents down fx-1/.test(err.message)
+          /held by fx-2/.test(err.message)
       );
     } finally {
       cleanup(f);

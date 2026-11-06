@@ -37,6 +37,7 @@ import {
   withMeta,
 } from '@broject/core'
 import type {
+  ClaimCapability,
   DepOpts,
   TaskDepEdge,
   TaskFilter,
@@ -708,14 +709,25 @@ export function buildTasks(S: JiraApi): {
     })
   }
 
+  /** The remote claim's honest capability (spec specs/bro-l8c4f.12):
+   *  assign→verify-reread is a marker, never a lease — a residual
+   *  interleaving window can seat two winners, and every worker
+   *  behind the viewer credential claims as the same identity. */
+  const CLAIM_CAPABILITY = {
+    strength: 'best-effort',
+    identity: 'viewer',
+    authority: 'service',
+  } as const satisfies ClaimCapability
+
   /** claim = assign viewer → verify re-read. The assignee write has
    *  no compare-and-set — last writer wins — so the verify is the
    *  strongest settlement the API allows: a loser whose re-read lands
    *  after the winner's write sees the winner and throws. A loser's
    *  re-read can still land BEFORE the winner's write — that residual
    *  window is inherent to the API, no client-side ordering closes
-   *  it. An 'indeterminate' transition rides best-effort so the board
-   *  column follows the claim. */
+   *  it; the capability above declares the claim best-effort, never a
+   *  lease. An 'indeterminate' transition rides best-effort so the
+   *  board column follows the claim. */
   function claimSync(ref: string): void {
     const n = mustIssue(ref)
     const key = n.key ?? ref
@@ -993,6 +1005,7 @@ export function buildTasks(S: JiraApi): {
       create: (i) => pub(createSync(i)) as never,
       update: (id, patch) => updateSync(id, patch),
       claim: (id) => claimSync(issueRef(id)),
+      claimCapability: () => CLAIM_CAPABILITY,
       actor: () => viewerName(),
       reopen: (id) => reopenSync(issueRef(id)),
       close: (id, reason) => closeSync(issueRef(id), reason),

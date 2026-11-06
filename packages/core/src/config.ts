@@ -25,14 +25,21 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { gitTry } from './git.ts';
-import { parseProviderEntry, type FleetProfile, type ProviderEntry } from './providers.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { parseBrouter, type BrouterConfig } from './brouter.ts';
+import {
+  API_WIRES,
+  parseProviderEntry,
+  type FleetProfile,
+  type ProviderEntry,
+} from './providers.ts';
 import {
   fleetWalls,
   fleetRouter,
   fleetRouting,
-  type FleetWallTtls,
+  ON_WALL,
   type FleetRouter,
+  type FleetWallTtls,
   type RoutingTable,
 } from './routing.ts';
 
@@ -41,10 +48,84 @@ export type StoreBackend = (typeof STORE_BACKENDS)[number];
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const;
 export type Personality = (typeof PERSONALITIES)[number];
 
+/** A JSON Schema (draft-07 subset — `validateSchemaValue` in
+ *  config-schema.ts honors exactly these keywords) describing a config
+ *  section's ACCEPTED INPUT: every value the parser accepts validates,
+ *  everything it would drop or fall back on is a diagnostic. Extra
+ *  draft keywords are legal in the emitted document; the validator
+ *  ignores them. */
+export interface JsonSchema {
+  type?: string | readonly string[];
+  enum?: readonly unknown[];
+  const?: unknown;
+  required?: readonly string[];
+  properties?: Record<string, JsonSchema>;
+  patternProperties?: Record<string, JsonSchema>;
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema | readonly JsonSchema[];
+  anyOf?: readonly JsonSchema[];
+  oneOf?: readonly JsonSchema[];
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  minProperties?: number;
+  pattern?: string;
+  title?: string;
+  description?: string;
+  $id?: string;
+  $schema?: string;
+  [k: string]: unknown;
+}
+
 /** A plugin-owned config section: raw JSON value in, normalized section
  *  out. `schema(undefined)` MUST return the section default — that's the
- *  fallback when the raw value is missing or the schema throws. */
-export type ConfigSection<T> = (raw: unknown) => T;
+ *  fallback when the raw value is missing or the schema throws.
+ *  `.jsonSchema` (spec: specs/bro-d9dmx.md) is the section's declared
+ *  input shape — IDE/agent autocompletion plus the diagnostics doctor,
+ *  `bro doctor --strict`, and the mutation gate read. */
+export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema };
+
+/** Compact builders for the `.jsonSchema` literals — keep each schema
+ *  a few lines next to its parser (spec: specs/bro-d9dmx.md). `obj`
+ *  defaults to a CLOSED shape: a key the parser ignores is a typo the
+ *  diagnostics should name, so only true maps (connectors, providers,
+ *  agents.<backend>) stay open. */
+export const js: {
+  str: JsonSchema;
+  bool: JsonSchema;
+  strList: JsonSchema;
+  int: (minimum?: number) => JsonSchema;
+  num: (minimum?: number) => JsonSchema;
+  obj: (
+    properties: Record<string, JsonSchema>,
+    opts?: { additional?: boolean | JsonSchema; required?: readonly string[] }
+  ) => JsonSchema;
+  map: (values: JsonSchema) => JsonSchema;
+  oneOf: (...variants: JsonSchema[]) => JsonSchema;
+  anyOf: (...variants: JsonSchema[]) => JsonSchema;
+} = {
+  // \S: parsers trim and drop whitespace-only input — a "present"
+  // value that normalizes to nothing must validate as the defect it is
+  str: { type: 'string', minLength: 1, pattern: String.raw`\S` },
+  bool: { type: 'boolean' },
+  strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: String.raw`\S` } },
+  int: (minimum = 0) => ({ type: 'integer', minimum }),
+  num: minimum => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
+  obj: (properties, opts) => ({
+    type: 'object',
+    properties,
+    additionalProperties: opts?.additional ?? false,
+    ...(opts?.required === undefined ? {} : { required: [...opts.required] }),
+  }),
+  map: values => ({ type: 'object', additionalProperties: values }),
+  oneOf: (...variants) => ({ oneOf: variants }),
+  anyOf: (...variants) => ({ anyOf: variants }),
+};
 
 export const debtSection: ConfigSection<{
   dir: string;
@@ -85,6 +166,14 @@ export const debtSection: ConfigSection<{
   };
 };
 
+debtSection.jsonSchema = js.obj({
+  dir: js.str,
+  sources: { type: 'array', items: js.str, minItems: 1 },
+  stale_days: { type: 'number', exclusiveMinimum: 0 },
+  // per-source knob bags pass through verbatim — core stays vendor-neutral
+  sourceConfig: js.map({ type: 'object' }),
+});
+
 export const syncSection: ConfigSection<{
   ref: string;
   remote: string;
@@ -100,6 +189,14 @@ export const syncSection: ConfigSection<{
     ),
     beads: typeof obj.beads === 'boolean' ? obj.beads : DEFAULT_CONFIG.sync.beads,
   };
+};
+
+// every non-empty-string key merges through — the passthrough is the
+// contract, so unknown keys are legal iff string-valued
+syncSection.jsonSchema = {
+  type: 'object',
+  properties: { ref: js.str, remote: js.str, beads: js.bool },
+  additionalProperties: js.str,
 };
 
 export const sweepSection: ConfigSection<{
@@ -122,6 +219,12 @@ export const sweepSection: ConfigSection<{
     flatten: typeof obj.flatten === 'boolean' ? obj.flatten : DEFAULT_CONFIG.sweep.flatten,
   };
 };
+
+sweepSection.jsonSchema = js.obj({
+  olderThanDays: { type: 'number', exclusiveMinimum: 0 },
+  dir: js.str,
+  flatten: js.bool,
+});
 
 /** A conditional ignoreChecks entry — `name` keeps the bare-string
  *  substring match; the two knobs say when a *failing* check has earned
@@ -173,6 +276,7 @@ export const actSection: ConfigSection<{
   docsPaths: string[];
   docsMaxRounds: number;
   requireApproval: boolean;
+  approvers: string[];
   mergeQueue: { label?: string; comment?: string };
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -181,6 +285,7 @@ export const actSection: ConfigSection<{
     docsPaths?: unknown;
     docsMaxRounds?: unknown;
     requireApproval?: unknown;
+    approvers?: unknown;
     mergeQueue?: unknown;
   };
   const queue = (
@@ -218,9 +323,49 @@ export const actSection: ConfigSection<{
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
+    // trusted-reviewer allowlist for the same gate — absent/empty
+    // means any human account's current-head approval counts. A
+    // CONFIGURED list that yields zero usable logins is the opposite
+    // intent — 'trust nobody', not 'trust anybody': one entry no host
+    // login can ever equal keeps the allowlist non-empty and the gate
+    // fails closed (PR #636 review).
+    approvers: (() => {
+      if (!Array.isArray(obj.approvers)) {
+        return [];
+      }
+      const valid = obj.approvers
+        .map(v => (typeof v === 'string' ? v.trim() : ''))
+        .filter(v => v !== '');
+      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid;
+    })(),
     mergeQueue,
   };
 };
+
+actSection.jsonSchema = js.obj({
+  ignoreChecks: {
+    type: 'array',
+    items: {
+      anyOf: [
+        js.str,
+        js.obj(
+          {
+            name: js.str,
+            consecutiveFailures: js.int(1),
+            threadWindowDays: js.int(1),
+          },
+          { required: ['name'] }
+        ),
+      ],
+    },
+  },
+  maxRounds: js.int(),
+  docsPaths: js.strList,
+  docsMaxRounds: js.int(),
+  requireApproval: js.bool,
+  approvers: js.strList,
+  mergeQueue: js.obj({ label: js.str, comment: js.str }),
+});
 
 /** bro.config.json `providers` section — the typed provider registry
  *  (spec: specs/bro-ribc.1.md). A name → entry map, kind-validated via
@@ -238,6 +383,13 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = ra
     if (trimmed === '') {
       continue;
     }
+    // '__proto__' is a setter on Object.prototype, not an own-property
+    // write — a provider named that would mutate the map instead of
+    // naming an entry (the mesh section refuses it the same way)
+    if (trimmed === '__proto__') {
+      console.error('bro.config: providers.__proto__ is a reserved key — entry dropped');
+      continue;
+    }
     const entry = parseProviderEntry(trimmed, v);
     if (entry !== null) {
       out[trimmed] = entry;
@@ -245,6 +397,86 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = ra
   }
   return out;
 };
+
+const providerApiSchema = js.obj(
+  {
+    type: { const: 'api' },
+    baseUrl: js.str,
+    model: js.str,
+    apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+    apiKeyCommand: js.str,
+    account: js.str,
+    // model → wire: a wire name, {wire}, or null (wire inferred).
+    // minProperties: an empty map parses to a dropped provider —
+    // "models": {} must not read as valid config
+    models: {
+      type: 'object',
+      minProperties: 1,
+      additionalProperties: {
+        anyOf: [{ enum: API_WIRES }, { type: 'null' }, js.obj({ wire: { enum: API_WIRES } })],
+      },
+    },
+  },
+  { required: ['type', 'baseUrl', 'models'] }
+);
+
+const providerAcpSchema = js.obj(
+  {
+    type: { const: 'acp' },
+    command: js.str,
+    profile: js.str,
+    model: js.str,
+    apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+    sessionRm: js.str,
+    account: js.str,
+    autoApprove: js.bool,
+    wallPause: js.bool,
+  },
+  { required: ['type', 'command'] }
+);
+
+const providerCliSchema = js.obj(
+  {
+    type: { const: 'cli' },
+    command: js.str,
+    model: js.str,
+    // a model-catalog command, not a map — one id per line on stdout
+    models: js.str,
+    account: js.str,
+    wallPause: js.bool,
+  },
+  { required: ['type', 'command'] }
+);
+
+providersSection.jsonSchema = {
+  type: 'object',
+  // '__proto__' is a reserved key — the loader drops it, so the schema
+  // must not accept it either (a config that passes the diagnostics
+  // must survive the load)
+  patternProperties: {
+    '^(?!__proto__$)': js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
+  },
+  additionalProperties: false,
+};
+
+/** bro.config.json `brouter` section — the model-centric routing
+ *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
+ *  model id to its route — a provider name, {provider, model?}, or an
+ *  ordered list of those (preference order; the first route is the
+ *  primary pick). Absent/empty = model routing off; a route naming an
+ *  unconfigured provider is a use-time config error naming the key. */
+export const brouterSection: ConfigSection<BrouterConfig> = raw => parseBrouter(raw);
+
+const brouterRouteSchema = js.oneOf(
+  js.str,
+  js.obj({ provider: js.str, model: js.str }, { required: ['provider'] })
+);
+
+brouterSection.jsonSchema = js.obj({
+  models: js.map(
+    js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
+  ),
+});
 
 /** bro.config.json `connectors` section — facade → connector precedence,
  *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
@@ -260,6 +492,8 @@ export const connectorsSection: ConfigSection<Record<string, string>> = raw => {
   }
   return out;
 };
+
+connectorsSection.jsonSchema = js.map(js.str);
 
 /** Default global-beads store — XDG data dir, not a repo path. */
 export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads');
@@ -286,6 +520,8 @@ export const beadsSection: ConfigSection<{ global: string }> = raw => {
   }
   return { global: dir };
 };
+
+beadsSection.jsonSchema = js.obj({ global: js.str });
 
 export const SINK_TYPES = ['slack', 'telegram', 'webhook'] as const;
 export type SinkType = (typeof SINK_TYPES)[number];
@@ -431,6 +667,46 @@ export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = raw => {
   return { sinks };
 };
 
+// per-type endpoint requirements mirror sinkEndpointMissing — a sink
+// the parser drops must not validate: telegram needs tokenEnv plus a
+// chat id source; url-typed sinks need a url source
+const sinkFields = {
+  name: js.str,
+  url: js.str,
+  urlEnv: js.str,
+  tokenEnv: js.str,
+  chatId: js.str,
+  chatIdEnv: js.str,
+  apiBase: js.str,
+  // an explicitly empty list is the no-narrowing rule — no minItems
+  events: { type: 'array', items: js.str },
+  timeoutMs: js.num(0),
+  minIntervalMs: js.num(0),
+} satisfies Record<string, JsonSchema>;
+
+notifySection.jsonSchema = js.obj({
+  sinks: {
+    type: 'array',
+    items: js.oneOf(
+      {
+        ...js.obj(
+          { ...sinkFields, type: { const: 'telegram' } },
+          { required: ['type', 'tokenEnv'] }
+        ),
+        anyOf: [{ required: ['chatId'] }, { required: ['chatIdEnv'] }],
+      },
+      {
+        ...js.obj({ ...sinkFields, type: { const: 'slack' } }, { required: ['type'] }),
+        anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
+      },
+      {
+        ...js.obj({ ...sinkFields, type: { const: 'webhook' } }, { required: ['type'] }),
+        anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
+      }
+    ),
+  },
+});
+
 /** bro.config.json `stack` section — how `bro work enter` picks the base
  *  for a new worktree when a session already produced a PR branch.
  *  'manual' (default): stack only on explicit --stack/--base.
@@ -445,6 +721,8 @@ export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = raw => {
   }
   return { mode: m ?? 'manual' };
 };
+
+stackSection.jsonSchema = js.obj({ mode: { enum: ['auto', 'manual'] } });
 
 export const SDD_MODES = ['off', 'remind', 'gate'] as const;
 export type SddMode = (typeof SDD_MODES)[number];
@@ -478,20 +756,149 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
   };
 };
 
+sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
+
+/** The exposed providers — the ROUTES the gateway answers to. Two
+ *  spellings: an array of entry names (route ≡ entry, today's form) or a
+ *  map of route → entry name (the public name is chosen; the entry keeps
+ *  its own). */
+export type ServeProviders = string[] | Record<string, string>;
+
+/** The exposed provider names — a list of non-blank strings, else
+ *  undefined (the section carries no list). A value that is not a
+ *  list, or an entry that is not a name, is a diagnostic — the lane
+ *  it names would silently disappear otherwise. */
+function providerNames(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.error(
+      'bro.config: serve.providers must be an array of provider names — section dropped'
+    );
+    return undefined;
+  }
+  const names: string[] = [];
+  for (const n of raw) {
+    if (typeof n !== 'string' || n.trim() === '') {
+      console.error(
+        'bro.config: serve.providers entries must be non-empty strings — entry dropped'
+      );
+      continue;
+    }
+    names.push(n.trim());
+  }
+  return names;
+}
+
+/** An object key that JavaScript orders FIRST — the integer indexes.
+ *  A route named like one cannot keep its declared position: the JSON
+ *  object's own iteration puts it ahead of its siblings, so "the first
+ *  declared route" would name a different lane than the operator
+ *  wrote. */
+export function isIntegerIndexKey(name: string): boolean {
+  const n = Number(name);
+  return Number.isInteger(n) && n >= 0 && n < 4_294_967_295 && String(n) === name;
+}
+
+/** One declared route — its name and the entry it reaches. A malformed
+ *  one is a diagnostic, not a silent drop: a lane that vanished leaves
+ *  the operator with a gateway that answers fewer models than they
+ *  declared. */
+function declareRoute(route: string, entry: unknown, routes: Record<string, string>): void {
+  const name = route.trim();
+  if (name === '') {
+    console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
+    return;
+  }
+  if (isIntegerIndexKey(name)) {
+    console.error(
+      `bro.config: serve.providers route '${name}' is a numeric index — it would lose its declared order — entry dropped`
+    );
+    return;
+  }
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    console.error(
+      `bro.config: serve.providers route '${route}' must name a provider entry — entry dropped`
+    );
+    return;
+  }
+  if (Object.hasOwn(routes, name)) {
+    console.error(
+      `bro.config: serve.providers route '${route}' duplicates an earlier route after trimming — entry dropped`
+    );
+    return;
+  }
+  if (name === '__proto__') {
+    // '__proto__' is a setter on Object.prototype, not a mergeable key —
+    // the config layer refuses it everywhere else (the layer merge skips
+    // it, a mesh alias skips it), so a route named that could not survive
+    // a layered merge anyway
+    console.error(`bro.config: serve.providers route '${name}' is a reserved key — entry dropped`);
+    return;
+  }
+  routes[name] = entry.trim();
+}
+
+/** The exposed providers, in either spelling — the array of entry names
+ *  (route ≡ entry) or the map of route → entry (the public name is
+ *  chosen). */
+function providerRoutes(raw: unknown): ServeProviders | undefined {
+  if (raw === undefined) return undefined;
+  if (Array.isArray(raw)) return providerNames(raw);
+  if (typeof raw !== 'object' || raw === null) {
+    console.error(
+      'bro.config: serve.providers must be an array of provider names or a route→entry map — section dropped'
+    );
+    return undefined;
+  }
+  const routes: Record<string, string> = {};
+  for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
+    declareRoute(route, entry, routes);
+  }
+  return routes;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
- *  (apiKeyHelper children do not inherit settings.env). */
-export const serveSection: ConfigSection<{ backend?: string }> = raw => {
+ *  (apiKeyHelper children do not inherit settings.env).
+ *  `providers` names the OTHER acp entries the gateway exposes: a
+ *  request whose model carries one of their names routes there, so one
+ *  listener serves every provider's models. It accepts two spellings —
+ *  an array of entry names (the route IS the entry) or a map of route →
+ *  entry, so the public name can be chosen independently of the
+ *  entry's own name (spec bro-jxw7p). */
+export const serveSection: ConfigSection<{
+  backend?: string;
+  providers?: ServeProviders;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
+    providers?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
+  const providers = providerRoutes(obj.providers);
   // an unset backend reads as an empty bag — same shape as providers:{}
-  return backend === undefined ? {} : { backend };
+  return {
+    ...(backend === undefined ? {} : { backend }),
+    ...(providers === undefined ? {} : { providers }),
+  };
 };
+
+serveSection.jsonSchema = js.obj({
+  backend: js.str,
+  providers: js.oneOf(js.strList, {
+    // the KEY is a ROUTE name — it must carry a non-blank character (or
+    // the loader drops it) and no '/' (a route is a model prefix: the
+    // router reads the first segment, so a slash makes it unreachable).
+    // The array form's names are ENTRY keys, which may carry a slash —
+    // only the map's keys are routes.
+    type: 'object',
+    patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
+    additionalProperties: false,
+  }),
+});
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -528,6 +935,13 @@ export const mirrorSection: ConfigSection<MirrorPolicy> = raw => {
     specLinked: obj.specLinked !== false,
   };
 };
+
+mirrorSection.jsonSchema = js.obj({
+  labels: js.strList,
+  excludeLabels: js.strList,
+  types: js.strList,
+  specLinked: js.bool,
+});
 
 const strField = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
@@ -628,6 +1042,37 @@ export const fleetSection: ConfigSection<{
   };
 };
 
+const fleetChainEntry: JsonSchema = {
+  anyOf: [js.str, js.obj({ provider: js.str, model: js.str }, { required: ['provider'] })],
+};
+
+fleetSection.jsonSchema = js.obj({
+  maxConcurrent: js.int(),
+  profiles: js.map(
+    js.obj(
+      { provider: js.str, model: js.str, backend: js.str, autoApprove: js.bool },
+      { required: ['provider'] }
+    )
+  ),
+  routing: js.map(
+    js.obj(
+      {
+        chain: { type: 'array', items: fleetChainEntry, minItems: 1 },
+        onWall: { enum: ON_WALL },
+      },
+      { required: ['chain'] }
+    )
+  ),
+  router: js.obj(
+    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    { required: ['provider', 'mode'] }
+  ),
+  walls: js.obj({
+    rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+    quotaTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
+});
+
 /** bro.config.json `query` section — `query`-plan defaults (spec
  *  bro-14h8.1). `concurrency` is the plan-level default a plan's own
  *  `concurrency` overrides; `env` is a literal overlay applied UNDER
@@ -659,6 +1104,10 @@ export const querySection: ConfigSection<{
     env,
   };
 };
+
+// env values are a literal overlay — the parser keeps empty strings
+// (explicit unset), so the schema must too
+querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map({ type: 'string' }) });
 
 /** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
  *  non-empty string; transport survives verbatim (parsePeer judges it —
@@ -729,6 +1178,18 @@ export const meshSection: ConfigSection<{
   return out;
 };
 
+const meshUri: JsonSchema = { type: 'string', pattern: '^mesh://' };
+
+meshSection.jsonSchema = js.obj({
+  rig: meshUri,
+  peers: js.map(
+    js.obj(
+      { rig: meshUri, remote: js.str, transport: js.str, login: js.str },
+      { required: ['rig', 'remote'] }
+    )
+  ),
+});
+
 /** bro.config.json `mcp` section — the `bro mcp` stdio server's plane
  *  exposure (specs/bro-9rls.1.md). Absent/empty section = every read
  *  plane; `planes: []` disables all; a non-empty list is an allowlist.
@@ -750,15 +1211,20 @@ export const mcpSection: ConfigSection<{ planes?: string[] }> = raw => {
   return out;
 };
 
+mcpSection.jsonSchema = js.obj({ planes: js.strList });
+
 /** Sections core normalizes itself — identical to what the built-in
- *  plugins declare as their configSchema. */
-const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
+ *  plugins declare as their configSchema. Exported for the schema
+ *  registry in config-schema.ts (spec: bro-d9dmx) — the .jsonSchema
+ *  slot on each is the machine-readable contract. */
+export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   debt: debtSection as ConfigSection<unknown>,
   sync: syncSection as ConfigSection<unknown>,
   sweep: sweepSection as ConfigSection<unknown>,
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
   providers: providersSection as ConfigSection<unknown>,
+  brouter: brouterSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
@@ -837,10 +1303,16 @@ export interface BroConfig {
      *  converges slower for less value. 0 disables the docs-specific cap. */
     docsMaxRounds: number;
     /** Human-signoff gate (bro-3vy93): when true the act exit gate —
-     *  and every auto-merge driven off it — also requires the host's
-     *  review verdict to be APPROVED. Opt-in hostile-input hardening;
-     *  default off keeps bot-only auto-merge. */
+     *  and every auto-merge driven off it — also requires a trusted
+     *  human's approving review on the current head (latest review per
+     *  reviewer; a standing CHANGES_REQUESTED vetoes). Opt-in
+     *  hostile-input hardening; default off keeps bot-only auto-merge. */
     requireApproval: boolean;
+    /** Trusted reviewer logins for requireApproval — an approval counts
+     *  only from these accounts; empty means any human (`User`) actor.
+     *  The knob that keeps a machine `User` account from satisfying the
+     *  gate on its own output. */
+    approvers: string[];
     /** External-merge-queue knobs (spec specs/bro-huy5o.6.md) — the
      *  connector pick lives in `connectors.mergeQueue`; these are the
      *  enqueue mechanics it reads. `label` adds a queue label on the
@@ -854,6 +1326,10 @@ export interface BroConfig {
    *  (`agents.<backend>.provider`) reference entries by name. Empty
    *  means provider behavior is off, not defaulted to a vendor. */
   providers: Record<string, ProviderEntry>;
+  /** Model-centric provider routing registry (spec: specs/bro-n1p0s.md)
+   *  — `models` maps a canonical model id to its provider route(s).
+   *  Empty means model routing is off, never a default route. */
+  brouter: BrouterConfig;
   /** Spec-driven development policy — spec before code for claimed
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
@@ -894,7 +1370,7 @@ export interface BroConfig {
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. */
-  serve: { backend?: string };
+  serve: { backend?: string; providers?: ServeProviders };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;
@@ -930,10 +1406,12 @@ export const DEFAULT_CONFIG: BroConfig = {
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
     requireApproval: false,
+    approvers: [],
     mergeQueue: {},
   },
   connectors: {},
   providers: {},
+  brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
   fleet: {
     maxConcurrent: 3,
@@ -1118,14 +1596,12 @@ function applySections(
  *  `--git-common-dir` resolves to `<main>/.git` there (and to
  *  `<cwd>/.git` in the main checkout itself, which dedupes). */
 function mainWorktreeRoot(cwd: string): string | null {
-  const r = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir']);
-  if (r.code !== 0 || r.out.trim() === '') {
+  // bounded + cached — config layers load on hook probes, where a
+  // wedged git probe must fail fast rather than stall dispatch
+  const common = gitCommonDir(cwd, GIT_SYNC_PROBE_TIMEOUT_MS);
+  if (common === null) {
     return null;
   }
-  // linked worktrees print the main checkout's absolute .git path; the
-  // main worktree prints a relative `.git` — resolve covers both, and
-  // unlike --path-format this works on older git too
-  const common = resolve(cwd, r.out.trim());
   if (basename(common) === '.git') {
     return dirname(common);
   }
@@ -1188,6 +1664,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   beads: 'operator',
   rig: 'operator',
   notify: 'operator',
+  otel: 'operator',
   // policy — identical-for-everyone project rules
   act: 'policy',
   debt: 'policy',
@@ -1245,8 +1722,9 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** Deep-merge overlay onto base — plain objects merge per key, arrays
  *  and scalars replace (never concat). `__proto__` is skipped: it is a
- *  setter on Object.prototype, not a mergeable key. */
-function deepMerge(
+ *  setter on Object.prototype, not a mergeable key. Exported so
+ *  configDiagnostics can judge the same merged view loadConfig reads. */
+export function deepMerge(
   base: Record<string, unknown>,
   overlay: Record<string, unknown>
 ): Record<string, unknown> {
@@ -1269,6 +1747,10 @@ export interface ConfigLayerHit {
   dir: string;
   file: string;
   raw: Record<string, unknown>;
+  /** The file's `plugins` value before normalizePluginSpecs filtered
+   *  it — diagnostics validate what the user wrote, not the cleaned
+   *  list (a non-string or blank entry must not vanish). */
+  pluginsRaw?: unknown;
 }
 
 export interface ConfigLayersResult {
@@ -1307,43 +1789,84 @@ export function loadConfigLayers(
   ];
   const layers: ConfigLayerHit[] = [];
   const broken: string[] = [];
-  const scan = (layer: ConfigLayerName, dirs: string[]): void => {
-    for (const dir of dirs) {
-      for (const name of CONFIG_LAYER_FILES[layer]) {
-        const path = join(dir, name);
-        if (!existsSync(path)) {
-          continue;
-        }
-        const raw = readConfigFile(name, path);
-        // a broken file stops the dir's remaining names (.ts precedence
-        // never promotes the sibling .json) but not the layer — the next
-        // dir still gets its shot, matching pre-layering fallback
-        if (raw === undefined) {
-          broken.push(path); // warned inside readConfigFile
-          break;
-        }
-        // a valid non-object root ("str", […], 42) is not a config —
-        // spreading it would silently produce garbage keys
-        if (!isPlainObject(raw)) {
-          console.error(`${name}: root must be an object — skipping`);
-          broken.push(path);
-          break;
-        }
-        // anchor relative plugin specs at this layer's dir — post-merge
-        // they must not re-root at the winning layer's location. Only
-        // touch the key when present: provenance reads own-keys.
-        const anchored =
-          'plugins' in raw ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) } : raw;
-        layers.push({ layer, dir, file: path, raw: anchored });
-        return;
-      }
-    }
-  };
   const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
-  if (want('global')) scan('global', [globalConfigDir()]);
-  if (want('project')) scan('project', projectDirs);
-  if (want('local')) scan('local', projectDirs);
+  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
+  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);
+  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken);
   return { layers, broken };
+}
+
+/** One candidate config file — 'missing' lets the next name try,
+ *  'broken' retires the dir (a parse failure already warned inside
+ *  readConfigFile; a non-object root warns here), 'loaded' settles the
+ *  layer. */
+function probeLayerCandidate(
+  layer: ConfigLayerName,
+  dir: string,
+  name: string,
+  layers: ConfigLayerHit[],
+  broken: string[]
+): 'missing' | 'broken' | 'loaded' {
+  const path = join(dir, name);
+  if (!existsSync(path)) {
+    return 'missing';
+  }
+  const raw = readConfigFile(name, path);
+  // a valid non-object root ("str", […], 42) is not a config —
+  // spreading it would silently produce garbage keys
+  if (raw === undefined || !isPlainObject(raw)) {
+    if (raw !== undefined) {
+      console.error(`${name}: root must be an object — skipping`);
+    }
+    broken.push(path);
+    return 'broken';
+  }
+  // anchor relative plugin specs at this layer's dir — post-merge
+  // they must not re-root at the winning layer's location. Only
+  // touch the key when present: provenance reads own-keys.
+  const anchored =
+    'plugins' in raw ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) } : raw;
+  layers.push({
+    layer,
+    dir,
+    file: path,
+    raw: anchored,
+    ...('plugins' in raw ? { pluginsRaw: raw.plugins } : {}),
+  });
+  return 'loaded';
+}
+
+/** Probe one dir's candidate names for a layer — the first existing
+ *  file wins the dir. A broken file stops the dir's remaining names
+ *  (.ts precedence never promotes the sibling .json) but not the layer:
+ *  the next dir still gets its shot, matching pre-layering fallback.
+ *  Returns true once a file was consumed — the layer is settled. */
+function scanConfigLayerDir(
+  layer: ConfigLayerName,
+  dir: string,
+  layers: ConfigLayerHit[],
+  broken: string[]
+): boolean {
+  for (const name of CONFIG_LAYER_FILES[layer]) {
+    const verdict = probeLayerCandidate(layer, dir, name, layers, broken);
+    if (verdict !== 'missing') {
+      return verdict === 'loaded';
+    }
+  }
+  return false;
+}
+
+function scanConfigLayer(
+  layer: ConfigLayerName,
+  dirs: string[],
+  layers: ConfigLayerHit[],
+  broken: string[]
+): void {
+  for (const dir of dirs) {
+    if (scanConfigLayerDir(layer, dir, layers, broken)) {
+      return;
+    }
+  }
 }
 
 export function loadConfig(

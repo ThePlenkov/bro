@@ -262,13 +262,52 @@ export function gitStacks(dir: string): StackFacade {
         if (opts.method === 'rebase') {
           // rebase-merge replays the member's commits onto the trunk tip —
           // cherry-pick is the local equivalent: `git rebase` would move
-          // the member's ref, and a worktree may be holding it. --empty=drop
-          // skips commits the trunk already carries patch-for-patch.
+          // the member's ref, and a worktree may be holding it. The replay
+          // walks the whole fork..branch range oldest-first and merge-free
+          // — a patch-id filter (git cherry) would also drop commits a
+          // revert still needs, so --empty=drop's semantics ride the pick
+          // loop instead (that flag needs a git new enough to parse it):
+          // a pick that fails with nothing staged and nothing unmerged
+          // went empty mid-range — patch-identical to trunk, an
+          // --allow-empty, a duplicate inside the branch — and is skipped;
+          // any other failure aborts the replay and reports like before.
           const fork = gitTry(['-C', main.path, 'merge-base', trunk, m.branch]).out.trim()
-          const r =
+          const picks =
+            fork === ''
+              ? []
+              : // --topo-order, not default date order — skewed
+                // timestamps would replay a child before its parent
+                gitTry([
+                  '-C',
+                  main.path,
+                  'rev-list',
+                  '--topo-order',
+                  '--reverse',
+                  '--no-merges',
+                  `${fork}..${m.branch}`,
+                ])
+                  .out.split('\n')
+                  .filter(Boolean)
+          let r =
             fork === ''
               ? { code: 1, out: '', err: `no merge-base with ${trunk}` }
-              : gitTry(['-C', main.path, 'cherry-pick', '--empty=drop', `${fork}..${m.branch}`])
+              : { code: 0, out: '', err: '' }
+          for (const sha of picks) {
+            const p = gitTry(['-C', main.path, 'cherry-pick', sha])
+            if (p.code === 0) {
+              continue
+            }
+            const wentEmpty =
+              gitTry(['-C', main.path, 'diff', '--cached', '--quiet']).code === 0 &&
+              gitTry(['-C', main.path, 'ls-files', '-u']).out.trim() === ''
+            if (wentEmpty) {
+              // a one-commit sequence — abort is the skip (HEAD never moved)
+              gitTry(['-C', main.path, 'cherry-pick', '--abort'])
+              continue
+            }
+            r = { code: p.code, out: p.out, err: p.err }
+            break
+          }
           if (r.code !== 0) {
             gitTry(['-C', main.path, 'cherry-pick', '--abort'])
             lines.push(

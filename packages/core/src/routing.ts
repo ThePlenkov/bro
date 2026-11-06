@@ -340,13 +340,26 @@ export function walkChain(
   chain: ChainEntry[],
   onWall: OnWall,
   walls: ProviderWall[],
-  from?: string
+  from?: string,
+  /** The chain position `from` was recorded at — a respawn resumes at
+   *  its own occurrence when the chain repeats a provider (spec
+   *  bro-1x7p). Only trusted while the entry still names `from`; a
+   *  redeclared chain falls back to the provider lookup. */
+  fromIndex?: number
 ): ChainWalk {
   if (chain.length === 0) {
     throw new SpawnError('fleet.routing chain must not be empty', 'config');
   }
-  const found = from === undefined ? -1 : chain.findIndex(entry => entry.provider === from);
-  const start = found < 0 ? 0 : found;
+  let found = -1;
+  if (from !== undefined) {
+    // the recorded resume point stands while it still names `from` —
+    // a redeclared chain falls back to the provider lookup
+    found =
+      fromIndex !== undefined && chain[fromIndex]?.provider === from
+        ? fromIndex
+        : chain.findIndex(entry => entry.provider === from);
+  }
+  const start = Math.max(found, 0);
   const wallFor = (entry: ChainEntry) => walls.find(wall => wall.provider === entry.provider);
   const startEntry = chain[start]!;
   const startWall = wallFor(startEntry);
@@ -425,6 +438,35 @@ function stamp(e: WallRecord): string {
   return typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
 }
 
+/** One entry's wall-scannable records — the live fields plus each
+ *  retained `attempts` record (a re-dispatch appends the outgoing
+ *  attempt verbatim, and a superseded death still walls the provider
+ *  it died on — spec bro-1x7p). A stopped entry scans as NOTHING:
+ *  `bro agents down` is the manual clear, and it must lift the step's
+ *  whole wall footprint — an attempt snapshot keeps its own
+ *  `stopped: false`, so without the entry-level rule a quota wall
+ *  recorded by a retained attempt could never be cleared. */
+function wallRecords(e: AgentRegistryEntry): WallRecord[] {
+  if (e.stopped === true) {
+    return [];
+  }
+  return Array.isArray(e.attempts) ? [e, ...(e.attempts as WallRecord[])] : [e];
+}
+
+/** The steps whose records hold `provider`'s wall — the `bro agents
+ *  down <step>` targets a wall refusal names. Every record must clear
+ *  before the wall lifts (quota dominates in accWall), so the clear
+ *  names them all. */
+export function providerWallOwners(
+  registry: Record<string, AgentRegistryEntry>,
+  provider: string
+): string[] {
+  return Object.entries(registry)
+    .filter(([, e]) => wallRecords(e).some(rec => wallable(rec) && rec.provider === provider))
+    .map(([step]) => step)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
   if (e.cause === 'quota') {
     if (acc.quota === undefined || stamp(e) > stamp(acc.quota)) {
@@ -486,14 +528,7 @@ export function deriveProviderWalls(
 ): ProviderWall[] {
   const byProvider = new Map<string, WallAcc>();
   for (const e of Object.values(registry)) {
-    // the entry's live fields plus each retained `attempts` record —
-    // a re-dispatch appends the outgoing attempt verbatim, and a
-    // superseded death still walls the provider it died on (spec
-    // bro-1x7p); entries that never re-dispatched carry no list
-    const records: WallRecord[] = Array.isArray(e.attempts)
-      ? [e, ...(e.attempts as WallRecord[])]
-      : [e];
-    for (const rec of records) {
+    for (const rec of wallRecords(e)) {
       if (!wallable(rec)) {
         continue;
       }

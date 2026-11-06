@@ -31,6 +31,7 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   loadConfig,
   lockHolderPid,
@@ -58,12 +59,26 @@ export interface RigPulseMarker {
 }
 
 export function rigPulseMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'rig-pulse.json')
 }
 
+export function rigPulseMarkerPathUncertain(dir: string): { path: string | null; uncertain: boolean } {
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  if (common === null) {
+    // If we got null from bounded probe, could be timeout or truly missing
+    // Try without timeout to distinguish
+    const common2 = gitCommonDir(dir)
+    if (common2 === null) {
+      return { path: null, uncertain: false }
+    }
+    return { path: join(common2, 'bro', 'rig-pulse.json'), uncertain: false }
+  }
+  return { path: join(common, 'bro', 'rig-pulse.json'), uncertain: false }
+}
+
 export function rigPulseLockPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'rig-pulse.lock')
 }
 
@@ -105,13 +120,23 @@ export function armRigPulse(
 
 /** Remove the want-marker. A running `bro rig watch` keeps its lock —
  *  disarming only drops the rearm intent. */
-export function disarmRigPulse(dir: string): 'disarmed' | 'absent' {
+export type DisarmRigState = 'disarmed' | 'absent' | 'unknown'
+
+export function disarmRigPulse(dir: string): DisarmRigState {
   const file = rigPulseMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
+  if (file === null) {
+    // Could not determine git common dir (timeout or error) - treat as unknown
+    return 'unknown'
+  }
+  if (!existsSync(file)) {
     return 'absent'
   }
-  rmSync(file)
-  return 'disarmed'
+  try {
+    rmSync(file)
+    return 'disarmed'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** Is a `bro rig watch` alive on this repo? The lock's holder pid
@@ -144,7 +169,7 @@ export function rigPulseState(dir: string): string {
 export type { PulseSpawn }
 
 export function rigPulseSpawnPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'rig-pulse.spawn.json')
 }
 
@@ -218,14 +243,14 @@ export function spawnRigPulse(
   // steer the child it must name a worktree of THIS repo: an absolute
   // path whose common dir is the marker's own. A foreign checkout's
   // refresh commands would otherwise run under our cadence (CWE-73).
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (
     SELF_ENTRY === null ||
     common === null ||
     !isAbsolute(repo) ||
     !existsSync(repo) ||
     worktreeGitDir(repo) === null ||
-    gitCommonDir(repo) !== common
+    gitCommonDir(repo, GIT_SYNC_PROBE_TIMEOUT_MS) !== common
   ) {
     return null
   }

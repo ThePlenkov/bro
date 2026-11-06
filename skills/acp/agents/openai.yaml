@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro ACP"
+  short_description: "Cascading ACP proxy — verbatim forwarding plus bro's session context on the first prompt"
+  brand_color: "#5B5BD6"
+  default_prompt: "Use $acp to put an ACP client behind `bro acp proxy -- <agent cmd>`."
+policy:
+  allow_implicit_invocation: true

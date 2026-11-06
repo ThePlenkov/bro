@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/debt-status.schema.json",
+  "title": "bro debt status --json",
+  "type": "object",
+  "additionalProperties": true
+}

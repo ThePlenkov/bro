@@ -11,6 +11,8 @@ import {
   agentsSection,
   beadsSection,
   checkBeads,
+  configDiagnostics,
+  configPolicyErrors,
   debtSection,
   definePlugin,
   loadConfig,
@@ -26,8 +28,10 @@ import {
   sweepSection,
   syncSection,
   type BroPlugin,
+  type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
+  type FacadeMap,
 } from '@broject/core';
 import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
@@ -55,6 +59,7 @@ import {
 } from '@broject/query';
 import { guardConnector, guardSection } from '@broject/guard';
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge';
+import { runAcpCommand } from './commands/acp.ts';
 import { runAcpWorkerCommand } from './commands/acp-worker.ts';
 import { applyActPlan, runActCommand } from './commands/act.ts';
 import { runBusCommand } from './commands/bus.ts';
@@ -65,6 +70,8 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { applyNextPlan, runNextCommand } from './commands/next.ts';
 import { runNotifyCommand } from './commands/notify.ts';
+import { runOtelCommand } from './commands/otel.ts';
+import { otelSection } from '@broject/otel';
 import { rigSection } from './commands/rig-config.ts';
 import { rigConnector } from './commands/rig-pulse.ts';
 import { runRigCommand } from './commands/rig.ts';
@@ -76,6 +83,7 @@ import {
   type NextPlan,
 } from './commands/next-plan.ts';
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
+import { runPipelineCommand } from './commands/pipeline.ts';
 import { runPluginsCommand } from './commands/plugins.ts';
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
@@ -86,15 +94,19 @@ import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
+import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
 import { runDogfoodCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
+import { runHerdrCommand } from './commands/herdr.ts';
 import { runHooksCommand } from './commands/hooks.ts';
 import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
 import { runQueueCommand } from './commands/queue.ts';
 import { runLearnCommand } from './commands/learn.ts';
+import { runSkillsCommand } from './commands/skills.ts';
+import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
@@ -111,6 +123,9 @@ import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
+import { sessionCapConnector } from './commands/session-cap.ts';
+import { runExecCommand } from './commands/exec.ts';
+import { herdrConnector } from './commands/herdr-connector.ts';
 import { runStackCommand } from './commands/stack.ts';
 import { runStampCommand } from './commands/buildstamp.ts';
 import { SPEC_CONNECTORS } from './spec-connectors.ts';
@@ -119,6 +134,7 @@ import { runSyncCommand } from './commands/sync.ts';
 import { runTraceCommand } from './commands/trace.ts';
 import { telemetrySection } from './commands/trace-config.ts';
 import { runWorkCommand, workConnector } from './commands/work.ts';
+import { runContractCommand } from './commands/contract.ts';
 
 // Built-in connectors register at module load, ahead of external
 // plugins — registry order is the fallback precedence, and an external
@@ -152,7 +168,12 @@ registerConnector(driveConnector);
 registerConnector(rigConnector);
 registerConnector(debtConnector);
 registerConnector(sddConnector);
+// the host-wide session cap — refuses a session start at the cap
+registerConnector(sessionCapConnector);
 registerConnector(notifyConnector);
+// pane report-back — env-gated inside the connector; outside herdr
+// every probe is a no-op (spec bro-84zrj)
+registerConnector(herdrConnector);
 registerConnector(learnConnector);
 registerConnector(systemoneConnector);
 registerConnector(llmJudgeConnector);
@@ -179,6 +200,27 @@ export const PLUGINS: BroPlugin[] = [
     run: runDebtCommand,
     skill: 'debt',
     configKey: 'debt',
+    contract: {
+      subs: {
+        status: {
+          exits: { 0: 'ledger summary printed', 1: 'usage (debt usage exits 1 today)' },
+        },
+        next: {
+          flags: {
+            '--json': 'the finding row as JSON',
+            '--claim': 'mark the finding claimed atomically (CAS)',
+            '--area <a>': 'only findings in this area',
+            '--author <u>': 'only findings from this thread author',
+          },
+          json: 'schemas/cli/debt-next.schema.json',
+          exits: {
+            0: 'top open finding emitted',
+            1: 'no open findings, or the claim CAS lost',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: debtSection,
     planSchema: (doc, source) => parseDebtPlan(doc, source),
     planVersion: DEBT_PLAN_VERSION,
@@ -191,6 +233,22 @@ export const PLUGINS: BroPlugin[] = [
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
+    contract: {
+      subs: {
+        status: {
+          flags: {
+            '--json': 'PR state + exit gate as one JSON document',
+            '--pr <n>': 'the PR to inspect — default: the current branch',
+          },
+          exits: {
+            0: 'exit gate green',
+            1: 'gate blocked — threads/failures remain (usage errors also exit 1 today)',
+            2: 'no open PR for the current branch',
+          },
+          json: 'schemas/cli/act-status.schema.json',
+        },
+      },
+    },
     configSchema: actSection,
     planSchema: (doc, source) => parseActPlan(doc, source),
     planVersion: ACT_PLAN_VERSION,
@@ -212,6 +270,20 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Claim + emit the top ready bead — the autonomous backlog loop',
     run: runNextCommand,
     skill: 'next',
+    contract: {
+      flags: {
+        '--list': 'emit the work order without claiming',
+        '--json': 'the verdict as JSON — {state: task|gated|idle, bead, beads, queue, …}',
+        '--global': 'read the user-level store instead of the project',
+        '--label <a,b>': 'only beads carrying one of these labels are claimable',
+      },
+      json: 'schemas/cli/next.schema.json',
+      exits: {
+        0: 'verdict emitted — task | gated | idle',
+        1: 'task store unreachable or classify failed',
+        2: 'usage',
+      },
+    },
     planSchema: (doc, source) => parseNextPlan(doc, source),
     planVersion: NEXT_PLAN_VERSION,
     runPlan: plan => applyNextPlan(plan as NextPlan),
@@ -226,11 +298,91 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: loopSection,
   }),
   definePlugin({
+    name: 'pipeline',
+    group: 'pipeline',
+    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    run: runPipelineCommand,
+    contract: {
+      subs: {
+        accept: {
+          flags: {
+            '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
+            '--by <id>': 'signer identity — default: $BRO_AGENT_ID, else the actor chain',
+            '--run <id>': 'the run to write to — default: the sole run parked at accept',
+          },
+          exits: {
+            0: 'verdict recorded on the run channel',
+            1: 'no run awaiting, an ambiguous target, or an unresolvable signer',
+            2: 'usage',
+          },
+        },
+        answer: {
+          flags: {
+            '-m <text>': 'answer text (short spelling)',
+            '--message <text>': 'answer text',
+            '--answers-file <path>': 'answers from a file (JSON parsed when it parses)',
+            '--by <id>': 'who answered — optional provenance',
+            '--run <id>': 'the run to write to — default: the sole run parked at intake',
+          },
+          exits: {
+            0: 'answers recorded on the run channel',
+            1: 'no run awaiting answers or an unreadable file',
+            2: 'usage',
+          },
+        },
+      },
+    },
+  }),
+  definePlugin({
     name: 'fleet',
     group: 'fleet',
     summary:
       'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json|clear <account>|clear --all]',
     run: runFleetCommand,
+    contract: {
+      flags: {
+        '--json':
+          'fleet payload as JSON — rows, degraded, conflicts, prErrors, occupancy, budget, walls',
+        '--live': 'TTY dashboard repaint loop (needs a TTY)',
+        '--every N': 'repaint cadence seconds — implies --live',
+      },
+      json: 'schemas/cli/fleet.schema.json',
+      exits: {
+        0: 'fleet printed',
+        2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'delegate',
+    group: 'fleet',
+    summary:
+      'Activate another agent — sync ask (--wait, pooled ACP turn) or detached registry spawn (--detach)',
+    run: runDelegateCommand,
+    skill: 'delegate',
+    contract: {
+      flags: {
+        '--wait': 'sync short ask — one pooled ACP turn; reply text on stdout (default)',
+        '--detach': 'real work — the registry spawn `bro agents run` takes; returns the agentId',
+        '--prompt <text>': 'literal prompt (positional text is the same channel)',
+        '--prompt-file <file>': 'prompt from a file',
+        '--provider <name>': 'providers.<name> pin — --wait needs an acp entry',
+        '--class <name>':
+          'fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)',
+        '--model <m>': 'model override — --wait pins it on the ACP session',
+        '--timeout <sec>': '--wait deadline (default 120)',
+        '--connector <name>': '--detach backend pin',
+        '--worktree <path>': '--detach worktree (default: minted <repo>--adhoc-*)',
+        '--auto-approve': '--detach ACP permission policy',
+        '--beads-dir <dir>': 'shared store override',
+        '--json':
+          '{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach',
+      },
+      exits: {
+        0: 'delegation served — reply printed (--wait) or agent spawned (--detach)',
+        1: 'provider walled/unavailable, spawn refused, prompt/pin error, or usage (usage errors also exit 1 today)',
+      },
+    },
   }),
   definePlugin({
     name: 'agents',
@@ -239,6 +391,22 @@ export const PLUGINS: BroPlugin[] = [
     run: runAgentsCommand,
     skill: 'agents',
     configKey: 'agents',
+    contract: {
+      subs: {
+        status: {
+          flags: {
+            '--json': 'agent rows + occupancy + session quota as JSON',
+            '--connector <name>': 'pin the agents facade connector',
+          },
+          json: 'schemas/cli/agents-status.schema.json',
+          exits: {
+            0: 'agent plane printed',
+            1: 'backend collection failed',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: agentsSection,
   }),
   definePlugin({
@@ -247,6 +415,15 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'The compact live board — beads + fleet + drill + git [--json|--deep]',
     run: runStatusCommand,
     skill: 'status',
+    contract: {
+      flags: {
+        '--json': 'the board as one JSON document',
+        '--deep':
+          'add the act exit gate for the current branch PR — the fast path stays local-only',
+      },
+      json: 'schemas/cli/fleet-status.schema.json',
+      exits: { 0: 'board printed' },
+    },
   }),
   definePlugin({
     name: 'notify',
@@ -351,7 +528,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'cleanup',
     group: 'review',
-    summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
+    summary: 'Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]',
     run: runCleanupCommand,
   }),
   definePlugin({
@@ -422,6 +599,39 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'goal',
     configKey: 'goal',
     configSchema: goalSection,
+  }),
+  definePlugin({
+    name: 'skills',
+    group: 'self',
+    summary:
+      'Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]',
+    run: runSkillsCommand,
+    skill: 'skills',
+    configKey: 'skills',
+    configSchema: skillsSection,
+    contract: {
+      subs: {
+        sync: {
+          flags: {
+            '--root <dir>': 'run root — its bro.config and .agents/skills apply',
+            '--json': 'per-source steps + reconcile rows + drift as JSON',
+          },
+          exits: {
+            0: 'all declared sources installed — lock verifies',
+            1: 'a source failed, or drift reported after sync',
+            2: 'usage',
+          },
+        },
+        list: {
+          flags: {
+            '--root <dir>': 'run root',
+            '--json': 'the reconcile rows as JSON',
+          },
+          json: 'schemas/cli/skills-list.schema.json',
+          exits: { 0: 'rows printed', 2: 'usage' },
+        },
+      },
+    },
   }),
   definePlugin({
     name: 'judge',
@@ -512,17 +722,77 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'trace',
     group: 'fleet',
-    summary: 'OTLP export of the session trace journals — export [--session|--dry-run|--json]',
+    summary:
+      '<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals',
     run: runTraceCommand,
     skill: 'trace',
     configKey: 'telemetry',
     configSchema: telemetrySection,
   }),
   definePlugin({
+    name: 'otel',
+    group: 'fleet',
+    summary:
+      'Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)',
+    run: runOtelCommand,
+    skill: 'otel',
+    configKey: 'otel',
+    configSchema: otelSection,
+    contract: {
+      subs: {
+        status: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'report printed' },
+        },
+        test: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'would-be record printed', 2: 'missing hook name' },
+        },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+      },
+      exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
+    },
+  }),
+  definePlugin({
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
     hidden: true,
+  }),
+  definePlugin({
+    name: 'herdr',
+    summary: 'Herdr bridge — pane-facing helpers (status-view); spawned, never typed',
+    run: runHerdrCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'acp',
+    group: 'fleet',
+    summary: 'ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)',
+    run: runAcpCommand,
+    skill: 'acp',
+    contract: {
+      subs: {
+        proxy: {
+          exits: {
+            0: 'client closed the wire — clean session end',
+            1: 'downstream agent died first — abnormal end',
+            2: 'usage — missing subcommand, missing `--`, or empty agent argv',
+          },
+        },
+      },
+    },
   }),
   definePlugin({
     name: 'providers',
@@ -549,6 +819,27 @@ export const PLUGINS: BroPlugin[] = [
     run: runRigCommand,
     skill: 'rig',
     configKey: 'rig',
+    contract: {
+      subs: {
+        status: {
+          flags: {
+            '--repo <dir>': 'rig checkout to inspect (default: this repo)',
+            '--json': 'rig status as JSON',
+          },
+          json: 'schemas/cli/rig-status.schema.json',
+          exits: { 0: 'rig fresh — no error surfaced', 1: 'a status error was found', 2: 'usage' },
+        },
+        next: {
+          flags: { '--json': 'the re-entry verdict as JSON' },
+          json: 'schemas/cli/rig-next.schema.json',
+          exits: {
+            0: 'verdict — step | gate | wait | done',
+            1: 'verdict blocked',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: rigSection,
   }),
   definePlugin({
@@ -619,6 +910,16 @@ export const PLUGINS: BroPlugin[] = [
     run: argv => runPlanFile(argv),
   }),
   definePlugin({
+    name: 'exec',
+    group: 'work',
+    summary:
+      'Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)',
+    run: runExecCommand,
+    contract: {
+      exits: { 2: 'usage', 130: 'child killed by SIGINT' },
+    },
+  }),
+  definePlugin({
     name: 'plan',
     group: 'plan',
     summary: 'Plan contract: list kinds + schema versions, validate a file',
@@ -628,6 +929,14 @@ export const PLUGINS: BroPlugin[] = [
     name: 'plugins',
     summary: 'Plugin registry + client adapters: install|uninstall|list <client>',
     run: argv => runPluginsCommand(argv, PLUGINS),
+  }),
+  definePlugin({
+    // consumer surface (agents/transports), not an operator one —
+    // hidden like hooks/acp-worker; spec bro-k9ces
+    name: 'contract',
+    summary: 'The CLI surface as data — dump|check|gen over the registry',
+    run: argv => runContractCommand(argv, PLUGINS, GROUP_META),
+    hidden: true,
   }),
 ];
 
@@ -644,6 +953,7 @@ export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
   ['plan', 'versioned plans'],
   ['mesh', 'inter-rig federation'],
   ['spec', 'spec-driven development'],
+  ['pipeline', 'pipeline customer surface — accept verdicts, intake answers'],
 ];
 
 /** name → members, derived over the live registry each call so
@@ -695,25 +1005,87 @@ export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections());
 }
 
-function isPlugin(p: unknown): p is BroPlugin {
-  const o = p as BroPlugin;
-  if (
-    !o ||
-    typeof o !== 'object' ||
-    typeof o.name !== 'string' ||
-    o.name === '' ||
-    typeof o.summary !== 'string' ||
-    typeof o.run !== 'function'
-  ) {
+/** configDiagnostics over the full registry — core sections merged with
+ *  every plugin's declared configKey schema (spec: specs/bro-d9dmx.md). */
+export function broConfigDiagnostics(cwd: string = process.cwd()) {
+  return configDiagnostics(cwd, pluginConfigSections());
+}
+
+// The gate lives in config-policy.ts — a leaf commands/work.ts can
+// import without the TDZ cycle back into this registry. The merged
+// section list is registered here at init so assertMutableConfig sees
+// plugin configKeys, not just core's.
+export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
+import { registerPolicySections } from './config-policy.ts';
+registerPolicySections(pluginConfigSections);
+
+function hasPluginRequiredShape(o: unknown): boolean {
+  const p = o as BroPlugin;
+  if (!p || typeof p !== 'object') {
     return false;
   }
-  // optional fields must be the right type when present — a truthy
-  // non-function configSchema would crash config loading later
-  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]));
+  if (typeof p.name !== 'string' || p.name === '') {
+    return false;
+  }
+  if (typeof p.summary !== 'string') {
+    return false;
+  }
+  if (typeof p.run !== 'function') {
+    return false;
+  }
+  return true;
+}
+
+function hasPluginOptionalFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  for (const [key, ok] of PLUGIN_FIELD_CHECKS) {
+    const v = p[key as string];
+    if (v === undefined) {
+      continue;
+    }
+    if (!ok(v)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasPluginPairedFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  const hasConfigKey = p.configKey !== undefined;
+  const hasConfigSchema = p.configSchema !== undefined;
+  if (hasConfigKey !== hasConfigSchema) {
+    return false;
+  }
+  const hasPlanSchema = p.planSchema !== undefined;
+  const hasRunPlan = p.runPlan !== undefined;
+  if (hasPlanSchema !== hasRunPlan) {
+    return false;
+  }
+  return true;
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  return hasPluginRequiredShape(p) && hasPluginOptionalFields(p) && hasPluginPairedFields(p);
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
  *  the field is defined. Table form keeps isPlugin flat as fields grow. */
+function isDenseStringArray(v: unknown): boolean {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  if (Object.keys(v).length !== v.length) {
+    return false;
+  }
+  for (const item of v) {
+    if (typeof item !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
 const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
   ['configSchema', v => typeof v === 'function'],
   ['planSchema', v => typeof v === 'function'],
@@ -726,21 +1098,119 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boole
   ['deprecated', v => typeof v === 'string'],
   ['flatDeprecated', v => typeof v === 'string'],
   ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v)],
+  ['argvPrefix', isDenseStringArray],
   ['docs', v => Array.isArray(v) && v.every(isDocType)],
   ['connectors', v => Array.isArray(v) && v.every(isConnector)],
+  ['contract', isCliContract],
+  ['group', v => typeof v === 'string'],
+  ['aliasOf', v => typeof v === 'string'],
+  ['hidden', v => typeof v === 'boolean'],
 ];
+
+/** `contract` must be the declared shape at every level — a malformed
+ *  nested map (flags: 5, subs: "x") would otherwise reach the
+ *  dump/reconcile engine and crash or corrupt the snapshot. */
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !Array.isArray(v);
+
+const isStrMap = (v: unknown): boolean =>
+  isRecord(v) && Object.values(v).every(x => typeof x === 'string');
+
+const isSubContract = (v: unknown): boolean =>
+  isRecord(v) &&
+  (v.flags === undefined || isStrMap(v.flags)) &&
+  (v.exits === undefined || isStrMap(v.exits)) &&
+  (v.json === undefined || typeof v.json === 'string');
+
+function isCliContract(v: unknown): boolean {
+  return (
+    isSubContract(v) &&
+    isRecord(v) &&
+    (v.subs === undefined || (isRecord(v.subs) && Object.values(v.subs).every(isSubContract)))
+  );
+}
+
+const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+]);
+
+const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
+  'matchRemote',
+  'matchDir',
+  'auth',
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+  'hooks',
+  'guards',
+];
+
+const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o === 'object';
 
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
-function isConnector(c: unknown): boolean {
-  const o = c as { name?: unknown; matchRemote?: unknown };
+function isNonEmptyString(v: unknown): boolean {
+  return typeof v === 'string' && v !== '';
+}
+
+function hasValidConnectorName(c: unknown): boolean {
+  return isObject(c) && isNonEmptyString(c.name);
+}
+
+function hasValidConnectorFunctions(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isValidFacadeKey(f: unknown): boolean {
+  return typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap);
+}
+
+function hasValidConnectorFlags(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
+    return false;
+  }
+  if (c.optInFacades === undefined) {
+    return true;
+  }
   return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    (o.matchRemote === undefined || typeof o.matchRemote === 'function')
+    Array.isArray(c.optInFacades) &&
+    !c.optInFacades.includes(undefined) &&
+    c.optInFacades.every(f => isValidFacadeKey(f))
+  );
+}
+
+function isConnector(c: unknown): boolean {
+  return (
+    isObject(c) &&
+    hasValidConnectorName(c) &&
+    hasValidConnectorFunctions(c) &&
+    hasValidConnectorFlags(c)
   );
 }
 

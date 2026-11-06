@@ -15,7 +15,7 @@ beads, skills, rules, or docs. Powers `bro wtf`.
 npm i @broject/retro
 ```
 
-Requires Node ≥ 22 and `bd`. ESM only.
+Requires Node ≥ 22.18 and `bd`. ESM only.
 
 ## Surface
 

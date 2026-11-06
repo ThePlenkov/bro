@@ -30,8 +30,14 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { gitTry, markerLive, taskStore, withFileLock } from '@broject/core'
+import { join } from 'node:path'
+import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDir,
+  markerLive,
+  taskStore,
+  withFileLock,
+} from '@broject/core'
 import {
   applyCapture,
   planCapture,
@@ -65,11 +71,8 @@ const oneLine = (s: string): string => s.trim().replace(/\s+/g, ' ')
  *  already live under. null outside a repo. Same resolution as the
  *  connector's. */
 function hooksDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-  if (r.code !== 0 || r.out.trim() === '') {
-    return null
-  }
-  return join(resolve(dir, r.out.trim()), 'bro', 'hooks')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'hooks')
 }
 
 /** Significant terms of a question — the same vocabulary capture uses

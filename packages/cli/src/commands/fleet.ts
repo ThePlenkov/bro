@@ -26,6 +26,8 @@ import { basename } from 'node:path';
 import {
   git,
   gitTry,
+  hasHelpFlag,
+  printUsage,
   clearLedgerWalls,
   reviewHost,
   wallText,
@@ -579,6 +581,9 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
       process.exit(2);
     }
     return;
+  }
+  if (hasHelpFlag(argv)) {
+    printUsage('usage: bro fleet [--live] [--every SEC] [--json]', 0);
   }
   let args: FleetArgs;
   try {

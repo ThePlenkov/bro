@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core'
@@ -24,6 +24,9 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_LINEAR_ISSUE_2   — scripted override for every LATER BroIssue
  *                            read (claim's verify); falls back to _1 —
  *                            an issue doesn't vanish after one read
+ *    FAKE_LINEAR_ISSUE_SEQ — dir of <n>.json bodies: the Nth BroIssue
+ *                            read answers file <n> when present —
+ *                            deterministic interleavings (claim races)
  *    FAKE_LINEAR_CHILDREN  — BroChildren body
  *    FAKE_LINEAR_CREATE    — BroIssueCreate body
  *    FAKE_LINEAR_USERS     — BroUsers body
@@ -53,7 +56,9 @@ case "$body" in
   # collide with the single-issue read's read-count switch
   *"BroIssue("*)
     n=$(grep -c 'BroIssue(' "$FAKE_CURL_LOG")
-    if [ "$n" -gt 1 ] && [ -n "$FAKE_LINEAR_ISSUE_2" ]; then
+    if [ -n "$FAKE_LINEAR_ISSUE_SEQ" ] && [ -f "$FAKE_LINEAR_ISSUE_SEQ/$n.json" ]; then
+      cat "$FAKE_LINEAR_ISSUE_SEQ/$n.json"
+    elif [ "$n" -gt 1 ] && [ -n "$FAKE_LINEAR_ISSUE_2" ]; then
       printf '%s\\n' "$FAKE_LINEAR_ISSUE_2"
     else
       printf '%s\\n' "$FAKE_LINEAR_ISSUE_1"
@@ -319,6 +324,71 @@ describe('linearTasks', { skip: WIN32 }, () => {
         assert.throws(() => linearTasks(dir).claim('ENG-42'), /claim contested — rival holds it/)
       }
     )
+  })
+
+  test('claimCapability declares best-effort assignment — never a lease', () => {
+    withLinear({}, (_log, dir) => {
+      assert.deepEqual(linearTasks(dir).claimCapability?.(), {
+        strength: 'best-effort',
+        identity: 'viewer',
+        authority: 'service',
+      })
+    })
+  })
+
+  /** Bodies for the reads of a scripted claim race — each entry is the
+   *  assignee the Nth ENG-42 read reports (null = unassigned). A
+   *  contested race reads raceReads(null, 'me', null, 'bob'): B's
+   *  pre-read is a stale snapshot, its verify shows B's own write. */
+  const raceReads = (...who: (string | null)[]): string[] =>
+    who.map((a) =>
+      issueRead(node({ ident: 'ENG-42', ...(a === null ? {} : { assignee: a }) }))
+    )
+
+  /** Run the scripted race: claim A, then `second()` — a viewer flip
+   *  goes inside the closure (spec specs/bro-l8c4f.12). */
+  const claimRace = (dir: string, bodies: string[], second: () => void): void => {
+    const seq = join(dir, 'seq')
+    mkdirSync(seq, { recursive: true })
+    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
+    process.env.FAKE_LINEAR_ISSUE_SEQ = seq
+    try {
+      linearTasks(dir).claim('ENG-42')
+      second()
+    } finally {
+      delete process.env.FAKE_LINEAR_ISSUE_SEQ
+    }
+  }
+
+  test('claim interleaving: two viewers both win the residual window', () => {
+    withLinear({}, (log, dir) => {
+      claimRace(dir, raceReads(null, 'me', null, 'bob'), () => {
+        // the rival racer is a different credential — the viewer cache
+        // keys on it, so the /myself probe re-runs for 'bob'
+        process.env.LINEAR_API_KEY = `lin_api_race_${keySeq++}`
+        process.env.FAKE_LINEAR_VIEWER = JSON.stringify({
+          data: { viewer: { id: 'u-bob', displayName: 'bob', email: 'bob@x' } },
+        })
+        linearTasks(dir).claim('ENG-42')
+      })
+      const updates = callsMatching(log, /BroIssueUpdate/)
+      assert.equal(updates.length, 2)
+      assert.match(updates[0]!, /"assigneeId":"u-me"/)
+      assert.match(updates[1]!, /"assigneeId":"u-bob"/)
+    })
+  })
+
+  test('claim interleaving: two workers on one viewer both pass — one identity', () => {
+    // one credential = one identity: worker B is indistinguishable from
+    // worker A on the wire — BOTH verify "assigned to me" and return.
+    withLinear({}, (log, dir) => {
+      claimRace(dir, raceReads(null, 'me', null, 'me'), () => linearTasks(dir).claim('ENG-42'))
+      // both workers' writes landed — under ONE identity
+      const updates = callsMatching(log, /BroIssueUpdate/)
+      assert.equal(updates.length, 2)
+      assert.match(updates[0]!, /"assigneeId":"u-me"/)
+      assert.match(updates[1]!, /"assigneeId":"u-me"/)
+    })
   })
 
   test('claim refuses a triage issue — unapproved work is not claimable', () => {

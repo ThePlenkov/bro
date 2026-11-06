@@ -105,7 +105,15 @@ function list(ul, items, cls) {
     ul.appendChild(el('li', '(quiet)', 'quiet'));
     return;
   }
-  items.forEach(function (it) { ul.appendChild(el('li', it, cls)); });
+  items.forEach(function (it) {
+    var li = document.createElement('li');
+    if (cls) li.className = cls;
+    // a [#N](url) prefix becomes a real anchor — PR references are
+    // always links, in warnings as much as in table cells
+    if (/^\[#(\d+)\]\(https?:\/\/[^)]+\)/.test(it)) appendPrLink(li, it);
+    else li.textContent = it;
+    ul.appendChild(li);
+  });
 }
 
 // pr/g.link are markdown [#N](url) — the webui renders real anchors;
@@ -441,7 +449,7 @@ function renderGates(gates) {
       appendPrLink(pr, g.link);
       tr.appendChild(pr);
       var verdict, cls;
-      if (g.error) { verdict = 'probe failed'; cls = 'bad'; warns.push('#' + g.pr + ': ' + g.error); }
+      if (g.error) { verdict = 'probe failed'; cls = 'bad'; warns.push((g.link || '#' + g.pr) + ': ' + g.error); }
       else if (g.ok === false) { verdict = 'blocked'; cls = 'bad'; }
       else if (g.ok === true) { verdict = 'ok'; cls = 'quiet'; }
       else { verdict = '—'; }
@@ -464,7 +472,7 @@ function renderGates(gates) {
       }
       tr.appendChild(el('td', ci, g.ciFailing > 0 ? 'bad' : ((g.ciPending > 0 || g.reviewersPending > 0) ? 'warn' : undefined)));
       tr.appendChild(el('td', (g.blockers || []).join('; ') || '—', (g.blockers || []).length > 0 ? 'warn' : 'muted'));
-      (g.alerts || []).forEach(function (a) { warns.push('#' + g.pr + ': ' + a); });
+      (g.alerts || []).forEach(function (a) { warns.push((g.link || '#' + g.pr) + ': ' + a); });
       tbody.appendChild(tr);
     });
     (gates.lookupErrors || []).forEach(function (e) { warns.push(e); });

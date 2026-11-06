@@ -1,9 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stackSection } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, stackSection, type ConnectorCtx } from '@broject/core'
 import { git, initRepo, inside } from './testrepo.ts'
 import {
   claimWorktree,
@@ -14,6 +14,7 @@ import {
   resolveEnterBase,
   runWorkCommand,
   unquoteGitPath,
+  workConnector,
   worktreePathFor,
 } from './work.ts'
 
@@ -220,7 +221,13 @@ describe('claimWorktree', () => {
       writeFileSync(
         join(main, '.git', 'bro', 'agents.json'),
         JSON.stringify({
-          'fx-1': { agentId: 'native-x', backend: 'native', spawnedAt: 't', worktree: tree },
+          'fx-1': {
+            agentId: 'native-x',
+            backend: 'native',
+            spawnedAt: new Date().toISOString(),
+            runId: 'r1',
+            worktree: tree,
+          },
         })
       )
       const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
@@ -310,4 +317,28 @@ describe('work enter --stack', () => {
       assert.equal(headOf(tree, 'HEAD'), headOf(main, 'work/b'))
     })
   })
+})
+
+const WIN32 = process.platform === 'win32'
+
+test('work connector hook probes bound the git lookups', { skip: WIN32 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-work-hanging-git-'))
+  const prevPath = process.env.PATH
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+  chmodSync(join(dir, 'git'), 0o755)
+  process.env.PATH = `${dir}:${prevPath}`
+  try {
+    const started = Date.now()
+    const ctx = { dir, owner: null } as ConnectorCtx
+    const hooks = workConnector.hooks?.(ctx)
+    assert.ok(hooks?.sessionStart && hooks.parallelWork && hooks.stopGate)
+    assert.deepEqual(await hooks.sessionStart(ctx), [])
+    assert.deepEqual(await hooks.parallelWork(ctx), [])
+    assert.deepEqual(await hooks.stopGate(ctx), [])
+    // four sequential probes worst case: gitDirOf ×2, toplevel, worktree list
+    assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS * 4 + 2_000)
+  } finally {
+    process.env.PATH = prevPath
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

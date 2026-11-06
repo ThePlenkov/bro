@@ -16,7 +16,7 @@ concurrency cap, one merged JSON document keyed by step id.
 npm i @broject/query
 ```
 
-Requires Node ≥ 22. ESM only.
+Requires Node ≥ 22.18. ESM only.
 
 ## Surface
 

@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -33,80 +33,102 @@ import {
 } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
+  type AccountWall,
+  type AgentCause,
+  type AgentConnector,
+  type AgentInfo,
   AgentNotFound,
-  agentEntryBlocked,
-  agentsSection,
-  bdActor,
+  type AgentRegistryEntry,
+  type AgentState,
   admitSessionSlot,
+  agentEntryBlocked,
+  agentExitFileName,
+  agentsSection,
+  appendPrivateFileSync,
   BATCH_MARKER_ENV,
-  isBatchSpawn,
+  type BrouterConfig,
+  BrouterConfigError,
+  bdActor,
+  brouterStaticCatalog,
+  type ConnectorCtx,
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
+  type DiscoveredSession,
   deriveAccountWalls,
   deriveProviderWalls,
   emitLifecycle,
+  entryRunId,
+  type FleetProfile,
+  type FleetRouter,
+  type FleetWallTtls,
   ghHost,
   gitTry,
+  groupMemberAlive,
+  handleOwner,
   isAgentCause,
+  isBatchSpawn,
+  isQualifiedRouteId,
   JudgeUnavailable,
+  type ListResult,
   loadConfig,
+  type ModelRoute,
   mintAgentId,
+  mintRunId,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  type ProcEntry,
+  type ProviderEntry,
+  ProviderSurfaceError,
+  type ProviderWall,
   patchAgentRegistry,
   pidAlive,
   probeStep,
   procStat,
   providerCallGrade,
   providerAccount,
+  providerWallOwners,
+  readAgentRegistry,
   readLedgerWalls,
   recordWall,
+  type ResolvedClass,
+  type RoutingTable,
   rebindStep,
   releaseSessionSlot,
+  releaseSessionStart,
   requireProviderSurface,
+  resolveModelRoute,
   resolveStepClass,
-  walkChain,
-  wallText,
+  scanProc,
+  SESSION_SLOT_TTL_MS,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  type SessionPlane,
+  SpawnError,
+  type SpawnSpec,
+  type SpawnWorker,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
   sessionSlotsDir,
-  SpawnError,
   stepParent,
-  ProviderSurfaceError,
-  readAgentRegistry,
   UnknownProviderError,
+  walkChain,
+  wallText,
   withAgentRegistryLock,
   writeAgentRegistry,
-  type AgentCause,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type AgentState,
-  type AccountWall,
-  type ConnectorCtx,
-  type DiscoveredSession,
-  type FleetProfile,
-  type FleetRouter,
-  type FleetWallTtls,
-  type ListResult,
-  type ProviderEntry,
-  type ProviderWall,
-  type ResolvedClass,
-  type RoutingTable,
-  type SessionPlane,
-  type SpawnSpec,
-  type SpawnWorker,
+  writePrivateFileSync,
 } from '@broject/core';
-import { otelEvent } from '@broject/providers';
+import { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
 import type { AcpSeam, FetchFn } from '@broject/providers';
-import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
+import { otelEvent } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import './session-planes/devin.ts';
+import '@broject/devin';
 import {
   devinLogsDir,
   devinPidBead,
@@ -114,10 +136,17 @@ import {
   devinPidLog,
   devinProcDir,
   devinSessionPlane,
-} from './session-planes/devin.ts';
+} from '@broject/devin';
 import './session-planes/copilot.ts';
-import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
+import { assertMutableConfig } from './config-policy.ts';
+import {
+  type LaneAdmission,
+  laneGateAdmission,
+  laneGateTake,
+  reconcileLanePauseForRegistry,
+} from './lane.ts';
+import { writeCopilotCount } from './session-planes/copilot.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -142,6 +171,11 @@ export interface AgentConnectorEnv {
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
   providers?: Record<string, ProviderEntry>;
+  /** The model-centric routing registry (spec: specs/bro-n1p0s.md) —
+   *  consulted only when no provider is named anywhere: a `--model`
+   *  that resolves through the static index takes its primary route.
+   *  Absent/empty models = label behavior, unchanged. */
+  brouter?: BrouterConfig;
 }
 
 export type AgentConnectorFactory = (ctx: ConnectorCtx, env: AgentConnectorEnv) => AgentConnector;
@@ -232,6 +266,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
+    brouter?: BrouterConfig;
   };
   return {
     agents: cfg.agents ?? {},
@@ -239,6 +274,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     loop: cfg.loop,
     fleet: cfg.fleet,
     providers: cfg.providers,
+    brouter: cfg.brouter,
   };
 }
 
@@ -277,6 +313,18 @@ export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfi
     );
   }
   return profile;
+}
+
+/** A profile's `model` is a PAIR with its `provider` — the same rule a
+ *  chain[0] `{provider, model}` pin follows. A profile naming another
+ *  provider (or no resolved lane) must never leak its model onto the
+ *  resolved provider — omp refused exactly such an alien model
+ *  (bro-mmmodel). */
+export function profileModelFor(
+  profile: FleetProfile | undefined,
+  provider: string | undefined
+): string | undefined {
+  return profile !== undefined && profile.provider === provider ? profile.model : undefined;
 }
 
 /** `agents.<backend>.provider` — the backend's default provider. */
@@ -318,6 +366,68 @@ export interface SpawnProviderPick {
   worker?: SpawnWorker;
 }
 
+/** The brouter's spawn-side pick — a bare `--model` resolving through
+ *  the model-centric registry (spec: specs/bro-n1p0s.md). Static
+ *  catalog only: a spawn never pays a live catalog probe. Absent or
+ *  empty `brouter.models` = the registry is off; unresolved stays the
+ *  label path. A declared route naming an unknown provider is a
+ *  'config' SpawnError — the brouter key's own contract. */
+function brouterSpawnRoute(
+  env: AgentConnectorEnv,
+  model: string
+): { provider: string; model: string; modelFromExplicitConfig: boolean } | undefined {
+  const brouter = env.brouter;
+  if (brouter === undefined || Object.keys(brouter.models).length === 0) {
+    return undefined;
+  }
+  let hit: ModelRoute | undefined;
+  try {
+    hit = resolveModelRoute(
+      env.providers ?? {},
+      brouter,
+      brouterStaticCatalog(env.providers ?? {}),
+      model
+    )[0];
+  } catch (err) {
+    if (err instanceof BrouterConfigError) {
+      throw new SpawnError(err.message, 'config');
+    }
+    throw err;
+  }
+  if (hit === undefined) {
+    return undefined;
+  }
+  // provenance must follow resolveModelRoute's source precedence: only a
+  // brouter.models route (source 2) with an explicit `model` counts as
+  // config — a qualified id, a catalog match and a provider-only
+  // declaration all carry a caller-named model, so their refusals stay
+  // 'input'
+  const modelFromExplicitConfig = isConfiguredBrouterModel(env, model);
+  return { provider: hit.provider, model: hit.model, modelFromExplicitConfig };
+}
+
+/** Whether `model` resolves through a `brouter.models` declaration that
+ *  names an explicit upstream `model` — the only case where the model
+ *  under the spawn came from configuration rather than from the
+ *  caller's string. A qualified `provider/model` id wins over the
+ *  declaration (source 1 precedes source 2), so it never counts. */
+function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolean {
+  const brouter = env.brouter;
+  if (brouter === undefined || !Object.hasOwn(brouter.models, model)) {
+    return false;
+  }
+  // a qualified id wins over the declaration (source 1 precedes source 2)
+  if (isQualifiedRouteId(env.providers ?? {}, model)) {
+    return false;
+  }
+  const routes = brouter.models[model];
+  if (routes === undefined) {
+    return false;
+  }
+  const primary = routes[0];
+  return primary !== undefined && primary.model !== undefined;
+}
+
 /** Resolve the spawn's provider into a worker payload. `sel` carries
  *  the explicit fields already merged over the profile's piecewise;
  *  `backend` is the RESOLVED connector name (a profile's `backend`
@@ -329,14 +439,24 @@ export interface SpawnProviderPick {
 export async function resolveSpawnProvider(
   env: AgentConnectorEnv,
   backend: string,
-  sel: { provider?: string; model?: string; autoApprove?: boolean },
+  sel: { provider?: string; model?: string; autoApprove?: boolean; modelConfig?: boolean },
   /** Where the provider name came from — a flag's typo is caller
    *  'input'; a name in config (profile preset, backend knob) is
    *  'config'. Used only for the SpawnError kind. */
   namedBy: 'flag' | 'profile' | 'backend' = 'backend'
 ): Promise<SpawnProviderPick> {
-  const providerName = sel.provider ?? backendProvider(env, backend);
+  let providerName = sel.provider ?? backendProvider(env, backend);
   const source = sel.provider === undefined ? 'backend' : namedBy;
+  let routedModel: string | undefined;
+  let modelFromExplicitConfig = false;
+  if (providerName === undefined && sel.model !== undefined) {
+    const hit = brouterSpawnRoute(env, sel.model);
+    if (hit !== undefined) {
+      providerName = hit.provider;
+      routedModel = hit.model;
+      modelFromExplicitConfig = hit.modelFromExplicitConfig;
+    }
+  }
   if (providerName === undefined) {
     // legacy template path — an explicit model still pins provenance
     // env/registry labels without changing what runs
@@ -354,7 +474,7 @@ export async function resolveSpawnProvider(
     }
     throw err;
   }
-  const model = sel.model ?? entry.model;
+  const model = routedModel ?? sel.model ?? entry.model;
   switch (entry.type) {
     case 'cli': {
       // the entry's command substitutes for the backend's template —
@@ -365,12 +485,12 @@ export async function resolveSpawnProvider(
       const { command } = cliCommandModel(
         entry.command,
         entry.model,
-        sel.model,
+        model,
         m =>
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
               'its command has no {model} placeholder',
-            'input'
+            modelFromExplicitConfig || sel.modelConfig === true ? 'config' : 'input'
           ),
         () =>
           new SpawnError(
@@ -434,6 +554,9 @@ export async function resolveSpawnRoute(
             provider: entry.provider,
             model: index === 0 ? (sel.model ?? entry.model ?? sel.modelFallback) : entry.model,
             autoApprove: sel.autoApprove,
+            // a chain pin/modelFallback is config content — a {model}
+            // refusal on it is a server defect (500), not caller input
+            modelConfig: index === 0 ? sel.model === undefined : true,
           },
           namedBy
         );
@@ -820,7 +943,59 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT_PROVIDER',
   'BRO_AGENT_MODEL',
   'BRO_AGENT_CLASS',
+  // delegation provenance is connector-owned too — a caller-supplied
+  // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
+  'BRO_DELEGATED_BY',
+  // pipeline provenance is connector-owned too (spec bro-7d5nb) — a
+  // caller-supplied BRO_FORMULA would let a commit claim a formula the
+  // registry never recorded, and `bro trace` only catches a claim it
+  // can compare
+  'BRO_FORMULA',
 ]);
+
+/** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
+function getCredentialScope(env: AgentConnectorEnv, backend: string) {
+  const b = env.agents?.[backend] as Record<string, unknown> | undefined;
+  if (!b) return { strictEnv: false, envAllowlist: undefined as string[] | undefined };
+  const strictEnv = b.strictEnv === true || b.credentialScope != null;
+  const allowlist = Array.isArray(b.envAllowlist)
+    ? (b.envAllowlist.filter((x): x is string => typeof x === 'string') as string[])
+    : undefined;
+  return { strictEnv, envAllowlist: allowlist };
+}
+
+function isAllowedByEnvPolicy(
+  key: string,
+  value: string | undefined,
+  backend: string,
+  spec: SpawnSpec,
+  env: AgentConnectorEnv,
+  policy: { strictEnv: boolean; envAllowlist?: string[] },
+  fromSpec = false
+): boolean {
+  if (value === undefined) return false;
+  if (AGENT_PIN_KEYS.has(key)) return true; // pins handled separately
+  if (GIT_REPOSITORY_ENV_KEYS.has(key)) return false;
+  // the fleet batch marker rides ONLY the caller's spec.env — an ambient
+  // BRO_BATCH inherited by a worker's own spawns would class those
+  // children as batch lane and charge them to the fleet budget
+  // (spec bro-9h86l), so fromSpec decides it, before trusted-host's
+  // blanket pass-through
+  if (key === BATCH_MARKER_ENV) return fromSpec;
+  // the customer-channel HMAC key is never a worker credential — a
+  // worker holding it can mint customer verdicts (spec bro-7d5nb
+  // trust model), so it's denied in every mode: ambient AND spec.env
+  if (key === 'BRO_PIPELINE_KEY') return false;
+  if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
+  // strict mode: only allowlisted
+  if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
+  // allow provider API key if known
+  if (spec.provider && env.providers?.[spec.provider]) {
+    const p = env.providers[spec.provider] as any;
+    if (typeof p.apiKeyEnv === 'string' && p.apiKeyEnv === key) return true;
+  }
+  return false;
+}
 
 /** Repo-retarget env keys — same triple core's git.ts strips for
  *  `git -C`. A spawn targets spec.worktree on argv alone; an inherited
@@ -853,13 +1028,24 @@ const agentEnvPins = (
     ['BRO_BEAD_ID', spec.molStep],
     ['BRO_AGENT_ID', agentId],
     ['BRO_PROMPT_FILE', promptFile],
-    ['BRO_SESSION_ID', agentId],
+    // a pipeline spawn may attest a session id the driver knows
+    // (spec bro-7d5nb) — the pin and the registry's session_id carry
+    // the same value so the BRO-Session trailer verifies; absent the
+    // override the agentId stays the session, as before
+    ['BRO_SESSION_ID', spec.pipeline?.sessionId ?? agentId],
   ];
   if (agentCli !== undefined && agentCli !== '') {
     pins.push(['BRO_AGENT', agentCli]);
   }
   if (mol !== undefined) {
     pins.push(['BRO_MOL_ID', mol]);
+  }
+  // pipeline provenance pin (spec bro-7d5nb) — `<id>@<sha>` verbatim;
+  // the prepare-commit-msg hook emits the BRO-Formula trailer from it.
+  // No stage pin: stage names are pipeline vocabulary the worker must
+  // never see (spec invariant 1)
+  if (spec.pipeline !== undefined) {
+    pins.push(['BRO_FORMULA', `${spec.pipeline.formula}@${spec.pipeline.formulaSha}`]);
   }
   // provenance pins (spec bro-5hx1.1) — BRO_AGENT_MODEL doubles as
   // MODEL_ENV[0] so the Agent-Model: commit trailer lands the day a
@@ -872,6 +1058,9 @@ const agentEnvPins = (
   }
   if (spec.class !== undefined) {
     pins.push(['BRO_AGENT_CLASS', spec.class]);
+  }
+  if (spec.delegatedBy !== undefined) {
+    pins.push(['BRO_DELEGATED_BY', spec.delegatedBy]);
   }
   return pins;
 };
@@ -959,10 +1148,14 @@ function entryOccupies(
   }
 ): boolean {
   switch (entry.backend) {
-    case 'native':
+    case 'native': {
       // nativeState also harvests recorded death and retires stale
-      // markers — the same side effects list() has on a dead entry
-      return nativeState(dir, home, molStep, entry) === 'running';
+      // markers — the same side effects list() has on a dead entry.
+      // 'spawned' occupies too: an unproven handoff is never a free
+      // step (spec bro-l8c4f.5)
+      const s = nativeState(dir, home, molStep, entry);
+      return s === 'running' || s === 'spawned';
+    }
     case 'tmux':
       return tmuxOccupies(entry, probes.tmuxLive());
     case 'gascity':
@@ -1586,19 +1779,33 @@ function spawnWalls(
 function applySpawnRoute(
   spec: SpawnSpec,
   walls: ProviderWall[],
-  existing: AgentRegistryEntry | undefined
+  existing: AgentRegistryEntry | undefined,
+  registry: Record<string, AgentRegistryEntry>
 ): void {
   const route = spec.route;
   if (route === undefined) {
     return;
   }
   const chain = route.candidates.map(({ provider, model }) => ({ provider, model }));
-  const walk = walkChain(chain, route.onWall, walls, existing?.provider);
+  const walk = walkChain(
+    chain,
+    route.onWall,
+    walls,
+    existing?.provider,
+    // a hand-edited entry can carry a malformed index — only an integer
+    // is a chain position; anything else falls back to the provider lookup
+    Number.isInteger(existing?.routeIndex) ? existing?.routeIndex : undefined
+  );
   if (walk.verdict === 'park') {
     const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted';
+    // the wall belongs to the steps whose records hold it, not
+    // necessarily to this one — `down` on the wrong step clears nothing
+    const owners = providerWallOwners(registry, walk.wall.provider);
     throw new SpawnError(
       `${spec.molStep} class "${route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
-        `\`bro agents down ${spec.molStep}\` lifts the block`,
+        (owners.length === 0
+          ? 'no registry record holds it — the wall lifts when the provider resets'
+          : `held by ${owners.join(', ')} — \`bro agents down <step>\` on each lifts it`),
       'cap'
     );
   }
@@ -1609,6 +1816,7 @@ function applySpawnRoute(
   spec.model = picked.model;
   spec.worker = picked.worker;
   spec.class = route.class;
+  spec.routeIndex = walk.index;
 }
 
 function prepareSpawn(
@@ -1631,22 +1839,43 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv };
+    /** The resolved agent env — provider entries carry the lane's
+     *  pacing config (`rateGate`/`wallPause`, spec bro-y3jvd); without
+     *  it the gate and the wall pause can't see their config. */
+    env?: AgentConnectorEnv;
     /** Session-kind admission — the spawn consumes one of the lane
      *  plane's sessions and refuses when live ones already hit
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
      *  host-wide mutex (the repo's registry lock can't serialize
      *  cross-repo), still before any write — a refused spawn leaves no
-     *  half-state. */
-    sessionQuota?: SessionQuotaLane | undefined;
+     *  half-state. Pass a thunk when the lane reads spec.worker: a
+     *  routed spawn's chain walk rewrites it inside, and admission
+     *  must bill the SELECTED worker's plane — the head worker's quota
+     *  would reserve the wrong lane (or skip the fallback's cap). */
+    sessionQuota?: SessionQuotaLane | (() => SessionQuotaLane | undefined);
+    /** The resolved command the spawn will run — used for cross-kind
+     *  admission (judging all session kinds the command starts). */
+    spawnCommand?: string;
   }
 ): {
   agentId: string;
   promptFile: string;
   log: string;
-  stderrLog: string;
+  stderrLog?: string;
   exitFile: string;
+  /** The attempt token — scopes this run's handle/go/exit artifacts. */
+  runId: string;
   reservation?: string;
+  /** Cross-kind slot claims — the session kinds OTHER than the quota
+   *  lane's that the spawned command starts. The caller releases them
+   *  alongside `reservation` on launch failure; on success they expire
+   *  with the shared TTL behind the sessions' own marks. */
+  crossKindReservations: string[];
 } {
+  // spawn is the authoritative mutation the audit gates on — invalid
+  // committed (policy) config refuses before registry/claim writes,
+  // ahead of even the exit-cause harvest (spec: bro-d9dmx)
+  assertMutableConfig(dir);
   const registry = readAgentRegistry(dir);
   const existing = registry[spec.molStep];
   // A batch spawn must not walk into a provider wall the fleet already
@@ -1667,22 +1896,34 @@ function prepareSpawn(
   for (const [step, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, step, entry);
   }
-  const now = Date.now();
-  const candidates =
-    spec.route?.candidates ??
-    (spec.provider === undefined
-      ? []
-      : [{ provider: spec.provider, account: spec.account ?? spec.provider }]);
-  const walls = spawnWalls(dir, registry, now, opts.cap?.env ?? loadAgentEnv(dir), candidates);
-  applySpawnRoute(spec, walls, existing);
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
+  const env = opts.env ?? opts.cap?.env ?? loadAgentEnv(dir);
+  const now = Date.now();
+  const candidates =
+    spec.route?.candidates ??
+    (spec.provider === undefined
+      ? []
+      : [{ provider: spec.provider, account: spec.account ?? spec.provider }]);
+  const walls = spawnWalls(dir, registry, now, env, candidates);
+  applySpawnRoute(spec, walls, existing, registry);
   const wallRefusal = batchWallRefusal(registry, spec, now, walls);
   if (wallRefusal !== undefined) {
+    // The wall stops the whole lane, not just this admission (spec
+    // bro-y3jvd): while a provider wall holds, the live workers that
+    // keep feeding it freeze — every rejected attempt pushes the
+    // account's reset further out.
+    if (opts.env !== undefined) {
+      try {
+        reconcileLanePauseForRegistry(dir, opts.env, registry);
+      } catch {
+        // the pause is advisory — the wall refusal below is the verdict
+      }
+    }
     throw wallRefusal;
   }
   // fleet admission — before the registry write + claim land, so a
@@ -1694,19 +1935,96 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend);
-  // session-kind admission — count + slot claim under ONE host-wide
-  // mutex: the registry lock above is per-repo and cannot serialize a
-  // cross-repo check-then-reserve. A refusal leaves no half-spawned
-  // state; an admit means the next spawn anywhere sees the slot taken.
-  const reservation =
-    opts.sessionQuota === undefined
-      ? undefined
-      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
-          key: agentId,
-          molStep: spec.molStep,
-          workerEnv: spec.env,
-        });
+  // session-kind admission — resolved AFTER the route walk swapped
+  // spec.worker, so the lane billed is the selected worker's; count +
+  // slot claim under ONE host-wide mutex: the registry lock above is
+  // per-repo and cannot serialize a cross-repo check-then-reserve. A
+  // refusal leaves no half-spawned state; an admit means the next
+  // spawn anywhere sees the slot taken.
+  const sessionQuota =
+    typeof opts.sessionQuota === 'function' ? opts.sessionQuota() : opts.sessionQuota;
+  let reservation: string | undefined;
+  const crossKindReservations: string[] = [];
   try {
+    // Cross-kind admission: judge every session kind the spawned command
+    // starts — a native/template worker running e.g. `devin -p …` consumes
+    // that kind's sessions too, and skipping it would bypass its cap. The
+    // effective command is what actually runs: the routed worker's own
+    // payload when there is one, else the resolved spawn command.
+    const spawnedCommand = (() => {
+      if (spec.worker?.kind === 'template') {
+        return spec.worker.command;
+      }
+      if (spec.worker?.kind === 'argv') {
+        return [...spec.worker.argv, '{promptFile}'].join(' ');
+      }
+      return typeof opts.spawnCommand === 'string' ? opts.spawnCommand : '';
+    })();
+    const agents = opts.env?.agents ?? sessionQuota?.agents ?? {};
+    if (spawnedCommand !== '') {
+      // a pre-flight refusal ahead of any claim; the authoritative
+      // count re-runs inside each kind's admission mutex below
+      const crossRefusal = sessionCapRefusalFor(spawnedCommand, agents, spec.env);
+      if (crossRefusal !== undefined) {
+        throw new SpawnError(crossRefusal, 'cap');
+      }
+      for (const view of sessionCapViews(spawnedCommand, agents, spec.env)) {
+        if (view.kind === sessionQuota?.plane.kind) {
+          continue; // admitSessionSlot below covers this kind's full lane
+        }
+        const plane = sessionPlane(view.kind);
+        if (plane === undefined) {
+          continue;
+        }
+        // Admit through the kind's OWN admission mutex — the same lock
+        // admitSessionSlot holds — so a check-then-reserve here cannot
+        // race a parallel start into overshooting the cap. A kind's
+        // multi-start view claims one serialized slot per start; a
+        // refusal mid-way is rolled back by the catch below.
+        for (let i = 0; i < view.starts; i++) {
+          const claimed = admitSessionSlot(plane, agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+          });
+          if (claimed !== undefined) {
+            crossKindReservations.push(claimed);
+          }
+        }
+      }
+    }
+    reservation =
+      sessionQuota === undefined
+        ? undefined
+        : admitSessionSlot(sessionQuota.plane, sessionQuota.agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+          });
+  } catch (err) {
+    // every claim this spawn holds goes back — the caller never saw them
+    releaseSessionStart(crossKindReservations);
+    crossKindReservations.length = 0;
+    throw err;
+  }
+  let charged: LaneAdmission['admitted'];
+  try {
+    // the rate gate charges LAST — after every admission that can
+    // still refuse (spec bro-y3jvd): a batch spawn pays its request
+    // budget up front so the lane paces to the account's ceiling
+    // instead of discovering it by dying. Inside the try so a gate
+    // refusal hands the session reservation back like any spawn
+    // failure; a throw still inside this try (enter/commit — both run
+    // BEFORE launch) refunds the charge, so budget is never spent on
+    // a spawn that didn't run. Failures after `prepareSpawn` returns
+    // keep the charge — launch may already have started work.
+    if (opts.env !== undefined) {
+      const admission = laneGateAdmission(opts.env, spec);
+      if (admission.refusal !== undefined) {
+        throw admission.refusal;
+      }
+      charged = admission.admitted;
+    }
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
     // catch below
@@ -1718,22 +2036,29 @@ function prepareSpawn(
         home,
         backend,
         spec,
-        opts,
-        agentId,
+        { ...opts, sessionQuota },
         {
+          agentId,
           claimed,
           actor,
           phantom,
-        },
-        existing
+          existing,
+        }
       ),
       reservation,
+      crossKindReservations,
     };
   } catch (err) {
     // a write/claim failure after the reservation — the caller never saw
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
+    }
+    releaseSessionStart(crossKindReservations);
+    // the same door for the charge: everything still inside this try
+    // precedes launch, so a spawn that never ran gives its tokens back
+    if (charged !== undefined) {
+      laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
     throw err;
   }
@@ -1776,21 +2101,61 @@ function commitSpawn(
     claimAs?: string;
     sessionQuota?: SessionQuotaLane | undefined;
   },
-  agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  existing: AgentRegistryEntry | undefined
-): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
-  mkdirSync(home, { recursive: true });
+  /** The run's write facts — the minted id, the claim verdict, and the
+   *  registry row this spawn replaces. */
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    existing: AgentRegistryEntry | undefined;
+  }
+): {
+  promptFile: string;
+  log: string;
+  stderrLog?: string;
+  exitFile: string;
+  runId: string;
+} {
+  mkdirPrivateSync(home);
+  const { agentId, existing } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
-  const stderrLog = join(home, `${agentId}.stderr`);
-  const exitFile = join(home, `${agentId}.exit`);
+  const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
+  const stderrLog = captureStderr ? join(home, `${agentId}.stderr`) : undefined;
+  // every attempt mints its own runId — respawns reuse the agentId but
+  // never the attempt artifacts: an old wrapper's late writes land in
+  // its own runId's files, never the live run's (spec bro-l8c4f.5)
+  const runId = mintRunId();
+  const exitFile = join(home, agentExitFileName(agentId, runId));
   rmSync(exitFile, { force: true });
-  writeFileSync(promptFile, spec.prompt);
+  // a pre-handshake run's legacy exit file would alias nothing the new
+  // run reads — still drop it so old readers can't resurrect it
+  rmSync(join(home, `${agentId}.exit`), { force: true });
+  // owner-only artifacts (spec bro-l8c4f.4): the prompt carries secrets
+  // and thread context; the streams get pre-created pinned so every
+  // later append — native's inherited fd, tmux's tee/2>>, docker's
+  // >>/2>> — lands on an already-0600 file. The .exit file can't be
+  // pre-created (readExitFile parses empty as exit 0); the wrapper's
+  // `umask 077` subshell pins it at write time instead.
+  writePrivateFileSync(promptFile, spec.prompt);
+  appendPrivateFileSync(log, '');
+  if (stderrLog !== undefined) {
+    appendPrivateFileSync(stderrLog, '');
+  }
   const logFrom = logSizeOrZero(log);
-  const stderrFrom = logSizeOrZero(stderrLog);
+  const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
   const outgoingAttempt = outgoingAttemptOf(spec, existing);
-  const attempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : [];
+  // `down` cleared this step's walls — a respawn over a stopped entry
+  // must not resurrect the pre-stop attempt records: carried over they'd
+  // re-wall the provider the moment the fresh entry's stopped flips false
+  const attempts =
+    existing?.stopped === true
+      ? []
+      : Array.isArray(existing?.attempts)
+        ? (existing.attempts as unknown[])
+        : [];
+  const nextAttempts = outgoingAttempt === undefined ? attempts : [...attempts, outgoingAttempt];
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1807,7 +2172,11 @@ function commitSpawn(
     logFrom,
     // the worker's stderr lands in a sibling capture, never the .log —
     // the .log stays the agent-updates stream; the classifier still
-    // reads this tail so provider walls classify (spec bro-e2ec0)
+    // reads this tail so provider walls classify (spec bro-e2ec0).
+    // Written unconditionally: remote backends carry no capture and the
+    // explicit undefined must evict a respawned entry's stale stderrLog —
+    // the registry patch is a shallow merge, so omitting the keys would
+    // keep the old run's tail advertised (and read) under the new run
     stderrLog,
     stderrFrom,
     stopped: false,
@@ -1829,6 +2198,22 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // the chain position the walk admitted at — a respawn's resume
+    // point when the chain repeats a provider; an unrouted (re)spawn
+    // clears a stale pin
+    routeIndex: spec.routeIndex,
+    // which agent asked for this spawn — same provenance write; a
+    // respawn re-stamps (clears when the respawn wasn't delegated)
+    delegatedBy: spec.delegatedBy,
+    // pipeline provenance (spec bro-7d5nb §traceability) — same
+    // provenance write: a non-formula respawn clears the previous
+    // run's stamps rather than keeping a formula it never ran under.
+    // session_id mirrors the BRO_SESSION_ID pin — the session the run
+    // attests, agentId unless the driver named one
+    formula: spec.pipeline?.formula,
+    formula_sha: spec.pipeline?.formulaSha,
+    pipeline_stage: spec.pipeline?.stage,
+    session_id: spec.pipeline === undefined ? undefined : (spec.pipeline.sessionId ?? agentId),
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
@@ -1836,14 +2221,19 @@ function commitSpawn(
       spec.route !== undefined && existing !== undefined && existing.provider !== spec.provider
         ? undefined
         : existing?.resumeSessionId,
-    ...(outgoingAttempt === undefined ? {} : { attempts: [...attempts, outgoingAttempt] }),
+    // always write the list — an empty one still has to evict a stale
+    // record set (undefined drops out of the serialized registry)
+    attempts: nextAttempts.length === 0 ? undefined : nextAttempts,
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
     sessionKind: opts.sessionQuota?.plane.kind,
+    // the attempt token — scopes handle/go/exit artifacts (spec
+    // bro-l8c4f.5); a respawn stamps a fresh one over the dead run's
+    runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs);
-  return { promptFile, log, stderrLog, exitFile };
+  recordSpawnClaim(dir, spec, agentId, backend, run, opts.claimAs, { runId, log });
+  return { promptFile, log, stderrLog, exitFile, runId };
 }
 
 /** The byte offset a fresh run's log starts at — the log is append-mode
@@ -1869,7 +2259,8 @@ function recordSpawnClaim(
   agentId: string,
   backend: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  claimAs: string | undefined
+  claimAs: string | undefined,
+  attempt: { runId: string; log: string }
 ): void {
   if (guard.claimed) {
     rebindStep(spec.beadsDir, spec.molStep, guard.actor!);
@@ -1897,6 +2288,8 @@ function recordSpawnClaim(
       agent: agentId,
       backend,
       worktree: resolve(spec.repoRoot),
+      log: attempt.log,
+      runId: attempt.runId,
       ...(spec.provider !== undefined ? { provider: spec.provider } : {}),
       ...(spec.model !== undefined ? { model: spec.model } : {}),
       ...(spec.class !== undefined ? { class: spec.class } : {}),
@@ -1949,11 +2342,13 @@ function enterSpawnTree(spec: SpawnSpec): void {
   }
 }
 
-/** Exit status the wrapper dropped at `<agentId>.exit` — absent when the
+/** Exit status the wrapper dropped — at the attempt-scoped
+ *  `<agentId>.<runId>.exit` for runId'd entries, the legacy
+ *  `<agentId>.exit` otherwise (spec bro-l8c4f.5). Absent when the
  *  process is still running or died by SIGKILL (nothing to write with). */
-function readExitFile(home: string, agentId: string): number | undefined {
+function readExitFile(home: string, agentId: string, runId?: string): number | undefined {
   try {
-    const v = readFileSync(join(home, `${agentId}.exit`), 'utf8').trim();
+    const v = readFileSync(join(home, agentExitFileName(agentId, runId)), 'utf8').trim();
     const n = Number(v);
     return Number.isInteger(n) ? n : undefined;
   } catch {
@@ -2086,7 +2481,7 @@ function emitClassifiedExitLifecycle(
   let exitAt: number | undefined;
   if (home !== null) {
     try {
-      exitAt = statSync(join(home, `${entry.agentId}.exit`)).mtimeMs;
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
     } catch {
       // the file rotated between read and stat — fall back to now
     }
@@ -2105,6 +2500,10 @@ function emitClassifiedExitLifecycle(
       backend: entry.backend,
       code: exitStatus,
       cause,
+      // the attempt token + streams the classification read — the bus
+      // mirror lifts them into worker.exited's payload (bro-294hf)
+      ...(entryRunId(entry) !== undefined ? { runId: entryRunId(entry) } : {}),
+      ...(typeof entry.log === 'string' && entry.log !== '' ? { log: entry.log } : {}),
     },
   });
 }
@@ -2152,7 +2551,7 @@ function ensureExitCause(
   entry: AgentRegistryEntry
 ): void {
   if (entry.exitStatus === undefined && home !== null) {
-    const exitStatus = readExitFile(home, entry.agentId);
+    const exitStatus = readExitFile(home, entry.agentId, entryRunId(entry));
     if (exitStatus !== undefined) {
       entry.exitStatus = exitStatus;
     }
@@ -2164,7 +2563,9 @@ function ensureExitCause(
   // bro-e2ec0) — provider walls the child prints on stderr classify from
   // the capture, the event stream no longer carries them. The tails
   // classify INDEPENDENTLY — a joined read could fabricate a wall token
-  // across the boundary ('…4' + '29…' → '429')
+  // across the boundary ('…4' + '29…' → '429'). A remote backend records
+  // no stderr capture — readLogTail maps the missing path to an empty
+  // tail, the same verdict an unwritten file gets
   const c = classifyExitCauseParts(
     [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
     entry.exitStatus
@@ -2234,7 +2635,9 @@ function findAgentEntry(
  *  nonexistent worktree, or an unanchorable agents home. Returns the
  *  shared artifacts dir on success. */
 function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
-  if (command === '' && spec.worker === undefined) {
+  // a declared route carries its own workers — the walk picks one
+  // inside prepareSpawn, so the legacy-command check can't refuse it
+  if (command === '' && spec.worker === undefined && spec.route === undefined) {
     throw new SpawnError(
       `no agent command configured — set agents.${backend}.command, agents.${backend}.provider, or loop.agent in bro.config.json`,
       'config'
@@ -2259,6 +2662,84 @@ function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpe
 const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
   typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined;
 
+/** The wrapper's death is not its unit's death: a TERM-resistant
+ *  descendant survives the group signal, so the stop may only record
+ *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
+ *  alone (bro-l8c4f.3). The probes live in core — pidAlive for the
+ *  wrapper, groupMemberAlive (over one shared scanProc) for the group.
+ *  Off /proc the group probe cannot tell the wrapper's zombie from a
+ *  live member — there the caller's pid check is the probe, and a
+ *  descendant that outlives its wrapper is a documented blind spot
+ *  (failing open would spin the whole kill-wait on EVERY stop and the
+ *  `stopped` marker would never land). */
+/** The wrapper's process-TREE snapshot — every descendant pid plus its
+ *  /proc starttime, walked over ppid links. A descendant that escaped
+ *  the process GROUP (setsid, its own session) is invisible to
+ *  groupMemberAlive but stays in this list: the tree link breaks when
+ *  the wrapper dies and the survivor reparents to init, so the
+ *  snapshot must be taken while the parentage is still intact, and
+ *  pid+starttime identity is what keeps a recycled pid from faking
+ *  death. Empty where /proc is absent (non-Linux). */
+function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  return unitSnapshot(root).members;
+}
+
+/** The pre-signal unit snapshot — the wrapper's process tree plus
+ *  every process GROUP the tree spans, off one /proc scan. A payload
+ *  that leads its own session or process group escapes
+ *  kill(-wrapperPgid): a fork-style `systemd-run --scope` gives the
+ *  scoped child its own pid (spec bro-ybo8z — exec-style systemd-run
+ *  keeps the wrapper's pid and needs nothing extra), and a setsid'd
+ *  descendant was already unreachable. `down` signals each distinct
+ *  pgid a live member belongs to — `{root group} ∪ {member groups}` —
+ *  which for the common single-group tree is the group it always was.
+ *  Members keep the same {pid,start} shape descendantsOf reports;
+ *  zombies claim no group. */
+function unitSnapshot(root: number): {
+  members: Array<{ pid: number; start?: string }>;
+  groups: Set<number>;
+} {
+  const scan = scanProc();
+  const members: Array<{ pid: number; start?: string }> = [];
+  const groups = new Set<number>();
+  if (scan === null) {
+    return { members, groups };
+  }
+  const { byPid, children } = procTreeIndex(scan.entries);
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const c of children.get(cur) ?? []) {
+      if (seen.has(c)) {
+        continue;
+      }
+      seen.add(c);
+      queue.push(c);
+      const e = byPid.get(c);
+      members.push({ pid: c, start: e?.start === '' ? undefined : e?.start });
+      if (e !== undefined && e.state !== 'Z' && e.pgrp > 0) {
+        groups.add(e.pgrp);
+      }
+    }
+  }
+  return { members, groups };
+}
+
+/** ppid → children index plus pid → row, built over one /proc scan —
+ *  the tree walk's lookup tables. */
+function procTreeIndex(entries: ProcEntry[]): {
+  byPid: Map<number, ProcEntry>;
+  children: Map<number, number[]>;
+} {
+  const byPid = new Map<number, ProcEntry>();
+  const children = new Map<number, number[]>();
+  for (const e of entries) {
+    byPid.set(e.pid, e);
+    children.set(e.ppid, [...(children.get(e.ppid) ?? []), e.pid]);
+  }
+  return { byPid, children };
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(
   dir: string,
@@ -2268,15 +2749,41 @@ function nativeState(
 ): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
+  // must keep refusing a respawn that would run alongside it. The unit,
+  // not the wrapper: a dead wrapper's group can still hold a
+  // TERM-resistant descendant, and reporting lost/exited over it would
+  // admit a respawn beside a live writer (bro-l8c4f.3). kill(-pgid,0)
+  // short-circuits before any /proc scan, so dead-group entries — the
+  // common stale row — cost one syscall; the wrapper's pidStart bounds
+  // members so a recycled pgid can't fake liveness.
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined;
-  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+  if (
+    pid !== undefined &&
+    (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid, entryPidStart(entry)))
+  ) {
     touchWorkMarker(dir, entry.agentId);
     return 'running';
   }
   const dead = recordedDeath(dir, home, molStep, entry);
   if (dead !== undefined) {
     return dead;
+  }
+  // no pid ≠ lost: inside the spawn handoff the worker may be
+  // mid-handshake. A live self-published handle adopts the survivor
+  // outright (spec bro-l8c4f.5); a missing one inside the window is
+  // 'spawned' — reserved/starting, and unknown is never a free step.
+  if (adoptNativeHandle(dir, home, molStep, entry) !== undefined) {
+    touchWorkMarker(dir, entry.agentId);
+    return 'running';
+  }
+  if (
+    pid === undefined &&
+    // only handshake-era rows get the handoff grace — a pre-runId
+    // pid-less row could never be mid-handshake and stays 'lost'
+    entryRunId(entry) !== undefined &&
+    Date.now() - Date.parse(entry.spawnedAt) < SESSION_SLOT_TTL_MS
+  ) {
+    return 'spawned';
   }
   dropWorkMarker(dir, molStep, entry);
   return 'lost';
@@ -2293,10 +2800,11 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
  *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
   entry: AgentRegistryEntry
-): Pick<AgentInfo, 'provider' | 'model' | 'class'> => ({
+): Pick<AgentInfo, 'provider' | 'model' | 'class' | 'delegatedBy'> => ({
   provider: typeof entry.provider === 'string' ? entry.provider : undefined,
   model: typeof entry.model === 'string' ? entry.model : undefined,
   class: typeof entry.class === 'string' ? entry.class : undefined,
+  delegatedBy: typeof entry.delegatedBy === 'string' ? entry.delegatedBy : undefined,
 });
 
 function toInfo(
@@ -2305,13 +2813,18 @@ function toInfo(
   molStep: string,
   entry: AgentRegistryEntry
 ): AgentInfo {
+  // state first — the handshake adoption stamps entry.pid on the way
+  // through (spec bro-l8c4f.5); reading pid before it would report the
+  // pre-adoption row
+  const state = nativeState(dir, home, molStep, entry);
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: nativeState(dir, home, molStep, entry),
+    state,
     ...infoCause(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
@@ -2365,6 +2878,283 @@ function workerRunLine(
     : expandAgentCmd(worker.command, promptFile);
 }
 
+/** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
+ *  between `spawn()` and the pid patch used to leave a live worker the
+ *  registry could not name — a 'lost' step and a respawn running beside
+ *  it. The worker now self-publishes its handle and the launcher
+ *  answers with an admission stamp:
+ *
+ *  - `<agentId>.<runId>.handle` — the wrapper's first act: `$$` (the
+ *    detached group-leader pid — the same value `child.pid` reports)
+ *    and the wrapper's /proc starttime. A parent that dies post-spawn
+ *    leaves a findable survivor, and the starttime is the identity
+ *    adoption pins before trusting that pid — a recycled one can never
+ *    pass as this worker.
+ *  - `<agentId>.<runId>.go` — the launcher's stamp, written only after
+ *    pid+marker are durable. The worker polls for it through the
+ *    spawn-handoff window; absent past the window means the launcher
+ *    died mid-publish, so the payload must never run (exit 75). */
+const GO_WAIT_TICK_MS = 50;
+const GO_WAIT_TICKS = SESSION_SLOT_TTL_MS / GO_WAIT_TICK_MS;
+
+/** The wrapper's half of the handshake — positional args
+ *  `$1` exit · `$2` handle · `$3` go · `$4` go-wait tick budget. Handle
+ *  publish is tmp+rename so a reader never sees a half-written pid, and
+ *  the pid rides with the wrapper's /proc starttime — the identity the
+ *  readers verify against pid reuse (spec bro-l8c4f.5). */
+const HANDSHAKE_SCRIPT =
+  'out=$1; h=$2; g=$3; t=$4; ' +
+  // field 22 off the last-')' slice — the same parse procStat takes;
+  // empty where /proc is absent, so the publish degrades to the
+  // bare-pid handle readers fail open on (POSIX sh: the subshell keeps
+  // $$ = this wrapper and $1..$4 for the payload's `shift 4`)
+  's=$(set -f; st=$(cat /proc/$$/stat 2>/dev/null); set -- ${st##*)}; printf %s "${20}"); ' +
+  '( umask 077; printf "%s%s" "$$" "${s:+ $s}" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
+  '|| { ( umask 077; printf %s 74 > "$out" ); exit 74; }; ' +
+  'i=0; until [ -f "$g" ]; do ' +
+  'i=$((i+1)); [ "$i" -gt "$t" ] && { ( umask 077; printf %s 75 > "$out" ); exit 75; }; ' +
+  `sleep ${GO_WAIT_TICK_MS / 1000}; ` +
+  'done;';
+
+/** Where a launcher crash would stop — the seam leaves exactly the
+ *  half-state a dead parent leaves: registry+claim only (`reservation`),
+ *  plus a live self-publishing child (`os-spawn`), plus the pid patch
+ *  and work marker (`publication`). Production never arms this. */
+export type SpawnAbandonAt = 'reservation' | 'os-spawn' | 'publication';
+
+/** Thrown at the armed point — the test's signal that the parent would
+ *  have died there; the spawned child and registry state are what a
+ *  real crash leaves behind. */
+export class SpawnAbandoned extends Error {
+  override name = 'SpawnAbandoned';
+  constructor(readonly at: SpawnAbandonAt) {
+    super(`spawn abandoned at ${at} (test seam)`);
+  }
+}
+
+const spawnTestSeam: {
+  abandonAt?: SpawnAbandonAt;
+  goWaitTicks?: number;
+  scope?: boolean;
+  scopeRefused?: boolean;
+} = {};
+
+/** Arm the crash-window failpoints (spec bro-l8c4f.5) — tests only:
+ *  `abandonAt` throws SpawnAbandoned mid-section exactly where a
+ *  launcher crash would cut it, `goWaitTicks` shrinks the worker's
+ *  admission wait so the timeout path runs inside a test budget,
+ *  `scope` pins the systemd-scope wrap on or off regardless of probe,
+ *  `scopeRefused` substitutes a child that dies before the exec — the
+ *  shape a user-manager refusal leaves. */
+export function armNativeSpawnTestSeam(seam: {
+  abandonAt?: SpawnAbandonAt;
+  goWaitTicks?: number;
+  scope?: boolean;
+  scopeRefused?: boolean;
+}): void {
+  spawnTestSeam.abandonAt = seam.abandonAt;
+  spawnTestSeam.goWaitTicks = seam.goWaitTicks;
+  spawnTestSeam.scope = seam.scope;
+  spawnTestSeam.scopeRefused = seam.scopeRefused;
+}
+
+const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
+  if (spawnTestSeam.abandonAt === at) {
+    throw new SpawnAbandoned(at);
+  }
+};
+
+/** systemd scope wrap (spec bro-ybo8z). A native worker spawned as a
+ *  plain `sh -c` child inherits the spawning unit's cgroup — under
+ *  `KillMode=control-group` every loop/daemon crash (and a manual
+ *  `systemctl stop`) wiped the whole lane: dead workers, no `.exit`,
+ *  'lost' rows. `systemd-run --user --scope` moves the payload into a
+ *  sibling `run-*.scope` that no supervisor's cgroup kill can reach.
+ *
+ *  `--scope`, never a transient service: systemd-run moves ITSELF
+ *  into the new scope and then execs the payload, so cwd, the
+ *  assembled env, and the log fds ride the exec unchanged (a service
+ *  reparents to the manager and would need each of those re-plumbed).
+ *  `--expand-environment=no` is mandatory — systemd-run otherwise
+ *  expands `$`-references in argv (ExecStart rules) and the handshake
+ *  script's `$$`, `$1`, `$@` arrive mangled.
+ *
+ *  Process shape: systemd-run registers the scope with its OWN pid
+ *  and then execs the payload in place, so `child.pid` keeps naming
+ *  the real worker — the handle's `$$`, the registry pid and the
+ *  scope's main pid are one. A systemd-run that FORKED instead would
+ *  put the payload in the scope under a different pid — the stop
+ *  path's multi-group signal and dead-pid handle adoption cover that
+ *  topology too.
+ *
+ *  Availability is one cached probe per process: no binary, no user
+ *  manager, or a refused registration all fall back to the plain
+ *  spawn. `agents.native.systemdScope` opts out (`false`) or forces
+ *  the wrap past the probe (`true`); the test seam wins over both. */
+const SCOPE_RUN_PREFIX = ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no'];
+
+let scopeProbeCache: boolean | undefined;
+
+/** Host capability only — the cached `systemd-run --user --scope`
+ *  probe. Exported so tests can skip scope assertions on hosts
+ *  without a user manager; the spawn decision itself is
+ *  `systemdScopeFor` (seam/knob/probe). */
+export function systemdScopeProbe(): boolean {
+  if (scopeProbeCache === undefined) {
+    // PATH lookup is the contract (same as sh/git)
+    const r = /* NOSONAR */ spawnSync('systemd-run', [...SCOPE_RUN_PREFIX.slice(1), '--', 'true'], {
+      stdio: 'ignore',
+      timeout: 5_000,
+    });
+    scopeProbeCache = r.status === 0;
+  }
+  return scopeProbeCache;
+}
+
+/** The spawn's scope decision: test seam → `systemdScope` knob →
+ *  cached probe. */
+function systemdScopeFor(knobs: Record<string, unknown>): boolean {
+  if (spawnTestSeam.scope !== undefined) {
+    return spawnTestSeam.scope;
+  }
+  if (typeof knobs.systemdScope === 'boolean') {
+    return knobs.systemdScope;
+  }
+  return systemdScopeProbe();
+}
+
+/** The scope-admission window (spec bro-ybo8z). The probe's yes is a
+ *  host answer, not this scope's — a user manager that refuses the
+ *  registration reports it only by `systemd-run` dying BEFORE the exec:
+ *  dead pid, no handle, no `.exit`, and the registry row would read
+ *  'lost' with no record. The handle is the payload's first write, so
+ *  the check waits on the positive signal and reads a dead pid without
+ *  it as refusal — a live-but-silent pid past the budget stays
+ *  admitted, because a scope still mid-registration is not a refusal
+ *  and retrying beside it would double the run. */
+const SCOPE_ADMIT_TICK_MS = 25;
+const SCOPE_ADMIT_TICKS = 80; // ~2s ceiling; a refusal lands in <100ms
+const scopeAdmitWait = new Int32Array(new SharedArrayBuffer(4));
+
+function scopeAdmitted(pid: number | undefined, handleFile: string, exitFile: string): boolean {
+  if (pid === undefined) {
+    return false;
+  }
+  for (let i = 0; i < SCOPE_ADMIT_TICKS; i++) {
+    if (existsSync(handleFile) || existsSync(exitFile)) {
+      return true;
+    }
+    if (!pidAlive(pid)) {
+      return false;
+    }
+    Atomics.wait(scopeAdmitWait, 0, 0, SCOPE_ADMIT_TICK_MS);
+  }
+  return true;
+}
+
+/** The `<agentId>.<runId>.{handle,go}` paths for one attempt — the
+ *  handle is the worker's durable self-registration, the go stamp the
+ *  launcher's admission answer. */
+function attemptHandles(
+  home: string,
+  agentId: string,
+  runId: string
+): { handleFile: string; goFile: string } {
+  return {
+    handleFile: join(home, `${agentId}.${runId}.handle`),
+    goFile: join(home, `${agentId}.${runId}.go`),
+  };
+}
+
+/** The handle's published identity against the pid's current one — a
+ *  mismatch is a recycled pid: refuse it (adopting would stamp a
+ *  stranger into the entry and `down` would signal its tree), and say
+ *  so on stderr, since a live handle is otherwise trusted outright.
+ *  Unpublished identity (a pre-identity handle, or a platform with no
+ *  /proc for the worker to read) or an unreadable current stat stays
+ *  unverifiable and fails open the way pidAlive documents — never a
+ *  false "this worker is dead". */
+function handleIdentity(pid: number, published: string | undefined, agentId: string): boolean {
+  const current = procStat(pid)?.start ?? null;
+  if (published !== undefined && current !== null && current !== '' && current !== published) {
+    console.error(
+      `bro: refusing handle for ${agentId} — pid ${pid} now starts at ${current}, ` +
+        `not the published ${published} (recycled pid)`
+    );
+    return false;
+  }
+  return true;
+}
+
+/** Adopt a survivor: the entry's pid patch never landed, but the
+ *  worker published its own handle before the launcher died. A live
+ *  handle whose pid still carries the published starttime stamps
+ *  pid+pidStart into the entry — under the same generation guard the
+ *  exit harvest uses, so a respawned entry is never adopted into — and
+ *  returns the pid so status/down reach the worker and dedup keeps
+ *  refusing beside it. A recycled pid never adopts (handleIdentity). */
+function adoptNativeHandle(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): { pid: number; start: string | null } | undefined {
+  const runId = entryRunId(entry);
+  if (
+    home === null ||
+    runId === undefined ||
+    entry.backend !== 'native' ||
+    basename(entry.agentId) !== entry.agentId // '../' must never escape the agents home
+  ) {
+    return undefined;
+  }
+  let owner: { pid: number; start?: string } | null;
+  try {
+    owner = handleOwner(
+      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8')
+    );
+  } catch {
+    return undefined;
+  }
+  if (owner === null) {
+    return undefined;
+  }
+  const { pid, start: published } = owner;
+  // identity before liveness: the handle's pid may have been recycled
+  // since the worker published it, and adopting the stranger would
+  // stamp it into the entry and hand `down` its process tree
+  if (!handleIdentity(pid, published, entry.agentId) || !pidAlive(pid, published)) {
+    return undefined;
+  }
+  const start = published ?? procStat(pid)?.start ?? null;
+  // the handle file is runId-scoped and identity-checked above — its pid
+  // IS this attempt's, so the in-memory row adopts it unconditionally
+  // (the AgentInfo built from it carries the pid to status/down)
+  entry.pid = pid;
+  entry.pidStart = start;
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[molStep];
+      // a respawn owns the entry now — the handle belongs to a dead
+      // generation and must not stamp the new run's fields
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
+        return;
+      }
+      reg[molStep] = { ...cur, pid, pidStart: start };
+      writeAgentRegistry(dir, reg);
+    });
+  } catch {
+    // the registry stamp is advisory — the handle still proves liveness
+  }
+  return { pid, start };
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -2385,6 +3175,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     name: 'native',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — a refused spawn must not run even the
+      // harmless probes (prepareSpawn re-checks inside the lock for the
+      // claim/registry writes)
+      assertMutableConfig(dir);
       const home = spawnHome(dir, 'native', command, spec);
       // dedup → claim → spawn → pid-patch runs as ONE critical section:
       // without the lock a second bro process can pass the liveness
@@ -2395,17 +3189,34 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'native',
-          spec,
-          {
-            isLive: e => nativeState(dir, home, spec.molStep, e) === 'running',
-            cap: { max: fleetCapOf(env), env },
-            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
-          }
-        );
+        const {
+          agentId,
+          promptFile,
+          log,
+          stderrLog,
+          exitFile,
+          runId,
+          reservation,
+          crossKindReservations,
+        } = prepareSpawn(dir, home, 'native', spec, {
+          // 'spawned' counts as live for dedup: inside the handoff
+          // window a pid-less entry may still be a worker about to
+          // publish its handle — a respawn beside it is the
+          // crash-window bug (spec bro-l8c4f.5)
+          isLive: e => {
+            const s = nativeState(dir, home, spec.molStep, e);
+            return s === 'running' || s === 'spawned';
+          },
+          liveDetail: e => (typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight'),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
+          spawnCommand: command,
+        });
+        // the launcher crashed after the reservation — registry+claim
+        // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
+        maybeAbandonSpawn('reservation');
+        const { handleFile, goFile } = attemptHandles(home, agentId, runId);
         // the worker's stderr gets its own append fd — the .log stays
         // the agent-updates stream; the child/agent noise (and every
         // template worker's diagnostics) lands in .stderr (bro-e2ec0).
@@ -2415,10 +3226,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let errFd: number | undefined;
         let spawned: AgentRegistryEntry;
         try {
-          fd = openSync(log, 'a');
-          errFd = openSync(stderrLog, 'a');
+          fd = openPrivateAppendSync(log);
+          if (stderrLog !== undefined) {
+            errFd = openPrivateAppendSync(stderrLog);
+          }
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
+          // The write targets the literal quoted path, never $out: a
+          // 'template' payload runs in this shell's scope and assigning
+          // `out` would retarget the exit write (the shape tmux/docker
+          // already use).
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
           // command substitutes for the backend's own template; an
           // 'argv' worker execs verbatim through the wrapper's "$@"
@@ -2426,67 +3243,119 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // could carry shell metachars) is never string-concatenated.
           const worker = spec.worker;
           warnNoPromptFile(worker, command);
+          // the handshake runs before the payload: the worker publishes
+          // its own handle, then holds on the launcher's go stamp — a
+          // launcher that died mid-publish never admits it (75), so a
+          // survivor can never silently double a respawn (spec
+          // bro-l8c4f.5)
+          const goTicks = String(spawnTestSeam.goWaitTicks ?? GO_WAIT_TICKS);
           const args =
             worker?.kind === 'argv'
               ? [
                   '-c',
-                  'out=$1; shift; "$@"; s=$?; printf %s "$s" > "$out"',
+                  `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
+                  handleFile,
+                  goFile,
+                  goTicks,
                   ...worker.argv,
                   promptFile,
                 ]
               : [
                   '-c',
-                  `${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; printf %s "$s" > "$1"`,
+                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
+                  handleFile,
+                  goFile,
+                  goTicks,
                 ];
           const cliBadge = workerCliBadge(worker, command);
-          const child = spawn(
-            'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
-            args,
-            {
-              // NOSONAR — operator-configured agent command (same contract as loop)
-              cwd: spec.repoRoot,
-              env: {
-                // ambient env minus the connector-owned pins — every
-                // other backend filters AGENT_PIN_KEYS out of
-                // ambient/spec env already (tmux's 0600 env file,
-                // gascity's args); without it a worker-spawned `bro
-                // agents up`/`bro loop` would bleed the parent's
-                // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
-                // commit trailers (bro-fzot's exact bug shape)
-                // The ambient env and the caller's env are filtered
-                // SEPARATELY: the fleet's marker may only come from the
-                // caller (spec.env). Inherited from the ambient env it
-                // would charge a worker's own children — an interactive
-                // session — to the fleet's budget.
-                ...Object.fromEntries(
-                  Object.entries(process.env).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-                      e[0] !== BATCH_MARKER_ENV
-                  )
-                ),
-                ...Object.fromEntries(
-                  Object.entries(spec.env ?? {}).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0])
-                  )
-                ),
+          // the scope wrap (bro-ybo8z): the payload runs under
+          // systemd-run so a supervisor's cgroup kill cannot reach it.
+          // --description carries the run's identity (never --unit — a
+          // respawned agentId must not collide on a lingering scope)
+          const scoped = systemdScopeFor(knobs);
+          const scopeArgv = [
+            ...SCOPE_RUN_PREFIX.slice(1),
+            `--description=bro agent ${agentId} ${spec.molStep}`,
+            '--',
+            'sh',
+            ...args,
+          ];
+          const spawnOpts: SpawnOptions = {
+            // NOSONAR — operator-configured agent command (same contract as loop)
+            cwd: spec.repoRoot,
+            env: (() => {
+              const policy = getCredentialScope(env, 'native');
+              const ambient = Object.fromEntries(
+                Object.entries(process.env).filter((e): e is [string, string] => {
+                  if (e[1] === undefined) return false;
+                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  // ambient BRO_BATCH is stripped, not passed — the
+                  // marker reaches the worker only via spec.env below
+                  return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+                })
+              );
+              const fromSpec = Object.fromEntries(
+                Object.entries(spec.env ?? {}).filter((e): e is [string, string] => {
+                  if (e[1] === undefined) return false;
+                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
+                })
+              );
+              return {
+                // ambient env minus the connector-owned pins
+                ...ambient,
+                ...fromSpec,
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
-              },
-              stdio: ['ignore', fd, errFd],
-              detached: true,
+              };
+            })(),
+            stdio: ['ignore', fd, errFd],
+            detached: true,
+          };
+          // the scope refusal path needs a second shot at the same spawn —
+          // the seam's refusal stand-in dies instantly like a real refused
+          // systemd-run, but runs the payload verbatim for everything else
+          const spawnWorker = (wrap: boolean) => {
+            if (wrap && spawnTestSeam.scopeRefused === true) {
+              // PATH lookup is the contract (same as git/bd everywhere)
+              return /* NOSONAR */ spawn('sh', ['-c', 'exit 1'], spawnOpts);
             }
-          );
+            // PATH lookup is the contract (same as git/bd everywhere)
+            return /* NOSONAR */ spawn(
+              wrap ? 'systemd-run' : 'sh',
+              wrap ? scopeArgv : args,
+              spawnOpts
+            );
+          };
+          let child = spawnWorker(scoped);
+          if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
+            // refused — the payload never ran: dead pid, no handle, no
+            // .exit; left alone the row would read 'lost' with no record
+            // and the reservation would idle out its TTL. Retry the plain
+            // spawn over the same attempt artifacts.
+            if (stderrLog !== undefined) {
+              appendPrivateFileSync(
+                stderrLog,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            } else {
+              appendPrivateFileSync(
+                log,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            }
+            // the discarded child may still emit 'error' (the ENOENT
+            // path) — an unlistened error event takes the whole CLI down
+            child.on('error', () => {
+              /* the retry owns the verdict now — swallow the loser's */
+            });
+            child = spawnWorker(false);
+          }
           // an unhandled 'error' event would take the whole CLI down —
           // a failed exec records itself on the entry and reads 'lost'
           const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;
@@ -2505,11 +3374,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               if (reservation !== undefined) {
                 releaseSessionSlot(reservation);
               }
+              releaseSessionStart(crossKindReservations);
             } catch {
               // the entry may not have landed yet — nothing else to do
             }
           });
           child.unref();
+          // the launcher died between OS spawn and pid publication —
+          // a live detached child the registry cannot yet name (spec
+          // bro-l8c4f.5 failpoint)
+          maybeAbandonSpawn('os-spawn');
           spawned = patchAgentRegistry(dir, spec.molStep, {
             pid: child.pid ?? -1,
             // the starttime pins identity against pid reuse — without it
@@ -2518,11 +3392,19 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             pidStart: typeof child.pid === 'number' ? (procStat(child.pid)?.start ?? null) : null,
           });
           writeWorkMarker(dir, agentId, spec.molStep, child.pid);
+          // died after publishing the handle — pid+marker are durable,
+          // the worker's admission stamp never lands
+          maybeAbandonSpawn('publication');
+          // the admission stamp — durable only after pid+marker, so a
+          // crash earlier can never admit a worker the registry cannot
+          // reach. Existence is the signal; the pid inside is forensic.
+          writePrivateFileSync(goFile, `${child.pid ?? -1}\n`);
         } catch (err) {
           // sync failure after the reservation — hand the slot back
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }
+          releaseSessionStart(crossKindReservations);
           throw err;
         } finally {
           if (fd !== undefined) {
@@ -2565,21 +3447,73 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         return; // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit;
-      const pid = typeof entry.pid === 'number' ? entry.pid : undefined;
-      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
-        try {
-          process.kill(-pid, 'SIGTERM'); // detached → own process group
-        } catch {
-          // No fallback to kill(pid): a native child is always its own
-          // group leader, so a failed group signal means the pid was
-          // recycled by a non-leader — signaling it would hit an
-          // unrelated process.
+      // a crashed launcher's survivor self-published its handle — adopt
+      // it here too so `down` reaches the worker the registry never got
+      // a pid for (spec bro-l8c4f.5). The consultation now also fires
+      // when the recorded pid is simply DEAD: a fork-style
+      // `systemd-run --scope` (bro-ybo8z) leaves the payload alive in
+      // another cgroup under a pid the registry never recorded, and
+      // stamping `stopped` over that live orphan would free a respawn
+      // beside a live writer.
+      const home = agentsHome(dir);
+      const entryPid = typeof entry.pid === 'number' ? entry.pid : undefined;
+      const adopted =
+        entryPid !== undefined &&
+        (pidAlive(entryPid, entryPidStart(entry)) ||
+          groupMemberAlive(entryPid, entryPidStart(entry)))
+          ? undefined
+          : adoptNativeHandle(dir, home, molStep, entry);
+      const pid = adopted?.pid ?? entryPid;
+      const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
+      // The unit check lives outside the signal block: a repeated `down`
+      // can find the wrapper already dead while a descendant still holds
+      // the group — the lock guard below must see it even when no signal
+      // was sent. `unit` stays empty without a live wrapper (the tree
+      // link is already broken by then — the snapshot only works
+      // pre-death).
+      let unit: Array<{ pid: number; start?: string }> = [];
+      const unitAlive = () =>
+        pid !== undefined &&
+        (pidAlive(pid, start) ||
+          groupMemberAlive(pid, start) ||
+          unit.some(d => pidAlive(d.pid, d.start)));
+      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
+        // the tree snapshot rides BEFORE the signal: a descendant that
+        // escaped the group (setsid — or a scope payload a fork-style
+        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
+        // groupMemberAlive, and once the wrapper dies it reparents to
+        // init — the pre-signal pid+starttime pin is the only handle
+        // left on it. The signal goes to every group the tree spans:
+        // a scoped payload's own pgid gets SIGTERM too.
+        const snap = unitSnapshot(pid);
+        unit = snap.members;
+        const groups = new Set<number>([pid, ...snap.groups]);
+        for (const g of groups) {
+          try {
+            // a lane-paused group (spec bro-y3jvd) pends every signal —
+            // SIGCONT first or the TERM below waits on a stopped process
+            process.kill(-g, 'SIGCONT');
+          } catch {
+            // not stopped, or already gone — the TERM below decides
+          }
+          try {
+            process.kill(-g, 'SIGTERM'); // detached → own process group
+          } catch {
+            // No fallback to kill(pid): a native child is always its own
+            // group leader, so a failed group signal means the group was
+            // emptied or recycled — signaling a bare pid could hit an
+            // unrelated process.
+          }
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // agent (nativeState reports live pids as running regardless).
+        // The unit, not the wrapper, is the wait: a TERM-resistant
+        // descendant outlives the sh-wrapper it was spawned under, and
+        // `stopped` over it would free a respawn onto a live writer
+        // (bro-l8c4f.3)
         const deadline = Date.now() + 2_000;
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        while (unitAlive() && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 25));
         }
       }
@@ -2592,9 +3526,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          unitAlive()
         ) {
-          return; // respawned or still alive — the live run owns the entry
+          return; // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true });
@@ -2641,8 +3575,8 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
-    // NOSONAR — PATH lookup is the contract (same as git/bd)
+  // NOSONAR — PATH lookup is the contract (same as git/bd)
+  const proc = /* NOSONAR */ spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -2740,6 +3674,7 @@ function toTmuxInfo(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -2781,6 +3716,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       // NOSONAR — connector contract is async; the critical section is sync
+      assertMutableConfig(dir);
       const home = spawnHome(dir, 'tmux', command, spec);
       const ver = tmuxRun(socket, ['-V']);
       if (ver.missing || ver.code !== 0) {
@@ -2797,37 +3733,41 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'tmux',
-          spec,
-          {
-            isLive: e => {
-              const n = tmuxSessionName(e);
-              if (n === undefined) {
-                return false;
-              }
-              const p = tmuxProbe(socket, n);
-              if (p.live === 'unknown') {
-                // an unverifiable liveness probe must not let a duplicate
-                // spawn kill-session a worker that may still be alive
-                throw new SpawnError(
-                  `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
-                  'unavailable'
-                );
-              }
-              if (p.live === 'running') {
-                touchWorkMarker(dir, e.agentId);
-              }
-              return p.live === 'running';
-            },
-            liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
-            entry: id => ({ session: `bro-${id}` }),
-            cap: { max: fleetCapOf(env), env },
-            sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
-          }
-        );
+        const {
+          agentId,
+          promptFile,
+          log,
+          stderrLog,
+          exitFile,
+          reservation,
+          crossKindReservations,
+        } = prepareSpawn(dir, home, 'tmux', spec, {
+          isLive: e => {
+            const n = tmuxSessionName(e);
+            if (n === undefined) {
+              return false;
+            }
+            const p = tmuxProbe(socket, n);
+            if (p.live === 'unknown') {
+              // an unverifiable liveness probe must not let a duplicate
+              // spawn kill-session a worker that may still be alive
+              throw new SpawnError(
+                `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
+                'unavailable'
+              );
+            }
+            if (p.live === 'running') {
+              touchWorkMarker(dir, e.agentId);
+            }
+            return p.live === 'running';
+          },
+          liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
+          entry: id => ({ session: `bro-${id}` }),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
+          spawnCommand: command,
+        });
         const session = `bro-${agentId}`;
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -2841,17 +3781,31 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // -e; they're also filtered OUT of the file so sourcing can
         // never redirect the claim store or re-badge the worker
         const envFile = join(home, `${agentId}.env`);
+        // the same credential-scope policy native/docker enforce (spec
+        // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
+        // ambient env the allowlist excludes, and the ambient BRO_BATCH
+        // marker is stripped the same way (only spec.env supplies it)
+        const policy = getCredentialScope(env, 'tmux');
         const ambient = Object.entries({ ...process.env, ...spec.env })
           .filter(
             (e): e is [string, string] =>
               e[1] !== undefined &&
               /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
               !AGENT_PIN_KEYS.has(e[0]) &&
-              !GIT_REPOSITORY_ENV_KEYS.has(e[0])
+              !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+              isAllowedByEnvPolicy(
+                e[0],
+                e[1],
+                'tmux',
+                spec,
+                env,
+                policy,
+                Object.hasOwn(spec.env ?? {}, e[0])
+              )
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n');
-        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 });
+        writePrivateFileSync(envFile, `${ambient}\n`);
         const worker = spec.worker;
         const cliBadge = workerCliBadge(worker, command);
         const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
@@ -2871,7 +3825,11 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command);
         const runLine = workerRunLine(worker, command, promptFile);
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`;
+        // stderr splits into its own capture when the backend records
+        // one; without a capture it folds into the stdout tee so the
+        // worker's noise still lands in the .log (docker does the same)
+        const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
         const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -2888,6 +3846,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }
+          releaseSessionStart(crossKindReservations);
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err });
           } catch {
@@ -3048,8 +4007,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = spawnSync('gc', args, {
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gc', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -3338,12 +4297,14 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         .replace(/^work_dir\s*=.*$/gm, '')
         .replace(/^env\s*=.*$/gm, '');
     const agentDir = join(city, 'agents', spec.molStep);
-    mkdirSync(agentDir, { recursive: true });
-    writeFileSync(
+    // owner-only (spec bro-l8c4f.4) — agent.toml inlines the caller's
+    // env table; a permissive file leaks secrets into every local login
+    mkdirPrivateSync(agentDir);
+    writePrivateFileSync(
       join(agentDir, 'prompt.template.md'),
       read('prompt.template.md', GC_PROMPT_TEMPLATE)
     );
-    writeFileSync(join(agentDir, 'agent.toml'), agentToml);
+    writePrivateFileSync(join(agentDir, 'agent.toml'), agentToml);
   };
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -3395,6 +4356,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     return {
       id: entry.agentId,
       spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+      runId: entryRunId(entry),
       molStep,
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
@@ -3402,7 +4364,6 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
-      stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
     };
   };
 
@@ -3515,6 +4476,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     matchDir: () => gcMatchDir(dir, env),
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — refuse invalid committed config ahead
+      // of the worker/prompt checks, let alone the gc side effects
+      assertMutableConfig(dir);
       // a provider-resolved worker can't ride gc — the city's provider
       // command is written once in city.toml at init, so recording
       // provenance while gc runs its own configured provider would be
@@ -3547,30 +4511,39 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep];
-        const { agentId, promptFile, reservation } = prepareSpawn(dir, home, 'gascity', spec, {
-          isLive: e => {
-            const { sessions, err } = listGcSessions(city);
-            if (sessions === undefined) {
-              // an unverifiable liveness probe must not let a duplicate
-              // spawn run alongside a worker that may still be alive
-              throw new SpawnError(
-                `gascity unreachable — cannot verify existing agent: ${err}`,
-                'unavailable'
-              );
-            }
-            const s = gcSessionFor(e, spec.molStep, sessions);
-            const st = s === undefined ? 'lost' : gcState(s);
-            return st === 'running' || st === 'spawned';
-          },
-          liveDetail: e =>
-            `session ${typeof e.sessionId === 'string' ? e.sessionId : spec.molStep}`,
-          entry: () => ({ sessionId: undefined }),
-          claimAs: spec.molStep,
-          cap: { max: fleetCapOf(env), env },
-          // the quota admits against what gc will actually RUN — the
-          // command pinned in city.toml at init, not today's config
-          sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
-        });
+        const { agentId, promptFile, reservation, crossKindReservations } = prepareSpawn(
+          dir,
+          home,
+          'gascity',
+          spec,
+          {
+            isLive: e => {
+              const { sessions, err } = listGcSessions(city);
+              if (sessions === undefined) {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn run alongside a worker that may still be alive
+                throw new SpawnError(
+                  `gascity unreachable — cannot verify existing agent: ${err}`,
+                  'unavailable'
+                );
+              }
+              const s = gcSessionFor(e, spec.molStep, sessions);
+              const st = s === undefined ? 'lost' : gcState(s);
+              return st === 'running' || st === 'spawned';
+            },
+            liveDetail: e =>
+              `session ${typeof e.sessionId === 'string' ? e.sessionId : spec.molStep}`,
+            entry: () => ({ sessionId: undefined }),
+            claimAs: spec.molStep,
+            cap: { max: fleetCapOf(env), env },
+            env,
+            // the quota admits against what gc will actually RUN — the
+            // command pinned in city.toml at init, not today's config
+            sessionQuota: () =>
+              sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
+            spawnCommand: gcEffectiveCommand(city, command),
+          }
+        );
         let sessionId: string | undefined;
         try {
           sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId, promptFile, mol);
@@ -3584,6 +4557,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }
+          releaseSessionStart(crossKindReservations);
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,
             spawnError: err instanceof Error ? err.message : String(err),
@@ -3746,8 +4720,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  const proc = spawnSync('docker', args, {
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('docker', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4115,6 +5089,7 @@ function toDockerInfo(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -4152,14 +5127,49 @@ const DOCKER_HOST_ENV = new Set([
   '_',
 ]);
 
+/** Env-passing docker run flags bro does not own — under a strict
+ *  credential scope the container's env is the allowlist-filtered
+ *  env-file plus the identity pins, so an operator `--env KEY[=value]`
+ *  or `--env-file` in runArgs would inject variables the allowlist
+ *  excluded (spec bro-l8c4f.6). Dropped with a warning naming only the
+ *  flag kinds — a value could be a secret and never reaches the log. */
+const DOCKER_ENV_FLAGS = new Set(['-e', '--env', '--env-file']);
+
+function filterStrictRunArgs(runArgs: string[], strictEnv: boolean): string[] {
+  if (!strictEnv) return runArgs;
+  const kept: string[] = [];
+  const dropped = new Set<string>();
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i]!;
+    const bare = a.includes('=') ? a.slice(0, a.indexOf('=')) : a;
+    if (DOCKER_ENV_FLAGS.has(bare)) {
+      dropped.add(bare);
+      // the separate-value form's operand is dropped with the flag —
+      // a leaked `KEY=secret` positional would fail docker run anyway
+      if (bare === a && i + 1 < runArgs.length) i++;
+      continue;
+    }
+    kept.push(a);
+  }
+  if (dropped.size > 0) {
+    console.error(
+      `warning: strict credential scope drops env-passing docker runArgs: ${[...dropped].join(', ')} — route secrets through agents.docker.envAllowlist or spec.env`
+    );
+  }
+  return kept;
+}
+
 /** The ambient env file — a 0600 file like tmux's, deleted by the
  *  caller after `docker run` (and on any failure). argv is visible to
  *  every local user (`ps`, `docker inspect`), so the ambient bag
  *  (secrets included) never goes on -e. Values with newlines can't
  *  survive docker's line-based format — dropped with a warning naming
  *  the keys. */
-function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
+function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnectorEnv): void {
   const dropped: string[] = [];
+  const policy = env
+    ? getCredentialScope(env, 'docker')
+    : { strictEnv: false, envAllowlist: undefined };
   const ambient = Object.entries({
     ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
     ...spec.env,
@@ -4167,7 +5177,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
     .filter((e): e is [string, string] => {
       if (
         e[1] === undefined ||
-        !/^[A-Za-z_]\w*$/.test(e[0]) ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
         AGENT_PIN_KEYS.has(e[0]) ||
         GIT_REPOSITORY_ENV_KEYS.has(e[0])
       ) {
@@ -4175,6 +5185,22 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
       }
       if (e[1].includes('\n') || e[1].includes('\r')) {
         dropped.push(e[0]);
+        return false;
+      }
+      // spec.env spread over ambient — a key the caller supplied decides
+      // its own row (the ambient BRO_BATCH marker is stripped; the
+      // caller's own travels, spec bro-l8c4f.6)
+      if (
+        !isAllowedByEnvPolicy(
+          e[0],
+          e[1],
+          'docker',
+          spec,
+          env ?? { agents: {}, connectors: {} },
+          policy,
+          Object.hasOwn(spec.env ?? {}, e[0])
+        )
+      ) {
         return false;
       }
       return true;
@@ -4186,7 +5212,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
       `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
     );
   }
-  writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 });
+  writePrivateFileSync(envFile, `${ambient}\n`);
 }
 
 /** The `docker run` argv — operator `runArgs` sit FIRST so docker's
@@ -4207,7 +5233,8 @@ function dockerRunArgv(
   mol: string | undefined,
   runArgs: string[],
   image: string,
-  wrapper: string
+  wrapper: string,
+  strictEnv: boolean
 ): string[] {
   const userArgs =
     typeof process.getuid === 'function' &&
@@ -4220,7 +5247,7 @@ function dockerRunArgv(
     '--init',
     '--rm',
     ...userArgs,
-    ...runArgs,
+    ...filterStrictRunArgs(runArgs, strictEnv),
     '--name',
     name,
     '--workdir',
@@ -4261,6 +5288,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       // NOSONAR — connector contract is async; the work is one sync critical section
+      // policy BEFORE the daemon probe and image pull/build — a refused
+      // spawn must not pay (or log) a docker fetch it will never use
+      assertMutableConfig(dir);
       const home = spawnHome(dir, 'docker', command, spec);
       const daemon = dockerDaemonUp();
       if (!daemon.up) {
@@ -4272,37 +5302,41 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const image = dockerImageFor(spec, knobs);
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'docker',
-          spec,
-          {
-            isLive: e => {
-              const n = dockerContainerName(e);
-              if (n === undefined) {
-                return false;
-              }
-              const p = dockerInspect(n);
-              if (p.live === 'unknown') {
-                // an unverifiable liveness probe must not let a duplicate
-                // spawn run beside a worker that may still be alive
-                throw new SpawnError(
-                  `cannot verify ${spec.molStep}'s container — ${p.err}`,
-                  'unavailable'
-                );
-              }
-              if (p.live === 'running') {
-                touchWorkMarker(dir, e.agentId);
-              }
-              return p.live === 'running';
-            },
-            liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
-            entry: id => ({ container: `bro-${id}`, containerId: undefined }),
-            cap: { max: fleetCapOf(env), env },
-            sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
-          }
-        );
+        const {
+          agentId,
+          promptFile,
+          log,
+          stderrLog,
+          exitFile,
+          reservation,
+          crossKindReservations,
+        } = prepareSpawn(dir, home, 'docker', spec, {
+          isLive: e => {
+            const n = dockerContainerName(e);
+            if (n === undefined) {
+              return false;
+            }
+            const p = dockerInspect(n);
+            if (p.live === 'unknown') {
+              // an unverifiable liveness probe must not let a duplicate
+              // spawn run beside a worker that may still be alive
+              throw new SpawnError(
+                `cannot verify ${spec.molStep}'s container — ${p.err}`,
+                'unavailable'
+              );
+            }
+            if (p.live === 'running') {
+              touchWorkMarker(dir, e.agentId);
+            }
+            return p.live === 'running';
+          },
+          liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
+          entry: id => ({ container: `bro-${id}`, containerId: undefined }),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
+          spawnCommand: command,
+        });
         const name = `bro-${agentId}`;
         const envFile = join(home, `${agentId}.env`);
         let containerId = '';
@@ -4311,7 +5345,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // respawn over a stopped container) collides docker run —
           // clear it
           dockerRun(['rm', '-f', name]);
-          writeDockerEnvFile(envFile, spec);
+          writeDockerEnvFile(envFile, spec, env);
           const worker = spec.worker;
           warnNoPromptFile(worker, command);
           const cliBadge = workerCliBadge(worker, command);
@@ -4321,7 +5355,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`;
+          const wrapper =
+            stderrLog !== undefined
+              ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+              : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
           const res = dockerRun(
             dockerRunArgv(
               name,
@@ -4334,7 +5371,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               mol,
               runArgs,
               image,
-              wrapper
+              wrapper,
+              getCredentialScope(env, 'docker').strictEnv
             )
           );
           rmSync(envFile, { force: true }); // the env is baked into container config — the file has done its job
@@ -4353,6 +5391,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }
+          releaseSessionStart(crossKindReservations);
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),
@@ -4478,6 +5517,20 @@ registerAgentConnector('docker', makeDockerConnector);
 
 // --- copilot -------------------------------------------------------------------
 
+/** No local command runs on a copilot spawn — a provider-resolved
+ *  worker/template has no remote surface to ride, and agents.copilot.
+ *  command is meaningless by the same logic; refuse before anything
+ *  lands. */
+function refuseCopilotWorker(spec: SpawnSpec): void {
+  if (spec.worker !== undefined) {
+    throw new SpawnError(
+      `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
+        `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
+      'config'
+    );
+  }
+}
+
 /** The copilot backend — GitHub's hosted coding agent ("agent tasks")
  *  as code. Spike verdict: specs/sessions/bro-huy5o.9.md — the first
  *  cloud connector: genuinely remote (no local worktree, supervisor or
@@ -4528,8 +5581,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  const proc = spawnSync('gh', args, {
-    // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+  // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gh', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4928,6 +5981,7 @@ function copilotInfoFor(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     molStep,
     backend: entry.backend,
     state: st === 'running' && probe.state === 'queued' ? 'spawned' : st,
@@ -5057,7 +6111,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     target: { owner: string; repo: string; slug: string }
   ): { task: CopilotTask; taskId: string } => {
     const bodyFile = join(home, `${agentId}.task.json`);
-    writeFileSync(
+    writePrivateFileSync(
       bodyFile,
       JSON.stringify({
         prompt: spec.prompt,
@@ -5165,16 +6219,10 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       // NOSONAR — connector contract is async; the critical section is sync
-      // no local command runs — a provider-resolved worker/template has
-      // no remote surface to ride, and agents.copilot.command is
-      // meaningless by the same logic; refuse before anything lands
-      if (spec.worker !== undefined) {
-        throw new SpawnError(
-          `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
-            `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
-          'config'
-        );
-      }
+      // policy before preflight — an invalid committed config must
+      // refuse ahead of the remote-count refresh, not just the claim
+      assertMutableConfig(dir);
+      refuseCopilotWorker(spec);
       if (!existsSync(spec.repoRoot)) {
         throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input');
       }
@@ -5196,6 +6244,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           agentId,
           promptFile: _promptFile,
           reservation,
+          crossKindReservations,
         } = prepareSpawn(dir, home, 'copilot', spec, {
           isLive: existing => {
             const p = copilotTaskProbe(dir, spec.molStep, existing);
@@ -5230,6 +6279,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             stderrFrom: undefined,
           }),
           cap: { max: fleetCapOf(env), env },
+          env,
           sessionQuota: copilotSessionQuota(env),
         });
         try {
@@ -5267,6 +6317,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           if (reservation !== undefined) {
             releaseSessionSlot(reservation);
           }
+          releaseSessionStart(crossKindReservations);
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),
