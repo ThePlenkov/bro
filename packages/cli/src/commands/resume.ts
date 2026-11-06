@@ -11,7 +11,9 @@
  * What it restores it restores because durable state recorded the
  * intent (a dead watch marker, an armed daemon.json); what has no
  * recorded intent it only reports — `bro flow loop` claims the
- * backlog and is a run-level decision, never auto-spawned.
+ * backlog and is a run-level decision, never auto-spawned. An armed
+ * loop.json is recorded intent too: its `daemon run --loop` supervisor
+ * revives on the same contract as the drive daemon's.
  * Orchestrator-only like `fleet daemon up`: a worker never arms
  * supervisors.
  */
@@ -78,7 +80,11 @@ interface ResumeReport {
   dryRun: boolean;
   sweep: { line: string; didWork: boolean } | null;
   watch: WatchReport;
-  daemon: DaemonLegResult[];
+  /** The drive leg under its pre-loop field name — `--json` readers'
+   *  `daemon.kind`/`daemon.pid`/`daemon.everySec` keep working. */
+  daemon: DaemonLegResult;
+  /** Every supervisor leg — drive and loop on their own planes. */
+  daemons: DaemonLegResult[];
   loop: LoopReport;
   agents: AgentsReport;
   worktrees: Array<{ path: string; branch?: string; dirty: number }>;
@@ -145,7 +151,7 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
       : await rearmPass(main, dry);
 
   // 3 — daemon: the session-checkpoint decision, extracted
-  const daemon = daemonLeg(main, dry);
+  const daemons = daemonLeg(main, dry);
 
   // 4 — loop: dead supervisor + dead run records are a report, not a
   // respawn — claiming the backlog is the operator's call
@@ -158,7 +164,18 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
   const agents = await agentsLeg(main);
   const worktrees = dirtyWorktrees(main);
 
-  return { dryRun: dry, sweep, watch, daemon, loop: { holder, deadRuns }, agents, worktrees };
+  return {
+    dryRun: dry,
+    sweep,
+    watch,
+    // `daemon` keeps the pre-loop shape: the drive leg, first by
+    // construction in daemonLeg
+    daemon: daemons[0]!,
+    daemons,
+    loop: { holder, deadRuns },
+    agents,
+    worktrees,
+  };
 }
 
 /** The daemon legs — the same decision a session checkpoint runs, once
@@ -199,7 +216,7 @@ function daemonLegKind(main: string, dry: boolean, k: DaemonKind): DaemonLegResu
   return { sup: k.sup, kind: 'unarmed' };
 }
 
-function daemonLeg(main: string, dry: boolean): ResumeReport['daemon'] {
+function daemonLeg(main: string, dry: boolean): ResumeReport['daemons'] {
   return [
     daemonLegKind(main, dry, {
       sup: 'drive',
@@ -269,8 +286,12 @@ function daemonLine(d: DaemonLegResult): string | null {
   }
 }
 
-function loopLine(l: LoopReport, dry: boolean): string | null {
-  const dead = l.holder.pid !== null && !l.holder.alive;
+function loopLine(l: LoopReport, sup: DaemonLegResult | undefined, dry: boolean): string | null {
+  // the daemon leg already reports a live or freshly revived loop
+  // supervisor — the pre-revival holder snapshot must not contradict it
+  // with a stale "supervisor dead" and a restart hint
+  const covered = sup !== undefined && sup.kind !== 'unarmed';
+  const dead = !covered && l.holder.pid !== null && !l.holder.alive;
   if (!dead && l.deadRuns.length === 0) {
     return null;
   }
@@ -285,7 +306,8 @@ function loopLine(l: LoopReport, dry: boolean): string | null {
         `: ${l.deadRuns.map(r => r.slug).join(', ')}`
     );
   }
-  return `resume: loop — ${bits.join('; ')} — restart with \`bro flow loop\``;
+  const hint = covered ? '' : ' — restart with `bro flow loop`';
+  return `resume: loop — ${bits.join('; ')}${hint}`;
 }
 
 function agentsLine(a: AgentsReport): string | null {
@@ -321,8 +343,12 @@ function reportLines(rep: ResumeReport): string[] {
   }
   lines.push(...watchLines(rep.watch, rep.dryRun));
   const rest = [
-    ...rep.daemon.map(daemonLine),
-    loopLine(rep.loop, rep.dryRun),
+    ...rep.daemons.map(daemonLine),
+    loopLine(
+      rep.loop,
+      rep.daemons.find(d => d.sup === 'loop'),
+      rep.dryRun
+    ),
     agentsLine(rep.agents),
     worktreeLine(rep.worktrees),
   ];

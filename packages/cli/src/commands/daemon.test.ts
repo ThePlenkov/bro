@@ -693,6 +693,61 @@ describe('supervisorDown', () => {
       rmSync(b.root, { recursive: true, force: true });
     }
   });
+
+  test('a kind-scoped sweep spares the sibling supervisor plane', () => {
+    const a = initRepo('bro-dkind-');
+    const pids: number[] = [];
+    const fake = (argv: string[]): number => {
+      const pid = (() => {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)', ...argv], {
+          cwd: a.main,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        return child.pid!;
+      })();
+      pids.push(pid);
+      return pid;
+    };
+    try {
+      const driveSup = fake(['daemon', 'run', '--every', '4242']);
+      const loopSup = fake(['daemon', 'run', '--loop', '--every', '4242']);
+      writeRecord(a.main, driveSup);
+      writeLoopRecord(a.main, loopSup);
+      for (let i = 0; i < 100 && ![driveSup, loopSup].every(cmdlineVisible); i++) {
+        pause(10);
+      }
+      assert.ok([driveSup, loopSup].every(cmdlineVisible));
+      // the loop sweep takes the loop supervisor + its record, nothing else
+      const downLoop = supervisorDown(a.main, { kind: 'loop' });
+      assert.ok(downLoop.pids.includes(loopSup), 'loop supervisor missed by its own sweep');
+      assert.ok(!downLoop.pids.includes(driveSup), 'drive supervisor caught in the loop sweep');
+      assert.ok(pidAlive(driveSup), 'drive supervisor was killed by the loop sweep');
+      assert.ok(existsSync(daemonStatePath(a.main)!), 'drive armer record swept by a loop down');
+      assert.ok(
+        !existsSync(daemonStatePath(a.main, { loop: true })!),
+        'loop armer record kept after a loop down'
+      );
+      // and the drive sweep — the surviving sibling's turn
+      const downDrive = supervisorDown(a.main, { kind: 'drive' });
+      assert.ok(downDrive.pids.includes(driveSup), 'drive supervisor missed by its own sweep');
+      assert.ok(!downDrive.pids.includes(loopSup), 'loop pid named in the drive sweep');
+      assert.ok(
+        !existsSync(daemonStatePath(a.main)!),
+        'drive armer record kept after a drive down'
+      );
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(a.root, { recursive: true, force: true });
+    }
+  });
 });
 
 // --- the loop install want-marker (bro-fw85h) ------------------------------

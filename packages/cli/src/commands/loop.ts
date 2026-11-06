@@ -184,8 +184,7 @@ import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
-import { installLoop, loopLockPath, uninstallLoop } from './daemon.ts';
-import { checkBeads } from '@broject/core';
+import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -2706,7 +2705,30 @@ function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
     );
     process.exit(2);
   }
+  // a typo'd flag (`--evry`) or a stray positional must not silently
+  // install the configured cadence — whitelist each verb's argv before
+  // any mutation
+  const installArgv = argv[0] === 'install';
+  const stray = positionals(argv.slice(1), installArgv ? new Set(['--every']) : new Set(), {
+    boolFlags: installArgv
+      ? new Set(['--print', '--dry-run', '--help'])
+      : new Set(['--dry-run', '--help']),
+    strict: true,
+  });
+  if (stray.length > 0) {
+    console.error(`error: unexpected argument '${stray[0]}'`);
+    process.exit(2);
+  }
   if (argv[0] === 'uninstall') {
+    if (argv.includes('--dry-run')) {
+      const marker = readLoopMarker(dir);
+      console.log(
+        marker === null
+          ? 'loop uninstall — no install marker; nothing would be disarmed'
+          : `loop uninstall — would disarm the marker (every ${marker.everySec}s) and SIGTERM the loop supervisor`
+      );
+      return;
+    }
     const r = uninstallLoop(dir);
     console.log(r.detail);
     if (r.state === 'error') {
@@ -2716,13 +2738,17 @@ function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
   }
   const everyRaw = flag(argv, '--every');
   const everySec = everyRaw === undefined ? loopCfg.everySec : Number(everyRaw);
-  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > 3600) {
+  // the marker cadence bounds are the want-marker's — the same
+  // MIN/MAX_INTERVAL_SEC every supervised entrypoint validates against
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
     console.error(
-      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to 3600s, got "${everyRaw ?? everySec}"`
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
     );
     process.exit(2);
   }
-  const r = installLoop(dir, { everySec, print: argv.includes('--print') });
+  // --dry-run is the preview verb here just like --print: plan, don't arm
+  const print = argv.includes('--print') || argv.includes('--dry-run');
+  const r = installLoop(dir, { everySec, print });
   console.log(r.detail);
   if (r.state === 'error') {
     process.exit(1);
@@ -2769,8 +2795,10 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   const broCfg = loadBroConfig(root);
   const loopCfg = broCfg.loop as LoopConfig;
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    if (argv[0] === 'install' && !argv.includes('--print')) {
-      checkBeads();
+    // install validates the configured tasks backend — a github-tasks
+    // rig has no beads to check; previews (--print/--dry-run) stay pure
+    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+      ensureTasksBackend(root, broCfg.connectors);
     }
     runLoopSched(argv, root, loopCfg);
     return;
@@ -2835,6 +2863,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       // queue, then the supervisor sleeps until the next re-scan; the
       // awaits must stay inside the loop, not fan out
       for (;;) {
+        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
         await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
         await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
       }

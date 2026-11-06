@@ -1,6 +1,11 @@
 import { js, type ConfigSection } from '@broject/core';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from './types.ts';
 
+/** The supervised cadence ceiling — the spawned `--every` lands in a
+ *  `setTimeout`, so the 32-bit-ms bound applies; the CLI's argv
+ *  validation enforces the same number. */
+const SUPERVISED_MAX_SEC = 0x7fffffff / 1000;
+
 /** `loop` config section — strings normalized, numbers must be finite
  *  non-negatives, everything else falls back to the default. */
 export const loopSection: ConfigSection<LoopConfig> = raw => {
@@ -25,9 +30,13 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
       | 'parkedKeep'
       | 'parkedTtlDays'
       | 'parkedWakeMin',
-    min = 0
+    min = 0,
+    max = Number.POSITIVE_INFINITY
   ) =>
-    typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
+    typeof obj[k] === 'number' &&
+    Number.isFinite(obj[k]) &&
+    (obj[k] as number) >= min &&
+    (obj[k] as number) <= max
       ? (obj[k] as number)
       : DEFAULT_LOOP_CONFIG[k];
   return {
@@ -37,8 +46,11 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
     model: str('model') as string,
     bootstrap: str('bootstrap') as string,
     // a sub-second re-scan cadence is a busy loop, not a supervisor —
-    // the same floor the shared want-marker bounds carry
-    everySec: num('everySec', 1),
+    // the same floor the shared want-marker bounds carry; the ceiling
+    // is the spawned supervisor's own --every bound (its sleep rides a
+    // setTimeout) — an oversized value would arm a marker the child
+    // refuses, so it falls back here instead
+    everySec: num('everySec', 1, SUPERVISED_MAX_SEC),
     stallMin: num('stallMin', 1),
     crashExitMs: num('crashExitMs'),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
@@ -64,7 +76,7 @@ loopSection.jsonSchema = js.obj({
   profile: js.str,
   model: js.str,
   bootstrap: js.str,
-  everySec: js.num(1),
+  everySec: { type: 'number', minimum: 1, maximum: SUPERVISED_MAX_SEC },
   stallMin: js.num(1),
   crashExitMs: js.num(0),
   mergeTimeoutMin: js.num(1),

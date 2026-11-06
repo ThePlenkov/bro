@@ -302,7 +302,7 @@ export function spawnDaemon(
  *  can't be verified — no /proc, cwd raced away, outside any repo —
  *  is spared: the sweep errs toward missing a standby, never toward
  *  killing a stranger. */
-function supervisionProcs(dir: string): number[] {
+function supervisionProcs(dir: string, kind?: 'drive' | 'loop'): number[] {
   const common = gitCommonDir(dir);
   if (common === null) {
     return [];
@@ -313,7 +313,17 @@ function supervisionProcs(dir: string): number[] {
     // unwriteable dirs — the default inherited PATH can contain
     // user-writable dirs (sonar S4036). The call stays one line so the
     // NOSONAR survives biome reformatting.
-    const pgrepArgs = ['-f', '(daemon run|drive|loop) --every'];
+    // one alternation per kind — `daemon run --loop --every` carries the
+    // `loop --every` pair inside it, so the loop pattern alone covers
+    // spawned and raw loop supervisors; the drive side needs its two
+    // shapes spelled out
+    const pattern =
+      kind === 'loop'
+        ? 'loop --every'
+        : kind === 'drive'
+          ? '(daemon run|drive) --every'
+          : '(daemon run|drive|loop) --every';
+    const pgrepArgs = ['-f', pattern];
     const pgrepOpts: ExecFileSyncOptionsWithStringEncoding = {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -425,23 +435,29 @@ export interface SupervisorDown {
 }
 
 /** The down path — SIGTERM the holder plus every supervision loop that
- *  could inherit its lock (standbys wait on drive.lock), then clear the
- *  armer record. `daemon down`'s core; `drive uninstall` runs the same
- *  sweep after disarming the marker. */
-export function supervisorDown(dir: string): SupervisorDown {
-  const probe = daemonProbe(dir);
-  const lprobe = loopProbe(dir);
-  const victims = new Set<number>([
-    ...(probe.live ? [probe.pid!] : []),
-    ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
-      ? [probe.recorded.pid]
-      : []),
-    ...(lprobe.live ? [lprobe.pid!] : []),
-    ...(lprobe.recorded !== null && pidAlive(lprobe.recorded.pid, lprobe.recorded.pidStart)
-      ? [lprobe.recorded.pid]
-      : []),
-    ...supervisionProcs(dir),
-  ]);
+ *  could inherit its lock (standbys wait on the kind's lock), then clear
+ *  the armer record. `daemon down` sweeps every kind; `drive|loop
+ *  uninstall` scopes the sweep to its own plane so a sibling's
+ *  supervision survives — a repo with both installed never loses the
+ *  one it didn't uninstall. */
+export function supervisorDown(
+  dir: string,
+  opts: { kind?: 'drive' | 'loop' } = {}
+): SupervisorDown {
+  const kinds = opts.kind === undefined ? (['drive', 'loop'] as const) : [opts.kind];
+  const victims = new Set<number>();
+  for (const kind of kinds) {
+    const probe = kind === 'loop' ? loopProbe(dir) : daemonProbe(dir);
+    if (probe.live) {
+      victims.add(probe.pid!);
+    }
+    if (probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)) {
+      victims.add(probe.recorded.pid);
+    }
+    for (const pid of supervisionProcs(dir, kind)) {
+      victims.add(pid);
+    }
+  }
   victims.delete(process.pid);
   for (const pid of victims) {
     try {
@@ -450,9 +466,10 @@ export function supervisorDown(dir: string): SupervisorDown {
       // already gone — SIGTERM is advisory, absence is not a failure
     }
   }
-  // every kind's armer record clears — the down sweep owns them all
+  // the sweep clears only its own kinds' armer records
   let hadRecord = false;
-  for (const state of [daemonStatePath(dir), daemonStatePath(dir, { loop: true })]) {
+  for (const kind of kinds) {
+    const state = daemonStatePath(dir, { loop: kind === 'loop' });
     if (state !== null) {
       hadRecord = hadRecord || existsSync(state);
       rmSync(state, { force: true });
@@ -644,7 +661,7 @@ export interface DriveSchedDeps {
     env?: NodeJS.ProcessEnv,
     opts?: { requireMarker?: boolean; loop?: boolean }
   ) => SupervisorUp;
-  down?: (dir: string) => SupervisorDown;
+  down?: (dir: string, opts?: { kind?: 'drive' | 'loop' }) => SupervisorDown;
 }
 
 /** The loop installer's seams — the same supervisor verbs, loop kind. */
@@ -732,7 +749,7 @@ export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveIns
   const release = upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' });
   try {
     const marker = disarmDrive(dir);
-    const down = (deps.down ?? supervisorDown)(dir);
+    const down = (deps.down ?? supervisorDown)(dir, { kind: 'drive' });
     const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0;
     return {
       state: removed ? 'removed' : 'absent',
@@ -867,7 +884,7 @@ export function uninstallLoop(dir: string, deps: LoopSchedDeps = {}): DriveInsta
   const release = upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' });
   try {
     const marker = disarmLoop(dir);
-    const down = (deps.down ?? supervisorDown)(dir);
+    const down = (deps.down ?? supervisorDown)(dir, { kind: 'loop' });
     const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0;
     return {
       state: removed ? 'removed' : 'absent',
