@@ -61,17 +61,27 @@ export function filterByMergedDate(
   if (untilMs !== null && Number.isNaN(untilMs)) {
     throw new Error(`Invalid --merged-until date: ${until}`);
   }
-  return prs.filter(pr => {
+  let undated = 0;
+  const kept = prs.filter(pr => {
     const ts = pr.mergedAt ?? pr.closedAt ?? null;
     const mergedMs = ts === null ? Number.NaN : new Date(ts).getTime();
     // no usable timestamp: a set bound must not let undated rows (e.g.
     // closed-unmerged PRs) bypass the window — only an unbounded query
     // keeps them
     if (!Number.isFinite(mergedMs)) {
+      undated += 1;
       return sinceMs === null && untilMs === null;
     }
     return (sinceMs === null || mergedMs >= sinceMs) && (untilMs === null || mergedMs <= untilMs);
   });
+  // a bound that silently drops undated rows reads as "no debt there" —
+  // surface the hole so the operator can rerun unbounded
+  if (undated > 0 && (sinceMs !== null || untilMs !== null)) {
+    console.error(
+      `debt collect: ${undated} PR(s) without a usable timestamp fell outside the merged-since/until window — rerun unbounded to include them`
+    );
+  }
+  return kept;
 }
 
 export function filterByLabels(prs: MergedPr[], required: string[]): MergedPr[] {
