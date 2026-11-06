@@ -29,6 +29,7 @@ import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
+  isEnvName,
   parseProviderEntry,
   type FleetProfile,
   type ProviderEntry,
@@ -859,6 +860,35 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
   return routes;
 }
 
+function serveUpstream(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  // a slash-only value strips to '' — that must read as unset, not as
+  // a configured base the proxy resolves every request against
+  let upstream = raw.trim();
+  while (upstream.endsWith('/')) upstream = upstream.slice(0, -1);
+  return upstream === '' ? undefined : upstream;
+}
+
+function serveApiKeyEnv(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  const name = raw.trim();
+  // the value NAMES an env var — an invalid name silently misses at
+  // resolution time, so an unparsable one drops loud like providers.*
+  // (the bad value stays out of the message — CodeQL reads anything
+  // named *key* as sensitive, and a name is all the diagnostic needs)
+  if (!isEnvName(name)) {
+    console.error(
+      'bro.config: serve.apiKeyEnv must name an env var (SCREAMING_SNAKE) — entry dropped'
+    );
+    return undefined;
+  }
+  return name;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -869,23 +899,40 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
  *  listener serves every provider's models. It accepts two spellings —
  *  an array of entry names (the route IS the entry) or a map of route →
  *  entry, so the public name can be chosen independently of the
- *  entry's own name (spec bro-jxw7p). */
+ *  entry's own name (spec bro-jxw7p).
+ *  `upstream` is the Messages-API base for the byte proxy (owned by
+ *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
+ *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
+ *  / `ANTHROPIC_*` override). */
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
+  upstream?: string;
+  apiKeyEnv?: string;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;
+    upstream?: unknown;
+    apiKeyEnv?: unknown;
   };
-  const backend =
-    typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
+  const out: {
+    backend?: string;
+    providers?: ServeProviders;
+    upstream?: string;
+    apiKeyEnv?: string;
+  } = {};
+  if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
+    out.backend = obj.backend.trim();
+  }
   const providers = providerRoutes(obj.providers);
-  // an unset backend reads as an empty bag — same shape as providers:{}
-  return {
-    ...(backend === undefined ? {} : { backend }),
-    ...(providers === undefined ? {} : { providers }),
-  };
+  if (providers !== undefined) out.providers = providers;
+  const upstream = serveUpstream(obj.upstream);
+  if (upstream !== undefined) out.upstream = upstream;
+  const apiKeyEnv = serveApiKeyEnv(obj.apiKeyEnv);
+  if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
+  // an unset section reads as an empty bag — same shape as providers:{}
+  return out;
 };
 
 serveSection.jsonSchema = js.obj({
@@ -900,6 +947,8 @@ serveSection.jsonSchema = js.obj({
     patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
     additionalProperties: false,
   }),
+  upstream: js.str,
+  apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1379,8 +1428,15 @@ export interface BroConfig {
   /** `bro serve` — the facade host's own knobs. `backend` names the acp
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
-   *  relying on env reaching every spawn path. */
-  serve: { backend?: string; providers?: ServeProviders };
+   *  relying on env reaching every spawn path. `providers` lists the
+   *  other acp entries the gateway routes to. `upstream`/`apiKeyEnv`
+   *  configure the byte proxy (env overrides and supplies the secret). */
+  serve: {
+    backend?: string;
+    providers?: ServeProviders;
+    upstream?: string;
+    apiKeyEnv?: string;
+  };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;

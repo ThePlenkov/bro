@@ -200,7 +200,7 @@ import {
   routeEventsStream,
   type EventsStreamBus,
 } from '../planes/stream.ts';
-import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
+import { fileProviderConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
 import {
   conductorConfig,
   conductorProxy,
@@ -2472,6 +2472,24 @@ function conductorLanes(cfg: ConductorConfig): string[] {
   return routeBindings(cfg).map(binding => binding.name);
 }
 
+/** The /v1 provider planes for a repo-scoped serve — the conductor's
+ *  explicit backend (BRO_PROVIDER_BACKEND / serve.backend) beats the
+ *  byte proxy's upstream+key pair, which stays the plain-HTTP fallback.
+ *  The repo's own bro.config may own upstream/apiKeyEnv — the full
+ *  merge applies; env still overrides. Kept out of the command body:
+ *  the wiring is one decision, not the command's to narrate. */
+function servePlanes(dir: string): {
+  conductorCfg: ConductorConfig | undefined;
+  providerCfg: ProviderConfig | undefined;
+} {
+  const conductorCfg = conductorConfig(process.env, dir);
+  const providerCfg =
+    conductorCfg === undefined
+      ? fileProviderConfig(process.env, () => loadBroConfig(dir))
+      : undefined;
+  return { conductorCfg, providerCfg };
+}
+
 export async function runServeCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'ensure') {
     await cmdEnsure(argv.slice(1));
@@ -2515,11 +2533,9 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
-  // the conductor answers /v1 from a configured acp provider
-  // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
-  // proxy's upstream+key pair, which stays the plain-HTTP fallback
-  const conductorCfg = conductorConfig(process.env, dir);
-  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
+  // the conductor answers /v1 from a configured acp provider — the byte
+  // proxy's upstream+key pair stays the plain-HTTP fallback
+  const { conductorCfg, providerCfg } = servePlanes(dir);
   if (conductorCfg !== undefined) {
     console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
   } else if (providerCfg !== undefined) {

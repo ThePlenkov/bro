@@ -29,6 +29,7 @@ import {
   syncSection,
   type BroPlugin,
   type ConfigDiagnostic,
+  type ConfigLayerName,
   type ConfigSection,
   type DocType,
   type FacadeMap,
@@ -1005,9 +1006,11 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
   );
 }
 
-/** loadConfig + registered plugin sections — the CLI's config entrypoint. */
-export function loadBroConfig(cwd: string = process.cwd()) {
-  return loadConfig(cwd, pluginConfigSections());
+/** loadConfig + registered plugin sections — the CLI's config entrypoint.
+ *  `only` restricts the layer scan (['global'] for host-level planes a
+ *  checkout enclosing the state dir must not re-root). */
+export function loadBroConfig(cwd: string = process.cwd(), only?: readonly ConfigLayerName[]) {
+  return loadConfig(cwd, pluginConfigSections(), only);
 }
 
 /** configDiagnostics over the full registry — core sections merged with
