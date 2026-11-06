@@ -243,6 +243,60 @@ and `policy.ts`'s one are rewritten to the same language without the
 super-linear shape, and their tests carry the cases that prove it (the
 gitdir line, the path segments, the policy's own pattern).
 
+## The review round — three findings, three fixes
+
+The bots found three things in this layer's diff, and all three are
+behaviour, not shape: the layer's promise is that the token crosses
+where the guard says it may, and that a help request never runs the
+command it names.
+
+### The redirect that carried the token
+
+`readCatalog` handed the session token to `fetch` and let `fetch`
+follow the redirects: the client forwards the request's headers to the
+hop's target, so a router that answered `302 Location:
+http://elsewhere.example.com/` would have carried `x-api-key` there —
+over cleartext if the hop chose it. The guard checked the FIRST url
+only.
+
+The fix is `packages/brouter/src/redirect.ts` — the read follows
+redirects BY HAND (`redirect: 'manual'`), one hop at a time, and every
+hop is checked against the same rule the router's own URL is checked
+against (`tokenSafeOrigin`, now exported from `router-url.ts`). A hop
+that leaves the guard is an error, not a request: the token never
+rides it. The whole read shares ONE timeout, and a redirect loop is an
+error rather than a read that never ends.
+
+The hop's URL is kept whole — its query and its fragment are the
+router's answer, not a base the catalog path is appended to. That is
+why the origin check moved OUT of `routerUrl`: the base drops its
+query (below), and a redirect target must not.
+
+### The base URL that kept its query
+
+`routerUrl` returned the URL as written, query and fragment included,
+and `readCatalog` appends `/v1/models` to it — so a router named
+`http://127.0.0.1:44927/?trace=1` was asked for
+`/?trace=1/v1/models`. The base carries a PATH and nothing else: the
+query and the fragment are dropped in `routerUrl`, the one place every
+endpoint bro builds passes through.
+
+### The help request that ran the command
+
+`help <plugin>` is rewritten to `<plugin> --help`, and the rewrite
+APPENDED the token: `help <plugin> <args>` became `<plugin> <args>
+--help`. The dispatch handles help as the FIRST token — so a plugin
+that reads its own first argument as a sub-command ran the sub-command
+instead of answering with its help.
+
+The fix is one rule at the two boundaries where a plugin's or a
+member's argv is handed over: the help token LEADS that argv
+(`helpFirst`). The token counts only before a `--` separator — after it
+everything is verbatim payload. So a help request can no longer reach
+a command's side effects, whatever the command's own dispatcher looks
+at first, and the direct spelling (`<plugin> <args> --help`) gets the
+same guarantee.
+
 ## Verify
 
 1. `cs review` on every file this layer touches — no finding, not just a
@@ -261,16 +315,25 @@ gitdir line, the path segments, the policy's own pattern).
    else — the tests cover the refusal (a cleartext remote host, a scheme that
    is not http(s), a URL that is not a URL) and the loopback and https
    routers that must keep working.
-8. The lint plane: Codacy runs clean on this layer's diff. The token's
-   guard reads the URL's protocol and host — a pattern is a way to starve
-   a caller on, and the debt plane's rule never needed one — and every
-   table in the arc's markdown sits on its header's columns under MD060's
-   aligned style.
+8. The hop: a redirect to a host the guard does not know is refused BEFORE
+   the request — the token never rides it — and a redirect the guard allows
+   is followed with the token. A redirect loop is an error.
+9. The base: no query and no fragment survive `routerUrl`, and the catalog
+   read asks `/v1/models?limit=N` — not the base URL's query.
+10. The help request: `help <plugin>` and `<plugin> <args> --help` answer
+    with the plugin's help and never run the plugin; the same for a member
+    reached through its group.
+11. The lint plane: Codacy runs clean on this layer's diff. The token's
+    guard reads the URL's protocol and host — a pattern is a way to starve
+    a caller on, and the debt plane's rule never needed one — and every
+    table in the arc's markdown sits on its header's columns under MD060's
+    aligned style.
 
 ## Not in this layer
 
-- **The arc's behaviour.** Nothing here changes what a command does; the
-  splits are where the logic lives, not what it says.
+- **The arc's behaviour, except where the review round says otherwise.**
+  The splits are where the logic lives, not what it says; the three
+  findings above are behaviour fixes, and they are named as such.
 - **The smart-routes arc's findings.** They were fixed in PR #922 itself
   (SonarCloud is green there); this layer is the arc's own debt.
 - **`config.ts`'s own debt.** `actSection`, `parseSinkDef`, `meshPeerEntry`,
