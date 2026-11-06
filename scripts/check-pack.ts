@@ -6,7 +6,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 const root = join(fileURLToPath(import.meta.url), '..', '..');
 const packDir = join(root, 'packages/pack');
@@ -43,31 +43,24 @@ if (
   console.error('packages/pack/pack.json is stale — run node scripts/gen-pack.ts');
   process.exit(1);
 }
-// Quick check: try to see if npm pack --dry-run would include it (best effort)
-try {
-  const out = execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts'], {
-    cwd: packDir,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }) as string;
-  const err = (out as any)?.toString?.() ?? String(out);
-  // npm writes to stderr in some cases; try to capture both
-  try {
-    const { execFileSync: ex } = await import('node:child_process');
-  } catch {}
-  if (!err.includes('pack.json') && !(out + '').includes('pack.json')) {
-    // also check stderr by running differently
-    const res = execFileSync('sh', ['-c', 'npm pack --dry-run --ignore-scripts 2>&1'], {
-      cwd: packDir,
-      encoding: 'utf8',
-    });
-    if (!String(res).includes('pack.json')) {
-      console.error('npm pack --dry-run does not list pack.json in tarball');
-      process.exit(1);
-    }
-  }
-  console.error('check:pack ok');
-} catch (e) {
-  // Don't fail hard if npm not fully configured in this env; just warn
+// Quick check: npm pack --dry-run should include pack.json (best effort).
+// Use a fixed PATH so the subprocess is not subject to PATH injection (S4036).
+const safeEnv = {
+  ...process.env,
+  PATH: '/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin',
+};
+const npmRes = spawnSync('npm', ['pack', '--dry-run', '--ignore-scripts'], {
+  cwd: packDir,
+  encoding: 'utf8',
+  env: safeEnv,
+});
+const npmOutput = `${npmRes.stdout ?? ''}\n${npmRes.stderr ?? ''}`;
+if (npmRes.error || npmRes.status !== 0) {
+  // Don't fail hard if npm is not fully configured in this env; just warn.
   console.error('check:pack: npm pack --dry-run skipped/failed (non-blocking in this env)');
+} else if (!npmOutput.includes('pack.json')) {
+  console.error('npm pack --dry-run does not list pack.json in tarball');
+  process.exit(1);
+} else {
+  console.error('check:pack ok');
 }
