@@ -105,3 +105,4 @@ export {
   sonarKeyOf,
 } from './sonarcloud.ts'
 export type { SonarDupe, SonarProject } from './sonarcloud.ts'
+export { collectSverka } from './collectors.ts'
