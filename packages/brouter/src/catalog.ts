@@ -56,6 +56,31 @@ interface CatalogPayload {
   data?: unknown;
 }
 
+/** A row's text field — trimmed, or empty when the row names no
+ *  string there. */
+function trimmedField(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+/** One catalog row → the served model it names, or undefined when the
+ *  row names none. A row without a usable id is not a model. */
+function servedRow(row: unknown): ServedModel | undefined {
+  if (typeof row !== 'object' || row === null) return undefined;
+  const bag = row as Record<string, unknown>;
+  const id = trimmedField(bag.id);
+  if (id === '') return undefined;
+  const label = trimmedField(bag.display_name);
+  const description = trimmedField(bag.description);
+  const source = modelSource(id);
+  return {
+    id,
+    ...(label === '' ? {} : { label }),
+    ...(description === '' ? {} : { description }),
+    ...(source === undefined ? {} : { source }),
+  };
+}
+
 /** The catalog rows → the served models. A row without a usable id is
  *  not a model: it is dropped, and the count of what was dropped rides
  *  the answer (a short catalog must be distinguishable from a whole
@@ -66,24 +91,12 @@ export function servedModels(payload: unknown): { models: ServedModel[]; dropped
   const models: ServedModel[] = [];
   let dropped = 0;
   for (const row of rows) {
-    if (typeof row !== 'object' || row === null) {
+    const model = servedRow(row);
+    if (model === undefined) {
       dropped++;
       continue;
     }
-    const bag = row as Record<string, unknown>;
-    const id = typeof bag.id === 'string' ? bag.id.trim() : '';
-    if (id === '') {
-      dropped++;
-      continue;
-    }
-    const label = typeof bag.display_name === 'string' ? bag.display_name.trim() : '';
-    const description = typeof bag.description === 'string' ? bag.description.trim() : '';
-    models.push({
-      id,
-      ...(label === '' ? {} : { label }),
-      ...(description === '' ? {} : { description }),
-      ...(modelSource(id) === undefined ? {} : { source: modelSource(id) }),
-    });
+    models.push(model);
   }
   return { models, dropped };
 }

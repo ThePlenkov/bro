@@ -15,7 +15,13 @@ export function deprecatedFlag(argv: string[], name: string, advice?: string): v
 /** A value flag's argument must exist and not look like another option. */
 export function flagValue(argv: string[], i: number, name: string): string {
   const v = argv[i + 1];
-  if (v === undefined || v.trim() === '' || v.startsWith('--')) {
+  // the value must exist and be non-empty
+  if (!v?.trim()) {
+    console.error(`error: ${name} requires a value`);
+    process.exit(2);
+  }
+  // and it must not look like another option
+  if (v.startsWith('--')) {
     console.error(`error: ${name} requires a value`);
     process.exit(2);
   }
@@ -44,20 +50,22 @@ export function flag(argv: string[], name: string): string | undefined {
     process.exit(2);
   }
   const eq = occurrences[0]!;
-  if (eq.startsWith(`${name}=`)) {
-    const v = eq.slice(name.length + 1);
-    if (v === '') {
-      console.error(`error: ${name} requires a value`);
-      process.exit(2);
-    }
-    return v;
+  if (!eq.startsWith(`${name}=`)) {
+    return flagValue(argv, argv.indexOf(name), name);
   }
-  return flagValue(argv, argv.indexOf(name), name);
+  // the value rides the token itself — an empty one is a usage error,
+  // never a silent drop
+  const v = eq.slice(name.length + 1);
+  if (v === '') {
+    console.error(`error: ${name} requires a value`);
+    process.exit(2);
+  }
+  return v;
 }
 
 /** Repeatable flags collect every occurrence. Matches both spellings,
- * `--name value` and `--name=value`, for parity with `flag` — a missed
- * `=` form would silently drop values instead of failing closed. */
+ *  `--name value` and `--name=value`, for parity with `flag` — a missed
+ *  `=` form would silently drop values instead of failing closed. */
 export function flagAll(argv: string[], name: string): string[] {
   argv = flagZone(argv);
   const out: string[] = [];
@@ -66,33 +74,51 @@ export function flagAll(argv: string[], name: string): string[] {
     if (arg === name) {
       out.push(flagValue(argv, i, name));
       i += 1;
-    } else if (arg.startsWith(`${name}=`)) {
-      const v = arg.slice(name.length + 1);
-      if (v === '') {
-        console.error(`error: ${name} requires a value`);
-        process.exit(2);
-      }
-      out.push(v);
+      continue;
     }
+    if (!arg.startsWith(`${name}=`)) continue;
+    // the value rides the token itself — an empty one is a usage error,
+    // never a silent drop
+    const v = arg.slice(name.length + 1);
+    if (v === '') {
+      console.error(`error: ${name} requires a value`);
+      process.exit(2);
+    }
+    out.push(v);
   }
   return out;
 }
 
-/** What one `--…` token is: 'value' consumes a value (inline via `=`,
- *  else the next token), 'bool' is a known no-value flag, 'drop' is an
- *  unrecognized flag lenient callers swallow, 'positional' isn't a
- *  flag at all. `strict` turns an unrecognized flag into a usage error
- *  instead of a silent drop. */
+/** What one `--…` token is: 'value' consumes the NEXT token, 'inline'
+ *  carries its own value after `=`, 'bool' is a known no-value flag,
+ *  'drop' is an unrecognized flag lenient callers swallow, 'positional'
+ *  isn't a flag at all. `strict` turns an unrecognized flag into a usage
+ *  error instead of a silent drop — and it holds a value flag to the same
+ *  rule: its value must exist and must not look like another option. */
 function flagTokenKind(
-  arg: string,
+  argv: string[],
+  i: number,
   valueFlags: ReadonlySet<string>,
   opts?: { boolFlags?: ReadonlySet<string>; strict?: boolean }
-): 'value' | 'bool' | 'drop' | 'positional' {
+): 'value' | 'inline' | 'bool' | 'drop' | 'positional' {
+  const arg = argv[i]!;
   if (!arg.startsWith('--')) {
     return 'positional';
   }
   const name = arg.split('=', 1)[0]!;
   if (valueFlags.has(name)) {
+    if (arg !== name) {
+      return 'inline';
+    }
+    // the value is the next token — under strict it must exist and must
+    // not look like another option
+    if (opts?.strict === true) {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        console.error(`error: option ${name} requires a value`);
+        process.exit(2);
+      }
+    }
     return 'value';
   }
   if (opts?.boolFlags?.has(name) === true) {
@@ -136,22 +162,13 @@ export function positionals(
       verbatim = true;
       continue;
     }
-    const kind = flagTokenKind(arg, valueFlags, opts);
+    const kind = flagTokenKind(argv, i, valueFlags, opts);
     if (kind === 'positional') {
       out.push(arg);
       continue;
     }
-    // `--name value` — the value is the next token; `--name=value` is
-    // self-contained
-    if (kind === 'value' && arg === arg.split('=', 1)[0]) {
-      const next = argv[i + 1];
-      // strict: `--agent --json` must not swallow `--json` as the
-      // value — a missing or flag-looking value is a usage error,
-      // never a silent misconfig
-      if (opts?.strict === true && (next === undefined || next.startsWith('--'))) {
-        console.error(`error: option ${arg} requires a value`);
-        process.exit(2);
-      }
+    // 'value' takes the next token with it; 'inline' carries its own
+    if (kind === 'value') {
       i += 1;
     }
   }
