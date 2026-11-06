@@ -22,6 +22,7 @@ import {
   inside,
   installFakeBd,
   installFakeHost,
+  killRunHandles,
   readHostState,
   runCli,
   writeHostState,
@@ -452,6 +453,30 @@ describe('bro loop e2e', () => {
     });
   });
 
+  test('a throwing claim read degrades to a held push — never a supervisor death (bro-etimout)', () => {
+    // a store wedged past bd's 15s budget throws out of claimClump's
+    // bd ready — uncaught it killed the loop supervisor three times in
+    // one day (raw spawnSync ETIMEDOUT, exit 1). The claim read must
+    // degrade: warn + hold pushes, then retry — the SAME run lands the
+    // bead once the store answers again. A failed read is not an empty
+    // queue: drained stays unset, so 'done' never lies either way.
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'slow store' }]);
+    // one injected failure — the first claim read throws, the retry
+    // after the hold succeeds
+    f.env.FAKE_BD_READY_FAILS = '1';
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      // the message spans the wrapped spawn error (multi-line) — anchor
+      // the two halves instead of one dot-all
+      assert.match(r.stdout, /loop: claim read failed — [\s\S]*?holding pushes for [\d.]+s/);
+      // the same run recovered and finished the pipeline — exit 0, no
+      // raw err.message death at the supervisor's top level
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /done — 1 landed/);
+      assertLandedBead(f.db, 'fx-a');
+    });
+  });
+
   test('agent exit != 0 without a PR → bead reopened + noted, worktree kept', () => {
     // crashExitMs:0 disables the crash-park guard — this tests the
     // legacy reopen path for a genuine mid-work failure
@@ -839,6 +864,9 @@ describe('bro loop liveness', () => {
           /* already gone */
         }
       }
+      // a fork-style scope would name the payload under a pid the log
+      // never saw — the handles cover either topology (bro-ybo8z)
+      killRunHandles(f.main);
       rmSync(f.root, { recursive: true, force: true });
     }
   });
