@@ -59,6 +59,34 @@ const planRun = definePlugin({
   },
 });
 
+/** A plugin that RUNS unless the help token leads its argv — the
+ *  bootstrap's promise: a help request never runs the command it
+ *  names, so the token has to arrive where every dispatcher looks
+ *  first. */
+const runner = definePlugin({
+  name: 'runner',
+  summary: 'a plugin that runs unless help leads',
+  run: (argv) => {
+    console.log(argv[0] === '--help' ? 'runner-help' : 'runner-ran');
+  },
+});
+
+/** The same rule for a MEMBER — the bootstrap hands the member's argv
+ *  too, so the member is the one that must not run. */
+const actor = definePlugin({
+  name: 'act',
+  summary: 'a member that runs unless help leads',
+  run: (argv) => {
+    console.log(argv[0] === '--help' ? 'act-help' : 'act-ran');
+  },
+});
+
+const shop = defineCommand({
+  name: 'shop',
+  summary: 'a group with a picky member',
+  plugins: [actor],
+});
+
 const db = singleMember({
   name: 'db',
   summary: 'the database plane',
@@ -88,10 +116,11 @@ const cli = defineCommand({
   name: 'fixture',
   summary: 'the fixture CLI',
   version: '9.9.9',
-  plugins: [flat, planHost],
+  plugins: [flat, planHost, runner],
   commands: [
     db,
     group,
+    shop,
     defineCommand({ name: 'plan', summary: 'the plan plane', plugins: [planRun] }),
     late,
   ],

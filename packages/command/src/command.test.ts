@@ -99,6 +99,33 @@ describe('the command bootstrap', () => {
     assert.match(r.stdout, /db/);
   });
 
+  test('help <plugin> never RUNS the plugin — the help token leads its argv', async () => {
+    const r = await run(['help', 'runner', 'extra']);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /runner-help/);
+    assert.doesNotMatch(r.stdout, /runner-ran/);
+  });
+
+  test('a help token anywhere leads the plugin argv — the command never runs', async () => {
+    const r = await run(['runner', 'extra', '--help']);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /runner-help/);
+    assert.doesNotMatch(r.stdout, /runner-ran/);
+  });
+
+  test('the plugin still runs when no help token is in the argv', async () => {
+    const r = await run(['runner', 'extra']);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /runner-ran/);
+  });
+
+  test('help <group> <member> never RUNS the member', async () => {
+    const r = await run(['help', 'shop', 'act', 'extra']);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /act-help/);
+    assert.doesNotMatch(r.stdout, /act-ran/);
+  });
+
   test('--version prints the version', async () => {
     const r = await run(['--version']);
     assert.equal(r.code, 0);
