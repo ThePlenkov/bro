@@ -449,7 +449,10 @@ export function supervisorDown(
    *  and every repo-scoped standby that could inherit the lock. */
   const victimsOf = (kind: 'drive' | 'loop'): number[] => {
     const probe = kind === 'loop' ? loopProbe(dir) : daemonProbe(dir);
-    const pids = probe.live ? [probe.pid!] : [];
+    // live-but-pidless probes exist (e.g. a lock held by an
+    // unresolvable holder) — a bare `!` would push undefined into the
+    // kill list and count a TypeError as "already gone"
+    const pids = probe.live && probe.pid !== undefined ? [probe.pid] : [];
     if (probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)) {
       pids.push(probe.recorded.pid);
     }
