@@ -96,7 +96,11 @@ export async function dispatchRead(
   name: string,
   args?: Record<string, unknown>
 ): Promise<unknown> {
-  const fn = reads[name];
+  // own-enumerable entries only — reads['__proto__'] would fetch
+  // Object.prototype (a thrown TypeError on invoke) and 'constructor'
+  // would run Object(args); a client-supplied name must never reach
+  // either. Key compare, never a dynamic property read.
+  const fn = Object.entries(reads).find(([k]) => k === name)?.[1];
   if (fn === undefined) {
     throw new PlaneVerbError(
       plane,
