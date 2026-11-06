@@ -127,6 +127,17 @@ export function hostFor(dir: string): string {
 
 // --- MR rows -----------------------------------------------------------------
 
+/** Terminal-state gate for a scanned MR — merged rows carry merged_at,
+ *  closed-unmerged rows carry state=closed + a closed_at stamp (an
+ *  undated close would poison downstream date sorting). */
+const scannableMr = (mr: MrRow): boolean => {
+  const state = (mr.state ?? '').toUpperCase();
+  if (state === 'MERGED') {
+    return mr.merged_at != null;
+  }
+  return state === 'CLOSED' && mr.closed_at != null;
+};
+
 interface MrRow {
   iid: number;
   state?: string; // opened | locked | merged | closed
@@ -563,16 +574,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
    *  downstream date sorting); the caller's serial path reports them. */
   async function scanOneMr(t: PrTarget): Promise<MergedPrScan | null> {
     const mr = await glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts());
-    const stateU = (mr.state ?? '').toUpperCase();
-    if (stateU === 'MERGED') {
-      if (!mr.merged_at) {
-        return null;
-      }
-    } else if (stateU === 'CLOSED') {
-      if (!mr.closed_at) {
-        return null;
-      }
-    } else {
+    if (!scannableMr(mr)) {
       return null;
     }
     const threads = toThreads(
