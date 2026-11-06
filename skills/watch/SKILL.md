@@ -1,6 +1,7 @@
 ---
+
 name: watch
-description: "Use when supervising parallel convoys/agents — 'watch the fleet', 'what needs attention', a monitor loop over mols/PRs. Thin wrapper over the bro CLI: `bro review watch` is the deterministic heartbeat — one snapshot of molecules, PR exit gates, and the fleet. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when supervising parallel convoys/agents — 'watch the fleet', 'what needs attention', a monitor loop over mols/PRs, or a read-only watchdog tick over a lane ('watch the lane', rate walls, resets). Thin wrapper over the bro CLI: `bro review watch` is the deterministic heartbeat — one snapshot of molecules, PR exit gates, and the fleet. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /watch (bro)
@@ -13,14 +14,14 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro review watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
-| `bro review watch --every N --for S` | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
-| `bro review watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
-| `bro review watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
-| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
-| `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
+| Command                                          | What it does                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bro review watch [--once]`                      | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows                                                                                                                                                                                                                                   |
+| `bro review watch --every N --for S`             | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
+| `bro review watch --notify`                      | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session                                                                                                                                                                                        |
+| `bro review watch --json`                        | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}`                                                                                                                                                                                                                                                                           |
+| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed                                                                                                    |
+| `bro review watch uninstall`                     | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own                                                                                                                                                                                                                                                       |
 
 Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
 last-known-state file. Mailbox drops expire after ~1h; this file does
@@ -75,6 +76,53 @@ context), never an inference from whether a session was polled.
 - **Report progress in words, not IDs.** When relaying snapshot state
   to the user, translate every code: `bro-mol-3n2` → "the notify
   connector molecule", `bro-mol-0io` → "the `bro review watch` molecule".
-  A status line must say what the agent is *doing* and what just
-  *landed* ("PR for X merged, session moved to Y") — bare mol/bead/PR
+  A status line must say what the agent is _doing_ and what just
+  _landed_ ("PR for X merged, session moved to Y") — bare mol/bead/PR
   IDs alone are not a report. IDs may appear in parentheses.
+
+## Watchdog tick (lane watch between turns)
+
+When a session supervises a lane over long windows (rate walls, model
+resets, queue refills), each inspection is a **bounded read-only tick** —
+usually a subagent handed the brief below — that reports facts and never
+acts. The session chains the ticks; the tick itself only reads.
+
+**Read-only contract.** `bro`/`gh`/`ls`/`tail`/`ps`/`stat`/`find` and
+`systemctl --user is-active|show` only. No kill, start, restart or
+respawn — not even on a rate-limit: the tick says `RATE-LIMIT: park
+(+reset …at HH:MM UTC)` quoting the reset time from the error text, and
+the _operator_ acts. A spawn that died into a wall is normal
+constatation, not a failure to fix.
+
+**Anti-fabrication.** Every fact comes from command output produced
+_this tick_ — never from memory or the previous report. Sync clocks once
+per snapshot (`date -u` vs the `Date:` header of a `gh api` response).
+Merges, PR states and counts come only from gh output. The window's
+boundary is the timeout, not what the tick meant to see.
+
+**PR counting and classification.** Count with `gh pr list --state open
+--json number --limit 100 --jq 'length'` — the default limit (30) and
+`gh api pulls` without `per_page` both undercount. Classify by
+`headRefName`: `loop/*` and `fix/bro-*` are ours (the fleet), everything
+else is foreign — report two numbers (fleet merges / total). A fleet
+merge counts only from gh's merged state, corroborated by the loop log's
+merge line — never from a branch disappearing.
+
+**Baselines at tick start.** Record before waiting: the exit-file
+boundary (`find <git-common>/bro/agents -name '*.exit' -newermt '<now>'`),
+the PR count, and the supervisor pids/unit. Worker logs are append-only —
+an old rate line is history; a fresh wall must be dated after the
+worker's spawn. Liveness is the pidfile or unit, never a grep over `ps`:
+`ps -p $(cat <git-common>/bro/loop.pid)`, `systemctl --user is-active
+<loop-unit>`; a climbing `NRestarts` means the auto-restart is working —
+constatation, not an alarm.
+
+**Bounded wait.** Poll 60–90 s (8–10 min across a long reset window)
+and stop at the first of: a new exit file (classify rate vs clean code),
+PR count changed (re-verify with numbers + branches), a supervisor down,
+a new spawn in the loop log, or the budget. Sleep past a reset to
+boundary + 30 s instead of hopping every minute. Answer: `WAKE|TIMEOUT`,
+lane state, wake reason, PR count (+classification), anomalies — then
+the next tick's plan carrying the new baselines. Cap refusals, foreign
+devin sessions, ETIMEDOUT and store-sync warnings are background — never
+a wake.
