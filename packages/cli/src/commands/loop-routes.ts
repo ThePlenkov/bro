@@ -108,13 +108,15 @@ export async function routeTableLane(opts: {
   if (route === undefined) {
     return undefined;
   }
-  const head = route.chain[0];
+  // the SURVIVING chain, not the route's own: the resolver drops the
+  // walled entries, and the lane must not point at one of them
+  const head = decision.chain[0];
   if (head === undefined) {
     return undefined;
   }
   return {
     class: route.name,
-    chain: route.chain,
+    chain: decision.chain,
     onWall: wallPolicy(route, opts.priority),
     provider: head.provider,
     ...(head.model === undefined ? {} : { model: head.model }),

@@ -231,6 +231,11 @@ function chainEntry(raw: unknown, at: TablePath, problems: RouteProblems): Chain
     return undefined;
   }
   const model = chainModel(raw.model, at, problems);
+  if (raw.model !== undefined && model === undefined) {
+    // the model was there and was bad: the entry is dropped, never
+    // degraded into a bare provider — that would change the route
+    return undefined;
+  }
   return model === undefined ? { provider } : { provider, model };
 }
 

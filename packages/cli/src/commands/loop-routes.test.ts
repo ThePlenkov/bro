@@ -4,10 +4,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { SpawnError } from '@broject/core';
+import { migrateStore, openStore, recordLimit, routerStorePath } from '@broject/router-store';
 import { routeTableLane } from './loop-routes.ts';
 
 const scratch = mkdtempSync(join(tmpdir(), 'bro-loop-routes-'));
+// the ledger is the operator's own — the test's state dir keeps it out
+process.env['XDG_STATE_HOME'] = join(scratch, 'state');
 after(() => rmSync(scratch, { recursive: true, force: true }));
+
+/** A wall on one lane — the ledger says that model is rate-limited. */
+async function wall(provider: string, model: string): Promise<void> {
+  const handle = openStore(routerStorePath());
+  assert.ok(handle.ok);
+  migrateStore(handle.db);
+  await recordLimit(handle.db, {
+    provider,
+    model,
+    resetAt: Date.now() + 60_000,
+    reason: 'rate-limited',
+    source: 'devin',
+    seenAt: Date.now(),
+  });
+  handle.close();
+}
 
 /** A route table on disk — the operator's own file. */
 function tableFile(body: string): string {
@@ -106,4 +125,26 @@ test('the verdict rides with the lane — the reasons do not die', async () => {
 test('the health rides with the lane — the walls are part of the why', async () => {
   const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
   assert.deepEqual(routed?.snapshot, {});
+});
+
+test('a walled head drops out — the lane lands on the next entry', async () => {
+  await wall('walled-acp', 'm1');
+  const table = tableFile(
+    [
+      'kind = "route"',
+      'version = 1',
+      '',
+      '[routes.sweep]',
+      'match = { type = "sweep" }',
+      'chain = [{ provider = "walled-acp", model = "m1" }, { provider = "kilo-free" }]',
+      '',
+    ].join('\n')
+  );
+  const routed = await routeTableLane({ table, label: 'sweep' });
+  assert.equal(routed?.provider, 'kilo-free', 'the walled head is not the lane');
+  assert.deepEqual(
+    routed?.decision.dropped.map(d => d.entry.provider),
+    ['walled-acp'],
+    'the dropped entry rides with the verdict'
+  );
 });
