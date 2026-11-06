@@ -8,7 +8,8 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ghJson } from '@broject/core'
 import type { DebtPriority, DebtRecord } from './types.ts'
 import { bodyPreview, deriveArea, fingerprint } from './text.ts'
@@ -325,6 +326,14 @@ function findSarifFiles(root: string): { files: string[]; complete: boolean; rea
         'no .sverka/artifacts or .sverka/sarif directory found — import a completed sverka run first (bro check --evaluate or copy *.sarif into .sverka/artifacts)',
     }
   }
+  if (out.length === 0) {
+    return {
+      files: [],
+      complete: false,
+      reason:
+        'no .sarif files found in .sverka/artifacts or .sverka/sarif — import a completed sverka run first',
+    }
+  }
   return { files: [...new Set(out)], complete: true }
 }
 
@@ -334,59 +343,123 @@ export function collectSverka(ctx: CollectCtx): DebtRecord[] {
   if (!found.complete) {
     throw new SourceSkipped(found.reason ?? 'incomplete sverka SARIF snapshot')
   }
-  const out: DebtRecord[] = []
-  for (const file of found.files) {
-    let raw: string
+  return found.files.flatMap((file) => collectSarifFile(ctx, root, file))
+}
+
+/** One SARIF file → records. Anything unreadable or malformed throws
+ *  SourceSkipped: a partial snapshot must never reach the resolve sweep
+ *  looking like "all sverka findings fixed upstream". */
+function collectSarifFile(ctx: CollectCtx, root: string, file: string): DebtRecord[] {
+  let raw: string
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch (err) {
+    throw new SourceSkipped(
+      `failed reading SARIF ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
+    )
+  }
+  const log = parseSarif(file, raw)
+  const relFile = relative(root, file)
+  return log.runs.flatMap((run) => sarifRunRecords(ctx, run, relFile, root))
+}
+
+/** JSON.parse can yield null/primitives too — validate before touching
+ *  `.runs` so a bad snapshot always lands as SourceSkipped, not TypeError. */
+function parseSarif(file: string, raw: string): { runs: SarifRun[] } {
+  let log: unknown
+  try {
+    log = JSON.parse(raw)
+  } catch (err) {
+    throw new SourceSkipped(
+      `invalid SARIF JSON in ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
+    )
+  }
+  if (log === null || typeof log !== 'object' || !Array.isArray((log as SarifLog).runs)) {
+    throw new SourceSkipped(`SARIF in ${file} has no runs array — refusing partial snapshot`)
+  }
+  return log as { runs: SarifRun[] }
+}
+
+/** SARIF artifact URIs are URIs, not repo paths — `file:///abs/x.ts` and
+ *  percent-encoded `a%20b.ts` both land here. Normalize to a
+ *  checkout-relative path so area labels and bead metadata see the real
+ *  source path; a URI outside the root keeps its decoded filesystem path. */
+function sarifUriToPath(uri: string, root: string): string {
+  if (uri === '') return ''
+  if (uri.startsWith('file://')) {
     try {
-      raw = readFileSync(file, 'utf8')
-    } catch (err) {
-      throw new SourceSkipped(
-        `failed reading SARIF ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
-      )
-    }
-    let log: SarifLog
-    try {
-      log = JSON.parse(raw) as SarifLog
-    } catch (err) {
-      throw new SourceSkipped(
-        `invalid SARIF JSON in ${file} — ${err instanceof Error ? err.message : String(err)}; refusing partial snapshot`
-      )
-    }
-    if (!Array.isArray(log.runs)) {
-      throw new SourceSkipped(`SARIF in ${file} has no runs array — refusing partial snapshot`)
-    }
-    const runs = log.runs
-    for (const run of runs) {
-      const tool = run.tool?.driver?.name ?? 'sverka'
-      const results = Array.isArray(run.results) ? run.results : []
-      for (const res of results) {
-        if (!res || typeof res !== 'object') continue
-        const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown'
-        const loc = res.locations?.[0]?.physicalLocation
-        const uri = loc?.artifactLocation?.uri ?? ''
-        const line = typeof loc?.region?.startLine === 'number' ? loc.region.startLine : null
-        const msg =
-          typeof res.message?.text === 'string' && res.message.text !== '' ? res.message.text : ruleId
-        // Stable identity: source + tool + rule + file/line + fingerprint of message/body.
-        // external_ref in beads = thread_id; ledger upserts by thread_id.
-        const threadId = `sverka:${tool}:${ruleId}:${uri}:${line ?? 0}:${fingerprint({ body: msg, path: uri })}`
-        out.push(
-          baseRecord(ctx, {
-            threadId,
-            url: file,
-            priority: sarifLevelToPriority(res.level),
-            path: uri,
-            line,
-            author: tool,
-            body: `[${res.level ?? 'warning'}] ${ruleId}: ${msg}`,
-            createdAt: ctx.harvestedAt,
-            source: 'sverka',
-          })
-        )
-      }
+      const abs = fileURLToPath(uri)
+      const rel = relative(root, abs)
+      return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : abs
+    } catch {
+      return uri
     }
   }
-  return out
+  try {
+    return decodeURIComponent(uri)
+  } catch {
+    return uri // malformed percent-encoding — keep the raw reference
+  }
+}
+
+function sarifRunRecords(
+  ctx: CollectCtx,
+  run: SarifRun,
+  relFile: string,
+  root: string
+): DebtRecord[] {
+  if (run === null || typeof run !== 'object') return []
+  const tool = run.tool?.driver?.name ?? 'sverka'
+  // `results` may be absent (a clean run legitimately reports nothing) but a
+  // present non-array value is malformed — silently dropping it would read
+  // as "findings fixed upstream" to the resolve sweep.
+  if (run.results !== undefined && !Array.isArray(run.results)) {
+    throw new SourceSkipped(
+      `SARIF run in ${relFile} has a non-array results value — refusing partial snapshot`
+    )
+  }
+  const results = run.results ?? []
+  return results
+    .map((res) => sarifResultRecord(ctx, tool, res, relFile, root))
+    .filter((r): r is DebtRecord => r !== null)
+}
+
+function sarifResultRecord(
+  ctx: CollectCtx,
+  tool: string,
+  res: SarifResult,
+  relFile: string,
+  root: string
+): DebtRecord | null {
+  if (res === null || typeof res !== 'object') return null
+  const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown'
+  const loc = res.locations?.[0]?.physicalLocation
+  const uri = sarifUriToPath(loc?.artifactLocation?.uri ?? '', root)
+  const line = typeof loc?.region?.startLine === 'number' ? loc.region.startLine : null
+  const msg =
+    typeof res.message?.text === 'string' && res.message.text !== '' ? res.message.text : ruleId
+  // Stable identity: source + tool + rule + artifact location + source SARIF
+  // file + message fingerprint. Segments are percent-encoded — `:` is legal
+  // inside ruleIds/URIs and must never act as a field delimiter. relFile
+  // scopes identity per artifact file so identical findings reported by two
+  // different snapshots stay distinct rows instead of silently merging.
+  // external_ref in beads = thread_id; ledger upserts by thread_id.
+  const seg = (s: string): string => encodeURIComponent(s)
+  const threadId = `sverka:${seg(tool)}:${seg(ruleId)}:${seg(uri)}:${line ?? 0}:${seg(relFile)}:${fingerprint({ body: msg, path: uri })}`
+  return baseRecord(ctx, {
+    threadId,
+    // No navigable URL exists for a local artifact — the machine-local path
+    // would be a dead link everywhere else, so the field stays empty and the
+    // repo-relative SARIF file rides in the body for provenance instead.
+    url: '',
+    priority: sarifLevelToPriority(res.level),
+    path: uri,
+    line,
+    author: tool,
+    body: `[${res.level ?? 'warning'}] ${ruleId}: ${msg} (${relFile})`,
+    createdAt: ctx.harvestedAt,
+    source: 'sverka',
+  })
 }
 
 // --- dependabot -------------------------------------------------------------

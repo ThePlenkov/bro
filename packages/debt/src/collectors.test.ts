@@ -254,6 +254,142 @@ describe('collectSverka', () => {
       assert.equal(a[0]!.path, 'src/a.ts')
       assert.equal(a[0]!.author, 'eslint')
       assert.match(a[0]!.thread_id, /^sverka:eslint:no-unused-vars:/)
+      // Local artifact path is provenance, not a navigable URL.
+      assert.equal(a[0]!.thread_url, '')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('artifacts dir without .sarif files skips (empty result would false-resolve)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-nosarif-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'notes.txt'), 'not sarif')
+      assert.throws(
+        () => collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir }),
+        (e: unknown) => e instanceof SourceSkipped
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('non-object SARIF JSON skips instead of TypeError', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-null-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'null.sarif'), 'null')
+      assert.throws(
+        () => collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir }),
+        (e: unknown) => e instanceof SourceSkipped
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('identical finding in two SARIF files keeps distinct thread_ids', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-dupe-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      const sarif = JSON.stringify({
+        runs: [
+          {
+            tool: { driver: { name: 'eslint' } },
+            results: [
+              {
+                ruleId: 'no-unused-vars',
+                message: { text: 'x is unused' },
+                locations: [
+                  { physicalLocation: { artifactLocation: { uri: 'src/a.ts' }, region: { startLine: 3 } } },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'a.sarif'), sarif)
+      writeFileSync(join(dir, '.sverka', 'artifacts', 'b.sarif'), sarif)
+      const rows = collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir })
+      assert.equal(rows.length, 2)
+      assert.notEqual(rows[0]!.thread_id, rows[1]!.thread_id)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('colons inside SARIF fields cannot collide thread_ids', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-colon-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      // Same file, two runs: naive `tool:ruleId` concat makes 'a'+'b:c' and
+      // 'a:b'+'c' identical — percent-encoding keeps the segments unambiguous.
+      const run = (tool: string, ruleId: string) => ({
+        tool: { driver: { name: tool } },
+        results: [
+          {
+            ruleId,
+            message: { text: 'm' },
+            locations: [{ physicalLocation: { artifactLocation: { uri: 'f.ts' } } }],
+          },
+        ],
+      })
+      writeFileSync(
+        join(dir, '.sverka', 'artifacts', 'r.sarif'),
+        JSON.stringify({ runs: [run('a', 'b:c'), run('a:b', 'c')] })
+      )
+      const rows = collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir })
+      assert.equal(rows.length, 2)
+      assert.notEqual(rows[0]!.thread_id, rows[1]!.thread_id)
+      assert.match(rows[0]!.thread_id, /^sverka:a:b%3Ac:/)
+      assert.match(rows[1]!.thread_id, /^sverka:a%3Ab:c:/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('non-array results value refuses the snapshot instead of dropping findings', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-badresults-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      writeFileSync(
+        join(dir, '.sverka', 'artifacts', 'r.sarif'),
+        JSON.stringify({ runs: [{ tool: { driver: { name: 't' } }, results: { bogus: true } }] })
+      )
+      assert.throws(
+        () => collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir }),
+        (e: unknown) => e instanceof SourceSkipped
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('SARIF artifact URIs normalize to checkout-relative paths', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sverka-uri-'))
+    try {
+      mkdirSync(join(dir, '.sverka', 'artifacts'), { recursive: true })
+      const res = (uri: string) => ({
+        ruleId: 'R',
+        message: { text: 'm' },
+        locations: [{ physicalLocation: { artifactLocation: { uri } } }],
+      })
+      writeFileSync(
+        join(dir, '.sverka', 'artifacts', 'r.sarif'),
+        JSON.stringify({
+          runs: [
+            {
+              tool: { driver: { name: 't' } },
+              results: [res(`file://${join(dir, 'src', 'a.ts')}`), res('src/b%20c.ts')],
+            },
+          ],
+        })
+      )
+      const rows = collectSverka({ repo: 'a/b', runId: 't', harvestedAt: 'x', dir })
+      assert.equal(rows.length, 2)
+      assert.equal(rows[0]!.path, join('src', 'a.ts'))
+      assert.equal(rows[1]!.path, 'src/b c.ts')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
