@@ -4,9 +4,9 @@ Review bots with auto-fix (e.g. `kiloconnect[bot]` / Kilo Code Review) can push 
 
 ## Options
 
-### 1) GitHub push ruleset (repo-enforced, blunt)
+### 1) GitHub branch ruleset (repo-enforced, blunt)
 
-A push ruleset with `restrict_pushes` blocks all but an allow-list of actors from pushing to matching branches. This is enforceable by the repo itself, but it cannot be conditional on bro occupancy state (GitHub rulesets know nothing about bro's runtime). Applying it affects _all_ branches the ruleset matches.
+A branch ruleset with an `update` rule blocks direct pushes to matching branches except for the actors listed in `bypass_actors`. This is enforceable by the repo itself, but it cannot be conditional on bro occupancy state (GitHub rulesets know nothing about bro's runtime). Applying it affects _all_ branches the ruleset matches.
 
 Use this if you want to disable auto-fix pushes repo-wide.
 
@@ -29,26 +29,28 @@ gh api -X POST repos/<owner>/<repo>/rulesets --input - <<'JSON'
   ],
   "bypass_actors": [
     { "actor_id": <your_numeric_user_id>, "actor_type": "User", "bypass_mode": "always" },
-    { "actor_id": <dependabot_numeric_id>, "actor_type": "Integration", "bypass_mode": "always" },
-    { "actor_id": <github_actions_numeric_id>, "actor_type": "Integration", "bypass_mode": "always" }
+    { "actor_id": <dependabot_app_id>, "actor_type": "Integration", "bypass_mode": "always" },
+    { "actor_id": <github_actions_app_id>, "actor_type": "Integration", "bypass_mode": "always" }
   ]
 }
 JSON
 ```
 
 Notes:
-- Use **numeric GitHub database IDs** for actors (not login names like `"dependabot[bot]"`). `push_allowed_actor_ids`/bypass actor IDs must be numeric database IDs — look them up with `gh api users/<actor> --jq .id` (e.g., `gh api users/dependabot[bot] --jq .id`, `gh api users/github-actions[bot] --jq .id`). For your own account, use `gh api user --jq .id`.
-- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in `bypass_actors` or you will break normal updates and release workflows.
+- Use **numeric GitHub database IDs** for `actor_id` (never login names like `"dependabot[bot]"`).
+  - For `actor_type: "User"` (your own account, or any user/bot account registered as a User), look up the numeric user ID with `gh api user --jq .id` (yourself) or `gh api users/<login> --jq .id` (e.g. `gh api users/dependabot[bot] --jq .id`).
+  - For `actor_type: "Integration"` (GitHub Apps such as Dependabot or GitHub Actions), look up the app ID with `gh api apps/<slug> --jq .id` (e.g. `gh api apps/dependabot --jq .id`, `gh api apps/github-actions --jq .id`). Do **not** use `/users/...` lookups for Integration entries.
+- You must keep your own account, `dependabot[bot]`, and `github-actions[bot]` in `bypass_actors` (by their numeric IDs) or you will break normal updates and release workflows.
 - A wrong bypass list can lock you out of pushes. Recover by editing or deleting the ruleset in the UI or REST API (e.g. `gh api -X DELETE repos/<owner>/<repo>/rulesets/<ruleset_id>`); the ruleset ID is required.
 - This is the blunt instrument — it disables the bots' auto-fix everywhere the ruleset applies.
 
 ### 2) Bot dashboard setting (per-integration)
 
-Some review bots allow disabling auto-fix/pushes in their integration settings. If available, this is more targeted than a global push ruleset. Check the bot's dashboard/config for your GitHub installation.
+Some review bots allow disabling auto-fix/pushes in their integration settings. If available, this is more targeted than a global branch ruleset. Check the bot's dashboard/config for your GitHub installation.
 
 ## Recommendation
 
-- If the goal is to prevent conflicts on branches that bro/agents actively occupy, a global push ruleset is the only thing the repo can enforce itself.
+- If the goal is to prevent conflicts on branches that bro/agents actively occupy, a global branch ruleset is the only thing the repo can enforce itself.
 - Keep the foreign-push signal enabled (it is) so that even if pushes slip through or rules are not applied, the bus flags them to armed sessions.
 
 ## References
