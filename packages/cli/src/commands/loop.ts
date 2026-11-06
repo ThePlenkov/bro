@@ -68,11 +68,12 @@ import {
   releaseSessionSlot,
   reviewHost,
   routeStepClass,
+  type SpawnSpec,
   SpawnError,
   releaseSessionStart,
-  reserveSessionStart,
   sessionCapRefusalFor,
   sessionCapViews,
+  sessionPlane,
   specStore,
   stampPrOwnership,
   stepClassInfo,
@@ -134,6 +135,7 @@ import {
   profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   sessionQuotaOf,
   type AgentConnectorEnv,
   type SpawnProviderPick,
@@ -410,6 +412,7 @@ export interface LoopLane {
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string;
+  route?: NonNullable<SpawnSpec['route']>;
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
@@ -432,7 +435,7 @@ export interface LoopLaneSel {
  *  is the facade's own — explicit flag pick → flag-named
  *  fleet.profiles preset → the routed chain head (spec bro-1x7p: a
  *  declared `fleet.routing` resolves the bead's class per spawn and its
- *  chain head supplies the provider) → config picks (`loop.profile`,
+ *  chain head supplies the initial provider) → config picks (`loop.profile`,
  *  `loop.provider`) → `agents.native.provider` → legacy template. A bad
  *  name throws SpawnError — the caller exits before a bead is claimed. */
 export async function resolveLoopLane(
@@ -451,7 +454,7 @@ export async function resolveLoopLane(
   if (sel.agent !== undefined && !agentIsProvider) {
     return templateEscape(sel, cfg, env);
   }
-  const { provider, model, autoApprove, profileSourced } = lanePicks(
+  const { provider, model, autoApprove, profileSourced, flagProvider } = lanePicks(
     env,
     sel,
     cfg,
@@ -465,7 +468,37 @@ export async function resolveLoopLane(
     pickTier(sel, agentIsProvider, profileSourced)
   );
   const lane = providerLaneOrEmpty(pick, model, autoApprove);
-  return route === undefined ? lane : { ...lane, class: route.class };
+  // a flag-named profile's provider is an explicit pick — outranks the
+  // table like --provider/--agent, so matching the chain head must not
+  // arm the walk. A config-named profile is the standing default and
+  // keeps routing (same tiers as lanePicks' provider order)
+  const routeSpec =
+    route !== undefined &&
+    sel.provider === undefined &&
+    !agentIsProvider &&
+    flagProvider === undefined &&
+    provider === route.provider
+      ? await resolveSpawnRoute(
+          env,
+          'native',
+          route,
+          {
+            model:
+              sel.model ??
+              (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
+            // the effective lane model — a config profile/loop.model
+            // the head would otherwise lose to the provider default
+            modelFallback: model,
+            autoApprove,
+          },
+          pickTier(sel, agentIsProvider, profileSourced)
+        )
+      : undefined;
+  return {
+    ...lane,
+    ...(route === undefined ? {} : { class: route.class }),
+    ...(routeSpec === undefined ? {} : { route: routeSpec }),
+  };
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -480,7 +513,15 @@ function lanePicks(
   cfg: LoopConfig,
   route: ResolvedClass | undefined,
   agentIsProvider: boolean
-): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
+): {
+  provider?: string;
+  model?: string;
+  autoApprove?: boolean;
+  profileSourced: boolean;
+  /** The flag-named (`--profile`) preset's provider — an explicit
+   *  pick that outranks the table; routing must not arm on it. */
+  flagProvider?: string;
+} {
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined);
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined;
   const flagProfile = sel.profile !== undefined ? profile : undefined;
@@ -506,6 +547,7 @@ function lanePicks(
     model,
     autoApprove: sel.autoApprove ?? profile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
+    flagProvider: flagProfile?.provider,
   };
 }
 
@@ -615,8 +657,9 @@ function beadClassInfo(
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
  *  (`--class` flag → `class:` label → `default`) and the chain head
- *  supplies the provider, exactly like `bro agents up`'s spawn path
- *  (routeStepClass → applyFleetRouter → resolveSpawnProvider). The
+ *  supplies the initial provider, exactly like `bro agents up`; the
+ *  registry-backed spawn may walk forward from the current provider.
+ *  The path is routeStepClass → applyFleetRouter → resolveSpawnProvider. The
  *  flag-tier picks still outrank the table piecewise; `ctx.lane` is the
  *  run's fixed lane when routing is off or bypassed. The judge router
  *  fires only on a genuinely unclassed bead — an explicit `--class` pin
@@ -841,6 +884,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     // the routing lane the spawn resolved to — provenance the registry
     // records and the BRO_AGENT_CLASS env pin both read spec.class
     class: lane.class,
+    ...(lane.route === undefined ? {} : { route: lane.route }),
     // an explicit worker keeps the backend's own command fallback from
     // re-reading loop.agent config — a --agent flag override would
     // otherwise be silently ignored
@@ -1304,31 +1348,12 @@ async function runFixRound(
     return;
   }
   let templateReservation: string | undefined;
-  let crossKindReservations: string[] = [];
+  const crossKindReservations: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
   const fixKey = `loop-fix-${leadFix.id}`;
+  const fixWorkerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' };
   try {
-    // Cross-kind admission check
-    const spawnedCmd = lane.worker?.kind === 'argv' 
-      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
-      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
-    const crossRefusal = sessionCapRefusalFor(spawnedCmd, ctx.env.agents);
-    if (crossRefusal !== undefined) {
-      throw new SpawnError(crossRefusal, 'cap');
-    }
-    const views = sessionCapViews(spawnedCmd, ctx.env.agents);
-    for (const view of views) {
-      const claimed = reserveSessionStart({
-        kind: view.kind,
-        agents: ctx.env.agents,
-        key: fixKey,
-        count: view.starts,
-        lane: 'batch',
-      });
-      crossKindReservations.push(...claimed.paths);
-    }
-    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -1337,7 +1362,7 @@ async function runFixRound(
         molStep: leadFix.id,
         prompt,
         repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
+        env: fixWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -1345,19 +1370,60 @@ async function runFixRound(
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmd =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusal = sessionCapRefusalFor(spawnedCmd, ctx.env.agents, fixWorkerEnv);
+    if (crossRefusal !== undefined) {
+      throw new SpawnError(crossRefusal, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmd, ctx.env.agents, fixWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: fixKey,
+          molStep: leadFix.id,
+          workerEnv: fixWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservations.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: fixKey,
         molStep: leadFix.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: fixWorkerEnv,
       });
     }
   } catch (err) {
-    for (const p of crossKindReservations) {
-      try { releaseSessionSlot(p); } catch {}
-    }
-    crossKindReservations = [];
-    console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    // every cross-kind claim this round holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservations);
+    crossKindReservations.length = 0;
+    console.error(
+      `loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+    // admitSessionSlot/sessionQuotaOf threw before assignment completed —
+    // templateReservation is still undefined, nothing to release
+    // Let respawnRound handle cap (decrements rounds) and other failures
     throw err;
   }
   let code: number | null = null;
@@ -1375,9 +1441,7 @@ async function runFixRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
-    for (const p of crossKindReservations) {
-      try { releaseSessionSlot(p); } catch {}
-    }
+    releaseSessionStart(crossKindReservations);
   }
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
@@ -1778,7 +1842,14 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     endLoopRun(ctx.root, loopSlug(lead.id));
     return { kind: 'done', result: 'failed' };
   }
-  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend);
+  const prompt = buildWorkPrompt(
+    beads,
+    item.branch,
+    slot?.base,
+    slot?.bottom,
+    ctx.backend,
+    ctx.cfg.autoMerge && !ctx.act.requireApproval
+  );
   ctx.stage = 'prompt write';
   try {
     writePrompt(item, prompt);
@@ -1826,30 +1897,14 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // the registry spawn so the fleet/session planes agree on live workers
   // (spec bro-9h86l / bro-0fbdp)
   let templateReservation: string | undefined;
-  let crossKindReservationsPush: string[] = [];
+  const crossKindReservationsPush: string[] = [];
   const templateReservationKey = `loop-${lead.id}`;
   const templateCommand = laneCommand(ctx, lane);
+  const pushWorkerEnv = {
+    ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
+    [BATCH_MARKER_ENV]: '1',
+  };
   try {
-    // Cross-kind admission check
-    const spawnedCmdPush = lane.worker?.kind === 'argv' 
-      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
-      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
-    const crossRefusalPush = sessionCapRefusalFor(spawnedCmdPush, ctx.env.agents);
-    if (crossRefusalPush !== undefined) {
-      throw new SpawnError(crossRefusalPush, 'cap');
-    }
-    const viewsPush = sessionCapViews(spawnedCmdPush, ctx.env.agents);
-    for (const view of viewsPush) {
-      const claimed = reserveSessionStart({
-        kind: view.kind,
-        agents: ctx.env.agents,
-        key: templateReservationKey,
-        count: view.starts,
-        lane: 'batch',
-      });
-      crossKindReservationsPush.push(...claimed.paths);
-    }
-    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -1858,7 +1913,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
         molStep: lead.id,
         prompt,
         repoRoot: item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
+        env: pushWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -1866,18 +1921,54 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmdPush =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusalPush = sessionCapRefusalFor(spawnedCmdPush, ctx.env.agents, pushWorkerEnv);
+    if (crossRefusalPush !== undefined) {
+      throw new SpawnError(crossRefusalPush, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmdPush, ctx.env.agents, pushWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: templateReservationKey,
+          molStep: lead.id,
+          workerEnv: pushWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservationsPush.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: templateReservationKey,
         molStep: lead.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: pushWorkerEnv,
       });
     }
   } catch (err) {
-    for (const p of crossKindReservationsPush) {
-      try { releaseSessionSlot(p); } catch {}
-    }
-    crossKindReservationsPush = [];
+    // every cross-kind claim this push holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservationsPush);
+    crossKindReservationsPush.length = 0;
     endLoopRun(ctx.root, loopSlug(lead.id));
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof SpawnError && err.kind === 'cap') {
@@ -1910,17 +2001,13 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
-    for (const p of crossKindReservationsPush) {
-      try { releaseSessionSlot(p); } catch {}
-    }
+    releaseSessionStart(crossKindReservationsPush);
     throw err;
   }
   if (templateReservation !== undefined) {
     releaseSessionSlot(templateReservation);
   }
-  for (const p of crossKindReservationsPush) {
-    try { releaseSessionSlot(p); } catch {}
-  }
+  releaseSessionStart(crossKindReservationsPush);
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt;
@@ -2280,6 +2367,34 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
   });
+  // loop.autoMerge — GitHub owns the merge once the worker armed
+  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase
+  // rounds — threads never gate a landing the merge bot drives.
+  // 'update' survives: a strict up-to-date repo would stall the
+  // merge bot on a behind-base PR otherwise. 'land' keeps the
+  // post-merge bookkeeping, 'closed'/'park' settle as usual — and
+  // the member still parks on the mergeTimeoutMin clock: a PR GitHub
+  // never lands (auto-merge unarmed, checks never green) must not
+  // wait forever. pushItem withholds the arm order when
+  // act.requireApproval is set — mirror that predicate here so the
+  // gate keeps supervisor semantics (merge stays approval-gated)
+  // instead of waiting on an auto-merge that was never armed.
+  const autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  const autoMergeTimedOut = Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
+  const kind =
+    autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
+      ? autoMergeTimedOut
+        ? 'park'
+        : act.kind === 'merge' || act.kind === 'fix' || act.kind === 'rebase'
+          ? 'wait'
+          : act.kind
+      : act.kind;
+  const parkWhy =
+    act.kind === 'park'
+      ? act.why
+      : autoMergeTimedOut
+        ? `auto-merge did not land after ${Math.round(ctx.cfg.mergeTimeoutMin)}m`
+        : 'parked';
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
@@ -2298,7 +2413,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       },
     });
   };
-  switch (act.kind) {
+  switch (kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
       gateRow('green', { action: 'land' });
@@ -2365,11 +2480,11 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'wait':
       return 'kept';
     case 'park':
-      gateRow('parked', { action: 'park', why: act.why });
+      gateRow('parked', { action: 'park', why: parkWhy });
       parkBeads(
         ctx,
         m.beads,
-        `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`
+        `loop: PR ${prRef(ctx, pr)} ${parkWhy} — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
   }
@@ -2414,7 +2529,10 @@ async function respawnRound(
     // repeated refusals must not burn fixRounds into a park
     if (err instanceof SpawnError && err.kind === 'cap') {
       m.rounds -= 1;
-    } else if (err instanceof SpawnError && (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input')) {
+    } else if (
+      err instanceof SpawnError &&
+      (err.kind === 'unavailable' || err.kind === 'config' || err.kind === 'input')
+    ) {
       m.rounds -= 1;
     }
     console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`);
@@ -2457,31 +2575,12 @@ async function runRebaseRound(
     return;
   }
   let templateReservation: string | undefined;
-  let crossKindReservationsRb: string[] = [];
+  const crossKindReservationsRb: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
   const rebaseKey = `loop-rebase-${leadRb.id}`;
+  const rebaseWorkerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' };
   try {
-    // Cross-kind admission check
-    const spawnedCmdRb = lane.worker?.kind === 'argv' 
-      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
-      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
-    const crossRefusalRb = sessionCapRefusalFor(spawnedCmdRb, ctx.env.agents);
-    if (crossRefusalRb !== undefined) {
-      throw new SpawnError(crossRefusalRb, 'cap');
-    }
-    const viewsRb = sessionCapViews(spawnedCmdRb, ctx.env.agents);
-    for (const view of viewsRb) {
-      const claimed = reserveSessionStart({
-        kind: view.kind,
-        agents: ctx.env.agents,
-        key: rebaseKey,
-        count: view.starts,
-        lane: 'batch',
-      });
-      crossKindReservationsRb.push(...claimed.paths);
-    }
-    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -2490,7 +2589,7 @@ async function runRebaseRound(
         molStep: leadRb.id,
         prompt,
         repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
+        env: rebaseWorkerEnv,
         worker: lane.worker,
         provider: lane.provider,
         model: lane.model,
@@ -2498,19 +2597,57 @@ async function runRebaseRound(
       },
       templateCommand
     );
+    // Cross-kind admission: every OTHER session kind the spawned command
+    // starts consumes its cap too. templateQuota's kind is admitted below
+    // by admitSessionSlot — claiming it here would double-reserve one
+    // spawn against the same plane.
+    const spawnedCmdRb =
+      lane.worker?.kind === 'argv'
+        ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+        : lane.worker?.kind === 'template'
+          ? lane.worker.command
+          : templateCommand;
+    const crossRefusalRb = sessionCapRefusalFor(spawnedCmdRb, ctx.env.agents, rebaseWorkerEnv);
+    if (crossRefusalRb !== undefined) {
+      throw new SpawnError(crossRefusalRb, 'cap');
+    }
+    for (const view of sessionCapViews(spawnedCmdRb, ctx.env.agents, rebaseWorkerEnv)) {
+      if (view.kind === templateQuota?.plane.kind) {
+        continue; // admitSessionSlot below covers this kind's full lane
+      }
+      const plane = sessionPlane(view.kind);
+      if (plane === undefined) {
+        continue;
+      }
+      // through the kind's own admission mutex — the same lock
+      // admitSessionSlot holds — so a check-then-reserve here cannot
+      // race a parallel start into overshooting the cap
+      for (let i = 0; i < view.starts; i++) {
+        const claimed = admitSessionSlot(plane, ctx.env.agents, {
+          key: rebaseKey,
+          molStep: leadRb.id,
+          workerEnv: rebaseWorkerEnv,
+        });
+        if (claimed !== undefined) {
+          crossKindReservationsRb.push(claimed);
+        }
+      }
+    }
     if (templateQuota !== undefined) {
       templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
         key: rebaseKey,
         molStep: leadRb.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
+        workerEnv: rebaseWorkerEnv,
       });
     }
   } catch (err) {
-    for (const p of crossKindReservationsRb) {
-      try { releaseSessionSlot(p); } catch {}
-    }
-    crossKindReservationsRb = [];
-    console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
+    // every cross-kind claim this round holds goes back — the caller
+    // never saw them
+    releaseSessionStart(crossKindReservationsRb);
+    crossKindReservationsRb.length = 0;
+    console.error(
+      `loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
+    );
     throw err;
   }
   let code: number | null = null;
@@ -2528,9 +2665,7 @@ async function runRebaseRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
-    for (const p of crossKindReservationsRb) {
-      try { releaseSessionSlot(p); } catch {}
-    }
+    releaseSessionStart(crossKindReservationsRb);
   }
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
