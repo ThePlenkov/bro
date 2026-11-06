@@ -50,6 +50,8 @@ import type {
 } from '@broject/providers';
 import { peerAttrs } from './peer.ts';
 import { catalogModels, type CatalogModel } from './providers.ts';
+import { clientCall } from './serve-conductor-bridge.ts';
+import { clientTools, type ClientTool } from './serve-conductor-tools.ts';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -1035,6 +1037,9 @@ function tagSuffix(s: string, tag: string): number {
 class StopFilter {
   private tail = '';
   private out = '';
+  /** The turn's tool calls, in the agent's own markup — the buffered
+   *  leg's answer reads them like the agent's (bro-sy4q3). */
+  calls = '';
   hit: string | undefined;
 
   constructor(private readonly seqs: string[]) {}
@@ -1088,7 +1093,7 @@ class StopFilter {
    *  client saw, whatever the delta boundaries were. The recorded
    *  reply comes from this, never from a re-run of the raw text. */
   get emitted(): string {
-    return this.out;
+    return this.out + this.calls;
   }
 }
 
@@ -1198,6 +1203,9 @@ class LiveTurn extends TagPump {
    *  text: a narration landing inside a held <tool_call> corrupts the
    *  flat markup and the replay loses the call (bro-cfwc1). */
   private readonly emittedBlocks: OutBlock[] = [];
+  /** The client's tools — the bridge's vocabulary. Empty when the client
+   *  offered none: then the agent's tools stay narrated edges. */
+  private readonly clientTools: ClientTool[];
   stopReason = 'end_turn';
 
   private readonly ping?: NodeJS.Timeout;
@@ -1208,9 +1216,11 @@ class LiveTurn extends TagPump {
     inputTokens: number,
     private readonly stops: StopFilter | undefined,
     pingMs?: number,
-    tools = true
+    tools = true,
+    clientTools: ClientTool[] = []
   ) {
     super(tools);
+    this.clientTools = clientTools;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs);
       this.ping.unref();
@@ -1222,6 +1232,21 @@ class LiveTurn extends TagPump {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
       // a stop_sequence hit cuts the wire here — later chunks swallow
       this.feed(this.stops?.feed(u.content.text) ?? u.content.text);
+      return;
+    }
+    // the agent's tool call, in the CLIENT's vocabulary: the client
+    // executes it, the wire stops at tool_use (bro-sy4q3)
+    const bridged = clientCall(u, this.clientTools);
+    if (bridged !== undefined) {
+      if (bridged.toolCallId !== undefined) {
+        // the call is DONE from the client's view — the agent's own
+        // terminal edge must not narrate it a second time
+        this.toolDone.add(bridged.toolCallId);
+      }
+      // the text that came before it drains first — a call never lands
+      // inside a held tag
+      this.drain(false);
+      this.call(bridged.name, bridged.input);
       return;
     }
     const line = this.narrateTool(u);
@@ -1605,6 +1630,26 @@ interface TurnEnv {
   openStream?: (inputTokens: number) => PooledTurnOpts['onUpdate'];
 }
 
+/** A resend pinning a DIFFERENT model — the session re-pins and the
+ *  recorded answer stays honest (it was generated under the old pin
+ *  either way). */
+async function repinModel(env: TurnEnv, cand: ConvSession): Promise<void> {
+  if (env.requestModel === undefined || env.requestModel === cand.requestModel) return;
+  try {
+    await cand.live.repin(env.requestModel, env.deadline);
+    cand.requestModel = env.requestModel;
+  } catch (err) {
+    evict(env.sessions, env.key, cand);
+    throw err;
+  }
+}
+
+/** The answer carries a tool call — the client would execute it a
+ *  second time (bro-sy4q3). */
+function toolAnswer(blocks: OutBlock[]): boolean {
+  return blocks.some(b => b.type === 'tool_use');
+}
+
 /** A proven continuation — the delta turns only; an empty tail is a
  *  replay (with a repin if the resend pins a different model). */
 async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
@@ -1619,19 +1664,17 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     tail = [{ role: 'user', content: env.prefix }, ...tail];
   }
   if (tail.length === 0) {
+    // a tool answer is NEVER replayed — the client would execute the
+    // call a second time; the retry asks the agent afresh (bro-sy4q3)
+    if (toolAnswer(cand.lastReply.blocks)) {
+      evict(env.sessions, env.key, cand);
+      return freshTurn(env, false);
+    }
     // a pure retry — nothing new for the session; the caller replays
     // the recorded reply. A resend pinning a DIFFERENT model is not a
     // replay — the session re-pins and the recorded answer stays
     // honest (it was generated under the old pin either way).
-    if (env.requestModel !== undefined && env.requestModel !== cand.requestModel) {
-      try {
-        await cand.live.repin(env.requestModel, env.deadline);
-        cand.requestModel = env.requestModel;
-      } catch (err) {
-        evict(env.sessions, env.key, cand);
-        throw err;
-      }
-    }
+    await repinModel(env, cand);
     cand.lastSeen = Date.now();
     return { reused: true, inputTokens: 0, replay: true, conv: cand };
   }
@@ -2184,7 +2227,18 @@ function messagesStreamOpener(
   stops: StopFilter,
   set: (live: LiveTurn) => void
 ): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
-  if (body.stream === false) return undefined;
+  const tools = clientTools(body.tools);
+  if (body.stream === false) {
+    // the buffered leg writes no stream — it collects the calls the
+    // bridge made, in the agent's own markup, so the answer parses
+    // them like the agent's (bro-sy4q3)
+    return () => u => {
+      const call = clientCall(u, tools);
+      if (call === undefined) return;
+      const payload = JSON.stringify({ name: call.name, input: call.input });
+      stops.calls += `${OPEN_TAG}${payload}${CLOSE_TAG}`;
+    };
+  }
   return inputTokens => {
     res.writeHead(200, {
       'content-type': 'text/event-stream',
@@ -2201,7 +2255,8 @@ function messagesStreamOpener(
       inputTokens,
       stops,
       lane.cfg.keepaliveMs ?? 10_000,
-      body.tool_choice?.type !== 'none'
+      body.tool_choice?.type !== 'none',
+      tools
     );
     set(live);
     return live.onUpdate;
@@ -2847,7 +2902,9 @@ function sseHead(res: ServerResponse): void {
 
 /** Estimated tokens over recorded blocks — replay output accounting. */
 const blocksTokens = (blocks: OutBlock[]): number =>
-  estimateTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
+  estimateTokens(
+    blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join('')
+  );
 
 /** Chain ids a listener can afford to remember — LRU-trimmed like
  *  the sessions map; entries pointing at dead sessions prune away. */
