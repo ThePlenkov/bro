@@ -15,6 +15,7 @@ import {
   git,
   initRepo,
   inside,
+  insideAsync,
   installFakeBd,
   installFakeHost,
   readHostState,
@@ -642,6 +643,57 @@ describe('bro stack e2e', () => {
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 1)
       assert.match(r.stdout, /stack s publish failed — host reported no membership/)
+    })
+  })
+
+  test("a member's PR registers the chain — nobody adds the PRs by hand", async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      const { wa } = openPair(f)
+      // the worker opens the member's PR — bro's post-tool hook sees the
+      // very command and registers the chain behind it
+      const r = runCli(['hooks', 'post-tool'], {
+        cwd: wa,
+        input: JSON.stringify({
+          session_id: 's1',
+          cwd: wa,
+          tool_name: 'Bash',
+          tool_input: { command: 'gh pr create --fill' },
+          tool_response: { success: true },
+        }),
+        env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      // the registration is detached — the hook never waits for it
+      const deadline = Date.now() + 20_000
+      let stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      while (stacks === undefined && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      }
+      assertBothInStack(f, 901)
+    })
+  })
+
+  test('a PR outside a chain registers nothing', async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      openPair(f)
+      const r = runCli(['hooks', 'post-tool'], {
+        cwd: f.main,
+        input: JSON.stringify({
+          session_id: 's1',
+          cwd: f.main,
+          tool_name: 'Bash',
+          tool_input: { command: 'gh pr create --fill' },
+          tool_response: { success: true },
+        }),
+        env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      // give a would-be registration the time to land — it must not
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+      assert.equal(readHostState(f.hostState).stacks, undefined)
     })
   })
 

@@ -120,6 +120,7 @@ import {
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { maybeSpawnTraceStamp } from './trace-resolve.ts';
+import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
@@ -1614,6 +1615,9 @@ async function emitPostTool(input: HookInput): Promise<void> {
     // verifies against the registry, not proof
     if (classifyExecCommand(cmd) === 'pr-create') {
       maybeSpawnTraceStamp(process.cwd());
+      // the PR IS a chain member — the chain registers itself with the
+      // host, so nobody adds the PRs to the stack by hand (bro-awbgd)
+      maybeSpawnStackPublish(process.cwd());
     }
   }
   if (outcome === true) {
