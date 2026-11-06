@@ -1,6 +1,6 @@
 ---
-
-## parent: project
+parent: project
+---
 
 # cli — command-surface structure: groups, aliases, naming contract
 
