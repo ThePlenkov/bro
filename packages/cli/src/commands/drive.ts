@@ -116,7 +116,7 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import { annotateThreads, judgeConfig, judgeFacade } from '@broject/judge';
-import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
+import { loadAgentEnv, settleAcpSessions, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { reconcileLanePause } from '../lane.ts';
 import { flag } from './args.ts';
 import { defaultBranch, runActCommand } from './act.ts';
@@ -1500,12 +1500,53 @@ async function spawnFixerAgent(ctx: Ctx, pr: number, s: FixerSpawn): Promise<PrV
     if (refused !== undefined) {
       return { pr, link, verdict: 'spawn-refused', detail: refused };
     }
+    // donor lookup (spec bro-5qsnr §4): while the coder's session
+    // lives, the fix order lands as a follow-up turn in THAT session.
+    // The fixer bead's own entry first, then any registry entry whose
+    // recorded worktree resolves to the fixer's, carrying an acpSessionId
+    // on a configured acp provider.
+    const isAcpProvider = (name: string | undefined): boolean => {
+      if (name === undefined) return false;
+      const p = ctx.env.providers?.[name];
+      return p?.type === 'acp';
+    };
+    const donors: AgentRegistryEntry[] = [];
+    const own = readAgentRegistry(ctx.mainRoot)[bead.id];
+    if (
+      own !== undefined &&
+      typeof own.acpSessionId === 'string' &&
+      own.acpSessionId !== '' &&
+      isAcpProvider(own.provider)
+    ) {
+      donors.push(own);
+    }
+    for (const [molStep, entry] of Object.entries(readAgentRegistry(ctx.mainRoot))) {
+      if (molStep === bead.id) continue;
+      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') continue;
+      if (!isAcpProvider(entry.provider)) continue;
+      if (typeof entry.worktree !== 'string' || entry.worktree === '') continue;
+      try {
+        if (resolve(entry.worktree) !== resolve(s.wt)) continue;
+      } catch {
+        continue;
+      }
+      donors.push(entry);
+    }
+    const donor = donors[0];
+    const spawnProvider = donor?.provider;
+    const spawnResume = donor?.acpSessionId;
+    const spawnPrompt =
+      donor !== undefined && typeof donor.acpSessionId === 'string'
+        ? `${s.prompt}\nSession: ${donor.acpSessionId}\n`
+        : s.prompt;
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
         worktree: s.wt,
-        prompt: s.prompt,
+        prompt: spawnPrompt,
         connector: ctx.connector,
+        provider: spawnProvider,
+        resumeSessionId: spawnResume,
         env: { BRO_PR: String(pr), BRO_PR_URL: link, [BATCH_MARKER_ENV]: '1' },
       });
       if (s.attempt !== undefined) {
@@ -1998,6 +2039,11 @@ async function mergeAndRetire(
       ),
     };
   }
+  try {
+    settleAcpSessions(ctx.mainRoot, ctx.env, worktree ? { worktree } : {});
+  } catch {
+    // advisory
+  }
   retireLanding(ctx, after, worktree);
   if (fixer) {
     closeFixer(ctx.store, fixer.id, `merged via ${link}`);
@@ -2233,6 +2279,14 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
   work.heads.set(pr, state.headSha);
   const fixer = fixerBeadFor(ctx.store, pr);
   if (state.state !== 'OPEN') {
+    try {
+      settleAcpSessions(ctx.mainRoot, ctx.env, {
+        worktree: work.worktreeByBranch.get(state.headRef),
+        molSteps: fixer ? [fixer.id] : undefined,
+      });
+    } catch {
+      // advisory
+    }
     if (fixer) {
       closeFixer(ctx.store, fixer.id, `${link} ${state.state.toLowerCase()} — fixer done`);
     }
@@ -2345,6 +2399,16 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         }
       );
       if (st.state !== 'OPEN') {
+        try {
+          const entry = readAgentRegistry(ctx.mainRoot)[row.id];
+          const wt = typeof entry?.worktree === 'string' ? entry.worktree : undefined;
+          settleAcpSessions(ctx.mainRoot, ctx.env, {
+            molSteps: [row.id],
+            ...(wt !== undefined ? { worktree: wt } : {}),
+          });
+        } catch {
+          // advisory
+        }
         closeFixer(ctx.store, row.id, `${link} ${st.state.toLowerCase()} — fixer done`);
         say(ctx, `drive ${link} settled (${st.state.toLowerCase()}) — fixer ${row.id} closed`);
       }

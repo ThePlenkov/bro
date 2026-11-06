@@ -1537,6 +1537,10 @@ function prepareSpawn(
   /** The attempt token — scopes this run's handle/go/exit artifacts. */
   runId: string;
   reservation?: string;
+  /** Effective resume id lifted by prepareSpawn (spec bro-5qsnr §3):
+   *  explicit spec.resumeSessionId wins, else the existing entry's
+   *  acpSessionId when provider matches. */
+  resumeSessionId?: string;
 } {
   // spawn is the authoritative mutation the audit gates on — invalid
   // committed (policy) config refuses before registry/claim writes,
@@ -1544,6 +1548,11 @@ function prepareSpawn(
   assertMutableConfig(dir);
   const registry = readAgentRegistry(dir);
   const existing = registry[spec.molStep];
+  const effectiveResumeSessionId =
+    spec.resumeSessionId ??
+    (existing !== undefined && existing.provider === spec.provider && spec.provider !== undefined
+      ? existing.acpSessionId
+      : undefined);
   // A batch spawn must not walk into a provider wall the fleet already
   // hit. The wall is DERIVED from the registry (spec bro-1x7p: walls
   // derived, not stored) and it is an ACCOUNT fact: one rate-limited
@@ -1630,6 +1639,7 @@ function prepareSpawn(
         phantom,
       }),
       reservation,
+      resumeSessionId: effectiveResumeSessionId,
     };
   } catch (err) {
     // a write/claim failure after the reservation — the caller never saw
@@ -2407,6 +2417,137 @@ function workerRunLine(worker: SpawnWorker | undefined, command: string): string
     : expandAgentCmd(worker.command);
 }
 
+/** Splice `--resume <id>` into an argv worker's argument list, ahead of
+ *  the promptFile positional the backend appends (spec bro-5qsnr §3).
+ *  Template workers and missing ids pass through unchanged — `--resume`
+ *  is an acp-driver flag that only argv workers understand. */
+export function workerWithResume(
+  worker: SpawnWorker | undefined,
+  resumeSessionId: string | undefined
+): SpawnWorker | undefined {
+  if (resumeSessionId === undefined || resumeSessionId === '') {
+    return worker;
+  }
+  if (worker === undefined || worker.kind !== 'argv') {
+    return worker;
+  }
+  return { ...worker, argv: [...worker.argv, '--resume', resumeSessionId] };
+}
+
+/** Settle recorded acp sessions at PR completion — run each unique
+ *  provider `sessionRm` template detached, then clear `acpSessionId` on
+ *  the matched registry entries (spec bro-5qsnr §5). Matching is by
+ *  molStep name or path-resolved worktree. Returns the settled session
+ *  ids for the caller's log line. Failures are advisory — never a
+ *  settle blocker. */
+export function settleAcpSessions(
+  dir: string,
+  env: AgentConnectorEnv,
+  opts: { worktree?: string; molSteps?: string[] } = {}
+): string[] {
+  const settled: string[] = [];
+  try {
+    const registry = readAgentRegistry(dir);
+    const molSteps = new Set(opts.molSteps ?? []);
+    const worktreeArg = opts.worktree;
+    const worktreeResolved = worktreeArg !== undefined ? resolve(worktreeArg) : undefined;
+    let worktreeReal: string | undefined;
+    if (worktreeResolved !== undefined) {
+      try {
+        worktreeReal = realpathSync(worktreeResolved);
+      } catch {
+        worktreeReal = worktreeResolved;
+      }
+    }
+
+    const matched: Array<[string, AgentRegistryEntry]> = [];
+    for (const [molStep, entry] of Object.entries(registry)) {
+      let match = false;
+      if (molSteps.size > 0 && molSteps.has(molStep)) {
+        match = true;
+      }
+      if (
+        !match &&
+        worktreeResolved !== undefined &&
+        typeof entry.worktree === 'string' &&
+        entry.worktree !== ''
+      ) {
+        const entryResolved = resolve(entry.worktree);
+        let entryReal: string;
+        try {
+          entryReal = realpathSync(entryResolved);
+        } catch {
+          entryReal = entryResolved;
+        }
+        if (entryReal === worktreeReal || entryResolved === worktreeResolved) {
+          match = true;
+        }
+      }
+      if (match) {
+        matched.push([molStep, entry]);
+      }
+    }
+
+    // unique session ids → their minting provider
+    const idProvider = new Map<string, string>();
+    for (const [, entry] of matched) {
+      if (
+        typeof entry.acpSessionId === 'string' &&
+        entry.acpSessionId !== '' &&
+        typeof entry.provider === 'string' &&
+        entry.provider !== '' &&
+        !idProvider.has(entry.acpSessionId)
+      ) {
+        idProvider.set(entry.acpSessionId, entry.provider);
+      }
+    }
+
+    const providers = env.providers ?? {};
+    for (const [sessionId, providerName] of idProvider) {
+      if (!/^[\w.-]+$/.test(sessionId)) {
+        continue;
+      }
+      const prov = providers[providerName];
+      if (prov === undefined || prov.type !== 'acp') {
+        continue;
+      }
+      const template = prov.sessionRm;
+      if (template === undefined || template === '') {
+        continue;
+      }
+      const rm = template.replaceAll('{sessionId}', sessionId);
+      try {
+        const child = spawn('/bin/sh', ['-c', rm], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+      } catch {
+        // advisory — a failed settle never blocks
+      }
+      settled.push(sessionId);
+    }
+
+    // clear acpSessionId on matched entries
+    for (const [molStep, entry] of matched) {
+      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') {
+        continue;
+      }
+      try {
+        if (registry[molStep] !== undefined) {
+          patchAgentRegistry(dir, molStep, { acpSessionId: undefined });
+        }
+      } catch {
+        // advisory
+      }
+    }
+
+    return settled;
+  } catch {
+    return settled;
+  }
+}
+
 /** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
  *  between `spawn()` and the pid patch used to leave a live worker the
  *  registry could not name — a 'lost' step and a respawn running beside
@@ -2718,27 +2859,29 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, runId, reservation } = prepareSpawn(
-          dir,
-          home,
-          'native',
-          spec,
-          {
-            // 'spawned' counts as live for dedup: inside the handoff
-            // window a pid-less entry may still be a worker about to
-            // publish its handle — a respawn beside it is the
-            // crash-window bug (spec bro-l8c4f.5)
-            isLive: e => {
-              const s = nativeState(dir, home, spec.molStep, e);
-              return s === 'running' || s === 'spawned';
-            },
-            liveDetail: e =>
-              typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
-            cap: { max: fleetCapOf(env), env },
-            env,
-            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
-          }
-        );
+        const {
+          agentId,
+          promptFile,
+          log,
+          stderrLog,
+          exitFile,
+          runId,
+          reservation,
+          resumeSessionId,
+        } = prepareSpawn(dir, home, 'native', spec, {
+          // 'spawned' counts as live for dedup: inside the handoff
+          // window a pid-less entry may still be a worker about to
+          // publish its handle — a respawn beside it is the
+          // crash-window bug (spec bro-l8c4f.5)
+          isLive: e => {
+            const s = nativeState(dir, home, spec.molStep, e);
+            return s === 'running' || s === 'spawned';
+          },
+          liveDetail: e => (typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight'),
+          cap: { max: fleetCapOf(env), env },
+          env,
+          sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+        });
         // the launcher crashed after the reservation — registry+claim
         // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
         maybeAbandonSpawn('reservation');
@@ -2765,7 +2908,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // 'argv' worker execs verbatim through the wrapper's "$@"
           // positional passthrough — the provider argv (a `model` value
           // could carry shell metachars) is never string-concatenated.
-          const worker = spec.worker;
+          const worker = workerWithResume(spec.worker, resumeSessionId);
           warnNoPromptFile(worker, command);
           // the handshake runs before the payload: the worker publishes
           // its own handle, then holds on the launcher's go stamp — a
@@ -3248,12 +3391,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'tmux',
-          spec,
-          {
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation, resumeSessionId } =
+          prepareSpawn(dir, home, 'tmux', spec, {
             isLive: e => {
               const n = tmuxSessionName(e);
               if (n === undefined) {
@@ -3278,8 +3417,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
-          }
-        );
+          });
         const session = `bro-${agentId}`;
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -4183,7 +4321,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     },
 
-    capabilities: () => ({ attach: true, respawn: true, supervisor: 'required' }),
+    capabilities: () => ({ attach: true, respawn: true, workers: false, supervisor: 'required' }),
   };
 }
 
@@ -4801,12 +4939,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const image = dockerImageFor(spec, knobs);
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'docker',
-          spec,
-          {
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation, resumeSessionId } =
+          prepareSpawn(dir, home, 'docker', spec, {
             isLive: e => {
               const n = dockerContainerName(e);
               if (n === undefined) {
@@ -4831,8 +4965,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
-          }
-        );
+          });
         const name = `bro-${agentId}`;
         const envFile = join(home, `${agentId}.env`);
         let containerId = '';
@@ -4842,7 +4975,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // clear it
           dockerRun(['rm', '-f', name]);
           writeDockerEnvFile(envFile, spec, env);
-          const worker = spec.worker;
+          const worker = workerWithResume(spec.worker, resumeSessionId);
           warnNoPromptFile(worker, command);
           const cliBadge = workerCliBadge(worker, command);
           const runLine = workerRunLine(worker, command);
@@ -5901,7 +6034,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       });
     },
 
-    capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
+    capabilities: () => ({ attach: true, respawn: true, workers: false, supervisor: 'none' }),
   };
 }
 
@@ -6028,7 +6161,7 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       return Promise.resolve();
     },
 
-    capabilities: () => ({ supervisor: 'none' }),
+    capabilities: () => ({ workers: false, supervisor: 'none' }),
   };
 }
 

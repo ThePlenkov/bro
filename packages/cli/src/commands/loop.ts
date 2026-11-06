@@ -50,6 +50,7 @@ import {
   AgentNotFound,
   agentExitFileName,
   agentRegistryPath,
+  readAgentRegistry,
   awaitFileLock,
   CLASS_LABEL_PREFIX,
   commandCliName,
@@ -125,6 +126,7 @@ import {
   applyFleetRouter,
   fleetProfileOf,
   loadAgentEnv,
+  settleAcpSessions,
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
@@ -460,6 +462,30 @@ export async function resolveLoopLane(
   return route === undefined ? lane : { ...lane, class: route.class };
 }
 
+/** Donor lookup — a recorded `acpSessionId` rides again only when the
+ *  fixer's lane is the same provider + an argv (acp) worker, so a
+ *  foreign provider or a template lane never receives a meaningless
+ *  id (spec bro-5qsnr §3-4). A corrupt registry reads as "no session"
+ *  rather than throwing past the claim. */
+export function resumeSessionFor(
+  ctx: { root: string },
+  molStep: string,
+  lane: { provider?: string; worker?: SpawnWorker } | undefined
+): string | undefined {
+  try {
+    const reg = readAgentRegistry(ctx.root);
+    const entry = reg[molStep];
+    if (entry === undefined) return undefined;
+    const id = entry.acpSessionId;
+    if (typeof id !== 'string' || id === '') return undefined;
+    if (lane?.provider === undefined || entry.provider !== lane.provider) return undefined;
+    if (lane.worker?.kind !== 'argv') return undefined;
+    return id;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The pick tiers — flag > flag-named profile > routing table >
  *  config-named profile > config. A flag-named profile is an explicit
  *  pick (outranks the table); a config-named one is a standing default
@@ -740,7 +766,7 @@ function spawnAgent(
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
+        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -1201,6 +1227,15 @@ async function finalizeMerge(
     }
     const meta = ctx.rev.prMeta({ repo: ctx.repo, pr });
     if (meta.state !== 'MERGED') {
+      // a CLOSED PR settled without merging — its sessions are done; an
+      // OPEN park keeps the session alive for the next round
+      if (meta.state === 'CLOSED') {
+        try {
+          settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+        } catch {
+          // advisory
+        }
+      }
       parkBeads(
         ctx,
         beads,
@@ -1228,6 +1263,11 @@ async function finalizeMerge(
       `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     );
     return 'parked';
+  }
+  try {
+    settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+  } catch {
+    // advisory
   }
   settleClump(ctx, beads, item, pr);
   // a process rooted in the tree (a serve, a watcher, a leftover agent)
@@ -1361,7 +1401,8 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
     env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
@@ -2782,7 +2823,7 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
   const argvLine =
     w?.kind === 'argv'
       ? [...w.argv, item.promptFile].map(shRender).join(' ')
-      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile);
+      : expandAgentCmd(laneCommand(ctx, lane));
   console.log(`  agent: ${argvLine}`);
 }
 

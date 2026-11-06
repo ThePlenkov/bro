@@ -649,6 +649,9 @@ export interface StepSpawnRequest {
    *  provenance (spec bro-z8tng). Stamped into the registry and pinned
    *  into the worker's env as BRO_DELEGATED_BY. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -763,6 +766,7 @@ export function spawnStepAgent(
           class: route?.class,
           delegatedBy: req.delegatedBy,
           worker: pick.worker,
+          resumeSessionId: req.resumeSessionId,
           enter: resolved.enter,
         })
         .then(r => {

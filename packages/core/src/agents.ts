@@ -238,6 +238,9 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
