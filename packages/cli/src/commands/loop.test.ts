@@ -9,11 +9,34 @@ import {
   type ProviderEntry,
   type RoutingTable,
   type SpawnWorker,
+  type Lease,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
-import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
+import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane, skipLeasedBeads } from './loop.ts'
 import type { AgentConnectorEnv } from '../agent-connectors.ts'
 import { git, initRepo, inside } from './testrepo.ts'
+
+test('loop picker skips live bead leases held by another process', () => {
+  const lease: Lease = {
+    key: 'bead/leased',
+    token: 'token',
+    holder: { host: 'other-host', pid: 44, rig: 'other-rig' },
+    acquiredAt: new Date(0).toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+  const logs: string[] = []
+  assert.deepEqual(
+    skipLeasedBeads(
+      [{ id: 'leased' }, { id: 'free' }],
+      (key) => (key === 'bead/leased' ? lease : undefined),
+      (line) => logs.push(line),
+      'local',
+      10
+    ),
+    [{ id: 'free' }]
+  )
+  assert.deepEqual(logs, ['loop: skipping leased — leased by other-rig@other-host pid 44'])
+})
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 

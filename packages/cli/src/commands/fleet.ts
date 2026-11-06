@@ -27,10 +27,13 @@ import {
   git,
   gitTry,
   clearLedgerWalls,
+  localLeaseStore,
+  projectId,
   reviewHost,
   wallText,
   type AgentInfo,
   type ProviderWall,
+  type Lease,
   type ReviewFacade,
 } from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
@@ -572,13 +575,8 @@ async function runFleetLive(
 }
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
-  if (argv[0] === 'walls') {
-    try {
-      runFleetWallsCommand(process.cwd(), argv.slice(1))
-    } catch (err) {
-      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(2)
-    }
+  const dir = process.cwd()
+  if (dispatchFleetSubcommand(dir, argv)) {
     return
   }
   let args: FleetArgs
@@ -588,7 +586,6 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(2)
   }
-  const dir = process.cwd()
   const prefer = loadBroConfig(dir).connectors
 
   if (args.live) {
@@ -615,6 +612,79 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
+}
+
+function dispatchFleetSubcommand(dir: string, argv: string[]): boolean {
+  if (argv[0] === 'leases') {
+    try {
+      runFleetLeasesCommand(dir, argv.slice(1))
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err))
+      process.exitCode = 2
+    }
+    return true
+  }
+  if (argv[0] === 'walls') {
+    try {
+      runFleetWallsCommand(dir, argv.slice(1))
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(2)
+    }
+    return true
+  }
+  return false
+}
+
+type FleetLeasesAction =
+  | { kind: 'list'; json: boolean }
+  | { kind: 'release'; key: string }
+
+function fleetLeasesAction(argv: string[]): FleetLeasesAction {
+  if (argv.length === 0) return { kind: 'list', json: false }
+  if (argv.length === 1 && argv[0] === '--json') return { kind: 'list', json: true }
+  if (argv.length !== 2) {
+    throw new Error('usage: bro fleet leases [--json] | release <key>')
+  }
+  const key = argv[1]
+  if (argv[0] !== 'release' || key === undefined) {
+    throw new Error('usage: bro fleet leases [--json] | release <key>')
+  }
+  if (key.trim() === '' || key.startsWith('-')) {
+    throw new Error('usage: bro fleet leases [--json] | release <key>')
+  }
+  return { kind: 'release', key }
+}
+
+export function runFleetLeasesCommand(dir: string, argv: string[], stateHome?: string): void {
+  const action = fleetLeasesAction(argv)
+  const store = localLeaseStore(projectId(dir), stateHome === undefined ? {} : { stateHome })
+  if (action.kind === 'release') {
+    console.log(
+      store.forceRelease(action.key) ? `released lease ${action.key}` : `no lease ${action.key}`
+    )
+    return
+  }
+  const rows = store.list().map((lease: Lease) => ({
+    key: lease.key,
+    rig: lease.holder.rig,
+    host: lease.holder.host,
+    pid: lease.holder.pid,
+    agentId: lease.holder.agentId,
+    acquiredAt: lease.acquiredAt,
+    expiresAt: lease.expiresAt,
+  }))
+  if (action.json) {
+    console.log(JSON.stringify(rows, null, 2))
+    return
+  }
+  if (rows.length === 0) {
+    console.log('no live leases')
+    return
+  }
+  for (const row of rows) {
+    console.log(`${row.key} held by ${row.rig}@${row.host} pid ${row.pid} until ${row.expiresAt}`)
+  }
 }
 
 type FleetWallsAction =

@@ -46,6 +46,55 @@ export const DEFAULT_FLEET_WALL_TTLS: FleetWallTtls = {
   quotaTtlMinutes: 360,
 }
 
+export interface FleetLeaseTtls {
+  roleTtlSeconds: number
+  workTtlMinutes: number
+}
+
+export const DEFAULT_FLEET_LEASE_TTLS: FleetLeaseTtls = {
+  roleTtlSeconds: 60,
+  workTtlMinutes: 360,
+}
+
+function positiveNumber(value: unknown): value is number {
+  if (typeof value !== 'number') {
+    return false
+  }
+  return Number.isFinite(value) && value > 0
+}
+
+/** `fleet.leases` TTLs — invalid fields fall back independently. */
+export function fleetLeases(raw: unknown): FleetLeaseTtls {
+  const out = { ...DEFAULT_FLEET_LEASE_TTLS }
+  if (raw === undefined) {
+    return out
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: fleet.leases must be an object — section dropped')
+    return out
+  }
+  const obj = raw as { roleTtlSeconds?: unknown; workTtlMinutes?: unknown }
+  if (obj.roleTtlSeconds !== undefined) {
+    if (positiveNumber(obj.roleTtlSeconds)) {
+      out.roleTtlSeconds = obj.roleTtlSeconds
+    } else {
+      console.error(
+        'bro.config: fleet.leases.roleTtlSeconds must be a positive number — field dropped'
+      )
+    }
+  }
+  if (obj.workTtlMinutes !== undefined) {
+    if (positiveNumber(obj.workTtlMinutes)) {
+      out.workTtlMinutes = obj.workTtlMinutes
+    } else {
+      console.error(
+        'bro.config: fleet.leases.workTtlMinutes must be a positive number — field dropped'
+      )
+    }
+  }
+  return out
+}
+
 /** `fleet.walls` TTLs — invalid fields fall back independently. */
 export function fleetWalls(raw: unknown): FleetWallTtls {
   const out = { ...DEFAULT_FLEET_WALL_TTLS }

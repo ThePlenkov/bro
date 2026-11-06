@@ -27,6 +27,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
+import type { Lease } from './leases.ts'
 import type { OnWall } from './routing.ts'
 import { acquireFileLock } from './filelock.ts'
 import { BD_NO_STORE } from './bd.ts'
@@ -387,6 +388,9 @@ export interface AgentRegistryEntry {
   provider?: string
   /** Opaque account identity; legacy rows fall back to provider. */
   account?: string
+  leaseKey?: string
+  leaseToken?: string
+  leaseRecord?: Lease
   observedAt?: string
   model?: string
   acpSessionId?: string
