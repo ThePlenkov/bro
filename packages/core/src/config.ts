@@ -860,6 +860,35 @@ function providerRoutes(raw: unknown): ServeProviders | undefined {
   return routes;
 }
 
+function serveUpstream(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  // a slash-only value strips to '' — that must read as unset, not as
+  // a configured base the proxy resolves every request against
+  let upstream = raw.trim();
+  while (upstream.endsWith('/')) upstream = upstream.slice(0, -1);
+  return upstream === '' ? undefined : upstream;
+}
+
+function serveApiKeyEnv(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  const name = raw.trim();
+  // the value NAMES an env var — an invalid name silently misses at
+  // resolution time, so an unparsable one drops loud like providers.*
+  // (the bad value stays out of the message — CodeQL reads anything
+  // named *key* as sensitive, and a name is all the diagnostic needs)
+  if (!isEnvName(name)) {
+    console.error(
+      'bro.config: serve.apiKeyEnv must name an env var (SCREAMING_SNAKE) — entry dropped'
+    );
+    return undefined;
+  }
+  return name;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -898,27 +927,10 @@ export const serveSection: ConfigSection<{
   }
   const providers = providerRoutes(obj.providers);
   if (providers !== undefined) out.providers = providers;
-  if (typeof obj.upstream === 'string' && obj.upstream.trim() !== '') {
-    // a slash-only value strips to '' — that must read as unset, not as
-    // a configured base the proxy resolves every request against
-    let upstream = obj.upstream.trim();
-    while (upstream.endsWith('/')) upstream = upstream.slice(0, -1);
-    if (upstream !== '') out.upstream = upstream;
-  }
-  if (typeof obj.apiKeyEnv === 'string' && obj.apiKeyEnv.trim() !== '') {
-    const name = obj.apiKeyEnv.trim();
-    // the value NAMES an env var — an invalid name silently misses at
-    // resolution time, so an unparsable one drops loud like providers.*
-    // (the bad value stays out of the message — CodeQL reads anything
-    // named *key* as sensitive, and a name is all the diagnostic needs)
-    if (isEnvName(name)) {
-      out.apiKeyEnv = name;
-    } else {
-      console.error(
-        'bro.config: serve.apiKeyEnv must name an env var (SCREAMING_SNAKE) — entry dropped'
-      );
-    }
-  }
+  const upstream = serveUpstream(obj.upstream);
+  if (upstream !== undefined) out.upstream = upstream;
+  const apiKeyEnv = serveApiKeyEnv(obj.apiKeyEnv);
+  if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
