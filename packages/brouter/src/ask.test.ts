@@ -11,7 +11,7 @@ process.env['XDG_CONFIG_HOME'] = join(scratch, 'config');
 process.env['XDG_STATE_HOME'] = join(scratch, 'state');
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
-const { modelPin, resolveLane } = await import('./ask.ts');
+const { costSlice, modelPin, resolveLane } = await import('./ask.ts');
 
 /** A directory with its own config — the providers the ask may pick. */
 function configDir(config: unknown): string {
@@ -119,6 +119,31 @@ test("the operator's model outranks the route's pin", () => {
   );
   assert.equal(pinned.model, 'my-model');
   assert.equal(pinned.pinnedBy, 'you');
+});
+
+test('a reported output stands — the estimate never overwrites it', async () => {
+  const facts = await costSlice({
+    lane: {
+      provider: 'devin-acp',
+      entry: { type: 'acp', command: 'devin acp' },
+      pinnedBy: 'the provider entry',
+      rule: 'the first acp provider in the config',
+      ruleSource: 'the config',
+    },
+    model: 'swe-2-max',
+    usage: { outputTokens: 42 },
+    question: 'a question the agent was asked',
+    answer: 'an answer',
+    ledgerKnown: true,
+  });
+  const output = facts.find(f => f.label === 'output');
+  assert.equal(output?.value, '42 tokens', 'the reported count is the one that stands');
+  const context = facts.find(f => f.label === 'context');
+  assert.match(
+    context?.value ?? '',
+    /^≈\d+ tokens$/,
+    'the missing count falls back to the estimate'
+  );
 });
 
 test('nothing pinned means the agent reports its own model', () => {

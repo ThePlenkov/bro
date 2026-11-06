@@ -30,6 +30,7 @@ import type { AcpUsage } from '@broject/providers';
 import { readRouteTable, unservedChains } from '@broject/router-routes';
 import type { RouteDecision, RouteTable } from '@broject/router-routes';
 import { costFacts, healthFacts, modelFacts, routeFacts, type ModelPin } from './explain.ts';
+import type { TurnUsage } from './explain.ts';
 import { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
 import { decideRoute, type TaskDecision } from './route-decide.ts';
 
@@ -331,7 +332,7 @@ function turnTokens(
 }
 
 /** The cost slice — the turn's own numbers and the ledger's window. */
-async function costSlice(input: {
+export async function costSlice(input: {
   lane: LanePick;
   model: string;
   usage?: AcpUsage;
@@ -340,21 +341,20 @@ async function costSlice(input: {
   ledgerKnown: boolean;
 }): Promise<ExplainFact[]> {
   const window = await windowCounters({ provider: input.lane.provider, model: input.model });
-  const reported = input.usage?.inputTokens !== undefined;
   const usage = input.usage;
-  const turn = reported
-    ? {
-        reported: {
-          inputTokens: usage?.inputTokens,
-          outputTokens: usage?.outputTokens,
-        },
-      }
-    : {
-        estimated: {
-          inputTokens: estimateTokens(input.question),
-          outputTokens: estimateTokens(input.answer),
-        },
-      };
+  // each field stands on its own: a reported count wins, a missing one
+  // falls back to the estimate — an agent that reports only its output
+  // keeps that output
+  const turn: TurnUsage = {
+    reported: {
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+    },
+    estimated: {
+      inputTokens: estimateTokens(input.question),
+      outputTokens: estimateTokens(input.answer),
+    },
+  };
   return costFacts({
     turn,
     window:
