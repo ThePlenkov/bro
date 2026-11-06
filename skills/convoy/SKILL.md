@@ -1,4 +1,5 @@
 ---
+
 name: convoy
 description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro flow convoy next` is the scheduler as code; `bro flow convoy done` advances it. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---

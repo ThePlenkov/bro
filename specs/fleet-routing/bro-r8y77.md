@@ -1,19 +1,21 @@
 ---
+
 parent: fleet-routing
 scope:
-  - packages/core/src/providers.ts
-  - packages/core/src/routing.ts
-  - packages/core/src/agents.ts
-  - packages/core/src/wall-ledger.ts
-  - packages/core/src/leases.ts
-  - packages/cli/src/agent-connectors.ts
-  - packages/cli/src/commands/fleet.ts
-  - packages/cli/src/commands/loop.ts
-  - packages/cli/src/commands/drive.ts
-  - packages/cli/src/plugins.ts
-  - skills/providers/
-  - skills/loop/
-  - skills/drive/
+- packages/core/src/providers.ts
+- packages/core/src/routing.ts
+- packages/core/src/agents.ts
+- packages/core/src/wall-ledger.ts
+- packages/core/src/leases.ts
+- packages/cli/src/agent-connectors.ts
+- packages/cli/src/commands/fleet.ts
+- packages/cli/src/commands/loop.ts
+- packages/cli/src/commands/drive.ts
+- packages/cli/src/plugins.ts
+- skills/providers/
+- skills/loop/
+- skills/drive/
+
 ---
 
 # bro-r8y77 — Free-router fleet: account-scoped walls + project leases
@@ -135,16 +137,32 @@ Every clone of one repo gets one id.
 ### Store (interface first, local impl now)
 
 ```ts
-interface LeaseHolder { host: string; pid: number; rig: string; agentId?: string; sessionId?: string }
-interface Lease { key: string; token: string; holder: LeaseHolder; acquiredAt: string; expiresAt: string }
+interface LeaseHolder {
+  host: string;
+  pid: number;
+  rig: string;
+  agentId?: string;
+  sessionId?: string;
+}
+interface Lease {
+  key: string;
+  token: string;
+  holder: LeaseHolder;
+  acquiredAt: string;
+  expiresAt: string;
+}
 interface LeaseStore {
-  acquire(key: string, holder: LeaseHolder, ttlMs: number): { ok: true; lease: Lease } | { ok: false; held: Lease }
-  renew(lease: Lease, ttlMs: number): Lease | undefined   // undefined = lost
-  release(lease: Lease): void                             // token-checked, idempotent
-  read(key: string): Lease | undefined                    // live leases only
-  rebind(lease: Lease, holderPatch: Partial<LeaseHolder>): Lease | undefined // token-checked, same expiry
-  forceRelease(key: string): boolean                      // whether a row existed
-  list(): Lease[]                                          // live leases only
+  acquire(
+    key: string,
+    holder: LeaseHolder,
+    ttlMs: number
+  ): { ok: true; lease: Lease } | { ok: false; held: Lease };
+  renew(lease: Lease, ttlMs: number): Lease | undefined; // undefined = lost
+  release(lease: Lease): void; // token-checked, idempotent
+  read(key: string): Lease | undefined; // live leases only
+  rebind(lease: Lease, holderPatch: Partial<LeaseHolder>): Lease | undefined; // token-checked, same expiry
+  forceRelease(key: string): boolean; // whether a row existed
+  list(): Lease[]; // live leases only
 }
 ```
 
