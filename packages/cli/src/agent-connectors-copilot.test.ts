@@ -1,8 +1,19 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  localLeaseStore,
+  projectId,
   readAgentRegistry,
   scrubEnv,
   sessionPlane,
@@ -23,6 +34,18 @@ import { initRepo, installFakeBd, readBeads } from './commands/testrepo.ts'
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
+// work leases are TTL-governed foreign stamps now — a spawn's row
+// stays live past a dead spawner pid until expiry, so fixtures must
+// never write into the real state dir: a leftover row would collide
+// with the next run's shared projectId (origin-derived)
+const previousLeaseStateHome = process.env.XDG_STATE_HOME
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-cp-lease-state-'))
+process.env.XDG_STATE_HOME = leaseStateHome
+after(() => {
+  if (previousLeaseStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousLeaseStateHome
+  rmSync(leaseStateHome, { recursive: true, force: true })
+})
 
 /** gh shim — the REST agent-task surface the connector speaks, backed
  *  by a JSON store at $FAKE_GH_DB ({tasks, prs, cancelledRuns, seq}).
@@ -284,6 +307,30 @@ describe('copilot connector', () => {
       const entry = readAgentRegistry(fx.main)['fx-1']!
       assert.match(String(entry.spawnError), /Copilot coding agent/)
       assert.equal(fx.rows()[0]!.status, 'in_progress')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test("the work lease is born foreign — the spawner's exit frees no live task's key", async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      // pidAlive:()=>false plays the spawner CLI already gone — a local
+      // holder stamp would read dead and free the key for a duplicate
+      // spawn beside the live remote task; the hosted worker owns no
+      // local pid, so the lease is TTL-governed (spec: a foreign-host
+      // pid is ignored until expiry)
+      const store = localLeaseStore(projectId(fx.main), { pidAlive: () => false })
+      const lease = store.read('bead/fx-1')
+      assert.ok(lease !== undefined)
+      assert.notEqual(lease.holder.host, hostname())
+      // and the key still refuses a second holder outright
+      assert.equal(
+        store.acquire('bead/fx-1', { host: hostname(), pid: 1, rig: 'rig' }, 60_000).ok,
+        false
+      )
     } finally {
       cleanup(fx)
     }

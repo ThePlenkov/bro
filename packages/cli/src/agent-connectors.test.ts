@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
@@ -29,6 +29,8 @@ import {
   BATCH_MARKER_ENV,
   deriveProviderWalls,
   handleOwner,
+  localLeaseStore,
+  projectId,
   readLedgerWalls,
   recordWall,
   patchAgentRegistry,
@@ -80,6 +82,17 @@ import { VERSION } from './version.ts';
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
+const previousLeaseStateHome = process.env.XDG_STATE_HOME;
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-agent-lease-state-'));
+process.env.XDG_STATE_HOME = leaseStateHome;
+after(() => {
+  if (previousLeaseStateHome === undefined) {
+    delete process.env.XDG_STATE_HOME;
+  } else {
+    process.env.XDG_STATE_HOME = previousLeaseStateHome;
+  }
+  rmSync(leaseStateHome, { recursive: true, force: true });
+});
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -140,6 +153,9 @@ if (args[0] === 'list-sessions') {
   fs.writeSync(1, live.join('\\n') + '\\n'); process.exit(0)
 }
 if (args[0] === 'list-panes') {
+  // TMUX_FAKE_NOPANE: a server that can't report pane pids — the spawn
+  // must still land, and its lease must not die with the spawner
+  if (process.env.TMUX_FAKE_NOPANE) { console.error('pane pid unavailable'); process.exit(1) }
   const s = load().sessions[target()]
   if (!s || !alive(s.pid)) { console.error('no session'); process.exit(1) }
   fs.writeSync(1, s.pid + '\\n'); process.exit(0)
@@ -481,6 +497,74 @@ function connectorContract(b: BackendCase): void {
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true });
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env);
   const kill = (f: Fixture, info: AgentInfo) => killRun(f.main, info);
+
+  if (b.name === 'native') {
+    test('a project work lease refuses a spawn held by another clone', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const held = localLeaseStore(projectId(f.main)).acquire(
+          'bead/fx-1',
+          { host: 'other-host', pid: 9876, rig: 'other-rig', agentId: 'other-agent' },
+          60_000
+        );
+        assert.equal(held.ok, true);
+        await assert.rejects(
+          conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) => {
+            assert.ok(err instanceof SpawnError);
+            assert.equal(err.kind, 'cap');
+            assert.match(err.message, /bead\/fx-1 leased by other-rig@other-host pid 9876 until/);
+            return true;
+          }
+        );
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a respawn reuses its matching live lease token', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      const store = localLeaseStore(projectId(f.main));
+      try {
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        const entry = readAgentRegistry(f.main)['fx-1']!;
+        const lease = store.read('bead/fx-1');
+        assert.equal(entry.leaseToken, lease?.token);
+        assert.ok(lease !== undefined);
+        assert.ok(store.rebind(lease, { pid: process.pid }));
+        kill(f, first);
+        await until(() => !pidAlive(first.pid!));
+        assert.equal(store.read('bead/fx-1')?.token, lease.token);
+        const second = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.leaseToken, lease.token);
+        await c.stop(second.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a local backend rebinds the work lease to the worker pid', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      try {
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+        assert.ok(lease !== undefined);
+        // a local worker keeps the lease pid-governed — its death frees
+        // the key without waiting out the TTL
+        assert.equal(lease.holder.host, hostname());
+        assert.equal(lease.holder.pid, info.pid);
+        await c.stop(info.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+  }
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
@@ -1010,6 +1094,9 @@ function connectorContract(b: BackendCase): void {
       assert.equal(st.state, 'blocked');
       assert.equal(st.cause, 'rate_limited');
       assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now());
+      // the exit harvested the lease too — a dead run never holds the
+      // key (forceRelease reports nothing to free)
+      assert.equal(localLeaseStore(projectId(f.main)).forceRelease('bead/fx-1'), false);
       // the registry carries the cause
       const entry = readAgentRegistry(f.main)['fx-1']!;
       assert.equal(entry.cause, 'rate_limited');
@@ -1762,6 +1849,29 @@ describe('tmux connector', () => {
     }
   });
 
+  test('a missing pane pid stamps the work lease foreign — the TTL, not the spawner pid, backs it', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
+    const prevNoPane = process.env.TMUX_FAKE_NOPANE;
+    process.env.TMUX_FAKE_NOPANE = '1';
+    try {
+      const c = makeTmuxConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // pidAlive:()=>false plays the spawner already gone — a local
+      // stamp would read dead and free the key for a duplicate while
+      // the pane still runs; a foreign holder is TTL-governed (spec:
+      // a foreign-host pid is ignored until expiry)
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevNoPane === undefined) delete process.env.TMUX_FAKE_NOPANE;
+      else process.env.TMUX_FAKE_NOPANE = prevNoPane;
+      cleanup(f);
+    }
+  });
+
   test('a failing tmux binary degrades list() and refuses spawn', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
     try {
@@ -1814,6 +1924,50 @@ describe('docker connector', () => {
       );
       await n.stop(first.id);
     } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a remote daemon stamps the work lease foreign — the spawner exit frees nothing', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = 'tcp://daemon-remote:2375';
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // the daemon's State.Pid names ITS host — no local probe sees it;
+      // the lease must hold by TTL, not die with the spawner's own pid
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      cleanup(f);
+    }
+  });
+
+  test('a local daemon binds the work lease to the container pid', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    const prevCtx = process.env.DOCKER_CONTEXT;
+    delete process.env.DOCKER_HOST;
+    delete process.env.DOCKER_CONTEXT;
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.equal(lease.holder.host, hostname());
+      assert.equal(lease.holder.pid, info.pid);
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      if (prevCtx === undefined) delete process.env.DOCKER_CONTEXT;
+      else process.env.DOCKER_CONTEXT = prevCtx;
       cleanup(f);
     }
   });

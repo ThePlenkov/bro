@@ -415,6 +415,20 @@
             }
           },
           "additionalProperties": false
+        },
+        "leases": {
+          "type": "object",
+          "properties": {
+            "roleTtlSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "workTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

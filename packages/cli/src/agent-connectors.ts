@@ -14,6 +14,7 @@
  */
 import { type SpawnOptions, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import {
   accessSync,
   closeSync,
@@ -62,6 +63,7 @@ import {
   deriveProviderWalls,
   emitLifecycle,
   entryRunId,
+  type FleetLeaseTtls,
   type FleetProfile,
   type FleetRouter,
   type FleetWallTtls,
@@ -73,8 +75,12 @@ import {
   isBatchSpawn,
   isQualifiedRouteId,
   JudgeUnavailable,
+  type Lease,
+  type LeaseHolder,
+  type LeaseStore,
   type ListResult,
   loadConfig,
+  localLeaseStore,
   type ModelRoute,
   mintAgentId,
   mintRunId,
@@ -86,6 +92,7 @@ import {
   type ProviderWall,
   patchAgentRegistry,
   pidAlive,
+  projectId,
   probeStep,
   procStat,
   providerCallGrade,
@@ -165,6 +172,7 @@ export interface AgentConnectorEnv {
     profiles?: Record<string, FleetProfile>;
     routing?: RoutingTable;
     walls?: FleetWallTtls;
+    leases?: FleetLeaseTtls;
     router?: FleetRouter;
   };
   /** The named provider registry — spawn resolution reads entries by
@@ -263,6 +271,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       profiles?: Record<string, FleetProfile>;
       routing?: RoutingTable;
       walls?: FleetWallTtls;
+      leases?: FleetLeaseTtls;
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
@@ -1841,6 +1850,131 @@ function applySpawnRoute(
   spec.routeIndex = walk.index;
 }
 
+interface SpawnWorkLease {
+  store: LeaseStore;
+  lease: Lease;
+}
+
+function pullRequestLeaseKey(spec: SpawnSpec): string | undefined {
+  const pr = spec.env?.BRO_PR;
+  const url = spec.env?.BRO_PR_URL;
+  if (pr === undefined || url === undefined) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(pr)) {
+    return undefined;
+  }
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return undefined;
+  }
+  const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(pathname);
+  if (match === null || match[3] !== pr) {
+    return undefined;
+  }
+  return `pr/${match[1]}/${match[2]}/${pr}`;
+}
+
+function spawnLeaseKey(spec: SpawnSpec): string {
+  return pullRequestLeaseKey(spec) ?? `bead/${spec.molStep}`;
+}
+
+/** Every work lease is BORN stamped with a foreign host — `live()`
+ *  governs a foreign-host holder by TTL alone, so the lease outlives
+ *  the spawning CLI no matter what the backend's worker turns out to
+ *  be. A backend that later surfaces a locally-probeable pid downgrades
+ *  to `{host: hostname(), pid}` via rebindSpawnLease — a dead worker
+ *  then frees the key immediately instead of at TTL. Stamping local at
+ *  acquire would leave a window (spawn → rebind) where the lease dies
+ *  with `process.pid` beneath a worker this host can never probe — a
+ *  copilot task, a remote daemon's container, a tmux pane whose pid
+ *  never surfaced — freeing the key for the duplicate spawn the lease
+ *  exists to refuse. `:` can't appear in a hostname, so the marker can
+ *  never alias a real host. */
+function remoteLeaseHost(backend: string): string {
+  return `remote:${backend}`;
+}
+
+function acquireSpawnLease(
+  dir: string,
+  spec: SpawnSpec,
+  agentId: string,
+  existing: AgentRegistryEntry | undefined,
+  env: AgentConnectorEnv,
+  backend: string
+): SpawnWorkLease {
+  const store = localLeaseStore(projectId(dir));
+  const key = spawnLeaseKey(spec);
+  const holder = {
+    host: remoteLeaseHost(backend),
+    pid: process.pid,
+    rig: basename(resolve(dir)),
+    agentId,
+  };
+  if (existing?.leaseKey === key && typeof existing.leaseToken === 'string') {
+    const current = store.read(key);
+    if (current?.token === existing.leaseToken) {
+      const rebound = store.rebind(current, holder);
+      if (rebound !== undefined) {
+        return { store, lease: rebound };
+      }
+    }
+  }
+  const ttlMinutes =
+    env.fleet?.leases?.workTtlMinutes ?? DEFAULT_CONFIG.fleet.leases.workTtlMinutes;
+  const result = store.acquire(key, holder, ttlMinutes * 60_000);
+  if (!result.ok) {
+    const owner = result.held.holder;
+    throw new SpawnError(
+      `${key} leased by ${owner.rig}@${owner.host} pid ${owner.pid} until ${result.held.expiresAt}`,
+      'cap'
+    );
+  }
+  return { store, lease: result.lease };
+}
+
+/** Downgrade a born-TTL-governed spawn lease to local governance once
+ *  the worker surfaces a pid this host can probe — `{host: hostname(),
+ *  pid}` so a dead worker frees the key without waiting out the TTL.
+ *  An `undefined` field must not clobber the value it names, and a
+ *  local stamp with no probeable pid governs nothing — either way the
+ *  acquired TTL stamp stays. Token-checked under the store lock, so a
+ *  stale rebind can't overwrite a successor's row; a failed rebind
+ *  warns but never blocks the spawn report. */
+function rebindSpawnLease(dir: string, lease: Lease, holderPatch: Partial<LeaseHolder>): void {
+  const patch = Object.fromEntries(
+    Object.entries(holderPatch).filter(([, value]) => value !== undefined)
+  ) as Partial<LeaseHolder>;
+  if (patch.pid !== undefined && patch.pid <= 0) {
+    return;
+  }
+  if (patch.host === hostname() && patch.pid === undefined) {
+    return; // a local stamp with no pid to probe dies with the spawner — keep the TTL stamp
+  }
+  if (Object.keys(patch).length === 0) {
+    return;
+  }
+  try {
+    localLeaseStore(projectId(dir)).rebind(lease, patch);
+  } catch (err) {
+    console.error(
+      `warning: work lease rebind failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+function releaseSpawnLease(dir: string, lease: Lease): void {
+  try {
+    localLeaseStore(projectId(dir)).release(lease);
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1887,6 +2021,10 @@ function prepareSpawn(
   exitFile: string;
   /** The attempt token — scopes this run's handle/go/exit artifacts. */
   runId: string;
+  /** The work lease this spawn holds — the caller releases it on a
+   *  launch failure, rebinds it onto the worker's real pid when one
+   *  surfaces (spec bro-r8y77, C). */
+  lease: Lease;
   reservation?: string;
   /** Cross-kind slot claims — the session kinds OTHER than the quota
    *  lane's that the spawned command starts. The caller releases them
@@ -1961,6 +2099,13 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend);
+  // The cross-repo work lease rides the same admission path the local
+  // claim guard just cleared: wall and fleet refusals above already
+  // passed, and every refusal below hands the lease back through the
+  // catch — a refused spawn never leaves the key held (spec bro-r8y77,
+  // C). The env load reuses the preloaded one — never a second config
+  // read inside the registry lock.
+  const workLease = acquireSpawnLease(dir, spec, agentId, existing, env, backend);
   // session-kind admission — resolved AFTER the route walk swapped
   // spec.worker, so the lane billed is the selected worker's; count +
   // slot claim under ONE host-wide mutex: the registry lock above is
@@ -2031,6 +2176,7 @@ function prepareSpawn(
     // every claim this spawn holds goes back — the caller never saw them
     releaseSessionStart(crossKindReservations);
     crossKindReservations.length = 0;
+    releaseSpawnLease(dir, workLease.lease);
     throw err;
   }
   let charged: LaneAdmission['admitted'];
@@ -2069,8 +2215,10 @@ function prepareSpawn(
           actor,
           phantom,
           existing,
+          lease: workLease.lease,
         }
       ),
+      lease: workLease.lease,
       reservation,
       crossKindReservations,
     };
@@ -2086,6 +2234,9 @@ function prepareSpawn(
     if (charged !== undefined) {
       laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
+    // and the lease: a spawn that never committed must not hold the
+    // cross-repo claim either
+    releaseSpawnLease(dir, workLease.lease);
     throw err;
   }
 }
@@ -2127,14 +2278,15 @@ function commitSpawn(
     claimAs?: string;
     sessionQuota?: SessionQuotaLane | undefined;
   },
-  /** The run's write facts — the minted id, the claim verdict, and the
-   *  registry row this spawn replaces. */
+  /** The run's write facts — the minted id, the claim verdict, the
+   *  registry row this spawn replaces, and the work lease it holds. */
   run: {
     agentId: string;
     claimed: boolean;
     actor: string | undefined;
     phantom: boolean;
     existing: AgentRegistryEntry | undefined;
+    lease: Lease;
   }
 ): {
   promptFile: string;
@@ -2144,7 +2296,7 @@ function commitSpawn(
   runId: string;
 } {
   mkdirPrivateSync(home);
-  const { agentId, existing } = run;
+  const { agentId, existing, lease } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
   const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
@@ -2220,6 +2372,9 @@ function commitSpawn(
     // keeping the previous run's provider
     provider: spec.provider,
     account: spec.account ?? spec.provider,
+    leaseKey: lease.key,
+    leaseToken: lease.token,
+    leaseRecord: lease,
     model: spec.model,
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
@@ -2561,6 +2716,7 @@ function persistClassifiedExit(
       ) {
         return;
       }
+      releaseClassifiedLease(dir, current);
       reg[molStep] = {
         ...current,
         exitStatus,
@@ -2572,6 +2728,23 @@ function persistClassifiedExit(
     });
   } catch {
     // the registry write is advisory — .exit still proves the exit
+  }
+}
+
+function releaseClassifiedLease(dir: string, entry: AgentRegistryEntry): void {
+  const lease = entry.leaseRecord;
+  if (lease === undefined) {
+    return;
+  }
+  if (lease.key !== entry.leaseKey || lease.token !== entry.leaseToken) {
+    return;
+  }
+  try {
+    localLeaseStore(projectId(dir)).release(lease);
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }
 
@@ -3231,6 +3404,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           stderrLog,
           exitFile,
           runId,
+          lease,
           reservation,
           crossKindReservations,
         } = prepareSpawn(dir, home, 'native', spec, {
@@ -3410,6 +3584,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 releaseSessionSlot(reservation);
               }
               releaseSessionStart(crossKindReservations);
+              releaseSpawnLease(dir, lease);
             } catch {
               // the entry may not have landed yet — nothing else to do
             }
@@ -3426,6 +3601,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             // dedup/stop decision the registry drives
             pidStart: typeof child.pid === 'number' ? (procStat(child.pid)?.start ?? null) : null,
           });
+          // the spawned pid IS probeable — downgrade the born-TTL
+          // lease to local governance so a dead worker frees the key
+          // without waiting out the TTL
+          rebindSpawnLease(dir, lease, { host: hostname(), pid: child.pid });
           writeWorkMarker(dir, agentId, spec.molStep, child.pid);
           // died after publishing the handle — pid+marker are durable,
           // the worker's admission stamp never lands
@@ -3440,6 +3619,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             releaseSessionSlot(reservation);
           }
           releaseSessionStart(crossKindReservations);
+          releaseSpawnLease(dir, lease);
           throw err;
         } finally {
           if (fd !== undefined) {
@@ -3764,147 +3944,165 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       // pid-patch under the registry lock, all synchronous shell-outs;
       // the molecule pin's bd show resolves before the lock is taken
       const mol = stepParent(spec.beadsDir, spec.molStep);
-      return withAgentRegistryLock(dir, () => {
-        // the session name derives from the agentId prepareSpawn
-        // resolves — entry callback, not a precomputed name, because a
-        // tampered entry's unsafe id is reminted inside
-        const {
-          agentId,
-          promptFile,
-          log,
-          stderrLog,
-          exitFile,
-          reservation,
-          crossKindReservations,
-        } = prepareSpawn(dir, home, 'tmux', spec, {
-          isLive: e => {
-            const n = tmuxSessionName(e);
-            if (n === undefined) {
-              return false;
+      // the lease prepareSpawn mints must outlive the lock scope — a
+      // launch failure after commit still has to free the cross-repo
+      // key, so it is hoisted for the catch below
+      let spawnLease: Lease | undefined;
+      try {
+        return withAgentRegistryLock(dir, () => {
+          // the session name derives from the agentId prepareSpawn
+          // resolves — entry callback, not a precomputed name, because a
+          // tampered entry's unsafe id is reminted inside
+          const {
+            agentId,
+            promptFile,
+            log,
+            stderrLog,
+            exitFile,
+            lease,
+            reservation,
+            crossKindReservations,
+          } = prepareSpawn(dir, home, 'tmux', spec, {
+            isLive: e => {
+              const n = tmuxSessionName(e);
+              if (n === undefined) {
+                return false;
+              }
+              const p = tmuxProbe(socket, n);
+              if (p.live === 'unknown') {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn kill-session a worker that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
+                  'unavailable'
+                );
+              }
+              if (p.live === 'running') {
+                touchWorkMarker(dir, e.agentId);
+              }
+              return p.live === 'running';
+            },
+            liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
+            entry: id => ({ session: `bro-${id}` }),
+            cap: { max: fleetCapOf(env), env },
+            env,
+            sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
+            spawnCommand: command,
+          });
+          spawnLease = lease;
+          const session = `bro-${agentId}`;
+          // a leftover session with our name (crash between entry and
+          // kill, a respawn over a zombie) would make new-session fail
+          // 'duplicate' — clear it; kill-session on a missing target is
+          // a no-op error we ignore
+          tmuxRun(socket, ['kill-session', '-t', session]);
+          // ambient env (process.env + spec.env) rides a 0600 file the
+          // pane sources, not argv — -e KEY=VALUE would expose secrets on
+          // the tmux client's world-readable cmdline, a regression vs
+          // native's spawn env. Identity pins are non-secret and stay on
+          // -e; they're also filtered OUT of the file so sourcing can
+          // never redirect the claim store or re-badge the worker
+          const envFile = join(home, `${agentId}.env`);
+          // the same credential-scope policy native/docker enforce (spec
+          // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
+          // ambient env the allowlist excludes, and the ambient BRO_BATCH
+          // marker is stripped the same way (only spec.env supplies it)
+          const policy = getCredentialScope(env, 'tmux');
+          const ambient = Object.entries({ ...process.env, ...spec.env })
+            .filter(
+              (e): e is [string, string] =>
+                e[1] !== undefined &&
+                /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
+                !AGENT_PIN_KEYS.has(e[0]) &&
+                !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+                isAllowedByEnvPolicy(
+                  e[0],
+                  e[1],
+                  'tmux',
+                  spec,
+                  env,
+                  policy,
+                  Object.hasOwn(spec.env ?? {}, e[0])
+                )
+            )
+            .map(([k, v]) => `export ${k}=${shQuote(v)}`)
+            .join('\n');
+          writePrivateFileSync(envFile, `${ambient}\n`);
+          const worker = spec.worker;
+          const cliBadge = workerCliBadge(worker, command);
+          const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
+            ([k, v]) => ['-e', `${k}=${v}`]
+          );
+          // the pane sources the ambient env and drops the file, then runs
+          // the agent; $? lands in the .exit file before the pipeline
+          // drains, tee keeps a log the way native's fd redirect does.
+          // Session dies with the pane → has-session IS liveness. tmux
+          // runs the command through the user's default-shell — a
+          // non-POSIX one (fish) would eat the braces, so sh -c pins the
+          // dialect the same way native's spawn does.
+          // Worker payloads (spec bro-5hx1.1): a 'template' command
+          // substitutes wholesale; an 'argv' worker becomes an exec line
+          // with every element single-quoted — the provider argv never
+          // re-parses into a different program.
+          warnNoPromptFile(worker, command);
+          const runLine = workerRunLine(worker, command, promptFile);
+          // stderr splits into its own capture when the backend records
+          // one; without a capture it folds into the stdout tee so the
+          // worker's noise still lands in the .log (docker does the same)
+          const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
+          const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
+          const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
+          const res = tmuxRun(socket, [
+            'new-session',
+            '-d',
+            '-s',
+            session,
+            '-c',
+            spec.repoRoot,
+            ...envArgs,
+            paneCmd,
+          ]);
+          if (res.code !== 0) {
+            rmSync(envFile, { force: true }); // a failed spawn must not leave ambient env on disk
+            if (reservation !== undefined) {
+              releaseSessionSlot(reservation);
             }
-            const p = tmuxProbe(socket, n);
-            if (p.live === 'unknown') {
-              // an unverifiable liveness probe must not let a duplicate
-              // spawn kill-session a worker that may still be alive
-              throw new SpawnError(
-                `cannot verify ${spec.molStep}'s tmux session — ${p.err}`,
-                'unavailable'
-              );
+            releaseSessionStart(crossKindReservations);
+            releaseSpawnLease(dir, lease);
+            try {
+              patchAgentRegistry(dir, spec.molStep, { spawnError: res.err });
+            } catch {
+              // the entry landed already — the SpawnError still reports
             }
-            if (p.live === 'running') {
-              touchWorkMarker(dir, e.agentId);
-            }
-            return p.live === 'running';
-          },
-          liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
-          entry: id => ({ session: `bro-${id}` }),
-          cap: { max: fleetCapOf(env), env },
-          env,
-          sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
-          spawnCommand: command,
+            throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+          }
+          // pane pid — a display handle like native's child pid, not the
+          // liveness signal (has-session is); pidStart pins its identity
+          // anyway so registry-side pidAlive probes (drive's cheap
+          // occupancy plane runs no backend list()) can tell a recycled
+          // pid from the live pane (bro-i5oq)
+          const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
+          const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : Number.NaN;
+          const hasPanePid = Number.isInteger(panePid) && panePid > 0;
+          const spawned = patchAgentRegistry(
+            dir,
+            spec.molStep,
+            hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
+          );
+          // a readable pane pid is a local liveness probe — downgrade the
+          // born-TTL lease to pid governance. No pane pid: the lease keeps
+          // its foreign host and the TTL backs it while the pane may still
+          // be live
+          rebindSpawnLease(dir, lease, hasPanePid ? { host: hostname(), pid: panePid } : {});
+          writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined);
+          return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
         });
-        const session = `bro-${agentId}`;
-        // a leftover session with our name (crash between entry and
-        // kill, a respawn over a zombie) would make new-session fail
-        // 'duplicate' — clear it; kill-session on a missing target is
-        // a no-op error we ignore
-        tmuxRun(socket, ['kill-session', '-t', session]);
-        // ambient env (process.env + spec.env) rides a 0600 file the
-        // pane sources, not argv — -e KEY=VALUE would expose secrets on
-        // the tmux client's world-readable cmdline, a regression vs
-        // native's spawn env. Identity pins are non-secret and stay on
-        // -e; they're also filtered OUT of the file so sourcing can
-        // never redirect the claim store or re-badge the worker
-        const envFile = join(home, `${agentId}.env`);
-        // the same credential-scope policy native/docker enforce (spec
-        // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
-        // ambient env the allowlist excludes, and the ambient BRO_BATCH
-        // marker is stripped the same way (only spec.env supplies it)
-        const policy = getCredentialScope(env, 'tmux');
-        const ambient = Object.entries({ ...process.env, ...spec.env })
-          .filter(
-            (e): e is [string, string] =>
-              e[1] !== undefined &&
-              /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
-              !AGENT_PIN_KEYS.has(e[0]) &&
-              !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-              isAllowedByEnvPolicy(
-                e[0],
-                e[1],
-                'tmux',
-                spec,
-                env,
-                policy,
-                Object.hasOwn(spec.env ?? {}, e[0])
-              )
-          )
-          .map(([k, v]) => `export ${k}=${shQuote(v)}`)
-          .join('\n');
-        writePrivateFileSync(envFile, `${ambient}\n`);
-        const worker = spec.worker;
-        const cliBadge = workerCliBadge(worker, command);
-        const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
-          '-e',
-          `${k}=${v}`,
-        ]);
-        // the pane sources the ambient env and drops the file, then runs
-        // the agent; $? lands in the .exit file before the pipeline
-        // drains, tee keeps a log the way native's fd redirect does.
-        // Session dies with the pane → has-session IS liveness. tmux
-        // runs the command through the user's default-shell — a
-        // non-POSIX one (fish) would eat the braces, so sh -c pins the
-        // dialect the same way native's spawn does.
-        // Worker payloads (spec bro-5hx1.1): a 'template' command
-        // substitutes wholesale; an 'argv' worker becomes an exec line
-        // with every element single-quoted — the provider argv never
-        // re-parses into a different program.
-        warnNoPromptFile(worker, command);
-        const runLine = workerRunLine(worker, command, promptFile);
-        // stderr splits into its own capture when the backend records
-        // one; without a capture it folds into the stdout tee so the
-        // worker's noise still lands in the .log (docker does the same)
-        const stderrRedirect = stderrLog !== undefined ? `2>> ${shQuote(stderrLog)}` : '2>&1';
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } ${stderrRedirect} | tee -a ${shQuote(log)}`;
-        const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
-        const res = tmuxRun(socket, [
-          'new-session',
-          '-d',
-          '-s',
-          session,
-          '-c',
-          spec.repoRoot,
-          ...envArgs,
-          paneCmd,
-        ]);
-        if (res.code !== 0) {
-          rmSync(envFile, { force: true }); // a failed spawn must not leave ambient env on disk
-          if (reservation !== undefined) {
-            releaseSessionSlot(reservation);
-          }
-          releaseSessionStart(crossKindReservations);
-          try {
-            patchAgentRegistry(dir, spec.molStep, { spawnError: res.err });
-          } catch {
-            // the entry landed already — the SpawnError still reports
-          }
-          throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable');
+      } catch (err) {
+        if (spawnLease !== undefined) {
+          releaseSpawnLease(dir, spawnLease);
         }
-        // pane pid — a display handle like native's child pid, not the
-        // liveness signal (has-session is); pidStart pins its identity
-        // anyway so registry-side pidAlive probes (drive's cheap
-        // occupancy plane runs no backend list()) can tell a recycled
-        // pid from the live pane (bro-i5oq)
-        const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}']);
-        const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : Number.NaN;
-        const hasPanePid = Number.isInteger(panePid) && panePid > 0;
-        const spawned = patchAgentRegistry(
-          dir,
-          spec.molStep,
-          hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
-        );
-        writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined);
-        return toTmuxInfo(socket, dir, home, spec.molStep, spawned);
-      });
+        throw err;
+      }
     },
 
     async list() {
@@ -4546,7 +4744,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const mol = stepParent(spec.beadsDir, spec.molStep);
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep];
-        const { agentId, promptFile, reservation, crossKindReservations } = prepareSpawn(
+        const { agentId, promptFile, lease, reservation, crossKindReservations } = prepareSpawn(
           dir,
           home,
           'gascity',
@@ -4593,6 +4791,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             releaseSessionSlot(reservation);
           }
           releaseSessionStart(crossKindReservations);
+          releaseSpawnLease(dir, lease);
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,
             spawnError: err instanceof Error ? err.message : String(err),
@@ -5336,6 +5535,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // serialize every concurrent spawn behind one `docker build`
       const image = dockerImageFor(spec, knobs);
       const mol = stepParent(spec.beadsDir, spec.molStep);
+      // only a LOCAL daemon's State.Pid is probeable from this host
+      const dockerPidIsLocal =
+        process.env.DOCKER_HOST === undefined && process.env.DOCKER_CONTEXT === undefined;
       return withAgentRegistryLock(dir, () => {
         const {
           agentId,
@@ -5343,6 +5545,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           log,
           stderrLog,
           exitFile,
+          lease,
           reservation,
           crossKindReservations,
         } = prepareSpawn(dir, home, 'docker', spec, {
@@ -5427,6 +5630,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             releaseSessionSlot(reservation);
           }
           releaseSessionStart(crossKindReservations);
+          releaseSpawnLease(dir, lease);
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),
@@ -5446,6 +5650,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               { pid: insp.pid, pidStart: null }
             : {}),
         });
+        // a usable local State.Pid downgrades the born-TTL lease to
+        // local governance — a remote daemon's pid names its own host,
+        // and an empty patch keeps the foreign stamp
+        rebindSpawnLease(dir, lease, dockerPidIsLocal ? { host: hostname(), pid: insp.pid } : {});
         writeWorkMarker(dir, agentId, spec.molStep, insp.pid);
         return toDockerInfo(dir, home, spec.molStep, spawned);
       });
@@ -6278,6 +6486,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         const {
           agentId,
           promptFile: _promptFile,
+          lease,
           reservation,
           crossKindReservations,
         } = prepareSpawn(dir, home, 'copilot', spec, {
@@ -6353,6 +6562,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             releaseSessionSlot(reservation);
           }
           releaseSessionStart(crossKindReservations);
+          releaseSpawnLease(dir, lease);
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),

@@ -43,8 +43,18 @@
  * reuses (bro-hl22w).
  */
 import { spawnSync, spawn } from 'node:child_process';
-import { closeSync, existsSync, readFileSync, statfsSync, statSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statfsSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
   AgentNotFound,
@@ -61,10 +71,13 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
   procStat,
+  projectId,
   releaseSessionSlot,
   reviewHost,
   routeStepClass,
@@ -84,6 +97,8 @@ import {
   type AgentInfo,
   type AgentState,
   type ClaimCapability,
+  type Lease,
+  type LeaseStore,
   type MirrorPolicy,
   type ResolvedClass,
   type ReviewFacade,
@@ -182,6 +197,7 @@ interface Ctx {
   backend: string;
   repo: string;
   root: string;
+  leaseStore?: LeaseStore;
   cfg: LoopConfig;
   /** The act gate's own section — service passes share the one read. */
   act: ReturnType<typeof loadBroConfig>['act'];
@@ -2688,6 +2704,8 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
   const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
+  const leaseStore = localLeaseStore(projectId(root));
+  ctx.leaseStore = leaseStore;
   if (argv.includes('--dry-run')) {
     await dryRunPlan(ctx);
     return;
@@ -2695,22 +2713,48 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   // One loop supervisor per repo: a respawn wrapper's duplicate stands
   // by behind the incumbent's hold and resumes once it exits — the
   // same single-instance contract `bro drive` takes (spec bro-2duu9).
-  const loopLock = gitCommonDir(root);
-  const releaseSupervisor =
-    loopLock === null
-      ? () => {}
-      : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
-          label: 'loop supervisor lock',
-          onStandby: pid =>
-            say(
-              ctx,
-              `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
-        });
-  try {
-    await guardedRun(ctx);
-  } finally {
+  const abort = new AbortController();
+  let roleLease: { release: () => void } | undefined;
+  let releaseSupervisor = () => {};
+  const releaseAll = (): void => {
     releaseSupervisor();
+    roleLease?.release();
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort();
+    releaseAll();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.kill(process.pid, signal);
+  };
+  const onInt = (): void => onSignal('SIGINT');
+  const onTerm = (): void => onSignal('SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
+  try {
+    roleLease = await holdRoleLease(
+      leaseStore,
+      'loop',
+      { host: hostname(), pid: process.pid, rig: basename(root) },
+      (ctx.env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    );
+    const loopLock = gitCommonDir(root);
+    if (loopLock !== null) {
+      releaseSupervisor = await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+        label: 'loop supervisor lock',
+        onStandby: pid =>
+          say(ctx, `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`),
+      });
+    }
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    await guardedRun(ctx, releaseAll);
+  } finally {
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    releaseSupervisor();
+    roleLease?.release();
   }
 }
 
@@ -3375,7 +3419,42 @@ function clumpCandidates(
 ): { candidates: ReadyBead[]; foreign: number } {
   const ready = readyBeads(ctx.root);
   const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root));
-  return { candidates: c.queue.filter(b => !seen.has(b.id)), foreign: c.foreign };
+  const candidates = c.queue.filter(b => !seen.has(b.id));
+  return {
+    candidates:
+      ctx.leaseStore === undefined
+        ? candidates
+        : skipLeasedBeads(
+            candidates,
+            key => ctx.leaseStore?.read(key),
+            line => say(ctx, line)
+          ),
+    foreign: c.foreign,
+  };
+}
+
+export function skipLeasedBeads<T extends { id: string }>(
+  candidates: T[],
+  read: (key: string) => Lease | undefined,
+  log: (line: string) => void = line => console.error(line),
+  host = hostname(),
+  pid = process.pid
+): T[] {
+  const picked: T[] = [];
+  for (const bead of candidates) {
+    const lease = read(`bead/${bead.id}`);
+    if (lease === undefined) {
+      picked.push(bead);
+      continue;
+    }
+    if (lease.holder.host === host && lease.holder.pid === pid) {
+      picked.push(bead);
+      continue;
+    }
+    const holder = lease.holder;
+    log(`loop: skipping ${bead.id} — leased by ${holder.rig}@${holder.host} pid ${holder.pid}`);
+  }
+  return picked;
 }
 
 /** Read-only drain check for the disk hold — clumpCandidates' pipeline
@@ -3933,7 +4012,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
  *  only write guaranteed to outlive the process — and signals, which
  *  never emit 'exit' and need handlers that audit then re-raise so
  *  the parent still sees the true signal death. */
-async function guardedRun(ctx: Ctx): Promise<void> {
+async function guardedRun(ctx: Ctx, release: () => void = () => {}): Promise<void> {
   let open = true;
   const heartbeat = setInterval(
     () => {
@@ -3959,11 +4038,13 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     if (open) {
       auditDeath(`exit code ${code}`);
     }
+    release();
   };
   const onSigint = (): void => {
     if (open) {
       auditDeath('signal SIGINT');
     }
+    release();
     // restore the default disposition, then re-raise — the parent sees
     // a real signal death, not a clean exit code
     process.removeListener('SIGINT', onSigint);
@@ -3973,6 +4054,7 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     if (open) {
       auditDeath('signal SIGTERM');
     }
+    release();
     process.removeListener('SIGTERM', onSigterm);
     process.kill(process.pid, 'SIGTERM');
   };

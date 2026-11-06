@@ -34,10 +34,12 @@ import {
   type ProviderEntry,
 } from './providers.ts';
 import {
-  fleetWalls,
+  fleetLeases,
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  fleetWalls,
+  type FleetLeaseTtls,
   type FleetRouter,
   type FleetWallTtls,
   type RoutingTable,
@@ -1018,6 +1020,7 @@ export const fleetSection: ConfigSection<{
   profiles: Record<string, FleetProfile>;
   routing: RoutingTable;
   walls: FleetWallTtls;
+  leases: FleetLeaseTtls;
   router?: FleetRouter;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -1025,6 +1028,7 @@ export const fleetSection: ConfigSection<{
     profiles?: unknown;
     routing?: unknown;
     walls?: unknown;
+    leases?: unknown;
     router?: unknown;
   };
   const router = fleetRouter(obj.router);
@@ -1038,6 +1042,7 @@ export const fleetSection: ConfigSection<{
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
     walls: fleetWalls(obj.walls),
+    leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
   };
 };
@@ -1070,6 +1075,10 @@ fleetSection.jsonSchema = js.obj({
   walls: js.obj({
     rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
     quotaTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
+  leases: js.obj({
+    roleTtlSeconds: { type: 'number', exclusiveMinimum: 0 },
+    workTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
   }),
 });
 
@@ -1347,6 +1356,7 @@ export interface BroConfig {
     profiles: Record<string, FleetProfile>;
     routing: RoutingTable;
     walls: FleetWallTtls;
+    leases: FleetLeaseTtls;
     router?: FleetRouter;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
@@ -1418,6 +1428,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     profiles: {},
     routing: {},
     walls: { rateTtlMinutes: 15, quotaTtlMinutes: 360 },
+    leases: { roleTtlSeconds: 60, workTtlMinutes: 360 },
   },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
