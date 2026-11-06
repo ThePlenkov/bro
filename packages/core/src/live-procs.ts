@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { Socket } from 'node:net';
 
 const live = new Set<ChildProcess>();
@@ -157,48 +158,213 @@ export function pickOrphanProcs(
 /** Read the rows pickOrphanProcs needs out of /proc — linux-only;
  *  anything else returns []. Races are the norm: a pid vanishing
  *  mid-scan just drops out. */
+
 export function readProcRows(procDir = '/proc'): ProcRow[] {
-  if (process.platform !== 'linux') return [];
-  let uptimeSec = 0;
-  try {
-    uptimeSec = Number(readFileSync(`${procDir}/uptime`, 'utf8').split(' ')[0]);
-  } catch {
-    return [];
-  }
-  const bootMs = Date.now() - uptimeSec * 1000;
-  const rows: ProcRow[] = [];
-  for (const ent of readdirSync(procDir)) {
-    if (!/^\d+$/.test(ent)) continue;
+  if (process.platform === 'linux') {
+    let uptimeSec = 0;
     try {
-      const stat = readFileSync(`${procDir}/${ent}/stat`, 'utf8');
-      // comm sits in parens and may itself hold parens — parse after ')'
-      const close = stat.lastIndexOf(')');
-      const comm = stat.slice(stat.indexOf('(') + 1, close);
-      const f = stat.slice(close + 2).split(' ');
-      const ppid = Number(f[1]);
-      // fields after comm are 1-indexed from state: starttime is
-      // field 22 → index 19; jiffies run at 100 ticks/s on linux
-      const startMs = bootMs + (Number(f[19]) / 100) * 1000;
-      let parentComm: string | null = null;
-      if (ppid > 0) {
-        try {
-          parentComm = readFileSync(`${procDir}/${ppid}/comm`, 'utf8').trim();
-        } catch {
-          /* parent exited mid-scan — orphan race, next tick decides */
-        }
-      }
-      let cwd: string | null = null;
-      try {
-        cwd = readlinkSync(`${procDir}/${ent}/cwd`);
-      } catch {
-        /* kernel threads and raced exits have no cwd */
-      }
-      rows.push({ pid: Number(ent), comm, ppid, parentComm, cwd, startMs });
+      uptimeSec = Number(readFileSync(`${procDir}/uptime`, 'utf8').split(' ')[0]);
     } catch {
-      continue;
+      return [];
+    }
+    const bootMs = Date.now() - uptimeSec * 1000;
+    const rows: ProcRow[] = [];
+    for (const ent of readdirSync(procDir)) {
+      if (!/^\d+$/.test(ent)) continue;
+      try {
+        const stat = readFileSync(`${procDir}/${ent}/stat`, 'utf8');
+        // comm sits in parens and may itself hold parens — parse after ')'
+        const close = stat.lastIndexOf(')');
+        const comm = stat.slice(stat.indexOf('(') + 1, close);
+        const f = stat.slice(close + 2).split(' ');
+        const ppid = Number(f[1]);
+        // fields after comm are 1-indexed from state: starttime is
+        // field 22 → index 19; jiffies run at 100 ticks/s on linux
+        const startMs = bootMs + (Number(f[19]) / 100) * 1000;
+        let parentComm: string | null = null;
+        if (ppid > 0) {
+          try {
+            parentComm = readFileSync(`${procDir}/${ppid}/comm`, 'utf8').trim();
+          } catch {
+            /* parent exited mid-scan — orphan race, next tick decides */
+          }
+        }
+        let cwd: string | null = null;
+        try {
+          cwd = readlinkSync(`${procDir}/${ent}/cwd`);
+        } catch {
+          /* kernel threads and raced exits have no cwd */
+        }
+        rows.push({ pid: Number(ent), comm, ppid, parentComm, cwd, startMs });
+      } catch {
+        continue;
+      }
+    }
+    return rows;
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' } })
+      const lines = out.split('\n').filter(Boolean)
+      const rows: ProcRow[] = []
+      const pids: number[] = []
+      for (const line of lines) {
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        pids.push(pid)
+      }
+      // Batch cwd lookup for all pids where possible
+      const cwdMap = new Map<number, string | null>()
+      try {
+        if (pids.length > 0) {
+          // Batch in chunks to avoid very long arg lists
+          const chunkSize = 200
+          for (let i = 0; i < pids.length; i += chunkSize) {
+            const chunk = pids.slice(i, i + chunkSize)
+            try {
+              const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 })
+              let currentPid: number | null = null
+              for (const l of lout.split('\n')) {
+                if (l.startsWith('p')) {
+                  const v = Number(l.slice(1))
+                  currentPid = Number.isInteger(v) ? v : null
+                  continue
+                }
+                if (l.startsWith('n') && currentPid !== null) {
+                  cwdMap.set(currentPid, l.slice(1))
+                  continue
+                }
+              }
+            } catch {
+              // continue to next chunk
+            }
+          }
+        }
+      } catch {
+        // fall back to per-pid lookups below
+      }
+      // Batch parent comms for unique pids
+      const parentComms = new Map<number, string | null>()
+      const uniquePpids = new Set<number>()
+      for (const line of lines) {
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        if (ppid > 0 && ppid !== 1 && !cwdMap.has(pid) /* just to iterate */) {
+          // collect
+        }
+        if (ppid > 0 && ppid !== 1) uniquePpids.add(ppid)
+      }
+      try {
+        if (uniquePpids.size > 0) {
+          const pout = execFileSync('ps', ['-p', Array.from(uniquePpids).join(','), '-o', 'pid=,comm='], { encoding: 'utf8', timeout: 1000 })
+          for (const l of pout.split('\n').filter(Boolean)) {
+            const t = l.trim().split(/\s+/)
+            if (t.length >= 2) {
+              const pc = t.slice(1).join(' ')
+              parentComms.set(Number(t[0]), (pc.includes('/') ? (pc.split('/').pop() ?? pc) : pc) || null)
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+      for (const line of lines) {
+        const trimmed = line.replace(/^\s+/, '')
+        const parts = trimmed.split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        // lstart can be 4 tokens (no year) or 5 tokens (with year) on macOS
+        // Parse lstart independently of comm by finding the parseable date/time sequence
+        let lstart = ''
+        let comm = ''
+        // Try to find a parseable lstart starting at index 2
+        for (let start = 2; start <= parts.length - 1; start++) {
+          for (let len = 5; len >= 4 && start + len <= parts.length; len--) {
+            const candidate = parts.slice(start, start + len).join(' ')
+            const parsed = Date.parse(candidate)
+            if (!isNaN(parsed)) {
+              lstart = candidate
+              const match = new RegExp(parts.slice(start, start + len).join('\\s+')).exec(trimmed)
+              comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
+              break
+            }
+          }
+          if (lstart !== '') break
+        }
+        if (lstart === '' || comm === '') {
+          // Fallback: try from index 2 with len 4 or 5
+          for (let len = 5; len >= 4 && 2 + len <= parts.length; len--) {
+            const candidate = parts.slice(2, 2 + len).join(' ')
+            const parsed = Date.parse(candidate)
+            if (!isNaN(parsed)) {
+              lstart = candidate
+              const match = new RegExp(parts.slice(2, 2 + len).join('\\s+')).exec(trimmed)
+              comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
+              break
+            }
+          }
+        }
+        if (lstart === '') {
+          continue
+        }
+        if (comm === '') {
+          // Last resort: take everything after the lstart found
+          const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+          comm = trimmed.slice(commStartIdx).trim()
+        }
+        let startMs = Date.now()
+        try {
+          startMs = Date.parse(lstart)
+          if (isNaN(startMs)) startMs = Date.now()
+        } catch {
+          startMs = Date.now()
+        }
+        let parentComm: string | null = null
+        if (ppid > 0 && ppid !== 1) {
+          parentComm = parentComms.get(ppid) ?? null
+          if (parentComm === null) {
+            try {
+              const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 })
+              const pc2 = pout.trim()
+              parentComm = (pc2.includes('/') ? (pc2.split('/').pop() ?? pc2) : pc2) || null
+            } catch {
+              parentComm = null
+            }
+          }
+        } else if (ppid === 1) {
+          parentComm = 'launchd'
+        }
+        let cwd: string | null = cwdMap.get(pid) ?? null
+        if (cwd === null) {
+          try {
+            const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 })
+            const cline = lout.split('\n').find(l => l.startsWith('n'))
+            if (cline) {
+              cwd = cline.slice(1)
+            }
+          } catch {
+            cwd = null
+          }
+        }
+        const commBase = comm.includes('/') ? (comm.split('/').pop() ?? comm) : comm
+        rows.push({ pid, comm: commBase, ppid, parentComm, cwd, startMs })
+      }
+      return rows
+    } catch {
+      return []
     }
   }
-  return rows;
+  return [];
 }
 
 export interface OrphanSweepReport {

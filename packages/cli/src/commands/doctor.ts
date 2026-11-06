@@ -10,7 +10,7 @@
  * failure; warnings pass. Probes are read-only — a broken tool reports as
  * a failing check, never as a crash.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import {
   existsSync,
   readdirSync,
@@ -611,15 +611,41 @@ function selfDistChecks(): DoctorCheck[] {
  *  null when /proc can't name a file (non-/proc platform, raced exit,
  *  `node -e`). */
 function daemonEntry(pid: number): string | null {
-  let argv: string[];
-  try {
-    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-      .split('\0')
-      .filter(t => t !== '');
-  } catch {
+  let argv: string[] | undefined;
+  if (process.platform === 'linux') {
+    try {
+      argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        .split('\0')
+        .filter(t => t !== '');
+    } catch {
+      return null;
+    }
+  } else if (process.platform === 'darwin') {
+    try {
+      let out: string;
+      try {
+        out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+      } catch {
+        try {
+          out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+        } catch {
+          return null;
+        }
+      }
+      const s = out.replace(/\r?\n$/, '');
+      const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+      if (tokens && tokens.length > 0) {
+        argv = tokens.map((t) => t.replace(/^["']|["']$/g, ''));
+      } else {
+        argv = s.split(/\s+/).filter((t) => t !== '');
+      }
+    } catch {
+      return null;
+    }
+  } else {
     return null;
   }
-  if (argv.length === 0) {
+  if (!argv || argv.length === 0) {
     return null;
   }
   const runtime = basename(argv[0]!);
@@ -628,10 +654,22 @@ function daemonEntry(pid: number): string | null {
     return null;
   }
   try {
-    const abs = candidate.startsWith('/')
-      ? candidate
-      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
-    return realpathSync(abs);
+    if (candidate.startsWith('/')) {
+      return realpathSync(candidate);
+    }
+    if (process.platform === 'linux') {
+      return realpathSync(join(readlinkSync(`/proc/${pid}/cwd`), candidate));
+    } else if (process.platform === 'darwin') {
+      try {
+        const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 });
+        const cline = lout.split('\n').find(l => l.startsWith('n'));
+        const cwd = cline ? cline.slice(1) : process.cwd();
+        return realpathSync(join(cwd, candidate));
+      } catch {
+        return null;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -683,16 +721,37 @@ function scriptArg(argv: string[]): string | undefined {
  *  null off-linux or on a raced exit; callers read null as unverifiable,
  *  never as stale. */
 function procStartMs(pid: number): number | null {
-  try {
-    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
-    const st = procStat(pid);
-    if (st === null || st.start === '') {
+  if (process.platform === 'linux') {
+    try {
+      const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // start is field 22 (jiffies) on linux
+      return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
+    } catch {
       return null;
     }
-    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
-  } catch {
-    return null;
   }
+  if (process.platform === 'darwin') {
+    try {
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // procStat on darwin may prefix with pid; try to parse as date
+      const startStr = st.start.replace(/^\d+\s+/, '');
+      const ms = Date.parse(startStr);
+      if (!isNaN(ms) && ms > 0) {
+        return ms;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** Two dirs inside the same repository — linked worktrees share the
@@ -1676,12 +1735,25 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
     return undefined;
   }
   try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-        const v = kv.slice(eq + 1).trim();
-        return v === '' ? undefined : v;
+    if (process.platform === 'linux') {
+      const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
+      for (const kv of environ.split('\0')) {
+        const eq = kv.indexOf('=');
+        if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
+          const v = kv.slice(eq + 1).trim();
+          return v === '' ? undefined : v;
+        }
+      }
+    } else if (process.platform === 'darwin') {
+      try {
+        const out = execFileSync('ps', ['eww', '-p', String(serve.pid)], { encoding: 'utf8', timeout: 1000 });
+        const m = out.match(/(?:^|\s|[\r\n])BRO_PROVIDER_BACKEND=([^\s]+)/);
+        if (m) {
+          const v = m[1].trim();
+          return v === '' ? undefined : v;
+        }
+      } catch {
+        // ignore
       }
     }
   } catch {
