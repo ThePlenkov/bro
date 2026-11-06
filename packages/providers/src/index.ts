@@ -42,8 +42,12 @@ export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts';
 export type { AcpWorkerSpec } from './acp-worker.ts';
 export { runAcpSessionView } from './acp-session-view.ts';
 export type { AcpSessionViewResult, AcpSessionViewSpec } from './acp-session-view.ts';
-export { AcpRenderer, safe } from './acp-render.ts';
-export type { PermissionRequestLike, RenderOpts, SessionUpdateLike } from './acp-render.ts';
+export { AcpRenderer, safe } from '@broject/acp-session';
+export type {
+  PermissionRequestLike,
+  RenderOpts,
+  SessionUpdateLike,
+} from '@broject/acp-session';
 export { acpProxy, runAcpProxy } from './acp-proxy.ts';
 export type { AcpProxyOptions, AcpProxySeam } from './acp-proxy.ts';
 export { cliChat, expandPromptFile } from './cli.ts';

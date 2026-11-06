@@ -185,7 +185,8 @@ describe('runAcpWorker', () => {
       });
       assert.deepEqual(
         probed.events.map(e => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
-        ['turn:start', 'tool_call:open', 'turn:stop']
+        // the journaled prompt rides the bus too (bro-l8wqu addendum 3)
+        ['turn:start', 'prompt:undefined', 'tool_call:open', 'turn:stop']
       );
       for (const e of probed.events) {
         assert.equal(e.key, agentId);

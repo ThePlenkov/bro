@@ -38,6 +38,7 @@ import type {
   StopReason,
 } from '@agentclientprotocol/sdk';
 import { pumpTurn } from './acp.ts';
+import { agentEventRecord } from './acp-events.ts';
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -186,16 +187,21 @@ function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] 
 function permissionHandler(
   autoApprove: boolean,
   provider: string | undefined,
-  log: (line: string) => void
+  log: (line: string) => void,
+  record?: (row: { sessionId: string; title: string; verdict: string }) => void
 ): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> {
   return ctx => {
     const opts = ctx.params.options ?? [];
     const what =
       ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'permission request';
+    const note = (verdict: string): void => {
+      record?.({ sessionId: ctx.params.sessionId, title: String(what), verdict });
+    };
     if (autoApprove) {
       const allow = opts.find(o => o.kind === 'allow_once' || o.kind === 'allow_always');
       if (allow !== undefined) {
         log(`permission ${what} — approved (autoApprove)`);
+        note('approved');
         return { outcome: { outcome: 'selected', optionId: allow.optionId } };
       }
       log(`permission ${what} — no allow option offered; denying`);
@@ -207,6 +213,8 @@ function permissionHandler(
       );
     }
     const reject = opts.find(o => o.kind === 'reject_once' || o.kind === 'reject_always');
+    if (reject === undefined) note('cancelled');
+    else note('denied');
     return {
       outcome:
         reject === undefined
@@ -237,13 +245,29 @@ const UNADVERTISED_METHODS = [
  *  caller maps the code to the `.exit` file, and every failure mode
  *  logs its own line first (the log IS the diagnosis surface). */
 export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
+  // Pin env-derived knobs at startup: BRO_WORKER_DRAIN_MS is read once,
+  // not per turn. Invalid/unset values parse to undefined so drain() owns
+  // the default and clamp; the worker's CI-sensitive longer bound (10s)
+  // applies at this call site.
+  const parsedDrainMs = Number(process.env.BRO_WORKER_DRAIN_MS);
+  const envDrainMs =
+    Number.isFinite(parsedDrainMs) && parsedDrainMs > 0 ? parsedDrainMs : undefined;
+  const drainTimeoutMs = envDrainMs ?? 10_000;
   const log = spec.log ?? ((line: string) => console.log(line));
   const errOut = spec.err ?? ((text: string) => void process.stderr.write(text));
   const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
 
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
-    permissionHandler(spec.autoApprove === true, spec.provider, log)
+    permissionHandler(spec.autoApprove === true, spec.provider, log, r =>
+      // the ask never reaches a session/update consumer — the archive
+      // row is the pane's blocked signal (spec bro-l8wqu)
+      agentEventRecord(spec.cwd, r.sessionId, by, {
+        kind: 'permission',
+        title: r.title,
+        verdict: r.verdict,
+      })
+    )
   );
   for (const m of UNADVERTISED_METHODS) {
     app.onRequest<unknown, never>(
@@ -399,7 +423,8 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         undefined,
         by,
         undefined,
-        spec.cwd
+        spec.cwd,
+        drainTimeoutMs
       ).finally(flush);
       log(`turn stopped — ${r.stopReason}`);
       return r.stopReason === 'end_turn' ? 0 : 1;
