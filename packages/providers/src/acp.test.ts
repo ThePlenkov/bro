@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { agent } from '@agentclientprotocol/sdk'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
@@ -18,6 +19,7 @@ import {
   shellWords,
 } from './acp.ts'
 import { providerClient } from './registry.ts'
+import { otelJournal } from './otel.ts'
 import { fakeAcpAgent } from './testkit.ts'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
@@ -1136,6 +1138,92 @@ describe('acp terminal plane (bro-z7afs)', () => {
       assert.match(fake.terminalResult?.output ?? '', /pooled-terminal/)
     } finally {
       peer.close()
+    }
+  })
+
+  test('a permission ask is denied LOUDLY — deny outcome plus an acp.denied_call journal row (spec bro-mfruo)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'))
+    const journal = join(dir, 'turns.jsonl')
+    otelJournal(journal)
+    try {
+      const fake = fakeAcpAgent({
+        replyText: 'sum',
+        askPermission: [{ optionId: 'deny-1', name: 'Deny', kind: 'reject_once' }],
+      })
+      const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+      try {
+        await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+      } finally {
+        peer.close()
+      }
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
+      const denied = readFileSync(journal, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((r) => r.event === 'acp.denied_call')
+      assert.ok(denied, 'the denial announced itself on the journal')
+      assert.equal(denied.by, 'conductor:x')
+      assert.equal(denied.method, 'session/request_permission')
+      assert.equal(denied.what, 'run tests')
+    } finally {
+      otelJournal(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an unadvertised agent→client call answers method-not-found and journals the attempt', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acp-'))
+    const journal = join(dir, 'turns.jsonl')
+    otelJournal(journal)
+    try {
+      const fake = fakeAcpAgent({
+        replyText: 'sum',
+        probeClient: async (client, sessionId) => {
+          try {
+            await client.request('elicitation/create', { sessionId })
+            return {}
+          } catch (err) {
+            const e = err as { code?: unknown; message?: unknown }
+            return {
+              ...(typeof e.code === 'number' ? { code: e.code } : {}),
+              message: typeof e.message === 'string' ? e.message : String(err),
+            }
+          }
+        },
+      })
+      const errLines: string[] = []
+      const origWrite = process.stderr.write
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        errLines.push(String(chunk))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+        try {
+          await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+        } finally {
+          peer.close()
+        }
+      } finally {
+        process.stderr.write = origWrite
+      }
+      assert.equal((fake.probeResult as { code?: number } | undefined)?.code, -32601)
+      const denied = readFileSync(journal, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((r) => r.event === 'acp.denied_call' && r.method === 'elicitation/create')
+      assert.ok(denied, 'the unserved call announced itself on the journal')
+      const line = errLines.find((l) => l.includes('elicitation/create'))
+      assert.match(line ?? '', /method-not-found/, 'the stderr line names the real cause')
+      assert.ok(
+        !line?.includes('non-interactive pin'),
+        'an unadvertised call does not blame the permission pin'
+      )
+    } finally {
+      otelJournal(undefined)
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
