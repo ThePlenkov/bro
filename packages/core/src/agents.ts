@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ConfigSection } from './config.ts';
+import type { Lease } from './leases.ts';
 import type { OnWall } from './routing.ts';
 import { acquireFileLock } from './filelock.ts';
 import { BD_NO_STORE } from './bd.ts';
@@ -145,9 +146,20 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
-/** Provider reset extraction across the known header/prose forms. */
+const DEVIN_RATE_LIMIT_RE = /reached free model rate limit/i;
+const RATE_LIMIT_GRACE_MS = 10 * 60 * 1000;
+
+/** Provider reset extraction across the known header/prose forms. A
+ *  Devin free-tier wall (`Reached free model rate limit …`) parks a
+ *  grace beat past the advertised reset — the window is a rolling
+ *  refill, so spawning exactly at the stamp re-drains it half-empty. */
 function parseResetAt(text: string, now: number): string | undefined {
-  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  const base = relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  if (base === undefined || !DEVIN_RATE_LIMIT_RE.test(text)) {
+    return base;
+  }
+  const t = Date.parse(base);
+  return Number.isFinite(t) ? toIso(t + RATE_LIMIT_GRACE_MS) : base;
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
@@ -249,6 +261,8 @@ export interface SpawnSpec {
    *  spawn resolved to. Recorded into the registry and pinned into
    *  the worker's env; never set for the legacy template path. */
   provider?: string;
+  /** Opaque provider-account identity; defaults to the provider name. */
+  account?: string;
   /** The effective model (spawn flag > profile > provider entry). */
   model?: string;
   /** The routing lane the spawn resolved to (fleet.routing class —
@@ -267,13 +281,18 @@ export interface SpawnSpec {
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
   /** Pre-resolved fleet-routing candidates, in declared chain order.
-   *  prepareSpawn rewrites provider/model/worker/class from the walked
-   *  candidate under the registry lock; callers read them only after
-   *  prepareSpawn returns. */
+   *  prepareSpawn rewrites provider/account/model/worker/class from the
+   *  walked candidate under the registry lock; callers read them only
+   *  after prepareSpawn returns. */
   route?: {
     class: string;
     onWall: OnWall;
-    candidates: Array<{ provider: string; model?: string; worker: SpawnWorker }>;
+    candidates: Array<{
+      provider: string;
+      account: string;
+      model?: string;
+      worker: SpawnWorker;
+    }>;
   };
   /** The chain position the walk selected — prepareSpawn stamps it so
    *  commitSpawn can pin the resume point (a respawn of a chain that
@@ -422,6 +441,12 @@ export interface AgentRegistryEntry {
   backend: string;
   spawnedAt: string;
   provider?: string;
+  /** Opaque account identity; legacy rows fall back to provider. */
+  account?: string;
+  leaseKey?: string;
+  leaseToken?: string;
+  leaseRecord?: Lease;
+  observedAt?: string;
   model?: string;
   acpSessionId?: string;
   /** Session-kind lane the run was admitted under — written at spawn so

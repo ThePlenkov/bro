@@ -401,6 +401,34 @@
             "provider",
             "mode"
           ]
+        },
+        "walls": {
+          "type": "object",
+          "properties": {
+            "rateTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "quotaTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "leases": {
+          "type": "object",
+          "properties": {
+            "roleTtlSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "workTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -1287,6 +1315,11 @@
                   "minLength": 1,
                   "pattern": "\\S"
                 },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
                 "models": {
                   "type": "object",
                   "minProperties": 1,
@@ -1354,7 +1387,15 @@
                   "minLength": 1,
                   "pattern": "\\S"
                 },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
                 "autoApprove": {
+                  "type": "boolean"
+                },
+                "wallPause": {
                   "type": "boolean"
                 }
               },
@@ -1384,6 +1425,14 @@
                   "type": "string",
                   "minLength": 1,
                   "pattern": "\\S"
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "wallPause": {
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false,
