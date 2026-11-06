@@ -11,6 +11,7 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
       : DEFAULT_LOOP_CONFIG[k];
   const num = (
     k:
+      | 'everySec'
       | 'stallMin'
       | 'crashExitMs'
       | 'mergeTimeoutMin'
@@ -35,6 +36,9 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
     profile: str('profile') as string,
     model: str('model') as string,
     bootstrap: str('bootstrap') as string,
+    // a sub-second re-scan cadence is a busy loop, not a supervisor —
+    // the same floor the shared want-marker bounds carry
+    everySec: num('everySec', 1),
     stallMin: num('stallMin', 1),
     crashExitMs: num('crashExitMs'),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
@@ -59,6 +63,7 @@ loopSection.jsonSchema = js.obj({
   profile: js.str,
   model: js.str,
   bootstrap: js.str,
+  everySec: js.num(1),
   stallMin: js.num(1),
   crashExitMs: js.num(0),
   mergeTimeoutMin: js.num(1),

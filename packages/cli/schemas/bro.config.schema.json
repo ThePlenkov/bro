@@ -779,6 +779,10 @@
           "minLength": 1,
           "pattern": "\\S"
         },
+        "everySec": {
+          "type": "number",
+          "minimum": 1
+        },
         "stallMin": {
           "type": "number",
           "minimum": 1

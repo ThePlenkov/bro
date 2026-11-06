@@ -59,7 +59,6 @@ import {
   facadeName,
   getTasks,
   gitBranchLog,
-  gitCommonDir,
   gitTry,
   LockTimeout,
   mkdirPrivateSync,
@@ -162,9 +161,9 @@ import {
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
-import { MIN_INTERVAL_SEC } from './drive-config.ts';
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
-import { installLoop, uninstallLoop } from './daemon.ts';
+import { installLoop, loopLockPath, uninstallLoop } from './daemon.ts';
 import { checkBeads } from '@broject/core';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -2518,6 +2517,16 @@ const LOOP_VALUE_FLAGS = new Set([
 const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print']);
 
 function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
+  // install arms and uninstall disarms — both are the orchestrator's
+  // own authority over the supervisor cadence; a spawned worker owns
+  // neither side of it
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never own the supervisor; ' +
+        'the orchestrator session owns it'
+    );
+    process.exit(2);
+  }
   if (argv[0] === 'uninstall') {
     const r = uninstallLoop(dir);
     console.log(r.detail);
@@ -2526,15 +2535,8 @@ function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
     }
     return;
   }
-  if (!isOrchestratorSession()) {
-    console.error(
-      'error: BRO_AGENT_ID is set — spawned workers never arm the supervisor; ' +
-        'the orchestrator session owns it'
-    );
-    process.exit(2);
-  }
   const everyRaw = flag(argv, '--every');
-  const everySec = everyRaw === undefined ? (loopCfg as any).intervalSec ?? 300 : Number(everyRaw);
+  const everySec = everyRaw === undefined ? loopCfg.everySec : Number(everyRaw);
   if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > 3600) {
     console.error(
       `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to 3600s, got "${everyRaw ?? everySec}"`
@@ -2567,6 +2569,30 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     return;
   }
   rejectStrayArgs(argv);
+  // supervised mode — `daemon run --loop` and `loop install` reach
+  // here through the marker; `--every` is the outer re-scan cadence
+  // (the queue drains, the pass sleeps, the next pass rescans), while
+  // `--interval` stays the in-run gate poll
+  const everyRaw = flag(argv, '--every');
+  let everySec: number | undefined;
+  if (everyRaw !== undefined) {
+    everySec = Number(everyRaw);
+    if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+      console.error(
+        `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+      );
+      process.exit(2);
+    }
+    // same arming guard as `bro drive --every` — spawned workers never
+    // own a supervisor cadence; the orchestrator session does
+    if (!isOrchestratorSession()) {
+      console.error(
+        'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+          'the orchestrator session owns the cadence'
+      );
+      process.exit(2);
+    }
+  }
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
@@ -2578,11 +2604,11 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   // One loop supervisor per repo: a respawn wrapper's duplicate stands
   // by behind the incumbent's hold and resumes once it exits — the
   // same single-instance contract `bro drive` takes (spec bro-2duu9).
-  const loopLock = gitCommonDir(root);
+  const loopLock = loopLockPath(root);
   const releaseSupervisor =
     loopLock === null
       ? () => {}
-      : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+      : await awaitFileLock(loopLock, {
           label: 'loop supervisor lock',
           onStandby: pid =>
             say(
@@ -2591,7 +2617,14 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
             ),
         });
   try {
-    await guardedRun(ctx);
+    if (everySec === undefined) {
+      await guardedRun(ctx);
+    } else {
+      for (;;) {
+        await guardedRun(ctx);
+        await sleep(everySec * 1000);
+      }
+    }
   } finally {
     releaseSupervisor();
   }
