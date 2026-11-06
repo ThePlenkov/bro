@@ -402,6 +402,13 @@
             "mode"
           ]
         },
+        "providerCaps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
         "walls": {
           "type": "object",
           "properties": {

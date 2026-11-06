@@ -1949,6 +1949,26 @@ export function loadConfig(
       : [],
   };
   applySections(config, merged, sections);
+  // fleet.providerCaps is machine-wide operator policy — the caps are
+  // counted across every repo and every session source, so only the
+  // global layer may set them. A repo-layer entry (committed policy or
+  // a checkout's local file) would let one repo raise its own ceiling;
+  // warn and pin the global-layer value over whatever the merge made.
+  const repoCaps = layers.some(
+    l => l.layer !== 'global' && isPlainObject(l.raw.fleet) && 'providerCaps' in l.raw.fleet
+  );
+  if (repoCaps) {
+    console.error(
+      'bro.config: fleet.providerCaps is global-only operator policy — repo-layer value ignored (set it in the global config)'
+    );
+  }
+  const globalFleet = layers.find(l => l.layer === 'global')?.raw.fleet;
+  config.fleet = {
+    ...config.fleet,
+    providerCaps: fleetProviderCaps(
+      isPlainObject(globalFleet) ? globalFleet.providerCaps : undefined
+    ),
+  };
   return config;
 }
 

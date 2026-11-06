@@ -814,6 +814,42 @@ describe('config layers (spec bro-9vmx)', () => {
     }
   });
 
+  test('fleet.providerCaps is global-only — repo layers cannot raise the machine-wide cap', () => {
+    const undo = withGlobalConfig({ fleet: { providerCaps: { devin: 3 } } });
+    try {
+      const dir = tmpDir('bro-config-');
+      project(dir, { fleet: { providerCaps: { devin: 99 } } });
+      local(dir, { fleet: { providerCaps: { claude: 9 } } });
+      const errs: string[] = [];
+      const orig = console.error;
+      console.error = (m: unknown) => errs.push(String(m));
+      try {
+        const cfg = loadConfig(dir);
+        assert.equal(cfg.fleet.providerCaps.devin, 3); // global wins, not the merged 99
+        assert.equal(cfg.fleet.providerCaps.claude, undefined); // local-only key dropped
+      } finally {
+        console.error = orig;
+      }
+      assert.match(errs.join('\n'), /providerCaps is global-only/);
+    } finally {
+      undo();
+    }
+  });
+
+  test('fleet.providerCaps with no global entry reads empty even when a repo layer sets it', () => {
+    const dir = tmpDir('bro-config-');
+    project(dir, { fleet: { providerCaps: { devin: 5 } } });
+    const orig = console.error;
+    const errs: string[] = [];
+    console.error = (m: unknown) => errs.push(String(m));
+    try {
+      assert.deepEqual(loadConfig(dir).fleet.providerCaps, {});
+    } finally {
+      console.error = orig;
+    }
+    assert.match(errs.join('\n'), /providerCaps is global-only/);
+  });
+
   test('config.ts works as the global file too', () => {
     const undo = withGlobalConfig('export default { personality: "mentor" }', 'config.ts');
     try {
