@@ -128,7 +128,7 @@ function httpDateReset(text: string): string | undefined {
 /** Keyword-anchored ISO stamps (`resets at 2026-10-05T23:00:00Z`) */
 function isoReset(text: string): string | undefined {
   const m =
-    /(?:resets?|resetting|try again|retry|until|available)\b[^\d\n]{0,32}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
+    /(?:resets?|resetting|try again|retry|until|available|at)\b[^\d\n]{0,32}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
       text
     );
   if (m === null) {
@@ -144,9 +144,53 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
+const DEVIN_RATE_LIMIT_RE = /reached free model rate limit/i;
+const RATE_LIMIT_GRACE_MS = 10 * 60 * 1000;
+
 /** Provider reset extraction across the known header/prose forms. */
 function parseResetAt(text: string, now: number): string | undefined {
-  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  const devin = DEVIN_RATE_LIMIT_RE.test(text);
+  const rel = relReset(text, now);
+  if (rel !== undefined) {
+    if (devin) {
+      const t = Date.parse(rel);
+      if (Number.isFinite(t)) {
+        return toIso(t + RATE_LIMIT_GRACE_MS);
+      }
+    }
+    return rel;
+  }
+  const http = httpDateReset(text);
+  if (http !== undefined) {
+    if (devin) {
+      const t = Date.parse(http);
+      if (Number.isFinite(t)) {
+        return toIso(t + RATE_LIMIT_GRACE_MS);
+      }
+    }
+    return http;
+  }
+  const iso = isoReset(text);
+  if (iso !== undefined) {
+    if (devin) {
+      const t = Date.parse(iso);
+      if (Number.isFinite(t)) {
+        return toIso(t + RATE_LIMIT_GRACE_MS);
+      }
+    }
+    return iso;
+  }
+  const epoch = epochReset(text);
+  if (epoch !== undefined) {
+    if (devin) {
+      const t = Date.parse(epoch);
+      if (Number.isFinite(t)) {
+        return toIso(t + RATE_LIMIT_GRACE_MS);
+      }
+    }
+    return epoch;
+  }
+  return undefined;
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
