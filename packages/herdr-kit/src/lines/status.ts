@@ -6,82 +6,67 @@
  * the daemon projector wrote to the worktree's fleet-state file;
  * on exit it releases, with herdr's ~1s idle-shell probe as the net.
  */
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
+import type { PaneLed } from '@broject/acp-session';
 import { gitCommonDir } from '@broject/core';
 import {
-  type FleetPaneState,
-  fleetStatusPath,
+  call,
+  metaArgs as kitMetaArgs,
+  releaseArgs as kitReleaseArgs,
+  reportArgs as kitReportArgs,
   nextSeq,
-  type PaneLed,
-  parseFleetState,
-} from './fleet-state.ts';
+  plain,
+  STATUS_IDENTITY,
+} from '../client/index.ts';
+import { type FleetPaneState, fleetStatusPath, parseFleetState } from '../fleet/state.ts';
 
-export const PANE_SOURCE = 'bro:fleet';
-export const PANE_AGENT = 'bro-status';
+export { plain } from '../client/index.ts';
+export const PANE_AGENT = STATUS_IDENTITY.agent;
 
-/** Milliseconds — every herdr call is fire-and-forget behind a short
- *  fuse; a wedged socket must not freeze the view. */
-const HERDR_TIMEOUT_MS = 5_000;
-
-const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
-
-function call(args: string[]): void {
-  try {
-    spawnSync(herdrBin(), args, { timeout: HERDR_TIMEOUT_MS, stdio: 'ignore' });
-  } catch {
-    // every report is advisory — a dead socket retires to the watch loop
-  }
-}
-
-/** The shared report/release/metadata envelope — `bro:fleet` (never
- *  `herdr:`-reserved), `bro-status` (self-reported, unrecognized by
- *  design), unix-micros seq. */
-function paneArgs(verb: string, pane: string, seq: number): string[] {
-  return ['pane', verb, pane, '--source', PANE_SOURCE, '--agent', PANE_AGENT, '--seq', String(seq)];
-}
-
-/** The report-agent argv for one semantic state. */
-export function reportArgs(pane: string, led: PaneLed, seq: number): string[] {
-  const args = [...paneArgs('report-agent', pane, seq), '--state', led.state];
-  if (led.message !== undefined && led.message !== '') {
-    args.push('--message', led.message);
-  }
-  return args;
+/** The report-agent argv for one semantic state (status identity). */
+export function statusReportArgs(pane: string, led: PaneLed, seq: number): string[] {
+  return kitReportArgs(pane, led, seq, STATUS_IDENTITY);
 }
 
 /** The release argv for pane exit — clears name, state, and any
  *  resume binding so the shell-return probe isn't left to clean up. */
-export function releaseArgs(pane: string, seq: number): string[] {
-  return paneArgs('release-agent', pane, seq);
+export function statusReleaseArgs(pane: string, seq: number): string[] {
+  return kitReleaseArgs(pane, seq, STATUS_IDENTITY);
 }
 
-/** Strip C0/C1 control bytes from untrusted text — a bead title is
- *  operator input, and an embedded ESC written to the pane is terminal
- *  injection (clear-screen, title-set, worse). */
-export function plain(s: string): string {
-  // eslint-disable-next-line no-control-regex -- sanitizing is the point
-  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+/** The display-text argvs — presentation only: `--display-agent` names
+ *  the pane (the agent when the projection resolves one, the slug,
+ *  `fleet` last) and `--state-label` swaps the semantic word for the
+ *  label's bracket text. Old labels clear each pass so a stale
+ *  `working=` can't outlive its state — but herdr rejects
+ *  set-and-clear in one call, so clear rides call 1 and the label
+ *  lands in call 2. `undefined` state → clear everything back to the
+ *  bare `bro-status` binding. */
+export function statusMetaArgs(
+  pane: string,
+  s: FleetPaneState | undefined,
+  seq: number
+): string[][] {
+  return kitMetaArgs(
+    pane,
+    seq,
+    STATUS_IDENTITY,
+    s?.agent ?? s?.slug ?? 'fleet',
+    s !== undefined && s.status !== '' ? `${s.led.state}=${plain(s.status)}` : undefined
+  );
 }
 
-/** The display-text argv — presentation only: `--display-agent` names
- *  the pane (the slug when the projection has one, `fleet` otherwise)
- *  and `--state-label` swaps the semantic word for the label's bracket
- *  text. Old labels clear each pass so a stale `working=` can't outlive
- *  its state. `undefined` state → clear everything back to the bare
- *  `bro-status` binding. */
-export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[] {
-  const args = [
-    ...paneArgs('report-metadata', pane, seq),
-    '--display-agent',
-    plain(s?.slug ?? 'fleet'),
-    '--clear-state-labels',
-  ];
-  if (s !== undefined && s.status !== '') {
-    args.push('--state-label', `${s.led.state}=${plain(s.status)}`);
-  }
-  return args;
+/** OSC8 hyperlink — `#N` stays `#N` on screen but a ctrl/cmd-click
+ *  opens the PR. Wraps only the first `#<digits>` (the PR token);
+ *  applied AFTER `plain` since plain strips the escape bytes. */
+export function linkifyPr(text: string, prUrl: string | undefined): string {
+  if (prUrl === undefined) return text;
+  const url = plain(prUrl);
+  // http(s) only — a crafted `file:`/`javascript:`/custom-scheme cache
+  // entry would open a local handler on click
+  if (!/^https?:\/\//i.test(url)) return text;
+  return text.replace(/#\d+/, m => `\u001b]8;;${url}\u0007${m}\u001b]8;;\u0007`);
 }
 
 const LED_ICON: Record<PaneLed['state'], string> = {
@@ -99,12 +84,12 @@ export function renderView(
   worktree: string,
   now = Date.now()
 ): string {
-  const lines: string[] = [`── bro fleet · ${plain(s?.slug ?? 'waiting')} ──`];
+  const lines: string[] = [`── ${plain(s?.agent ?? 'fleet')} · ${plain(s?.slug ?? 'waiting')} ──`];
   if (s === undefined) {
     lines.push(' · waiting for the daemon projector', ` ${plain(worktree)}`);
   } else {
     lines.push(
-      ` ${LED_ICON[s.led.state]} ${plain(s.status !== '' ? s.status : s.led.state)}`,
+      ` ${LED_ICON[s.led.state]} ${linkifyPr(plain(s.status !== '' ? s.status : s.led.state), s.prUrl)}`,
       ` ${plain(s.title)}`,
       ` ${plain(worktree)} · ${plain(s.workspace)}`,
       ` updated ${new Date(s.ts).toTimeString().slice(0, 8)} (${Math.max(0, Math.round((now - s.ts) / 1000))}s ago)`
@@ -144,7 +129,7 @@ function armRelease(pane: string): void {
   const release = (): void => {
     if (released) return;
     released = true;
-    call(releaseArgs(pane, nextSeq()));
+    call(statusReleaseArgs(pane, nextSeq()));
   };
   process.on('exit', release);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
@@ -180,8 +165,8 @@ function makeRefresh(ctx: ViewCtx): () => void {
   let lastRaw: string | undefined | null = null;
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();
-    call(reportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
-    call(metaArgs(ctx.pane, s, seq));
+    call(statusReportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
+    for (const a of statusMetaArgs(ctx.pane, s, seq)) call(a);
     process.stdout.write(renderView(s, ctx.worktree));
   };
   return () => {

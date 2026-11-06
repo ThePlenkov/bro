@@ -11,6 +11,7 @@
 import {
   boundPaneIds,
   BRO,
+  BRO_LABELS,
   type HerdrPane,
   herdrOk,
   herdrTry,
@@ -18,7 +19,6 @@ import {
   paneIdle,
   paneList,
   type PluginState,
-  RENDER_LABEL,
   shq,
   STATUS_LABEL,
 } from './lib.ts';
@@ -85,12 +85,15 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
 
 /** The pane the status role may take: an unbound orphan carrying our
  *  label first, then any idle pane not bound to another bro role and
- *  not wearing the renderer's label. */
+ *  not wearing any bro-role label. */
 function pickPane(panes: HerdrPane[], bound: Set<string>): { id?: string; adopted: boolean } {
   const orphan = panes.find(p => p.label === STATUS_LABEL && !bound.has(p.pane_id));
   if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
   const free = panes.find(
-    p => !bound.has(p.pane_id) && p.label !== RENDER_LABEL && paneIdle(p.pane_id)
+    p =>
+      !bound.has(p.pane_id) &&
+      (p.label === undefined || !BRO_LABELS.has(p.label)) &&
+      paneIdle(p.pane_id)
   );
   return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
 }
@@ -117,6 +120,22 @@ export function ensureStatus(ctx: RenderCtx): void {
     return;
   }
   armAndReport(ctx, pick.id, pick.adopted);
+}
+
+/** The acp lane folds the status strip into the session pane (spec
+ *  bro-l8wqu) — close the recorded or orphan-labeled `bro: status`
+ *  pane and drop the record. */
+export function retireStatus(ctx: RenderCtx): void {
+  const rec = ctx.state.statuses[ctx.path];
+  const stale =
+    rec !== undefined && paneExists(rec.pane_id)
+      ? rec.pane_id
+      : paneList(ctx.ws).find(x => x.label === STATUS_LABEL)?.pane_id;
+  if (stale !== undefined) {
+    herdrTry(['pane', 'close', stale]);
+    log(`retire status pane ${stale} — session pane folds it in (${ctx.ws})`);
+  }
+  delete ctx.state.statuses[ctx.path];
 }
 
 /** Workspaces that lost their arm get their status record dropped —

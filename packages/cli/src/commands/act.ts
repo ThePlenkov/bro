@@ -7,7 +7,7 @@
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   appendFileSync,
   closeSync,
@@ -17,8 +17,8 @@ import {
   readFileSync,
   statSync,
   writeFileSync,
-} from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import {
   acquireFileLock,
   emitLifecycle,
@@ -39,18 +39,18 @@ import {
   type ReviewFacade,
   type ReviewThread,
   type TaskRow,
-} from '@broject/core'
-import type { ExitCode } from '@broject/core'
-import { loadBroConfig } from '../plugins.ts'
-import { flag } from './args.ts'
-import { SELF_ENTRY } from './self-entry.ts'
+} from '@broject/core';
+import type { ExitCode } from '@broject/core';
+import { loadBroConfig } from '../plugins.ts';
+import { flag } from './args.ts';
+import { SELF_ENTRY } from './self-entry.ts';
 import {
   deleteMergedLocalBranch,
   gitDirOf,
   isLinkedGitDir,
   parseWorktreePorcelain,
   removeMergedWorktree,
-} from './work.ts'
+} from './work.ts';
 import {
   acquireMergeSlot,
   checkHistory,
@@ -69,19 +69,15 @@ import {
   type PrActState,
   type RearmPlan,
   resolveLedger,
-} from '@broject/act'
-import {
-  annotateThreads,
-  judgeConfig,
-  judgeFacade,
-  recordDisposition,
-} from '@broject/judge'
-import { coveredBeadIds } from '@broject/loop'
-import { githubPrWake } from '@broject/github'
-import { collectReviewThreads, type CollectArgs } from './debt.ts'
+} from '@broject/act';
+import { annotateThreads, judgeConfig, judgeFacade, recordDisposition } from '@broject/judge';
+import { coveredBeadIds } from '@broject/loop';
+import { githubPrWake } from '@broject/github';
+import { collectReviewThreads, type CollectArgs } from './debt.ts';
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(`Usage: bro act <command> [args…]
+  printUsage(
+    `Usage: bro act <command> [args…]
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
@@ -104,60 +100,71 @@ Commands:
                                     reject/defer reasons
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
-        --unresolve                 resolve → unresolve instead`, exitCode)
+        --unresolve                 resolve → unresolve instead`,
+    exitCode
+  );
 }
 
-const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
+const VALUE_FLAGS = new Set([
+  '--pr',
+  '--thread',
+  '--comment',
+  '--file',
+  '--interval',
+  '--timeout',
+  '--bead',
+]);
 
 /** How a resolved target may be used: 'read' — accept the auto row and
  *  announce it; 'strict' — refuse the auto row (exit 2) because the
  *  caller pushes to the PR; 'record' — accept silently and tag the
  *  source so the caller can skip a row it cannot attribute. */
-export type ResolveMode = 'read' | 'strict' | 'record'
-export type ResolvedTarget = PrTarget & { source: 'explicit' | 'branch' | 'auto' }
+export type ResolveMode = 'read' | 'strict' | 'record';
+export type ResolvedTarget = PrTarget & { source: 'explicit' | 'branch' | 'auto' };
 
 /** PR number from argv — `--pr N` first, then the first positional. */
 function prArgFrom(argv: string[]): string | null {
-  const positional: string[] = []
+  const positional: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!
+    const arg = argv[i]!;
     if (arg.startsWith('--')) {
       if (VALUE_FLAGS.has(arg)) {
-        i += 1
+        i += 1;
       }
-      continue
+      continue;
     }
-    positional.push(arg)
+    positional.push(arg);
   }
-  const prFlag = argv.indexOf('--pr')
-  return (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
+  const prFlag = argv.indexOf('--pr');
+  return (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null;
 }
 
 /** No explicit number — the current branch's OPEN PR, else the repo's
  *  most recently updated open PR (announced for readers, refused for
  *  anything that can push). Exits 2 when neither source exists. */
 function resolveImplicit(rev: ReviewFacade, repo: string, mode: ResolveMode): ResolvedTarget {
-  const pr = rev.currentPr()
+  const pr = rev.currentPr();
   if (pr?.state === 'OPEN') {
-    return { repo, pr: pr.pr, source: 'branch' }
+    return { repo, pr: pr.pr, source: 'branch' };
   }
-  const auto = rev.openPrs?.(repo)[0]
+  const auto = rev.openPrs?.(repo)[0];
   if (auto === undefined) {
-    console.error('error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board')
-    process.exit(2)
+    console.error(
+      'error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board'
+    );
+    process.exit(2);
   }
-  const link = rev.prLink(repo, auto.pr)
+  const link = rev.prLink(repo, auto.pr);
   if (mode === 'strict') {
     console.error(
-      `error: refusing to act on auto-resolved PR ${link} — ` +
-        'pass a PR number explicitly'
-    )
-    process.exit(2)
+      `error: refusing to act on auto-resolved PR ${link} — ` + 'pass a PR number explicitly'
+    );
+    process.exit(2);
   }
   if (mode === 'read') {
-    console.error(`act: resolved current PR ${link} — most recently updated open PR`)
+    console.error(`act: resolved current PR ${link} — most recently updated open PR`);
   }
-  return { repo, pr: auto.pr, source: 'auto' }
+  return { repo, pr: auto.pr, source: 'auto' };
 }
 
 /** PR number: --pr flag, first positional, the current branch's PR, or
@@ -167,25 +174,25 @@ export function resolvePr(
   argv: string[],
   mode: ResolveMode = 'read'
 ): ResolvedTarget {
-  const repo = rev.resolveRepo([])
-  const prRaw = prArgFrom(argv)
+  const repo = rev.resolveRepo([]);
+  const prRaw = prArgFrom(argv);
   if (prRaw === null) {
-    return resolveImplicit(rev, repo, mode)
+    return resolveImplicit(rev, repo, mode);
   }
-  const pr = Number(prRaw)
+  const pr = Number(prRaw);
   if (!Number.isInteger(pr) || pr <= 0) {
-    console.error(`error: invalid PR number "${prRaw}"`)
-    process.exit(2)
+    console.error(`error: invalid PR number "${prRaw}"`);
+    process.exit(2);
   }
-  return { repo, pr, source: 'explicit' }
+  return { repo, pr, source: 'explicit' };
 }
 
 async function cmdStatus(argv: string[]): Promise<void> {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const json = argv.includes('--json')
-  const t = resolvePr(rev, argv)
-  const act = loadBroConfig().act
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const json = argv.includes('--json');
+  const t = resolvePr(rev, argv);
+  const act = loadBroConfig().act;
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
     checkHistory: checkHistory(process.cwd()),
@@ -196,24 +203,26 @@ async function cmdStatus(argv: string[]): Promise<void> {
     approvers: act.approvers,
     stateCache: prStateCache(process.cwd()),
     resolveLedger: resolveLedger(process.cwd()),
-  })
-  const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
+  });
+  const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
 
   if (!gate.ok) {
-    process.exitCode = 1
+    process.exitCode = 1;
   }
   if (json) {
-    console.log(JSON.stringify({ pr: state, exit_gate: gate }, null, 2))
-    return
+    console.log(JSON.stringify({ pr: state, exit_gate: gate }, null, 2));
+    return;
   }
-  printStatus(state, gate)
+  printStatus(state, gate);
 }
 
 function printStatus(state: PrActState, gate: ExitGate): void {
   // clickable by convention (AGENTS.md): user-facing PR refs are links —
   // state.url is the PR's own html_url, so this is also GHE-safe
-  console.log(`pr=[#${state.pr}](${state.url}) ${state.headRef}`)
-  console.log(`mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`)
+  console.log(`pr=[#${state.pr}](${state.url}) ${state.headRef}`);
+  console.log(
+    `mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`
+  );
   console.log(
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
       `ci_failing=${gate.ci_failing} ` +
@@ -222,19 +231,17 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
       `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
       `reopened_threads=${gate.reopened_threads}`
-  )
-  console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
-  const live = listWatches(process.cwd()).filter(
-    (l) => l.alive && l.watch.pr === state.pr
-  )
+  );
+  console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`);
+  const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);
   console.log(
     `watch=${live.length > 0 ? `live pid=${live[0]!.watch.pid}` : `none — \`bro act wait ${state.pr}\` arms one`}`
-  )
+  );
   for (const b of gate.blockers) {
-    console.log(`  blocker: ${b}`)
+    console.log(`  blocker: ${b}`);
   }
   for (const a of gate.alerts) {
-    console.log(`  alert: ${a}`)
+    console.log(`  alert: ${a}`);
   }
 }
 
@@ -242,12 +249,12 @@ function printStatus(state: PrActState, gate: ExitGate): void {
  *  settled (merged/closed mid-poll), or green. */
 function waitVerdict(res: GateWaitResult): string {
   if (res.timedOut) {
-    return 'timeout'
+    return 'timeout';
   }
   if (!res.gate.ok) {
-    return 'blocked'
+    return 'blocked';
   }
-  return res.state.state === 'OPEN' ? 'green' : res.state.state.toLowerCase()
+  return res.state.state === 'OPEN' ? 'green' : res.state.state.toLowerCase();
 }
 
 /**
@@ -261,27 +268,27 @@ async function cmdWait(argv: string[]): Promise<void> {
   // the error reads on this stderr, not in a detached child's log after
   // the whole wait already ran
   if (argv.includes('--squash') && argv.includes('--rebase')) {
-    console.error('error: conflicting merge strategies: --squash --rebase')
-    process.exit(2)
+    console.error('error: conflicting merge strategies: --squash --rebase');
+    process.exit(2);
   }
   if (argv.includes('--detach')) {
-    return cmdWaitDetach(argv)
+    return cmdWaitDetach(argv);
   }
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read')
-  const act = loadBroConfig().act
-  const interval = Number(flag(argv, '--interval') ?? '60')
-  const timeout = Number(flag(argv, '--timeout') ?? '45')
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read');
+  const act = loadBroConfig().act;
+  const interval = Number(flag(argv, '--interval') ?? '60');
+  const timeout = Number(flag(argv, '--timeout') ?? '45');
   if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
-    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)')
-    process.exit(2)
+    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
+    process.exit(2);
   }
   // the wait's polls ride the shared feed — loop/watch/drive passes
   // share the same entries; the settle→merge dispatch re-gates
   // uncached inside cmdMerge, so a cached green never lands a PR
-  const cache = prStateCache(process.cwd())
-  const ledger = resolveLedger(process.cwd())
+  const cache = prStateCache(process.cwd());
+  const ledger = resolveLedger(process.cwd());
   const res = await waitForGate(
     async () => {
       const state = await fetchPrActState(rev, t, {
@@ -294,11 +301,11 @@ async function cmdWait(argv: string[]): Promise<void> {
         approvers: act.approvers,
         stateCache: cache,
         resolveLedger: ledger,
-      })
-      return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
+      });
+      return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) };
     },
     waitOpts(rev, t, argv, { interval, timeout }, cache)
-  )
+  );
   // the settled wait is one gate verdict — timeout, blocked, externally
   // settled, or green. Poll snapshots inside waitForGate are noise;
   // only the decision journals here.
@@ -314,18 +321,18 @@ async function cmdWait(argv: string[]): Promise<void> {
       fix_rounds: res.gate.fix_rounds,
       ...(res.gate.blockers.length > 0 ? { blockers: res.gate.blockers } : {}),
     },
-  })
+  });
   if (argv.includes('--json')) {
     console.log(
       JSON.stringify({ pr: res.state, exit_gate: res.gate, timed_out: res.timedOut }, null, 2)
-    )
+    );
   } else {
-    printStatus(res.state, res.gate)
+    printStatus(res.state, res.gate);
     if (res.timedOut) {
-      console.log(`wait: timed out after ${timeout}m — still pending`)
+      console.log(`wait: timed out after ${timeout}m — still pending`);
     }
   }
-  await settleWait(argv, rev, t, res, timeout)
+  await settleWait(argv, rev, t, res, timeout);
 }
 
 /** The poll loop's knobs — cadence, wake subscription, the session
@@ -346,23 +353,23 @@ function waitOpts(
     t.source === 'auto'
       ? undefined
       : (s: PrActState) => {
-          const ok = rev.updateBranch(t, s.headSha)
+          const ok = rev.updateBranch(t, s.headSha);
           console.error(
             `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
-          )
+          );
           // the pushed head obsoletes this PR's feed entry — the next
           // poll must fetch it, not re-serve the pre-update state
           if (ok) {
-            cache?.invalidate(t)
+            cache?.invalidate(t);
           }
           emitLifecycle(process.cwd(), {
             kind: 'gate',
             pr: t.pr,
             to: ok ? 'updated' : 'blocked',
             detail: { via: 'act', action: 'update', sha: s.headSha },
-          })
-          return ok
-        }
+          });
+          return ok;
+        };
   return {
     intervalMs: timing.interval * 1000,
     timeoutMs: timing.timeout * 60_000,
@@ -390,7 +397,7 @@ function waitOpts(
         `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
       ),
     ...(updateBranch ? { updateBranch } : {}),
-  }
+  };
 }
 
 /** The settled tail — verdict events, the loop-claimed bead's discharge
@@ -407,44 +414,25 @@ async function settleWait(
 ): Promise<void> {
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
     if (!res.timedOut && !res.gate.ok) {
-      await recordBlockedVerdict(rev, t, res, timeout)
+      await recordBlockedVerdict(rev, t, res, timeout);
     } else if (!res.timedOut && res.state.state !== 'OPEN') {
       // externally settled (merged/closed between polls) — the "wait
       // finished" moment a sink is for (spec: specs/bro-huy5o.8.md)
-      await recordSettledVerdict(rev, t, res.state.url, res.state.state.toLowerCase())
+      await recordSettledVerdict(rev, t, res.state.url, res.state.state.toLowerCase());
     }
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
-    closeBeadIfLanded(argv, rev, t, res.state.state)
-    if (!res.timedOut && res.state.state === 'CLOSED') {
-      const prevExit = process.exitCode
-      try {
-        await collectReviewThreads(rev, {
-          repo: t.repo,
-          filters: { prIds: [t.pr], mergedSince: null, mergedUntil: null, lastN: null, prAuthor: null, labels: [] },
-          threadAuthor: null,
-          runId: 'local',
-          dryRun: false,
-          listOnly: false,
-          reharvest: false,
-          noLabel: false,
-          sources: null,
-          includeClosed: true,
-        } as CollectArgs)
-      } catch (err) {
-        console.error(
-          `act: debt harvest failed for closed PR — ${err instanceof Error ? err.message : err}`
-        )
-      }
-      process.exitCode = prevExit
+    closeBeadIfLanded(argv, rev, t, res.state.state);
+    if (!res.timedOut) {
+      await harvestClosedPr(rev, t, res.state.state);
     }
-    process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
-    return
+    process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0;
+    return;
   }
-  await mergeIfAsked(argv, t.pr)
+  await mergeIfAsked(argv, t.pr);
   // mergeIfAsked reports merge failures on exitCode — a clean return
   // means the wait ended at a green gate (and --merge landed or queued)
   if (process.exitCode === undefined || process.exitCode === 0) {
-    await recordSettledVerdict(rev, t, res.state.url, 'green')
+    await recordSettledVerdict(rev, t, res.state.url, 'green');
   }
 }
 
@@ -458,8 +446,8 @@ async function recordBlockedVerdict(
   res: GateWaitResult,
   timeoutMin: number
 ): Promise<void> {
-  const link = rev.prLink(t.repo, t.pr)
-  watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin }, res.gate.blockers)
+  const link = rev.prLink(t.repo, t.pr);
+  watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin }, res.gate.blockers);
   try {
     await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish({
       topic: 'act',
@@ -470,7 +458,7 @@ async function recordBlockedVerdict(
       payload:
         `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
         `\`bro act threads ${t.pr}\` lists them`,
-    })
+    });
   } catch {
     // fail-open — the verdict record must never turn the exit-code
     // contract into a failure
@@ -481,47 +469,47 @@ async function recordBlockedVerdict(
 
 /** Cap the per-PR wait log — append-only state in a .git dir still
  *  shouldn't grow without bound; keep the tail where fresh entries are. */
-const WAIT_LOG_CAP = 512 * 1024
+const WAIT_LOG_CAP = 512 * 1024;
 
 /** `<git-common>/bro/act-wait-<pr>.log` — the detached waiter's
  *  stdout/stderr. The watch marker under bro/watches/ records the pid
  *  and the promise; this keeps the words. */
 function waitLogPath(dir: string, pr: number): string | null {
-  const common = gitCommonDir(dir)
-  return common === null ? null : join(common, 'bro', `act-wait-${pr}.log`)
+  const common = gitCommonDir(dir);
+  return common === null ? null : join(common, 'bro', `act-wait-${pr}.log`);
 }
 
 /** Append fd for the wait log, or undefined — the spawn then falls back
  *  to `stdio: 'ignore'`, never to a broken fd. */
 function waitLogFd(dir: string, pr: number): number | undefined {
-  const p = waitLogPath(dir, pr)
+  const p = waitLogPath(dir, pr);
   if (p === null) {
-    return undefined
+    return undefined;
   }
   try {
-    mkdirSync(dirname(p), { recursive: true })
+    mkdirSync(dirname(p), { recursive: true });
     if (statSync(p).size > WAIT_LOG_CAP) {
-      writeFileSync(p, readFileSync(p, 'utf8').slice(-WAIT_LOG_CAP / 2))
+      writeFileSync(p, readFileSync(p, 'utf8').slice(-WAIT_LOG_CAP / 2));
     }
   } catch {
     // no log yet or unreadable — the append below creates/keeps it
   }
   try {
-    return openSync(p, 'a')
+    return openSync(p, 'a');
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 interface DetachedWait {
-  pid: number
+  pid: number;
   /** 'armed' — the child's own live watch marker was seen: the wait is
    *  running detached. 'settled' — the child already exited 0: an
    *  already-set gate finishes the wait inside the spawn (a merge armed
    *  with --merge already ran). 'pending' — alive at the deadline
    *  without a marker yet (late arming — a slow auth probe); the pid is
    *  real, the marker may still land. */
-  state: 'armed' | 'settled' | 'pending'
+  state: 'armed' | 'settled' | 'pending';
 }
 
 /** The green twin of recordBlockedVerdict — "act wait finished" is a
@@ -535,7 +523,7 @@ async function recordSettledVerdict(
   url: string,
   outcome: string
 ): Promise<void> {
-  const link = rev.prLink(t.repo, t.pr)
+  const link = rev.prLink(t.repo, t.pr);
   try {
     await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish({
       topic: 'act',
@@ -544,7 +532,7 @@ async function recordSettledVerdict(
       source: 'act-wait',
       ref: url,
       payload: `act wait on ${link} settled ${outcome.toUpperCase()}`,
-    })
+    });
   } catch {
     // fail-open — same rule as the blocked verdict
   }
@@ -562,33 +550,33 @@ async function recordSettledVerdict(
  *  clean 0 means the gate was already settled — the wait did its whole
  *  job inline; anything else is a failed spawn and resolves undefined. */
 async function spawnDetachedWait(opts: {
-  dir: string
-  pr: number
-  args: string[]
-  cwd: string
+  dir: string;
+  pr: number;
+  args: string[];
+  cwd: string;
 }): Promise<DetachedWait | undefined> {
-  const entry = SELF_ENTRY
+  const entry = SELF_ENTRY;
   if (entry === null) {
-    return undefined
+    return undefined;
   }
-  const fd = waitLogFd(opts.dir, opts.pr)
-  const child = spawnWaitChild(opts, entry, fd)
+  const fd = waitLogFd(opts.dir, opts.pr);
+  const child = spawnWaitChild(opts, entry, fd);
   if (child === undefined) {
-    return undefined
+    return undefined;
   }
   // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
   // would crash the caller mid-loop — swallow it; state stays the verdict
-  child.on('error', () => {})
-  let exited: number | null | undefined // undefined = still running; null = signaled
-  child.once('exit', (code) => {
-    exited = code
-  })
-  child.unref()
-  const pid = child.pid
+  child.on('error', () => {});
+  let exited: number | null | undefined; // undefined = still running; null = signaled
+  child.once('exit', code => {
+    exited = code;
+  });
+  child.unref();
+  const pid = child.pid;
   if (pid === undefined) {
-    return undefined
+    return undefined;
   }
-  return awaitWaitMarker(opts.dir, pid, () => exited)
+  return awaitWaitMarker(opts.dir, pid, () => exited);
 }
 
 function spawnWaitChild(
@@ -598,18 +586,18 @@ function spawnWaitChild(
 ): ChildProcess | undefined {
   try {
     if (fd !== undefined) {
-      appendFileSync(fd, `\n--- bro ${opts.args.join(' ')} — ${new Date().toISOString()}\n`)
+      appendFileSync(fd, `\n--- bro ${opts.args.join(' ')} — ${new Date().toISOString()}\n`);
     }
     return spawn(process.execPath, [entry, ...opts.args], {
       cwd: opts.cwd,
       detached: true,
       stdio: fd === undefined ? 'ignore' : ['ignore', fd, fd],
-    })
+    });
   } catch {
-    return undefined
+    return undefined;
   } finally {
     if (fd !== undefined) {
-      closeSync(fd)
+      closeSync(fd);
     }
   }
 }
@@ -622,20 +610,20 @@ async function awaitWaitMarker(
   pid: number,
   exited: () => number | null | undefined
 ): Promise<DetachedWait | undefined> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + 10_000;
   for (;;) {
-    const live = listWatches(dir).find((l) => l.alive && l.watch.pid === pid)
+    const live = listWatches(dir).find(l => l.alive && l.watch.pid === pid);
     if (live !== undefined) {
-      return { pid, state: 'armed' }
+      return { pid, state: 'armed' };
     }
-    const code = exited()
+    const code = exited();
     if (code !== undefined) {
-      return code === 0 ? { pid, state: 'settled' } : undefined
+      return code === 0 ? { pid, state: 'settled' } : undefined;
     }
     if (Date.now() >= deadline) {
-      return { pid, state: 'pending' }
+      return { pid, state: 'pending' };
     }
-    await new Promise((r) => setTimeout(r, 100))
+    await new Promise(r => setTimeout(r, 100));
   }
 }
 
@@ -645,37 +633,37 @@ async function awaitWaitMarker(
  *  validation stay in the parent so a typo'd PR or bad flag fails where
  *  stderr is read; the child re-runs the same wait argv minus --detach. */
 async function cmdWaitDetach(argv: string[]): Promise<void> {
-  const interval = Number(flag(argv, '--interval') ?? '60')
-  const timeout = Number(flag(argv, '--timeout') ?? '45')
+  const interval = Number(flag(argv, '--interval') ?? '60');
+  const timeout = Number(flag(argv, '--timeout') ?? '45');
   if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
-    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)')
-    process.exit(2)
+    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)');
+    process.exit(2);
   }
   // a detached child hitting this post-settle reports into a log nobody
   // reads — refuse in the parent where the error is seen
   if (argv.includes('--cleanup') && !argv.includes('--merge')) {
-    console.error('error: --cleanup requires --merge — nothing to clean without it')
-    process.exit(2)
+    console.error('error: --cleanup requires --merge — nothing to clean without it');
+    process.exit(2);
   }
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv, 'strict')
-  const args = detachWaitArgs(argv, t.pr, interval, timeout)
-  const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() })
-  const link = rev.prLink(t.repo, t.pr)
-  const log = waitLogPath(process.cwd(), t.pr)
-  const logTag = (sep: string): string => (log === null ? '' : `${sep}log: ${log}`)
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const t = resolvePr(rev, argv, 'strict');
+  const args = detachWaitArgs(argv, t.pr, interval, timeout);
+  const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() });
+  const link = rev.prLink(t.repo, t.pr);
+  const log = waitLogPath(process.cwd(), t.pr);
+  const logTag = (sep: string): string => (log === null ? '' : `${sep}log: ${log}`);
   if (r === undefined) {
     console.error(
       `error: detached act wait on ${link} never armed — the child exited ` +
         `before its marker landed${logTag('; ')}`
-    )
-    process.exitCode = 1
-    return
+    );
+    process.exitCode = 1;
+    return;
   }
   if (argv.includes('--json')) {
-    console.log(JSON.stringify({ pr: t.pr, pid: r.pid, state: r.state, log }, null, 2))
-    return
+    console.log(JSON.stringify({ pr: t.pr, pid: r.pid, state: r.state, log }, null, 2));
+    return;
   }
   if (r.state === 'settled') {
     // the gate was already settled — the wait ran to its verdict inside
@@ -683,41 +671,40 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
     console.log(
       `act wait ${link} — gate already settled; the wait ran to completion ` +
         `in the child (exit 0)${logTag(' — ')}`
-    )
-    return
+    );
+    return;
   }
   console.log(
     `act wait ${link} detached — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
-  )
-  console.log(`  inspect: \`bro act status --pr ${t.pr}\`${logTag(' · ')}`)
+  );
+  console.log(`  inspect: \`bro act status --pr ${t.pr}\`${logTag(' · ')}`);
   if (r.state === 'pending') {
-    console.error('warning: marker not confirmed within 10s — the child may still be arming')
+    console.error('warning: marker not confirmed within 10s — the child may still be arming');
   }
 }
 
 // the wait's whole flag surface replays — merge mode + strategy the
 // child's mergeIfAsked dispatches on, the bead its marker re-records
-function detachWaitArgs(
-  argv: string[],
-  pr: number,
-  interval: number,
-  timeout: number
-): string[] {
+function detachWaitArgs(argv: string[], pr: number, interval: number, timeout: number): string[] {
   const args = [
-    'act', 'wait', String(pr),
-    '--interval', String(interval),
-    '--timeout', String(timeout),
-  ]
+    'act',
+    'wait',
+    String(pr),
+    '--interval',
+    String(interval),
+    '--timeout',
+    String(timeout),
+  ];
   for (const f of ['--merge', '--cleanup', '--squash', '--rebase', '--admin']) {
     if (argv.includes(f)) {
-      args.push(f)
+      args.push(f);
     }
   }
-  const bead = flag(argv, '--bead')
+  const bead = flag(argv, '--bead');
   if (bead !== undefined) {
-    args.push('--bead', bead)
+    args.push('--bead', bead);
   }
-  return args
+  return args;
 }
 
 /** Detached `act wait` resurrection — the same spawnDetachedWait shape
@@ -736,26 +723,26 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
   // replayed only when the recorded workdir still exists. Replaying it
   // from the rearm cwd (or a marker old enough to lack workdir) could
   // tear down the wrong checkout.
-  const workdirOk = plan.workdir !== undefined && existsSync(plan.workdir)
-  const args = ['act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
+  const workdirOk = plan.workdir !== undefined && existsSync(plan.workdir);
+  const args = ['act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)];
   if (plan.merge) {
-    args.push('--merge')
+    args.push('--merge');
     // --cleanup only has meaning behind --merge — a wait armed with
     // cleanup alone exits on the post-wait dispatch, so a merge:false
     // marker's cleanup bit (user error at arm time) isn't replayed
     if (plan.cleanup && workdirOk) {
-      args.push('--cleanup')
+      args.push('--cleanup');
     }
   }
   // the loop-claimed bead rides along in either mode — the respawned
   // wait's own marker re-records it, so a second rearm keeps the
   // identity; on merge it is the bead the dead loop never closed
   if (plan.bead !== undefined) {
-    args.push('--bead', plan.bead)
+    args.push('--bead', plan.bead);
   }
-  const cwd = workdirOk ? plan.workdir! : dir
-  const r = await spawnDetachedWait({ dir, pr: plan.pr, args, cwd })
-  return r !== undefined && r.state !== 'pending' ? r.pid : undefined
+  const cwd = workdirOk ? plan.workdir! : dir;
+  const r = await spawnDetachedWait({ dir, pr: plan.pr, args, cwd });
+  return r !== undefined && r.state !== 'pending' ? r.pid : undefined;
 }
 
 /** `<git-common>/bro/act-rearm.lock` — serializes the plan→respawn
@@ -766,16 +753,16 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
  *  nothing. A wedged lock degrades to no lock — an advisory pass must
  *  not brick on residue. */
 function rearmLock(dir: string): () => void {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir);
   if (common === null) {
-    return () => {}
+    return () => {};
   }
   try {
     return acquireFileLock(join(common, 'bro', 'act-rearm.lock'), {
       label: 'act rearm lock',
-    })
+    });
   } catch {
-    return () => {}
+    return () => {};
   }
 }
 
@@ -789,47 +776,47 @@ export async function rearmPass(
   dir: string,
   dry: boolean
 ): Promise<{
-  rearmed: Array<{ pr: number; pid: number }>
-  settled: Array<{ pr: number; bead?: string }>
-  kept: Array<{ pr: number; reason: string }>
-  link: (pr: number) => string
+  rearmed: Array<{ pr: number; pid: number }>;
+  settled: Array<{ pr: number; bead?: string }>;
+  kept: Array<{ pr: number; reason: string }>;
+  link: (pr: number) => string;
 }> {
   // dir-scoped config — a linked worktree may carry a different
   // committed bro.config than the checkout the watches live under
-  const rev = reviewHost(undefined, loadBroConfig(dir).connectors)
+  const rev = reviewHost(undefined, loadBroConfig(dir).connectors);
   const repo = await (rev.resolveRepoAsync === undefined
     ? Promise.resolve(rev.resolveRepo([]))
-    : rev.resolveRepoAsync([]))
+    : rev.resolveRepoAsync([]));
   // prMeta answers both probes — the OPEN gate and the settle-path
   // reconcile below — cache it so the second read costs nothing
-  const metas = new Map<number, { state: string }>()
+  const metas = new Map<number, { state: string }>();
   const isOpen = async (pr: number): Promise<boolean> => {
     const meta =
       rev.prMetaAsync === undefined
         ? rev.prMeta({ repo, pr })
-        : await rev.prMetaAsync({ repo, pr })
-    metas.set(pr, meta)
-    return meta.state === 'OPEN'
-  }
-  const release = rearmLock(dir)
-  let res: Awaited<ReturnType<typeof rearmWatches>>
+        : await rev.prMetaAsync({ repo, pr });
+    metas.set(pr, meta);
+    return meta.state === 'OPEN';
+  };
+  const release = rearmLock(dir);
+  let res: Awaited<ReturnType<typeof rearmWatches>>;
   try {
     res = await rearmWatches({
       dir,
       isOpen,
-      respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
-    })
+      respawn: dry ? undefined : plan => respawnWatcher(dir, plan),
+    });
   } finally {
-    release()
+    release();
   }
   if (!dry) {
     for (const s of res.settled) {
       if (s.bead !== undefined && metas.get(s.pr)?.state === 'MERGED') {
-        closeLandedBead(rev, { repo, pr: s.pr }, s.bead)
+        closeLandedBead(rev, { repo, pr: s.pr }, s.bead);
       }
     }
   }
-  return { ...res, link: (pr) => rev.prLink(repo, pr) }
+  return { ...res, link: pr => rev.prLink(repo, pr) };
 }
 
 /** `bro act rearm` — dead watch markers mean their watcher died with
@@ -837,12 +824,12 @@ export async function rearmPass(
  *  goes back up with the recorded mode; settled PRs' markers sweep.
  *  --dry-run prints the plan without spawning or touching markers. */
 async function cmdRearm(argv: string[]): Promise<void> {
-  const dry = argv.includes('--dry-run')
-  const { link, ...res } = await rearmPass(process.cwd(), dry)
+  const dry = argv.includes('--dry-run');
+  const { link, ...res } = await rearmPass(process.cwd(), dry);
   if (argv.includes('--json')) {
-    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
+    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2));
   } else {
-    reportRearm(res, dry, link)
+    reportRearm(res, dry, link);
   }
 }
 
@@ -850,9 +837,9 @@ async function cmdRearm(argv: string[]): Promise<void> {
  *  command reads as resolve → run → report. */
 function reportRearm(
   res: {
-    rearmed: Array<{ pr: number; pid: number }>
-    settled: Array<{ pr: number; bead?: string }>
-    kept: Array<{ pr: number; reason: string }>
+    rearmed: Array<{ pr: number; pid: number }>;
+    settled: Array<{ pr: number; bead?: string }>;
+    kept: Array<{ pr: number; reason: string }>;
   },
   dry: boolean,
   link: (pr: number) => string
@@ -860,16 +847,16 @@ function reportRearm(
   for (const r of res.rearmed) {
     console.log(
       `rearm: ${link(r.pr)} — ` + (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
-    )
+    );
   }
   for (const s of res.settled) {
-    console.log(`rearm: ${link(s.pr)} settled — marker swept`)
+    console.log(`rearm: ${link(s.pr)} settled — marker swept`);
   }
   for (const k of res.kept) {
-    console.error(`rearm: ${link(k.pr)} kept — ${k.reason}`)
+    console.error(`rearm: ${link(k.pr)} kept — ${k.reason}`);
   }
   if (res.rearmed.length === 0 && res.settled.length === 0 && res.kept.length === 0) {
-    console.log('rearm: no dead watches')
+    console.log('rearm: no dead watches');
   }
 }
 
@@ -878,15 +865,17 @@ function reportRearm(
  *  merged. */
 async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
   if (argv.includes('--merge')) {
-    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin', '--cleanup'].includes(a))
-    const bead = flag(argv, '--bead')
+    const mergeArgs = argv.filter(a =>
+      ['--squash', '--rebase', '--admin', '--cleanup'].includes(a)
+    );
+    const bead = flag(argv, '--bead');
     if (bead !== undefined) {
-      mergeArgs.push('--bead', bead)
+      mergeArgs.push('--bead', bead);
     }
-    await cmdMerge([String(pr), ...mergeArgs])
+    await cmdMerge([String(pr), ...mergeArgs]);
   } else if (argv.includes('--cleanup')) {
-    console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean')
-    process.exitCode = 2
+    console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean');
+    process.exitCode = 2;
   }
 }
 
@@ -899,12 +888,12 @@ async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
  *  conflicting flags. Runs before the slot so a doomed request never
  *  occupies the critical section. */
 function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
-  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
+  const strategies = ['--squash', '--merge', '--rebase'].filter(f => argv.includes(f));
   if (strategies.length > 1) {
-    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
-    return null
+    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`);
+    return null;
   }
-  return (strategies[0]?.slice(2) ?? 'squash') as 'squash' | 'merge' | 'rebase'
+  return (strategies[0]?.slice(2) ?? 'squash') as 'squash' | 'merge' | 'rebase';
 }
 
 /** A mutation just landed — the shared feed's next read must fetch,
@@ -914,11 +903,11 @@ function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
  *  a repo without a feed has nothing to drop. */
 function dropActState(t?: PrTarget): void {
   try {
-    const cache = prStateCache(process.cwd())
+    const cache = prStateCache(process.cwd());
     if (t === undefined) {
-      cache?.invalidateAll()
+      cache?.invalidateAll();
     } else {
-      cache?.invalidate(t)
+      cache?.invalidate(t);
     }
   } catch {
     // invalidation is freshness polish — the TTL bounds a missed drop
@@ -946,36 +935,36 @@ function landPr(
       // lives in its own; cwd is the fallback (act wait --merge's shape).
       const checkout =
         parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).find(
-          (w) => w.branch === head.ref
-        )?.path ?? process.cwd()
+          w => w.branch === head.ref
+        )?.path ?? process.cwd();
       const r = queue.enqueue(t, {
         dir: checkout,
         headRef: head.ref,
         expectedHeadSha: head.sha,
-      })
+      });
       if (r === 'merged') {
-        console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
+        console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`);
         emitLifecycle(process.cwd(), {
           kind: 'merge',
           pr: t.pr,
           to: 'merged',
           detail: { via: 'act', sha: head.sha, queue: true },
-        })
-        dropActState(t)
-        return head
+        });
+        dropActState(t);
+        return head;
       }
       console.log(
         `act: ${rev.prLink(t.repo, t.pr)} enqueued — an external merge queue owns it; ` +
           'local cleanup deferred'
-      )
+      );
       emitLifecycle(process.cwd(), {
         kind: 'merge',
         pr: t.pr,
         to: 'enqueued',
         detail: { via: 'act', sha: head.sha },
-      })
-      dropActState(t)
-      return undefined
+      });
+      dropActState(t);
+      return undefined;
     }
     // expectedHeadSha pins the merge to the sha the gate evaluated —
     // a head that moved since fetch fails closed instead of landing
@@ -985,34 +974,34 @@ function landPr(
       expectedHeadSha: head.sha,
       deleteBranch: true,
       admin: opts.admin,
-    })
+    });
     if (after === 'MERGED') {
-      console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
+      console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`);
       emitLifecycle(process.cwd(), {
         kind: 'merge',
         pr: t.pr,
         to: 'merged',
         detail: { via: 'act', sha: head.sha, method: opts.method },
-      })
-      dropActState(t)
-      return head
+      });
+      dropActState(t);
+      return head;
     }
     console.log(
       `act: ${rev.prLink(t.repo, t.pr)} accepted but state=${after} — a merge queue still owns it; ` +
         'local cleanup deferred'
-    )
+    );
     emitLifecycle(process.cwd(), {
       kind: 'merge',
       pr: t.pr,
       to: 'enqueued',
       detail: { via: 'act', sha: head.sha, method: opts.method, state: after },
-    })
-    dropActState(t)
-    return undefined
+    });
+    dropActState(t);
+    return undefined;
   } catch (err) {
-    console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
-    process.exitCode = 1
-    return undefined
+    console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return undefined;
   }
 }
 
@@ -1027,27 +1016,29 @@ function warnHumanOwned(rev: ReviewFacade, t: PrTarget): void {
       console.error(
         `warning: ${rev.prLink(t.repo, t.pr)} carries no bro-managed/bro-review label — ` +
           'human-owned; landing anyway'
-      )
+      );
     }
-  } catch { /* advisory only */ }
+  } catch {
+    /* advisory only */
+  }
 }
 
 async function cmdMerge(argv: string[]): Promise<void> {
-  const cfg = loadBroConfig()
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors })
-  const rev = reviewHost(undefined, cfg.connectors)
+  const cfg = loadBroConfig();
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors });
+  const rev = reviewHost(undefined, cfg.connectors);
   // A configured external queue replaces mergePr — its auth probe runs
   // up front so a missing `gt`/`gh` fails fast, not mid-enqueue.
-  const queue = mergeQueueHost(undefined, cfg.connectors)
+  const queue = mergeQueueHost(undefined, cfg.connectors);
   if (queue) {
-    ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors })
+    ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors });
   }
-  const t = resolvePr(rev, argv, 'strict')
+  const t = resolvePr(rev, argv, 'strict');
 
-  const method = mergeMethod(argv)
+  const method = mergeMethod(argv);
   if (!method) {
-    process.exitCode = 2
-    return
+    process.exitCode = 2;
+    return;
   }
 
   // Gate evaluation + merge is ONE critical section: acquiring the slot
@@ -1055,18 +1046,18 @@ async function cmdMerge(argv: string[]): Promise<void> {
   // (new threads/state can't sneak in while a wedged bd would otherwise
   // burn its timeout). `unavailable` (no bd, no .beads) proceeds —
   // coordination is a bonus, never a gate of its own.
-  const slot = acquireMergeSlot()
+  const slot = acquireMergeSlot();
   if (slot.kind === 'held') {
     console.error(
       `merge slot held by ${slot.holder} — another session is merging; ` +
         'wait for `bd merge-slot check` to report available, or `bd merge-slot release` a crashed holder'
-    )
-    process.exitCode = 1
-    return
+    );
+    process.exitCode = 1;
+    return;
   }
-  let mergedHead: { ref: string; sha: string } | undefined
+  let mergedHead: { ref: string; sha: string } | undefined;
   try {
-    const act = loadBroConfig().act
+    const act = loadBroConfig().act;
     // deliberately OFF the shared feed: this fetch IS the merge
     // decision — a ≤ttl-old "green" must never land a PR (bro-0tcrl)
     const state = await fetchPrActState(rev, t, {
@@ -1078,58 +1069,47 @@ async function cmdMerge(argv: string[]): Promise<void> {
       requireApproval: act.requireApproval,
       approvers: act.approvers,
       resolveLedger: resolveLedger(process.cwd()),
-    })
+    });
 
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
       // already landed still discharges the claim — the race where the
       // PR merged between the wait's last green poll and this fetch
-      closeBeadIfLanded(argv, rev, t, state.state)
-      if (state.state === 'CLOSED') {
-        const prevExit = process.exitCode
-        try {
-          await collectReviewThreads(rev, {
-            repo: t.repo,
-            filters: { prIds: [t.pr], mergedSince: null, mergedUntil: null, lastN: null, prAuthor: null, labels: [] },
-            threadAuthor: null,
-            runId: 'local',
-            dryRun: false,
-            listOnly: false,
-            reharvest: false,
-            noLabel: false,
-            sources: null,
-            includeClosed: true,
-          } as CollectArgs)
-        } catch {}
-        process.exitCode = prevExit
-      }
+      closeBeadIfLanded(argv, rev, t, state.state);
+      await harvestClosedPr(rev, t, state.state);
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
-      )
-      process.exitCode = 1
-      return
+      );
+      process.exitCode = 1;
+      return;
     }
 
-    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
+    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
     if (!gate.ok) {
-      console.error(`exit_gate=BLOCKED — refusing to merge ${rev.prLink(t.repo, t.pr)}`)
+      console.error(`exit_gate=BLOCKED — refusing to merge ${rev.prLink(t.repo, t.pr)}`);
       for (const b of gate.blockers) {
-        console.error(`  blocker: ${b}`)
+        console.error(`  blocker: ${b}`);
       }
-      process.exitCode = 1
-      return
+      process.exitCode = 1;
+      return;
     }
 
-    warnHumanOwned(rev, t)
+    warnHumanOwned(rev, t);
 
-    mergedHead = landPr(rev, t, { method, admin: argv.includes('--admin') }, {
-      ref: state.headRef,
-      sha: state.headSha,
-    }, queue)
+    mergedHead = landPr(
+      rev,
+      t,
+      { method, admin: argv.includes('--admin') },
+      {
+        ref: state.headRef,
+        sha: state.headSha,
+      },
+      queue
+    );
   } finally {
     if (slot.kind === 'acquired') {
-      releaseMergeSlot()
+      releaseMergeSlot();
     }
   }
   // local cleanup runs AFTER the merge slot is released — it is pure git
@@ -1137,14 +1117,14 @@ async function cmdMerge(argv: string[]): Promise<void> {
   // shares the ordering: a landed merge discharges the loop's claim
   // before the worktree goes away.
   if (mergedHead) {
-    const bead = flag(argv, '--bead')
+    const bead = flag(argv, '--bead');
     if (bead !== undefined) {
-      closeLandedBead(rev, t, bead)
+      closeLandedBead(rev, t, bead);
     }
     if (argv.includes('--cleanup')) {
-      cleanupAfterMerge(mergedHead.ref, mergedHead.sha)
+      cleanupAfterMerge(mergedHead.ref, mergedHead.sha);
     } else {
-      deleteMergedLocalBranch(mergedHead.ref, mergedHead.sha)
+      deleteMergedLocalBranch(mergedHead.ref, mergedHead.sha);
     }
   }
 }
@@ -1155,29 +1135,28 @@ async function cmdMerge(argv: string[]): Promise<void> {
  *  or an unreachable store reports and the merge result stands. stderr
  *  keeps it out of a --json stdout stream. */
 function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
-  const link = rev.prLink(t.repo, t.pr)
+  const link = rev.prLink(t.repo, t.pr);
   const ids = bead
     .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '')
+    .map(s => s.trim())
+    .filter(s => s !== '');
   // a batch claim's marker carries the whole clump comma-joined
   // (bro-nspj7) — coverage is evidence: only members a commit on the
   // merged head names get closed; the unfinished tail re-queues instead
   // of landing a silent false-close. Unknown coverage reads as empty,
   // which is the fail-safe direction (re-queue, never false-close).
-  const covered =
-    ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids)
+  const covered = ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids);
   // one bulk read for the whole clump — a `bd show` per member stacks
   // the ~0.65s spawn floor on every merge. A failed batch leaves rows
   // undefined and each member's own probe reports the dead store.
-  let rows: Map<string, TaskRow> | undefined
+  let rows: Map<string, TaskRow> | undefined;
   try {
-    rows = new Map(
-      getTasks(claimStore(process.cwd()), ids).map((r) => [r.id, r])
-    )
-  } catch { /* per-member probes below carry the failure report */ }
+    rows = new Map(getTasks(claimStore(process.cwd()), ids).map(r => [r.id, r]));
+  } catch {
+    /* per-member probes below carry the failure report */
+  }
   for (const id of ids) {
-    dischargeLandedId(id, covered, link, t.pr, rows)
+    dischargeLandedId(id, covered, link, t.pr, rows);
   }
 }
 
@@ -1194,33 +1173,37 @@ function dischargeLandedId(
   rows?: Map<string, TaskRow>
 ): void {
   try {
-    const tasks = claimStore(process.cwd())
-    let row = rows === undefined ? tasks.get(id) : rows.get(id)
+    const tasks = claimStore(process.cwd());
+    let row = rows === undefined ? tasks.get(id) : rows.get(id);
     if (row === undefined) {
-      console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
-      return
+      console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`);
+      return;
     }
     if (row.status === 'closed') {
       // the bulk row is a pre-loop snapshot — `closed` is the verdict a
       // mid-clump reopen falsifies, and skipping on it drops the close
       // the landing still owes (bro-cmr5h). Re-read this one path live;
       // non-closed members keep the prefetch's one-spawn cost.
-      row = tasks.get(id) ?? row
+      row = tasks.get(id) ?? row;
       if (row.status === 'closed') {
-        return
+        return;
       }
     }
     if (!covered.has(id)) {
       try {
         tasks.update(id, {
           notes: `act: ${link} merged without a commit naming ${id} — re-queued`,
-        })
-      } catch { /* the reopen below is the load-bearing half */ }
-      let released = false
+        });
+      } catch {
+        /* the reopen below is the load-bearing half */
+      }
+      let released = false;
       try {
-        tasks.reopen(id)
-        released = true
-      } catch { /* best-effort unclaim */ }
+        tasks.reopen(id);
+        released = true;
+      } catch {
+        /* best-effort unclaim */
+      }
       if (released) {
         emitLifecycle(process.cwd(), {
           kind: 'release',
@@ -1228,22 +1211,24 @@ function dischargeLandedId(
           from: 'in_progress',
           to: 'open',
           detail: { via: 'act', pr, reason: 'uncovered' },
-        })
+        });
       }
-      console.error(`act: ${id} re-queued — no covering commit in ${link}`)
-      return
+      console.error(`act: ${id} re-queued — no covering commit in ${link}`);
+      return;
     }
-    tasks.close(id, `landed via ${link}`)
+    tasks.close(id, `landed via ${link}`);
     emitLifecycle(process.cwd(), {
       kind: 'close',
       bead: id,
       pr,
       to: 'closed',
       detail: { via: 'act' },
-    })
-    console.error(`act: ${id} closed — ${link} merged`)
+    });
+    console.error(`act: ${id} closed — ${link} merged`);
   } catch (err) {
-    console.error(`act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`)
+    console.error(
+      `act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }
 
@@ -1255,27 +1240,57 @@ function dischargeLandedId(
  *  reads as "none", re-queueing every member rather than closing on a
  *  guess. */
 function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
-  let meta: { baseRef: string; headSha: string }
+  let meta: { baseRef: string; headSha: string };
   try {
-    meta = rev.prMeta(t)
+    meta = rev.prMeta(t);
   } catch {
-    return ''
+    return '';
   }
-  return gitBranchLog(meta.headSha, meta.baseRef)
+  return gitBranchLog(meta.headSha, meta.baseRef);
 }
 
 /** The claim discharge owed even when the merge didn't happen here —
  *  an external merge (or the race past the last green poll) leaves
  *  `--bead` to release exactly as an own-merge would. */
-function closeBeadIfLanded(
-  argv: string[],
-  rev: ReviewFacade,
-  t: PrTarget,
-  state: string
-): void {
-  const bead = flag(argv, '--bead')
+function closeBeadIfLanded(argv: string[], rev: ReviewFacade, t: PrTarget, state: string): void {
+  const bead = flag(argv, '--bead');
   if (state === 'MERGED' && bead !== undefined) {
-    closeLandedBead(rev, t, bead)
+    closeLandedBead(rev, t, bead);
+  }
+}
+
+/** Best-effort debt harvest for a closed-unmerged PR — the threads on a
+ *  closed branch are still review debt. A harvest failure reports to
+ *  stderr but must never change the command's exit code: callers set
+ *  their verdict unconditionally right after. */
+async function harvestClosedPr(rev: ReviewFacade, t: PrTarget, state: string): Promise<void> {
+  if (state !== 'CLOSED') {
+    return;
+  }
+  try {
+    await collectReviewThreads(rev, {
+      repo: t.repo,
+      filters: {
+        prIds: [t.pr],
+        mergedSince: null,
+        mergedUntil: null,
+        lastN: null,
+        prAuthor: null,
+        labels: [],
+      },
+      threadAuthor: null,
+      runId: 'local',
+      dryRun: false,
+      listOnly: false,
+      reharvest: false,
+      noLabel: false,
+      sources: null,
+      includeClosed: true,
+    } as CollectArgs);
+  } catch (err) {
+    console.error(
+      `act: debt harvest failed for closed PR — ${err instanceof Error ? err.message : err}`
+    );
   }
 }
 
@@ -1285,9 +1300,9 @@ function closeBeadIfLanded(
  *  settle running in the bead's own worktree — or any scoped/subdir cwd —
  *  must not fork the close onto a store the claim was never written to. */
 function claimStore(dir: string): ReturnType<typeof taskStore> {
-  const common = gitCommonDir(dir)
-  const root = common !== null && basename(common) === '.git' ? dirname(common) : dir
-  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
+  const common = gitCommonDir(dir);
+  const root = common !== null && basename(common) === '.git' ? dirname(common) : dir;
+  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors });
 }
 
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's
@@ -1296,17 +1311,17 @@ function claimStore(dir: string): ReturnType<typeof taskStore> {
 export function defaultBranch(): string {
   // refresh first — a stale origin/HEAD would switch back to a renamed or
   // deleted default branch (failure only: kept, never data loss)
-  gitTry(['remote', 'set-head', 'origin', '--auto'])
-  const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  gitTry(['remote', 'set-head', 'origin', '--auto']);
+  const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
   if (head.code === 0) {
-    return head.out.trim().replace(/^[^/]+\//, '')
+    return head.out.trim().replace(/^[^/]+\//, '');
   }
   for (const b of ['main', 'master']) {
     if (gitTry(['rev-parse', '--verify', `refs/heads/${b}`]).code === 0) {
-      return b
+      return b;
     }
   }
-  return 'main'
+  return 'main';
 }
 
 /**
@@ -1318,43 +1333,43 @@ export function defaultBranch(): string {
  * step reports and a dirty tree is kept, never force-removed.
  */
 export function cleanupAfterMerge(headRef: string, headSha: string): void {
-  const cwd = process.cwd()
+  const cwd = process.cwd();
   // cwd may be a subdirectory — resolve the containing worktree root
   // before matching against `worktree list` paths
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || cwd
-  const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
-  const main = all[0]
-  const here = all.find((w) => w.path === root)
-  const gitDir = gitDirOf(cwd)
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || cwd;
+  const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out);
+  const main = all[0];
+  const here = all.find(w => w.path === root);
+  const gitDir = gitDirOf(cwd);
 
   if (here?.branch === headRef && gitDir && isLinkedGitDir(gitDir) && main) {
     if (!removeMergedWorktree(root, here, main)) {
-      return
+      return;
     }
     // worktree removed — fall through to retire the branch it sat on
   } else if (here?.branch === headRef && here.path === main?.path) {
     // the main checkout itself sits on the merged branch — switch back to
     // the default branch before the delete below can run
-    const def = defaultBranch()
-    const res = gitTry(['-C', main.path, 'switch', def])
+    const def = defaultBranch();
+    const res = gitTry(['-C', main.path, 'switch', def]);
     if (res.code !== 0) {
-      console.error(`cleanup: could not switch to ${def} (${res.err}) — branch ${headRef} kept`)
-      return
+      console.error(`cleanup: could not switch to ${def} (${res.err}) — branch ${headRef} kept`);
+      return;
     }
-    console.log(`cleanup: switched to ${def}`)
+    console.log(`cleanup: switched to ${def}`);
   }
   // merged branch checked out elsewhere, or not checked out at all —
   // deleteMergedLocalBranch reports the first and handles the second
-  deleteMergedLocalBranch(headRef, headSha)
+  deleteMergedLocalBranch(headRef, headSha);
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv)
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const t = resolvePr(rev, argv);
   // threads only needs the threads API — fetching checks/SAST here would
   // make a read-only listing fail on unrelated check-service flakes
-  const threads = await rev.reviewThreads(t)
+  const threads = await rev.reviewThreads(t);
   // shadow-mode judge verdicts render beside each unresolved thread —
   // annotation only, never applied; every failure mode degrades to
   // "no annotation" (a judge that can stall `act threads` gets turned
@@ -1363,29 +1378,29 @@ async function cmdThreads(argv: string[]): Promise<void> {
   // first; shadowNotes can open with a slow prMeta call, and starting
   // it before the row loop would still stall the listing. Annotations
   // land on stderr once the batch resolves.
-  let open = 0
+  let open = 0;
   for (const thread of threads) {
     if (thread.resolved) {
-      continue
+      continue;
     }
-    open += 1
-    const c = thread.comment
-    const author = c?.author ?? '-'
-    const path = c?.path ?? '-'
-    const line = c?.line ?? '-'
-    const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
-    console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
+    open += 1;
+    const c = thread.comment;
+    const author = c?.author ?? '-';
+    const path = c?.path ?? '-';
+    const line = c?.line ?? '-';
+    const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120);
+    console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`);
   }
-  const notes = await shadowNotes(rev, t, threads).catch(() => undefined)
+  const notes = await shadowNotes(rev, t, threads).catch(() => undefined);
   for (const thread of threads) {
-    const note = notes?.get(thread.id)
+    const note = notes?.get(thread.id);
     if (note !== undefined) {
       // stderr — stdout is the documented TSV contract; a `judge:` line
       // there reads as a malformed thread record to TSV consumers
-      console.error(`${thread.id} ${note}`)
+      console.error(`${thread.id} ${note}`);
     }
   }
-  console.error(`act threads: ${open} unresolved`)
+  console.error(`act threads: ${open} unresolved`);
 }
 
 /** Shadow-mode judge annotation for the threads listing — the
@@ -1398,23 +1413,20 @@ async function shadowNotes(
   t: PrTarget,
   threads: ReviewThread[]
 ): Promise<Map<string, string> | undefined> {
-  const dir = process.cwd()
-  const cfg = judgeConfig(dir).judge
+  const dir = process.cwd();
+  const cfg = judgeConfig(dir).judge;
   if (cfg.mode !== 'shadow') {
-    return undefined
+    return undefined;
   }
   try {
     // headSha is the "inputs moved" half of the dedup key — a push
     // re-judges the thread; an unfetchable head just loosens the key
-    let headSha: string | undefined
+    let headSha: string | undefined;
     try {
       // async twin when the facade has one — a sync CLI call inside an
       // async fn still freezes the loop this listing shares
-      const meta =
-        rev.prMetaAsync !== undefined
-          ? await rev.prMetaAsync(t)
-          : rev.prMeta(t)
-      headSha = meta.headSha
+      const meta = rev.prMetaAsync !== undefined ? await rev.prMetaAsync(t) : rev.prMeta(t);
+      headSha = meta.headSha;
     } catch {
       // no head — dedup keys on commentSha alone
     }
@@ -1427,16 +1439,16 @@ async function shadowNotes(
       // a listing must stay a listing — a slow-but-alive backend gets a
       // few decide rounds, then the rows print unjudged
       deadlineMs: 10_000,
-    })
+    });
     if (res.decided > 0) {
-      console.error(`act: judge decided ${res.decided} thread(s) — verdicts journaled`)
+      console.error(`act: judge decided ${res.decided} thread(s) — verdicts journaled`);
     }
-    return res.annotations
+    return res.annotations;
   } catch (err) {
     console.error(
       `act: judge annotation skipped — ${err instanceof Error ? err.message : String(err)}`
-    )
-    return undefined
+    );
+    return undefined;
   }
 }
 
@@ -1447,38 +1459,38 @@ async function shadowNotes(
  *  writes no judge artifacts). A failed journal write never fails the
  *  mutation that produced the outcome. */
 function disposition(threadId: string, outcome: string, pr?: number): void {
-  const dir = process.cwd()
+  const dir = process.cwd();
   emitLifecycle(dir, {
     kind: 'verdict',
     ...(pr !== undefined ? { pr } : {}),
     to: outcome,
     detail: { via: 'act', thread: threadId },
-  })
+  });
   if (judgeConfig(dir).judge.mode !== 'shadow') {
-    return
+    return;
   }
   try {
-    recordDisposition(dir, { pr, threadId }, outcome)
+    recordDisposition(dir, { pr, threadId }, outcome);
   } catch (err) {
     console.error(
       `act: disposition not journaled — ${err instanceof Error ? err.message : String(err)}`
-    )
+    );
   }
 }
 
 function threadArg(argv: string[]): string {
-  const i = argv.indexOf('--thread')
-  const id = i >= 0 ? argv[i + 1] : undefined
+  const i = argv.indexOf('--thread');
+  const id = i >= 0 ? argv[i + 1] : undefined;
   if (!id) {
-    console.error('error: --thread required')
-    usage()
+    console.error('error: --thread required');
+    usage();
   }
-  return id!
+  return id!;
 }
 
 function commentArg(argv: string[]): string | null {
-  const i = argv.indexOf('--comment')
-  return i >= 0 ? (argv[i + 1] ?? null) : null
+  const i = argv.indexOf('--comment');
+  return i >= 0 ? (argv[i + 1] ?? null) : null;
 }
 
 /** Record a resolve in the ledger — the source of "this thread was
@@ -1487,119 +1499,125 @@ function commentArg(argv: string[]): string | null {
  *  detected, never a crash. */
 function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): void {
   try {
-    const ledger = resolveLedger(process.cwd())
+    const ledger = resolveLedger(process.cwd());
     if (ledger === null) {
-      return
+      return;
     }
-    const target = resolvePr(rev, argv, 'record')
+    const target = resolvePr(rev, argv, 'record');
     if (target.source === 'auto') {
       // the auto row is a recency guess — recording a thread under the
       // wrong PR poisons the reopen guard just as much as losing the
       // row would, so the row is dropped with a note instead (codeant)
       console.error(
         `act: note — no branch PR for this thread; ledger record of ${threadId} skipped`
-      )
-      return
+      );
+      return;
     }
-    ledger.record({ repo: target.repo, pr: target.pr, thread: threadId })
+    ledger.record({ repo: target.repo, pr: target.pr, thread: threadId });
   } catch {
     // recording is best-effort — the resolve itself already landed
   }
 }
 
 function cmdResolve(argv: string[]): void {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const id = threadArg(argv)
-  const comment = commentArg(argv)
-  const unresolve = argv.includes('--unresolve')
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const id = threadArg(argv);
+  const comment = commentArg(argv);
+  const unresolve = argv.includes('--unresolve');
   if (comment) {
     if (!unresolve) {
       // the verdict on a fix is the push — comments on resolved-as-fixed
       // threads are boilerplate noise on the PR (skills/act/SKILL.md)
-      console.error('act: note — fixes resolve silently; --comment is for reject/defer reasons')
+      console.error('act: note — fixes resolve silently; --comment is for reject/defer reasons');
     }
-    rev.replyThread(id, comment)
-    console.error(`act: replied on ${id}`)
+    rev.replyThread(id, comment);
+    console.error(`act: replied on ${id}`);
   }
   if (unresolve) {
-    rev.resolveThread(id, true)
-    console.error(`act: unresolved ${id}`)
+    rev.resolveThread(id, true);
+    console.error(`act: unresolved ${id}`);
     emitLifecycle(process.cwd(), {
       kind: 'verdict',
       to: 'unresolved',
       detail: { via: 'act', thread: id },
-    })
+    });
   } else {
-    rev.resolveThread(id)
-    console.error(`act: resolved ${id}`)
+    rev.resolveThread(id);
+    console.error(`act: resolved ${id}`);
     // Record the resolve — the reopened-thread cycle-guard needs to know
     // this thread was resolved before. The ledger, not the state cache:
     // the cache TTL is 30s, so its entry is gone between polls.
-    recordResolve(rev, argv, id)
+    recordResolve(rev, argv, id);
     // a silent resolve is the fix verdict; a comment is a reject/defer
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a
     // bare resolve can see
-    disposition(id, comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed')
+    disposition(
+      id,
+      comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed'
+    );
   }
-  dropActState()
+  dropActState();
 }
 
 function cmdReply(argv: string[]): void {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const fileIdx = argv.indexOf('--file')
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
+  const fileIdx = argv.indexOf('--file');
   if (fileIdx >= 0) {
-    const file = argv[fileIdx + 1]
+    const file = argv[fileIdx + 1];
     if (!file) {
-      console.error('error: --file requires a path')
-      process.exit(2)
+      console.error('error: --file requires a path');
+      process.exit(2);
     }
     const lines = readFileSync(file, 'utf8')
       .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-    let skipped = 0
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+    let skipped = 0;
     const rows = lines
-      .map((l) => {
-        const tab = l.indexOf('\t')
+      .map(l => {
+        const tab = l.indexOf('\t');
         if (tab === -1) {
-          skipped += 1
-          return null
+          skipped += 1;
+          return null;
         }
         return {
           id: l.slice(0, tab).trim(),
-          body: l.slice(tab + 1).replaceAll(String.raw`\n`, '\n').replaceAll(String.raw`\t`, '\t'),
-        }
+          body: l
+            .slice(tab + 1)
+            .replaceAll(String.raw`\n`, '\n')
+            .replaceAll(String.raw`\t`, '\t'),
+        };
       })
-      .filter((r): r is { id: string; body: string } => r !== null)
+      .filter((r): r is { id: string; body: string } => r !== null);
     for (const row of rows) {
-      rev.replyThread(row.id, row.body)
-      console.error(`act: replied on ${row.id}`)
-      disposition(row.id, /deferred to \S+/i.test(row.body) ? 'deferred' : 'replied')
+      rev.replyThread(row.id, row.body);
+      console.error(`act: replied on ${row.id}`);
+      disposition(row.id, /deferred to \S+/i.test(row.body) ? 'deferred' : 'replied');
     }
-    console.error(`act reply: ${rows.length} repl(ies)`)
+    console.error(`act reply: ${rows.length} repl(ies)`);
     if (skipped > 0) {
-      console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`)
-      process.exitCode = 1
+      console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`);
+      process.exitCode = 1;
     }
-    dropActState()
-    return
+    dropActState();
+    return;
   }
-  const id = threadArg(argv)
-  const comment = commentArg(argv)
+  const id = threadArg(argv);
+  const comment = commentArg(argv);
   if (!comment) {
-    console.error('error: --comment required (or --file TSV)')
-    usage()
+    console.error('error: --comment required (or --file TSV)');
+    usage();
   }
-  rev.replyThread(id, comment!)
-  console.error(`act: replied on ${id}`)
+  rev.replyThread(id, comment!);
+  console.error(`act: replied on ${id}`);
   // the documented defer flow replies "deferred to <bead>" then
   // resolves silently — journaled as deferred here (stats join
   // first-hit wins) so the silent resolve's 'fixed' can't mask it
-  disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied')
-  dropActState()
+  disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied');
+  dropActState();
 }
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
@@ -1610,7 +1628,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   threads: cmdThreads,
   resolve: cmdResolve,
   reply: cmdReply,
-}
+};
 
 /** Defer a thread into a debt bead — the skill's mechanics as code:
  *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
@@ -1627,109 +1645,111 @@ function deferThread(
       ? `deferred from PR ${rev.prLink(ownerRepo, pr)} thread ${v.thread_id}`
       : pr
         ? `deferred from PR #${pr} thread ${v.thread_id}`
-        : `deferred thread ${v.thread_id}`
+        : `deferred thread ${v.thread_id}`;
   if (!v.title) {
-    throw new Error(`defer verdict for ${v.thread_id} has no title`)
+    throw new Error(`defer verdict for ${v.thread_id} has no title`);
   }
   const bead = claimStore(process.cwd()).create({
     title: v.title,
     labels: ['debt'],
     description: desc,
     externalRef: v.thread_id,
-  }).id
-  const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
-  rev.replyThread(v.thread_id, reply)
-  rev.resolveThread(v.thread_id)
-  disposition(v.thread_id, 'deferred', pr)
-  return bead
+  }).id;
+  const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '');
+  rev.replyThread(v.thread_id, reply);
+  rev.resolveThread(v.thread_id);
+  disposition(v.thread_id, 'deferred', pr);
+  return bead;
 }
 
 function replyVerdict(rev: ReviewFacade, v: ActThreadVerdict, pr?: number): void {
   if (!v.comment) {
-    throw new Error(`reply verdict for ${v.thread_id} has no comment`)
+    throw new Error(`reply verdict for ${v.thread_id} has no comment`);
   }
-  rev.replyThread(v.thread_id, v.comment)
-  console.error(`act: replied on ${v.thread_id}`)
-  disposition(v.thread_id, 'replied', pr)
+  rev.replyThread(v.thread_id, v.comment);
+  console.error(`act: replied on ${v.thread_id}`);
+  disposition(v.thread_id, 'replied', pr);
 }
 
 function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict, pr?: number): void {
   if (v.comment) {
-    rev.replyThread(v.thread_id, v.comment)
+    rev.replyThread(v.thread_id, v.comment);
   }
-  rev.resolveThread(v.thread_id)
-  console.error(`act: resolved ${v.thread_id}`)
-  disposition(v.thread_id, v.comment ? 'rejected' : 'fixed', pr)
+  rev.resolveThread(v.thread_id);
+  console.error(`act: resolved ${v.thread_id}`);
+  disposition(v.thread_id, v.comment ? 'rejected' : 'fixed', pr);
 }
 
 /** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors });
+  const rev = reviewHost(undefined, loadBroConfig().connectors);
   // no upfront beads check — a defer without bd/.beads fails that one
   // verdict (thread stays unresolved, per the skill's fallback rule)
   // instead of blocking every other verdict in the plan
-  const failed: string[] = []
+  const failed: string[] = [];
   // lazy: only a defer verdict pays the repo-resolution call — and
   // outside a clone it can't pay at all; null falls back to the bare-#
   // bead description rather than failing a valid defer plan.
   // undefined = not yet attempted.
-  let ownerRepo: string | null | undefined
+  let ownerRepo: string | null | undefined;
   const repoForDefers = (): string | null => {
     if (ownerRepo !== undefined) {
-      return ownerRepo
+      return ownerRepo;
     }
     // a failed resolve isn't cached — one transient outage must not
     // degrade every later defer in the same plan
     try {
-      return (ownerRepo = rev.resolveRepo([]))
+      return (ownerRepo = rev.resolveRepo([]));
     } catch {
-      return null
+      return null;
     }
-  }
+  };
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
-        replyVerdict(rev, v, plan.pr)
+        replyVerdict(rev, v, plan.pr);
       } else if (v.action === 'defer') {
-        console.error(`act: deferred ${v.thread_id} → ${deferThread(rev, v, repoForDefers(), plan.pr)}`)
+        console.error(
+          `act: deferred ${v.thread_id} → ${deferThread(rev, v, repoForDefers(), plan.pr)}`
+        );
       } else {
-        resolveVerdict(rev, v, plan.pr)
+        resolveVerdict(rev, v, plan.pr);
       }
     } catch (err) {
-      failed.push(v.thread_id)
+      failed.push(v.thread_id);
       console.error(
         `act: ${v.thread_id} failed — ${err instanceof Error ? err.message : String(err)}`
-      )
+      );
     }
   }
   if (plan.threads.length > 0) {
-    dropActState()
+    dropActState();
   }
   if (failed.length > 0) {
-    console.error(`act plan: ${failed.length} verdict(s) failed: ${failed.join(', ')}`)
-    process.exitCode = 1
+    console.error(`act plan: ${failed.length} verdict(s) failed: ${failed.join(', ')}`);
+    process.exitCode = 1;
   }
 }
 
 export async function runActCommand(argv: string[]): Promise<void> {
-  const [cmd, ...rest] = argv
+  const [cmd, ...rest] = argv;
   // zero-arg magic: bare `bro act` is the gate on the current branch's PR
   if (!cmd) {
-    await cmdStatus([])
-    return
+    await cmdStatus([]);
+    return;
   }
   if (cmd === '--help' || cmd === '-h') {
-    usage(0)
+    usage(0);
   }
-  const handler = COMMANDS[cmd]
+  const handler = COMMANDS[cmd];
   if (!handler) {
-    console.error(`unknown command: ${cmd}`)
-    usage()
+    console.error(`unknown command: ${cmd}`);
+    usage();
   }
   if (hasHelpFlag(rest)) {
-    usage(0)
+    usage(0);
   }
-  await handler(rest)
+  await handler(rest);
 }

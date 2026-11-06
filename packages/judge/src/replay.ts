@@ -15,7 +15,7 @@
  * on the diff — classify OUT: 'replied' vs 'rejected' is unrecoverable
  * from facade state and a silent guess would poison the agreement set.
  */
-import { facade, JudgeUnavailable, loadConfig } from '@broject/core'
+import { facade, JudgeUnavailable, loadConfig } from '@broject/core';
 import type {
   Disposition,
   JudgeFacade,
@@ -23,23 +23,18 @@ import type {
   ReviewFacade,
   ReviewThread,
   Verdict,
-} from '@broject/core'
-import {
-  appendRow,
-  commentKey,
-  readJournal,
-  threadSubject,
-} from './journal.ts'
-import { ACT_THREAD_QUESTIONS, threadState } from './shadow.ts'
+} from '@broject/core';
+import { appendRow, commentKey, readJournal, threadSubject } from './journal.ts';
+import { ACT_THREAD_QUESTIONS, threadState } from './shadow.ts';
 
 /** Everything inference needs that isn't on the thread itself —
  *  dispositions and defer refs are run-wide. */
 export interface InferenceCtx {
   /** Journal's act-disposition rows. */
-  dispositions: Disposition[]
+  dispositions: Disposition[];
   /** Bead ids are irrelevant — the set holds thread_ids carried as
    *  bead external_refs (the act defer flow's link). */
-  deferRefs: Set<string>
+  deferRefs: Set<string>;
 }
 
 /** Latest disposition for the subject. Replay's join is looser than
@@ -56,20 +51,20 @@ function dispositionFor(
   commentSha: string | undefined
 ): string | undefined {
   for (let i = dispositions.length - 1; i >= 0; i -= 1) {
-    const d = dispositions[i]!
+    const d = dispositions[i]!;
     if (d.subject.threadId !== threadId) {
-      continue
+      continue;
     }
     if (
       commentSha !== undefined &&
       d.subject.commentSha !== undefined &&
       d.subject.commentSha !== commentSha
     ) {
-      continue
+      continue;
     }
-    return d.outcome
+    return d.outcome;
   }
-  return undefined
+  return undefined;
 }
 
 /** The outcome half of the dogfood pair. Order: the recorded
@@ -82,74 +77,71 @@ function dispositionFor(
  *  unrecoverable — replied/rejected look identical on the facade, and
  *  a wrong 'fixed' poisons the agreement set worse than a smaller
  *  sample does. */
-export function inferOutcome(
-  thread: ReviewThread,
-  ctx: InferenceCtx
-): string | undefined {
-  const commentSha = thread.comment !== null ? commentKey(thread.comment) : undefined
-  const recorded = dispositionFor(ctx.dispositions, thread.id, commentSha)
+export function inferOutcome(thread: ReviewThread, ctx: InferenceCtx): string | undefined {
+  const commentSha = thread.comment !== null ? commentKey(thread.comment) : undefined;
+  const recorded = dispositionFor(ctx.dispositions, thread.id, commentSha);
   if (recorded !== undefined) {
-    return recorded
+    return recorded;
   }
   if (ctx.deferRefs.has(thread.id)) {
-    return 'deferred'
+    return 'deferred';
   }
   if (!thread.resolved) {
-    return undefined // unresolved when the PR settled → excluded
+    return undefined; // unresolved when the PR settled → excluded
   }
   if (thread.outdated) {
-    return 'fixed' // the diff moved past the finding — a later headSha
+    return 'fixed'; // the diff moved past the finding — a later headSha
   }
-  return undefined
+  return undefined;
 }
 
 export interface ReplayOpts {
   /** Working dir — locates the shared journal + the defer beads. */
-  dir: string
+  dir: string;
   /** 'owner/name' the merged PRs live under. */
-  repo: string
+  repo: string;
   /** Resolved facades — tests inject fakes. */
-  rev: ReviewFacade
-  judge: JudgeFacade
+  rev: ReviewFacade;
+  judge: JudgeFacade;
   /** Explicit PR selection — wins over the merged-since scan. */
-  prs?: number[]
+  prs?: number[];
   /** Only PRs merged at/after this ISO timestamp enter the scan. */
-  mergedSince?: string
+  mergedSince?: string;
   /** Merged-PR listing cap for the scan path (default 50). */
-  limit?: number
+  limit?: number;
   /** Fresh decide() attempts this run may pay for — defaults to
    *  judge.maxDecisionsPerRun's caller-side equivalent (50). */
-  budget?: number
+  budget?: number;
   /** Defer-bead thread refs — injectable; the default reads the repo's
    *  'debt'-labelled beads once per run. */
-  deferRefs?: Set<string>
+  deferRefs?: Set<string>;
   /** Progress line sink — the CLI wires it to stderr. */
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void;
 }
 
 export interface ReplayResult {
   /** Merged PRs scanned. */
-  prs: number
+  prs: number;
   /** Threads seen across them. */
-  threads: number
+  threads: number;
   /** Threads with a classifiable outcome — the decidable set. */
-  candidates: number
+  candidates: number;
   /** Fresh verdicts journaled this run. */
-  judged: number
+  judged: number;
   /** Candidates that already carried a replay verdict — re-run reads. */
-  cached: number
+  cached: number;
   /** Threads dropped as unclassifiable — smaller sample over a wrong
    *  one, per spec. */
-  excluded: number
+  excluded: number;
   /** decide() failures (attempts still consumed budget). */
-  failed: number
+  failed: number;
   /** Candidates dropped because the decision budget ran out — the
    *  truncation signal: another run finishes them. */
-  skipped: number
+  skipped: number;
 }
 
-const REPLAY_CONCURRENCY = 4
-const DEFAULT_SCAN_LIMIT = 50
+const REPLAY_CONCURRENCY = 4;
+const DEFAULT_SCAN_LIMIT = 50;
 
 /** The dedup key for replay rows — a replay verdict never serves live
  *  callers (findVerdict skips them), so a re-run must dedup against
@@ -157,12 +149,12 @@ const DEFAULT_SCAN_LIMIT = 50
 const replayKey = (v: Verdict): string | undefined =>
   v.subject.threadId === undefined
     ? undefined
-    : `${v.subject.threadId} ${v.subject.commentSha ?? ''}`
+    : `${v.subject.threadId} ${v.subject.commentSha ?? ''}`;
 
-const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition'
+const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition';
 
-type PrKey = { repo: string; pr: number }
-type ThreadMap = Map<number, ReviewThread[]>
+type PrKey = { repo: string; pr: number };
+type ThreadMap = Map<number, ReviewThread[]>;
 
 /** The connector's bulk scan — covers the target set it returns; a
  *  connector-level failure degrades to the serial probe. */
@@ -173,22 +165,22 @@ async function bulkScan(
   out: ThreadMap
 ): Promise<void> {
   if (typeof opts.rev.scanMergedPrs !== 'function' || targets.length === 0) {
-    return
+    return;
   }
   try {
     const scans = await opts.rev.scanMergedPrs(targets, {
       onProgress: (done, total) =>
         opts.onProgress?.(`judge replay: probed ${done}/${total} merged PR(s)`),
-    })
+    });
     for (const [pr, scan] of scans) {
-      out.set(pr, scan.threads)
-      missing.delete(pr)
+      out.set(pr, scan.threads);
+      missing.delete(pr);
     }
   } catch (err) {
     console.error(
       `warning: bulk scan failed — falling back to serial probes ` +
         `(${err instanceof Error ? err.message : err})`
-    )
+    );
   }
 }
 
@@ -201,30 +193,27 @@ async function serialProbe(
 ): Promise<void> {
   for (const t of targets) {
     if (!missing.has(t.pr)) {
-      continue
+      continue;
     }
     try {
-      out.set(t.pr, await opts.rev.reviewThreads(t))
+      out.set(t.pr, await opts.rev.reviewThreads(t));
     } catch (err) {
       console.error(
         `warning: thread fetch for #${t.pr} failed — ` +
           `${err instanceof Error ? err.message : err}`
-      )
+      );
     }
   }
 }
 
 /** Threads for the selected PRs — the connector's bulk scan when it
  *  exists, the serial per-PR fetch for what the bulk pass missed. */
-async function probeThreads(
-  opts: ReplayOpts,
-  targets: PrKey[]
-): Promise<ThreadMap> {
-  const out: ThreadMap = new Map()
-  const missing = new Set(targets.map((t) => t.pr))
-  await bulkScan(opts, targets, missing, out)
-  await serialProbe(opts, targets, missing, out)
-  return out
+async function probeThreads(opts: ReplayOpts, targets: PrKey[]): Promise<ThreadMap> {
+  const out: ThreadMap = new Map();
+  const missing = new Set(targets.map(t => t.pr));
+  await bulkScan(opts, targets, missing, out);
+  await serialProbe(opts, targets, missing, out);
+  return out;
 }
 
 /** Default defer-ref set — thread_ids carried as external_ref on
@@ -234,7 +223,7 @@ async function probeThreads(
  *  real store failure warns and degrades (the defer signal is one of
  *  three, and dispositions usually cover act-driven defers). */
 function loadDeferRefs(dir: string): Set<string> {
-  const out = new Set<string>()
+  const out = new Set<string>();
   try {
     for (const row of facade('tasks', { dir }, { prefer: loadConfig(dir).connectors }).list({
       all: true,
@@ -242,23 +231,23 @@ function loadDeferRefs(dir: string): Set<string> {
       limit: 0,
     })) {
       if (typeof row.external_ref === 'string' && row.external_ref !== '') {
-        out.add(row.external_ref)
+        out.add(row.external_ref);
       }
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? err.message : String(err);
     if (!/no beads database/i.test(msg)) {
-      console.error(`warning: defer-bead scan failed — ${msg}`)
+      console.error(`warning: defer-bead scan failed — ${msg}`);
     }
   }
-  return out
+  return out;
 }
 
 type PendingItem = {
-  thread: ReviewThread
-  subject: Verdict['subject']
-  outcome: string
-}
+  thread: ReviewThread;
+  subject: Verdict['subject'];
+  outcome: string;
+};
 
 /** Merged-PR selection — explicit ids, or the connector's merged scan
  *  capped at --limit, narrowed by --merged-since. The since stamp goes
@@ -267,8 +256,7 @@ type PendingItem = {
  *  out before the filter ever saw them. The result-side filter stays —
  *  it also narrows the explicit-ids path, which ignores the hint. */
 function selectMerged(opts: ReplayOpts): ReturnType<ReviewFacade['mergedPrs']> {
-  const sinceMs =
-    opts.mergedSince !== undefined ? Date.parse(opts.mergedSince) : undefined
+  const sinceMs = opts.mergedSince !== undefined ? Date.parse(opts.mergedSince) : undefined;
   const merged =
     opts.prs !== undefined
       ? opts.rev.mergedPrs(opts.repo, { ids: opts.prs })
@@ -277,10 +265,15 @@ function selectMerged(opts: ReplayOpts): ReturnType<ReviewFacade['mergedPrs']> {
           ...(sinceMs !== undefined && Number.isFinite(sinceMs)
             ? { mergedSince: opts.mergedSince }
             : {}),
-        })
+        });
+  // replay selects merged PRs only — a closed-unmerged row (null
+  // mergedAt) is not merge evidence even if a caller widened the query
+  const mergedOnly = merged.filter(
+    (p): p is typeof p & { mergedAt: string } => p.mergedAt !== null
+  );
   return sinceMs !== undefined && Number.isFinite(sinceMs)
-    ? merged.filter((p) => Date.parse(p.mergedAt) >= sinceMs)
-    : merged
+    ? mergedOnly.filter(p => Date.parse(p.mergedAt) >= sinceMs)
+    : mergedOnly;
 }
 
 /** Classify one PR's threads into pending candidates — dispositions,
@@ -295,23 +288,23 @@ function collectPr(
   res: ReplayResult
 ): void {
   for (const thread of threads) {
-    res.threads += 1
-    const subject = threadSubject(pr.number, thread.id, thread.comment, pr.headSha)
+    res.threads += 1;
+    const subject = threadSubject(pr.number, thread.id, thread.comment, pr.headSha);
     // a subject that already carries a replay verdict is cached — its
     // outcome was inferred at judgment time; re-inferring can only
     // miscount it (e.g. as excluded when a signal went missing)
     if (replayed.has(`${thread.id} ${subject.commentSha ?? ''}`)) {
-      res.candidates += 1
-      res.cached += 1
-      continue
+      res.candidates += 1;
+      res.cached += 1;
+      continue;
     }
-    const outcome = inferOutcome(thread, base)
+    const outcome = inferOutcome(thread, base);
     if (outcome === undefined) {
-      res.excluded += 1
-      continue
+      res.excluded += 1;
+      continue;
     }
-    res.candidates += 1
-    pending.push({ thread, subject, outcome })
+    res.candidates += 1;
+    pending.push({ thread, subject, outcome });
   }
 }
 
@@ -324,29 +317,29 @@ async function judgePending(
   pending: PendingItem[],
   res: ReplayResult
 ): Promise<void> {
-  const budget = opts.budget ?? 50
-  let decided = 0
-  let i = 0
-  let dead = false
+  const budget = opts.budget ?? 50;
+  let decided = 0;
+  let i = 0;
+  let dead = false;
   const worker = async (): Promise<void> => {
     while (!dead && i < pending.length) {
-      const item = pending[i]!
-      i += 1
+      const item = pending[i]!;
+      i += 1;
       if (decided >= budget) {
-        res.skipped += 1
-        continue
+        res.skipped += 1;
+        continue;
       }
-      decided += 1 // an attempt consumes budget — it paid either way
-      let decision
+      decided += 1; // an attempt consumes budget — it paid either way
+      let decision;
       try {
-        decision = await opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
+        decision = await opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS);
       } catch (err) {
         // a dead backend ends the loop; a per-thread failure skips it
-        res.failed += 1
+        res.failed += 1;
         if (err instanceof JudgeUnavailable) {
-          dead = true
+          dead = true;
         }
-        continue
+        continue;
       }
       appendRow(opts.dir, {
         ts: new Date().toISOString(),
@@ -356,21 +349,15 @@ async function judgePending(
         answers: decision.answers,
         model: decision.model,
         latencyMs: decision.latencyMs,
-        ...(decision.usage?.costUsd !== undefined
-          ? { costUsd: decision.usage.costUsd }
-          : {}),
-        ...(decision.lowConfidence.length > 0
-          ? { lowConfidence: decision.lowConfidence }
-          : {}),
+        ...(decision.usage?.costUsd !== undefined ? { costUsd: decision.usage.costUsd } : {}),
+        ...(decision.lowConfidence.length > 0 ? { lowConfidence: decision.lowConfidence } : {}),
         outcome: item.outcome,
         replay: true,
-      } satisfies Verdict)
-      res.judged += 1
+      } satisfies Verdict);
+      res.judged += 1;
     }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(REPLAY_CONCURRENCY, pending.length) }, worker)
-  )
+  };
+  await Promise.all(Array.from({ length: Math.min(REPLAY_CONCURRENCY, pending.length) }, worker));
 }
 
 /** `bro judge replay` engine — select merged PRs, reconstruct the
@@ -378,17 +365,17 @@ async function judgePending(
  *  outcomes. Idempotent: a subject that already carries a replay
  *  verdict counts as cached, never re-judged. */
 export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResult> {
-  const selected = selectMerged(opts)
-  const rows = readJournal(opts.dir)
-  const dispositions = rows.filter((r): r is Disposition => r.kind === 'act-disposition')
+  const selected = selectMerged(opts);
+  const rows = readJournal(opts.dir);
+  const dispositions = rows.filter((r): r is Disposition => r.kind === 'act-disposition');
   const replayed = new Set(
-    rows.filter((r) => isVerdict(r) && r.replay === true).map((v) => replayKey(v as Verdict))
-  )
+    rows.filter(r => isVerdict(r) && r.replay === true).map(v => replayKey(v as Verdict))
+  );
   const threadsByPr = await probeThreads(
     opts,
-    selected.map((p) => ({ repo: opts.repo, pr: p.number }))
-  )
-  const base = { dispositions, deferRefs: opts.deferRefs ?? loadDeferRefs(opts.dir) }
+    selected.map(p => ({ repo: opts.repo, pr: p.number }))
+  );
+  const base = { dispositions, deferRefs: opts.deferRefs ?? loadDeferRefs(opts.dir) };
   const res: ReplayResult = {
     prs: selected.length,
     threads: 0,
@@ -398,11 +385,11 @@ export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResul
     excluded: 0,
     failed: 0,
     skipped: 0,
-  }
-  const pending: PendingItem[] = []
+  };
+  const pending: PendingItem[] = [];
   for (const pr of selected) {
-    collectPr(pr, threadsByPr.get(pr.number) ?? [], base, replayed, pending, res)
+    collectPr(pr, threadsByPr.get(pr.number) ?? [], base, replayed, pending, res);
   }
-  await judgePending(opts, pending, res)
-  return res
+  await judgePending(opts, pending, res);
+  return res;
 }

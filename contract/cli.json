@@ -31,7 +31,7 @@
     },
     "work": {
       "summary": "worktree & session mechanics",
-      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep"]
+      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep", "exec"]
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
@@ -52,6 +52,10 @@
     "spec": {
       "summary": "spec-driven development",
       "members": ["spec"]
+    },
+    "pipeline": {
+      "summary": "pipeline customer surface — accept verdicts, intake answers",
+      "members": ["pipeline"]
     }
   },
   "commands": {
@@ -169,6 +173,46 @@
       "skill": "loop",
       "configKey": "loop",
       "plan": false,
+      "external": false
+    },
+    "pipeline": {
+      "name": "pipeline",
+      "group": "pipeline",
+      "summary": "Pipeline customer surface — accept|answer write the verdict store",
+      "spellings": ["pipeline"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "subs": {
+          "accept": {
+            "flags": {
+              "--notes <text>": "the customer's notes — required on rejected (the fix scope)",
+              "--by <id>": "signer identity — default: $BRO_AGENT_ID, else the actor chain",
+              "--run <id>": "the run to write to — default: the sole run parked at accept"
+            },
+            "exits": {
+              "0": "verdict recorded on the run channel",
+              "1": "no run awaiting, an ambiguous target, or an unresolvable signer",
+              "2": "usage"
+            }
+          },
+          "answer": {
+            "flags": {
+              "-m <text>": "answer text (short spelling)",
+              "--message <text>": "answer text",
+              "--answers-file <path>": "answers from a file (JSON parsed when it parses)",
+              "--by <id>": "who answered — optional provenance",
+              "--run <id>": "the run to write to — default: the sole run parked at intake"
+            },
+            "exits": {
+              "0": "answers recorded on the run channel",
+              "1": "no run awaiting answers or an unreadable file",
+              "2": "usage"
+            }
+          }
+        }
+      },
       "external": false
     },
     "fleet": {
@@ -410,7 +454,7 @@
     "cleanup": {
       "name": "cleanup",
       "group": "review",
-      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "summary": "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]",
       "spellings": ["cleanup", "review cleanup"],
       "aliases": [],
       "hidden": false,
@@ -651,7 +695,7 @@
     "trace": {
       "name": "trace",
       "group": "fleet",
-      "summary": "OTLP export of the session trace journals — export [--session|--dry-run|--json]",
+      "summary": "<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals",
       "spellings": ["trace", "fleet trace"],
       "aliases": [],
       "hidden": false,
@@ -892,6 +936,22 @@
       "aliases": [],
       "hidden": false,
       "plan": false,
+      "external": false
+    },
+    "exec": {
+      "name": "exec",
+      "group": "work",
+      "summary": "Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)",
+      "spellings": ["exec", "work exec"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "exits": {
+          "2": "usage",
+          "130": "child killed by SIGINT"
+        }
+      },
       "external": false
     },
     "plan": {

@@ -35,6 +35,7 @@ import {
   occupancyProofs,
   processesRootedIn,
   projectorKicker,
+  projectorWatcher,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
@@ -1430,5 +1431,76 @@ describe('projectorKicker — the event-kick coalescer (bro-xmd9l)', () => {
     // the second fire lands at/after the first fire + kickMs, not at t0+30
     assert.ok(firedAt[1]! - firedAt[0]! >= 55, `gap ${firedAt[1]! - firedAt[0]!}ms < 55ms`);
     assert.ok(firedAt[1]! - t0 >= 55);
+  });
+});
+
+describe('projectorWatcher — the write-point fast path (bro-9me97)', () => {
+  const waitFor = async (cond: () => boolean, ms = 3000): Promise<boolean> => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (cond()) return true;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return false;
+  };
+
+  test('a matching filename kicks, a non-matching one stays quiet', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'projwatch-'));
+    let n = 0;
+    const ws = projectorWatcher(
+      [{ dir, hit: name => name === 'agents.json' || name.endsWith('.exit') }],
+      () => {
+        n += 1;
+      }
+    );
+    try {
+      assert.equal(ws.length, 1);
+      // inotify registration lag is unbounded on a loaded runner —
+      // poke at a sane interval until the kick lands rather than
+      // trusting one settle window (a 25ms-cadence storm starves the
+      // loop and delayed the first run's own delivery past timeout)
+      let lastWrite = 0;
+      const kicked = await waitFor(() => {
+        if (n === 0 && Date.now() - lastWrite > 300) {
+          lastWrite = Date.now();
+          writeFileSync(join(dir, 'native-x.1.exit'), '1\n');
+        }
+        return n >= 1;
+      }, 8000);
+      assert.ok(kicked, 'no kick on .exit');
+      // drain before the baseline — an .exit write fires rename AND
+      // change, and a retried poke can still be in flight; snapshot
+      // only once n holds still past the poke cadence or late kicks
+      // land inside the quiet window below
+      // n must hold across fourteen 25ms polls (~350ms, past the
+      // 300ms poke cadence) before it counts as drained
+      let stable = 0;
+      let last = -1;
+      const drained = await waitFor(() => {
+        if (n !== last) {
+          last = n;
+          stable = 0;
+          return false;
+        }
+        return ++stable >= 14;
+      }, 8000);
+      assert.ok(drained, 'kick stream never settled');
+      const before = n;
+      writeFileSync(join(dir, 'other.log'), 'noise\n');
+      writeFileSync(join(dir, 'state.tmp'), 'noise\n');
+      const quiet = await waitFor(() => n > before, 400);
+      assert.equal(quiet, false, 'a non-matching write must not kick');
+    } finally {
+      for (const w of ws) w.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an absent dir yields no watcher — a no-watch, not a failure', () => {
+    const ws = projectorWatcher(
+      [{ dir: join(tmpdir(), 'projwatch-absent-does-not-exist'), hit: () => true }],
+      () => {}
+    );
+    assert.equal(ws.length, 0);
   });
 });

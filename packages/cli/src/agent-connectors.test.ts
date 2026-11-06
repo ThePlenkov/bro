@@ -1,4 +1,3 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -14,34 +13,42 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
+  type AgentCapabilities,
+  type AgentConnector,
+  type AgentInfo,
+  AgentNotFound,
+  type AgentRegistryEntry,
   agentExitFileName,
   agentRegistryPath,
   bdActor,
+  type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
+  deriveProviderWalls,
   handleOwner,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
-  scrubEnv,
+  type ResolvedClass,
   SESSION_SLOT_TTL_MS,
   SpawnError,
-  AgentNotFound,
+  type SpawnSpec,
+  scrubEnv,
   testGitSpawn,
-  type AgentCapabilities,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentRegistryEntry,
-  type ConnectorCtx,
 } from '@broject/core';
+import { devinSessionPlane } from '@broject/devin';
 import {
+  type AgentConnectorEnv,
   agentConnectorNames,
   armNativeSpawnTestSeam,
+  BUDGET_LIMITS,
+  type BudgetSnapshot,
+  batchWallRefusal,
   broSpawnArgv,
   budgetLines,
   budgetSnapshot,
-  BUDGET_LIMITS,
   dockerImageFor,
   eachAgentConnector,
   fleetOccupancy,
@@ -54,20 +61,17 @@ import {
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
-  SpawnAbandoned,
   registerAgentConnector,
-  batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
+  SpawnAbandoned,
   sessionKindOf,
   sessionQuotaOf,
   systemdScopeProbe,
   unregisterAgentConnector,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
-import { devinSessionPlane } from '@broject/devin';
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -1256,6 +1260,43 @@ describe('native credential scope (bro-l8c4f.6)', () => {
       cleanup(f);
     }
   });
+
+  test('BRO_PIPELINE_KEY never reaches the worker — denied in trusted-host AND strict mode', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_PIPELINE_KEY = 'channel-key';
+    // the worker writes back what it saw — the customer-channel key is
+    // never a worker credential (a worker holding it mints verdicts)
+    const payload = "require('fs').writeFileSync('env.out', process.env.BRO_PIPELINE_KEY ?? '')";
+    try {
+      // trusted-host mode (no strictEnv): the blanket passthrough must
+      // still refuse it
+      const a = await conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await conn(f).stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // strict mode — denied too, even allowlisted AND spec.env'd
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'BRO_PIPELINE_KEY'],
+      };
+      const c = conn(f);
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_PIPELINE_KEY: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_PIPELINE_KEY;
+      cleanup(f);
+    }
+  });
 });
 
 /** The spawn-handshake crash windows (spec bro-l8c4f.5): deterministic
@@ -2428,6 +2469,70 @@ describe('resolveSpawnProvider', () => {
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo');
   });
 
+  test('a route candidate resolution failure names the class and provider as config', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'local' }, { provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'local',
+        },
+        {}
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'config' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    );
+  });
+
+  test('a route candidate preserves an input error kind', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'missing',
+        },
+        {},
+        'flag'
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'input' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    );
+  });
+
+  test('a model selection applies to the chain head, not fallback provider pins', async () => {
+    const routeEnv: AgentConnectorEnv = {
+      ...env,
+      providers: {
+        A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+        B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+        C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      },
+    };
+    const resolved: ResolvedClass = {
+      class: 'free',
+      chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+      onWall: 'fallthrough',
+      provider: 'A',
+      model: 'a1',
+    };
+    const route = await resolveSpawnRoute(routeEnv, 'native', resolved, { model: 'x' });
+    assert.deepEqual(
+      route.candidates.map(candidate => candidate.model),
+      ['x', 'b-default', 'c1']
+    );
+  });
+
   test('cli {model} placeholder wires the resolved model into the worker command', async () => {
     const pin = await resolveSpawnProvider(env, 'native', { provider: 'zen' }, 'flag');
     assert.equal(pin.model, 'zen/free');
@@ -2793,6 +2898,77 @@ describe('provider-resolved spawns', () => {
     }
   });
 
+  test('native: pipeline provenance pins BRO_FORMULA + session, stamps the registry (spec bro-7d5nb)', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = 'f'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipeline', formulaSha: sha, stage: 'work', sessionId: 'sess-9' },
+        // ambient forgery attempts are pin-filtered like every other
+        // provenance key
+        env: { BRO_FORMULA: 'forged@bad', BRO_SESSION_ID: 'forged-session' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipeline@${sha}|sess-9`);
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, 'pipeline');
+      assert.equal(entry.formula_sha, sha);
+      assert.equal(entry.pipeline_stage, 'work');
+      assert.equal(entry.session_id, 'sess-9');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a pipeline spawn without a sessionId pins agentId as the attested session', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = '0'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipe', formulaSha: sha },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipe@${sha}|${entry.agentId}`);
+      assert.equal(entry.session_id, entry.agentId);
+      assert.equal(entry.pipeline_stage, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a non-pipeline spawn writes no formula stamps', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, undefined);
+      assert.equal(entry.formula_sha, undefined);
+      assert.equal(entry.pipeline_stage, undefined);
+      assert.equal(entry.session_id, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('gascity: a provider-resolved worker refuses before any gc call', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
@@ -3076,5 +3252,273 @@ describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => 
       batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_BATCH: '1' } }),
       undefined
     );
+  });
+});
+
+describe('fleet chain walk spawn integration', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const future = '2099-01-01T00:00:00Z';
+  const oldSpawn = '2026-10-20T00:00:00Z';
+  const routeFor = (onWall: 'park' | 'fallthrough'): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall,
+    candidates: ['A', 'B'].map(provider => ({
+      provider,
+      model: `model-${provider}`,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  });
+  const death = (provider: string): AgentRegistryEntry => ({
+    agentId: `native-${provider.toLowerCase()}-dead`,
+    backend: 'native',
+    spawnedAt: oldSpawn,
+    provider,
+    model: `model-${provider}`,
+    cause: 'rate_limited',
+    resetAt: future,
+    stopped: false,
+    acpSessionId: 'old-acp-session',
+    resumeSessionId: 'old-resume-session',
+  });
+
+  test('falls through A to B and retains A as a walled attempt', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      const attempts = entry.attempts as unknown[];
+      assert.deepEqual(attempts[0], {
+        provider: 'A',
+        model: 'model-A',
+        cause: 'rate_limited',
+        resetAt: future,
+        spawnedAt: oldSpawn,
+        stopped: false,
+      });
+      assert.equal(entry.acpSessionId, undefined);
+      assert.equal(entry.resumeSessionId, undefined);
+      assert.equal(
+        deriveProviderWalls(registry, Date.now()).find(wall => wall.provider === 'A')?.cause,
+        'rate_limited'
+      );
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a cause-less routed respawn records its outgoing provider when it moves', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-a-lost',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'A',
+        model: 'model-A',
+        stopped: false,
+      });
+      patchAgentRegistry(f.main, 'fx-2', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      assert.deepEqual((entry.attempts as unknown[])[0], {
+        provider: 'A',
+        model: 'model-A',
+        spawnedAt: oldSpawn,
+        stopped: false,
+      });
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a respawn over a stopped entry does not resurrect its attempt walls', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-b-dead',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'B',
+        model: 'model-B',
+        cause: 'rate_limited',
+        resetAt: future,
+        // `bro agents down` — the manual clear. The retained attempt
+        // would re-wall A the moment the respawn flips stopped:false
+        stopped: true,
+        attempts: [
+          {
+            provider: 'A',
+            model: 'model-A',
+            cause: 'rate_limited',
+            resetAt: future,
+            spawnedAt: oldSpawn,
+            stopped: false,
+          },
+        ],
+      });
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      // the pre-stop attempt list is evicted — only the outgoing
+      // (stopped:true, never wallable) record remains
+      assert.deepEqual(entry.attempts, [
+        {
+          provider: 'B',
+          model: 'model-B',
+          cause: 'rate_limited',
+          resetAt: future,
+          spawnedAt: oldSpawn,
+          stopped: true,
+        },
+      ]);
+      assert.deepEqual(deriveProviderWalls(registry, Date.now()), []);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('fallback provider uses its own model instead of the chain-head selection', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    f.env.providers = {
+      A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+      B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+      C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+    };
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      const resolved: ResolvedClass = {
+        class: 'free',
+        chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+        onWall: 'fallthrough',
+        provider: 'A',
+        model: 'a1',
+      };
+      const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' });
+      assert.deepEqual(
+        route.candidates.map(candidate => candidate.model),
+        ['x', 'b-default', 'c1']
+      );
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route,
+      });
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      assert.equal(entry.model, 'b-default');
+      assert.notEqual(entry.model, 'x');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('onWall park refuses the step and points to agents down', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('park'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" parked — onWall park/.test(err.message) &&
+          /A walled — rate_limited til/.test(err.message) &&
+          /held by fx-1/.test(err.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('fallthrough exhaustion names the final walled provider', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      patchAgentRegistry(f.main, 'fx-2', death('B'));
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" chain exhausted/.test(err.message) &&
+          /B walled — rate_limited til/.test(err.message) &&
+          /held by fx-2/.test(err.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a fresh step falls through a wall recorded by another step', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-2', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'B');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a live entry still refuses a routed spawn', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    let info: AgentInfo | undefined;
+    try {
+      const c = conn(f);
+      info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      await assert.rejects(
+        c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError && /fx-1 already has a live agent/.test(err.message)
+      );
+    } finally {
+      if (info !== undefined) {
+        await conn(f).stop(info.id);
+      }
+      cleanup(f);
+    }
   });
 });

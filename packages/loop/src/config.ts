@@ -39,6 +39,7 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
     crashExitMs: num('crashExitMs'),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
     fixRounds: num('fixRounds'),
+    autoMerge: obj.autoMerge === true,
     maxItems: num('maxItems'),
     maxOpen: num('maxOpen', 1),
     // a 0 price would silence the floor entirely — the honest
@@ -63,6 +64,7 @@ loopSection.jsonSchema = js.obj({
   crashExitMs: js.num(0),
   mergeTimeoutMin: js.num(1),
   fixRounds: js.num(0),
+  autoMerge: js.bool,
   maxItems: js.num(0),
   maxOpen: js.num(1),
   worktreeMb: js.num(1),
