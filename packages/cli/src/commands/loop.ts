@@ -163,7 +163,9 @@ import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
 import { MIN_INTERVAL_SEC } from './drive-config.ts';
-
+import { isOrchestratorSession } from './watch-pulse.ts';
+import { installLoop, uninstallLoop } from './daemon.ts';
+import { checkBeads } from '@broject/core';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -251,6 +253,9 @@ const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
     `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+       bro loop [--every SEC]        run in supervised loop mode
+       bro loop install [--every N] [--print]
+       bro loop uninstall
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -277,6 +282,7 @@ function usage(exitCode: ExitCode = 2): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
+  --every SEC                    supervised loop cadence, ≥${MIN_INTERVAL_SEC}s
   --interval SEC                 gate poll interval, ≥0.1s (60)`,
     exitCode
   );
@@ -2501,6 +2507,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--disk-min-slots',
   '--batch',
   '--interval',
+  '--every',
   '--label',
   '--stack',
   '--provider',
@@ -2508,19 +2515,58 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print']);
+
+function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
+  if (argv[0] === 'uninstall') {
+    const r = uninstallLoop(dir);
+    console.log(r.detail);
+    if (r.state === 'error') {
+      process.exit(1);
+    }
+    return;
+  }
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm the supervisor; ' +
+        'the orchestrator session owns it'
+    );
+    process.exit(2);
+  }
+  const everyRaw = flag(argv, '--every');
+  const everySec = everyRaw === undefined ? (loopCfg as any).intervalSec ?? 300 : Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > 3600) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to 3600s, got "${everyRaw ?? everySec}"`
+    );
+    process.exit(2);
+  }
+  const r = installLoop(dir, { everySec, print: argv.includes('--print') });
+  console.log(r.detail);
+  if (r.state === 'error') {
+    process.exit(1);
+  }
+}
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  rejectStrayArgs(argv);
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim();
   if (!root) {
     console.error('bro loop: not inside a git worktree');
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
+  const loopCfg = broCfg.loop as LoopConfig;
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    if (argv[0] === 'install' && !argv.includes('--print')) {
+      checkBeads();
+    }
+    runLoopSched(argv, root, loopCfg);
+    return;
+  }
+  rejectStrayArgs(argv);
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);

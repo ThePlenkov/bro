@@ -20,6 +20,10 @@
  * postTool, orchestrator-only) rearms a dead supervisor from it.
  * `daemon down` under an install is a transient stop — the next
  * checkpoint brings it back; `bro drive uninstall` is the disarm.
+ *
+ * Loop installs mirror drive: `bro loop install` writes
+ * `<git-common>/bro/loop.json` and brings a supervised `bro loop` up;
+ * `daemon run --loop` runs it, and the rearm checkpoints can revive it.
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -37,18 +41,20 @@ import {
 import type { ExitCode } from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
+import { runLoopCommand } from './loop.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import { SELF_ENTRY } from './self-entry.ts'
 import { readWantMarker } from './want-marker.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { mainWorktree } from './work.ts'
 import { loadBroConfig } from '../plugins.ts'
+import { loopSection } from '@broject/loop'
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
-    'Usage: bro daemon <up|status|down|run> [--every SEC]\n' +
+    'Usage: bro daemon <up|status|down|run> [--every SEC] [--loop]\n' +
       '  up      spawn the detached supervisor (orchestrator sessions only)\n' +
       '  status  supervisor liveness — lock holder, armer record, log path\n' +
       '  down    SIGTERM the supervisor and clear the armer record\n' +
@@ -193,25 +199,28 @@ export function daemonUpLockPath(dir: string): string | null {
  *  daemon gets a real log — an owner must be debuggable. The record is
  *  best-effort: `drive.lock` is the liveness truth, `daemon.json` only
  *  says who armed it — a failed write warns, never orphans the report. */
-export function spawnDaemon(dir: string, everySec: number): { pid: number; log: string | null } {
+export function spawnDaemon(
+  dir: string,
+  everySec: number,
+  opts: { loop?: boolean } = {}
+): { pid: number; log: string | null } {
   const log = daemonLogPath(dir)
   const broDir = daemonStatePath(dir)
   if (broDir !== null) {
     mkdirSync(join(broDir, '..'), { recursive: true })
   }
   const out = log === null ? 'ignore' : openSync(log, 'a')
-  const child = spawn(
-    process.execPath,
-    [SELF_ENTRY!, 'daemon', 'run', '--every', String(everySec)],
-    { cwd: dir, detached: true, stdio: ['ignore', out, out] }
-  )
+  const args = opts.loop
+    ? [SELF_ENTRY!, 'daemon', 'run', '--loop', '--every', String(everySec)]
+    : [SELF_ENTRY!, 'daemon', 'run', '--every', String(everySec)]
+  const child = spawn(process.execPath, args, { cwd: dir, detached: true, stdio: ['ignore', out, out] })
   child.unref()
   try {
     writeDaemonRecord(dir, {
       pid: child.pid!,
       everySec,
       spawnedAt: new Date().toISOString(),
-      cmd: `bro daemon run --every ${everySec}`,
+      cmd: opts.loop ? `bro daemon run --loop --every ${everySec}` : `bro daemon run --every ${everySec}`,
       pidStart: procStat(child.pid!)?.start,
     })
   } catch (err) {
@@ -228,7 +237,7 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
 }
 
 /** Every supervision-loop process OWNED BY THIS REPO — `daemon run
- *  --every` children plus raw `bro drive --every` runs (they hold the
+ *  --every` children plus raw `bro drive --every`/`bro loop --every` runs (they hold the
  *  same lock, so `down` owes them the same SIGTERM or a standby
  *  quietly inherits it). The pgrep match is machine-wide, so each hit
  *  is re-scoped by repo: the candidate's /proc cwd must resolve to the
@@ -245,7 +254,7 @@ function supervisionProcs(dir: string): number[] {
   }
   let pids: number[]
   try {
-    const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], { // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
+    const out = execFileSync('pgrep', ['-f', '(daemon run|drive|loop) --every'], { // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       // fixed, unwriteable PATH for the binary lookup — the default
@@ -321,7 +330,7 @@ export function supervisorUp(
   dir: string,
   everySec: number,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { requireMarker?: boolean } = {}
+  opts: { requireMarker?: boolean; loop?: boolean } = {}
 ): SupervisorUp {
   const upLock = daemonUpLockPath(dir)
   const release =
@@ -334,10 +343,16 @@ export function supervisorUp(
     if (decision.kind === 'already') {
       return { kind: 'already', pid: decision.pid }
     }
-    if (opts.requireMarker === true && readDriveMarker(dir) === null) {
-      return { kind: 'disarmed' }
+    if (opts.requireMarker === true) {
+      if (opts.loop) {
+        if (readLoopMarker(dir) === null) {
+          return { kind: 'disarmed' }
+        }
+      } else if (readDriveMarker(dir) === null) {
+        return { kind: 'disarmed' }
+      }
     }
-    const spawned = spawnDaemon(dir, everySec)
+    const spawned = spawnDaemon(dir, everySec, { loop: opts.loop })
     return { kind: 'spawned', pid: spawned.pid, log: spawned.log }
   } finally {
     release()
@@ -404,20 +419,28 @@ function daemonUp(main: string, interval: number): void {
 function daemonStatus(main: string): void {
   const probe = daemonProbe(main)
   const log = daemonLogPath(main)
-  const marker = readDriveMarker(main)
-  const installed = marker === null ? '' : ` · installed (every ${marker.everySec}s)`
+  const dmarker = readDriveMarker(main)
+  const lmarker = readLoopMarker(main)
+  const installed = []
+  if (dmarker !== null) {
+    installed.push(`drive installed (every ${dmarker.everySec}s)`)
+  }
+  if (lmarker !== null) {
+    installed.push(`loop installed (every ${lmarker.everySec}s)`)
+  }
+  const installedStr = installed.length === 0 ? '' : ` · ${installed.join(' · ')}`
   if (!probe.live) {
     console.log(
       (probe.recorded === null
         ? `daemon down — no supervisor; 'bro daemon up' to start`
-        : `daemon down — recorded pid ${probe.recorded.pid} is dead`) + installed
+        : `daemon down — recorded pid ${probe.recorded.pid} is dead`) + installedStr
     )
     return
   }
   console.log(
     `daemon up — pid ${probe.pid} supervising` +
       (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
-      installed +
+      installedStr +
       (log === null ? '' : ` — log ${log}`)
   )
 }
@@ -443,7 +466,9 @@ function daemonDown(main: string): void {
       // checkpoint rearms from the marker; uninstall is the disarm
       readDriveMarker(main) !== null
         ? `installed — the next session checkpoint rearms it; 'bro drive uninstall' disarms`
-        : '',
+        : readLoopMarker(main) !== null
+          ? `installed — the next session checkpoint rearms it; 'bro loop uninstall' disarms`
+          : '',
     ]
       .filter((s) => s !== '')
       .join('\n  ')
@@ -632,7 +657,13 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
   }
   const main = mainWorktree().path
   const broCfg = loadBroConfig(main) as Record<string, unknown>
-  const interval = everyArg(argv, driveSection(broCfg.drive).intervalSec)
+  const isLoop = argv.includes('--loop')
+  const interval = everyArg(
+    argv,
+    isLoop
+      ? ((loopSection((broCfg as Record<string, unknown>).loop) as any).intervalSec ?? 300)
+      : driveSection((broCfg as Record<string, unknown>).drive).intervalSec
+  )
 
   switch (verb) {
     case 'up':
@@ -641,6 +672,10 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     case 'run':
       // the supervised loop — drive's own guard, lock and cadence apply;
       // reached directly only via `up`'s detached spawn
+      if (isLoop) {
+        await runLoopCommand(['--every', String(interval)])
+        return
+      }
       await runDriveCommand(['--every', String(interval)])
       return
     case 'status':

@@ -33,7 +33,7 @@ import { deadWatchPlan } from '@broject/act'
 import { rearmPass } from './act.ts'
 import { loadAgentEnv } from '../agent-connectors.ts'
 import { collectAgentBackends } from './agents.ts'
-import { daemonProbe, driveRearm, supervisorUp } from './daemon.ts'
+import { daemonProbe, driveRearm, loopRearm, supervisorUp } from './daemon.ts'
 import { collectLoopRuns, reapLoopRuns, type LoopRunView } from './loop-state.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { mainWorktree, parseWorktreePorcelain } from './work.ts'
@@ -161,18 +161,31 @@ function daemonLeg(main: string, dry: boolean): ResumeReport['daemon'] {
   if (probe.live) {
     return { kind: 'live', pid: probe.pid! }
   }
-  // orchestrator-only already enforced by the command; 'quiet' here
-  // means no drive.json marker — the recorded intent does not exist
-  const rearm = driveRearm(main)
-  if (rearm.kind === 'quiet') {
+  // try drive first, then loop
+  const drearm = driveRearm(main)
+  if (drearm.kind === 'rearm') {
+    if (dry) {
+      return { kind: 'would-respawn', everySec: drearm.everySec }
+    }
+    const up = supervisorUp(main, drearm.everySec, process.env, { requireMarker: true })
+    if (up.kind === 'spawned') {
+      return { kind: 'respawned', pid: up.pid, everySec: drearm.everySec }
+    }
+    if (up.kind === 'already') {
+      return { kind: 'live', pid: up.pid }
+    }
+    return { kind: 'unarmed' }
+  }
+  const lrearm = loopRearm(main)
+  if (lrearm.kind === 'quiet') {
     return { kind: 'unarmed' }
   }
   if (dry) {
-    return { kind: 'would-respawn', everySec: rearm.everySec }
+    return { kind: 'would-respawn', everySec: lrearm.everySec }
   }
-  const up = supervisorUp(main, rearm.everySec, process.env, { requireMarker: true })
+  const up = supervisorUp(main, lrearm.everySec, process.env, { requireMarker: true, loop: true })
   if (up.kind === 'spawned') {
-    return { kind: 'respawned', pid: up.pid, everySec: rearm.everySec }
+    return { kind: 'respawned', pid: up.pid, everySec: lrearm.everySec }
   }
   if (up.kind === 'already') {
     return { kind: 'live', pid: up.pid }
