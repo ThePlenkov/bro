@@ -70,7 +70,9 @@ The check measures four facts, and refuses to pass without all of them:
 3. **The client's model list is the router's catalog** — the picker row carries
    the router's own label, not the client's.
 4. **The loop is gone** — the router's `tool_use` runs, the client sends the
-   tool result, the agent answers, and nothing repeats.
+   tool result, the agent answers, and the tool call is not replayed. The
+   loop's signature is the SAME `tool_use` id twice — not two answers that
+   merely read alike.
 
 ## Measured, not assumed
 
@@ -91,7 +93,8 @@ means, and it is what the live check asserts.
 
 The transcript of the tool turn is the fourth fact: the first assistant answer
 is a `tool_use` block, the client sends a `tool_result`, the agent answers in
-text, and no answer repeats.
+text, and no `tool_use` id appears twice. Two answers that read alike are the
+model's formatting; the replayed tool call is the loop.
 
 ## The client's own vocabulary
 
@@ -126,7 +129,7 @@ compaction boundary). bro does not guess a window it cannot know.
 2. `scripts/claude-code-live-check.ts` — the four facts, against the real
    client and a running router: the served id is sent verbatim, the client's
    handling equals the borrowed model's, the picker carries the router's
-   label, and the tool turn ends without a repeat.
+   label, and the tool turn ends without a replayed tool call.
 3. `cs review` on every file this layer touches — no finding.
 4. `npm run check:codescene` — green: nothing introduced, nothing degraded.
 5. The repo's CI, exactly as GitHub runs it.
