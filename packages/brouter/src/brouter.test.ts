@@ -138,6 +138,30 @@ test('the token crosses over https or to this machine — nowhere else', () => {
   assert.throws(() => routerUrl('not a url'), /not a valid URL/);
 });
 
+test('a url with credentials is refused — and the refusal never prints the password', () => {
+  assert.throws(
+    () => routerUrl('http://user:hunter2@127.0.0.1:44927'),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /credentials/);
+      assert.equal(message.includes('hunter2'), false);
+      return true;
+    }
+  );
+});
+
+test('the refusal names the host — never the url\'s query or fragment', () => {
+  assert.throws(
+    () => routerUrl('http://router.example.com/base?token=hunter2'),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /router\.example\.com/);
+      assert.equal(message.includes('hunter2'), false);
+      return true;
+    }
+  );
+});
+
 test('a router bro refuses is not a router bro did not find', () => {
   const gitDir = join(scratch, 'remote', '.git');
   mkdirSync(join(gitDir, 'bro'), { recursive: true });
