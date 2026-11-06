@@ -7,31 +7,47 @@
  * fleet's own registry identity stands.
  */
 import { flag, positionals } from './args.ts';
+import { readFileSync } from 'node:fs';
 import { patchAgentRegistry } from '@broject/core';
+
+/** MCP server descriptors reach the worker as a FILE, never inline on
+ *  argv — a stdio server's `env` credentials would be world-readable in
+ *  ps/procfs. Spawned workers get the path via the BRO_MCP_FILE pin;
+ *  `--mcp-servers-file` is the same contract for a manual run. */
+function mcpServersFromFile(argv: string[]): unknown[] | undefined {
+  const mcpFile = flag(argv, '--mcp-servers-file') ?? process.env.BRO_MCP_FILE;
+  if (mcpFile === undefined || mcpFile === '') {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(mcpFile, 'utf8'));
+  } catch (err) {
+    console.error(
+      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof Error ? err.message : String(err)}`
+    );
+    process.exit(2);
+  }
+  if (!Array.isArray(parsed)) {
+    console.error(`bro acp-worker: MCP servers file ${mcpFile} must contain a JSON array`);
+    process.exit(2);
+  }
+  return parsed;
+}
 
 export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   const command = flag(argv, '--command');
   const model = flag(argv, '--model');
   const autoApprove = argv.includes('--auto-approve');
   const sessionRm = flag(argv, '--session-rm');
-  const mcpServersRaw = flag(argv, '--mcp-servers');
-  let mcpServers: unknown[] | undefined;
-  if (mcpServersRaw !== undefined) {
-    try {
-      const parsed: unknown = JSON.parse(mcpServersRaw);
-      if (!Array.isArray(parsed)) {
-        throw new Error('not an array');
-      }
-      mcpServers = parsed;
-    } catch {
-      console.error('bro acp-worker: --mcp-servers must be valid JSON array');
-      process.exit(2);
-    }
-  }
-  const pos = positionals(argv, new Set(['--command', '--model', '--session-rm', '--mcp-servers']));
+  const mcpServers = mcpServersFromFile(argv);
+  const pos = positionals(
+    argv,
+    new Set(['--command', '--model', '--session-rm', '--mcp-servers-file'])
+  );
   if (command === undefined || pos.length !== 1) {
     console.error(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] [--mcp-servers <json>] <promptFile>'
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] [--mcp-servers-file <path>] <promptFile>'
     );
     process.exit(2);
   }

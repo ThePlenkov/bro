@@ -111,19 +111,21 @@ describe('acpWorkerArgv', () => {
     assert.ok(!none.includes('--session-rm'));
   });
 
-  test('opt-in mcpServers serialize as JSON in --mcp-servers; absent stays empty', () => {
-    const servers = [{ type: 'stdio', name: 'bro', command: 'bro', args: ['mcp'], env: [] }];
-    const argv = acpWorkerArgv(
-      ['bro'],
-      { type: 'acp', command: 'kilo acp' },
-      { mcpServers: servers }
-    );
-    const i = argv.indexOf('--mcp-servers');
-    assert.ok(i >= 0);
-    assert.deepEqual(JSON.parse(argv[i + 1]!), servers);
-
-    const none = acpWorkerArgv(['bro'], { type: 'acp', command: 'kilo acp' });
-    assert.ok(!none.includes('--mcp-servers'));
+  test('mcpServers never reach argv — descriptors ride the worker payload to a 0600 file', () => {
+    // stdio `env` credentials on argv would be world-readable in
+    // ps/procfs; the backend lands them via BRO_MCP_FILE instead
+    const servers = [
+      {
+        type: 'stdio',
+        name: 'bro',
+        command: 'bro',
+        args: ['mcp'],
+        env: [{ name: 'K', value: 'sk-x' }],
+      },
+    ];
+    const argv = acpWorkerArgv(['bro'], { type: 'acp', command: 'kilo acp', mcpServers: servers });
+    assert.ok(!argv.includes('--mcp-servers'));
+    assert.ok(!argv.some(a => a.includes('sk-x')), `argv leaked env credential: ${argv.join(' ')}`);
   });
 });
 

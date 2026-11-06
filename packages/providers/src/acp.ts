@@ -162,7 +162,8 @@ function deniedCall(by: string, method: string, what: string): void {
 const denyPermission =
   (by: string): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> =>
   ctx => {
-    const what = ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'unspecified tool';
+    const what =
+      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'unspecified tool';
     deniedCall(by, 'session/request_permission', String(what));
     const reject = ctx.params.options.find(
       o => o.kind === 'reject_once' || o.kind === 'reject_always'
@@ -194,10 +195,7 @@ const UNSERVED_METHODS = [
  *  say it. A bridged link never gets this: every client-bound call
  *  forwards to the real client, whose answer is the honest one. */
 function wiredClient(terminals: AcpTerminals, by: string): ClientApp {
-  const app = client({ name: 'bro' }).onRequest(
-    'session/request_permission',
-    denyPermission(by)
-  );
+  const app = client({ name: 'bro' }).onRequest('session/request_permission', denyPermission(by));
   for (const m of UNSERVED_METHODS) {
     app.onRequest<unknown, never>(
       m,
@@ -1573,7 +1571,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`;
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean; sessionRm?: string; mcpServers?: unknown[] } = {}
+  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
 ): string[] {
   const command =
     entry.profile === undefined
@@ -1590,10 +1588,6 @@ export function acpWorkerArgv(
   const sessionRm = opts.sessionRm ?? entry.sessionRm;
   if (sessionRm !== undefined) {
     argv.push('--session-rm', sessionRm);
-  }
-  const mcpServers = opts.mcpServers ?? entry.mcpServers;
-  if (Array.isArray(mcpServers) && mcpServers.length > 0) {
-    argv.push('--mcp-servers', JSON.stringify(mcpServers));
   }
   return argv;
 }

@@ -530,9 +530,14 @@ export async function resolveSpawnProvider(
             model,
             autoApprove,
             sessionRm: entry.sessionRm,
-            mcpServers: entry.mcpServers,
           }),
           cliName: commandCliName(entry.command),
+          // bulk descriptors ride the payload → a 0600 artifact at
+          // commitSpawn + the BRO_MCP_FILE pin. Never argv: a stdio
+          // server's `env` credentials would be world-readable in ps
+          ...(Array.isArray(entry.mcpServers) && entry.mcpServers.length > 0
+            ? { mcpServers: entry.mcpServers }
+            : {}),
         },
       };
     }
@@ -961,6 +966,9 @@ const AGENT_PIN_KEYS = new Set([
   // registry never recorded, and `bro trace` only catches a claim it
   // can compare
   'BRO_FORMULA',
+  // the MCP-servers artifact path is connector-owned too — a caller-
+  // supplied BRO_MCP_FILE would point the worker at a planted file
+  'BRO_MCP_FILE',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -1071,6 +1079,17 @@ const agentEnvPins = (
   }
   if (spec.delegatedBy !== undefined) {
     pins.push(['BRO_DELEGATED_BY', spec.delegatedBy]);
+  }
+  // an argv worker carrying MCP descriptors gets its artifact pin —
+  // the 0600 file commitSpawn writes next to the prompt. The
+  // descriptors never ride argv: a stdio server's `env` credentials
+  // would be world-readable in ps/procfs.
+  if (
+    spec.worker?.kind === 'argv' &&
+    Array.isArray(spec.worker.mcpServers) &&
+    spec.worker.mcpServers.length > 0
+  ) {
+    pins.push(['BRO_MCP_FILE', join(dirname(promptFile), `${agentId}.mcp.json`)]);
   }
   return pins;
 };
@@ -2321,6 +2340,21 @@ function commitSpawn(
   appendPrivateFileSync(log, '');
   if (stderrLog !== undefined) {
     appendPrivateFileSync(stderrLog, '');
+  }
+  // an argv worker's MCP descriptors land as a 0600 artifact — the
+  // worker reads them via the BRO_MCP_FILE pin (agentEnvPins). Never
+  // argv: a stdio server's `env` credentials would be world-readable
+  // in ps/procfs. A respawn over an entry whose config dropped the
+  // servers clears the stale file — secrets don't linger unreferenced.
+  const mcpFile = join(home, `${agentId}.mcp.json`);
+  const mcpServers =
+    spec.worker?.kind === 'argv' && Array.isArray(spec.worker.mcpServers)
+      ? spec.worker.mcpServers
+      : undefined;
+  if (mcpServers !== undefined && mcpServers.length > 0) {
+    writePrivateFileSync(mcpFile, JSON.stringify(mcpServers));
+  } else {
+    rmSync(mcpFile, { force: true });
   }
   const logFrom = logSizeOrZero(log);
   const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
