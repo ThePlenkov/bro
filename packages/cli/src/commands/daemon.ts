@@ -445,19 +445,17 @@ export function supervisorDown(
   opts: { kind?: 'drive' | 'loop' } = {}
 ): SupervisorDown {
   const kinds = opts.kind === undefined ? (['drive', 'loop'] as const) : [opts.kind];
-  const victims = new Set<number>();
-  for (const kind of kinds) {
+  /** One kind's victims — its lock holder, its still-live recorded pid,
+   *  and every repo-scoped standby that could inherit the lock. */
+  const victimsOf = (kind: 'drive' | 'loop'): number[] => {
     const probe = kind === 'loop' ? loopProbe(dir) : daemonProbe(dir);
-    if (probe.live) {
-      victims.add(probe.pid!);
-    }
+    const pids = probe.live ? [probe.pid!] : [];
     if (probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)) {
-      victims.add(probe.recorded.pid);
+      pids.push(probe.recorded.pid);
     }
-    for (const pid of supervisionProcs(dir, kind)) {
-      victims.add(pid);
-    }
-  }
+    return [...pids, ...supervisionProcs(dir, kind)];
+  };
+  const victims = new Set<number>(kinds.flatMap(victimsOf));
   victims.delete(process.pid);
   for (const pid of victims) {
     try {

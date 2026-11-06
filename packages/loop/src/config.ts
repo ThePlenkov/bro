@@ -31,10 +31,13 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
       | 'parkedTtlDays'
       | 'parkedWakeMin',
     min = 0,
-    max = Number.POSITIVE_INFINITY
+    max = Number.POSITIVE_INFINITY,
+    int = false
   ) =>
     typeof obj[k] === 'number' &&
-    Number.isFinite(obj[k]) &&
+    // counts and budgets must be whole; durations and cadences may be
+    // fractional (a 0.5s stallMin or a 2.5s everySec is valid)
+    (int ? Number.isInteger(obj[k]) : Number.isFinite(obj[k])) &&
     (obj[k] as number) >= min &&
     (obj[k] as number) <= max
       ? (obj[k] as number)
@@ -54,18 +57,18 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
     stallMin: num('stallMin', 1),
     crashExitMs: num('crashExitMs'),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
-    fixRounds: num('fixRounds'),
+    fixRounds: num('fixRounds', 0, Number.POSITIVE_INFINITY, true),
     autoMerge: obj.autoMerge === true,
-    maxItems: num('maxItems'),
-    maxOpen: num('maxOpen', 1),
+    maxItems: num('maxItems', 0, Number.POSITIVE_INFINITY, true),
+    maxOpen: num('maxOpen', 1, Number.POSITIVE_INFINITY, true),
     // a 0 price would silence the floor entirely — the honest
     // "disable" is diskMinSlots: 0, not worktreeMb: 0
     worktreeMb: num('worktreeMb', 1),
-    diskMinSlots: num('diskMinSlots'),
-    batch: num('batch', 1),
-    batchMinPriority: num('batchMinPriority'),
-    parkedKeep: num('parkedKeep'),
-    parkedTtlDays: num('parkedTtlDays'),
+    diskMinSlots: num('diskMinSlots', 0, Number.POSITIVE_INFINITY, true),
+    batch: num('batch', 1, Number.POSITIVE_INFINITY, true),
+    batchMinPriority: num('batchMinPriority', 0, Number.POSITIVE_INFINITY, true),
+    parkedKeep: num('parkedKeep', 0, Number.POSITIVE_INFINITY, true),
+    parkedTtlDays: num('parkedTtlDays', 0, Number.POSITIVE_INFINITY, true),
     parkedWakeMin: num('parkedWakeMin'),
   };
 };
