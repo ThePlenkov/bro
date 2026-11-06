@@ -506,7 +506,7 @@ export async function resolveSpawnProvider(
             model,
             autoApprove,
             sessionRm: entry.sessionRm,
-            mcpServers: (entry as { mcpServers?: unknown[] }).mcpServers,
+            mcpServers: entry.mcpServers,
           }),
           cliName: commandCliName(entry.command),
         },

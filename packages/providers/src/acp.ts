@@ -1535,7 +1535,7 @@ export function acpWorkerArgv(
   if (sessionRm !== undefined) {
     argv.push('--session-rm', sessionRm);
   }
-  const mcpServers = opts.mcpServers ?? (entry as { mcpServers?: unknown[] }).mcpServers;
+  const mcpServers = opts.mcpServers ?? entry.mcpServers;
   if (Array.isArray(mcpServers) && mcpServers.length > 0) {
     argv.push('--mcp-servers', JSON.stringify(mcpServers));
   }

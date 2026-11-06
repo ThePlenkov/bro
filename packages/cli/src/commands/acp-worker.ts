@@ -18,10 +18,11 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   let mcpServers: unknown[] | undefined;
   if (mcpServersRaw !== undefined) {
     try {
-      const parsed = JSON.parse(mcpServersRaw);
-      if (Array.isArray(parsed)) {
-        mcpServers = parsed;
+      const parsed: unknown = JSON.parse(mcpServersRaw);
+      if (!Array.isArray(parsed)) {
+        throw new Error('not an array');
       }
+      mcpServers = parsed;
     } catch {
       console.error('bro acp-worker: --mcp-servers must be valid JSON array');
       process.exit(2);
