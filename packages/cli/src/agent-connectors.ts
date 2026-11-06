@@ -71,10 +71,14 @@ import {
   isQualifiedRouteId,
   rebindStep,
   releaseSessionSlot,
+  releaseSessionStart,
   requireProviderSurface,
+  reserveSessionStart,
   resolveModelRoute,
   resolveStepClass,
   SESSION_SLOT_TTL_MS,
+  sessionCapRefusalFor,
+  sessionCapViews,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -1624,6 +1628,9 @@ function prepareSpawn(
      *  cross-repo), still before any write — a refused spawn leaves no
      *  half-state. */
     sessionQuota?: SessionQuotaLane | undefined;
+    /** The resolved command the spawn will run — used for cross-kind
+     *  admission (judging all session kinds the command starts). */
+    spawnCommand?: string;
   }
 ): {
   agentId: string;
@@ -1689,14 +1696,84 @@ function prepareSpawn(
   // mutex: the registry lock above is per-repo and cannot serialize a
   // cross-repo check-then-reserve. A refusal leaves no half-spawned
   // state; an admit means the next spawn anywhere sees the slot taken.
-  const reservation =
-    opts.sessionQuota === undefined
-      ? undefined
-      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
-          key: agentId,
-          molStep: spec.molStep,
-          workerEnv: spec.env,
-        });
+  let reservation: string | undefined;
+  let crossKindReservations: string[] = [];
+  try {
+    // Cross-kind admission: judge all session kinds the spawned command starts.
+    // This catches cases where a native/template worker runs a command that
+    // starts sessions of another kind (e.g. `devin -p …`), which would
+    // otherwise bypass that kind's maxSessions cap.
+    const spawnedCommand = (() => {
+      if (typeof opts.spawnCommand === 'string' && opts.spawnCommand !== '') {
+        // Prefer the resolved template command; if a worker override exists,
+        // check the worker's command too.
+        if (spec.worker?.kind === 'template') {
+          return spec.worker.command;
+        }
+        if (spec.worker?.kind === 'argv') {
+          return [...spec.worker.argv, '{promptFile}'].join(' ');
+        }
+        return opts.spawnCommand;
+      }
+      if (spec.worker?.kind === 'template') {
+        return spec.worker.command;
+      }
+      if (spec.worker?.kind === 'argv') {
+        return [...spec.worker.argv, '{promptFile}'].join(' ');
+      }
+      return '';
+    })();
+    
+    const agents = opts.env?.agents ?? opts.sessionQuota?.agents ?? {};
+    const lane: 'batch' | 'interactive' = isBatchSpawn(spec.env) ? 'batch' : 'interactive';
+    // Check cross-kind refusals and reserve slots for all kinds the command starts.
+    // Skip the kind handled by admitSessionSlot below to avoid double-reserving.
+    const quotaKind = opts.sessionQuota?.plane.kind;
+    if (spawnedCommand !== '') {
+      const crossRefusal = sessionCapRefusalFor(spawnedCommand, agents, spec.env);
+      if (crossRefusal !== undefined) {
+        throw new SpawnError(crossRefusal, 'cap');
+      }
+      const views = sessionCapViews(spawnedCommand, agents, spec.env);
+      for (const view of views) {
+        if (view.kind === quotaKind) {
+          continue; // admitSessionSlot handles this kind's full lane admission
+        }
+        try {
+          const claimed = reserveSessionStart({
+            kind: view.kind,
+            agents,
+            key: agentId,
+            count: view.starts,
+            lane,
+          });
+          crossKindReservations.push(...claimed.paths);
+        } catch (err) {
+          for (const p of crossKindReservations) {
+            try { releaseSessionSlot(p); } catch {}
+          }
+          crossKindReservations = [];
+          throw err;
+        }
+      }
+    }
+    
+    reservation =
+      opts.sessionQuota === undefined
+        ? undefined
+        : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+          });
+  } catch (err) {
+    // Clean up cross-kind reservations
+    for (const p of crossKindReservations) {
+      try { releaseSessionSlot(p); } catch {}
+    }
+    crossKindReservations = [];
+    throw err;
+  }
   let charged: LaneAdmission['admitted'];
   try {
     // the rate gate charges LAST — after every admission that can
@@ -1733,6 +1810,9 @@ function prepareSpawn(
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
+    }
+    for (const p of crossKindReservations) {
+      try { releaseSessionSlot(p); } catch {}
     }
     // the same door for the charge: everything still inside this try
     // precedes launch, so a spawn that never ran gives its tokens back
@@ -2837,6 +2917,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+            spawnCommand: command,
           }
         );
         // the launcher crashed after the reservation — registry+claim
@@ -3378,6 +3459,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+            spawnCommand: command,
           }
         );
         const session = `bro-${agentId}`;
@@ -4143,6 +4225,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
           sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
+          spawnCommand: gcEffectiveCommand(city, command),
         });
         let sessionId: string | undefined;
         try {
@@ -4931,6 +5014,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+            spawnCommand: command,
           }
         );
         const name = `bro-${agentId}`;

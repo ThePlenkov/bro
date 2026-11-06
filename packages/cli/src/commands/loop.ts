@@ -69,6 +69,10 @@ import {
   reviewHost,
   routeStepClass,
   SpawnError,
+  releaseSessionStart,
+  reserveSessionStart,
+  sessionCapRefusalFor,
+  sessionCapViews,
   specStore,
   stampPrOwnership,
   stepClassInfo,
@@ -1300,10 +1304,31 @@ async function runFixRound(
     return;
   }
   let templateReservation: string | undefined;
+  let crossKindReservations: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
   const fixKey = `loop-fix-${leadFix.id}`;
   try {
+    // Cross-kind admission check
+    const spawnedCmd = lane.worker?.kind === 'argv' 
+      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
+    const crossRefusal = sessionCapRefusalFor(spawnedCmd, ctx.env.agents);
+    if (crossRefusal !== undefined) {
+      throw new SpawnError(crossRefusal, 'cap');
+    }
+    const views = sessionCapViews(spawnedCmd, ctx.env.agents);
+    for (const view of views) {
+      const claimed = reserveSessionStart({
+        kind: view.kind,
+        agents: ctx.env.agents,
+        key: fixKey,
+        count: view.starts,
+        lane: 'batch',
+      });
+      crossKindReservations.push(...claimed.paths);
+    }
+    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -1328,10 +1353,11 @@ async function runFixRound(
       });
     }
   } catch (err) {
+    for (const p of crossKindReservations) {
+      try { releaseSessionSlot(p); } catch {}
+    }
+    crossKindReservations = [];
     console.error(`loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
-    // admitSessionSlot/sessionQuotaOf threw before assignment completed —
-    // templateReservation is still undefined, nothing to release
-    // Let respawnRound handle cap (decrements rounds) and other failures
     throw err;
   }
   let code: number | null = null;
@@ -1348,6 +1374,9 @@ async function runFixRound(
   } finally {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
+    }
+    for (const p of crossKindReservations) {
+      try { releaseSessionSlot(p); } catch {}
     }
   }
   if (code !== 0) {
@@ -1797,9 +1826,30 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // the registry spawn so the fleet/session planes agree on live workers
   // (spec bro-9h86l / bro-0fbdp)
   let templateReservation: string | undefined;
+  let crossKindReservationsPush: string[] = [];
   const templateReservationKey = `loop-${lead.id}`;
   const templateCommand = laneCommand(ctx, lane);
   try {
+    // Cross-kind admission check
+    const spawnedCmdPush = lane.worker?.kind === 'argv' 
+      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
+    const crossRefusalPush = sessionCapRefusalFor(spawnedCmdPush, ctx.env.agents);
+    if (crossRefusalPush !== undefined) {
+      throw new SpawnError(crossRefusalPush, 'cap');
+    }
+    const viewsPush = sessionCapViews(spawnedCmdPush, ctx.env.agents);
+    for (const view of viewsPush) {
+      const claimed = reserveSessionStart({
+        kind: view.kind,
+        agents: ctx.env.agents,
+        key: templateReservationKey,
+        count: view.starts,
+        lane: 'batch',
+      });
+      crossKindReservationsPush.push(...claimed.paths);
+    }
+    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -1824,6 +1874,10 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       });
     }
   } catch (err) {
+    for (const p of crossKindReservationsPush) {
+      try { releaseSessionSlot(p); } catch {}
+    }
+    crossKindReservationsPush = [];
     endLoopRun(ctx.root, loopSlug(lead.id));
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof SpawnError && err.kind === 'cap') {
@@ -1856,10 +1910,16 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    for (const p of crossKindReservationsPush) {
+      try { releaseSessionSlot(p); } catch {}
+    }
     throw err;
   }
   if (templateReservation !== undefined) {
     releaseSessionSlot(templateReservation);
+  }
+  for (const p of crossKindReservationsPush) {
+    try { releaseSessionSlot(p); } catch {}
   }
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
@@ -2397,10 +2457,31 @@ async function runRebaseRound(
     return;
   }
   let templateReservation: string | undefined;
+  let crossKindReservationsRb: string[] = [];
   const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
   const rebaseKey = `loop-rebase-${leadRb.id}`;
   try {
+    // Cross-kind admission check
+    const spawnedCmdRb = lane.worker?.kind === 'argv' 
+      ? [...(lane.worker.argv || []), '{promptFile}'].join(' ')
+      : lane.worker?.kind === 'template' ? lane.worker.command : templateCommand;
+    const crossRefusalRb = sessionCapRefusalFor(spawnedCmdRb, ctx.env.agents);
+    if (crossRefusalRb !== undefined) {
+      throw new SpawnError(crossRefusalRb, 'cap');
+    }
+    const viewsRb = sessionCapViews(spawnedCmdRb, ctx.env.agents);
+    for (const view of viewsRb) {
+      const claimed = reserveSessionStart({
+        kind: view.kind,
+        agents: ctx.env.agents,
+        key: rebaseKey,
+        count: view.starts,
+        lane: 'batch',
+      });
+      crossKindReservationsRb.push(...claimed.paths);
+    }
+    
     const templateQuota = sessionQuotaOf(
       ctx.env,
       'native',
@@ -2425,6 +2506,10 @@ async function runRebaseRound(
       });
     }
   } catch (err) {
+    for (const p of crossKindReservationsRb) {
+      try { releaseSessionSlot(p); } catch {}
+    }
+    crossKindReservationsRb = [];
     console.error(`loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`);
     throw err;
   }
@@ -2442,6 +2527,9 @@ async function runRebaseRound(
   } finally {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
+    }
+    for (const p of crossKindReservationsRb) {
+      try { releaseSessionSlot(p); } catch {}
     }
   }
   if (code !== 0) {
