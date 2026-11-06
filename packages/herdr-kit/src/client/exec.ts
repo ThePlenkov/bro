@@ -1,7 +1,8 @@
-/** The exec seam — the ONLY place `spawnSync('herdr', …)` lives. Every
- *  module above this (fleet/lines/views, the cli wrappers, the plugin)
- *  builds argvs and calls `call`/`callOut`; nothing else spawns. */
-import { spawnSync } from 'node:child_process';
+/** The exec seam — the ONLY place `spawnSync`/`spawn('herdr', …)`
+ *  lives. Every module above this (fleet/lines/views, the cli
+ *  wrappers, the plugin) builds argvs and calls `call`/`callOut`;
+ *  nothing else spawns. */
+import { spawn, spawnSync } from 'node:child_process';
 
 /** Milliseconds — every herdr call is fire-and-forget behind a short
  *  fuse; a wedged socket must not freeze the view. */
@@ -51,4 +52,90 @@ export function callJson<T>(args: string[]): T | undefined {
 /** `herdr <args>` succeeded — the write-side verdict. */
 export function callOk(args: string[]): boolean {
   return callOut(args).code === 0;
+}
+
+/** Bytes — the async capture path's ceiling: `.result` envelopes are
+ *  small, and a noisy child must not eat memory inside the fuse. */
+const OUT_CAP_BYTES = 1024 * 1024;
+
+/** Async twin of `callOut` — same short fuse through a real child,
+ *  for callers whose own event loop must not block (a connector probe
+ *  inside a timeout race: a spawnSync there is unpreemptable). Output
+ *  decodes as utf8 per chunk boundary — a multibyte character split
+ *  across chunks arrives whole, capped at OUT_CAP_BYTES. */
+export function callOutAsync(args: string[]): Promise<{ code: number; out: string }> {
+  return new Promise(resolve => {
+    let out = '';
+    let settled = false;
+    const finish = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      resolve({ code, out });
+    };
+    try {
+      const p = spawn(herdrBin(), args, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: process.env,
+      });
+      const timer = setTimeout(() => {
+        p.kill('SIGKILL');
+        finish(-1);
+      }, HERDR_TIMEOUT_MS);
+      p.stdout?.setEncoding('utf8');
+      p.stdout?.on('data', (c: string) => {
+        if (out.length < OUT_CAP_BYTES) out += c;
+      });
+      p.on('error', () => {
+        clearTimeout(timer);
+        finish(-1);
+      });
+      p.on('close', code => {
+        clearTimeout(timer);
+        finish(code ?? -1);
+      });
+    } catch {
+      finish(-1);
+    }
+  });
+}
+
+/** Async twin of `call` — fire-and-forget without blocking the loop
+ *  and without capturing output nobody reads. */
+export function callAsync(args: string[]): Promise<void> {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      const p = spawn(herdrBin(), args, { stdio: 'ignore', env: process.env });
+      const timer = setTimeout(() => {
+        p.kill('SIGKILL');
+        finish();
+      }, HERDR_TIMEOUT_MS);
+      p.on('error', () => {
+        clearTimeout(timer);
+        finish();
+      });
+      p.on('close', () => {
+        clearTimeout(timer);
+        finish();
+      });
+    } catch {
+      finish();
+    }
+  });
+}
+
+/** Async twin of `callJson` — `.result` or undefined on any failure. */
+export async function callJsonAsync<T>(args: string[]): Promise<T | undefined> {
+  const r = await callOutAsync(args);
+  if (r.code !== 0 || r.out === '') return undefined;
+  try {
+    return (JSON.parse(r.out) as { result: T }).result;
+  } catch {
+    return undefined;
+  }
 }

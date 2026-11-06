@@ -49,6 +49,7 @@ export {
   labelFor,
   type ProjectResult,
   paneLed,
+  pluginLedgerDirs,
   prFor,
   projectTree,
   prToken,

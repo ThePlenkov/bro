@@ -209,6 +209,14 @@ const UNADVERTISED_METHODS = [
  *  caller maps the code to the `.exit` file, and every failure mode
  *  logs its own line first (the log IS the diagnosis surface). */
 export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
+  // Pin env-derived knobs at startup: BRO_WORKER_DRAIN_MS is read once,
+  // not per turn. Invalid/unset values parse to undefined so drain() owns
+  // the default and clamp; the worker's CI-sensitive longer bound (10s)
+  // applies at this call site.
+  const parsedDrainMs = Number(process.env.BRO_WORKER_DRAIN_MS);
+  const envDrainMs =
+    Number.isFinite(parsedDrainMs) && parsedDrainMs > 0 ? parsedDrainMs : undefined;
+  const drainTimeoutMs = envDrainMs ?? 10_000;
   const log = spec.log ?? ((line: string) => console.log(line));
   const errOut = spec.err ?? ((text: string) => void process.stderr.write(text));
   const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
@@ -364,7 +372,6 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
           log(renderAcpUpdate(u));
         }
       };
-      const drainTimeoutMs = Number(process.env.BRO_WORKER_DRAIN_MS);
       const r = await pumpTurn(
         session,
         promptText,
@@ -377,10 +384,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         by,
         undefined,
         spec.cwd,
-        Math.min(
-          Number.isFinite(drainTimeoutMs) && drainTimeoutMs > 0 ? drainTimeoutMs : 10_000,
-          2_147_483_647
-        )
+        drainTimeoutMs
       ).finally(flush);
       log(`turn stopped — ${r.stopReason}`);
       return r.stopReason === 'end_turn' ? 0 : 1;

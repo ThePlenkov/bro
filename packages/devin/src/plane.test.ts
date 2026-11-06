@@ -45,11 +45,20 @@ const withLockDir = (fn: (dir: string) => void): void => {
 };
 
 /** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
- *  scripts them; absent files read as "no data" like on macOS. */
+ *  scripts them; absent files read as "no data" like on macOS. `tty`
+ *  (a controlling-terminal device number) additionally scripts
+ *  <pid>/stat — without it the tty probe reads "no data" and the
+ *  stdin probe decides. */
 const withProc = (
   fn: (
     procDir: string,
-    mk: (pid: number, environ: string | null, stdinTo: string | null, argv0?: string) => void
+    mk: (
+      pid: number,
+      environ: string | null,
+      stdinTo: string | null,
+      argv0?: string,
+      tty?: number
+    ) => void
   ) => void
 ): void => {
   const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'));
@@ -57,7 +66,8 @@ const withProc = (
     pid: number,
     environ: string | null,
     stdinTo: string | null,
-    argv0 = 'devin'
+    argv0 = 'devin',
+    tty?: number
   ): void => {
     const dir = join(procDir, String(pid));
     mkdirSync(join(dir, 'fd'), { recursive: true });
@@ -66,6 +76,12 @@ const withProc = (
     }
     if (stdinTo !== null) {
       symlinkSync(stdinTo, join(dir, 'fd', '0'));
+    }
+    if (tty !== undefined) {
+      // the real shape: pid (comm) state ppid pgrp session tty_nr … —
+      // the comm may wrap in parens and hold spaces, the parser goes
+      // after the last ')'
+      writeFileSync(join(dir, 'stat'), `${pid} (devin acp) S 1 1 1 ${tty} ${tty} 0\n`);
     }
     // the identity the live-session count checks: argv[0] is the cli
     writeFileSync(join(dir, 'cmdline'), `${argv0}\0--flag\0`);
@@ -276,6 +292,34 @@ describe('devinPidIsWorker', () => {
       assert.equal(devinPidIsWorker(301, procDir), false);
       mk(302, 'PATH=/bin\0', null); // environ read, no badge, stdin unknown
       assert.equal(devinPidIsWorker(302, procDir), false);
+    });
+  });
+
+  test("the REPL's spawned acp child — piped fd/0 but the REPL's terminal — is not a worker", () => {
+    withProc((procDir, mk) => {
+      // the devin CLI's chisel_acp_client child holds the session lock
+      // with a piped fd/0 while sharing the REPL's controlling terminal
+      // (observed 2026-11-04: two such children read as 'devin workers:
+      // 2/1 live' and walled the whole devin spawn lane)
+      mk(501, 'PATH=/bin\0', 'pipe:[33601833]', 'devin', 34822);
+      assert.equal(devinPidIsWorker(501, procDir), false);
+      // the REPL itself reads interactive on either probe
+      mk(502, 'PATH=/bin\0', '/dev/pts/6', 'devin', 34822);
+      assert.equal(devinPidIsWorker(502, procDir), false);
+    });
+  });
+
+  test('the worker badge still wins over a controlling terminal', () => {
+    withProc((procDir, mk) => {
+      mk(511, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0', 'pipe:[2]', 'devin', 34822);
+      assert.equal(devinPidIsWorker(511, procDir), true);
+    });
+  });
+
+  test('a terminal-less pid with piped stdin is still a spawned worker', () => {
+    withProc((procDir, mk) => {
+      mk(521, 'PATH=/bin\0', 'pipe:[42]', 'devin', 0);
+      assert.equal(devinPidIsWorker(521, procDir), true);
     });
   });
 });

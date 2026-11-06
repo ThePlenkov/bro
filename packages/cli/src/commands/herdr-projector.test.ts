@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -702,6 +702,116 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     const st = readFleetState(fleetStatusPath(root, root));
     assert.equal(st?.workspace, 'w1');
     assert.equal(st?.title, 'Old Title');
+  });
+
+  test('a stale sibling-state ledger cannot clobber the live ws binding — herdr restart regression', () => {
+    const root = plainRoot();
+    const fresh = stateDirOf();
+    const xdg = mkdtempSync(join(tmpdir(), 'proj-xdg-'));
+    const stale = join(xdg, 'herdr', 'plugins', 'bro.fleet');
+    mkdirSync(stale, { recursive: true });
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    const f = statusFixture(root, 'w1', {});
+    // the live writer's ledger — current ws binding
+    const freshFile = join(fresh, `state-${scope}.json`);
+    writeFileSync(freshFile, JSON.stringify(f.state));
+    // the herdr-hosted plugin's stale copy — same path pinned to a
+    // dead ws id from before the restart, with an older mtime
+    const staleFile = join(stale, `state-${scope}.json`);
+    writeFileSync(
+      staleFile,
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w0-dead', label: 'Old', managed: true } },
+      })
+    );
+    const hourAgo = new Date(Date.now() - H);
+    utimesSync(staleFile, hourAgo, hourAgo);
+    const fake = join(root, 'fake-herdr.js');
+    const scenario = join(root, 'scenario.json');
+    const log = join(root, 'calls.jsonl');
+    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+    writeFileSync(scenario, JSON.stringify(f.scenario));
+    rmSync(log, { force: true });
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: fake,
+        HERDR_PLUGIN_STATE_DIR: fresh,
+        XDG_STATE_HOME: xdg,
+        HOME: mkdtempSync(join(tmpdir(), 'proj-home-')),
+        FAKE_HERDR_SCENARIO: scenario,
+        FAKE_HERDR_LOG: log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.workspaces, 1);
+    const rename = callsOf(log).find(c => c.slice(0, 2).join(' ') === 'workspace rename');
+    assert.deepEqual(rename?.slice(0, 3), ['workspace', 'rename', 'w1']);
+  });
+
+  test('a NEWER stale ledger still loses — a live ws binding outranks mtime', () => {
+    const root = plainRoot();
+    const old = stateDirOf();
+    const xdg = mkdtempSync(join(tmpdir(), 'proj-xdg-'));
+    const newer = join(xdg, 'herdr', 'plugins', 'bro.fleet');
+    mkdirSync(newer, { recursive: true });
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    const f = statusFixture(root, 'w1', {
+      statuses: statusesOf(root, 'p-status', 'w1'),
+    });
+    // the LIVE record sits in the OLDER file — its ws binding and its
+    // status-pane binding are both current
+    const oldFile = join(old, `state-${scope}.json`);
+    writeFileSync(oldFile, JSON.stringify(f.state));
+    const hourAgo = new Date(Date.now() - H);
+    utimesSync(oldFile, hourAgo, hourAgo);
+    // the newer file re-saved a DEAD ws binding for the same path —
+    // mtime must not let it clobber the live record. Its status rows
+    // carry a dead pane id AND a half-written row without pane_id —
+    // neither may hide the older live binding: the push walks the
+    // candidate list to the pane that actually answers
+    writeFileSync(
+      join(newer, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w0-dead', label: 'Old', managed: true } },
+        statuses: {
+          stale: { pane_id: 'p-dead', workspace: 'w1', worktree: root },
+          partial: { workspace: 'w1', worktree: root },
+        },
+      })
+    );
+    const fake = join(root, 'fake-herdr.js');
+    const scenario = join(root, 'scenario.json');
+    const log = join(root, 'calls.jsonl');
+    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+    writeFileSync(
+      scenario,
+      JSON.stringify({
+        ...f.scenario,
+        // pane list carries the live status pane so the backstop can push
+        panes: [{ pane_id: 'p-status', workspace_id: 'w1', label: 'bro: status' }],
+      })
+    );
+    rmSync(log, { force: true });
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: fake,
+        HERDR_PLUGIN_STATE_DIR: old,
+        XDG_STATE_HOME: xdg,
+        HOME: mkdtempSync(join(tmpdir(), 'proj-home-')),
+        FAKE_HERDR_SCENARIO: scenario,
+        FAKE_HERDR_LOG: log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.workspaces, 1);
+    const calls = callsOf(log);
+    const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
+    assert.deepEqual(rename?.slice(0, 3), ['workspace', 'rename', 'w1']);
+    // the backstop pushed to the LIVE pane binding, never the dead one
+    const push = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
+    assert.ok(push !== undefined, 'a live status-pane binding gets its backstop push');
+    assert.deepEqual(push?.slice(0, 3), ['pane', 'report-agent', 'p-status']);
+    assert.ok(!calls.some(c => c.includes('p-dead')));
   });
 
   test('an acp session owner lands lane + events + the 🤖 label (spec bro-l8wqu)', () => {

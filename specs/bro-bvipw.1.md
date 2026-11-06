@@ -36,8 +36,15 @@ areas claude code actually sends:
   type on the `error` event). 529 `overloaded_error` and 500
   `api_error` unchanged.
 - `messages()` validates `messages` is a non-empty array of
-  `{role: user|assistant, content: string|blocks}` — 400
-  `invalid_request_error`, not a 500 downstream.
+  `{role: user|assistant|system, content: string|blocks}` with at least
+  one user turn — 400 `invalid_request_error`, not a 500 downstream.
+- A `role:'system'` turn is CONTEXT, not a speaker: claude 2.1.309
+  sends its environment block that way, inside `messages`. The gate
+  accepts it and `liftSystemTurns` moves it to the system slot — its
+  own `<system>` block in the prompt, never a downgraded user turn
+  (the chat and responses dialects already claim those roles the same
+  way). A request whose turns are ALL system still answers 400: the
+  conversation needs a user turn to answer.
 - `ConductorConfig.keepaliveMs` (env `BRO_CONDUCTOR_KEEPALIVE_MS`,
   default 10s): `LiveTurn` ticks `event: ping` while the stream is
   open, cleared on `finish()`/`error()`.

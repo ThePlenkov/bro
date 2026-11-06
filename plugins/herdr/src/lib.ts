@@ -22,9 +22,13 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
-import { agentsJson as kitAgentsJson } from '../../../packages/herdr-kit/src/index.ts';
+import {
+  agentsJson as kitAgentsJson,
+  type SessionRec,
+} from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
+export const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? 'bro.fleet';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 // The plugin and the CLI ship from one repo — prefer the checkout's own
 // build over a possibly stale `bro` on PATH (a linked dev worktree must
@@ -239,7 +243,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-export { pidAlive } from '../../../packages/herdr-kit/src/index.ts';
+export { pidAlive, workerLedState } from '../../../packages/herdr-kit/src/index.ts';
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */
@@ -484,8 +488,9 @@ export interface PluginState {
   /** worktree path → the status-pane record (one per managed ws). */
   statuses: Record<string, StatusPaneRec>;
   /** worktree path → the session-pane record (one per managed ws —
-   *  spec bro-nwl5g's `bro herdr session-view` renderer). */
-  sessions: Record<string, StatusPaneRec>;
+   *  spec bro-nwl5g's `bro herdr session-view` renderer; carries the
+   *  bound agent's id so a new worker rebinds the pane). */
+  sessions: Record<string, SessionRec>;
   /** agentId → the plugin-owned live view (addendum 17) — an agent
    *  outside armed worktrees gets its own `🤖 view:<id>` workspace. */
   liveViews?: Record<string, { workspace: string; pane_id: string; owned?: boolean }>;
@@ -505,6 +510,16 @@ export function stateScope(repo: string): string {
 
 function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
+}
+
+/** The sync loop publishes its pid here so the startup/action path
+ *  probes liveness on a number it wrote itself — never argv matching:
+ *  a launcher that rewrites argv (absolute path, a non-node runtime)
+ *  slips a literal `pgrep` and a live pane would be re-opened every
+ *  pass. Scoped like the state file so repos never see each other's
+ *  loop pid. */
+export function syncPidPath(scope: string): string {
+  return join(STATE_DIR, `sync-${scope}.pid`);
 }
 
 export function loadState(scope: string): PluginState {
