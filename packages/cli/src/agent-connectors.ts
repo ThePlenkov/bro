@@ -1629,7 +1629,7 @@ function prepareSpawn(
   agentId: string;
   promptFile: string;
   log: string;
-  stderrLog: string;
+  stderrLog?: string;
   exitFile: string;
   /** The attempt token — scopes this run's handle/go/exit artifacts. */
   runId: string;
@@ -1762,14 +1762,15 @@ function commitSpawn(
 ): {
   promptFile: string;
   log: string;
-  stderrLog: string;
+  stderrLog?: string;
   exitFile: string;
   runId: string;
 } {
   mkdirPrivateSync(home);
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
-  const stderrLog = join(home, `${agentId}.stderr`);
+  const captureStderr = backend !== 'gascity' && backend !== 'copilot' && backend !== 'devin';
+  const stderrLog = captureStderr ? join(home, `${agentId}.stderr`) : undefined;
   // every attempt mints its own runId — respawns reuse the agentId but
   // never the attempt artifacts: an old wrapper's late writes land in
   // its own runId's files, never the live run's (spec bro-l8c4f.5)
@@ -1787,9 +1788,11 @@ function commitSpawn(
   // `umask 077` subshell pins it at write time instead.
   writePrivateFileSync(promptFile, spec.prompt);
   appendPrivateFileSync(log, '');
-  appendPrivateFileSync(stderrLog, '');
+  if (stderrLog !== undefined) {
+    appendPrivateFileSync(stderrLog, '');
+  }
   const logFrom = logSizeOrZero(log);
-  const stderrFrom = logSizeOrZero(stderrLog);
+  const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1807,8 +1810,7 @@ function commitSpawn(
     // the worker's stderr lands in a sibling capture, never the .log —
     // the .log stays the agent-updates stream; the classifier still
     // reads this tail so provider walls classify (spec bro-e2ec0)
-    stderrLog,
-    stderrFrom,
+    ...(stderrLog !== undefined ? { stderrLog, stderrFrom } : {}),
     stopped: false,
     exitStatus: undefined,
     // a respawned entry's cause/resetAt belonged to the PREVIOUS run —
@@ -2053,7 +2055,10 @@ function ensureExitCause(
   // classify INDEPENDENTLY — a joined read could fabricate a wall token
   // across the boundary ('…4' + '29…' → '429')
   const c = classifyExitCauseParts(
-    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    [
+      readLogTail(entry.log, entry.logFrom),
+      typeof entry.stderrLog === 'string' ? readLogTail(entry.stderrLog, entry.stderrFrom) : '',
+    ],
     entry.exitStatus
   );
   // the tails were read off-lock — a respawn stamping the entry between
@@ -2853,7 +2858,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let spawned: AgentRegistryEntry;
         try {
           fd = openPrivateAppendSync(log);
-          errFd = openPrivateAppendSync(stderrLog);
+          if (stderrLog !== undefined) {
+            errFd = openPrivateAppendSync(stderrLog);
+          }
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // The write targets the literal quoted path, never $out: a
@@ -2962,10 +2969,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             // .exit; left alone the row would read 'lost' with no record
             // and the reservation would idle out its TTL. Retry the plain
             // spawn over the same attempt artifacts.
-            appendPrivateFileSync(
-              stderrLog,
-              'bro: systemd-run refused the scope — respawned without the wrap\n'
-            );
+            if (stderrLog !== undefined) {
+              appendPrivateFileSync(
+                stderrLog,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            } else {
+              appendPrivateFileSync(
+                log,
+                'bro: systemd-run refused the scope — respawned without the wrap\n'
+              );
+            }
             // the discarded child may still emit 'error' (the ENOENT
             // path) — an unlistened error event takes the whole CLI down
             child.on('error', () => {
@@ -3971,7 +3985,6 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
-      stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
     };
   };
 
@@ -4951,7 +4964,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`;
+          const wrapper =
+            stderrLog !== undefined
+              ? `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+              : `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>&1`;
           const res = dockerRun(
             dockerRunArgv(
               name,
