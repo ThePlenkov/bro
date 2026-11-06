@@ -30,6 +30,11 @@ export interface LoopConfig {
   /** Model override for the provider lane — meaningless on a raw
    *  template (the template carries its own flags). */
   model: string;
+  /** Seconds between supervised re-scans — `bro loop --every` and the
+   *  `loop install` want-marker cadence. The gate's own in-run poll
+   *  stays `--interval`; this is the outer pass cadence the daemon
+   *  re-enters the queue on. */
+  everySec: number;
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string;
@@ -97,6 +102,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   provider: '',
   profile: '',
   model: '',
+  everySec: 300,
   bootstrap: '',
   stallMin: 45,
   crashExitMs: 10_000,

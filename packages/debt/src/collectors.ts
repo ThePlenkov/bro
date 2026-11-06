@@ -198,17 +198,17 @@ export function dedupeByThreads(
 
 /** Sources whose findings a PR-decorating bot may have already landed
  *  via the review-threads sweep — dedupe before landing, then ride the
- *  shared duplicate/reopen overlay bookkeeping in the CLI. */
-export const SOURCE_DEDUPES: Partial<
-  Record<
-    DebtSource,
-    (records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }
-  >
-> = {
-  sonarcloud: dedupeReviewThreads,
-  codacy: dedupeCodacyThreads,
-  codescene: dedupeCodesceneThreads,
-};
+ *  shared duplicate/reopen overlay bookkeeping in the CLI. A Map keeps
+ *  the lookup off dynamic object indexing — a runtime-keyed
+ *  `table[source]` retrieval-then-call trips object-injection rules. */
+export const SOURCE_DEDUPES: ReadonlyMap<
+  DebtSource,
+  (records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }
+> = new Map([
+  ['sonarcloud', dedupeReviewThreads],
+  ['codacy', dedupeCodacyThreads],
+  ['codescene', dedupeCodesceneThreads],
+]);
 
 export function baseRecord(
   ctx: CollectCtx,
@@ -404,7 +404,12 @@ function sarifRunRecords(
   relFile: string,
   root: string
 ): DebtRecord[] {
-  if (run === null || typeof run !== 'object') return [];
+  // a null/primitive run element is malformed, not a clean run — `[]`
+  // here would read as "findings fixed upstream" to the resolve sweep,
+  // the exact lie SourceSkipped exists to refuse
+  if (run === null || typeof run !== 'object') {
+    throw new SourceSkipped(`SARIF run in ${relFile} is not an object — refusing partial snapshot`);
+  }
   const tool = run.tool?.driver?.name ?? 'sverka';
   // `results` may be absent (a clean run legitimately reports nothing) but a
   // present non-array value is malformed — silently dropping it would read
@@ -415,9 +420,7 @@ function sarifRunRecords(
     );
   }
   const results = run.results ?? [];
-  return results
-    .map(res => sarifResultRecord(ctx, tool, res, relFile, root))
-    .filter((r): r is DebtRecord => r !== null);
+  return results.map(res => sarifResultRecord(ctx, tool, res, relFile, root));
 }
 
 function sarifResultRecord(
@@ -426,8 +429,15 @@ function sarifResultRecord(
   res: SarifResult,
   relFile: string,
   root: string
-): DebtRecord | null {
-  if (res === null || typeof res !== 'object') return null;
+): DebtRecord {
+  // a null/primitive result element is malformed like the run/results
+  // guards above — dropping it would read as "finding fixed upstream"
+  // to the resolve sweep and could retire its ledger row
+  if (res === null || typeof res !== 'object') {
+    throw new SourceSkipped(
+      `SARIF result in ${relFile} is not an object — refusing partial snapshot`
+    );
+  }
   const ruleId = typeof res.ruleId === 'string' ? res.ruleId : 'unknown';
   const loc = res.locations?.[0]?.physicalLocation;
   const uri = sarifUriToPath(loc?.artifactLocation?.uri ?? '', root);
@@ -474,8 +484,9 @@ interface DependabotAlert {
 
 /** Open dependabot PRs — an alert with a fix PR in flight isn't debt, the
  *  PR is the work item. Matched by head ref `dependabot/.../<pkg>-<ver>` —
- *  the trailing dash is the version boundary so `ember` can't match
- *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages.
+ *  the `/` before the name pins the segment start and the dash must open
+ *  the VERSION (`-v?\d`), so `ember` can't eat `ember-cli-1.0`'s own
+ *  name dash. Dependabot refs drop the `@` from scoped packages.
  *  Failure propagates: an empty list here would mark every covered alert
  *  as debt, so the caller skips the whole source on error. */
 function dependabotOpenPrs(
@@ -497,6 +508,28 @@ function dependabotOpenPrs(
   ]);
 }
 
+/** `<pkg>-<ver>` inside a `dependabot/.../` head ref needs BOTH
+ *  boundaries AND a real version tail: `/` before the name (segment
+ *  start) and the whole remainder parses as `v?\d+\.\d+…`. A bare
+ *  `ember-` substring eats `ember-cli-1.0`'s own name dash; a digit-
+ *  opening name segment (`lodash-2fa-…`, `eslint-8-…`) eats the
+ *  version check when only the first char is inspected — the dotted
+ *  stem refuses both. Scoped pkgs keep their `/` (`babel/core` matches
+ *  `.../babel/core-1.0`). Bias: a false keep lists debt noise, a false
+ *  suppression hides a security alert. */
+const DEPENDABOT_VERSION_TAIL = /^v?\d+\.\d+([-+.][0-9A-Za-z.-]*)?$/;
+function dependabotRefMatchesPkg(headRef: string, pkg: string): boolean {
+  const needle = `/${pkg}-`;
+  let i = headRef.indexOf(needle);
+  while (i !== -1) {
+    if (DEPENDABOT_VERSION_TAIL.test(headRef.slice(i + needle.length))) {
+      return true;
+    }
+    i = headRef.indexOf(needle, i + 1);
+  }
+  return false;
+}
+
 export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const alerts = ghJsonAll<DependabotAlert>(
     `repos/${ctx.repo}/dependabot/alerts?state=open&per_page=100`
@@ -505,7 +538,7 @@ export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const out: DebtRecord[] = [];
   for (const a of alerts) {
     const pkg = a.security_vulnerability?.package?.name?.replace(/^@/, '') ?? '';
-    const fixPr = pkg ? prs.find(p => p.headRefName.includes(`${pkg}-`)) : undefined;
+    const fixPr = pkg ? prs.find(p => dependabotRefMatchesPkg(p.headRefName, pkg)) : undefined;
     if (fixPr) continue; // linked PR is the work item — see bead bro-8gk
     const severity = a.security_vulnerability?.severity ?? 'medium';
     const body =

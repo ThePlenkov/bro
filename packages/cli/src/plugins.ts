@@ -90,6 +90,7 @@ import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
 import { driveSection } from './commands/drive-config.ts';
 import { driveConnector } from './commands/drive-pulse.ts';
+import { loopConnector } from './commands/loop-pulse.ts';
 import { runDaemonCommand } from './commands/daemon.ts';
 import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
@@ -166,6 +167,7 @@ registerConnector(actConnector);
 registerConnector(watchConnector);
 // the installed merge path's rearm checkpoint — drive.json's owner
 registerConnector(driveConnector);
+registerConnector(loopConnector);
 registerConnector(rigConnector);
 registerConnector(debtConnector);
 registerConnector(sddConnector);

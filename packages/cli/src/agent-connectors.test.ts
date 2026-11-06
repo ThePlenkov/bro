@@ -2390,7 +2390,8 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.causes.length, 1);
       assert.equal(snap.causes[0]!.cause, 'rate_limited');
       assert.equal(snap.blocked, 1);
-      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z');
+      // devin free-tier wall parks 10min of grace past the stamp
+      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:10:00.000Z');
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
@@ -2439,7 +2440,8 @@ describe('budgetSnapshot', () => {
       );
       assert.deepEqual(
         snap.resets.map(r => [r.step, r.resetAt, r.holding]),
-        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+        // devin free-tier wall parks 10min of grace past the stamp
+        [['step-wall', '2999-01-01T00:10:00.000Z', true]]
       );
       assert.equal(registry['step-wall']!.cause, 'rate_limited');
     } finally {
@@ -2624,6 +2626,34 @@ describe('resolveSpawnProvider', () => {
       '--auto-approve',
     ]);
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo');
+  });
+
+  test('acp mcpServers ride the worker payload, never argv — env credentials stay off ps', async () => {
+    const servers = [
+      {
+        type: 'stdio',
+        name: 'bro',
+        command: 'bro',
+        args: ['mcp'],
+        env: [{ name: 'BRO_KEY', value: 'sk-secret' }],
+      },
+    ];
+    const pick = await resolveSpawnProvider(
+      {
+        ...env,
+        providers: { kilo: { type: 'acp', command: 'kilo --acp', mcpServers: servers } },
+      },
+      'native',
+      { provider: 'kilo' },
+      'flag'
+    );
+    assert.equal(pick.worker?.kind, 'argv');
+    const worker = pick.worker?.kind === 'argv' ? pick.worker : undefined;
+    assert.deepEqual(worker?.mcpServers, servers);
+    assert.ok(
+      !worker?.argv.some(a => a.includes('sk-secret') || a === '--mcp-servers'),
+      `argv leaked descriptors: ${worker?.argv.join(' ')}`
+    );
   });
 
   test('a route candidate resolution failure names the class and provider as config', async () => {
@@ -2994,6 +3024,45 @@ describe('provider-resolved spawns', () => {
       const entry = readAgentRegistry(f.main)['fx-1']!;
       const out = readFileSync(join(f.main, 'argv.out'), 'utf8');
       assert.ok(out.endsWith(`${entry.agentId}.prompt.md`), out);
+      await until(() => !pidAlive(info.pid!));
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: argv worker mcpServers land as a 0600 artifact + BRO_MCP_FILE pin — never argv, never forgeable', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const script = join(f.main, 'agent.mjs');
+      writeFileSync(
+        script,
+        "import { writeFileSync, readFileSync } from 'node:fs'\n" +
+          "writeFileSync('mcp.out', [process.env.BRO_MCP_FILE, readFileSync(process.env.BRO_MCP_FILE, 'utf8'), process.argv.slice(2).join(' ')].join('\\x1f'))\n"
+      );
+      const servers = [
+        {
+          type: 'stdio',
+          name: 'bro',
+          command: 'bro',
+          args: ['mcp'],
+          env: [{ name: 'K', value: 'sk-mcp-secret' }],
+        },
+      ];
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused — the worker owns the program'),
+        worker: { kind: 'argv', argv: [process.execPath, script], mcpServers: servers },
+        // a caller-supplied pin must not redirect the artifact path
+        env: { BRO_MCP_FILE: '/etc/passwd' },
+      });
+      await until(() => existsSync(join(f.main, 'mcp.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      const [mcpFile, json, argv] = readFileSync(join(f.main, 'mcp.out'), 'utf8').split('\x1f');
+      assert.ok(mcpFile!.endsWith(`${entry.agentId}.mcp.json`), mcpFile);
+      assert.deepEqual(JSON.parse(json!), servers);
+      assert.ok(!argv!.includes('sk-mcp-secret'), argv);
+      // the artifact is owner-only — the descriptors can carry env credentials
+      assert.equal(statSync(mcpFile!).mode & 0o777, 0o600);
       await until(() => !pidAlive(info.pid!));
     } finally {
       cleanup(f);

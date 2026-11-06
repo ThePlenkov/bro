@@ -75,6 +75,8 @@ export interface AcpWorkerSpec {
    *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
    *  logs, never changes the exit code. */
   sessionRm?: string;
+  /** MCP servers to pass to session/new (opt-in per provider). */
+  mcpServers?: unknown[];
   /** The in-process test seam — a fakeAcpAgent() app from
    *  `@broject/providers/testkit`, skipping the process spawn
    *  entirely. */
@@ -141,6 +143,100 @@ export function renderAcpUpdate(u: SessionUpdate): string {
         : `${String(kind)} ${detail.length > 300 ? `${detail.slice(0, 300)}…` : detail}`;
     }
   }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Validate opt-in MCP descriptors before session/new. Start with stdio;
+ *  HTTP/SSE/remote transports need negotiated capability the headless
+ *  worker does not wire. Diagnostics must not echo env/header values. */
+function validatedMcpServers(raw: unknown[] | undefined, by: string): unknown[] {
+  if (raw === undefined || raw.length === 0) {
+    return [];
+  }
+  const out: unknown[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (!isPlainObject(v)) {
+      throw new AcpWorkerError(`${by}: mcpServers[${i}] must be an object descriptor`);
+    }
+    const t = typeof v.type === 'string' ? v.type : 'stdio';
+    if (t !== 'stdio') {
+      throw mcpTransportErr(t, i, by);
+    }
+    const dErr = stdioDescriptorErr(v, i, by);
+    if (dErr !== undefined) {
+      throw dErr;
+    }
+    out.push(v);
+  }
+  return out;
+}
+
+/** The non-stdio transports all fail here — HTTP-family ones carry the
+ *  negotiated-capability remediation, unknown names the accepted shape. */
+function mcpTransportErr(t: string, i: number, by: string): AcpWorkerError {
+  if (t === 'http' || t === 'sse' || t === 'streamable-http') {
+    return new AcpWorkerError(
+      `${by}: mcpServers[${i}] uses transport '${t}' — HTTP/SSE MCP is only supported when the ACP session negotiates it; use a stdio descriptor for headless workers`
+    );
+  }
+  return new AcpWorkerError(
+    `${by}: mcpServers[${i}] has unsupported MCP transport '${t}' — use a stdio descriptor`
+  );
+}
+
+/** A stdio descriptor is `{command, args, env?}` — session/new validates
+ *  the same wire shape, but a missing or mistyped field dies there as an
+ *  opaque session-start failure instead of naming the bad key. Values
+ *  are never echoed into messages. */
+function stdioDescriptorErr(
+  v: Record<string, unknown>,
+  i: number,
+  by: string
+): AcpWorkerError | undefined {
+  if (typeof v.command !== 'string' || v.command === '') {
+    return new AcpWorkerError(`${by}: mcpServers[${i}].command must be a non-empty string`);
+  }
+  if (!Array.isArray(v.args) || v.args.some(a => typeof a !== 'string')) {
+    return new AcpWorkerError(`${by}: mcpServers[${i}].args must be an array of strings`);
+  }
+  return stdioEnvShapeErr(v, i, by);
+}
+
+/** A stdio descriptor's `env`, when present, is `[{name, value}]`
+ *  string pairs — a numeric/bare value would fail obscurely inside
+ *  session/new, so it is refused here with an index. Values are never
+ *  echoed into the message. */
+function stdioEnvShapeErr(
+  v: Record<string, unknown>,
+  i: number,
+  by: string
+): AcpWorkerError | undefined {
+  if (v.env === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(v.env)) {
+    return new AcpWorkerError(
+      `${by}: mcpServers[${i}].env must be an array of {name, value} pairs`
+    );
+  }
+  for (let j = 0; j < v.env.length; j++) {
+    const e = v.env[j];
+    if (
+      !isPlainObject(e) ||
+      typeof e.name !== 'string' ||
+      e.name === '' ||
+      typeof e.value !== 'string'
+    ) {
+      return new AcpWorkerError(
+        `${by}: mcpServers[${i}].env[${j}] must be a {name, value} string pair`
+      );
+    }
+  }
+  return undefined;
 }
 
 /** `session/request_permission` policy — the headless default-deny:
@@ -297,8 +393,12 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     // its login methods — only an actual refusal at session/new names
     // auth as required
     const authMethods = init.authMethods ?? [];
+    const mcpServers = validatedMcpServers(
+      Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
+      by
+    );
     const session = await ctx
-      .buildSession({ cwd: spec.cwd, mcpServers: [] })
+      .buildSession({ cwd: spec.cwd, mcpServers: mcpServers as never })
       .start()
       .catch((err: unknown) => {
         const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
