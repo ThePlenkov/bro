@@ -796,9 +796,10 @@ emit(
 // `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
 // the canonical content: devin resolves skills as slash commands, codex
 // and every skills/-linked adapter read the same file. Claude's native
-// surface is commands/bro.md — derived from the skill body here so a
+// surface is commands/bro.md, codex's is prompts/bro.md, opencode's is
+// .opencode/command/bro.md — derived from the skill body here so a
 // hand edit on either side surfaces as check:plugins drift. opencode's
-// /bro is native (opencode-tui.ts), no file to check.
+// /bro is also native (opencode-tui.ts), but the command file ships too.
 const BRO_SKILL = 'skills/bro/SKILL.md';
 if (!existsSync(join(ROOT, BRO_SKILL))) {
   // same convention as the `null` adapter entries: generation can't
@@ -838,6 +839,17 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
   emit(
     'commands/bro.md',
     `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // codex custom prompt — same body, codex frontmatter (description +
+  // argument-hint). Invoked as /prompts:bro.
+  emit(
+    'prompts/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nargument-hint: [act|debt|work|loop|next|fleet|watch|drive|status|…] [args]\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // opencode legacy singular command dir — same body, opencode frontmatter.
+  emit(
+    '.opencode/command/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
   );
 }
 
