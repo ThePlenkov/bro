@@ -18,7 +18,14 @@ import {
   stepsOf,
 } from '@broject/convoy';
 import type { ConvoyStep, Molecule } from '@broject/convoy';
-import { argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts';
+import {
+  argString,
+  beadsReachable,
+  bounded,
+  dispatchRead,
+  inRepo,
+  sliceLimited,
+} from './helpers.ts';
 
 /** A mol whose own read fails is a row in error — never a fake
  *  'blocked' the whole list would have to carry, and never a thrown
@@ -110,8 +117,7 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
           return molErrorRow(m.id, m.title, m.status, err);
         }
       });
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
-      return limit === undefined ? rows : rows.slice(0, limit);
+      return sliceLimited(rows, f);
     },
     get: async ref => {
       if (!inRepo(dir)) {

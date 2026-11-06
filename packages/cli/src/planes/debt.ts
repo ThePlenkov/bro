@@ -4,7 +4,7 @@
  *  (specs/bro-9rls.1.md). */
 import { verbsNotWired, type Finding, type PlaneCtx, type PlaneDescriptor } from '@broject/core';
 import { buildSummary, readDebtRecords, type DebtRecord } from '@broject/debt';
-import { argString, dispatchRead } from './helpers.ts';
+import { argString, dispatchRead, sliceLimited } from './helpers.ts';
 
 const VERBS = ['collect', 'set'];
 
@@ -97,11 +97,7 @@ export function debtPlane(ctx: PlaneCtx): PlaneDescriptor {
       summary: { type: 'object', properties: {} },
     },
     capabilities: async () => ({ read: true, collect: false, set: false }),
-    list: async f => {
-      const rows = filtered(f);
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
-      return limit === undefined ? rows : rows.slice(0, limit);
-    },
+    list: async f => sliceLimited(filtered(f), f),
     get: async ref =>
       records()
         .map(toFinding)

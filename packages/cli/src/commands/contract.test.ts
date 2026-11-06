@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import type { BroPlugin, PlaneDescriptor } from '@broject/core';
 import { clearPlanes, registerPlane } from '@broject/core';
 import {
@@ -438,6 +438,10 @@ describe('parseBreaking', () => {
 });
 
 describe('runContractCommand', () => {
+  // plane registration is process-global — a test that clears it and
+  // then throws mid-body must not leave a stub catalog for whatever
+  // runs next in this file
+  after(() => clearPlanes());
   function captured(fn: () => void): string {
     const orig = console.log;
     const lines: string[] = [];

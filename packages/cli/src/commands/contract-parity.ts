@@ -6,9 +6,10 @@ import { isRecord, own, type ContractProblem } from './contract-shared.ts';
  *  `mcpVerbs` allowlist — the only write surface today. Declared verbs
  *  outside `mcpVerbs` are declared-but-unwired (their exec throws
  *  PlaneUnavailable), so they serve nothing yet and need no twin until
- *  a spec exposes one. */
+ *  a spec exposes one. Deduped — an op named in both lists is one
+ *  exposure, so its missing twin is one problem, not two. */
 function exposedOps(plane: PlaneDescriptor): string[] {
-  return [...plane.reads, ...(plane.mcpVerbs ?? [])];
+  return [...new Set([...plane.reads, ...(plane.mcpVerbs ?? [])])];
 }
 
 /** Every transport-exposed plane op mirrors a CLI contract entry — the

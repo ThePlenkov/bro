@@ -12,7 +12,15 @@ import {
   type PlaneDescriptor,
 } from '@broject/core';
 import { getLesson, listLessons, probeQuestion, type Lesson } from '@broject/learn';
-import { argNumber, argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts';
+import {
+  argNumber,
+  argString,
+  beadsReachable,
+  bounded,
+  dispatchRead,
+  inRepo,
+  sliceLimited,
+} from './helpers.ts';
 
 const VERBS = ['capture', 'promote'];
 
@@ -61,12 +69,7 @@ export function learnPlane(ctx: PlaneCtx): PlaneDescriptor {
       capture: false,
       promote: false,
     }),
-    list: async f => {
-      const { lessons } = listLessons(dir);
-      const rows = lessons.map(toRow);
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
-      return limit === undefined ? rows : rows.slice(0, limit);
-    },
+    list: async f => sliceLimited(listLessons(dir).lessons.map(toRow), f),
     get: async ref => {
       const l = getLesson(ref, dir);
       return l === null ? undefined : toRow(l);

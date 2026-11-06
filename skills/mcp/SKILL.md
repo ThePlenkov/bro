@@ -40,6 +40,11 @@ plane op declares its twin in the descriptor's `cli` map, and
 | `bro_debt_summary`     | `bro debt summary`   |
 | `bro_learn_probe`      | `bro learn probe`    |
 
+The events reads are richer than their twins: `bro_events_tail` merges
+broker replay, mailbox drops, and lifecycle rows; `bro bus subscribe`
+streams broker rows only — subscribe gets you the live leg, the tool
+gets you the merged replay.
+
 **Read-only except spec-assigned verbs.** Write verbs stay unexposed
 until a spec assigns one to this transport through the descriptor's
 `mcpVerbs` allowlist — generation is the only path, so a verb cannot
