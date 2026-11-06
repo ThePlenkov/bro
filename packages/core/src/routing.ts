@@ -303,12 +303,15 @@ export function walkChain(
   if (chain.length === 0) {
     throw new SpawnError('fleet.routing chain must not be empty', 'config');
   }
-  const found =
-    from === undefined
-      ? -1
-      : fromIndex !== undefined && chain[fromIndex]?.provider === from
+  let found = -1;
+  if (from !== undefined) {
+    // the recorded resume point stands while it still names `from` —
+    // a redeclared chain falls back to the provider lookup
+    found =
+      fromIndex !== undefined && chain[fromIndex]?.provider === from
         ? fromIndex
         : chain.findIndex(entry => entry.provider === from);
+  }
   const start = Math.max(found, 0);
   const wallFor = (entry: ChainEntry) => walls.find(wall => wall.provider === entry.provider);
   const startEntry = chain[start]!;
@@ -408,7 +411,7 @@ export function providerWallOwners(
   return Object.entries(registry)
     .filter(([, e]) => wallRecords(e).some(rec => wallable(rec) && rec.provider === provider))
     .map(([step]) => step)
-    .sort();
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {

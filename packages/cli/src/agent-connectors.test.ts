@@ -3349,6 +3349,58 @@ describe('fleet chain walk spawn integration', () => {
     }
   });
 
+  test('a respawn over a stopped entry does not resurrect its attempt walls', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-b-dead',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'B',
+        model: 'model-B',
+        cause: 'rate_limited',
+        resetAt: future,
+        // `bro agents down` — the manual clear. The retained attempt
+        // would re-wall A the moment the respawn flips stopped:false
+        stopped: true,
+        attempts: [
+          {
+            provider: 'A',
+            model: 'model-A',
+            cause: 'rate_limited',
+            resetAt: future,
+            spawnedAt: oldSpawn,
+            stopped: false,
+          },
+        ],
+      });
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      // the pre-stop attempt list is evicted — only the outgoing
+      // (stopped:true, never wallable) record remains
+      assert.deepEqual(entry.attempts, [
+        {
+          provider: 'B',
+          model: 'model-B',
+          cause: 'rate_limited',
+          resetAt: future,
+          spawnedAt: oldSpawn,
+          stopped: true,
+        },
+      ]);
+      assert.deepEqual(deriveProviderWalls(registry, Date.now()), []);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('fallback provider uses its own model instead of the chain-head selection', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
     f.env.providers = {

@@ -1684,7 +1684,9 @@ function applySpawnRoute(
     route.onWall,
     walls,
     existing?.provider,
-    typeof existing?.routeIndex === 'number' ? existing.routeIndex : undefined
+    // a hand-edited entry can carry a malformed index — only an integer
+    // is a chain position; anything else falls back to the provider lookup
+    Number.isInteger(existing?.routeIndex) ? existing?.routeIndex : undefined
   );
   if (walk.verdict === 'park') {
     const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted';
@@ -1742,7 +1744,7 @@ function prepareSpawn(
      *  routed spawn's chain walk rewrites it inside, and admission
      *  must bill the SELECTED worker's plane — the head worker's quota
      *  would reserve the wrong lane (or skip the fallback's cap). */
-    sessionQuota?: SessionQuotaLane | (() => SessionQuotaLane | undefined) | undefined;
+    sessionQuota?: SessionQuotaLane | (() => SessionQuotaLane | undefined);
   }
 ): {
   agentId: string;
@@ -1858,13 +1860,13 @@ function prepareSpawn(
         backend,
         spec,
         { ...opts, sessionQuota },
-        agentId,
         {
+          agentId,
           claimed,
           actor,
           phantom,
-        },
-        existing
+          existing,
+        }
       ),
       reservation,
     };
@@ -1917,9 +1919,15 @@ function commitSpawn(
     claimAs?: string;
     sessionQuota?: SessionQuotaLane | undefined;
   },
-  agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  existing: AgentRegistryEntry | undefined
+  /** The run's write facts — the minted id, the claim verdict, and the
+   *  registry row this spawn replaces. */
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    existing: AgentRegistryEntry | undefined;
+  }
 ): {
   promptFile: string;
   log: string;
@@ -1928,6 +1936,7 @@ function commitSpawn(
   runId: string;
 } {
   mkdirPrivateSync(home);
+  const { agentId, existing } = run;
   const promptFile = join(home, `${agentId}.prompt.md`);
   const log = join(home, `${agentId}.log`);
   const stderrLog = join(home, `${agentId}.stderr`);
@@ -1952,7 +1961,16 @@ function commitSpawn(
   const logFrom = logSizeOrZero(log);
   const stderrFrom = logSizeOrZero(stderrLog);
   const outgoingAttempt = outgoingAttemptOf(spec, existing);
-  const attempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : [];
+  // `down` cleared this step's walls — a respawn over a stopped entry
+  // must not resurrect the pre-stop attempt records: carried over they'd
+  // re-wall the provider the moment the fresh entry's stopped flips false
+  const attempts =
+    existing?.stopped === true
+      ? []
+      : Array.isArray(existing?.attempts)
+        ? (existing.attempts as unknown[])
+        : [];
+  const nextAttempts = outgoingAttempt === undefined ? attempts : [...attempts, outgoingAttempt];
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -2013,7 +2031,9 @@ function commitSpawn(
       spec.route !== undefined && existing !== undefined && existing.provider !== spec.provider
         ? undefined
         : existing?.resumeSessionId,
-    ...(outgoingAttempt === undefined ? {} : { attempts: [...attempts, outgoingAttempt] }),
+    // always write the list — an empty one still has to evict a stale
+    // record set (undefined drops out of the serialized registry)
+    attempts: nextAttempts.length === 0 ? undefined : nextAttempts,
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
     sessionKind: opts.sessionQuota?.plane.kind,
@@ -2022,7 +2042,7 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
+  recordSpawnClaim(dir, spec, agentId, backend, run, opts.claimAs, { runId, log });
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 

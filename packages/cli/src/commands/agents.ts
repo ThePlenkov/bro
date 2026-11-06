@@ -721,8 +721,12 @@ export function spawnStepAgent(
   );
   return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then(route => {
     const provider = req.provider ?? profile?.provider ?? route?.provider;
-    const namedBy =
-      req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile';
+    let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
+    if (req.provider !== undefined) {
+      namedBy = 'flag';
+    } else if (profile !== undefined) {
+      namedBy = 'profile';
+    }
     return resolveSpawnProvider(
       env,
       conn.name,
