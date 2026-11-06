@@ -741,18 +741,36 @@ sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
- *  (apiKeyHelper children do not inherit settings.env). */
-export const serveSection: ConfigSection<{ backend?: string }> = raw => {
+ *  (apiKeyHelper children do not inherit settings.env).
+ *  `upstream` is the Messages-API base for the byte proxy (owned by
+ *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
+ *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
+ *  / `ANTHROPIC_*` override). */
+export const serveSection: ConfigSection<{
+  backend?: string;
+  upstream?: string;
+  apiKeyEnv?: string;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
+    upstream?: unknown;
+    apiKeyEnv?: unknown;
   };
-  const backend =
-    typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
-  // an unset backend reads as an empty bag — same shape as providers:{}
-  return backend === undefined ? {} : { backend };
+  const out: { backend?: string; upstream?: string; apiKeyEnv?: string } = {};
+  if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
+    out.backend = obj.backend.trim();
+  }
+  if (typeof obj.upstream === 'string' && obj.upstream.trim() !== '') {
+    out.upstream = obj.upstream.trim().replace(/\/+$/, '');
+  }
+  if (typeof obj.apiKeyEnv === 'string' && obj.apiKeyEnv.trim() !== '') {
+    out.apiKeyEnv = obj.apiKeyEnv.trim();
+  }
+  // an unset section reads as an empty bag — same shape as providers:{}
+  return out;
 };
 
-serveSection.jsonSchema = js.obj({ backend: js.str });
+serveSection.jsonSchema = js.obj({ backend: js.str, upstream: js.str, apiKeyEnv: js.str });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -1215,8 +1233,9 @@ export interface BroConfig {
   /** `bro serve` — the facade host's own knobs. `backend` names the acp
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
-   *  relying on env reaching every spawn path. */
-  serve: { backend?: string };
+   *  relying on env reaching every spawn path. `upstream`/`apiKeyEnv`
+   *  configure the byte proxy (env overrides and supplies the secret). */
+  serve: { backend?: string; upstream?: string; apiKeyEnv?: string };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;

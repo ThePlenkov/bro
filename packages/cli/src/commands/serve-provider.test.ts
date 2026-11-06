@@ -31,6 +31,34 @@ describe('providerConfig', () => {
     })
     assert.equal(cfg?.upstream, 'http://127.0.0.1:9000')
   })
+
+  test('serve config owns upstream and apiKeyEnv; env overrides and carries secret', () => {
+    // config upstream + apiKeyEnv, key resolved from env
+    assert.deepEqual(
+      providerConfig({ MY_PROXY_KEY: 'sk-cfg' }, { upstream: 'http://proxy.local/', apiKeyEnv: 'MY_PROXY_KEY' }),
+      { upstream: 'http://proxy.local', apiKey: 'sk-cfg' }
+    )
+    // env upstream overrides config upstream
+    assert.equal(
+      providerConfig(
+        { MY_PROXY_KEY: 'sk-cfg', BRO_PROVIDER_UPSTREAM: 'http://env-override/' },
+        { upstream: 'http://proxy.local', apiKeyEnv: 'MY_PROXY_KEY' }
+      )?.upstream,
+      'http://env-override'
+    )
+    // BRO_PROVIDER_API_KEY overrides apiKeyEnv-resolved key
+    assert.equal(
+      providerConfig(
+        { BRO_PROVIDER_API_KEY: 'sk-env', MY_PROXY_KEY: 'sk-cfg' },
+        { upstream: 'http://proxy.local', apiKeyEnv: 'MY_PROXY_KEY' }
+      )?.apiKey,
+      'sk-env'
+    )
+    // config upstream alone is not enough without any key
+    assert.equal(providerConfig({}, { upstream: 'http://proxy.local' }), undefined)
+    // apiKeyEnv naming an unset/blank var leaves it unwired
+    assert.equal(providerConfig({ MY_PROXY_KEY: '  ' }, { apiKeyEnv: 'MY_PROXY_KEY' }), undefined)
+  })
 })
 
 describe('serve /v1/* provider plane — guards and wiring', () => {

@@ -7,12 +7,17 @@
  * the protocol — SSE frames, tool_use blocks, and beta surface all
  * pass through untouched, so the wire contract is the upstream's.
  *
- * Config (server-side env, never the client's):
- *   BRO_PROVIDER_UPSTREAM  default https://api.anthropic.com — any
- *                          Messages-API endpoint (Z.AI, DashScope,
- *                          a local model gateway)
- *   BRO_PROVIDER_API_KEY   the real credential — falls back to the
- *                          operator's ANTHROPIC_API_KEY / AUTH_TOKEN
+ * Config:
+ *   serve.upstream / BRO_PROVIDER_UPSTREAM  Messages-API base
+ *                                          (config owns the URL; env
+ *                                          overrides). Default
+ *                                          https://api.anthropic.com
+ *   serve.apiKeyEnv                         env var name holding the
+ *                                          real credential (config owns
+ *                                          the name; secret lives in env).
+ *                                          BRO_PROVIDER_API_KEY /
+ *                                          ANTHROPIC_API_KEY /
+ *                                          ANTHROPIC_AUTH_TOKEN override.
  *
  * Client-side wiring (documented, not enforced):
  *   env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
@@ -32,24 +37,37 @@ export interface ProviderConfig {
 
 const DEFAULT_UPSTREAM = 'https://api.anthropic.com'
 
-/** Provider config from the server's own environment — the upstream
- *  credential lives here, never in the client request. No key means
- *  the dep stays unwired and `/v1/*` 404s like any unknown path:
- *  a half-configured provider is a miss, not a degraded proxy. */
-export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefined {
-  // a set-but-blank override must not starve the fallbacks — scan in
-  // precedence order and take the first non-blank
-  const apiKey = [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN].find(
-    (v) => v !== undefined && v.trim() !== ''
-  )
-  if (apiKey === undefined) {
+/** Provider config: config owns upstream and the apiKey env-name; env is
+ *  the override+secret channel. No key means the dep stays unwired and
+ *  `/v1/*` 404s like any unknown path: a half-configured provider is a
+ *  miss, not a degraded proxy. */
+export function providerConfig(
+  env: NodeJS.ProcessEnv,
+  serve?: { upstream?: string; apiKeyEnv?: string }
+): ProviderConfig | undefined {
+  // env overrides win; BRO_PROVIDER_API_KEY / ANTHROPIC_* remain the secret
+  // channel and also override whatever apiKeyEnv names
+  let apiKey: string | undefined
+  for (const name of [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN]) {
+    if (name !== undefined && name.trim() !== '') {
+      apiKey = name
+      break
+    }
+  }
+  if (apiKey === undefined && serve?.apiKeyEnv !== undefined) {
+    const v = env[serve.apiKeyEnv]
+    if (v !== undefined && v.trim() !== '') {
+      apiKey = v
+    }
+  }
+  if (apiKey === undefined || apiKey.trim() === '') {
     return undefined
   }
-  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM
+  let upstream = env.BRO_PROVIDER_UPSTREAM ?? serve?.upstream ?? DEFAULT_UPSTREAM
   while (upstream.endsWith('/')) {
     upstream = upstream.slice(0, -1)
   }
-  return { upstream, apiKey }
+  return { upstream, apiKey: apiKey.trim() }
 }
 
 /** Headers that must not ride the proxy — hop-by-hop framing, the

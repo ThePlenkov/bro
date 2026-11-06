@@ -2423,7 +2423,15 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
   // proxy's upstream+key pair, which stays the plain-HTTP fallback
   const conductorCfg = conductorConfig(process.env, dir);
-  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
+  let providerCfg: ProviderConfig | undefined
+  if (conductorCfg === undefined) {
+    try {
+      const cfg = loadBroConfig(dir)
+      providerCfg = providerConfig(process.env, cfg.serve)
+    } catch {
+      providerCfg = providerConfig(process.env)
+    }
+  }
   if (conductorCfg !== undefined) {
     console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`);
   } else if (providerCfg !== undefined) {
