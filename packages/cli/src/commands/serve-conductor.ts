@@ -3009,7 +3009,10 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
       typeof m.content === 'string'
         ? m.content
         : chatContent(m.content)
-            .map((b) => (b.type === 'text' ? (b as { text: string }).text : ''))
+            .map((b) => {
+              if (b.type === 'text') return (b as { text: string }).text
+              throw new Error('tool messages support text content only')
+            })
             .join('')
     return [
       {
