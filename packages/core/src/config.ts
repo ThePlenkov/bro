@@ -1057,13 +1057,36 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   return out;
 }
 
+function fleetProviderCaps(raw: unknown): Record<string, number> {
+  if (raw === undefined) {
+    return {};
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: fleet.providerCaps must be an object — section dropped');
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [name, v] of Object.entries(raw)) {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+      console.error(
+        `bro.config: fleet.providerCaps.${name} must be a non-negative integer — entry dropped`
+      );
+      continue;
+    }
+    out[name] = v;
+  }
+  return out;
+}
+
 /** bro.config.json `fleet` section — the live-agent ceiling the spawn
  *  prologue enforces, the named spawn presets (`profiles`, spec
  *  bro-5hx1.1), and the dispatch routing table (`routing`, spec
  *  bro-1x7p: task class → ordered provider chain; absent = today's
  *  static resolution). `maxConcurrent` counts registry agents across
  *  ALL backends (the budget wall is per-account, not per-runtime); 0
- *  disables the cap, matching act.maxRounds' convention. */
+ *  disables the cap, matching act.maxRounds' convention. `providerCaps`
+ *  sets per-provider session caps (global operator policy) — counted
+ *  machine-wide across all repos and all session sources. */
 export const fleetSection: ConfigSection<{
   maxConcurrent: number;
   profiles: Record<string, FleetProfile>;
@@ -1071,6 +1094,7 @@ export const fleetSection: ConfigSection<{
   walls: FleetWallTtls;
   leases: FleetLeaseTtls;
   router?: FleetRouter;
+  providerCaps: Record<string, number>;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown;
@@ -1079,6 +1103,7 @@ export const fleetSection: ConfigSection<{
     walls?: unknown;
     leases?: unknown;
     router?: unknown;
+    providerCaps?: unknown;
   };
   const router = fleetRouter(obj.router);
   return {
@@ -1090,6 +1115,7 @@ export const fleetSection: ConfigSection<{
         : DEFAULT_CONFIG.fleet.maxConcurrent,
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
+    providerCaps: fleetProviderCaps(obj.providerCaps),
     walls: fleetWalls(obj.walls),
     leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
@@ -1121,6 +1147,7 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  providerCaps: js.map(js.int()),
   walls: js.obj({
     rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
     quotaTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
@@ -1399,7 +1426,8 @@ export interface BroConfig {
    *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1).
    *  `routing` maps a task class to an ordered provider chain (spec
    *  bro-1x7p) — absent/empty = today's static resolution; `router`
-   *  names the optional judge classifier (M7). */
+   *  names the optional judge classifier (M7). `providerCaps` sets
+   *  per-provider session caps from the global config layer. */
   fleet: {
     maxConcurrent: number;
     profiles: Record<string, FleetProfile>;
@@ -1407,6 +1435,7 @@ export interface BroConfig {
     walls: FleetWallTtls;
     leases: FleetLeaseTtls;
     router?: FleetRouter;
+    providerCaps: Record<string, number>;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
    *  own field overrides (default 4); `env` is the global literal
@@ -1483,6 +1512,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     maxConcurrent: 3,
     profiles: {},
     routing: {},
+    providerCaps: {},
     walls: { rateTtlMinutes: 15, quotaTtlMinutes: 360 },
     leases: { roleTtlSeconds: 60, workTtlMinutes: 360 },
   },
@@ -1975,6 +2005,26 @@ export function loadConfig(
       : [],
   };
   applySections(config, merged, sections);
+  // fleet.providerCaps is machine-wide operator policy — the caps are
+  // counted across every repo and every session source, so only the
+  // global layer may set them. A repo-layer entry (committed policy or
+  // a checkout's local file) would let one repo raise its own ceiling;
+  // warn and pin the global-layer value over whatever the merge made.
+  const repoCaps = layers.some(
+    l => l.layer !== 'global' && isPlainObject(l.raw.fleet) && 'providerCaps' in l.raw.fleet
+  );
+  if (repoCaps) {
+    console.error(
+      'bro.config: fleet.providerCaps is global-only operator policy — repo-layer value ignored (set it in the global config)'
+    );
+  }
+  const globalFleet = layers.find(l => l.layer === 'global')?.raw.fleet;
+  config.fleet = {
+    ...config.fleet,
+    providerCaps: fleetProviderCaps(
+      isPlainObject(globalFleet) ? globalFleet.providerCaps : undefined
+    ),
+  };
   return config;
 }
 
