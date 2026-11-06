@@ -3,7 +3,7 @@
  * 1. Generated pack.json exists and matches trees + package.json
  * 2. Tarball would include pack.json (and schema if referenced)
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -25,6 +25,24 @@ if (!files.includes('pack.json')) {
   process.exit(1);
 }
 
+// Freshness gate: committed pack.json must match package.json + root trees.
+const committed = JSON.parse(readFileSync(packJsonPath, 'utf8'));
+const expectedSkills = readdirSync(join(root, 'skills'), { withFileTypes: true })
+  .filter(d => d.isDirectory())
+  .map(d => d.name)
+  .sort();
+const expectedFormulas = readdirSync(join(root, 'formulas'))
+  .filter(f => f.endsWith('.formula.toml'))
+  .sort();
+if (
+  committed.name !== packPkg.name ||
+  committed.version !== packPkg.version ||
+  JSON.stringify(committed.skills) !== JSON.stringify(expectedSkills) ||
+  JSON.stringify(committed.formulas) !== JSON.stringify(expectedFormulas)
+) {
+  console.error('packages/pack/pack.json is stale — run node scripts/gen-pack.ts');
+  process.exit(1);
+}
 // Quick check: try to see if npm pack --dry-run would include it (best effort)
 try {
   const out = execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts'], {
