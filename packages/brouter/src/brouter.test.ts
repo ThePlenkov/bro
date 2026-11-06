@@ -9,6 +9,7 @@ import { runClient } from './commands.ts';
 import { modelFamily, modelSource, servedModels } from './catalog.ts';
 import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
+import { routerUrl } from './endpoint.ts';
 import { clientById, clientIds } from './registry.ts';
 import { configuredProviders } from './providers.ts';
 import { clientInventory, connectorInventory, isInstalled } from './agents.ts';
@@ -113,6 +114,32 @@ test('the router state file is the discovery — and a torn record is not a rout
   assert.equal(endpoint?.token, 'tok');
   writeFileSync(join(gitDir, 'bro', 'serve.json'), '{ torn');
   assert.equal(readRouterEndpoint(repo), undefined);
+});
+
+test('the token crosses over https or to this machine — nowhere else', () => {
+  assert.equal(routerUrl('http://127.0.0.1:44927'), 'http://127.0.0.1:44927');
+  assert.equal(routerUrl('http://localhost:44927/'), 'http://localhost:44927');
+  assert.equal(routerUrl('https://router.example.com'), 'https://router.example.com');
+  assert.throws(() => routerUrl('http://router.example.com'), /cannot carry the session token/);
+  assert.throws(() => routerUrl('ftp://router.example.com'), /cannot carry the session token/);
+  assert.throws(() => routerUrl('not a url'), /not a valid URL/);
+});
+
+test('a router bro refuses is not a router bro did not find', () => {
+  const gitDir = join(scratch, 'remote', '.git');
+  mkdirSync(join(gitDir, 'bro'), { recursive: true });
+  writeFileSync(
+    join(gitDir, 'bro', 'serve.json'),
+    JSON.stringify({ pid: 1, url: 'http://router.example.com', dir: scratch, token: 'tok' })
+  );
+  assert.throws(() => readRouterEndpoint(join(scratch, 'remote')), /cannot carry the session token/);
+});
+
+test('the catalog is not fetched over cleartext to a remote host', async () => {
+  await assert.rejects(
+    () => readCatalog({ url: 'http://router.example.com', token: 'tok' }),
+    /cannot carry the session token/
+  );
 });
 
 test('the catalog is read from the router with the credential', async () => {

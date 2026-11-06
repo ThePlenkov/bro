@@ -9,6 +9,7 @@
  */
 import { flag } from '@broject/core';
 import { readRouterEndpoint } from './gateway.ts';
+import { routerUrl } from './endpoint.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
 /** What a host may inject — the POLICY the router's commands read. */
@@ -40,7 +41,7 @@ export function defaultEndpoint(argv: string[]): RouterEndpoint {
   const url = flag(argv, '--url');
   const token = flag(argv, '--token');
   if (url !== undefined && token !== undefined) {
-    return { url: url.replace(/\/+$/, ''), token };
+    return { url: routerUrl(url), token };
   }
   const found = readRouterEndpoint(process.cwd());
   if (found === undefined) {
