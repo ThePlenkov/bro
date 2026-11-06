@@ -26,7 +26,10 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 function gitDirFromFile(dot: string): string | undefined {
   const stat = statSync(dot, { throwIfNoEntry: false });
   if (stat?.isFile() !== true) return undefined;
-  const named = /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'));
+  // the gitdir line, read without backtracking: a character class (not
+  // `\s`, which crosses a line) and no `$` after the capture — the
+  // capture stops at the line end by itself
+  const named = /^gitdir:[ \t]*(.*)/m.exec(readFileSync(dot, 'utf8'));
   if (named?.[1] === undefined) return undefined;
   const path = named[1].trim();
   return isAbsolute(path) ? path : resolve(dirname(dot), path);

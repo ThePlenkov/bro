@@ -745,7 +745,7 @@ export const PLUGINS: BroPlugin[] = [
         printUsage(TELEMETRY_USAGE, 0)
         return
       }
-      runHooksCommand(['perf', ...argv])
+      return runHooksCommand(['perf', ...argv])
     },
   }),
   definePlugin({
