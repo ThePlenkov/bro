@@ -1,4 +1,5 @@
 ---
+
 name: convoy
 description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro flow convoy next` is the scheduler as code; `bro flow convoy done` advances it. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
@@ -82,6 +83,10 @@ applies at spawn.
   `parked`/`stopped` verdicts — reported, never retried.
 - A mol already claimed by a live worker reads `occupied` — skipped,
   never double-run. A mol that ends on a human gate reads `gated`.
+- `bro loop` and `bro drive` coordinate through project-scoped role
+  leases; work leases prevent another clone from spawning the same bead
+  or PR. Inspect them with `bro fleet leases [--json]`; force-release a
+  stale lease with `bro fleet leases release <key>`.
 - Run it detached for real queues (`nohup`/`systemd-run`/tmux) — it is
   a supervisor loop like `bro review drive --every`, and exit 1 means some mol
   exhausted attempts.

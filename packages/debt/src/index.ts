@@ -6,8 +6,8 @@ export type {
   DebtStatus,
   DebtSummary,
   LedgerOverlay,
-} from './types.ts'
-export { bodyPreview, deriveArea, fingerprint } from './text.ts'
+} from './types.ts';
+export { bodyPreview, deriveArea, fingerprint } from './text.ts';
 export {
   buildSummary,
   claimDebtRecord,
@@ -22,7 +22,7 @@ export {
   upsertRecords,
   writeHarvestFile,
   writeSummary,
-} from './store.ts'
+} from './store.ts';
 export {
   applyLastN,
   filterByLabels,
@@ -31,8 +31,8 @@ export {
   parseCsvInts,
   parseCsvStrings,
   resolveHarvestPrs,
-} from './harvest.ts'
-export type { HarvestPrFilters } from './harvest.ts'
+} from './harvest.ts';
+export type { HarvestPrFilters } from './harvest.ts';
 export {
   applyCollectLabel,
   applyDebtLabel,
@@ -42,26 +42,26 @@ export {
   ensureDebtLabels,
   partitionByProcessed,
   prDebtState,
-} from './labels.ts'
-export type { DebtPrState } from './labels.ts'
-export { classifyThread, collectPr, collectThreads } from './collect.ts'
-export type { CollectPrResult } from './collect.ts'
-export { checkBeads, listDebtBeads, syncDebtToBeads } from './beads.ts'
-export type { BeadRef, SyncResult } from './beads.ts'
+} from './labels.ts';
+export type { DebtPrState } from './labels.ts';
+export { classifyThread, collectPr, collectThreads } from './collect.ts';
+export type { CollectPrResult } from './collect.ts';
+export { checkBeads, listDebtBeads, syncDebtToBeads } from './beads.ts';
+export type { BeadRef, SyncResult } from './beads.ts';
 export {
   DEBT_ROW_STATUSES,
   parseDebtPlan,
   PLAN_KIND as DEBT_PLAN_KIND,
   PLAN_VERSION as DEBT_PLAN_VERSION,
-} from './plan.ts'
-export type { DebtPlan, DebtVerdict } from './plan.ts'
-export { applyDebtVerdicts } from './store.ts'
-export type { DebtVerdictInput } from './store.ts'
-export { debtConnector } from './connector.ts'
-export { groupKey, groupStats } from './stats.ts'
-export type { StatBucket, StatsGroupBy } from './stats.ts'
-export { buildTrend } from './trend.ts'
-export type { ThreadBounds, TrendGranularity, TrendOptions, TrendPoint } from './trend.ts'
+} from './plan.ts';
+export type { DebtPlan, DebtVerdict } from './plan.ts';
+export { applyDebtVerdicts } from './store.ts';
+export type { DebtVerdictInput } from './store.ts';
+export { debtConnector } from './connector.ts';
+export { groupKey, groupStats } from './stats.ts';
+export type { StatBucket, StatsGroupBy } from './stats.ts';
+export { buildTrend } from './trend.ts';
+export type { ThreadBounds, TrendGranularity, TrendOptions, TrendPoint } from './trend.ts';
 export {
   ALL_SOURCES,
   assertTokenSafeHost,
@@ -73,8 +73,8 @@ export {
   SOURCE_DEDUPES,
   SourceSkipped,
   stripSlashes,
-} from './collectors.ts'
-export type { CollectCtx, DebtSource, DebtSourceName, DedupeDupe } from './collectors.ts'
+} from './collectors.ts';
+export type { CollectCtx, DebtSource, DebtSourceName, DedupeDupe } from './collectors.ts';
 export {
   CODACY_HOST,
   CODACY_UI_HOST,
@@ -82,8 +82,8 @@ export {
   collectCodacy,
   dedupeCodacyThreads,
   resolveCodacyRepo,
-} from './codacy.ts'
-export type { CodacyRepo } from './codacy.ts'
+} from './codacy.ts';
+export type { CodacyRepo } from './codacy.ts';
 export {
   CODESCENE_HOST,
   CODESCENE_UI_HOST,
@@ -93,8 +93,8 @@ export {
   failedGates,
   parseAnalysisTime,
   resolveCodesceneProject,
-} from './codescene.ts'
-export type { CodesceneProject } from './codescene.ts'
+} from './codescene.ts';
+export type { CodesceneProject } from './codescene.ts';
 export {
   assertSonarHostTrusted,
   collectSonarcloud,
@@ -103,5 +103,6 @@ export {
   resolveSonarProject,
   SONAR_HOST,
   sonarKeyOf,
-} from './sonarcloud.ts'
-export type { SonarDupe, SonarProject } from './sonarcloud.ts'
+} from './sonarcloud.ts';
+export type { SonarDupe, SonarProject } from './sonarcloud.ts';
+export { collectSverka } from './collectors.ts';
