@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { mergeSettings } from './adapter.ts';
 import { runClient } from './commands.ts';
-import { modelFamily, modelSource, servedModels } from './catalog.ts';
+import { modelFamily, servedModels } from './catalog.ts';
 import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
 import { clientById, clientIds } from './registry.ts';
@@ -30,15 +30,28 @@ test('a family name inside another segment names no family', () => {
   assert.equal(modelFamily('devin-acp/haikuish-2'), 'other');
 });
 
-test('the source is the id head', () => {
-  assert.equal(modelSource('devin-acp/swe-2-high'), 'devin-acp');
-  assert.equal(modelSource('bare-model'), undefined);
+test('the lane is the row\'s own answer — never re-read off the id', () => {
+  const { models } = servedModels({
+    data: [
+      { id: 'devin-acp/swe/2-high', display_name: 'SWE-2', source: 'devin-acp' },
+      { id: 'devin-acp/swe-2-high', display_name: 'SWE-2' },
+    ],
+  });
+  assert.equal(models[0]?.source, 'devin-acp');
+  // a row that names no lane names none: the id's head is a guess where
+  // the row's field is a fact
+  assert.equal(models[1]?.source, undefined);
 });
 
 test('a catalog row without an id is not a model — and the drop is counted', () => {
   const { models, dropped } = servedModels({
     data: [
-      { id: 'devin-acp/swe-2-high', display_name: 'devin-acp/SWE-2', description: 'devin-acp' },
+      {
+        id: 'devin-acp/swe-2-high',
+        display_name: 'devin-acp/SWE-2',
+        description: 'devin-acp',
+        source: 'devin-acp',
+      },
       { id: '  ' },
       { display_name: 'no id' },
       null,

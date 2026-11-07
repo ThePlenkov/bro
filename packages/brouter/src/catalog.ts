@@ -22,7 +22,8 @@ export interface ServedModel {
   label?: string;
   /** the catalog's own description — where the model comes from */
   description?: string;
-  /** the entry (the lane) the model is served by — the id's head */
+  /** the entry (the lane) the model is served by — the router's own
+   *  answer, not a guess read back off the id */
   source?: string;
 }
 
@@ -44,13 +45,6 @@ export function modelFamily(id: string): ModelFamily {
   return 'other';
 }
 
-/** The lane an id belongs to — the head before the first '/'. An id
- *  without a slash names no lane (a bare model id). */
-export function modelSource(id: string): string | undefined {
-  const cut = id.indexOf('/');
-  return cut > 0 ? id.slice(0, cut) : undefined;
-}
-
 /** The Anthropic-shaped catalog payload — `/v1/models` answers this. */
 interface CatalogPayload {
   data?: unknown;
@@ -65,6 +59,11 @@ function readString(bag: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/** The row → the served model. The lane comes from the row's own
+ *  `source` field — the router knows which lane served it and says so.
+ *  It is NOT re-read off the id: an id is `<entry>/<model>`, and a
+ *  model's own name may carry a slash of its own, so the id's head is
+ *  a guess where the row's field is a fact. */
 function toServedModel(row: unknown): ServedModel | null {
   if (typeof row !== 'object' || row === null) return null;
   const bag = row as Record<string, unknown>;
@@ -72,12 +71,12 @@ function toServedModel(row: unknown): ServedModel | null {
   if (id === '') return null;
   const label = readString(bag, 'display_name');
   const description = readString(bag, 'description');
-  const source = modelSource(id);
+  const source = readString(bag, 'source');
   return {
     id,
     ...(label === '' ? {} : { label }),
     ...(description === '' ? {} : { description }),
-    ...(source === undefined ? {} : { source }),
+    ...(source === '' ? {} : { source }),
   };
 }
 

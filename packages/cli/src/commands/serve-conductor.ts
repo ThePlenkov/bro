@@ -4120,6 +4120,10 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     id: m.id,
     display_name: displayName(m),
     description: providerPath(m),
+    // the LANE, stated by the router that served the row: the reader
+    // must not have to guess it back out of the id, whose head is a
+    // formatted string and the model's own name may carry a slash
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
     created_at: '2025-01-01T00:00:00Z',
   }));
   // a lane that FAILED is not silently absent from the union: the

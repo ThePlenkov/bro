@@ -27,6 +27,14 @@ keeps **89**. The filter is the client's, in its discovery path:
 ee.data.data.filter(le => /(claude|anthropic)/i.test(le.id));
 ```
 
+That quoted filter is the CLIENT's own rule, quoted as measured fact —
+a whole-id substring match, so `sonnetizer-1` reads as an Anthropic id
+there. bro's own family read (below) is not that rule and never was: a
+family is named by a WHOLE SEGMENT of the id, so a name that merely
+contains the family word names no family. The client is the client's
+business; the catalog bro hands it does not depend on the client's
+filter.
+
 An honest id — `devin-acp/swe-2-high` — is not an Anthropic id, so it
 never reaches the picker. The client offers a second path that does NOT
 filter: its own `modelPicker.options` settings block, whose rows are
@@ -54,7 +62,9 @@ has no home in bro (spec bro-olfvd) — hence this package.
   client needs to reach the router.
 - **model block** — the adapter's rendering of the served models.
 - **family** — the model family an id names (`fable` / `opus` /
-  `sonnet` / `haiku` / `other`), read off the id's TEXT.
+  `sonnet` / `haiku` / `other`), read off the id's SEGMENTS: the id is
+  split on `/` and a segment that EQUALS a family name names that
+  family. A substring never names a family — `sonnetizer-1` names none.
 
 ## Design
 
@@ -146,7 +156,7 @@ the reader reports what it dropped.
 
 ### The CLI
 
-```
+```bash
 brouter models [--json]              the served catalog
 brouter clients [--json]              the client adapters
 brouter client <id> [--write] [--settings <path>] [--json]

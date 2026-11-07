@@ -12,7 +12,6 @@
  */
 export {
   modelFamily,
-  modelSource,
   servedModels,
   type ModelFamily,
   type ServedModel,
