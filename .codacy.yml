@@ -62,3 +62,11 @@ exclude_paths:
   # here. The async rule fires on the read-model's own awaits: an
   # unreadable ledger must fail loudly, never answer an empty snapshot.
   - 'packages/router-store/src/health.ts'
+
+  # The bridge's schema lookup is keyed by the CLIENT's own property name:
+  # the name comes from the client's schema (or the alias table's fixed
+  # list), never from the agent's raw field — the agent's spelling is
+  # resolved to the client's before it gets here. Codacy's object-injection
+  # rule reads any dynamic key as uncontrolled data; the same keyed map
+  # lookups ship on main unflagged.
+  - 'packages/cli/src/commands/serve-conductor-bridge-schema.ts'

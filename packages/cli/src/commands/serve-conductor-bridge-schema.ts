@@ -31,8 +31,12 @@ function integerFits(declared: string[], actual: string, value: unknown): boolea
 /** Whether the value fits the type the client declares for the property —
  *  a property the schema says nothing about accepts anything. */
 export function typeFits(tool: ClientTool, prop: string, value: unknown): boolean {
-  const declared = tool.types[prop];
-  if (declared === undefined || declared.length === 0) return true;
+  const types = tool.types;
+  // the property is the CLIENT's own — one of the names its schema
+  // declares. A name the client never declared accepts anything.
+  if (!Object.hasOwn(types, prop)) return true;
+  const declared = types[prop];
+  if (declared.length === 0) return true;
   const actual = typeName(value);
   if (declared.includes(actual)) return true;
   return integerFits(declared, actual, value);
