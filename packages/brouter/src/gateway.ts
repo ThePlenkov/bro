@@ -21,6 +21,9 @@ import type { RouterEndpoint } from './adapter.ts';
  *  nested quantifier is a denial-of-service waiting for a caller. */
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** The statuses that carry a redirect — the catalog read refuses them. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 /** The URL without its trailing slashes — a loop, not a pattern: the
  *  scanners read these files, and a trailing slash is not worth a
  *  pattern. */
@@ -163,9 +166,9 @@ export async function readCatalog(
     redirect: 'manual',
   });
   const location = res.headers.get('location');
-  if (res.status >= 300 && res.status < 400 && location !== null) {
+  if (REDIRECT_STATUSES.has(res.status)) {
     throw new Error(
-      `the router answered ${res.status} with a redirect to ${location} — the catalog read does not ` +
+      `the router answered ${res.status} with a redirect to ${location ?? ''} — the catalog read does not ` +
         `follow redirects: the session token would ride to a host the guard never checked`
     );
   }
