@@ -50,28 +50,29 @@ interface CatalogPayload {
   data?: unknown;
 }
 
-/** The catalog rows → the served models. A row without a usable id is
- *  not a model: it is dropped, and the count of what was dropped rides
- *  the answer (a short catalog must be distinguishable from a whole
- *  one). */
-function readString(bag: Record<string, unknown>, key: string): string {
-  const value = bag[key];
-  return typeof value === 'string' ? value.trim() : '';
+/** A row's text field — trimmed, or empty when the row names no
+ *  string there. */
+function trimmedField(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim();
 }
 
-/** The row → the served model. The lane comes from the row's own
- *  `source` field — the router knows which lane served it and says so.
- *  It is NOT re-read off the id: an id is `<entry>/<model>`, and a
- *  model's own name may carry a slash of its own, so the id's head is
- *  a guess where the row's field is a fact. */
-function toServedModel(row: unknown): ServedModel | null {
-  if (typeof row !== 'object' || row === null) return null;
+/** One catalog row → the served model it names, or undefined when the
+ *  row names none. A row without a usable id is not a model.
+ *
+ *  The lane comes from the row's own `source` field — the router knows
+ *  which lane served it and says so. It is NOT re-read off the id: an
+ *  id is `<entry>/<model>`, and a model's own name may carry a slash of
+ *  its own, so the id's head is a guess where the row's field is a
+ *  fact. */
+function servedRow(row: unknown): ServedModel | undefined {
+  if (typeof row !== 'object' || row === null) return undefined;
   const bag = row as Record<string, unknown>;
-  const id = readString(bag, 'id');
-  if (id === '') return null;
-  const label = readString(bag, 'display_name');
-  const description = readString(bag, 'description');
-  const source = readString(bag, 'source');
+  const id = trimmedField(bag.id);
+  if (id === '') return undefined;
+  const label = trimmedField(bag.display_name);
+  const description = trimmedField(bag.description);
+  const source = trimmedField(bag.source);
   return {
     id,
     ...(label === '' ? {} : { label }),
@@ -80,18 +81,22 @@ function toServedModel(row: unknown): ServedModel | null {
   };
 }
 
+/** The catalog rows → the served models. A row without a usable id is
+ *  not a model: it is dropped, and the count of what was dropped rides
+ *  the answer (a short catalog must be distinguishable from a whole
+ *  one). */
 export function servedModels(payload: unknown): { models: ServedModel[]; dropped: number } {
   const body = (payload ?? {}) as CatalogPayload;
   const rows = Array.isArray(body.data) ? body.data : [];
   const models: ServedModel[] = [];
   let dropped = 0;
   for (const row of rows) {
-    const model = toServedModel(row);
-    if (model === null) {
+    const model = servedRow(row);
+    if (model === undefined) {
       dropped++;
-    } else {
-      models.push(model);
+      continue;
     }
+    models.push(model);
   }
   return { models, dropped };
 }
