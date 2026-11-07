@@ -1205,7 +1205,7 @@ class LiveTurn extends TagPump {
   private readonly emittedBlocks: OutBlock[] = [];
   stopReason = 'end_turn';
 
-  private readonly ping?: NodeJS.Timeout;
+  private ping?: NodeJS.Timeout;
 
   constructor(
     private readonly res: ServerResponse,
@@ -1217,8 +1217,24 @@ class LiveTurn extends TagPump {
   ) {
     super(tools);
     if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs);
+      this.ping = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          sse(res, 'ping', { type: 'ping' });
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
       this.ping.unref();
+      res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
     }
     sse(res, 'message_start', messageStartEvent(model, inputTokens));
   }
@@ -2591,6 +2607,8 @@ class RespLive extends TagPump {
    *  client saw; settle reads it to flag the conversation divergent. */
   capped = false;
 
+  private ping?: NodeJS.Timeout;
+
   constructor(
     private readonly res: ServerResponse,
     private readonly respId: string,
@@ -2598,9 +2616,30 @@ class RespLive extends TagPump {
     private readonly inputTokens: number,
     private readonly store: boolean,
     tools = true,
-    private readonly cap?: number
+    private readonly cap?: number,
+    pingMs?: number
   ) {
     super(tools);
+    if (pingMs !== undefined && pingMs > 0) {
+      this.ping = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
+      this.ping.unref();
+      res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
+    }
     sse(res, 'response.created', {
       type: 'response.created',
       response: this.respObj('in_progress'),
@@ -2749,6 +2788,10 @@ class RespLive extends TagPump {
    *  The message item carries the same status: 'incomplete' on a
    *  cancelled turn would read as a token cap, not the cancel it was. */
   finish(status: string, usageOut: number, reason?: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     const st = this.capped ? 'incomplete' : status;
     this.closeItem(st);
@@ -2765,6 +2808,10 @@ class RespLive extends TagPump {
   }
 
   fail(type: string, message: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     sse(this.res, 'error', { type: 'error', code: type, message });
   }
@@ -3114,7 +3161,8 @@ function respStreamOpener(
       inputTokens,
       d.store,
       d.tools,
-      capCharsOf(rreq.max_output_tokens)
+      capCharsOf(rreq.max_output_tokens),
+      lane.cfg.keepaliveMs ?? 10_000
     );
     d.set(live);
     return live.onUpdate;
@@ -3528,6 +3576,8 @@ class ChatLive extends TagPump {
    *  client saw; settle reads it to flag the conversation divergent. */
   capped = false;
 
+  private ping?: NodeJS.Timeout;
+
   constructor(
     private readonly res: ServerResponse,
     private readonly id: string,
@@ -3535,9 +3585,30 @@ class ChatLive extends TagPump {
     private readonly created: number,
     tools = true,
     private readonly cap?: number,
-    private readonly stops?: StopFilter
+    private readonly stops?: StopFilter,
+    pingMs?: number
   ) {
     super(tools);
+    if (pingMs !== undefined && pingMs > 0) {
+      this.ping = setInterval(() => {
+        if (this.res.writableEnded || this.res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          this.res.write(': ping\n\n');
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
+      this.ping.unref();
+      this.res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
+    }
   }
 
   private ev(delta: Record<string, unknown>, finish: string | null = null): void {
@@ -3604,6 +3675,10 @@ class ChatLive extends TagPump {
    *  held tail flushes through the pump first — a non-marker tail is
    *  real content the wire still owes the client. */
   finish(stopReason: string, usage?: Record<string, unknown>): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     if (this.stops !== undefined) this.feed(this.stops.flush());
     this.drainAll();
     this.head();
@@ -3629,6 +3704,10 @@ class ChatLive extends TagPump {
   }
 
   fail(type: string, message: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     this.res.write(`data: ${JSON.stringify({ error: { message, type } })}\n\n`);
     this.res.write('data: [DONE]\n\n');
@@ -3755,7 +3834,8 @@ async function chatCompletions(
                 created,
                 tools,
                 capCharsOf(creq.max_completion_tokens ?? creq.max_tokens),
-                stops
+                stops,
+                lane.cfg.keepaliveMs ?? 10_000
               );
               return live.onUpdate;
             }
