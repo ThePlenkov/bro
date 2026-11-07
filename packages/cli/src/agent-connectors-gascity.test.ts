@@ -614,7 +614,23 @@ describe('gascity connector', () => {
       const { spawnSync } = await import('node:child_process');
       const { mkdirSync, writeFileSync } = await import('node:fs');
       const { join } = await import('node:path');
-      const v = spawnSync('gc', ['--version'], { encoding: 'utf8' });
+      // every probe is bounded — a hung real gc must fail the check,
+      // never stall the suite without a verdict
+      const GC_TIMEOUT = 15_000;
+      // a probe counts as responding when stdout parses as the expected
+      // document — a substring match could hide in an error dump and
+      // misclassify a malformed response as valid
+      const jsonHas = (out: string, key: string): boolean => {
+        try {
+          const doc: unknown = JSON.parse(out);
+          return (
+            Array.isArray(doc) || (typeof doc === 'object' && doc !== null && key in doc)
+          );
+        } catch {
+          return false;
+        }
+      };
+      const v = spawnSync('gc', ['--version'], { encoding: 'utf8', timeout: GC_TIMEOUT });
       assert.equal(v.status, 0, 'gc --version must succeed');
       const version = (v.stdout || v.stderr || '').trim();
       assert.ok(version.length > 0);
@@ -630,7 +646,7 @@ describe('gascity connector', () => {
       const checks: Array<{ name: string; ok: boolean; detail?: string; stdout?: string }> = [];
 
       // Check basic help/commands exist
-      const help = spawnSync('gc', ['--help'], { encoding: 'utf8' });
+      const help = spawnSync('gc', ['--help'], { encoding: 'utf8', timeout: GC_TIMEOUT });
       checks.push({
         name: 'gc --help',
         ok: help.status === 0,
@@ -638,26 +654,35 @@ describe('gascity connector', () => {
       });
 
       // Try to get supervisor status if supported
-      const sup = spawnSync('gc', ['supervisor', 'status', '--json'], { encoding: 'utf8' });
+      const sup = spawnSync('gc', ['supervisor', 'status', '--json'], {
+        encoding: 'utf8',
+        timeout: GC_TIMEOUT,
+      });
       checks.push({
         name: 'gc supervisor status --json',
-        ok: sup.status === 0 || (sup.stdout || '').includes('schema_version'),
+        ok: sup.status === 0 || jsonHas(sup.stdout || '', 'schema_version'),
         stdout: (sup.stdout || sup.stderr || '').slice(0, 200),
       });
 
       // Try session list
-      const slist = spawnSync('gc', ['session', 'list', '--json'], { encoding: 'utf8' });
+      const slist = spawnSync('gc', ['session', 'list', '--json'], {
+        encoding: 'utf8',
+        timeout: GC_TIMEOUT,
+      });
       checks.push({
         name: 'gc session list --json',
-        ok: slist.status === 0 || (slist.stdout || '').includes('sessions'),
+        ok: slist.status === 0 || jsonHas(slist.stdout || '', 'sessions'),
         stdout: (slist.stdout || slist.stderr || '').slice(0, 200),
       });
 
       // Try rig list
-      const rlist = spawnSync('gc', ['rig', 'list', '--json'], { encoding: 'utf8' });
+      const rlist = spawnSync('gc', ['rig', 'list', '--json'], {
+        encoding: 'utf8',
+        timeout: GC_TIMEOUT,
+      });
       checks.push({
         name: 'gc rig list --json',
-        ok: rlist.status === 0 || (rlist.stdout || '').includes('rigs'),
+        ok: rlist.status === 0 || jsonHas(rlist.stdout || '', 'rigs'),
         stdout: (rlist.stdout || rlist.stderr || '').slice(0, 200),
       });
 
@@ -676,11 +701,15 @@ describe('gascity connector', () => {
       console.log(`GASCITY_REAL_CONFORMANCE_EVIDENCE=${evidencePath}`);
       console.log(JSON.stringify(evidence));
 
-      // Require at least version captured and basic commands responsive as fixtures
+      // Version captured and EVERY probed command responsive — the
+      // recorded evidence computes passed as every(); asserting some()
+      // would let green CI ship evidence that records passed:false
       assert.ok(version.length > 0, 'gc version must be recorded');
       assert.ok(
-        checks.some(c => c.ok),
-        'real gc must respond to at least one probed command (conformance fixture)'
+        checks.every(c => c.ok),
+        `real gc must pass every probed command (conformance evidence): ${JSON.stringify(
+          checks.filter(c => !c.ok).map(c => c.name)
+        )}`
       );
     }
   );

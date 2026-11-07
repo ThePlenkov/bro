@@ -4803,7 +4803,20 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // spawn → registry patch, all under the agents.json lock — and the
       // molecule pin's bd show resolves before it, off the critical path
       const mol = stepParent(spec.beadsDir, spec.molStep);
-      return withAgentRegistryLock(dir, () => {
+      // gc round-trips are blocking subprocesses — they pay BEFORE the
+      // registry lock whenever the step already owns an entry, so the
+      // critical section never serializes concurrent spawns/status on gc
+      // latency. An entry appearing between this read and the lock is
+      // the rare fallback: isLive still probes inside the section.
+      const priorEntry = readAgentRegistry(dir)[spec.molStep];
+      const preSessions = priorEntry === undefined ? undefined : listGcSessions(city);
+      const preSupervisor =
+        priorEntry !== undefined &&
+        preSessions?.sessions !== undefined &&
+        gcSessionFor(priorEntry, spec.molStep, preSessions.sessions) === undefined
+          ? { probed: true as const, up: gcSupervisorRunning() }
+          : undefined;
+      const spawned = withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep];
         const { agentId, promptFile, lease, reservation, crossKindReservations } = prepareSpawn(
           dir,
@@ -4812,7 +4825,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           spec,
           {
             isLive: e => {
-              const { sessions, err } = listGcSessions(city);
+              const { sessions, err } = preSessions ?? listGcSessions(city);
               if (sessions === undefined) {
                 // an unverifiable liveness probe must not let a duplicate
                 // spawn run alongside a worker that may still be alive
@@ -4826,7 +4839,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
                 // session listing omitted the worker but supervisor liveness
                 // is indeterminate — cannot conclude lost/rebindable without
                 // a verifiably running supervisor (admission guarantee)
-                if (gcSupervisorRunning() !== true) {
+                const up =
+                  preSupervisor !== undefined ? preSupervisor.up : gcSupervisorRunning();
+                if (up !== true) {
                   throw new SpawnError(
                     'gc supervisor not running — agent liveness unknown',
                     'unavailable'
@@ -4873,10 +4888,12 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             ? err
             : new SpawnError(err instanceof Error ? err.message : String(err), 'unavailable');
         }
-        const spawned = patchAgentRegistry(dir, spec.molStep, { sessionId });
-        const { sessions } = listGcSessions(city);
-        return toInfo(spec.molStep, spawned, sessions ?? [], 'spawned');
+        return patchAgentRegistry(dir, spec.molStep, { sessionId });
       });
+      // the session list rides AFTER the lock — it must see the session
+      // just dispatched, and a gc round-trip never holds agents.json
+      const { sessions } = listGcSessions(city);
+      return toInfo(spec.molStep, spawned, sessions ?? [], 'spawned');
     },
 
     async list(): Promise<ListResult> {
