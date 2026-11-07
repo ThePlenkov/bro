@@ -28,7 +28,9 @@ export interface RouteTableLane extends ResolvedClass {
 }
 
 /** The health — the router's own ledger. A ledger that cannot be read
- *  is no wall at all: the decision degrades, the run continues. */
+ *  says NOTHING about the walls, and a caller that treats that silence
+ *  as "no walls" routes into a model that is walled. The `known` flag
+ *  rides the answer: the caller decides whether silence is fatal. */
 async function ledgerHealth(): Promise<{ snapshot: HealthSnapshot; known: boolean }> {
   const handle = openStore(routerStorePath());
   if (!handle.ok) {
@@ -102,7 +104,18 @@ export async function routeTableLane(opts: {
     );
   }
   assertServed(table, file, opts.served ?? {});
-  const { snapshot } = await ledgerHealth();
+  const { snapshot, known } = await ledgerHealth();
+  if (!known) {
+    // the table's walls are the health ledger's: a ledger that cannot
+    // be read is not a ledger without walls — it is no answer at all,
+    // and routing as if there were no walls would walk straight into a
+    // walled model
+    throw new SpawnError(
+      'the router health ledger could not be read — the route table decides with the walls it can see, ' +
+        'and a wall nobody can see is not a wall',
+      'config'
+    );
+  }
   const decision = resolveRoute(table, taskShape(opts), snapshot);
   const route = decision.route;
   if (route === undefined) {
