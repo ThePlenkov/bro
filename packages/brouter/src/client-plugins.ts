@@ -9,15 +9,16 @@
  * builds, the outcome it reports. A plugin that does both in one closure
  * is a plugin whose complexity nobody can name.
  */
-import { definePlugin, type CommandPlugin } from '@broject/command';
+import { type CommandPlugin, definePlugin } from '@broject/command';
 import { explainSlicesOrExit, flag, positionals, renderExplanation } from '@broject/core';
 import { runAcpFacade } from './acp.ts';
 import { runAsk } from './ask.ts';
-import { runClient } from './commands.ts';
 import type { ClientOutcome, ClientRequest } from './commands.ts';
-import { BOOL_FLAGS, VALUE_FLAGS, endpointFor, type RouterPolicy } from './policy.ts';
+import { runClient } from './commands.ts';
+import { BOOL_FLAGS, endpointFor, type RouterPolicy, VALUE_FLAGS } from './policy.ts';
 import { CLIENTS } from './registry.ts';
 import { routeTablePath } from './routes-cmd.ts';
+import { formatSettingsDiff } from './settings-diff.ts';
 
 /** The lane flags every agent command reads — the provider, the model and
  *  the budget. */
@@ -107,11 +108,20 @@ function printsBlock(input: { argv: string[]; written?: string }): boolean {
   return input.written === undefined && !input.argv.includes('--wire');
 }
 
-/** What the command says after the run — the write, the wire, the block. */
+/** What the command says after the run — the change, the wire, the block.
+ *
+ *  The change is said FIRST: the dry-run shows what the write would do
+ *  before anything lands, and the write says the same thing after it
+ *  did. With `--json` the machine shape is the block alone. */
 function reportClient(input: { argv: string[]; outcome: ClientOutcome }): void {
   const outcome = input.outcome;
-  if (outcome.written !== undefined) {
-    console.log(`wrote ${outcome.models.length} model row(s) → ${outcome.written}`);
+  if (!input.argv.includes('--json')) {
+    if (outcome.written === undefined) {
+      console.log('dry run — nothing written');
+    } else {
+      console.log(`wrote ${outcome.models.length} model row(s) → ${outcome.written}`);
+    }
+    console.log(formatSettingsDiff(outcome.path, outcome.changes));
   }
   if (input.argv.includes('--wire')) {
     console.log(JSON.stringify(outcome.wiring, null, 2));
