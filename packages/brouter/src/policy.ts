@@ -55,5 +55,7 @@ export function defaultEndpoint(argv: string[]): RouterEndpoint {
 /** The endpoint a host's policy answers with — the router's own by default. */
 export function endpointFor(policy: RouterPolicy): (argv: string[]) => RouterEndpoint {
   return (argv: string[]): RouterEndpoint =>
-    policy.endpoint ? policy.endpoint(argv) : defaultEndpoint(argv);
+    // the policy's own endpoint, or the router's: the hook is either
+    // REGISTERED or it is not — a truthiness test would say otherwise
+    policy.endpoint === undefined ? defaultEndpoint(argv) : policy.endpoint(argv);
 }
