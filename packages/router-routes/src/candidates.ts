@@ -46,14 +46,30 @@ const FIELDS = ['type', 'complexity', 'priority'] as const;
 /** One match field — the task's shape, as the table spells it. */
 type Field = (typeof FIELDS)[number];
 
-/** The value a route pins on a field — undefined when it pins nothing. */
+/** The value a route pins on a field — undefined when it pins nothing.
+ *  The fields are a closed set, so the read is a literal per field — no
+ *  dynamic index, nothing to reach into a prototype with. */
 function pinned(route: Route, field: Field): string | undefined {
-  return route.match[field];
+  switch (field) {
+    case 'type':
+      return route.match.type;
+    case 'complexity':
+      return route.match.complexity;
+    case 'priority':
+      return route.match.priority;
+  }
 }
 
 /** The value the task carries on a field. */
 function carried(task: RouteTask, field: Field): string | undefined {
-  return task[field];
+  switch (field) {
+    case 'type':
+      return task.type;
+    case 'complexity':
+      return task.complexity;
+    case 'priority':
+      return task.priority;
+  }
 }
 
 /** The field's fit — the route pins it AND the task carries the same
@@ -76,11 +92,11 @@ function fits(route: Route, task: RouteTask, field: Field): string | undefined {
  */
 function conflict(route: Route, task: RouteTask): string | undefined {
   for (const field of FIELDS) {
-    const want = route.match[field];
+    const want = pinned(route, field);
     if (want === undefined) {
       continue;
     }
-    const got = task[field];
+    const got = carried(task, field);
     if (got === undefined) {
       return `the task carries no ${field}`;
     }

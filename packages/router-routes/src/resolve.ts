@@ -58,7 +58,7 @@ export function resolveRoute(
   pick?: (candidates: RouteCandidate[]) => string | undefined
 ): RouteDecision {
   const set = candidates(table, task, health);
-  const first = set.candidates[0];
+  const first = set.candidates.at(0);
   if (first === undefined) {
     const why = set.rejected.map(r => `${r.route.name}: ${r.reason}`).join('; ');
     return {

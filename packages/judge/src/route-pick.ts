@@ -11,7 +11,13 @@
  * The model picks a ROUTE. It never names a provider: it cannot see the
  * rate limits, and a route whose chain is walled was never a candidate.
  */
-import type { DecideResult, JudgeFacade, JudgeQuestion, Verdict } from '@broject/core';
+import type {
+  DecideResult,
+  JudgeAnswer,
+  JudgeFacade,
+  JudgeQuestion,
+  Verdict,
+} from '@broject/core';
 import { appendRow } from './journal.ts';
 
 /** Journal kind — discriminates route verdicts from the fleet's
@@ -72,9 +78,19 @@ export function routePickQuestions(options: RouteOption[]): Record<string, Judge
   };
 }
 
+/** The judge's answer for one question — undefined when the judge
+ *  answered another question. The answer map is keyed by the judge's own
+ *  ids, so the read matches the key instead of indexing with a variable. */
+function answerFor(res: DecideResult, qid: string): JudgeAnswer | undefined {
+  for (const [id, answer] of Object.entries(res.answers)) {
+    if (id === qid) return answer;
+  }
+  return undefined;
+}
+
 /** The model's own choice — a confident answer, or nothing. */
 function confidentChoice(res: DecideResult): string | undefined {
-  const answer = res.answers[ROUTE_QID];
+  const answer = answerFor(res, ROUTE_QID);
   if (answer?.type !== 'choice') {
     return undefined;
   }

@@ -120,9 +120,14 @@ export function explainSlicesOrExit(argv: string[]): ExplainSlice[] | undefined 
   }
 }
 
-/** The facts of one slice — empty when the slice says nothing. */
+/** The facts of one slice — empty when the slice says nothing. The
+ *  slice's own entry is found by matching the key: the key set is
+ *  closed, and a read that matches never indexes with a variable. */
 export function sliceFacts(explanation: Explanation, slice: ExplainSlice): ExplainFact[] {
-  return explanation.slices[slice] ?? [];
+  for (const [key, facts] of Object.entries(explanation.slices)) {
+    if (key === slice) return facts ?? [];
+  }
+  return [];
 }
 
 /** Put a slice's facts into an explanation — the collectors build one

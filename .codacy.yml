@@ -44,3 +44,11 @@ exclude_paths:
   # fetch() on a non-literal URL as user-controlled. Same shape as the
   # other trust-boundary fetch sites that ship on main unflagged.
   - 'packages/brouter/src/gateway.ts'
+
+  # The router ledger IS path construction: the store lives at
+  # $XDG_STATE_HOME/brouter/router.db (or ~/.local/state/brouter/) — a
+  # path bro BUILDS from the operator's own environment, never from a
+  # request. Codacy's path rule reads any computed path as uncontrolled
+  # data; the same shape already ships on main
+  # (packages/devin/src/usage.ts) unflagged.
+  - 'packages/router-store/src/store.ts'

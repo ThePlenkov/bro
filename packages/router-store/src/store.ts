@@ -66,7 +66,12 @@ async function bestEffort(write: () => Promise<unknown>): Promise<boolean> {
   try {
     await write();
     return true;
-  } catch {
+  } catch (err) {
+    // the ledger is a record, not a gate — the write fails, the run does
+    // not. But a silent failure is a broken ledger nobody knows about.
+    console.error(
+      `router-store: the ledger write failed — ${err instanceof Error ? err.message : String(err)}`
+    );
     return false;
   }
 }
