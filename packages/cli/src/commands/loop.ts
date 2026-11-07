@@ -970,6 +970,10 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     if (wall !== undefined) {
       const untilMs = wall.until === undefined ? Number.NaN : Date.parse(wall.until);
       if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+        // clamp to the 10-year cap so a far-future reset never holds
+        // pushes indefinitely (bro-36bhc review)
+        const wakeCapMs = Date.now() + 10 * 365 * 24 * 60 * 60_000;
+        const capped = Math.min(untilMs, wakeCapMs);
         // the batch lane waits the reset out — the claims release so
         // the pick re-takes them when the wall lifts (or re-refuses
         // into the same hold if a fresh death re-forms it)
@@ -977,7 +981,7 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
           reopenBead(ctx, b.id);
         }
         say(ctx, `loop: ${wallText(wall)} — pushes hold until the reset`);
-        return { kind: 'hold', why: msg, untilMs };
+        return { kind: 'hold', why: msg, untilMs: capped };
       }
       // a wall with no advertised end is reported, not waited into —
       // park once, never churn (the convoy 'parked' verdict)
@@ -1631,6 +1635,16 @@ interface GateMember {
   updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
   fetchErrors: number;
+  /** Wall wait expiry (ms) — a rate_limited death carrying a parseable
+   *  resetAt arms this and the member waits instead of respawning
+   *  (bro-36bhc). Cleared on expiry/respawn. */
+  wallWaitUntil?: number;
+  /** Consecutive wall deaths on this member — drives the escalating
+   *  stale-reset floor. */
+  wallWaits?: number;
+  /** The work prompt the spawn wrote — retained so a wall expiry can
+   *  respawn the same work order without rebuilding it. */
+  prompt?: string;
 }
 
 /** The registry handle a pending member polls — `spawnedAt` is the
@@ -1814,18 +1828,28 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       since: Date.now(),
       rounds: 0,
       fetchErrors: 0,
+      prompt,
     };
     try {
       await spawnWorker(ctx, member, prompt, lane);
     } catch (err) {
       return settleSpawnRefusal(ctx, member, err);
     }
-    // custody transfers to the agent registry entry — claimStep landed
-    // the lead's claim under the spawn lock (bro-ho09d). The run
-    // record does NOT retire here (bro-wg896): re-stamped to the
-    // worker inside spawnWorker, it stays the check-in plane until the
-    // armed watch marker takes custody at the settle.
-    return { kind: 'member', member };
+    // settle a worker that already died before the push returns (e.g. a
+    // provider wall) so the hold can take effect before the next claim
+    // (bro-36bhc) — a still-running worker stays 'kept' and the member
+    // joins the gate as usual.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const verdict = await serviceWorker(ctx, member);
+    if (verdict === 'kept' || verdict === 'active') {
+      // custody transfers to the agent registry entry — claimStep landed
+      // the lead's claim under the spawn lock (bro-ho09d). The run
+      // record does NOT retire here (bro-wg896): re-stamped to the
+      // worker inside spawnWorker, it stays the check-in plane until the
+      // armed watch marker takes custody at the settle.
+      return { kind: 'member', member };
+    }
+    return { kind: 'done', result: verdict };
   }
   // no shared store to pin a claim/exit record against — the awaited
   // spawn keeps the serial semantics (documented fallback)
@@ -2019,6 +2043,32 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    // fix/rebase wall check (bro-36bhc): a rate_limited death with a
+    // reset defers the re-poll to the reset (round refunded — a wall
+    // death is not a repair attempt); quota/auth/reset-less parks.
+    const entry = entryReset(ctx, m.beads[0]!.id);
+    const cause = info?.cause ?? entry?.cause;
+    const resetAt = cause === 'rate_limited' ? (info?.resetAt ?? entry?.resetAt) : undefined;
+    const verdict = agentVerdict(ctx, m.beads, m.item.worktreeDir);
+    if (verdict !== undefined) {
+      return leave(m, verdict);
+    }
+    const wait = wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0);
+    if (wait !== undefined) {
+      m.wallWaitUntil = wait;
+      m.wallWaits = (m.wallWaits ?? 0) + 1;
+      // refund the round the dead worker paid
+      m.rounds = Math.max(0, m.rounds - 1);
+      return 'kept';
+    }
+    if (cause === 'quota' || cause === 'auth' || cause === 'rate_limited') {
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: worker ${w.agentId} ${cause} without a PR — worktree ${m.item.worktreeDir}`
+      );
+      return leave(m, 'parked');
+    }
     return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
@@ -2051,6 +2101,31 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   if (pr === null) {
     const entry = entryReset(ctx, m.beads[0]!.id);
     const cause = info?.cause ?? entry?.cause;
+    const resetAt = cause === 'rate_limited' ? (info?.resetAt ?? entry?.resetAt) : undefined;
+    // the agent's own verdict still outranks the wall (bro-36bhc)
+    const verdict = agentVerdict(ctx, m.beads, m.item.worktreeDir);
+    if (verdict !== undefined) {
+      return leave(m, verdict);
+    }
+    // a rate_limited death carrying a NEAR reset waits (auto-respawn)
+    // instead of parking; a far reset parks (deferred) so the run does
+    // not hold for hours — the operator wakes it when the wall lifts.
+    const resetMs =
+      resetAt !== undefined && Number.isFinite(Date.parse(resetAt))
+        ? Date.parse(resetAt)
+        : undefined;
+    const near =
+      resetMs !== undefined && (resetMs <= Date.now() || resetMs - Date.now() <= 15 * 60 * 1000);
+    const wait = near ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0) : undefined;
+    if (wait !== undefined) {
+      m.wallWaitUntil = wait;
+      m.wallWaits = (m.wallWaits ?? 0) + 1;
+      say(
+        ctx,
+        `loop: worker ${w.agentId} rate_limited${resetAt !== undefined ? ` til ${resetAt}` : ''} without a PR — waiting`
+      );
+      return 'kept';
+    }
     // exited deaths can still carry a wall cause (rate_limited whose
     // resetAt already passed at poll time reads 'exited', not 'blocked');
     // park those instead of reopening into the same wall (bro-36bhc).
@@ -2062,10 +2137,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       // reset-aware: only a future reset snoozes to it; a stale/missing
       // reset takes the flat cooldown so we never wake straight back
       // into the wall.
-      const rawReset =
-        cause === 'rate_limited' && state !== 'stopped'
-          ? (info?.resetAt ?? entry?.resetAt)
-          : undefined;
+      const rawReset = cause === 'rate_limited' && state !== 'stopped' ? resetAt : undefined;
       const resetMs =
         rawReset !== undefined &&
         Number.isFinite(Date.parse(rawReset)) &&
@@ -2134,6 +2206,38 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
  *  honest: worker exits land fast without dragging every gate into
  *  hot host polls, and a long worker never starves the stack. */
 async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
+  // a member sitting in a provider wall wait (bro-36bhc) — service the
+  // wait instead of the gate/worker. PR members re-poll at expiry;
+  // workerless members respawn the same work order.
+  if (m.wallWaitUntil !== undefined) {
+    if (Date.now() < m.wallWaitUntil) {
+      m.nextPollAt = m.wallWaitUntil;
+      return 'kept';
+    }
+    m.wallWaitUntil = undefined;
+    if (m.pr !== undefined) {
+      return 'active';
+    }
+    if (m.worker === undefined) {
+      try {
+        say(ctx, 'loop: respawn after wall');
+        await spawnWorker(ctx, m, m.prompt ?? '', m.lane);
+        return 'kept';
+      } catch (err) {
+        say(ctx, `loop: respawn failed — ${err instanceof Error ? err.message : String(err)}`);
+        const out = settleSpawnRefusal(ctx, m, err);
+        if (out.kind === 'hold') {
+          m.wallWaitUntil = out.untilMs ?? Date.now() + ctx.intervalS * 1000;
+          m.wallWaits = (m.wallWaits ?? 0) + 1;
+          return 'kept';
+        }
+        if (out.kind === 'done') {
+          return out.result;
+        }
+        return 'kept';
+      }
+    }
+  }
   if (m.nextPollAt !== undefined && Date.now() < m.nextPollAt) {
     return 'kept';
   }
@@ -3416,6 +3520,9 @@ interface QueueState {
   /** The disk floor's transition edge — the held/resumed lines say
    *  once per episode, not once per tick (spec bro-2spp7). */
   diskHeld: boolean;
+  /** A member sitting in a wall wait holds pushes — the transition
+   *  edge for the once-per-episode line (bro-36bhc). */
+  wallHeld: boolean;
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
@@ -3539,8 +3646,38 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
-  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
+  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen) {
     return false;
+  }
+  if (Date.now() < q.pushHoldUntil) {
+    // a held push still owes the drain verdict — an empty queue behind
+    // the wall reports done instead of idling until the reset
+    if (queueDrained(ctx, scope, q.seen)) {
+      q.drained = true;
+    }
+    return false;
+  }
+  // a member sitting in a provider wall wait holds pushes (bro-36bhc) —
+  // claiming the next bead into the same wall burns its spawn. The drain
+  // check still runs: an empty queue behind the wall owes the done
+  // verdict, not an infinite hold.
+  const wallWaiters = q.stack.filter(m => m.wallWaitUntil !== undefined);
+  if (wallWaiters.length > 0) {
+    if (queueDrained(ctx, scope, q.seen)) {
+      q.drained = true;
+      return false;
+    }
+    const until = Math.min(...wallWaiters.map(m => m.wallWaitUntil as number));
+    if (!q.wallHeld) {
+      q.wallHeld = true;
+      say(ctx, 'loop: rate wall — pushes hold until the reset');
+    }
+    q.pushHoldUntil = Math.max(q.pushHoldUntil, until);
+    return false;
+  }
+  if (q.wallHeld) {
+    q.wallHeld = false;
+    say(ctx, 'loop: wall cleared — pushes resume');
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
@@ -3680,6 +3817,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
     pushHoldUntil: 0,
     diskHeld: false,
     diskProbeWarned: new Set(),
+    wallHeld: false,
   };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -3701,7 +3839,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find(m => m.worker !== undefined);
-        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle';
+        const idle = q.wallHeld ? 'idle (wall wait)' : q.diskHeld ? 'idle (disk floor)' : 'idle';
         ctx.stage =
           pending === undefined
             ? idle

@@ -155,8 +155,8 @@ knobs below.
   attempt burned waiting), and a `rate_limited`/`quota` wall derived at
   spawn admission either holds pushes until the reset or parks the
   clump when no reset was reported. The shared exit-cause taxonomy —
-  the same contract convoy supervision runs — decides; the flat
-  cooldown only covers walls with no advertised end.
+  the same contract convoy supervision runs — decides. Only a `rate_limited` reset
+  at settlement is waited on; quota, reset-less, and stopped exits keep the flat cooldown.
 - **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
   many gates sit on the stack; a full stack services gates only until a
   merge frees a slot. Independent branches drift against shared files
