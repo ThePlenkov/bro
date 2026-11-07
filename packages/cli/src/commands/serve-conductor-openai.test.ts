@@ -208,7 +208,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     }
   })
 
-  test('a tool_call turn cancelled backend-side replays the delivered status', async () => {
+  test('a tool_call turn cancelled backend-side answers the delivered status', async () => {
     // tool_use outranks the backend reason on the wire — the record must
     // store that verdict or the replay answers 'cancelled' for a turn the
     // client saw complete
@@ -229,7 +229,10 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.equal(((await t1.json()) as { status: string }).status, 'completed')
       const t2 = await call()
       assert.equal(((await t2.json()) as { status: string }).status, 'completed')
-      assert.equal(fake.prompts.length, 1)
+      // a tool answer is never replayed — the repeat asks the agent
+      // again, so the client never executes a recorded call twice
+      // (bro-sy4q3)
+      assert.equal(fake.prompts.length, 2)
     } finally {
       await close()
     }

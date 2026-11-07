@@ -21,11 +21,29 @@
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { estimateTokens, gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
+import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
+import {
+  estimateTokens,
+  gitCommonDir,
+  isIntegerIndexKey,
+  loadConfig,
+  reserveSessionStart,
+  sessionCapViews,
+} from '@broject/core';
+import type {
+  AcpContentBlock,
+  AcpPeer,
+  AcpRetainedSession,
+  AcpTerminals,
+  OtelCtx,
+  PooledTurnOpts,
+  ProviderWireOpts,
+  Toolish,
+} from '@broject/providers';
 import {
   acpOpen,
   acpPooledTurn,
@@ -36,21 +54,11 @@ import {
   otelSpan,
   toolPayload,
 } from '@broject/providers';
-import { randomUUID } from 'node:crypto';
-import { reserveSessionStart, sessionCapViews } from '@broject/core';
 import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
-import type { AcpTerminals, Toolish } from '@broject/providers';
-import type {
-  AcpContentBlock,
-  AcpPeer,
-  AcpRetainedSession,
-  OtelCtx,
-  PooledTurnOpts,
-  ProviderWireOpts,
-} from '@broject/providers';
 import { peerAttrs } from './peer.ts';
-import { catalogModels, type CatalogModel } from './providers.ts';
-import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
+import { type CatalogModel, catalogModels } from './providers.ts';
+import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
+import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -379,6 +387,17 @@ function toolContract(
     ...(must !== undefined ? [must] : []),
     '</tools>',
   ].join('\n');
+}
+
+/** The request's tool choice → the contract the BRIDGE honours: may a
+ *  call be bridged at all, and which tool did the request name? The
+ *  contract TEXT above is the agent's half; this is the client's. */
+function clientToolContract(choice: MessagesRequest['tool_choice']): ToolContract {
+  if (choice?.type === 'none') return { allowed: false };
+  if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    return { allowed: true, name: choice.name };
+  }
+  return { allowed: true };
 }
 
 /** tool_choice → the MUST clause of the injected contract — the one
@@ -1011,6 +1030,13 @@ function emitBlocks(res: ServerResponse, view: ReplyView): void {
 const OPEN_TAG = '<tool_call>';
 const CLOSE_TAG = '</tool_call>';
 
+/** The markup's payload — `<` escaped, so a value that carries the tag
+ *  cannot close the call early and truncate the JSON the parser reads.
+ *  JSON's own escape keeps the payload valid. */
+function callPayload(name: string, input: Record<string, unknown>): string {
+  return JSON.stringify({ name, input }).replaceAll('<', '\\u003c');
+}
+
 /** Narration label — a tool_call title can carry a whole command
  *  string; first line only, capped. */
 function shortLabel(s: string): string {
@@ -1034,14 +1060,27 @@ function tagSuffix(s: string, tag: string): number {
  *  is swallowed (generation stops — the wire's own semantics). */
 class StopFilter {
   private tail = '';
-  private out = '';
+  /** The turn's text and its tool calls, in the order they arrived — the
+   *  buffered leg's answer reads them like the agent's (bro-sy4q3), and a
+   *  call keeps its place between the words. */
+  private readonly chunks: string[] = [];
+  /** the turn's text landed — the settle path does not feed it twice */
+  sawText = false;
   hit: string | undefined;
 
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
+    // the input ARRIVED — the turn's text landed, even when the cut holds
+    // it back as a stop-sequence prefix. The settle path must not feed it
+    // a second time: the text is already in the filter, held or emitted.
+    if (s !== '') {
+      this.sawText = true;
+    }
     const o = this.cut(s);
-    this.out += o;
+    if (o !== '') {
+      this.chunks.push(o);
+    }
     return o;
   }
 
@@ -1080,15 +1119,30 @@ class StopFilter {
   flush(): string {
     const t = this.hit === undefined ? this.tail : '';
     this.tail = '';
-    this.out += t;
+    if (t !== '') {
+      this.chunks.push(t);
+      this.sawText = true;
+    }
     return t;
+  }
+
+  /** The agent's own markup for a call the bridge made — it rides the
+   *  same order the text does. The text held back as a stop-sequence
+   *  prefix belongs BEFORE the call: it was the agent's, and the call
+   *  interrupted it. */
+  addCall(markup: string): void {
+    if (this.tail !== '') {
+      this.chunks.push(this.tail);
+      this.tail = '';
+    }
+    this.chunks.push(markup);
   }
 
   /** Everything the filter let through — byte-identical to what the
    *  client saw, whatever the delta boundaries were. The recorded
    *  reply comes from this, never from a re-run of the raw text. */
   get emitted(): string {
-    return this.out;
+    return this.chunks.join('');
   }
 }
 
@@ -1198,6 +1252,9 @@ class LiveTurn extends TagPump {
    *  text: a narration landing inside a held <tool_call> corrupts the
    *  flat markup and the replay loses the call (bro-cfwc1). */
   private readonly emittedBlocks: OutBlock[] = [];
+  /** The client's tools — the bridge's vocabulary. Empty when the client
+   *  offered none: then the agent's tools stay narrated edges. */
+  private readonly clientTools: ClientTool[];
   stopReason = 'end_turn';
 
   private ping?: NodeJS.Timeout;
@@ -1208,9 +1265,12 @@ class LiveTurn extends TagPump {
     inputTokens: number,
     private readonly stops: StopFilter | undefined,
     pingMs?: number,
-    tools = true
+    tools = true,
+    clientTools: ClientTool[] = [],
+    private readonly contract: ToolContract = OPEN_CONTRACT
   ) {
     super(tools);
+    this.clientTools = clientTools;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
         if (res.writableEnded || res.destroyed) {
@@ -1240,6 +1300,30 @@ class LiveTurn extends TagPump {
       this.feed(this.stops?.feed(u.content.text) ?? u.content.text);
       return;
     }
+    // the agent's tool call, in the CLIENT's vocabulary: the client
+    // executes it, the wire stops at tool_use (bro-sy4q3)
+    // a stop_sequence hit ends the turn: a call that arrives after the cut
+    // is not bridged — the client must not run what the cut withheld
+    const bridged =
+      this.stops?.hit === undefined ? clientCall(u, this.clientTools, this.contract) : undefined;
+    if (bridged !== undefined) {
+      if (bridged.toolCallId !== undefined) {
+        // a repeated tool_call must not reach the client twice — the
+        // client would run the call again
+        if (this.bridged.has(bridged.toolCallId)) {
+          return;
+        }
+        this.bridged.add(bridged.toolCallId);
+        // the call is DONE from the client's view — the agent's own
+        // terminal edge must not narrate it a second time
+        this.toolDone.add(bridged.toolCallId);
+      }
+      // the text that came before it drains first — a call never lands
+      // inside a held tag
+      this.drain(false);
+      this.call(bridged.name, bridged.input);
+      return;
+    }
     const line = this.narrateTool(u);
     if (line !== undefined) {
       // pending may hold a held-back partial-tag tail — flush what
@@ -1260,6 +1344,9 @@ class LiveTurn extends TagPump {
 
   private readonly toolStarted = new Set<string>();
   private readonly toolDone = new Set<string>();
+  /** The calls the bridge already sent to the client — a repeated
+   *  tool_call must not become a second tool_use the client runs again. */
+  private readonly bridged = new Set<string>();
   private readonly toolLabels = new Map<string, string>();
 
   /** Structured twin of the narration edges (bro-btccj): a named
@@ -1623,6 +1710,26 @@ interface TurnEnv {
   openStream?: (inputTokens: number) => PooledTurnOpts['onUpdate'];
 }
 
+/** A resend pinning a DIFFERENT model — the session re-pins and the
+ *  recorded answer stays honest (it was generated under the old pin
+ *  either way). */
+async function repinModel(env: TurnEnv, cand: ConvSession): Promise<void> {
+  if (env.requestModel === undefined || env.requestModel === cand.requestModel) return;
+  try {
+    await cand.live.repin(env.requestModel, env.deadline);
+    cand.requestModel = env.requestModel;
+  } catch (err) {
+    evict(env.sessions, env.key, cand);
+    throw err;
+  }
+}
+
+/** The answer carries a tool call — the client would execute it a
+ *  second time (bro-sy4q3). */
+function toolAnswer(blocks: OutBlock[]): boolean {
+  return blocks.some(b => b.type === 'tool_use');
+}
+
 /** A proven continuation — the delta turns only; an empty tail is a
  *  replay (with a repin if the resend pins a different model). */
 async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
@@ -1637,19 +1744,23 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     tail = [{ role: 'user', content: env.prefix }, ...tail];
   }
   if (tail.length === 0) {
+    // a tool answer is NEVER replayed — the client would execute the
+    // call a second time; the retry asks the agent afresh (bro-sy4q3)
+    if (toolAnswer(cand.lastReply.blocks)) {
+      // a CHAINED retry cannot be answered afresh: evicting the
+      // predecessor would break the chain the client's next request rides
+      // on — it would find the predecessor gone. Fail loudly instead.
+      if (env.chained === true) {
+        throw new ChainBroken('previous_response_id carries a tool answer — the retry is empty');
+      }
+      evict(env.sessions, env.key, cand);
+      return freshTurn(env, false);
+    }
     // a pure retry — nothing new for the session; the caller replays
     // the recorded reply. A resend pinning a DIFFERENT model is not a
     // replay — the session re-pins and the recorded answer stays
     // honest (it was generated under the old pin either way).
-    if (env.requestModel !== undefined && env.requestModel !== cand.requestModel) {
-      try {
-        await cand.live.repin(env.requestModel, env.deadline);
-        cand.requestModel = env.requestModel;
-      } catch (err) {
-        evict(env.sessions, env.key, cand);
-        throw err;
-      }
-    }
+    await repinModel(env, cand);
     cand.lastSeen = Date.now();
     return { reused: true, inputTokens: 0, replay: true, conv: cand };
   }
@@ -2212,7 +2323,34 @@ function messagesStreamOpener(
   stops: StopFilter,
   set: (live: LiveTurn) => void
 ): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
-  if (body.stream === false) return undefined;
+  const tools = clientTools(body.tools);
+  if (body.stream === false) {
+    // the buffered leg writes no stream — it collects the calls the
+    // bridge made, in the agent's own markup, so the answer parses
+    // them like the agent's (bro-sy4q3)
+    const contract = clientToolContract(body.tool_choice);
+    // the bridged ids — a repeated tool_call must not reach the client
+    // twice: the client would run the call again
+    const bridged = new Set<string>();
+    return () => u => {
+      if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+        // the text lands WITH the calls, in the order they arrived — a
+        // call keeps its place between the words
+        stops.feed(u.content.text);
+        return;
+      }
+      // a stop_sequence hit ends the turn: a call that arrives after the
+      // cut is not part of the answer
+      if (stops.hit !== undefined) return;
+      const call = clientCall(u, tools, contract);
+      if (call === undefined) return;
+      if (call.toolCallId !== undefined) {
+        if (bridged.has(call.toolCallId)) return;
+        bridged.add(call.toolCallId);
+      }
+      stops.addCall(`${OPEN_TAG}${callPayload(call.name, call.input)}${CLOSE_TAG}`);
+    };
+  }
   return inputTokens => {
     res.writeHead(200, {
       'content-type': 'text/event-stream',
@@ -2229,7 +2367,9 @@ function messagesStreamOpener(
       inputTokens,
       stops,
       lane.cfg.keepaliveMs ?? 10_000,
-      body.tool_choice?.type !== 'none'
+      body.tool_choice?.type !== 'none',
+      tools,
+      clientToolContract(body.tool_choice)
     );
     set(live);
     return live.onUpdate;
@@ -2295,8 +2435,9 @@ async function messages(
   // let through — byte-identical to the client's own view
   live?.finish(canonicalStopReason(reply.stopReason));
   if (live === undefined) {
-    // the buffered leg's cut lands post-hoc through the same filter
-    stops.feed(reply.text);
+    // the buffered leg's cut lands post-hoc through the same filter —
+    // unless its text already landed with the calls, in order
+    if (!stops.sawText) stops.feed(reply.text);
     stops.flush();
   }
   const view: ReplyView = {
@@ -2906,7 +3047,9 @@ function sseHead(res: ServerResponse): void {
 
 /** Estimated tokens over recorded blocks — replay output accounting. */
 const blocksTokens = (blocks: OutBlock[]): number =>
-  estimateTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
+  estimateTokens(
+    blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join('')
+  );
 
 /** Chain ids a listener can afford to remember — LRU-trimmed like
  *  the sessions map; entries pointing at dead sessions prune away. */

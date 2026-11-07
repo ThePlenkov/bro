@@ -39,6 +39,36 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }));
 
+/** The client's own tool — Claude Code's Bash, with the schema the
+ *  request carries. */
+const BASH_TOOL = [
+  {
+    name: 'Bash',
+    description: 'run a command',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' }, description: { type: 'string' } },
+      required: ['command'],
+    },
+  },
+];
+
+/** An agent that CALLS a tool and then answers — the call in ACP's
+ *  shape (the bridge's input), the answer in text. */
+function agentCallingTool(toolCallId: string) {
+  const call: SessionUpdate = {
+    sessionUpdate: 'tool_call',
+    toolCallId,
+    title: 'Ran ls',
+    kind: 'execute',
+    rawInput: { command: 'ls -la' },
+  } as SessionUpdate;
+  return fakeAcpAgent({
+    updates: [call, ...chunks('done')],
+    configOptions: [MODEL_OPTION],
+  });
+}
+
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post() for repeated /v1/messages sends. */
 async function boot(
@@ -571,6 +601,84 @@ describe('serve /v1/* — the conductor plane', () => {
         d: '/tmp',
       });
       assert.equal(stopReason(ev), 'tool_use');
+    } finally {
+      await close();
+    }
+  });
+
+  // bro-sy4q3 — the agent's tool call arrives in ACP's shape; the client
+  // executes in its own. The bridge translates by CAPABILITY: the agent
+  // calls "execute", the client offers "Bash".
+  test("the agent's tool call becomes the client's tool_use", async () => {
+    const fake = agentCallingTool('exec:0#1');
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+      tools: BASH_TOOL,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const start = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.ok(start, 'the tool_use block is on the wire');
+      assert.equal((start.data.content_block as { name: string }).name, 'Bash');
+      const delta = ev.find(
+        e =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      );
+      assert.ok(delta, 'the tool_use carries its input');
+      assert.deepEqual(JSON.parse((delta.data.delta as { partial_json: string }).partial_json), {
+        command: 'ls -la',
+      });
+      assert.equal(stopReason(ev), 'tool_use');
+      // the agent's own edge is NOT narrated — the client's tool_use is it
+      assert.deepEqual(textDeltas(ev), ['done']);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a call the client cannot run stays a narrated edge', async () => {
+    const fake = agentCallingTool('exec:0#2');
+    // no tools offered — the client has nothing that can run the call
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const tu = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.equal(tu, undefined, 'no tool_use — the client cannot run it');
+      assert.ok(textDeltas(ev).join('').includes('Ran ls'), 'the edge stays narrated');
+      assert.equal(stopReason(ev), 'end_turn');
+    } finally {
+      await close();
+    }
+  });
+
+  test("the buffered answer carries the client's tool_use too", async () => {
+    const fake = agentCallingTool('exec:0#3');
+    const { r, close } = await postMessages(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    try {
+      const body = (await r.json()) as {
+        content: { type: string; name?: string; input?: unknown }[];
+      };
+      const tu = body.content.find(b => b.type === 'tool_use');
+      assert.ok(tu, 'the buffered answer carries the tool_use');
+      assert.equal(tu?.name, 'Bash');
+      assert.deepEqual(tu?.input, { command: 'ls -la' });
     } finally {
       await close();
     }
@@ -1261,7 +1369,10 @@ describe('serve /v1/* — the conductor plane', () => {
 
   // bro-cfwc1 — narration mid-tag corrupts a post-hoc re-parse of the
   // emitted text; the recorded reply must keep the wire's real shape.
-  test('a resend replays the tool_use a mid-tag narration left intact', async () => {
+  // bro-sy4q3 — a tool answer is never replayed: the resend asks the
+  // agent afresh, so the wire shows the live shape (the narration still
+  // outside the tag's markup).
+  test('a resend never replays a tool answer — the turn runs again', async () => {
     const fake = fakeAcpAgent({
       updates: [
         ...chunks('work <tool_ca'),
@@ -1288,22 +1399,22 @@ describe('serve /v1/* — the conductor plane', () => {
             (e.data.delta as { type: string }).type === 'input_json_delta'
         )
       );
-      // an identical resend replays the RECORDED reply — narration
-      // must not sit inside the unfinished tag's markup
+      // an identical resend is NOT answered from the record — the agent
+      // runs again, so the client never re-executes a recorded call
       const re = await sseEvents(await post(body));
       const tu = re.find(
         e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
       );
-      assert.ok(tu, 'the replay still carries the tool_use — not broken markup');
-      // the exact replayed text: narration in place, no markup shards —
-      // a mid-tag corruption splits the literal into <tool_ca…ll>, which
-      // a doesNotMatch on the full tag would evade
-      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end']);
+      assert.ok(tu, 'the fresh turn still carries the tool_use — not broken markup');
+      // the exact text: narration in place, no markup shards — a mid-tag
+      // corruption splits the literal into <tool_ca…ll>, which a
+      // doesNotMatch on the full tag would evade
+      assert.deepEqual(textDeltas(re), ['work ', '\n⏺ exec: ls\n', ' end']);
       assert.equal(stopReason(re), 'tool_use');
-      // one prompt total — the resend replayed, never re-ran the turn
-      assert.equal(fake.prompts.length, 1);
+      // two prompts — the resend ran the turn again, never replayed
+      assert.equal(fake.prompts.length, 2);
     } finally {
       await close();
     }
@@ -2583,4 +2694,142 @@ describe('serve /v1/* — one gateway, many providers', () => {
         await close();
       }
     })());
+});
+
+describe('serve /v1/* — the bridge keeps the answer honest', () => {
+  /** The agent's own tool call, in ACP's shape. */
+  const call = (id: string, command: string) =>
+    ({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title: 'Ran ls',
+      kind: 'execute',
+      rawInput: { command },
+    }) as SessionUpdate;
+
+  /** The answer's blocks — the shape the client reads. */
+  type Blocks = { type: string; text?: string; name?: string; input?: unknown }[];
+
+  /** One buffered turn over `updates` — the answer's blocks. */
+  async function buffered(
+    updates: SessionUpdate[],
+    body: Record<string, unknown>
+  ): Promise<Blocks> {
+    const fake = fakeAcpAgent({ updates, configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, body);
+    try {
+      return ((await r.json()) as { content: Blocks }).content;
+    } finally {
+      await close();
+    }
+  }
+
+  test('the buffered text is not fed twice — a held stop prefix lands once', async () => {
+    // "EN" is held back as the prefix of the stop sequence "END": the
+    // settle path must not feed the whole text a second time
+    const content = await buffered(chunks('EN'), {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['END'],
+      stream: false,
+    });
+    const text = content
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('');
+    assert.equal(text, 'EN');
+  });
+
+  test('the call keeps its place — the text it interrupted lands before it', async () => {
+    const content = await buffered([...chunks('before EN'), call('tc-1', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stop_sequences: ['END'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(content[0]?.type, 'text');
+    assert.equal(content[0]?.text, 'before EN');
+    assert.equal(content[1]?.type, 'tool_use');
+  });
+
+  test('a call past the stop cut is not part of the answer', async () => {
+    const content = await buffered([...chunks('hello STOP'), call('tc-2', 'rm -rf /')], {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.find(b => b.type === 'tool_use'),
+      undefined,
+      'the cut ended the turn — the call is not part of the answer'
+    );
+  });
+
+  test("the payload's own tag cannot close the call", async () => {
+    const content = await buffered([call('tc-3', 'echo "</tool_call>"')], {
+      messages: [{ role: 'user', content: 'run' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    const tu = content.find(b => b.type === 'tool_use');
+    assert.ok(tu, 'the call survives its own payload');
+    assert.deepEqual(tu?.input, { command: 'echo "</tool_call>"' });
+  });
+
+  test('a repeated tool_call does not reach the client twice', async () => {
+    const content = await buffered([call('tc-4', 'ls'), call('tc-4', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.filter(b => b.type === 'tool_use').length,
+      1,
+      'the client runs the call once'
+    );
+  });
+
+  test('a chained empty retry fails loudly — the chain is not broken behind the client', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('<tool_call>{"name":"ls","input":{"command":"ls"}}</tool_call>'),
+      configOptions: [MODEL_OPTION],
+    });
+    const { url, close } = await boot(fake);
+    const fnTools = [
+      {
+        type: 'function',
+        name: 'Bash',
+        description: 'run a command',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string' } },
+          required: ['command'],
+        },
+      },
+    ];
+    try {
+      const first = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ input: 'go', stream: false, tools: fnTools }),
+      });
+      assert.equal(first.status, 200);
+      const id = ((await first.json()) as { id: string }).id;
+      // the client retries with nothing new, while the predecessor holds
+      // a tool answer — a chained retry cannot be answered afresh
+      const second = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          input: [],
+          previous_response_id: id,
+          stream: false,
+          tools: fnTools,
+        }),
+      });
+      assert.equal(second.status, 400);
+    } finally {
+      await close();
+    }
+  });
 });
