@@ -4,7 +4,7 @@
  * 2. Tarball carries pack.json (npm pack --dry-run)
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -49,44 +49,41 @@ if (
 // resolves to a tarball entry at publish time. We invoke npm's CLI through
 // the current node binary (process.execPath) and an absolute path to
 // npm-cli.js, so no PATH lookup is performed and no user-writable directory
-// needs to be on PATH (SonarCloud S4036).
-let npmRan = false;
-let tarballHasPackJson = false;
+// needs to be on PATH (SonarCloud S4036). Fail closed: an unverified
+// tarball cannot be reported as ok.
 const npmCliCandidates = [
-  join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  '/home/linuxbrew/.linuxbrew/lib/node_modules/npm/bin/npm-cli.js',
   '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
   '/usr/lib/node_modules/npm/bin/npm-cli.js',
   '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
+  '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
 ];
 const npmCli = npmCliCandidates.find(c => existsSync(c));
-if (npmCli) {
-  try {
-    const out = execFileSync(
-      process.execPath,
-      [npmCli, 'pack', '--dry-run', '--ignore-scripts', '--json'],
-      {
-        cwd: packDir,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { PATH: '/usr/bin:/bin' },
-      }
-    );
-    npmRan = true;
-    const parsed = JSON.parse(out);
-    const entries: string[] = Array.isArray(parsed)
-      ? parsed.flatMap((p: { files?: { path?: string }[] }) =>
-          (p.files ?? []).map(f => f.path ?? '')
-        )
-      : [];
-    tarballHasPackJson = entries.includes('pack.json');
-  } catch {
-    // npm not available / not configured in this env — non-blocking (infra).
-    console.error('check:pack: npm pack --dry-run skipped/failed (non-blocking in this env)');
-  }
+if (!npmCli) {
+  console.error('check:pack: npm-cli.js not found — cannot verify tarball contents');
+  process.exit(1);
 }
-
-if (npmRan && !tarballHasPackJson) {
-  console.error('npm pack --dry-run does not list pack.json in tarball');
+try {
+  const out = execFileSync(
+    process.execPath,
+    [npmCli, 'pack', '--dry-run', '--ignore-scripts', '--json'],
+    {
+      cwd: packDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: '/usr/bin:/bin' },
+    }
+  );
+  const parsed = JSON.parse(out);
+  const entries: string[] = Array.isArray(parsed)
+    ? parsed.flatMap((p: { files?: { path?: string }[] }) => (p.files ?? []).map(f => f.path ?? ''))
+    : [];
+  if (!entries.includes('pack.json')) {
+    console.error('npm pack --dry-run does not list pack.json in tarball');
+    process.exit(1);
+  }
+} catch {
+  console.error('check:pack: npm pack --dry-run failed — cannot verify tarball contents');
   process.exit(1);
 }
 
