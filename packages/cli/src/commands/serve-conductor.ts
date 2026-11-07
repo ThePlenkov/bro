@@ -4077,6 +4077,22 @@ function firstSegment(id: string): string {
   return cut <= 0 ? id : id.slice(0, cut);
 }
 
+/** One served row — the anthropic /v1/models shape.
+ *
+ *  The LANE rides the row as its own field: the reader must not have
+ *  to guess it back out of the id, whose head is a formatted string and
+ *  the model's own name may carry a slash of its own. */
+function servedRow(m: RoutedModel): Record<string, unknown> {
+  return {
+    type: 'model',
+    id: m.id,
+    display_name: displayName(m),
+    description: providerPath(m),
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
+    created_at: '2025-01-01T00:00:00Z',
+  };
+}
+
 /** The row's SECOND line — the path that serves it: the lane's prefix and
  *  the agent's own provider chain, without the model leaf. A client picker
  *  renders it as the row's origin ("devin-acp", "opencode-acp/vercel/anthropic")
@@ -4115,17 +4131,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
-  const data = rows.map(m => ({
-    type: 'model',
-    id: m.id,
-    display_name: displayName(m),
-    description: providerPath(m),
-    // the LANE, stated by the router that served the row: the reader
-    // must not have to guess it back out of the id, whose head is a
-    // formatted string and the model's own name may carry a slash
-    ...(m.prefix === undefined ? {} : { source: m.prefix }),
-    created_at: '2025-01-01T00:00:00Z',
-  }));
+  const data = rows.map(servedRow);
   // a lane that FAILED is not silently absent from the union: the
   // degradation rides the response, so a client reading a shorter
   // catalog can tell it apart from the whole truth. A lane that merely

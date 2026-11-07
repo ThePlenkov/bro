@@ -119,10 +119,19 @@ export function routerStatePath(dir: string): string | undefined {
   return common === undefined ? undefined : join(common, 'bro', 'serve.json');
 }
 
+/** The endpoint a record states — undefined when the record is torn:
+ *  a half-written record is not a router. A record whose URL cannot
+ *  carry the token is NOT "no router": the router is running and bro
+ *  refuses it, loudly. */
+function endpointOf(bag: Record<string, unknown>): RouterEndpoint | undefined {
+  const url = typeof bag.url === 'string' ? bag.url.trim() : '';
+  const token = typeof bag.token === 'string' ? bag.token.trim() : '';
+  if (url === '' || token === '') return undefined;
+  return { url: routerUrl(url), token };
+}
+
 /** The endpoint the router published — undefined when there is no
- *  state file or it is torn (a half-written record is not a router).
- *  A record whose URL cannot carry the token is NOT "no router": the
- *  router is running and bro refuses it, loudly. */
+ *  state file or it is torn (a half-written record is not a router). */
 export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
   const path = routerStatePath(dir);
   if (path === undefined) return undefined;
@@ -133,11 +142,13 @@ export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
     return undefined;
   }
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const bag = raw as Record<string, unknown>;
-  const url = typeof bag.url === 'string' ? bag.url.trim() : '';
-  const token = typeof bag.token === 'string' ? bag.token.trim() : '';
-  if (url === '' || token === '') return undefined;
-  return { url: routerUrl(url), token };
+  return endpointOf(raw as Record<string, unknown>);
+}
+
+/** The catalog's own url — the router's /v1/models, with the limit it
+ *  was asked for. */
+function catalogUrl(endpoint: RouterEndpoint, limit: number): string {
+  return `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
 }
 
 /** The catalog, read from the router. A router that is not up is an
@@ -152,8 +163,7 @@ export async function readCatalog(
   endpoint: RouterEndpoint,
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
-  const limit = opts.limit ?? 1000;
-  const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
+  const url = catalogUrl(endpoint, opts.limit ?? 1000);
   const res = await fetch(url, {
     headers: {
       'x-api-key': endpoint.token,
