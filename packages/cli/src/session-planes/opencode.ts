@@ -215,21 +215,18 @@ export function opencodeActivityMs(dataDir: string): number | undefined {
   return at;
 }
 
-/** The configured override wins when set — else the pid's own
- *  env-derived data dir. */
-function dataDirFor(override: unknown, own: string | undefined): string | undefined {
-  return typeof override === 'string' && override.trim() !== '' ? override : own;
-}
-
 /** One foreign session's verdict — the active row when its stamp is
  *  unprovable or inside the hold window, else the stamp the caller
- *  folds into the freshest-idle evidence. */
+ *  folds into the freshest-idle evidence. The configured override wins
+ *  when set, else the pid's own env-derived data dir. */
 function opencodeEntryActivity(
   entry: { pid: number; dataDir?: string; unknown: boolean },
-  dataDir: string | undefined,
+  override: unknown,
   ctx: ExternalProbeCtx,
   detail: (pid: number, note: string) => ExternalActivity
 ): ExternalActivity | number {
+  const dataDir =
+    typeof override === 'string' && override.trim() !== '' ? override : entry.dataDir;
   if (entry.unknown || dataDir === undefined) {
     return detail(entry.pid, 'no provable activity stamp');
   }
@@ -262,12 +259,7 @@ export function opencodeExternalActivity(ctx: ExternalProbeCtx): ExternalActivit
   });
   let freshest: number | undefined;
   for (const entry of entries) {
-    const verdict = opencodeEntryActivity(
-      entry,
-      dataDirFor(override, entry.dataDir),
-      ctx,
-      detail
-    );
+    const verdict = opencodeEntryActivity(entry, override, ctx, detail);
     if (typeof verdict !== 'number') {
       return verdict;
     }
