@@ -556,10 +556,17 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
  * that roots on something other than the default branch (the router's arc
  * roots on its own PR) must not be planned onto the default: the root is
  * the chain's own, and the plan follows it.
+ *
+ * A member that MERGED left the chain: its base is the branch it landed
+ * on, and that branch is gone with it. The chain then stands on the
+ * default branch — the same answer `planSync` gives the member that
+ * follows ("its successor's base becomes the nearest lower member still
+ * open, or the default branch").
  */
-function chainRootBase(members: MemberView[], defaultBase: string): string {
+export function chainRootBase(members: SyncMemberInput[], defaultBase: string): string {
   const first = members[0];
   if (first === undefined) return defaultBase;
+  if (first.prState === 'MERGED') return defaultBase;
   return first.edgeBase ?? first.prBase ?? defaultBase;
 }
 
