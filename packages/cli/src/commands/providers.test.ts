@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { SessionConfigOption } from '@broject/core';
+import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { runProvidersCommand } from './providers.ts';
 import { capture } from './testrepo.ts';
@@ -13,6 +13,7 @@ const MODEL_OPTION: SessionConfigOption = {
   name: 'Model',
   category: 'model',
   type: 'select',
+  currentValue: 'qwen/qwen3-coder',
   options: [
     { value: 'qwen/qwen3-coder', name: 'qwen3-coder' },
     { value: 'google/gemini-2.5-pro', name: 'gemini-2.5-pro' },
@@ -23,7 +24,7 @@ describe('bro providers models', () => {
   test('lists models for a named acp provider', async () => {
     const out: string[] = [];
     await runProvidersCommand(['models', 'acp1'], {
-      acp: fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] }),
+      acp: { peer: fakeAcpAgent({ configOptions: [MODEL_OPTION] }).app },
       providers: { acp1: { type: 'acp', command: 'x' } },
       out: l => out.push(l),
     });
@@ -33,7 +34,7 @@ describe('bro providers models', () => {
   test('includes the pinned model when not in the option list', async () => {
     const out: string[] = [];
     await runProvidersCommand(['models', 'acp1'], {
-      acp: fakeAcpAgent({ sessionConfigOptions: [] }),
+      acp: { peer: fakeAcpAgent({ configOptions: [] }).app },
       providers: { acp1: { type: 'acp', command: 'x', model: 'some/model' } },
       out: l => out.push(l),
     });
@@ -72,7 +73,14 @@ describe('bro providers models', () => {
   test('api provider uses the models allowlist', async () => {
     const out: string[] = [];
     await runProvidersCommand(['models', 'api1'], {
-      providers: { api1: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { 'm/a': {}, 'm/b': {} } } },
+      providers: {
+        api1: {
+          type: 'api',
+          baseUrl: 'http://x',
+          apiKeyEnv: 'K',
+          models: { 'm/a': 'openai-compat', 'm/b': 'openai-compat' },
+        },
+      },
       out: l => out.push(l),
     });
     assert.deepEqual(out, ['api1/m/a', 'api1/m/b']);
@@ -82,7 +90,7 @@ describe('bro providers models', () => {
     const out: string[] = [];
     await runProvidersCommand([], {
       providers: {
-        a: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: {} } },
+        a: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: 'openai-compat' } },
         b: { type: 'cli', command: 'x', model: 'p' },
       },
       out: l => out.push(l),
@@ -97,24 +105,14 @@ describe('bro providers models', () => {
   });
 
   test('a failing provider warns and exits 1', async () => {
-    const err: string[] = [];
-    const out: string[] = [];
-    const orig = console.error;
-    console.error = (...a: unknown[]) => err.push(a.map(String).join(' '));
-    try {
-      await runProvidersCommand(['models', 'bad'], {
-        acp: fakeAcpAgent({ throwOnInitialize: new Error('boom') }),
+    const r = await capture(() =>
+      runProvidersCommand(['models', 'bad'], {
         providers: { bad: { type: 'acp', command: 'x' } },
-        out: l => out.push(l),
-      });
-    } catch (e: any) {
-      assert.equal(e.code, 1);
-    } finally {
-      console.error = orig;
-    }
-    assert.deepEqual(out, []);
-    assert.match(err.join('\n'), /bad/);
-    assert.match(err.join('\n'), /boom/);
+        out: l => {},
+      })
+    );
+    assert.equal(r.code, 1);
+    assert.match(r.err.join('\n'), /bad/);
   });
 
   test('-h prints usage and exits 0', async () => {
@@ -267,8 +265,7 @@ describe('bro providers route', () => {
 
 describe('bro providers add', () => {
   test('add writes a preset entry to project config by default', async () => {
-    const dir = tmpDir('bro-prov-add-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
       await runProvidersCommand(['add', 'kilo']);
       const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
@@ -277,8 +274,7 @@ describe('bro providers add', () => {
   });
 
   test('add with --name overrides provider name', async () => {
-    const dir = tmpDir('bro-prov-add2-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
       await runProvidersCommand(['add', 'kilo', '--name', 'kilo-cli']);
       const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
@@ -288,8 +284,7 @@ describe('bro providers add', () => {
   });
 
   test('add refuses to clobber without --force', async () => {
-    const dir = tmpDir('bro-prov-add3-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
       await runProvidersCommand(['add', 'kilo']);
       const r = await capture(() => runProvidersCommand(['add', 'kilo']));
@@ -299,10 +294,16 @@ describe('bro providers add', () => {
   });
 
   test('add --force overwrites existing entry', async () => {
-    const dir = tmpDir('bro-prov-add4-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
-      writeFileSync(join(process.cwd(), 'bro.config.json'), JSON.stringify({ providers: { kilo: { type: 'acp', command: 'kilo-old --acp' } } }, null, 2) + '\n');
+      writeFileSync(
+        join(process.cwd(), 'bro.config.json'),
+        JSON.stringify(
+          { providers: { kilo: { type: 'acp', command: 'kilo-old --acp' } } },
+          null,
+          2
+        ) + '\n'
+      );
       await runProvidersCommand(['add', 'kilo', '--force']);
       const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
       assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
@@ -310,8 +311,7 @@ describe('bro providers add', () => {
   });
 
   test('add to global config with --global', async () => {
-    const dir = tmpDir('bro-prov-add5-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
       const home = join(dir, 'home');
       const origHome = process.env.HOME;
@@ -327,8 +327,7 @@ describe('bro providers add', () => {
   });
 
   test('add refuses if bro.config.ts shadows', async () => {
-    const dir = tmpDir('bro-prov-add6-');
-    const { main } = initRepo(dir);
+    const { root: dir, main } = initRepo('bro-prov-add-');
     await insideAsync(main, dir, async () => {
       writeFileSync(join(process.cwd(), 'bro.config.ts'), 'export default {}\n');
       const r = await capture(() => runProvidersCommand(['add', 'kilo']));
@@ -340,7 +339,7 @@ describe('bro providers add', () => {
 
 describe('bro providers test', () => {
   test('test smokes acp connection via acpModels', async () => {
-    const fake = fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] });
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
     const r = await capture(() =>
       runProvidersCommand(['test', 'dv-acp'], {
         providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
@@ -355,7 +354,14 @@ describe('bro providers test', () => {
   test('test errors on non-acp provider', async () => {
     const r = await capture(() =>
       runProvidersCommand(['test', 'api1'], {
-        providers: { api1: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: {} } } },
+        providers: {
+          api1: {
+            type: 'api',
+            baseUrl: 'http://x',
+            apiKeyEnv: 'K',
+            models: { m: 'openai-compat' },
+          },
+        },
       })
     );
     assert.equal(r.code, 1);

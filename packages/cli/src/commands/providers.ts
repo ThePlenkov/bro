@@ -8,7 +8,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   brouterStaticCatalog,
@@ -56,12 +56,21 @@ function globalConfigJsonPath(): string {
 function writeConfigJsonAtomic(path: string, cfg: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = join(dirname(path), `.bro.config.json.tmp.${process.pid}.${Date.now()}`);
-  writeFileSync(
-    tmp,
-    `${JSON.stringify(cfg, null, 2)}
+  try {
+    writeFileSync(
+      tmp,
+      `${JSON.stringify(cfg, null, 2)}
 `
-  );
-  renameSync(tmp, path);
+    );
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* best effort */
+    }
+    throw err;
+  }
 }
 
 function readConfigJson(path: string): Record<string, unknown> {
@@ -70,13 +79,17 @@ function readConfigJson(path: string): Record<string, unknown> {
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
-    return isPlainObject(raw) ? raw : {};
+    if (!isPlainObject(raw)) {
+      die(`${path}: root must be an object`);
+    }
+    return raw;
   } catch (err) {
     die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
+  throw new Error('unreachable');
 }
 
-const PRESETS: Record<string, { command: string; defaultName?: string }> = {
+const PRESETS: Record<string, { command: string }> = {
   kilo: { command: 'kilo --acp' },
   'claude-code': { command: 'claude --acp' },
   codex: { command: 'codex --acp' },
@@ -299,11 +312,12 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
   if (parsed.preset === undefined) {
     die('usage: bro providers add <preset> [--name <name>] [--global] [--force]');
   }
-  const p = PRESETS[parsed.preset];
+  const presetName = parsed.preset!;
+  const p = PRESETS[presetName];
   if (p === undefined) {
-    die(`unknown preset ${parsed.preset} — available: ${Object.keys(PRESETS).join(', ')}`);
+    die(`unknown preset ${presetName} — available: ${Object.keys(PRESETS).join(', ')}`);
   }
-  const providerName = parsed.name ?? parsed.preset;
+  const providerName = parsed.name ?? presetName;
   const path = getAddConfigPath(parsed.global);
   return withFileLock(`${path}.lock`, () => {
     const cfg = readConfigJson(path);
