@@ -851,19 +851,16 @@ function cmdBenchmark(dir: string, argv: string[]): void {
   }
   if (sub === 'run') {
     const pos = positionals(argv.slice(1), new Set(['--targets', '--out']), { strict: true });
-    const corpusPath = benchmarkCorpusPath(dir);
+    const outFlag = flag(argv, '--out');
+    const targetsFlag = flag(argv, '--targets');
+    const corpusPath = targetsFlag ?? benchmarkCorpusPath(dir);
     if (!existsSync(corpusPath)) {
       die('no benchmark corpus found');
     }
     const corpus = JSON.parse(readFileSync(corpusPath, 'utf8')) as any;
-    const outFlag = flag(argv, '--out');
-    const targetsFlag = flag(argv, '--targets');
     const outPath = outFlag ?? join(dir, '.evidence', 'benchmark', 'paired-results.jsonl');
     mkdirSync(dirname(outPath), { recursive: true });
     const schema = benchmarkSchemaPath(dir);
-    if (!existsSync(schema)) {
-      die('benchmark schema missing');
-    }
     const now = new Date().toISOString();
     const tasks = Array.isArray(corpus.tasks) ? corpus.tasks : [];
     for (const task of tasks) {
@@ -893,7 +890,10 @@ function cmdBenchmark(dir: string, argv: string[]): void {
         }
       }
     }
-    console.log(`wrote paired results to ${outPath} (schema: ${schema})`);
+    console.log(
+      `wrote paired results to ${outPath}` +
+        (existsSync(schema) ? ` (schema: ${schema})` : '')
+    );
     if (targetsFlag) {
       console.log(`targets: ${targetsFlag}`);
     }

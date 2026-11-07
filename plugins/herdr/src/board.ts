@@ -7,19 +7,27 @@
  * Columns: worktree · bead/title · agent (step/state/cause) ·
  * workspace(id,label) · mirror pane · PR.
  */
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  type AgentEntry,
   broFleet,
   type FleetRow,
   type HerdrWorkspace,
   loadState,
   type MirrorRec,
+  pidAlive,
   repoDir,
+  workerLedState,
   type StatusAgent,
   type StatusWorktree,
   stateScope,
 } from './lib.ts';
 import { type Planes, readPlanes } from './planes.ts';
+// the board-short timestamp the session pane's footer already owns —
+// one formatter, one contract
+import { fmtWhen } from '../../../packages/acp/session/src/index.ts';
+import { SESSION_SLOT_TTL_MS } from '../../../packages/core/src/session-planes.ts';
 
 const requested = Number(process.env.BRO_BOARD_EVERY_S ?? 15);
 const EVERY_MS = Math.max(3, Number.isFinite(requested) ? requested : 15) * 1000;
@@ -29,6 +37,7 @@ interface Row {
   bead: string;
   agent: string;
   state: string;
+  last: string;
   ws: string;
   mirror: string;
   pr: string;
@@ -42,6 +51,7 @@ interface BoardJoins {
   titles: Map<string, string>;
   fleetByStep: Map<string, FleetRow>;
   agentByWt: Map<string, StatusAgent>;
+  regByWt: Map<string, AgentEntry>;
   armedDetails: Set<string>;
   mirrors: MirrorRec[];
   mirrorPanes: Record<string, boolean>;
@@ -57,10 +67,15 @@ function boardJoins(p: Planes): BoardJoins {
     // fleet rows are the PR column only — absent renders '—'
   }
   const agentByWt = new Map<string, StatusAgent>();
+  const regByWt = new Map<string, AgentEntry>();
   for (const a of p.status.fleet.agents) {
     if (a.worktree !== undefined) {
       const reg = p.registry[a.id];
       agentByWt.set(a.worktree, { ...a, agentId: a.agentId ?? reg?.agentId });
+      // a later agent on the same worktree with no registry record
+      // must clear the earlier one — both maps name the same agent
+      if (reg !== undefined) regByWt.set(a.worktree, reg);
+      else regByWt.delete(a.worktree);
     }
   }
   return {
@@ -73,6 +88,7 @@ function boardJoins(p: Planes): BoardJoins {
     titles: new Map(p.status.beads.inProgress.map(b => [b.id, b.title] as const)),
     fleetByStep: new Map(fleetRows.map(r => [r.step, r])),
     agentByWt,
+    regByWt,
     armedDetails: new Set(p.armedDetails),
     mirrors: Object.values(loadState(stateScope(p.main)).mirrors),
     mirrorPanes: p.mirrorPanes,
@@ -82,14 +98,21 @@ function boardJoins(p: Planes): BoardJoins {
 }
 
 /** Claimed, hosting a live agent, or named by a session marker — the
- *  board's "has live work" predicate. */
+ *  board's "has live work" predicate. The status doc's `running`
+ *  lies (loop records keep it for dead workers); the registry's
+ *  pid/pidStart pair is the honest check. */
 function isArmed(
   w: StatusWorktree,
-  agent: StatusAgent | undefined,
+  reg: AgentEntry | undefined,
   armedDetails: Set<string>,
   main: string
 ): boolean {
-  if (w.claim !== undefined || agent?.state === 'running') return true;
+  if (
+    w.claim !== undefined ||
+    (reg?.pid !== undefined &&
+      pidAlive(reg.pid, typeof reg.pidStart === 'string' ? reg.pidStart : undefined))
+  )
+    return true;
   return [...armedDetails].some(d =>
     d.includes('/')
       ? resolve(main, d) === w.path
@@ -108,9 +131,74 @@ function beadCell(
   return bead.length > 46 ? `${bead.slice(0, 45)}…` : bead;
 }
 
-function stateCell(agent: StatusAgent | undefined, w: StatusWorktree): string {
-  if (agent === undefined) return w.state ?? '';
-  return `${agent.state}${agent.cause !== undefined ? `/${agent.cause}` : ''}`;
+/** The agent's last-output stamp — the events journal's mtime first
+ *  (it ticks per session update), the native log's as fallback. */
+function lastWrite(reg: AgentEntry): number | undefined {
+  const events = reg.log?.replace(/\.log$/, '.events.jsonl');
+  for (const p of [events, reg.log]) {
+    if (p === undefined || !existsSync(p)) continue;
+    try {
+      return statSync(p).mtimeMs;
+    } catch {
+      // a file that vanished mid-check reads as no stamp
+    }
+  }
+  return undefined;
+}
+
+/** The `/<cause>` suffix on a dead row — the registry field is
+ *  `unknown` behind the index signature, so only a string joins the
+ *  cell verbatim; anything else serializes instead of printing
+ *  `[object Object]`. */
+function causeSuffix(reg: AgentEntry): string {
+  const c = reg.cause;
+  if (c === undefined) return '';
+  return `/${typeof c === 'string' ? c : JSON.stringify(c)}`;
+}
+
+/** The dead row: `exit N/<cause>` when a status recorded, `dead/<cause>`
+ *  when the pid is simply gone. */
+function deadCell(reg: AgentEntry): string {
+  const suffix = causeSuffix(reg);
+  return typeof reg.exitStatus === 'number' ? `exit ${reg.exitStatus}${suffix}` : `dead${suffix}`;
+}
+
+/** The honest liveness cell — the kit's `workerLedState` ladder the
+ *  session pane shares, so the board and the pane never disagree: a
+ *  live pid plus a fresh non-empty journal is 'working', a silent or
+ *  absent one 'idle', a dead pid the dead row's exit/cause text. The
+ *  spawn handoff shows 'spawn' only while no terminal field
+ *  (exitStatus/stopped) is recorded — a crashed attempt shows its
+ *  exit, never the spawn placeholder. */
+function stateCell(reg: AgentEntry | undefined, w: StatusWorktree, now: number): string {
+  if (reg === undefined) return w.state ?? '';
+  if (reg.pid === undefined) {
+    // spawn handoff — the connector patches pid after the attempt
+    // lands; inside the slot window a pid-less row is 'spawn', the
+    // same reading the fleet's own liveness ladder gives it
+    const spawned = typeof reg.spawnedAt === 'string' ? Date.parse(reg.spawnedAt) : Number.NaN;
+    if (
+      Number.isFinite(spawned) &&
+      now - spawned < SESSION_SLOT_TTL_MS &&
+      reg.exitStatus === undefined &&
+      reg.stopped !== true &&
+      // a recorded spawnError is already the failed end of the window —
+      // the placeholder must not outlive the connector's own verdict
+      typeof reg.spawnError !== 'string'
+    )
+      return 'spawn';
+  }
+  const events =
+    typeof reg.log === 'string' ? reg.log.replace(/\.log$/, '.events.jsonl') : undefined;
+  const led = workerLedState(reg, events, now);
+  if (led === 'blocked') return deadCell(reg);
+  if (led === 'unknown') return w.state ?? '';
+  return led;
+}
+
+function lastCell(reg: AgentEntry | undefined): string {
+  const last = reg === undefined ? undefined : lastWrite(reg);
+  return last === undefined ? '' : fmtWhen(last);
 }
 
 function wsCell(ws: HerdrWorkspace | undefined): string {
@@ -131,19 +219,21 @@ function prCell(agent: StatusAgent | undefined, fleetByStep: Map<string, FleetRo
   return pr !== undefined ? `#${pr}` : '';
 }
 
-function rowFor(w: StatusWorktree, j: BoardJoins): Row | undefined {
+function rowFor(w: StatusWorktree, j: BoardJoins, now: number): Row | undefined {
   const agent = j.agentByWt.get(w.name);
+  const reg = j.regByWt.get(w.name);
   const wsId = j.openByPath.get(w.path);
   const ws = wsId !== undefined ? j.wsById.get(wsId) : undefined;
   // the board shows live work plus opened workspaces — parked litter
   // is noise the fleet table already carries
-  if (!isArmed(w, agent, j.armedDetails, j.main) && ws === undefined) return undefined;
+  if (!isArmed(w, reg, j.armedDetails, j.main) && ws === undefined) return undefined;
 
   return {
     worktree: w.name,
     bead: beadCell(w, agent, j.titles),
     agent: agent?.agentId ?? '',
-    state: stateCell(agent, w),
+    state: stateCell(reg, w, now),
+    last: lastCell(reg),
     ws: wsCell(ws),
     mirror: mirrorCell(
       j.mirrors.find(m => m.worktree === w.path),
@@ -156,10 +246,11 @@ function rowFor(w: StatusWorktree, j: BoardJoins): Row | undefined {
 function collect(): Row[] {
   const p = readPlanes(repoDir());
   const j = boardJoins(p);
+  const now = Date.now();
   const rows: Row[] = [];
   for (const w of p.status.worktrees) {
     if (w.main === true) continue;
-    const r = rowFor(w, j);
+    const r = rowFor(w, j, now);
     if (r !== undefined) rows.push(r);
   }
   return rows;
@@ -171,6 +262,7 @@ function render(rows: Row[], err?: string): string {
     ['bead', 'bead / title'],
     ['agent', 'agent'],
     ['state', 'state'],
+    ['last', 'last'],
     ['ws', 'workspace'],
     ['mirror', 'mirror'],
     ['pr', 'pr'],
