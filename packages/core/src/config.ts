@@ -928,35 +928,44 @@ export interface ServeClientConfig {
 /** The client configs, keyed by client name (`claude-code`). */
 export type ServeClients = Record<string, ServeClientConfig>;
 
+/** A string field, trimmed — undefined when it is absent or blank. */
+function trimmedField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** One client's config — its fields, trimmed. Undefined when the entry is
+ *  malformed or carries nothing to configure. */
+function serveClientConfig(raw: unknown, name: string): ServeClientConfig | undefined {
+  if (!isPlainObject(raw)) {
+    console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
+    return undefined;
+  }
+  const settingsPath = trimmedField(raw.settingsPath);
+  const command = trimmedField(raw.command);
+  const cfg: ServeClientConfig = {
+    ...(settingsPath === undefined ? {} : { settingsPath }),
+    ...(command === undefined ? {} : { command }),
+  };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
 /** The client configs — a malformed entry drops ITS OWN fields, never
  *  the whole section (same discipline as the lane limits). */
 function serveClients(raw: unknown): ServeClients | undefined {
   if (raw === undefined) return undefined;
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  if (!isPlainObject(raw)) {
     console.error(
       'bro.config: serve.client must be an object of client → config — section dropped'
     );
     return undefined;
   }
   const out: ServeClients = {};
-  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+  for (const [name, value] of Object.entries(raw)) {
     if (name === '__proto__') continue;
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
-      continue;
-    }
-    const bag = value as Record<string, unknown>;
-    const settingsPath =
-      typeof bag.settingsPath === 'string' && bag.settingsPath.trim() !== ''
-        ? bag.settingsPath.trim()
-        : undefined;
-    const command =
-      typeof bag.command === 'string' && bag.command.trim() !== '' ? bag.command.trim() : undefined;
-    const cfg: ServeClientConfig = {
-      ...(settingsPath === undefined ? {} : { settingsPath }),
-      ...(command === undefined ? {} : { command }),
-    };
-    if (Object.keys(cfg).length > 0) out[name] = cfg;
+    const cfg = serveClientConfig(value, name);
+    if (cfg !== undefined) out[name] = cfg;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }

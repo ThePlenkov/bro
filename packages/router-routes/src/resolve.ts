@@ -70,7 +70,9 @@ export function resolveRoute(
       picked: 'static',
     };
   }
-  const named = pick?.(set.candidates);
+  // a missing hook and a hook that named nothing are DIFFERENT states:
+  // only the second one is the decision model speaking
+  const named = pick === undefined ? undefined : pick(set.candidates);
   const chosen = named === undefined ? undefined : set.candidates.find(c => c.route.name === named);
   const winner = chosen ?? first;
   const live = survivingChain(winner.route, health);

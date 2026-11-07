@@ -24,10 +24,11 @@ export function pluginGroups(plugins: readonly CommandPlugin[]): Map<string, Com
 /** Is the entry a plugin at all? A plugin is a runnable declaration
  *  with a name and a summary. */
 export function isPlugin(entry: unknown): entry is CommandPlugin {
-  const p = entry as CommandPlugin | undefined;
+  // the entry's PRESENCE is tested before its fields are read: a missing
+  // entry is not a plugin with empty fields
+  if (typeof entry !== 'object' || entry === null) return false;
+  const p = entry as Partial<CommandPlugin>;
   return (
-    !!p &&
-    typeof p === 'object' &&
     typeof p.name === 'string' &&
     p.name !== '' &&
     typeof p.summary === 'string' &&

@@ -69,9 +69,12 @@ describe('routePickQuestions', () => {
     const q = qs['route']!;
     assert.equal(q.type, 'choice');
     assert.deepEqual(Object.keys(q.criteria).sort(), ['design', 'edit']);
-    const design = q.criteria['design']!;
-    assert.ok(typeof design === 'string');
-    assert.match(design, /devin-acp\(swe-2-max\)/);
+    // the criteria ARE the options' descriptions — whole values, not a
+    // substring of one: a name that merely CONTAINS a model names no model
+    assert.deepEqual(q.criteria, {
+      edit: 'chain: devin-acp → kilo-free',
+      design: 'chain: devin-acp(swe-2-max)',
+    });
   });
 
   test('a "__proto__" route lands as an own key, never a prototype write', () => {
