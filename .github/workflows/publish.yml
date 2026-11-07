@@ -90,7 +90,12 @@ jobs:
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
       # Publish order follows the internal dep graph (core first, cli last)
       # so a consumer never resolves a dep that isn't on the registry yet.
+      # EXPECTED_TAG is re-declared here on purpose: step-level env does
+      # not leak between steps, and the dist-tag derivation below needs
+      # it in THIS step (a review round caught exactly that).
       - name: Publish @broject/* packages
+        env:
+          EXPECTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -e
           # setup-node's registry-url writes an _authToken placeholder
@@ -114,5 +119,38 @@ jobs:
               echo "npm view $name failed without E404 — aborting to avoid double publish"
               exit 1
             fi
-            npm publish --access public
+            # A prerelease (v0.3.0-preview.0) must not take over the
+            # `latest` dist-tag — plain `npm publish` sets latest even
+            # for prereleases, leaking previews to every `npm i bro`.
+            # Derive the tag from the version's prerelease id
+            # (v0.3.0-preview.0 → preview; stable tags publish to latest),
+            # then fail closed on prerelease ids that must not become a
+            # dist-tag: `latest` would hand the preview to the stable
+            # channel, and a numeric id ("0") is a valid semver range —
+            # npm rejects it as a tag name.
+            dist=""
+            case "$EXPECTED_TAG" in
+              v*-*)
+                dist="${EXPECTED_TAG#v*-}"
+                dist="${dist%%.*}"
+                ;;
+              *)
+                ;;
+            esac
+            case "$dist" in
+              "")
+                npm publish --access public
+                ;;
+              latest)
+                echo "::error::prerelease id 'latest' in $EXPECTED_TAG is ambiguous — rename the preid" >&2
+                exit 1
+                ;;
+              [0-9]*|*[!A-Za-z0-9._-]*)
+                echo "::error::prerelease id '$dist' in $EXPECTED_TAG is not a safe npm dist-tag" >&2
+                exit 1
+                ;;
+              *)
+                npm publish --access public --tag "$dist"
+                ;;
+            esac
           done

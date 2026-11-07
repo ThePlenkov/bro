@@ -84,10 +84,12 @@ jobs:
           # regen adapters — check:plugins fails the release PR otherwise
           node scripts/gen-plugins.ts --sync-version
           git checkout -B "release/v$v"
-          git add CHANGELOG.md packages/*/package.json package.json package-lock.json \
-            plugin.json .claude-plugin/marketplace.json \
-            .agents/plugins/marketplace.json .cursor-plugin/marketplace.json \
-            plugins/ hooks.json hooks/run.sh
+          # Everything the steps above touched is intentional release
+          # content — version-stamped VERSIONED_SOURCES, per-client
+          # manifests, regenerated bundles. A fixed path list silently
+          # drops new generated surfaces (check:plugins caught
+          # .omp-plugin/marketplace.json unstaged on v0.3.0).
+          git add -A
           if git diff --cached --quiet; then
             echo "no version change — nothing to release"
             exit 0

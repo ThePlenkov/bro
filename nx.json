@@ -37,7 +37,8 @@
       }
     },
     "version": {
-      "conventionalCommits": true
+      "conventionalCommits": true,
+      "preserveMatchingDependencyRanges": false
     },
     "releaseTag": {
       "pattern": "v{version}"
