@@ -703,8 +703,7 @@ function isRecordedServe(
     /* /proc absent (macOS) or the pid is gone — try argv evidence */
   }
   try {
-    // NOSONAR — PATH lookup is the contract
-    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
     });
     const port = state.url?.match(/:(\d+)/)?.[1];
