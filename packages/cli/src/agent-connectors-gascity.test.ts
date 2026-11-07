@@ -619,12 +619,14 @@ describe('gascity connector', () => {
       const GC_TIMEOUT = 15_000;
       // a probe counts as responding when stdout parses as the expected
       // document — a substring match could hide in an error dump and
-      // misclassify a malformed response as valid
+      // misclassify a malformed response as valid. The connector reads
+      // object envelopes ({schema_version}, {sessions}, {rigs}), so a
+      // bare array is incompatible even when it parses.
       const jsonHas = (out: string, key: string): boolean => {
         try {
           const doc: unknown = JSON.parse(out);
           return (
-            Array.isArray(doc) || (typeof doc === 'object' && doc !== null && key in doc)
+            typeof doc === 'object' && doc !== null && !Array.isArray(doc) && key in doc
           );
         } catch {
           return false;
@@ -637,9 +639,9 @@ describe('gascity connector', () => {
 
       // Run minimal conformance fixtures against real gc and preserve versioned evidence
       const evidenceDir = join(process.cwd(), '.artifacts');
-      try {
-        mkdirSync(evidenceDir, { recursive: true });
-      } catch {}
+      // no catch — a directory we can't create must fail here, not
+      // surface as a misleading ENOENT at the writeFileSync below
+      mkdirSync(evidenceDir, { recursive: true });
       const safeVersion = version.replace(/[^a-zA-Z0-9._-]+/g, '_');
       const evidencePath = join(evidenceDir, `gascity-real-conformance-${safeVersion}.json`);
 
@@ -660,7 +662,7 @@ describe('gascity connector', () => {
       });
       checks.push({
         name: 'gc supervisor status --json',
-        ok: sup.status === 0 || jsonHas(sup.stdout || '', 'schema_version'),
+        ok: sup.status === 0 && jsonHas(sup.stdout || '', 'schema_version'),
         stdout: (sup.stdout || sup.stderr || '').slice(0, 200),
       });
 
@@ -671,7 +673,7 @@ describe('gascity connector', () => {
       });
       checks.push({
         name: 'gc session list --json',
-        ok: slist.status === 0 || jsonHas(slist.stdout || '', 'sessions'),
+        ok: slist.status === 0 && jsonHas(slist.stdout || '', 'sessions'),
         stdout: (slist.stdout || slist.stderr || '').slice(0, 200),
       });
 
@@ -682,7 +684,7 @@ describe('gascity connector', () => {
       });
       checks.push({
         name: 'gc rig list --json',
-        ok: rlist.status === 0 || jsonHas(rlist.stdout || '', 'rigs'),
+        ok: rlist.status === 0 && jsonHas(rlist.stdout || '', 'rigs'),
         stdout: (rlist.stdout || rlist.stderr || '').slice(0, 200),
       });
 
@@ -693,7 +695,10 @@ describe('gascity connector', () => {
         timestamp: new Date().toISOString(),
         checks,
         passed: checks.every(c => c.ok),
-        fixtureCoverage: true,
+        // probes only — version/help/status/list verify the binary and
+        // JSON contracts; no lifecycle fixture (session new/submit/
+        // close) has run, so coverage stays unclaimed until one does
+        fixtureCoverage: false,
         evidenceType: 'versioned-real-gc-conformance',
       };
       writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));

@@ -4803,19 +4803,19 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // spawn → registry patch, all under the agents.json lock — and the
       // molecule pin's bd show resolves before it, off the critical path
       const mol = stepParent(spec.beadsDir, spec.molStep);
-      // gc round-trips are blocking subprocesses — they pay BEFORE the
-      // registry lock whenever the step already owns an entry, so the
-      // critical section never serializes concurrent spawns/status on gc
-      // latency. An entry appearing between this read and the lock is
-      // the rare fallback: isLive still probes inside the section.
+      // gc round-trips are blocking subprocesses — the session list
+      // prefetches BEFORE the registry lock whenever the step already
+      // owns an entry, so the critical section never serializes
+      // concurrent spawns/status on gc latency in the common case.
+      // But a pre-lock snapshot can only prove LIFE, never loss: the
+      // unlocked registry read above can observe an entry while its
+      // creator still holds the lock building the session, so a
+      // snapshot missing that session may simply predate it. A live
+      // verdict may ride the snapshot; a lost verdict re-probes under
+      // the lock (kody's lock-latency fix and coderabbit's stale-read
+      // race both hold under this rule).
       const priorEntry = readAgentRegistry(dir)[spec.molStep];
       const preSessions = priorEntry === undefined ? undefined : listGcSessions(city);
-      const preSupervisor =
-        priorEntry !== undefined &&
-        preSessions?.sessions !== undefined &&
-        gcSessionFor(priorEntry, spec.molStep, preSessions.sessions) === undefined
-          ? { probed: true as const, up: gcSupervisorRunning() }
-          : undefined;
       const spawned = withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep];
         const { agentId, promptFile, lease, reservation, crossKindReservations } = prepareSpawn(
@@ -4825,7 +4825,15 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           spec,
           {
             isLive: e => {
-              const { sessions, err } = preSessions ?? listGcSessions(city);
+              const snap = gcSessionFor(e, spec.molStep, preSessions?.sessions ?? []);
+              if (snap !== undefined && (gcState(snap) === 'running' || gcState(snap) === 'spawned')) {
+                return true; // the snapshot proves life — it cannot predate existence
+              }
+              // anything short of proven-live re-verifies under the
+              // lock: a session absent from a stale pre-lock snapshot
+              // may exist by now, and only a fresh list can carry a
+              // lost verdict (rebind/reset hangs off it)
+              const { sessions, err } = listGcSessions(city);
               if (sessions === undefined) {
                 // an unverifiable liveness probe must not let a duplicate
                 // spawn run alongside a worker that may still be alive
@@ -4839,9 +4847,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
                 // session listing omitted the worker but supervisor liveness
                 // is indeterminate — cannot conclude lost/rebindable without
                 // a verifiably running supervisor (admission guarantee)
-                const up =
-                  preSupervisor !== undefined ? preSupervisor.up : gcSupervisorRunning();
-                if (up !== true) {
+                if (gcSupervisorRunning() !== true) {
                   throw new SpawnError(
                     'gc supervisor not running — agent liveness unknown',
                     'unavailable'
@@ -4891,9 +4897,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         return patchAgentRegistry(dir, spec.molStep, { sessionId });
       });
       // the session list rides AFTER the lock — it must see the session
-      // just dispatched, and a gc round-trip never holds agents.json
+      // just dispatched, and a gc round-trip never holds agents.json.
+      // A failed list passes undefined → 'spawned' (the contract's
+      // registered-unverified state), not a faked live read.
       const { sessions } = listGcSessions(city);
-      return toInfo(spec.molStep, spawned, sessions ?? [], 'spawned');
+      return toInfo(spec.molStep, spawned, sessions, 'spawned');
     },
 
     async list(): Promise<ListResult> {

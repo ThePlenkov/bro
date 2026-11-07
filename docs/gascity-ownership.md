@@ -33,7 +33,7 @@ sequenceDiagram
     GC-->>BRO: session_id (or error; on parse error -> close orphan)
   end
   BRO->>GC: gc sling <molStep> <molStep> (no --force)
-  BRO->>GC: gc session submit <prompt>
+  BRO->>GC: gc session submit <molStep> <prompt>
   GC->>Store: work routed via rig (shared store)
   loop reconcile
     BRO->>GC: gc session list --json; gc supervisor status --json
@@ -63,4 +63,4 @@ sequenceDiagram
 ## Conformance evidence
 
 - **Stub (fake-gc):** `packages/cli/src/agent-connectors-gascity.test.ts` covers duplicate spawn, foreign claim, respawn/reset, list mapping, lost vs degraded, stop idempotency, config/env.
-- **Real-gc (versioned):** opt-in conformance via `BRO_REAL_GC=1` against a real `gc` binary; tests record `gc --version` and run a minimal versioned suite. Evidence captured as test output/artifacts for the pinned version.
+- **Real-gc (versioned):** opt-in conformance via `BRO_REAL_GC=1` against a real `gc` binary; tests record `gc --version` and run a minimal probe suite (version, help, supervisor status, session list, rig list). Evidence lands at `.artifacts/gascity-real-conformance-<version>.json` per run — **lifecycle-fixture coverage is pending** (`fixtureCoverage: false` in the evidence until session new/submit/close fixtures execute).
