@@ -10,59 +10,65 @@
  * router is a process with a published endpoint; this package talks to
  * it over HTTP.
  */
+
 export {
-  modelFamily,
-  servedModels,
-  type ModelFamily,
-  type ServedModel,
-} from './catalog.ts';
-export {
-  mergeSettings,
   type ClientAdapter,
+  mergeSettings,
   type RouterEndpoint,
 } from './adapter.ts';
 export {
-  CLAUDE_CODE_BEHAVES_AS,
-  claudeCodeAdapter,
-  claudeCodeRows,
-  type ClaudeCodeRow,
-} from './clients/claude-code.ts';
-export { CLIENTS, clientById, clientIds } from './registry.ts';
-export { routerPlugins, type RouterPolicy } from './plugins.ts';
+  type ModelFamily,
+  modelFamily,
+  type ServedModel,
+  servedModels,
+} from './catalog.ts';
 export { catalogPlugins } from './catalog-plugins.ts';
 export { clientPlugins } from './client-plugins.ts';
-export { routePlugins } from './route-plugins.ts';
-export { decisionProvider, requireTypedGrade, type DecisionProvider } from './decision-model.ts';
+export {
+  CLAUDE_CODE_BEHAVES_AS,
+  type ClaudeCodeRow,
+  claudeCodeAdapter,
+  claudeCodeRows,
+} from './clients/claude-code.ts';
+export {
+  type ClientOutcome,
+  type ClientRequest,
+  requireClient,
+  runClient,
+  runModels,
+} from './commands.ts';
+export { type DecisionProvider, decisionProvider, requireTypedGrade } from './decision-model.ts';
 export {
   chainModelFacts,
   costFacts,
   healthFacts,
+  type ModelPick,
+  type ModelPin,
   modelFacts,
   routeFacts,
-  type ModelPin,
-  type ModelPick,
   type TurnUsage,
   type WindowCounters,
 } from './explain.ts';
-export { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
-export { decideRoute, type TaskDecision } from './route-decide.ts';
-export { runHealthCommand } from './health-cmd.ts';
-export { runRouteCommand } from './route-cmd.ts';
-export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';
-export { runStoreCommand } from './store-cmd.ts';
-export { configuredProviders, type ProviderRow } from './providers.ts';
-export {
-  requireClient,
-  runClient,
-  runModels,
-  type ClientOutcome,
-  type ClientRequest,
-} from './commands.ts';
 export {
   gitCommonDir,
   readCatalog,
   readRouterEndpoint,
   routerStatePath,
 } from './gateway.ts';
+export { runHealthCommand } from './health-cmd.ts';
+export { ledgerHealth, recordTurn, windowCounters } from './ledger.ts';
+export { type RouterPolicy, routerPlugins } from './plugins.ts';
+export { configuredProviders, type ProviderRow } from './providers.ts';
+export { CLIENTS, clientById, clientIds } from './registry.ts';
+export { runRouteCommand } from './route-cmd.ts';
+export { decideRoute, type TaskDecision } from './route-decide.ts';
+export { routePlugins } from './route-plugins.ts';
 export { routerUrl } from './router-url.ts';
+export { routeTablePath, runRoutesCommand } from './routes-cmd.ts';
 export { expandHome, readSettings, writeSettings } from './settings.ts';
+export {
+  formatSettingsDiff,
+  type SettingsChange,
+  settingsDiff,
+} from './settings-diff.ts';
+export { runStoreCommand } from './store-cmd.ts';
