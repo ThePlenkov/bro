@@ -65,7 +65,7 @@ try {
     ? parsed.flatMap((p: { files?: { path?: string }[] }) => (p.files ?? []).map(f => f.path ?? ''))
     : [];
   tarballHasPackJson = entries.includes('pack.json');
-} catch (e) {
+} catch {
   // npm not available / not configured in this env — non-blocking (infra).
   console.error('check:pack: npm pack --dry-run skipped/failed (non-blocking in this env)');
 }
