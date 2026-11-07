@@ -49,12 +49,15 @@ function mappedProperty(tool: ClientTool, key: string, value: unknown): string |
 
 /** The client's input for the raw fields — the mapped properties only. */
 function mappedInput(tool: ClientTool, raw: Record<string, unknown>): Record<string, unknown> {
-  const input: Record<string, unknown> = {};
+  const pairs: [string, unknown][] = [];
   for (const [key, value] of Object.entries(raw)) {
     const prop = mappedProperty(tool, key, value);
-    if (prop !== undefined) input[prop] = value;
+    if (prop !== undefined) pairs.push([prop, value]);
   }
-  return input;
+  // the pairs become the client's own object: fromEntries writes each
+  // property as an OWN entry, so even a name that is a setter on
+  // Object.prototype lands as data and not as a prototype swap
+  return Object.fromEntries(pairs);
 }
 
 /** The call's input in the client's schema — undefined when the schema's
