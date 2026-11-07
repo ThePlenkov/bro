@@ -110,15 +110,6 @@ describe('conductorConfig', () => {
   // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
   // in ~/.config/bro would leak a backend into the 'unset env' assertions;
   // this suite reads an empty global config dir instead
-  const prevXdg = process.env.XDG_CONFIG_HOME
-  const xdg = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
-  process.env.XDG_CONFIG_HOME = xdg
-  process.env.BRO_TEST = '1'
-  process.env.BRO_NO_GLOBAL_CONFIG = '1'
-  after(() => {
-    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
-    else process.env.XDG_CONFIG_HOME = prevXdg
-  })
   after(scrubEnv())
   const providers = {
     'dv-acp': { type: 'acp' as const, command: 'dv acp', model: 'swe-y' },

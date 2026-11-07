@@ -110,7 +110,7 @@ export function scrubEnv(extra: string[] = []): () => void {
   // record absent extras and the pin keys as undefined too — a var the
   // code-under-test sets during the scrub window must not leak past
   // the restore
-  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'XDG_CONFIG_HOME']) {
+  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'XDG_CONFIG_HOME', 'BRO_TEST', 'BRO_NO_GLOBAL_CONFIG']) {
     if (!(k in saved)) saved[k] = process.env[k]
   }
   process.env.GIT_CONFIG_NOSYSTEM = '1'
@@ -122,6 +122,12 @@ export function scrubEnv(extra: string[] = []): () => void {
   process.env.BRO_NO_GLOBAL_CONFIG = '1'
   if (!('XDG_CONFIG_HOME' in saved)) {
     saved['XDG_CONFIG_HOME'] = undefined
+  }
+  if (!('BRO_TEST' in saved)) {
+    saved['BRO_TEST'] = undefined
+  }
+  if (!('BRO_NO_GLOBAL_CONFIG' in saved)) {
+    saved['BRO_NO_GLOBAL_CONFIG'] = undefined
   }
   return () => {
     // the pattern classes are unbounded — rescan so a pin re-added
@@ -136,8 +142,6 @@ export function scrubEnv(extra: string[] = []): () => void {
         process.env[k] = v
       }
     }
-    if (!('BRO_TEST' in saved)) delete process.env.BRO_TEST
-    if (!('BRO_NO_GLOBAL_CONFIG' in saved)) delete process.env.BRO_NO_GLOBAL_CONFIG
   }
 }
 

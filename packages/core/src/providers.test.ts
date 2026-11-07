@@ -23,8 +23,6 @@ import { scrubEnv } from './testkit.ts'
 // for the whole file so a dev machine's real user config can't leak in
 // (config.test.ts runs the same guard)
 after(scrubEnv())
-const XDG = tmpDir('bro-xdg-')
-process.env.XDG_CONFIG_HOME = XDG
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = tmpDir('bro-providers-')
