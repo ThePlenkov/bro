@@ -60,14 +60,19 @@ function changeOf(
   after: Record<string, unknown>,
   key: string
 ): SettingsChange | undefined {
+  // the value is read ONCE, into a name of its own: the key is one of the
+  // object's own keys (Object.keys never reaches a prototype), and the
+  // diff speaks about the VALUE, not about where it came from
+  const was = before[key];
+  const now = after[key];
   if (!Object.hasOwn(before, key)) {
-    return { key, kind: 'added', detail: summarize(after[key]) };
+    return { key, kind: 'added', detail: summarize(now) };
   }
-  if (JSON.stringify(before[key]) === JSON.stringify(after[key])) return undefined;
+  if (JSON.stringify(was) === JSON.stringify(now)) return undefined;
   return {
     key,
     kind: 'changed',
-    detail: `${summarize(before[key])} → ${summarize(after[key])}`,
+    detail: `${summarize(was)} → ${summarize(now)}`,
   };
 }
 
@@ -78,7 +83,10 @@ function removalsOf(
 ): SettingsChange[] {
   return Object.keys(before)
     .filter(key => !Object.hasOwn(after, key))
-    .map(key => ({ key, kind: 'removed' as const, detail: summarize(before[key]) }));
+    .map(key => {
+      const was = before[key];
+      return { key, kind: 'removed' as const, detail: summarize(was) };
+    });
 }
 
 /** The diff — the keys that change, the after-object's order first. */

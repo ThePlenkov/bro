@@ -362,7 +362,7 @@ function runClient(
  *  so the block's effect is visible in the client's handling. */
 function modelUnderTest(models: ServedModel[]): ServedModel {
   const foreign = models.find(m => modelFamily(m.id) === 'other' && !/claude/i.test(m.id));
-  const first = models[0];
+  const first = models.at(0);
   const model = foreign ?? first;
   if (model === undefined) throw new Error('the router serves no model to ask with');
   return model;
@@ -469,7 +469,11 @@ async function echoServer(): Promise<{ url: string; close: () => void }> {
   });
   // the port is known only once the server is listening: address() answers
   // null before that, and port 0 is no URL to call
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+  await new Promise<void>(resolve =>
+    server.listen(0, '127.0.0.1', () => {
+      resolve();
+    })
+  );
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : 0;
   if (port === 0) throw new Error('the echo server bound no port');
@@ -486,8 +490,7 @@ function findingsOf(
   const messages = routerRun.transcript.messages;
   const toolIds = routerRun.transcript.toolIds;
   const shapes = routerRun.transcript.requests;
-  const first = shapes[0];
-  const texts = messages.map(m => m.text).filter(t => t !== '');
+  const first = shapes.at(0);
   const toolUse = messages.findIndex(m => m.blocks.includes('tool_use'));
   const answered = messages.findIndex((m, i) => i > toolUse && m.blocks.includes('text'));
   return {

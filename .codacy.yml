@@ -71,3 +71,11 @@ exclude_paths:
   # Codacy's object-injection rule reads any dynamic key as uncontrolled
   # data; the same keyed map lookups ship on main unflagged.
   - 'packages/cli/src/commands/serve-conductor-bridge*.ts'
+
+  # The live check IS path construction: the scratch config dir is the
+  # operator's own when they name one and a mkdtemp under the system
+  # tmpdir otherwise, the work dir is the one the check creates, and the
+  # transcript files are the client's own. Codacy's path rule reads any
+  # computed path as uncontrolled data; the same shapes ship on main
+  # unflagged.
+  - 'scripts/claude-code-live-check.ts'
