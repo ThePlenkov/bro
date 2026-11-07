@@ -37,6 +37,7 @@ JSON
 ```
 
 Notes:
+
 - Use **numeric GitHub database IDs** for `actor_id` (never login names like `"dependabot[bot]"`).
   - For `actor_type: "User"` (your own account, or any user/bot account registered as a User), look up the numeric user ID with `gh api user --jq .id` (yourself) or `gh api users/<login> --jq .id` (e.g. `gh api users/dependabot[bot] --jq .id`).
   - For `actor_type: "Integration"` (GitHub Apps such as Dependabot or GitHub Actions), look up the app ID with `gh api apps/<slug> --jq .id` (e.g. `gh api apps/dependabot --jq .id`, `gh api apps/github-actions --jq .id`). Do **not** use `/users/...` lookups for Integration entries.
