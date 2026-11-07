@@ -46,30 +46,31 @@ if (
 
 // Tarball assertion: the published tarball must actually carry pack.json.
 // npm pack --dry-run (JSON mode) is the only proof that the `files` list
-// resolves to a tarball entry at publish time. PATH is pinned to fixed,
-// non-writable directories so the lookup is not subject to PATH injection
-// (SonarCloud S4036); execFileSync takes an argv array (no shell).
+// resolves to a tarball entry at publish time. We invoke npm's CLI through
+// the current node binary (process.execPath) and an absolute path to
+// npm-cli.js, so no PATH lookup is performed and no user-writable directory
+// needs to be on PATH (SonarCloud S4036).
 let npmRan = false;
 let tarballHasPackJson = false;
-// Resolve the npm binary from fixed, well-known locations so we never
-// depend on a PATH that may contain user-writable directories (S4036).
-const npmCandidates = [
-  '/usr/local/bin/npm',
-  '/usr/bin/npm',
-  '/bin/npm',
-  '/opt/homebrew/bin/npm',
-  '/home/linuxbrew/.linuxbrew/bin/npm',
+const npmCliCandidates = [
+  join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
+  '/usr/lib/node_modules/npm/bin/npm-cli.js',
+  '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
 ];
-const npmBin = npmCandidates.find(c => existsSync(c));
-if (npmBin) {
+const npmCli = npmCliCandidates.find(c => existsSync(c));
+if (npmCli) {
   try {
-    const out = execFileSync(npmBin, ['pack', '--dry-run', '--ignore-scripts', '--json'], {
-      // NOSONAR — npm is a required build tool; binary resolved from fixed locations above
-      cwd: packDir,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PATH: `${dirname(npmBin)}:/usr/local/bin:/usr/bin:/bin` },
-    });
+    const out = execFileSync(
+      process.execPath,
+      [npmCli, 'pack', '--dry-run', '--ignore-scripts', '--json'],
+      {
+        cwd: packDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { PATH: '/usr/bin:/bin' },
+      }
+    );
     npmRan = true;
     const parsed = JSON.parse(out);
     const entries: string[] = Array.isArray(parsed)
