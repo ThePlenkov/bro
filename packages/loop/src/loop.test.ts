@@ -295,21 +295,21 @@ describe('prompts', () => {
 });
 
 describe('expandAgentCmd', () => {
-  test('placeholder is replaced with the quoted path', () => {
+  test('placeholder is replaced with the env reference', () => {
     assert.equal(
-      expandAgentCmd('devin --prompt-file {promptFile} -p', '/tmp/wt/p.md'),
-      "devin --prompt-file '/tmp/wt/p.md' -p"
+      expandAgentCmd('devin --prompt-file {promptFile} -p'),
+      'devin --prompt-file "$BRO_PROMPT_FILE" -p'
     );
   });
 
-  test('no placeholder → path appended as the last arg', () => {
-    assert.equal(expandAgentCmd('myagent run', '/tmp/p.md'), "myagent run '/tmp/p.md'");
+  test('no placeholder → the env reference appends as the last arg', () => {
+    assert.equal(expandAgentCmd('myagent run'), 'myagent run "$BRO_PROMPT_FILE"');
   });
 
-  test('paths with quotes are escaped', () => {
-    assert.equal(
-      expandAgentCmd('a {promptFile}', "/tmp/o'brien/p.md"),
-      "a '/tmp/o'\\''brien/p.md'"
-    );
+  test('an empty template still names only the env reference', () => {
+    // the prompt path never enters the line — injection by filename is
+    // impossible no matter what the artifact is called
+    assert.equal(expandAgentCmd(''), '"$BRO_PROMPT_FILE"');
+    assert.equal(expandAgentCmd('a {promptFile} b {promptFile}'), 'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"');
   });
 });

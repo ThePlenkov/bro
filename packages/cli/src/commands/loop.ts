@@ -820,7 +820,7 @@ function spawnAgent(
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
+        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -1590,15 +1590,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
+  // operator-configured bootstrap; PATH lookup is the contract (same as git/bd)
+  const b = /* NOSONAR */ spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
   if (b.status === 0) {
     return true;
   }
@@ -2217,6 +2214,16 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    if (exit.code === 0 && !superseded) {
+      // If the fix worker exited cleanly but did not resolve threads,
+      // we must not let the cycle loop forever. Do not auto-retry here;
+      // let the gate re-poll and the memberAction decide. However, ensure
+      // we don't re-trigger without budget pressure - the gate will see
+      // current thread state. Also log to make the behavior explicit.
+      console.error(
+        `loop ${prRef(ctx, m.pr)}: fix worker exited 0 without obvious thread resolution — gate will re-poll`
+      );
+    }
     return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
@@ -3273,7 +3280,7 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
   const argvLine =
     w?.kind === 'argv'
       ? [...w.argv, item.promptFile].map(shRender).join(' ')
-      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile);
+      : expandAgentCmd(laneCommand(ctx, lane));
   console.log(`  agent: ${argvLine}`);
 }
 
