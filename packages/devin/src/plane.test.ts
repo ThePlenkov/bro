@@ -1,31 +1,24 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import {
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { SpawnError } from '@broject/core'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SpawnError } from '@broject/core';
 /** A scratch dir swept on exit — the fixture-leak contract: a test
  *  that dies leaves nothing behind. */
-const tmpDirs: string[] = []
-let tmpSweepArmed = false
+const tmpDirs: string[] = [];
+let tmpSweepArmed = false;
 function tmpDir(prefix: string): string {
   if (!tmpSweepArmed) {
-    tmpSweepArmed = true
+    tmpSweepArmed = true;
     process.once('exit', () => {
-      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
-    })
+      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    });
   }
-  const dir = mkdtempSync(join(tmpdir(), prefix))
-  tmpDirs.push(dir)
-  return dir
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
 }
 
 import {
@@ -40,199 +33,240 @@ import {
   devinTranscriptsDir,
   listDevinSessions,
   renderDevinTranscript,
-} from './plane.ts'
+} from './plane.ts';
 
 const withLockDir = (fn: (dir: string) => void): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'));
   try {
-    fn(dir)
+    fn(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 /** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
- *  scripts them; absent files read as "no data" like on macOS. */
-const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null, stdinTo: string | null, argv0?: string) => void) => void): void => {
-  const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'))
-  const mk = (pid: number, environ: string | null, stdinTo: string | null, argv0 = 'devin'): void => {
-    const dir = join(procDir, String(pid))
-    mkdirSync(join(dir, 'fd'), { recursive: true })
+ *  scripts them; absent files read as "no data" like on macOS. `tty`
+ *  (a controlling-terminal device number) additionally scripts
+ *  <pid>/stat — without it the tty probe reads "no data" and the
+ *  stdin probe decides. */
+const withProc = (
+  fn: (
+    procDir: string,
+    mk: (
+      pid: number,
+      environ: string | null,
+      stdinTo: string | null,
+      argv0?: string,
+      tty?: number
+    ) => void
+  ) => void
+): void => {
+  const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'));
+  const mk = (
+    pid: number,
+    environ: string | null,
+    stdinTo: string | null,
+    argv0 = 'devin',
+    tty?: number
+  ): void => {
+    const dir = join(procDir, String(pid));
+    mkdirSync(join(dir, 'fd'), { recursive: true });
     if (environ !== null) {
-      writeFileSync(join(dir, 'environ'), environ)
+      writeFileSync(join(dir, 'environ'), environ);
     }
     if (stdinTo !== null) {
-      symlinkSync(stdinTo, join(dir, 'fd', '0'))
+      symlinkSync(stdinTo, join(dir, 'fd', '0'));
+    }
+    if (tty !== undefined) {
+      // the real shape: pid (comm) state ppid pgrp session tty_nr … —
+      // the comm may wrap in parens and hold spaces, the parser goes
+      // after the last ')'
+      writeFileSync(join(dir, 'stat'), `${pid} (devin acp) S 1 1 1 ${tty} ${tty} 0\n`);
     }
     // the identity the live-session count checks: argv[0] is the cli
-    writeFileSync(join(dir, 'cmdline'), `${argv0}\0--flag\0`)
-  }
+    writeFileSync(join(dir, 'cmdline'), `${argv0}\0--flag\0`);
+  };
   try {
-    fn(procDir, mk)
+    fn(procDir, mk);
   } finally {
-    rmSync(procDir, { recursive: true, force: true })
+    rmSync(procDir, { recursive: true, force: true });
   }
-}
+};
 
 /** A fake /proc where the test process reads as the devin cli —
  *  the identity the live-session count checks (a lock's pid must still
  *  BE a devin process). */
 const withDevinProc = (fn: (procDir: string) => void): void => {
   withProc((procDir, mk) => {
-    mk(process.pid, 'PATH=/bin\0', null, 'devin')
-    fn(procDir)
-  })
-}
+    mk(process.pid, 'PATH=/bin\0', null, 'devin');
+    fn(procDir);
+  });
+};
 
 /** A live process that reads as the devin cli — the live-session
  *  count checks the process identity (argv[0]), so the fixture must BE
  *  named devin: a lock's pid must still be the cli that wrote it. */
 const spawnDevinCli = (env: Record<string, string> = {}): ChildProcess => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-bin-'))
-  const bin = join(dir, 'devin')
-  symlinkSync('/bin/sleep', bin)
-  return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } })
-}
+  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-bin-'));
+  const bin = join(dir, 'devin');
+  symlinkSync('/bin/sleep', bin);
+  return spawn(bin, ['30'], { stdio: 'ignore', env: { ...process.env, ...env } });
+};
 
 describe('devinSessionPlane', () => {
   test('detects the devin cli and nothing else', () => {
-    assert.equal(devinSessionPlane.kind, 'devin')
-    assert.equal(devinSessionPlane.detectsCli('devin'), true)
-    assert.equal(devinSessionPlane.detectsCli('opencode'), false)
-  })
+    assert.equal(devinSessionPlane.kind, 'devin');
+    assert.equal(devinSessionPlane.detectsCli('devin'), true);
+    assert.equal(devinSessionPlane.detectsCli('opencode'), false);
+  });
 
   test('countLive scans the configured lockDir plus the worker env dir', () => {
-    withDevinProc((procDir) => {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        assert.equal(devinSessionPlane.countLive({ lockDir: dir, procDir }), 1)
-      })
-    })
-  })
+    withDevinProc(procDir => {
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid));
+        assert.equal(devinSessionPlane.countLive({ lockDir: dir, procDir }), 1);
+      });
+    });
+  });
 
   test('a spec.env XDG override makes countLive scan BOTH dirs', () => {
-    withDevinProc((procDir) => {
-    withLockDir((dir) => {
-      const xdg = mkdtempSync(join(tmpdir(), 'bro-devin-xdg-'))
-      try {
-        const workerDir = join(xdg, 'devin', 'cli', 'session_locks')
-        mkdirSync(workerDir, { recursive: true })
-        // one lock in the spawner's dir, one in the worker's — both count
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        writeFileSync(join(workerDir, 'b.lock'), String(process.pid))
-        assert.equal(
-          devinSessionPlane.countLive({ lockDir: dir, procDir }, { XDG_DATA_HOME: xdg }),
-          1 // same pid — dedupes
-        )
-      } finally {
-        rmSync(xdg, { recursive: true, force: true })
-      }
-    })
-    })
-  })
-})
+    withDevinProc(procDir => {
+      withLockDir(dir => {
+        const xdg = mkdtempSync(join(tmpdir(), 'bro-devin-xdg-'));
+        try {
+          const workerDir = join(xdg, 'devin', 'cli', 'session_locks');
+          mkdirSync(workerDir, { recursive: true });
+          // one lock in the spawner's dir, one in the worker's — both count
+          writeFileSync(join(dir, 'a.lock'), String(process.pid));
+          writeFileSync(join(workerDir, 'b.lock'), String(process.pid));
+          assert.equal(
+            devinSessionPlane.countLive({ lockDir: dir, procDir }, { XDG_DATA_HOME: xdg }),
+            1 // same pid — dedupes
+          );
+        } finally {
+          rmSync(xdg, { recursive: true, force: true });
+        }
+      });
+    });
+  });
+});
 
 describe('countDevinSessions', () => {
   test('counts unique live pids — duped locks and dead pids collapse', () => {
-    withDevinProc((procDir) => {
-      withLockDir((dir) => {
+    withDevinProc(procDir => {
+      withLockDir(dir => {
         // two locks, one live process (a resumed session's residue) — counts once
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        writeFileSync(join(dir, 'b.lock'), String(process.pid))
+        writeFileSync(join(dir, 'a.lock'), String(process.pid));
+        writeFileSync(join(dir, 'b.lock'), String(process.pid));
         // a pid guaranteed dead — the just-reaped child's pid
-        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
-        writeFileSync(join(dir, 'dead.lock'), String(dead))
+        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid;
+        writeFileSync(join(dir, 'dead.lock'), String(dead));
         // non-numeric content and non-lock files are skipped entirely
-        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
-        writeFileSync(join(dir, 'note.txt'), String(process.pid))
+        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid');
+        writeFileSync(join(dir, 'note.txt'), String(process.pid));
         // strict pid parse — '123abc' is NOT 123; a trailing-garbage lock
         // must not collapse onto an innocent process's pid
-        writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`)
-        assert.equal(countDevinSessions([dir], undefined, procDir), 1)
-      })
-    })
-  })
+        writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`);
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1);
+      });
+    });
+  });
 
   test('a RECYCLED pid is not a devin session — the lock is stale', () => {
     withProc((procDir, mk) => {
-      withLockDir((dir) => {
+      withLockDir(dir => {
         // the session died and the number now belongs to another program
-        mk(process.pid, 'PATH=/bin\0', null, '/usr/sbin/tailscaled')
-        writeFileSync(join(dir, 'recycled.lock'), String(process.pid))
-        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
-      })
-    })
-  })
+        mk(process.pid, 'PATH=/bin\0', null, '/usr/sbin/tailscaled');
+        writeFileSync(join(dir, 'recycled.lock'), String(process.pid));
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0);
+      });
+    });
+  });
 
   test('another CLI sharing the lock dir is not a devin session', () => {
     withProc((procDir, mk) => {
-      withLockDir((dir) => {
+      withLockDir(dir => {
         // `pi` writes devin-shaped locks into the same directory — its
         // sessions draw on a different account
-        mk(process.pid, 'PATH=/bin\0', null, 'omp')
-        writeFileSync(join(dir, 'foreign.lock'), String(process.pid))
-        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
-      })
-    })
-  })
+        mk(process.pid, 'PATH=/bin\0', null, 'omp');
+        writeFileSync(join(dir, 'foreign.lock'), String(process.pid));
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0);
+      });
+    });
+  });
 
   test('an unreadable pid entry counts — the count fails closed', () => {
-    withProc((procDir) => {
-      withLockDir((dir) => {
+    withProc(procDir => {
+      withLockDir(dir => {
         // present but unreadable (a directory where the file belongs):
         // the identity cannot be disproved — count it
-        rmSync(join(procDir, String(process.pid), 'cmdline'), { force: true })
-        mkdirSync(join(procDir, String(process.pid), 'cmdline'), { recursive: true })
-        writeFileSync(join(dir, 'blind.lock'), String(process.pid))
-        assert.equal(countDevinSessions([dir], undefined, procDir), 1)
-      })
-    })
-  })
+        rmSync(join(procDir, String(process.pid), 'cmdline'), { force: true });
+        mkdirSync(join(procDir, String(process.pid), 'cmdline'), { recursive: true });
+        writeFileSync(join(dir, 'blind.lock'), String(process.pid));
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1);
+      });
+    });
+  });
 
   test('a pid that is GONE is not a session — the lock outlived it', () => {
-    withProc((procDir) => {
-      withLockDir((dir) => {
+    withProc(procDir => {
+      withLockDir(dir => {
         // no /proc entry for the pid: the session died, the lock stayed
-        rmSync(join(procDir, String(process.pid)), { recursive: true, force: true })
-        writeFileSync(join(dir, 'gone.lock'), String(process.pid))
-        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
-      })
-    })
-  })
+        rmSync(join(procDir, String(process.pid)), { recursive: true, force: true });
+        writeFileSync(join(dir, 'gone.lock'), String(process.pid));
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0);
+      });
+    });
+  });
 
   test('a missing lock dir reads as zero sessions', () => {
-    assert.equal(countDevinSessions([join(tmpdir(), 'bro-devin-locks-absent-')]), 0)
-  })
+    assert.equal(countDevinSessions([join(tmpdir(), 'bro-devin-locks-absent-')]), 0);
+  });
 
   test('an unreadable lock dir fails closed — refuse, never pretend zero', () => {
     // a path where readdirSync fails non-ENOENT: a file posing as the dir
-    const file = join(tmpDir('bro-devin-nodir-'), 'notdir')
-    writeFileSync(file, 'x')
-    assert.throws(() => countDevinSessions([file]), /not a directory|ENOTDIR/)
-  })
-})
+    const file = join(tmpDir('bro-devin-nodir-'), 'notdir');
+    writeFileSync(file, 'x');
+    assert.throws(() => countDevinSessions([file]), /not a directory|ENOTDIR/);
+  });
+});
 
 describe('devinPidIsWorker', () => {
+  test('BRO_HOOKS=0 marks a machine backend service child as not a worker', () => {
+    withProc((procDir, mk) => {
+      mk(601, 'PATH=/bin\0BRO_HOOKS=0\0', 'pipe:[1]');
+      assert.equal(devinPidIsWorker(601, procDir), false);
+      // BRO_AGENT_ID takes precedence — a real bro worker must count even if it inherits BRO_HOOKS=0
+      mk(602, 'PATH=/bin\0BRO_HOOKS=0\0BRO_AGENT_ID=abc\0', 'pipe:[1]');
+      assert.equal(devinPidIsWorker(602, procDir), true);
+      // lookalikes must not trigger the exclusion (NUL-anchored like BRO_AGENT_ID)
+      mk(603, 'PATH=/bin\0XBRO_HOOKS=0\0', 'pipe:[1]');
+      assert.equal(devinPidIsWorker(603, procDir), true);
+      mk(604, 'PATH=/bin\0BRO_HOOKS=00\0', 'pipe:[1]');
+      assert.equal(devinPidIsWorker(604, procDir), true);
+    });
+  });
+
   test('the BRO_AGENT_ID env badge classifies a worker — NUL-anchored', () => {
     withProc((procDir, mk) => {
-      mk(101, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0HOME=/h\0', '/dev/pts/3')
-      assert.equal(devinPidIsWorker(101, procDir), true)
+      mk(101, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0HOME=/h\0', '/dev/pts/3');
+      assert.equal(devinPidIsWorker(101, procDir), true);
       // a lookalike suffix must not alias — the anchor rejects XBRO_AGENT_ID
-      mk(102, 'PATH=/bin\0XBRO_AGENT_ID=spoof\0', '/dev/pts/3')
-      assert.equal(devinPidIsWorker(102, procDir), false)
-    })
-  })
+      mk(102, 'PATH=/bin\0XBRO_AGENT_ID=spoof\0', '/dev/pts/3');
+      assert.equal(devinPidIsWorker(102, procDir), false);
+    });
+  });
 
   test('non-pty stdin classifies a worker, a pty does not', () => {
     withProc((procDir, mk) => {
-      mk(201, 'PATH=/bin\0', 'pipe:[1234]')
-      assert.equal(devinPidIsWorker(201, procDir), true)
-      mk(202, 'PATH=/bin\0', '/dev/null')
-      assert.equal(devinPidIsWorker(202, procDir), true)
-      mk(203, 'PATH=/bin\0', '/dev/pts/2')
-      assert.equal(devinPidIsWorker(203, procDir), false)
-    })
-  })
+      mk(201, 'PATH=/bin\0', 'pipe:[1234]');
+      assert.equal(devinPidIsWorker(201, procDir), true);
+      mk(202, 'PATH=/bin\0', '/dev/null');
+      assert.equal(devinPidIsWorker(202, procDir), true);
+      mk(203, 'PATH=/bin\0', '/dev/pts/2');
+      assert.equal(devinPidIsWorker(203, procDir), false);
+    });
+  });
 
   test('terminal devices beyond /dev/pts still read interactive', () => {
     withProc((procDir, mk) => {
@@ -244,263 +278,296 @@ describe('devinPidIsWorker', () => {
         [403, '/dev/console'],
         [404, '/dev/ttyS0'],
       ] as const) {
-        mk(pid, 'PATH=/bin\0', dev)
-        assert.equal(devinPidIsWorker(pid, procDir), false, `${dev} must not be a worker`)
+        mk(pid, 'PATH=/bin\0', dev);
+        assert.equal(devinPidIsWorker(pid, procDir), false, `${dev} must not be a worker`);
       }
-      mk(405, 'PATH=/bin\0', 'socket:[99]')
-      assert.equal(devinPidIsWorker(405, procDir), true)
-    })
-  })
+      mk(405, 'PATH=/bin\0', 'socket:[99]');
+      assert.equal(devinPidIsWorker(405, procDir), true);
+    });
+  });
 
   test('no verifiable data is NOT a worker — undercount never invents workers', () => {
     withProc((procDir, mk) => {
-      mk(301, null, null) // no environ, no fd/0 — macOS-equivalent blind
-      assert.equal(devinPidIsWorker(301, procDir), false)
-      mk(302, 'PATH=/bin\0', null) // environ read, no badge, stdin unknown
-      assert.equal(devinPidIsWorker(302, procDir), false)
-    })
-  })
-})
+      mk(301, null, null); // no environ, no fd/0 — macOS-equivalent blind
+      assert.equal(devinPidIsWorker(301, procDir), false);
+      mk(302, 'PATH=/bin\0', null); // environ read, no badge, stdin unknown
+      assert.equal(devinPidIsWorker(302, procDir), false);
+    });
+  });
+
+  test("the REPL's spawned acp child — piped fd/0 but the REPL's terminal — is not a worker", () => {
+    withProc((procDir, mk) => {
+      // the devin CLI's chisel_acp_client child holds the session lock
+      // with a piped fd/0 while sharing the REPL's controlling terminal
+      // (observed 2026-11-04: two such children read as 'devin workers:
+      // 2/1 live' and walled the whole devin spawn lane)
+      mk(501, 'PATH=/bin\0', 'pipe:[33601833]', 'devin', 34822);
+      assert.equal(devinPidIsWorker(501, procDir), false);
+      // the REPL itself reads interactive on either probe
+      mk(502, 'PATH=/bin\0', '/dev/pts/6', 'devin', 34822);
+      assert.equal(devinPidIsWorker(502, procDir), false);
+    });
+  });
+
+  test('the worker badge still wins over a controlling terminal', () => {
+    withProc((procDir, mk) => {
+      mk(511, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0', 'pipe:[2]', 'devin', 34822);
+      assert.equal(devinPidIsWorker(511, procDir), true);
+    });
+  });
+
+  test('a terminal-less pid with piped stdin is still a spawned worker', () => {
+    withProc((procDir, mk) => {
+      mk(521, 'PATH=/bin\0', 'pipe:[42]', 'devin', 0);
+      assert.equal(devinPidIsWorker(521, procDir), true);
+    });
+  });
+});
 
 describe('devinPidIsBatch (spec bro-9h86l)', () => {
   test('the supervisor marker in the worker env classifies the fleet lane', () => {
     withProc((procDir, mk) => {
       // a fleet spawn — the marker the fleet sets on every spawn
-      mk(501, 'PATH=/bin\0BRO_BATCH=1\0BRO_PR=599\0', 'pipe:[1]')
-      assert.equal(devinPidIsBatch(501, procDir), true)
-      mk(502, 'PATH=/bin\0BRO_BATCH=1\0', 'pipe:[1]')
-      assert.equal(devinPidIsBatch(502, procDir), true)
+      mk(501, 'PATH=/bin\0BRO_BATCH=1\0BRO_PR=599\0', 'pipe:[1]');
+      assert.equal(devinPidIsBatch(501, procDir), true);
+      mk(502, 'PATH=/bin\0BRO_BATCH=1\0', 'pipe:[1]');
+      assert.equal(devinPidIsBatch(502, procDir), true);
       // an EMPTY marker is not a marker — the spawn side says so too
-      mk(506, 'PATH=/bin\0BRO_BATCH=\0', 'pipe:[1]')
-      assert.equal(devinPidIsBatch(506, procDir), false)
+      mk(506, 'PATH=/bin\0BRO_BATCH=\0', 'pipe:[1]');
+      assert.equal(devinPidIsBatch(506, procDir), false);
       // the operator's own session — no marker
-      mk(503, 'PATH=/bin\0HOME=/h\0', 'pipe:[1]')
-      assert.equal(devinPidIsBatch(503, procDir), false)
-    })
-  })
+      mk(503, 'PATH=/bin\0HOME=/h\0', 'pipe:[1]');
+      assert.equal(devinPidIsBatch(503, procDir), false);
+    });
+  });
 
   test('NUL-anchored — a lookalike suffix does not classify', () => {
     withProc((procDir, mk) => {
-      mk(504, 'PATH=/bin\0XBRO_BATCH=spoof\0', 'pipe:[1]')
-      assert.equal(devinPidIsBatch(504, procDir), false)
-    })
-  })
+      mk(504, 'PATH=/bin\0XBRO_BATCH=spoof\0', 'pipe:[1]');
+      assert.equal(devinPidIsBatch(504, procDir), false);
+    });
+  });
 
-  test('an unclassifiable live worker counts as the fleet\'s — the cap fails closed', () => {
+  test("an unclassifiable live worker counts as the fleet's — the cap fails closed", () => {
     withProc((procDir, mk) => {
       // the environ EXISTS but cannot be read: the pid is a live session
       // it cannot classify, and a quota that cannot be established must
       // not be passed silently. (A directory where the file belongs
       // gives EISDIR — "present, unreadable", not "gone".)
-      mk(505, null, null)
-      mkdirSync(join(procDir, '505', 'environ'), { recursive: true })
-      assert.equal(devinPidIsBatch(505, procDir), true)
-    })
-  })
+      mk(505, null, null);
+      mkdirSync(join(procDir, '505', 'environ'), { recursive: true });
+      assert.equal(devinPidIsBatch(505, procDir), true);
+    });
+  });
 
   test('a pid that is GONE counts for nobody', () => {
     withProc((procDir, mk) => {
       // no environ file at all: the process exited between the liveness
       // check and the read — it holds no slot
-      mk(507, null, null)
-      assert.equal(devinPidIsBatch(507, procDir), false)
-    })
-  })
-})
+      mk(507, null, null);
+      assert.equal(devinPidIsBatch(507, procDir), false);
+    });
+  });
+});
 
 describe('countDevinWorkers', () => {
   test('counts only worker-classified live pids', () => {
-    withDevinProc((procDir) => {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        const workers = new Set<number>()
-        const isWorker = (pid: number): boolean => workers.has(pid)
-        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 0)
-        workers.add(process.pid)
-        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 1)
-      })
-    })
-  })
+    withDevinProc(procDir => {
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid));
+        const workers = new Set<number>();
+        const isWorker = (pid: number): boolean => workers.has(pid);
+        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 0);
+        workers.add(process.pid);
+        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 1);
+      });
+    });
+  });
 
   test('a real spawned child carrying BRO_AGENT_ID reads as a worker', async () => {
-    const child = spawnDevinCli({ BRO_AGENT_ID: 'native-test' })
-    if (!child.pid) throw new Error('spawn failed to create child process')
+    const child = spawnDevinCli({ BRO_AGENT_ID: 'native-test' });
+    if (!child.pid) throw new Error('spawn failed to create child process');
     try {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'w.lock'), String(child.pid))
-        assert.equal(countDevinWorkers([dir]), 1)
-      })
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'w.lock'), String(child.pid));
+        assert.equal(countDevinWorkers([dir]), 1);
+      });
     } finally {
-      child.kill('SIGKILL')
+      child.kill('SIGKILL');
     }
-  })
+  });
 
   test('a landed worker retires its own reservation slot — no double count', () => {
-    const child = spawn('sleep', ['30'], { stdio: 'ignore' })
-    if (!child.pid) throw new Error('spawn failed to create child process')
-    const pid = child.pid
+    const child = spawn('sleep', ['30'], { stdio: 'ignore' });
+    if (!child.pid) throw new Error('spawn failed to create child process');
+    const pid = child.pid;
     try {
       // scripted /proc, not the real child's environ: spawn() resolves
       // at fork — until execve lands, /proc/<pid>/environ still reads
       // the PARENT's env (no badge → the sweep misses the landing),
       // which is the flake this test carried under full-suite load
       withProc((procDir, mk) => {
-        mk(pid, 'PATH=/bin\0BRO_AGENT_ID=native-landed\0HOME=/h\0', null)
-        withLockDir((dir) => {
-          writeFileSync(join(dir, 'w.lock'), String(pid))
-          const resv = mkdtempSync(join(tmpdir(), 'bro-devin-slots-'))
+        mk(pid, 'PATH=/bin\0BRO_AGENT_ID=native-landed\0HOME=/h\0', null);
+        withLockDir(dir => {
+          writeFileSync(join(dir, 'w.lock'), String(pid));
+          const resv = mkdtempSync(join(tmpdir(), 'bro-devin-slots-'));
           try {
-            const landed = join(resv, 'native-landed-a1b2c3d4.slot')
-            const inflight = join(resv, 'native-inflight-e5f6a7b8.slot')
-            writeFileSync(landed, String(Date.now()))
-            writeFileSync(inflight, String(Date.now()))
-            assert.equal(countDevinSessions([dir], resv, procDir), 1)
+            const landed = join(resv, 'native-landed-a1b2c3d4.slot');
+            const inflight = join(resv, 'native-inflight-e5f6a7b8.slot');
+            writeFileSync(landed, String(Date.now()));
+            writeFileSync(inflight, String(Date.now()));
+            assert.equal(countDevinSessions([dir], resv, procDir), 1);
             // the landed spawn's slot is gone; an unrelated in-flight
             // claim stays for the tally
-            assert.equal(existsSync(landed), false)
-            assert.equal(existsSync(inflight), true)
+            assert.equal(existsSync(landed), false);
+            assert.equal(existsSync(inflight), true);
           } finally {
-            rmSync(resv, { recursive: true, force: true })
+            rmSync(resv, { recursive: true, force: true });
           }
-        })
-      })
+        });
+      });
     } finally {
-      child.kill('SIGKILL')
+      child.kill('SIGKILL');
     }
-  })
+  });
 
   test('no /proc + live sessions → the worker count fails closed', () => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'a.lock'), String(process.pid))
-      const absent = join(tmpdir(), 'bro-proc-absent-')
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'a.lock'), String(process.pid));
+      const absent = join(tmpdir(), 'bro-proc-absent-');
       assert.throws(
         () => countDevinWorkers([dir], devinPidIsWorker, undefined, absent),
         (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
-      )
+      );
       // an injected classifier doesn't probe /proc — no throw
-      assert.equal(countDevinWorkers([dir], () => false, undefined, absent), 0)
-    })
+      assert.equal(
+        countDevinWorkers([dir], () => false, undefined, absent),
+        0
+      );
+    });
     // zero live sessions are verifiably zero workers on any host
     assert.equal(
-      countDevinWorkers([join(tmpdir(), 'bro-devin-locks-absent-')], devinPidIsWorker, undefined, 'nope'),
+      countDevinWorkers(
+        [join(tmpdir(), 'bro-devin-locks-absent-')],
+        devinPidIsWorker,
+        undefined,
+        'nope'
+      ),
       0
-    )
-  })
-})
+    );
+  });
+});
 
 describe('listDevinSessions', () => {
   test('live locks yield rows named for the session — dead, duped, and junk locks collapse', () => {
     withProc((procDir, mk) => {
-      mk(process.pid, 'PATH=/bin\0', '/dev/pts/1')
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'sess-a.lock'), String(process.pid))
-        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
-        writeFileSync(join(dir, 'dead.lock'), String(dead))
-        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
-        writeFileSync(join(dir, 'note.txt'), String(process.pid))
-        const rows = listDevinSessions([dir], procDir)
-        assert.equal(rows.length, 1)
-        assert.equal(rows[0]!.name, 'sess-a')
-        assert.equal(rows[0]!.pid, process.pid)
+      mk(process.pid, 'PATH=/bin\0', '/dev/pts/1');
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'sess-a.lock'), String(process.pid));
+        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid;
+        writeFileSync(join(dir, 'dead.lock'), String(dead));
+        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid');
+        writeFileSync(join(dir, 'note.txt'), String(process.pid));
+        const rows = listDevinSessions([dir], procDir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.name, 'sess-a');
+        assert.equal(rows[0]!.pid, process.pid);
         // a pty stdin, no badge — the same undercount contract the
         // worker lane holds: live, but not verifiably a worker
-        assert.equal(rows[0]!.worker, false)
-        assert.equal(rows[0]!.agentId, undefined)
-      })
-    })
-  })
+        assert.equal(rows[0]!.worker, false);
+        assert.equal(rows[0]!.agentId, undefined);
+      });
+    });
+  });
 
   test('a duped lock for one pid yields one row', () => {
     withProc((procDir, mk) => {
-      mk(process.pid, null, null)
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        writeFileSync(join(dir, 'b.lock'), String(process.pid))
-        const rows = listDevinSessions([dir], procDir)
-        assert.equal(rows.length, 1)
-        assert.equal(rows[0]!.pid, process.pid)
-      })
-    })
-  })
+      mk(process.pid, null, null);
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid));
+        writeFileSync(join(dir, 'b.lock'), String(process.pid));
+        const rows = listDevinSessions([dir], procDir);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.pid, process.pid);
+      });
+    });
+  });
 
   test('a real spawned worker carries its BRO_AGENT_ID badge into the row', async () => {
-    const child = spawnDevinCli({ BRO_AGENT_ID: 'native-xyz' })
-    if (!child.pid) throw new Error('spawn failed to create child process')
+    const child = spawnDevinCli({ BRO_AGENT_ID: 'native-xyz' });
+    if (!child.pid) throw new Error('spawn failed to create child process');
     try {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'w.lock'), String(child.pid))
-        const rows = listDevinSessions([dir])
-        assert.equal(rows.length, 1)
-        assert.equal(rows[0]!.worker, true)
-        assert.equal(rows[0]!.agentId, 'native-xyz')
-      })
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'w.lock'), String(child.pid));
+        const rows = listDevinSessions([dir]);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.worker, true);
+        assert.equal(rows[0]!.agentId, 'native-xyz');
+      });
     } finally {
-      child.kill('SIGKILL')
+      child.kill('SIGKILL');
     }
-  })
+  });
 
   test('the plane wires listLive over the configured lockDir', () => {
-    withDevinProc((procDir) => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'x.lock'), String(process.pid))
-      const rows = devinSessionPlane.listLive!({ lockDir: dir, procDir })
-      assert.equal(rows.length, 1)
-      assert.equal(rows[0]!.name, 'x')
-    })
-    })
-  })
-})
+    withDevinProc(procDir => {
+      withLockDir(dir => {
+        writeFileSync(join(dir, 'x.lock'), String(process.pid));
+        const rows = devinSessionPlane.listLive!({ lockDir: dir, procDir });
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]!.name, 'x');
+      });
+    });
+  });
+});
 
 describe('devinLocksDir', () => {
   test('explicit override wins; XDG_DATA_HOME otherwise', () => {
-    assert.equal(devinLocksDir({ lockDir: '/tmp/x' }), '/tmp/x')
+    assert.equal(devinLocksDir({ lockDir: '/tmp/x' }), '/tmp/x');
     assert.equal(
       devinLocksDir({}, { XDG_DATA_HOME: '/tmp/xdg' }),
       join('/tmp/xdg', 'devin', 'cli', 'session_locks')
-    )
+    );
     assert.equal(
       devinLocksDir({}, { HOME: '/tmp/home' }),
       join('/tmp/home', '.local', 'share', 'devin', 'cli', 'session_locks')
-    )
-  })
-})
+    );
+  });
+});
 
 describe('devinLogsDir', () => {
   test('explicit override wins; a lockDir override confines the default inside it', () => {
-    assert.equal(devinLogsDir({ logsDir: '/tmp/l' }), '/tmp/l')
+    assert.equal(devinLogsDir({ logsDir: '/tmp/l' }), '/tmp/l');
     assert.equal(
       devinLogsDir({}, { XDG_DATA_HOME: '/tmp/xdg' }),
       join('/tmp/xdg', 'devin', 'cli', 'session_locks', '..', 'logs')
-    )
+    );
     // lockDir overridden without logsDir — a '../logs' sibling would
     // escape the chosen root; the default nests inside the override
-    assert.equal(devinLogsDir({ lockDir: '/tmp/locks' }), join('/tmp/locks', 'logs'))
-  })
-})
+    assert.equal(devinLogsDir({ lockDir: '/tmp/locks' }), join('/tmp/locks', 'logs'));
+  });
+});
 
 describe('devinTranscriptsDir', () => {
   test('explicit override wins; a lockDir override confines the default inside it', () => {
-    assert.equal(devinTranscriptsDir({ transcriptsDir: '/tmp/t' }), '/tmp/t')
+    assert.equal(devinTranscriptsDir({ transcriptsDir: '/tmp/t' }), '/tmp/t');
     assert.equal(
       devinTranscriptsDir({}, { XDG_DATA_HOME: '/tmp/xdg' }),
       join('/tmp/xdg', 'devin', 'cli', 'session_locks', '..', 'transcripts')
-    )
-    assert.equal(
-      devinTranscriptsDir({ lockDir: '/tmp/locks' }),
-      join('/tmp/locks', 'transcripts')
-    )
-  })
-})
+    );
+    assert.equal(devinTranscriptsDir({ lockDir: '/tmp/locks' }), join('/tmp/locks', 'transcripts'));
+  });
+});
 
 describe('devinSessionTranscript', () => {
   test('resolves <name>.json when the file exists, undefined otherwise', () => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'sess-a.json'), '{}')
-      assert.equal(devinSessionTranscript('sess-a', dir), join(dir, 'sess-a.json'))
-      assert.equal(devinSessionTranscript('sess-b', dir), undefined)
-    })
-  })
-})
+    withLockDir(dir => {
+      writeFileSync(join(dir, 'sess-a.json'), '{}');
+      assert.equal(devinSessionTranscript('sess-a', dir), join(dir, 'sess-a.json'));
+      assert.equal(devinSessionTranscript('sess-b', dir), undefined);
+    });
+  });
+});
 
 const TRANSCRIPT = JSON.stringify({
   schema_version: 'ATIF-v1.7',
@@ -542,7 +609,9 @@ const TRANSCRIPT = JSON.stringify({
       timestamp: '2026-10-16T20:03:00.000Z',
       source: 'system',
       message: '',
-      tool_calls: [{ tool_call_id: 'exec:2', function_name: 'exec', arguments: { command: 'internal' } }],
+      tool_calls: [
+        { tool_call_id: 'exec:2', function_name: 'exec', arguments: { command: 'internal' } },
+      ],
     },
     {
       timestamp: '2026-10-16T20:04:00.000Z',
@@ -550,35 +619,32 @@ const TRANSCRIPT = JSON.stringify({
       message: 'a step with no numeric step_id',
     },
   ],
-})
+});
 
 describe('renderDevinTranscript', () => {
   test('renders messages and tool calls, elides system steps — tool calls included', () => {
-    const r = renderDevinTranscript(TRANSCRIPT)
-    assert.ok(r !== undefined)
-    assert.equal(r.watermark, 5)
-    const text = r.lines.join('\n')
-    assert.match(text, /\[20:01:00\] agent: checking the provider template/)
-    assert.match(text, /\[20:01:05\] → exec\(grep -rn loadAgentEnv packages\/cli\/src\)/)
-    assert.match(text, /\[20:02:00\] user: ship it/)
-    assert.match(text, /\[20:04:00\] agent: a step with no numeric step_id/)
-    assert.doesNotMatch(text, /additional_metadata/)
-    assert.doesNotMatch(text, /exec\(internal\)/)
-    assert.match(text, /2 system steps elided/)
-  })
+    const r = renderDevinTranscript(TRANSCRIPT);
+    assert.ok(r !== undefined);
+    assert.equal(r.watermark, 5);
+    const text = r.lines.join('\n');
+    assert.match(text, /\[20:01:00\] agent: checking the provider template/);
+    assert.match(text, /\[20:01:05\] → exec\(grep -rn loadAgentEnv packages\/cli\/src\)/);
+    assert.match(text, /\[20:02:00\] user: ship it/);
+    assert.match(text, /\[20:04:00\] agent: a step with no numeric step_id/);
+    assert.doesNotMatch(text, /additional_metadata/);
+    assert.doesNotMatch(text, /exec\(internal\)/);
+    assert.match(text, /2 system steps elided/);
+  });
 
   test('fromStepId resumes a follow watermark — id-less steps do not reprint', () => {
-    const r = renderDevinTranscript(TRANSCRIPT, 3)
-    assert.ok(r !== undefined)
-    assert.equal(r.watermark, 5)
-    assert.deepEqual(r.lines, [
-      '[20:02:00] user: ship it',
-      '[transcript] (1 system steps elided)',
-    ])
-  })
+    const r = renderDevinTranscript(TRANSCRIPT, 3);
+    assert.ok(r !== undefined);
+    assert.equal(r.watermark, 5);
+    assert.deepEqual(r.lines, ['[20:02:00] user: ship it', '[transcript] (1 system steps elided)']);
+  });
 
   test('a mid-rewrite torn JSON reports undefined instead of throwing', () => {
-    assert.equal(renderDevinTranscript(TRANSCRIPT.slice(0, 40)), undefined)
-    assert.equal(renderDevinTranscript('{"steps": null}'), undefined)
-  })
-})
+    assert.equal(renderDevinTranscript(TRANSCRIPT.slice(0, 40)), undefined);
+    assert.equal(renderDevinTranscript('{"steps": null}'), undefined);
+  });
+});
