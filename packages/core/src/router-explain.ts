@@ -131,7 +131,9 @@ export function sliceFacts(explanation: Explanation, slice: ExplainSlice): Expla
 }
 
 /** Put a slice's facts into an explanation — the collectors build one
- *  slice at a time and hand it over. */
+ *  slice at a time and hand it over. The slice's own entry is written as
+ *  a literal key: the key set is closed, and a write that names its key
+ *  never reaches into a shape it did not choose. */
 export function withSlice(
   explanation: Explanation,
   slice: ExplainSlice,
@@ -140,7 +142,16 @@ export function withSlice(
   if (facts.length === 0) {
     return explanation;
   }
-  return { slices: { ...explanation.slices, [slice]: facts } };
+  switch (slice) {
+    case 'route':
+      return { slices: { ...explanation.slices, route: facts } };
+    case 'model':
+      return { slices: { ...explanation.slices, model: facts } };
+    case 'health':
+      return { slices: { ...explanation.slices, health: facts } };
+    case 'cost':
+      return { slices: { ...explanation.slices, cost: facts } };
+  }
 }
 
 /** One fact, rendered — the value, the reason, and where it came from. */
