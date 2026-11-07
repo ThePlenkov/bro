@@ -18,6 +18,7 @@
  * live with the surfaces that own the data (the router's CLI); the shape
  * they speak lives here, beside the health contract.
  */
+import { flagZone } from './cli-args.ts';
 
 /** The slices — the four questions an explanation can answer. */
 export const EXPLAIN_SLICES = ['route', 'model', 'health', 'cost'] as const;
@@ -95,13 +96,18 @@ export function parseExplainSlices(spec: string): ExplainSlice[] {
 /** The flag's answer — whether an explanation was asked for, and which
  *  slices. `--explain` is the whole story; `--explain=route,model` is a
  *  subset. The subset rides the `=` spelling so a bare `--explain` never
- *  swallows the next positional (the task text, the question). */
+ *  swallows the next positional (the task text, the question).
+ *
+ *  Only the FLAGS' zone is read: everything after `--` is the task's
+ *  own text, and a task that happens to say `--explain` asks for
+ *  nothing. */
 export function explainFlag(argv: string[]): { enabled: boolean; slices: ExplainSlice[] } {
-  const subset = argv.find(a => a.startsWith('--explain='));
+  const flags = flagZone(argv);
+  const subset = flags.find(a => a.startsWith('--explain='));
   if (subset !== undefined) {
     return { enabled: true, slices: parseExplainSlices(subset.slice('--explain='.length)) };
   }
-  if (argv.includes('--explain')) {
+  if (flags.includes('--explain')) {
     return { enabled: true, slices: [...EXPLAIN_SLICES] };
   }
   return { enabled: false, slices: [] };

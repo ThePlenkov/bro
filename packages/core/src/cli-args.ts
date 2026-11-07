@@ -31,7 +31,7 @@ export function flagValue(argv: string[], i: number, name: string): string {
 
 /** Flag parsing stops at `--` — everything after it is positional
  *  text, never an option. */
-const flagZone = (argv: string[]): string[] => {
+export const flagZone = (argv: string[]): string[] => {
   const end = argv.indexOf('--');
   return end === -1 ? argv : argv.slice(0, end);
 };
