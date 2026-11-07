@@ -12,5 +12,10 @@ const TERMINAL = new Set(['completed', 'failed']);
 
 /** Whether the call is one the bridge may hand to the client. */
 export function bridgeable(call: { sessionUpdate: string; status?: string | null }): boolean {
-  return call.sessionUpdate === 'tool_call' && !TERMINAL.has(call.status ?? '');
+  if (call.sessionUpdate !== 'tool_call') return false;
+  const status = call.status;
+  // NO status is in flight — the update says nothing about the call yet,
+  // and only a status that names a terminal outcome means it already ran
+  if (status === undefined || status === null) return true;
+  return !TERMINAL.has(status);
 }
