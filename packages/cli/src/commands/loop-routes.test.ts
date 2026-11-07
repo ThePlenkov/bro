@@ -124,7 +124,8 @@ test('the verdict rides with the lane — the reasons do not die', async () => {
 
 test('the health rides with the lane — the walls are part of the why', async () => {
   const routed = await routeTableLane({ table: tableFile(TABLE), label: 'sweep' });
-  assert.deepEqual(routed?.snapshot, {});
+  // the snapshot is a map with NO prototype — the keys are what it holds
+  assert.deepEqual(Object.keys(routed?.snapshot ?? {}), []);
 });
 
 test('a walled head drops out — the lane lands on the next entry', async () => {
