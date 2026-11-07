@@ -157,6 +157,9 @@ describe('isSelfToolCommand', () => {
     assert.ok(isSelfToolCommand('npx bro status'));
     assert.ok(isSelfToolCommand('npx --no-install bro serve ensure --port 44928'));
     assert.ok(!isSelfToolCommand('npx brother status'));
+    assert.ok(!isSelfToolCommand('npx eslint bro.config.js'));
+    assert.ok(!isSelfToolCommand('npx --package=bro prettier file.ts'));
+    assert.ok(!isSelfToolCommand('npx --package=other-package bro'));
   });
 
   test('does not approve lookalikes or other tools', () => {

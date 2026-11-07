@@ -639,7 +639,10 @@ if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; 
   # deadline is the error, never a PATH-bro swap. Never set it on a
   # live session: it weakens the fail-open contract.
   if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
-    { [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; } && exit 1
+    if [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; then
+      printf '%s\n' 'bro-hooks: dispatch failed' >&2
+    fi
+    cursor_permission_ask
     exit 0
   fi
   [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
@@ -647,7 +650,11 @@ if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; 
 fi
 # same pin when dist or node is missing — the PATH fallback must not
 # hide it either
-[ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
+if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+  printf '%s\n' 'bro-hooks: dispatch failed' >&2
+  cursor_permission_ask
+  exit 0
+fi
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
   [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask

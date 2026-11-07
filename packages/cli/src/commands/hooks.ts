@@ -90,12 +90,12 @@ import type {
   ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
+import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import type { InstallResult } from './githooks.ts';
-import { cliVersion } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { emitRefGuard } from './refguard.ts';
@@ -434,7 +434,26 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (!/^\s*npx\b/.test(cmd)) {
     return false;
   }
-  return /\bbro\b/.test(cmd);
+  const tokens = cmd.trim().split(/\s+/).slice(1);
+  // Reject package overrides and any flag that selects a package.
+  for (const t of tokens) {
+    if (t === '-p' || t === '--package' || t.startsWith('--package=') || t.startsWith('-p=')) {
+      return false;
+    }
+  }
+  // Find the first non-flag token: that is the executable npx will run.
+  let exec: string | undefined;
+  for (const t of tokens) {
+    if (t.startsWith('-')) {
+      continue;
+    }
+    exec = t;
+    break;
+  }
+  if (exec === undefined) {
+    return false;
+  }
+  return /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
 }
 
 // --- session arming -----------------------------------------------------------
@@ -986,17 +1005,28 @@ let perfBuf: PerfRow[] | null = null;
  *  when rows arrive, so span duration ≈ probe duration (spec
  *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
-  let span: any;
+  let span: any | undefined;
+  let pendingEnd: Record<string, unknown> | undefined;
   void lazyOtelSpan().then((otelSpan: any) => {
     try {
-      span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
+      const created = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
+      if (pendingEnd) {
+        created.end(pendingEnd);
+      } else {
+        span = created;
+      }
     } catch {
       span = undefined;
     }
   });
   return rows => {
+    const attrs = { 'hook.rows': rows.length };
     try {
-      span?.end({ 'hook.rows': rows.length });
+      if (span) {
+        span.end(attrs);
+      } else {
+        pendingEnd = attrs;
+      }
     } catch {
       // ignore
     }
@@ -1120,39 +1150,21 @@ const require = createRequire(import.meta.url);
 
 /** Trace tail for this session — the MatchContext's structured half.
  *  No hooks dir or session id means an empty tail, never a throw. */
-function sessionTail(dir: string, sessionId: string): { entries: any[]; raw: string } {
+async function sessionTail(
+  dir: string,
+  sessionId: string
+): Promise<{ entries: any[]; raw: string }> {
   const path = traceFile(dir, sessionId);
   if (path === null) {
     return { entries: [], raw: '' };
   }
   try {
-    // @ts-ignore
-    const mod = (globalThis as any).__bro_learn_cache;
-    if (mod?.readTraceTail) {
-      try {
-        return mod.readTraceTail(path);
-      } catch {
-        // fall through
-      }
-    }
-  } catch {
-    // ignore
-  }
-  // Try to load via require (works in CJS and with createRequire in ESM)
-  try {
-    const learn = require('@broject/learn');
+    const learn = await lazyLearn();
     (globalThis as any).__bro_learn_cache = learn;
     return learn.readTraceTail(path);
   } catch {
-    // ignore
+    return { entries: [], raw: '' };
   }
-  // Last resort: trigger async load for future calls
-  void lazyLearn()
-    .then((m: any) => {
-      (globalThis as any).__bro_learn_cache = m;
-    })
-    .catch(() => {});
-  return { entries: [], raw: '' };
 }
 
 /** `sessionContextText` costs a cold bd/dolt handshake plus git spawns —
@@ -1582,7 +1594,7 @@ export async function collectPromptContext(
     // guards on prompt-submit: match.terms sees the raw prompt, trace
     // keys see this session's tail, state sees the live repo
     guardLines(dir, 'prompt-submit', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
+      const tail = await sessionTail(dir, sessionId);
       let trace: any[] = [];
       try {
         const learn = await lazyLearn().catch(() => null);
@@ -1725,7 +1737,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
     // guards on post-tool: match sees the journaled trace tail (this
     // landing included — journalTrace ran first), state sees live repo
     guardLines(dir, 'post-tool', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
+      const tail = await sessionTail(dir, sessionId);
       let trace: any[] = [];
       try {
         const learn = await lazyLearn().catch(() => null);
@@ -1775,7 +1787,7 @@ async function emitStopGate(input: HookInput): Promise<void> {
   const goalP = (async () => {
     try {
       const g = await lazyGoal();
-      const tail = sessionTail(process.cwd(), sessionId);
+      const tail = await sessionTail(process.cwd(), sessionId);
       return g.goalStopLines(process.cwd(), sessionId, {
         trace: tail.raw,
         context: contextP,
@@ -1844,7 +1856,7 @@ async function emitStopGateBody(
       rows.sort((a, b) => rank(a.aspect) - rank(b.aspect))
     ),
     guardLines(dir, 'stop', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
+      const tail = await sessionTail(dir, sessionId);
       let trace: any[] = [];
       try {
         const learn = await lazyLearn().catch(() => null);
@@ -2001,9 +2013,9 @@ function runCommitHookCommand(event: 'install' | 'uninstall'): void {
       const results: [string, InstallResult][] =
         event === 'install'
           ? [
-              ['prepare-commit-msg', m.installCommitHook(process.cwd(), cliVersion())],
-              ['reference-transaction', m.installRefGuardHook(process.cwd(), cliVersion())],
-              ['post-merge', m.installPostMergeHook(process.cwd(), cliVersion())],
+              ['prepare-commit-msg', m.installCommitHook(process.cwd(), m.cliVersion())],
+              ['reference-transaction', m.installRefGuardHook(process.cwd(), m.cliVersion())],
+              ['post-merge', m.installPostMergeHook(process.cwd(), m.cliVersion())],
             ]
           : [
               ['prepare-commit-msg', m.uninstallCommitHook(process.cwd())],
@@ -2035,6 +2047,7 @@ function runPrepareCommitMsg(argv: string[]): void {
       }
     })
     .catch(() => {});
+  emitHook('prepare-commit-msg', {}, { dir: process.cwd() });
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -2047,6 +2060,7 @@ function runRefGuard(argv: string[]): void {
   } catch {
     // fail-open — the guard must never wedge git
   }
+  emitHook('reference-transaction', {}, { dir: process.cwd() });
 }
 
 /** bd/gh probes inherit cwd — run them in the project the hook fired for. */
@@ -2243,6 +2257,7 @@ function runPostMergeEvent(event: string | undefined): boolean {
     } catch {
       // fail-open
     }
+    emitHook('post-merge', {}, { dir: process.cwd() });
     return true;
   }
   if (event === 'post-merge-run') {
@@ -2340,7 +2355,7 @@ async function dispatchWithSpan(
   raw: unknown,
   input: HookInput,
   spanState: { evSpan: any; evSpanEnded: boolean; evSpanError: any }
-): Promise<void> {
+): Promise<boolean> {
   try {
     await dispatchHook(event, raw, input);
     try {
@@ -2349,6 +2364,7 @@ async function dispatchWithSpan(
       // ignore
     }
     spanState.evSpanEnded = true;
+    return true;
   } catch (e) {
     try {
       spanState.evSpan?.end({}, 'error');
@@ -2362,6 +2378,7 @@ async function dispatchWithSpan(
     // hooks fail open — a bro bug must never break the session.
     console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`);
     answerCursorPermission(event, input);
+    return false;
   }
 }
 
@@ -2446,10 +2463,18 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
       spanState.evSpan = undefined;
     }
   });
-  await dispatchWithSpan(event, raw, input, spanState);
+  const ok = await dispatchWithSpan(event, raw, input, spanState);
   clearTimeout(deadlineTimer);
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   flushPerf(sessionId, event, t0);
+  emitHook(event, input, {
+    sessionId,
+    client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+    durationMs: Date.now() - t0,
+    ok,
+    error: ok ? undefined : 'dispatch threw',
+    dir: root,
+  });
   // A probe that raced past its budget leaves its bd/gh child running —
   // unref the stragglers so the hook exits with the answer it sent,
   // not when the last subprocess closes.

@@ -117,6 +117,7 @@ interface Options {
 }
 
 function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
 }
 
@@ -126,11 +127,11 @@ function argValue(argv: string[], flag: string): string | undefined {
 }
 
 function validateRuns(runs: number, warmup: number): void {
-  if (!Number.isFinite(runs) || runs < 3) {
+  if (!Number.isInteger(runs) || runs < 3) {
     console.error('bench-hooks: need --runs ≥3');
     process.exit(2);
   }
-  if (!Number.isFinite(warmup) || warmup < 0) {
+  if (!Number.isInteger(warmup) || warmup < 0) {
     console.error('bench-hooks: need --warmup ≥0');
     process.exit(2);
   }
@@ -170,8 +171,19 @@ function loadBudget(file: string | undefined): Record<string, number> {
     return BUDGET_P50_MS;
   }
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Record<string, number>;
-    return { ...BUDGET_P50_MS, ...parsed };
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('budget must be an object');
+    }
+    for (const [key, cap] of Object.entries(parsed)) {
+      if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) {
+        console.error(
+          `bench-hooks: --budget ${file}: cap for ${key} must be a positive finite number`
+        );
+        process.exit(2);
+      }
+    }
+    return { ...BUDGET_P50_MS, ...(parsed as Record<string, number>) };
   } catch (e) {
     console.error(
       `bench-hooks: cannot read --budget ${file} — ${e instanceof Error ? e.message : String(e)}`
@@ -236,7 +248,7 @@ function attempt(
   const stderr = typeof proc.stderr === 'string' ? proc.stderr : '';
   const ok = proc.status === 0 && proc.error === undefined && !stderr.includes(HOOK_DISPATCH_ERR);
   const detail = `status=${proc.status} signal=${proc.signal} err=${proc.error?.message ?? ''} stderr=${stderr.slice(0, 300)}`;
-  return { ms, ok, detail, fatal: proc.error !== undefined };
+  return { ms, ok, detail, fatal: proc.error !== undefined || proc.status !== 0 };
 }
 
 /** stdin for one attempt — a fresh session id per run, since the trace
@@ -347,7 +359,7 @@ function printTable(rows: Map<string, Row>): void {
  *  both, so `--json` output always parses. --out writes the file in
  *  either mode. */
 function writeReport(rows: Map<string, Row>, budget: Record<string, number>, opts: Options): void {
-  const sha = '';
+  const sha = process.env.GITHUB_SHA?.slice(0, 7) ?? '';
   const report = {
     meta: {
       ts: new Date().toISOString(),
@@ -416,10 +428,15 @@ function checkUnbudgetedRows(
 function enforce(
   rows: Map<string, Row>,
   budget: Record<string, number>,
+  lanes: Lane[],
   say: (line: string) => void
 ): boolean {
   let failed = false;
   for (const [key, cap] of Object.entries(budget)) {
+    const lane = key.split(':')[0] as Lane;
+    if (LANES.includes(lane) && !lanes.includes(lane)) {
+      continue;
+    }
     if (checkBudgetRow(key, rows.get(key), cap, say)) {
       failed = true;
     }
@@ -447,7 +464,7 @@ function main(): void {
     : (line: string): void => {
         console.log(line);
       };
-  if (opts.enforce && enforce(rows, budget, say)) {
+  if (opts.enforce && enforce(rows, budget, opts.lanes, say)) {
     process.exit(1);
   }
 }
