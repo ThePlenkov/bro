@@ -34,7 +34,7 @@ function filterOf(query: Record<string, string>): PlaneFilter {
     filter.status = status;
   }
   const n = Number(limit);
-  if (limit !== undefined && Number.isFinite(n) && n >= 0) {
+  if (limit !== undefined && Number.isInteger(n) && n >= 0) {
     filter.limit = n;
   }
   return filter;
