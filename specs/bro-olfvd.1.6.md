@@ -76,12 +76,12 @@ the flag names the questions. `verbose` says "more"; `explain=model` says
 
 ### 3. The slices
 
-| Slice     | What it answers                                                                    |
-| --------- | ---------------------------------------------------------------------------------- |
-| `route`   | the route, the chain, the candidates, every reject with its reason, the entries health dropped |
-| `model`   | the model that serves, and its PROVENANCE (who pinned it)                          |
-| `health`  | what the router knew at decision time: the walls (reason + until), the open sessions |
-| `cost`    | the turn's context and cost, and the ledger's window counters                      |
+| Slice    | What it answers                                                                                |
+| -------- | ---------------------------------------------------------------------------------------------- |
+| `route`  | the route, the chain, the candidates, every reject with its reason, the entries health dropped |
+| `model`  | the model that serves, and its PROVENANCE (who pinned it)                                      |
+| `health` | what the router knew at decision time: the walls (reason + until), the open sessions           |
+| `cost`   | the turn's context and cost, and the ledger's window counters                                  |
 
 `route` is a superset of what `brouter route` prints today, so the plain
 render becomes the `route` slice — the same facts, one vocabulary.
@@ -150,14 +150,14 @@ operator would bill against.
 
 ### The package design
 
-| Package                  | Owns (this milestone)                                             |
-| ------------------------ | ----------------------------------------------------------------- |
+| Package                  | Owns (this milestone)                                                           |
+| ------------------------ | ------------------------------------------------------------------------------- |
 | `@broject/core`          | the explain contract: the slices, the facts, the pure renderer, the flag parser |
-| `@broject/router-store`  | the ledger — unchanged this milestone; the writer lives in the serving path |
-| `@broject/router-routes` | unchanged — the resolver's verdict is the `route` slice's source  |
-| `@broject/providers`     | the ACP turn's usage — reported tokens ride out with the reply   |
-| `@broject/brouter`       | the collectors and the surfaces: `route --explain`, `ask --explain` |
-| `@broject/cli`           | the spawn path: `bro loop --explain` prints the route a bead lands on |
+| `@broject/router-store`  | the ledger — unchanged this milestone; the writer lives in the serving path     |
+| `@broject/router-routes` | unchanged — the resolver's verdict is the `route` slice's source                |
+| `@broject/providers`     | the ACP turn's usage — reported tokens ride out with the reply                  |
+| `@broject/brouter`       | the collectors and the surfaces: `route --explain`, `ask --explain`             |
+| `@broject/cli`           | the spawn path: `bro loop --explain` prints the route a bead lands on           |
 
 Nothing reaches back: the store knows no routing, the table knows no store,
 the explain contract knows no IO.

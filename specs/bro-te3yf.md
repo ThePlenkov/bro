@@ -45,7 +45,7 @@ implementation.
 
 ### `brouter ask`
 
-```
+```bash
 brouter ask [--provider <name>] [--model <id>] [--timeout <ms>] [--json] <question…>
 ```
 
@@ -60,7 +60,7 @@ brouter ask [--provider <name>] [--model <id>] [--timeout <ms>] [--json] <questi
 
 ### `brouter acp`
 
-```
+```bash
 brouter acp [--provider <name>] [--model <id>]
 ```
 
