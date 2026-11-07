@@ -12,8 +12,8 @@ bro's Code Health policy, expressed as code. Three files carry it:
 
 | Rung | Profile                       | Who carries it                                                                                                  |
 | ---- | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 3    | `pay_down_tech_debt`          | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
-| 2    | `bare_minimum`                | **129 files** — no _critical_ rule fires. The critical-rule safety net plus "no new debt".                      |
+| 3    | `pay_down_tech_debt`          | **64 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
+| 2    | `bare_minimum`                | **135 files** — no _critical_ rule fires. The critical-rule safety net plus "no new debt".                      |
 | 1    | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
 
 A _critical_ rule is one of the four CodeScene names: Low Cohesion, Deep
