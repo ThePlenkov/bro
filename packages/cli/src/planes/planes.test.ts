@@ -20,6 +20,9 @@ import {
   type Finding,
 } from '@broject/core';
 import { agentEventLine } from './events.ts';
+import { buildDump } from '../commands/contract-dump.ts';
+import { planeParityProblems } from '../commands/contract-parity.ts';
+import { GROUP_META, PLUGINS } from '../plugins.ts';
 // registration side-effect — the catalog is empty without it
 import './index.ts';
 
@@ -90,6 +93,18 @@ describe('plane catalog', () => {
         }
         await assert.rejects(() => plane.exec('__bogus__', {}), PlaneVerbError);
       }
+    } finally {
+      rm();
+    }
+  });
+
+  test('every transport-exposed op declares a CLI twin in the contract (spec bro-xiq2m)', () => {
+    const { dir, rm } = tmp();
+    try {
+      // the live registry dump is the CLI surface — an op whose twin is
+      // absent (or undeclared) fails the parity gate
+      const live = buildDump(PLUGINS, GROUP_META);
+      assert.deepEqual(planeParityProblems(planes(dir), live), []);
     } finally {
       rm();
     }

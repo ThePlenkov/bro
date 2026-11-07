@@ -75,6 +75,13 @@ export interface PlaneDescriptor {
    *  every entry must also appear in `verbs` and hold a `true` live
    *  capability. An absent list keeps the plane read-only over MCP. */
   mcpVerbs?: string[];
+  /** verbs the REST transport exposes as POST
+   *  /api/v1/planes/<plane>/<verb> — same rules as `mcpVerbs` (subset
+   *  of `verbs`, live capability required). An absent list keeps the
+   *  plane read-only over REST: without it the transport would expose
+   *  every declared verb whose capability flips true, with no twin
+   *  requirement reaching the parity gate. */
+  restVerbs?: string[];
   /** JSON-schema arg shapes per verb — surfaced verbatim as tool
    *  inputSchema for `mcpVerbs` entries. Absent → a permissive object
    *  schema. */
@@ -82,6 +89,12 @@ export interface PlaneDescriptor {
   /** JSON-schema arg shapes per named read and for 'list' — transports
    *  surface them as-is. Absent → a permissive object schema. */
   readArgs?: Record<string, PlaneArgSchema>;
+  /** op → the CLI contract entry the op mirrors (`'next'`, `'act'`,
+   *  `'convoy'` — a plugin name in contract/cli.json). Every named read
+   *  and every `mcpVerbs`/`restVerbs` entry must appear: `bro contract
+   *  check` fails on an op with no CLI twin, so the transport surface
+   *  can never outgrow the CLI contract (spec bro-xiq2m). */
+  cli?: Record<string, string>;
   /** live-evaluated — presence means probed-capable, not configured.
    *  `read: false` hides every tool for the plane. */
   capabilities(): Promise<Record<string, boolean>>;

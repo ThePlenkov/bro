@@ -1,11 +1,11 @@
 /** Shared probes + row plumbing for the plane adapters
  *  (specs/bro-9rls.1.md — `cli/src/planes/*` over existing machinery). */
-import { gitTry, PlaneVerbError, taskStoreAsync } from '@broject/core'
+import { gitTry, PlaneVerbError, taskStoreAsync } from '@broject/core';
 
 /** "Inside a repo" — every plane's floor: `bro mcp` in a non-repo dir
  *  exposes nothing rather than answering with a wrong-repo read. */
 export function inRepo(dir: string): boolean {
-  return gitTry(['-C', dir, 'rev-parse', '--git-common-dir']).code === 0
+  return gitTry(['-C', dir, 'rev-parse', '--git-common-dir']).code === 0;
 }
 
 /** The beads doc db is reachable — the probe for planes whose reads are
@@ -14,10 +14,10 @@ export function inRepo(dir: string): boolean {
  *  reachable remote backend must not advertise their reads. */
 export async function beadsReachable(dir: string): Promise<boolean> {
   try {
-    await taskStoreAsync(dir).list({ limit: 1 })
-    return true
+    await taskStoreAsync(dir).list({ limit: 1 });
+    return true;
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -25,24 +25,27 @@ export async function beadsReachable(dir: string): Promise<boolean> {
 export function bounded<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
     p,
-    new Promise<T>((resolve) => {
-      const t = setTimeout(() => resolve(fallback), ms)
-      t.unref?.()
+    new Promise<T>(resolve => {
+      const t = setTimeout(() => resolve(fallback), ms);
+      t.unref?.();
     }),
-  ])
+  ]);
 }
 
 /** Read-arg coercion — tool args arrive as untyped JSON; planes take
  *  numbers/strings, so pull them narrowly instead of trusting. */
-export function argNumber(args: Record<string, unknown> | undefined, key: string): number | undefined {
-  const v = args?.[key]
+export function argNumber(
+  args: Record<string, unknown> | undefined,
+  key: string
+): number | undefined {
+  const v = args?.[key];
   if (typeof v === 'number' && Number.isFinite(v)) {
-    return v
+    return v;
   }
   if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) {
-    return Number(v)
+    return Number(v);
   }
-  return undefined
+  return undefined;
 }
 
 /** `limit` read-arg — a bound is a positive integer. The integer
@@ -55,24 +58,34 @@ export function argLimit(
   def: number,
   cap: number
 ): number {
-  const n = argNumber(args, key)
-  return Math.min(Math.max(n === undefined ? def : Math.floor(n), 1), cap)
+  const n = argNumber(args, key);
+  return Math.min(Math.max(n === undefined ? def : Math.floor(n), 1), cap);
 }
 
 export function argString(
   args: Record<string, unknown> | undefined,
   key: string
 ): string | undefined {
-  const v = args?.[key]
-  return typeof v === 'string' && v.trim() !== '' ? v : undefined
+  const v = args?.[key];
+  return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+
+/** `limit` on a locally-collected row set — undefined means unbounded;
+ *  a non-positive or fractional value must not turn slice(0, n) into a
+ *  tail-chop (slice(0,-n) drops rows from the END, an arbitrary partial
+ *  list). Floored and floored-at-zero, so a bad limit reads as "no
+ *  rows", never as misordered data. */
+export function sliceLimited<T>(rows: T[], args: Record<string, unknown> | undefined): T[] {
+  const limit = argNumber(args, 'limit');
+  return limit === undefined ? rows : rows.slice(0, Math.max(0, Math.floor(limit)));
 }
 
 export function argBool(
   args: Record<string, unknown> | undefined,
   key: string
 ): boolean | undefined {
-  const v = args?.[key]
-  return typeof v === 'boolean' ? v : undefined
+  const v = args?.[key];
+  return typeof v === 'boolean' ? v : undefined;
 }
 
 /** The named-read dispatcher every plane shares: undeclared names are
@@ -83,13 +96,17 @@ export async function dispatchRead(
   name: string,
   args?: Record<string, unknown>
 ): Promise<unknown> {
-  const fn = reads[name]
+  // own-enumerable entries only — reads['__proto__'] would fetch
+  // Object.prototype (a thrown TypeError on invoke) and 'constructor'
+  // would run Object(args); a client-supplied name must never reach
+  // either. Key compare, never a dynamic property read.
+  const fn = Object.entries(reads).find(([k]) => k === name)?.[1];
   if (fn === undefined) {
     throw new PlaneVerbError(
       plane,
       name,
       `undeclared read — declared: ${Object.keys(reads).join(', ')}`
-    )
+    );
   }
-  return fn(args)
+  return fn(args);
 }

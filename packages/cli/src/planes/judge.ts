@@ -9,17 +9,17 @@ import {
   type PlaneDescriptor,
   type Verdict,
   type VerdictRow,
-} from '@broject/core'
-import { computeStats, journalPath, judgeFacade, readJournal } from '@broject/judge'
-import { argString, dispatchRead } from './helpers.ts'
+} from '@broject/core';
+import { computeStats, journalPath, judgeFacade, readJournal } from '@broject/judge';
+import { argString, dispatchRead } from './helpers.ts';
 
-const VERBS = ['decide']
+const VERBS = ['decide'];
 
-const rowKey = (_r: JournalRow, i: number): string => `row:${i}`
+const rowKey = (_r: JournalRow, i: number): string => `row:${i}`;
 
 /** journal.ts/stats.ts's own predicate — Verdict.kind is `string`, so
  *  the union narrows only through a guard, never a bare !== check. */
-const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition'
+const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition';
 
 const toRow = (r: JournalRow, i: number): VerdictRow => {
   const base: VerdictRow = {
@@ -28,34 +28,39 @@ const toRow = (r: JournalRow, i: number): VerdictRow => {
     kind: r.kind,
     subject: r.subject,
     outcome: r.outcome,
-  }
+  };
   if (isVerdict(r)) {
-    base.model = r.model
-    base.lowConfidence = r.lowConfidence
+    base.model = r.model;
+    base.lowConfidence = r.lowConfidence;
   }
-  return base
-}
+  return base;
+};
 
 export function judgePlane(ctx: PlaneCtx): PlaneDescriptor {
-  const dir = ctx.dir
-  const rows = (): JournalRow[] => readJournal(dir)
+  const dir = ctx.dir;
+  const rows = (): JournalRow[] => readJournal(dir);
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     /** `bro judge stats` — agreement/accuracy rollups over the journal. */
-    stats: (a) => {
-      const since = argString(a, 'since')
-      return computeStats(rows(), since === undefined ? {} : { since })
+    stats: a => {
+      const since = argString(a, 'since');
+      return computeStats(rows(), since === undefined ? {} : { since });
     },
-  }
+  };
   return {
     name: 'judge',
     reads: Object.keys(reads),
     verbs: VERBS,
+    /** CLI twin — `bro judge stats` (spec bro-xiq2m). */
+    cli: { stats: 'judge' },
     readArgs: {
       list: { type: 'object', properties: { limit: { type: 'integer' } } },
       stats: {
         type: 'object',
         properties: {
-          since: { type: 'string', description: 'ISO timestamp — verdicts older than this are excluded' },
+          since: {
+            type: 'string',
+            description: 'ISO timestamp — verdicts older than this are excluded',
+          },
         },
       },
     },
@@ -63,25 +68,25 @@ export function judgePlane(ctx: PlaneCtx): PlaneDescriptor {
      *  legacy entry) — configured is not capable; `read` = a journal
      *  path exists (verdicts may be empty — that's a valid ledger). */
     capabilities: async () => {
-      let decide = false
+      let decide = false;
       try {
-        judgeFacade(dir)
-        decide = true
+        judgeFacade(dir);
+        decide = true;
       } catch {
-        decide = false
+        decide = false;
       }
-      return { read: journalPath(dir) !== null, decide }
+      return { read: journalPath(dir) !== null, decide };
     },
-    list: async (f) => {
-      const all = rows().map((r, i) => toRow(r, i))
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined
-      return limit === undefined ? all : all.slice(-limit)
+    list: async f => {
+      const all = rows().map((r, i) => toRow(r, i));
+      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
+      return limit === undefined ? all : all.slice(-limit);
     },
-    get: async (ref) =>
+    get: async ref =>
       rows()
         .map((r, i) => toRow(r, i))
-        .find((r) => r.id === ref),
+        .find(r => r.id === ref),
     read: (name, args) => dispatchRead('judge', reads, name, args),
     exec: verbsNotWired('judge', VERBS),
-  }
+  };
 }

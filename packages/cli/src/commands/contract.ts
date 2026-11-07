@@ -26,4 +26,5 @@ export type { ContractCommandRow, ContractDump } from './contract-dump.ts';
 export { buildDump } from './contract-dump.ts';
 export type { ContractDoc, ContractProblem } from './contract-shared.ts';
 export { parseBreaking, reconcileContract } from './contract-reconcile.ts';
+export { planeParityProblems } from './contract-parity.ts';
 export { runContractCommand } from './contract-cli.ts';
