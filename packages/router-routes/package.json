@@ -1,0 +1,47 @@
+{
+  "name": "@broject/router-routes",
+  "version": "0.3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@broject/core": "^0.3.0",
+    "smol-toml": "^1.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/router-routes"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "router-routes — the route table: TOML routes, the candidate builder, and the resolver",
+  "keywords": [
+    "router",
+    "routes",
+    "toml",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}

@@ -65,6 +65,21 @@ current provider. `fallthrough` moves forward to the first un-walled
 provider without wrapping; `park` keeps the step blocked on its current
 provider.
 
+**Route table** — declare `brouter.routes` and the loop asks the ROUTER's
+own table instead: the bead's class label is the task's `type`, its
+priority the task's band, and the table's `chain` names the models (the
+honest `<entry>/<model>` ids). `fleet.routing` stays the compatibility
+face — a run that declares no table behaves exactly as before. A table
+that breaks, or names a model `brouter.models` contradicts, is a config
+error: the run refuses to spawn rather than land the bead elsewhere
+(`bro router route "<task>"` shows the verdict and the why).
+
+`bro loop --explain` prints WHY each bead landed on its route — the route
+slice (the route, the chain, the rejects), the model slice (the model and
+who pinned it), the health slice (the walls the router knew) and the cost
+slice (the ledger's counters). `--explain=route,model` takes a subset; the
+explanation goes to stderr so the run log on stdout stays clean.
+
 **Raw template** — `loop.agent` (or an `--agent` value that names no
 provider) is the escape hatch:
 
