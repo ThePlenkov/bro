@@ -27,7 +27,6 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import {
-  appendFileSync,
   chmodSync,
   copyFileSync,
   existsSync,
@@ -42,7 +41,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   acquireFileLock,
   gitCommonDir,
@@ -832,8 +831,27 @@ function benchmarkCorpusPath(dir: string): string {
   return join(dir, 'dogfood', 'benchmark', 'corpus.json');
 }
 
-function benchmarkSchemaPath(dir: string): string {
-  return join(dir, 'packages', 'cli', 'schemas', 'benchmark', 'paired-results.schema.json');
+/** The loose shape of a benchmark JSON document — the corpus carries
+ *  `tasks`, a targets file carries `targets`; everything else is
+ *  passthrough the validator doesn't inspect. */
+interface BenchmarkJson {
+  tasks?: unknown;
+  targets?: unknown;
+}
+
+/** A benchmark JSON document parsed with a verdict — a malformed file
+ *  dies naming itself instead of crashing the command. */
+function loadBenchmarkJson(path: string, what: string): BenchmarkJson {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    die(`invalid ${what} JSON in ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (typeof doc !== 'object' || doc === null) {
+    die(`invalid ${what} in ${path}: expected an object`);
+  }
+  return doc as BenchmarkJson;
 }
 
 function cmdBenchmark(dir: string, argv: string[]): void {
@@ -850,54 +868,48 @@ function cmdBenchmark(dir: string, argv: string[]): void {
     return;
   }
   if (sub === 'run') {
-    const pos = positionals(argv.slice(1), new Set(['--targets', '--out']), { strict: true });
-    const outFlag = flag(argv, '--out');
+    positionals(argv.slice(1), new Set(['--targets', '--out']), { strict: true });
     const targetsFlag = flag(argv, '--targets');
-    const corpusPath = targetsFlag ?? benchmarkCorpusPath(dir);
+    // the corpus always comes from the pinned path — `--targets` is a
+    // targets override, never the corpus itself (a targets-shaped file
+    // has no .tasks and would silently emit zero rows)
+    const corpusPath = benchmarkCorpusPath(dir);
     if (!existsSync(corpusPath)) {
       die('no benchmark corpus found');
     }
-    const corpus = JSON.parse(readFileSync(corpusPath, 'utf8')) as any;
-    const outPath = outFlag ?? join(dir, '.evidence', 'benchmark', 'paired-results.jsonl');
-    mkdirSync(dirname(outPath), { recursive: true });
-    const schema = benchmarkSchemaPath(dir);
-    const now = new Date().toISOString();
+    const corpus = loadBenchmarkJson(corpusPath, 'benchmark corpus');
+    // every emitted row must carry taskId + revision (schema-required) —
+    // a task missing them would write an invalid line while reporting
+    // success, so the corpus validates before anything is emitted
     const tasks = Array.isArray(corpus.tasks) ? corpus.tasks : [];
     for (const task of tasks) {
-      const models = Array.isArray(task.models) ? task.models : ['native'];
-      for (const model of models) {
-        for (const variant of ['native', 'bro']) {
-          const runId = `bench-${task.taskId}-${variant}-${randomBytes(2).toString('hex')}`;
-          const row = {
-            taskId: task.taskId,
-            revision: task.revision,
-            runId,
-            variant,
-            model,
-            startedAt: now,
-            finishedAt: now,
-            timeToGreenMs: 0,
-            humanInterventions: 0,
-            controlPlaneCalls: 0,
-            tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            duplicateWorkCount: 0,
-            abandonedWorkCount: 0,
-            mergedFindingsWithoutFollowup: 0,
-            outcome: 'pass',
-            notes: 'paired benchmark scaffold (execution integrated)',
-          };
-          appendFileSync(outPath, `${JSON.stringify(row)}\n`);
-        }
+      if (
+        typeof task !== 'object' ||
+        task === null ||
+        typeof task.taskId !== 'string' ||
+        task.taskId === '' ||
+        typeof task.revision !== 'string' ||
+        task.revision === ''
+      ) {
+        die(
+          `invalid benchmark corpus task in ${corpusPath}: missing required taskId/revision`
+        );
       }
     }
-    console.log(
-      `wrote paired results to ${outPath}` +
-        (existsSync(schema) ? ` (schema: ${schema})` : '')
-    );
-    if (targetsFlag) {
-      console.log(`targets: ${targetsFlag}`);
+    if (targetsFlag !== undefined) {
+      if (!existsSync(targetsFlag)) {
+        die(`no targets file found: ${targetsFlag}`);
+      }
+      const doc = loadBenchmarkJson(targetsFlag, 'targets file');
+      if (typeof doc.targets !== 'object' || doc.targets === null) {
+        die(`invalid targets file: ${targetsFlag} — expected a { targets } document`);
+      }
     }
-    return;
+    // the spec's own contract — no claims without a baseline. Emitting
+    // zero-metric 'pass' rows would fabricate a baseline into the shared
+    // evidence store, so the scaffold refuses rather than write made-up
+    // measurements (spec bro-l8c4f.9, targets first).
+    die('paired benchmark execution is not implemented — refusing to emit fabricated results');
   }
   usage();
 }

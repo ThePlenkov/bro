@@ -603,42 +603,71 @@ describe('benchmark (bro-l8c4f.9)', () => {
     assert.ok(tokens.properties.input.type === 'integer');
   });
 
-  test('benchmark run emits paired results with targets support', async () => {
+  test('benchmark run validates corpus and targets, then refuses fabricated rows', async () => {
     const fx = fixture();
     try {
-      process.chdir(fx.main);
-      // run benchmark
-      const r = await (async () => {
-        const { runBenchmarkCommand } = await import('./dogfood.ts');
-        const out: string[] = [];
-        const err: string[] = [];
-        const origLog = console.log;
+      // the command resolves the corpus inside the CURRENT repo — the
+      // fixture's toplevel is its own repo, so plant what each arm needs
+      const benchDir = join(fx.main, 'dogfood', 'benchmark');
+      const corpusPath = join(benchDir, 'corpus.json');
+      const invoke = async (args: string[]) => {
+        const origExit = process.exit;
         const origErr = console.error;
-        console.log = (...args: any[]) => out.push(args.map(String).join(' '));
-        console.error = (...args: any[]) => err.push(args.map(String).join(' '));
+        const err: string[] = [];
+        console.error = (...a: unknown[]) => err.push(a.map(String).join(' '));
+        process.exit = ((code?: number) => {
+          throw Object.assign(new Error('exit'), { exitCode: code ?? 0 });
+        }) as typeof process.exit;
         try {
-          await runBenchmarkCommand([
-            'run',
-            '--targets',
-            join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'),
-          ]);
-          return { code: 0, out, err };
+          const { runBenchmarkCommand } = await import('./dogfood.ts');
+          await runBenchmarkCommand(args);
+          return { code: -1, err };
         } catch (e: any) {
-          return { code: e?.exitCode ?? 1, out, err };
+          return { code: e?.exitCode ?? -1, err };
         } finally {
-          console.log = origLog;
+          process.exit = origExit;
           console.error = origErr;
         }
-      })();
-      assert.equal(r.code, 0, r.err.join('\n'));
-      // find jsonl
-      const { readFileSync } = await import('node:fs');
-      const lines = readFileSync(join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl'), 'utf8')
-        .trim()
-        .split('\n');
-      assert.ok(lines.length > 0);
-      const row = JSON.parse(lines[0]);
-      assert.ok(row.taskId && row.variant && row.tokens);
+      };
+      // no corpus on disk → named, not an unhandled throw
+      const missing = await invoke(['run']);
+      assert.equal(missing.code, 1);
+      assert.match(missing.err.join('\n'), /no benchmark corpus found/);
+      // valid corpus → the honest refusal; nothing is written
+      mkdirSync(benchDir, { recursive: true });
+      writeFileSync(
+        corpusPath,
+        readFileSync(join(repoRoot, 'dogfood', 'benchmark', 'corpus.json'), 'utf8')
+      );
+      const r = await invoke(['run']);
+      assert.equal(r.code, 1, r.err.join('\n'));
+      assert.match(r.err.join('\n'), /not implemented/);
+      assert.ok(!existsSync(join(fx.main, '.evidence')), 'no fabricated evidence');
+      // --targets is a targets document, never the corpus itself — the
+      // corpus file has no top-level `targets`, so feeding it here dies
+      const asCorpus = await invoke(['run', '--targets', corpusPath]);
+      assert.equal(asCorpus.code, 1);
+      assert.match(asCorpus.err.join('\n'), /invalid targets file/);
+      const missingTargets = await invoke(['run', '--targets', join(benchDir, 'nope.json')]);
+      assert.equal(missingTargets.code, 1);
+      assert.match(missingTargets.err.join('\n'), /no targets file found/);
+      // a real targets document passes validation — same refusal after
+      const targetsPath = join(benchDir, 'targets.json');
+      writeFileSync(targetsPath, JSON.stringify({ targets: { timeToGreenMs: 1 } }));
+      const withTargets = await invoke(['run', '--targets', targetsPath]);
+      assert.equal(withTargets.code, 1);
+      assert.match(withTargets.err.join('\n'), /not implemented/);
+      // malformed corpus JSON dies named, never crashes unhandled
+      writeFileSync(corpusPath, '{nope');
+      const bad = await invoke(['run']);
+      assert.equal(bad.code, 1);
+      assert.match(bad.err.join('\n'), /invalid benchmark corpus JSON/);
+      // a task missing schema-required fields dies before any row could
+      // be written — never a schema-invalid line reported as success
+      writeFileSync(corpusPath, JSON.stringify({ tasks: [{ revision: 'abc' }] }));
+      const noId = await invoke(['run']);
+      assert.equal(noId.code, 1);
+      assert.match(noId.err.join('\n'), /missing required taskId\/revision/);
     } finally {
       fx.restore();
     }
