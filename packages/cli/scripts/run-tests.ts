@@ -49,17 +49,27 @@ const pattern = process.argv[2] || 'src/**/*.test.ts'
 if (pattern.includes('.e2e')) {
   const pkgDir = dirname(fileURLToPath(import.meta.url))
   const repoRoot = join(pkgDir, '..', '..')
-  const build = spawnSync(process.execPath, [require.resolve('nx'), 'run', '@broject/bro:build'], {
-    stdio: 'inherit',
-    cwd: repoRoot,
-  })
+  let build: ReturnType<typeof spawnSync>
+  try {
+    build = spawnSync(process.execPath, [require.resolve('nx'), 'run', '@broject/bro:build'], {
+      stdio: 'inherit',
+      cwd: repoRoot,
+    })
+  } catch {
+    build = { status: 1, pid: 0, output: [], stdout: null, stderr: null, signal: null } as ReturnType<typeof spawnSync>
+  }
   if (build.status !== 0) {
     // Fallback: try building from package dir if nx not available in expected form
-    const tsdownEntry = join(dirname(require.resolve('tsdown/package.json')), 'dist', 'run.mjs')
-    const build2 = spawnSync(process.execPath, [tsdownEntry, 'src/index.ts'], {
-      stdio: 'inherit',
-      cwd: join(pkgDir, '..'),
-    })
+    let build2: ReturnType<typeof spawnSync>
+    try {
+      const tsdownEntry = join(dirname(require.resolve('tsdown/package.json')), 'dist', 'run.mjs')
+      build2 = spawnSync(process.execPath, [tsdownEntry, 'src/index.ts'], {
+        stdio: 'inherit',
+        cwd: join(pkgDir, '..'),
+      })
+    } catch {
+      build2 = { status: 1, pid: 0, output: [], stdout: null, stderr: null, signal: null } as ReturnType<typeof spawnSync>
+    }
     if (build2.status !== 0 && build.status !== null) {
       // continue anyway; tests will fail clearly if dist missing
     }
