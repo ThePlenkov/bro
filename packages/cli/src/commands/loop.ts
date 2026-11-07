@@ -1435,24 +1435,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-<<<<<<< HEAD
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
-=======
   const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
-    // NOSONAR — operator-configured bootstrap
+    // NOSONAR — operator-configured bootstrap shell, PATH by design
     cwd: item.worktreeDir,
     env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
   });
->>>>>>> da72268a (loop: add fleet PR ceiling and closure-first reconcile (bro-jis0c))
   if (b.status === 0) {
     return true;
   }
