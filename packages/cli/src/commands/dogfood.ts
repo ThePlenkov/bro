@@ -385,6 +385,21 @@ async function provisionRepo(
   return { repo, beads, initErr };
 }
 
+/** Overlay one config layer's providers onto the resolved map —
+ *  per-field, so a payload that sets only `command` must not drop the
+ *  `type` a global/host layer supplied (greptile: raw copies break
+ *  partial overrides). Returns true when anything merged. */
+function overlayProviders(providers: Record<string, ProviderEntry>, p: unknown): boolean {
+  if (typeof p !== 'object' || p === null) return false;
+  let touched = false;
+  for (const [name, raw] of Object.entries(p)) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    providers[name] = { ...providers[name], ...raw } as ProviderEntry;
+    touched = true;
+  }
+  return touched;
+}
+
 /** The spawn env for a run: host config plus the scratch repo's own
  *  provider entries. A payload's bro.config.local.json providers
  *  (CODEX_HOME/token wiring) must win over host layers — resolving
@@ -401,16 +416,7 @@ function runEnv(dir: string, scratch: string): AgentConnectorEnv {
   let touched = false;
   for (const l of loadConfigLayers(scratch).layers) {
     if (l.layer === 'global') continue;
-    const p = l.raw.providers;
-    if (typeof p !== 'object' || p === null) continue;
-    // per-field overlay onto the RESOLVED entry — a payload that sets
-    // only `command` must not drop the `type` a global/host layer
-    // supplied (greptile: raw copies break partial overrides)
-    for (const [name, raw] of Object.entries(p)) {
-      if (typeof raw !== 'object' || raw === null) continue;
-      providers[name] = { ...providers[name], ...raw } as ProviderEntry;
-      touched = true;
-    }
+    touched = overlayProviders(providers, l.raw.providers) || touched;
   }
   return touched ? { ...env, providers } : env;
 }
