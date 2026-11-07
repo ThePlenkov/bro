@@ -54,6 +54,14 @@ export interface ToolContract {
 /** The contract of a request that said nothing about its tools. */
 export const OPEN_CONTRACT: ToolContract = { allowed: true };
 
+/** Whether the call already ran — the update says so, and a report is
+ *  not a request. The agent did it in its own sandbox; a `tool_use`
+ *  would make the client execute the same call a second time, on the
+ *  client's own machine. */
+function alreadyRan(u: AcpToolCall): boolean {
+  return u.status === 'completed' || u.status === 'failed';
+}
+
 /** The ACP tool call → the client's tool call — undefined when the client
  *  offers no tool that can run it, or when the request's own contract
  *  allows no call. */
@@ -64,11 +72,7 @@ export function clientCall(
 ): ClientCall | undefined {
   if (!contract.allowed) return undefined;
   if (u.sessionUpdate !== 'tool_call') return undefined;
-  // a call that arrives already TERMINAL has run — the agent did it in
-  // its own sandbox, and it is a report, not a request. Bridging it
-  // would make the client execute the same call a second time, on the
-  // client's own machine.
-  if (u.status === 'completed' || u.status === 'failed') return undefined;
+  if (alreadyRan(u)) return undefined;
   const wanted = capabilityOf(u.kind);
   if (wanted === undefined) return undefined;
   const raw = recordOf(u.rawInput);
