@@ -2,21 +2,21 @@
 
 bro's Code Health policy, expressed as code. Three files carry it:
 
-| File | What it holds |
-| --- | --- |
-| `code-health-rules.json` | The numeric bar. bro's ceilings are pinned as **warning** thresholds: function CC ≤ 9, file mean CC ≤ 4, function LoC ≤ 50, nesting ≤ 4, bumpy road ≤ 2 bumps at depth 2, function args ≤ 4, constructor args ≤ 5, duplication ≥ 10 LoC @ 75 %. The **alert** thresholds stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a wave decision, not a default. |
-| `custom-quality-gates.json` | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates. |
-| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt. |
+| File                           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `code-health-rules.json`       | The numeric bar. bro's ceilings are pinned as **warning** thresholds: function CC ≤ 9, file mean CC ≤ 4, function LoC ≤ 50, nesting ≤ 4, bumpy road ≤ 2 bumps at depth 2, function args ≤ 4, constructor args ≤ 5, duplication ≥ 10 LoC @ 75 %. The **alert** thresholds stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a wave decision, not a default. |
+| `custom-quality-gates.json`    | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates.                                                                                                                                                                                                                                                                                                                              |
+| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt.                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ## The ladder
 
-| Rung | Profile | Who carries it |
-| --- | --- | --- |
-| 3 | `pay_down_tech_debt` | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced. |
-| 2 | `bare_minimum` | **129 files** — no *critical* rule fires. The critical-rule safety net plus "no new debt". |
-| 1 | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
+| Rung | Profile                       | Who carries it                                                                                                  |
+| ---- | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 3    | `pay_down_tech_debt`          | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
+| 2    | `bare_minimum`                | **129 files** — no _critical_ rule fires. The critical-rule safety net plus "no new debt".                      |
+| 1    | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
 
-A *critical* rule is one of the four CodeScene names: Low Cohesion, Deep
+A _critical_ rule is one of the four CodeScene names: Low Cohesion, Deep
 Nested Logic, Bumpy Road, Brain/God Functions. Everything else is advisory —
 advisory rules are a judgement call, critical ones are not.
 
@@ -61,7 +61,7 @@ and the same file with 8 thresholds left out → **1.84**. The file lists every
 threshold; the ones bro does not override carry `"-"` (use the default).
 
 **An explicit threshold beats the project's configured value.** The CLI's
-`cs rules-config list-thresholds` reports CodeScene's *defaults*, not what
+`cs rules-config list-thresholds` reports CodeScene's _defaults_, not what
 project 86325 actually enforces. Setting `function_cyclomatic_complexity_alert`
 to 9 (the skill's ceiling) fired Complex Method on every cc >= 9 method and
 cost 1.3 points of file score on its own. That is why only the warning
@@ -73,7 +73,7 @@ each time measured.
 **The CodeScene GitHub App** — it is the gate. It authenticates itself
 (an app installation needs no secret in this repo), it reads
 `.codescene/custom-quality-gates.json` **from the branch under review**, and
-it posts the review as the *CodeScene Code Health Review* check. That check
+it posts the review as the _CodeScene Code Health Review_ check. That check
 is what blocks a merge here: on PR #599 the App failed the PR over a
 Complex Method the diff introduced (cc 10) and the review gate counted it
 as a failing check.
@@ -86,7 +86,7 @@ carries the policy it enforces.
 The same delta analysis, before you push:
 
 ```bash
-npm run check:codescene                    # delta vs origin/main
+npm run check:codescene                    # delta vs the merge-base with origin/main
 node scripts/codescene-gate.ts <report>    # evaluate a saved report
 node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing findings
 ```
@@ -108,10 +108,10 @@ carries `cli.access` only, and expires in an hour.
 
 `change-type` per finding, as CodeScene reports it:
 
-| change-type | Meaning | Fails the gate? |
-| --- | --- | --- |
-| `fixed` | the diff resolved it | no |
-| `improved` | the diff made it milder | no |
-| `unchanged` | pre-existing debt, untouched | no (`--strict`: yes) |
-| `introduced` | the diff added it | **yes** |
-| `degraded` | the diff made it worse | **yes** |
+| change-type  | Meaning                      | Fails the gate?      |
+| ------------ | ---------------------------- | -------------------- |
+| `fixed`      | the diff resolved it         | no                   |
+| `improved`   | the diff made it milder      | no                   |
+| `unchanged`  | pre-existing debt, untouched | no (`--strict`: yes) |
+| `introduced` | the diff added it            | **yes**              |
+| `degraded`   | the diff made it worse       | **yes**              |

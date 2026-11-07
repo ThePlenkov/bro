@@ -15,6 +15,7 @@ import {
   git,
   initRepo,
   inside,
+  insideAsync,
   installFakeBd,
   installFakeHost,
   readHostState,
@@ -163,6 +164,22 @@ function assertBothInStack(f: Fixture, id: number): void {
   const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
   assert.equal(stacks?.['stack/s/1-fx-a'], id)
   assert.equal(stacks?.['stack/s/2-fx-b'], id)
+}
+
+/** The post-tool hook's own event — a worker's `gh pr create` landing in
+ *  the worktree that created it. */
+function prCreateHook(f: Fixture, cwd: string): CliResult {
+  return runCli(['hooks', 'post-tool'], {
+    cwd,
+    input: JSON.stringify({
+      session_id: 's1',
+      cwd,
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr create --fill' },
+      tool_response: { success: true },
+    }),
+    env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+  })
 }
 
 describe('bro stack e2e', () => {
@@ -369,6 +386,51 @@ describe('bro stack e2e', () => {
       assert.deepEqual(readHostState(f.hostState).retargets, [{ pr: 12, base: 'main' }])
     })
   })
+
+  test('a fix that landed below rides the whole chain', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      // three members, each on the one below
+      for (const slug of ['fx-a', 'fx-b', 'fx-c']) {
+        assert.equal(f.run(['push', slug, '--name', 's']).code, 0);
+      }
+      const wa = join(f.root, 'main--fx-a');
+      const wb = join(f.root, 'main--fx-b');
+      const wc = join(f.root, 'main--fx-c');
+      commitIn(wa, 'a.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      commitIn(wb, 'b.txt');
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb);
+      commitIn(wc, 'c.txt');
+      git(['push', '-q', 'origin', 'stack/s/3-fx-c'], wc);
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+          'stack/s/3-fx-c': { number: 13, state: 'OPEN', baseRef: 'stack/s/2-fx-b' },
+        },
+      });
+      // a fix lands BELOW the chain — the bottom member's branch moves
+      commitIn(wa, 'fix.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      // the middle rides the moved bottom…
+      const midHead = git(['rev-parse', 'stack/s/2-fx-b'], f.main).trim();
+      assert.equal(
+        git(['merge-base', 'stack/s/1-fx-a', 'stack/s/2-fx-b'], f.main).trim(),
+        git(['rev-parse', 'stack/s/1-fx-a'], f.main).trim()
+      );
+      // …and the TOP rides the middle: the plan is made before the
+      // cascade, so a member that is rewritten mid-pass is re-checked
+      // against the base it now stands on
+      assert.equal(
+        git(['merge-base', 'stack/s/2-fx-b', 'stack/s/3-fx-c'], f.main).trim(),
+        midHead,
+        'the member above a rewritten one rides it'
+      );
+    });
+  });
 
   test('a merged member with no worktree loses its branch on sync', () => {
     const f = stackFixture()
@@ -642,6 +704,37 @@ describe('bro stack e2e', () => {
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 1)
       assert.match(r.stdout, /stack s publish failed — host reported no membership/)
+    })
+  })
+
+  test("a member's PR registers the chain — nobody adds the PRs by hand", async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      const { wa } = openPair(f)
+      // the worker opens the member's PR — bro's post-tool hook sees the
+      // very command and registers the chain behind it
+      const r = prCreateHook(f, wa)
+      assert.equal(r.code, 0, r.stderr)
+      // the registration is detached — the hook never waits for it
+      const deadline = Date.now() + 20_000
+      let stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      while (stacks === undefined && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      }
+      assertBothInStack(f, 901)
+    })
+  })
+
+  test('a PR outside a chain registers nothing', async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      openPair(f)
+      const r = prCreateHook(f, f.main)
+      assert.equal(r.code, 0, r.stderr)
+      // give a would-be registration the time to land — it must not
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+      assert.equal(readHostState(f.hostState).stacks, undefined)
     })
   })
 
