@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/acp/*"
   ],
   "scripts": {
     "build": "node scripts/gen-plugins.ts && nx run-many -t build --exclude=skills-*,plugins-*-skills-*",
@@ -23,6 +24,7 @@
     "gen:plugins": "node scripts/gen-plugins.ts",
     "check:plugins": "node scripts/gen-plugins.ts --check",
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
+    "test:e2e": "nx run-many -t test:e2e --exclude=skills-*,plugins-*-skills-*",
     "lint": "biome lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
     "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*",
