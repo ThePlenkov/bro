@@ -153,8 +153,12 @@ GROWS one is a "degraded" finding — the gate's blocker. The bridge therefore:
 - adds no nested block and no multi-part condition to the conductor (the
   Bumpy Road and Complex Conditional rules fire at two).
 
-Measured after the change: the delta reports `unchanged`/`improved` only —
-no introduced finding, no degraded one.
+Measured after the change (`cs delta stack/router/2-token HEAD`): the
+bridge's own files carry NO finding, and the conductor's three
+pre-existing findings DEGRADE by the tool_use path — `serve-conductor.ts`
++30 lines, +4 functions, `messages` +1 cyclomatic point. The conductor
+stands on the `bare_minimum` rung, so the delta reports those and the
+gate tolerates them; the debt is carried by its bead, not hidden here.
 
 ## Verify
 
@@ -168,9 +172,10 @@ no introduced finding, no degraded one.
    buffered answer carries the `tool_use` too.
 3. The replay — a resend of a tool-bearing request runs the turn again (the
    agent is reached), and a text answer still replays.
-4. `npm run check:codescene` — the conductor's pre-existing findings stay
-   unchanged: the bridge lives in its own files, and the conductor's own
-   change adds no function.
+4. `npm run check:codescene` — the bridge's own files carry no finding, and
+   the conductor's pre-existing findings stay on the `bare_minimum` rung:
+   the bridge lives in its own files, and the conductor's tool_use path is
+   the debt its bead carries.
 5. The repo's CI, exactly as GitHub runs it.
 
 ## Not in this layer
