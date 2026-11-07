@@ -18,6 +18,18 @@ export function expandHome(path: string): string {
 /** The settings as an object — an absent file reads as empty, a
  *  malformed one is an error (writing over it would destroy the user's
  *  file without saying so). */
+function assertSettingsObject(path: string, raw: unknown): asserts raw is Record<string, unknown> {
+  if (typeof raw !== 'object') {
+    throw new Error(`${path} is not a settings object — fix it by hand`);
+  }
+  if (raw === null) {
+    throw new Error(`${path} is not a settings object — fix it by hand`);
+  }
+  if (Array.isArray(raw)) {
+    throw new Error(`${path} is not a settings object — fix it by hand`);
+  }
+}
+
 export function readSettings(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
   let raw: unknown;
@@ -26,10 +38,8 @@ export function readSettings(path: string): Record<string, unknown> {
   } catch (err) {
     throw new Error(`${path} is not valid JSON — fix it by hand (${String(err)})`);
   }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error(`${path} is not a settings object — fix it by hand`);
-  }
-  return raw as Record<string, unknown>;
+  assertSettingsObject(path, raw);
+  return raw;
 }
 
 /** Write the settings atomically — the client never reads a torn file. */

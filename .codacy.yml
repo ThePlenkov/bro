@@ -37,3 +37,10 @@ exclude_paths:
   # — the module's function reads to the path rule as uncontrolled data,
   # same as the store/contract files above.
   - 'packages/core/src/private-files.ts'
+
+  # The router gateway reads the catalog over HTTP from the router's own
+  # published endpoint (a state file bro writes into the git common dir).
+  # The URL is bro's own, not user input — Codacy's SSRF rule reads any
+  # fetch() on a non-literal URL as user-controlled. Same shape as the
+  # other trust-boundary fetch sites that ship on main unflagged.
+  - 'packages/brouter/src/gateway.ts'

@@ -15,7 +15,15 @@ export function deprecatedFlag(argv: string[], name: string, advice?: string): v
 /** A value flag's argument must exist and not look like another option. */
 export function flagValue(argv: string[], i: number, name: string): string {
   const v = argv[i + 1];
-  if (v === undefined || v.trim() === '' || v.startsWith('--')) {
+  if (v === undefined) {
+    console.error(`error: ${name} requires a value`);
+    process.exit(2);
+  }
+  if (v.trim() === '') {
+    console.error(`error: ${name} requires a value`);
+    process.exit(2);
+  }
+  if (v.startsWith('--')) {
     console.error(`error: ${name} requires a value`);
     process.exit(2);
   }
@@ -66,14 +74,15 @@ export function flagAll(argv: string[], name: string): string[] {
     if (arg === name) {
       out.push(flagValue(argv, i, name));
       i += 1;
-    } else if (arg.startsWith(`${name}=`)) {
-      const v = arg.slice(name.length + 1);
-      if (v === '') {
-        console.error(`error: ${name} requires a value`);
-        process.exit(2);
-      }
-      out.push(v);
+      continue;
     }
+    if (!arg.startsWith(`${name}=`)) continue;
+    const v = arg.slice(name.length + 1);
+    if (v === '') {
+      console.error(`error: ${name} requires a value`);
+      process.exit(2);
+    }
+    out.push(v);
   }
   return out;
 }
@@ -86,13 +95,26 @@ export function flagAll(argv: string[], name: string): string[] {
 function flagTokenKind(
   arg: string,
   valueFlags: ReadonlySet<string>,
-  opts?: { boolFlags?: ReadonlySet<string>; strict?: boolean }
+  opts?: { boolFlags?: ReadonlySet<string>; strict?: boolean },
+  argv?: string[],
+  i?: number
 ): 'value' | 'bool' | 'drop' | 'positional' {
   if (!arg.startsWith('--')) {
     return 'positional';
   }
   const name = arg.split('=', 1)[0]!;
   if (valueFlags.has(name)) {
+    if (opts?.strict === true && argv !== undefined && i !== undefined && !arg.includes('=')) {
+      const next = argv[i + 1];
+      if (next === undefined) {
+        console.error(`error: option ${arg} requires a value`);
+        process.exit(2);
+      }
+      if (next.startsWith('--')) {
+        console.error(`error: option ${arg} requires a value`);
+        process.exit(2);
+      }
+    }
     return 'value';
   }
   if (opts?.boolFlags?.has(name) === true) {
@@ -136,24 +158,14 @@ export function positionals(
       verbatim = true;
       continue;
     }
-    const kind = flagTokenKind(arg, valueFlags, opts);
+    const kind = flagTokenKind(arg, valueFlags, opts, argv, i);
     if (kind === 'positional') {
       out.push(arg);
       continue;
     }
-    // `--name value` — the value is the next token; `--name=value` is
-    // self-contained
-    if (kind === 'value' && arg === arg.split('=', 1)[0]) {
-      const next = argv[i + 1];
-      // strict: `--agent --json` must not swallow `--json` as the
-      // value — a missing or flag-looking value is a usage error,
-      // never a silent misconfig
-      if (opts?.strict === true && (next === undefined || next.startsWith('--'))) {
-        console.error(`error: option ${arg} requires a value`);
-        process.exit(2);
-      }
-      i += 1;
-    }
+    if (kind !== 'value') continue;
+    if (arg.includes('=')) continue;
+    i += 1;
   }
   return out;
 }

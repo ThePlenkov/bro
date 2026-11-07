@@ -60,30 +60,39 @@ interface CatalogPayload {
  *  not a model: it is dropped, and the count of what was dropped rides
  *  the answer (a short catalog must be distinguishable from a whole
  *  one). */
+function readString(bag: Record<string, unknown>, key: string): string {
+  const value = bag[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function toServedModel(row: unknown): ServedModel | null {
+  if (typeof row !== 'object' || row === null) return null;
+  const bag = row as Record<string, unknown>;
+  const id = readString(bag, 'id');
+  if (id === '') return null;
+  const label = readString(bag, 'display_name');
+  const description = readString(bag, 'description');
+  const source = modelSource(id);
+  return {
+    id,
+    ...(label === '' ? {} : { label }),
+    ...(description === '' ? {} : { description }),
+    ...(source === undefined ? {} : { source }),
+  };
+}
+
 export function servedModels(payload: unknown): { models: ServedModel[]; dropped: number } {
   const body = (payload ?? {}) as CatalogPayload;
   const rows = Array.isArray(body.data) ? body.data : [];
   const models: ServedModel[] = [];
   let dropped = 0;
   for (const row of rows) {
-    if (typeof row !== 'object' || row === null) {
+    const model = toServedModel(row);
+    if (model === null) {
       dropped++;
-      continue;
+    } else {
+      models.push(model);
     }
-    const bag = row as Record<string, unknown>;
-    const id = typeof bag.id === 'string' ? bag.id.trim() : '';
-    if (id === '') {
-      dropped++;
-      continue;
-    }
-    const label = typeof bag.display_name === 'string' ? bag.display_name.trim() : '';
-    const description = typeof bag.description === 'string' ? bag.description.trim() : '';
-    models.push({
-      id,
-      ...(label === '' ? {} : { label }),
-      ...(description === '' ? {} : { description }),
-      ...(modelSource(id) === undefined ? {} : { source: modelSource(id) }),
-    });
   }
   return { models, dropped };
 }

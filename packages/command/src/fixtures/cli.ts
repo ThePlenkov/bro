@@ -37,32 +37,38 @@ const planRun = definePlugin({
   },
 });
 
-const db = defineCommand({
+function oneMemberCommand(spec: {
+  name: string;
+  summary: string;
+  memberName: string;
+  memberSummary: string;
+  run: () => void;
+}): ReturnType<typeof defineCommand> {
+  return defineCommand({
+    name: spec.name,
+    summary: spec.summary,
+    plugins: [definePlugin({ name: spec.memberName, summary: spec.memberSummary, run: spec.run })],
+  });
+}
+
+const db = oneMemberCommand({
   name: 'db',
   summary: 'the database plane',
-  plugins: [
-    definePlugin({
-      name: 'migrate',
-      summary: 'run the migrations',
-      run: () => {
-        console.log('migrate');
-      },
-    }),
-  ],
+  memberName: 'migrate',
+  memberSummary: 'run the migrations',
+  run: () => {
+    console.log('migrate');
+  },
 });
 
-const group = defineCommand({
+const group = oneMemberCommand({
   name: 'group',
   summary: 'a group of things',
-  plugins: [
-    definePlugin({
-      name: 'member',
-      summary: 'a member',
-      run: () => {
-        console.log('member');
-      },
-    }),
-  ],
+  memberName: 'member',
+  memberSummary: 'a member',
+  run: () => {
+    console.log('member');
+  },
 });
 
 /** The late-joining group — its member list is a RESOLVER, because the
