@@ -24,7 +24,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
+import { estimateTokens, gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
 import type { ProviderEntry } from '@broject/core';
 import {
   acpOpen,
@@ -944,11 +944,6 @@ function canonicalStopReason(raw: string | undefined): string {
 /** chars/4 underestimates CJK several-fold — count wide codepoints
  *  (~1 token each) against the ascii quarter-rate. Estimate only —
  *  never billing, never compaction. */
-function estTokens(s: string): number {
-  let units = 0;
-  for (const ch of s) units += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 4 : 1;
-  return Math.max(1, Math.ceil(units / 4));
-}
 
 function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -977,7 +972,7 @@ function messageStartEvent(model: string, inputTokens: number): object {
  *  resend answers from conv.lastReply, never a fresh pump. */
 function emitBlocks(res: ServerResponse, view: ReplyView): void {
   const { blocks, model, stopReason, inputTokens, stopSequence } = view;
-  const outTokens = estTokens(JSON.stringify(blocks));
+  const outTokens = estimateTokens(JSON.stringify(blocks));
   sse(res, 'message_start', messageStartEvent(model, inputTokens));
   blocks.forEach((b, i) => {
     if (b.type === 'tool_use') {
@@ -1447,9 +1442,9 @@ class LiveTurn extends TagPump {
   }
 
   outputTokens(): number {
-    // estTokens floors at 1 — a genuinely silent turn reports 0, not
+    // estimateTokens floors at 1 — a genuinely silent turn reports 0, not
     // a phantom token (amazon-q #566)
-    return this.acc === '' ? 0 : estTokens(this.acc);
+    return this.acc === '' ? 0 : estimateTokens(this.acc);
   }
 }
 
@@ -1523,7 +1518,7 @@ const RATE = /rate.?limit|too many|quota|429/i;
  *  (amazon-q #558). */
 function inputTokensOf(prompt: AcpContentBlock[]): number {
   return (
-    estTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
+    estimateTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
     prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
   );
 }
@@ -1551,7 +1546,7 @@ function respond(
         model,
         stop_reason: stopReason,
         stop_sequence: stopSequence ?? null,
-        usage: { input_tokens: inputTokens, output_tokens: estTokens(JSON.stringify(blocks)) },
+        usage: { input_tokens: inputTokens, output_tokens: estimateTokens(JSON.stringify(blocks)) },
       })
     );
     return;
@@ -2340,7 +2335,7 @@ async function messages(
     stream: body.stream !== false,
     session_reused: out.reused,
     input_tokens: inputTokens,
-    output_tokens: live?.outputTokens() ?? estTokens(reply.text),
+    output_tokens: live?.outputTokens() ?? estimateTokens(reply.text),
     duration_ms: Date.now() - t0,
   });
   if (live !== undefined) {
@@ -2911,7 +2906,7 @@ function sseHead(res: ServerResponse): void {
 
 /** Estimated tokens over recorded blocks — replay output accounting. */
 const blocksTokens = (blocks: OutBlock[]): number =>
-  estTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
+  estimateTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
 
 /** Chain ids a listener can afford to remember — LRU-trimmed like
  *  the sessions map; entries pointing at dead sessions prune away. */
@@ -2996,7 +2991,7 @@ const respError = (status: string, reason?: string): unknown =>
     : null;
 
 /** A caller's output-token budget expressed in chars — the inverse of
- *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
+ *  estimateTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
 const capCharsOf = (tokens: number | undefined): number | undefined =>
   typeof tokens === 'number' && tokens > 0 ? tokens * 4 : undefined;
 
@@ -3300,7 +3295,7 @@ function responsesDeliver(
   // canonicalize before precedence applies — an unmapped backend reason
   // overridden by a cap or a tool_use still earns its otel breadcrumb
   const backendReason = canonicalStopReason(reply.stopReason);
-  const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text);
+  const outTokens = capped.capped ? blocksTokens(outBlocks) : estimateTokens(reply.text);
   const wireReason = finalRespReason(capped.capped, outBlocks, backendReason);
   const status = respStatus(wireReason);
   if (d.out.conv !== undefined && d.key !== undefined) {
@@ -3774,7 +3769,7 @@ function chatOutcome(
   const reply = replay ? undefined : (out.reply as PooledReply);
   const inputTokens = replay ? (lr?.inputTokens ?? 0) : out.inputTokens;
   const blocks = replay ? (lr?.blocks ?? []) : parseReply(reply?.text ?? '', tools);
-  const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '');
+  const outTokens = replay ? blocksTokens(blocks) : estimateTokens(reply?.text ?? '');
   const stopReason = chatStopReason(replay, lr, blocks, reply);
   const finish =
     ownKey(CHAT_FINISH, stopReason) ??
@@ -3903,7 +3898,7 @@ function chatDeliver(
   const outTokens = capped.capped
     ? blocksTokens(blocks)
     : settled !== undefined
-      ? estTokens(settled)
+      ? estimateTokens(settled)
       : o.outTokens;
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
@@ -4082,6 +4077,22 @@ function firstSegment(id: string): string {
   return cut <= 0 ? id : id.slice(0, cut);
 }
 
+/** One served row — the anthropic /v1/models shape.
+ *
+ *  The LANE rides the row as its own field: the reader must not have
+ *  to guess it back out of the id, whose head is a formatted string and
+ *  the model's own name may carry a slash of its own. */
+function servedRow(m: RoutedModel): Record<string, unknown> {
+  return {
+    type: 'model',
+    id: m.id,
+    display_name: displayName(m),
+    description: providerPath(m),
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
+    created_at: '2025-01-01T00:00:00Z',
+  };
+}
+
 /** The row's SECOND line — the path that serves it: the lane's prefix and
  *  the agent's own provider chain, without the model leaf. A client picker
  *  renders it as the row's origin ("devin-acp", "opencode-acp/vercel/anthropic")
@@ -4120,13 +4131,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
-  const data = rows.map(m => ({
-    type: 'model',
-    id: m.id,
-    display_name: displayName(m),
-    description: providerPath(m),
-    created_at: '2025-01-01T00:00:00Z',
-  }));
+  const data = rows.map(servedRow);
   // a lane that FAILED is not silently absent from the union: the
   // degradation rides the response, so a client reading a shorter
   // catalog can tell it apart from the whole truth. A lane that merely
@@ -4408,5 +4413,5 @@ async function countTokens(req: IncomingMessage, res: ServerResponse): Promise<v
 
 function apiErrorCountTokens(res: ServerResponse, raw: string): void {
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ input_tokens: estTokens(raw) }));
+  res.end(JSON.stringify({ input_tokens: estimateTokens(raw) }));
 }

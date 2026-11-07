@@ -753,6 +753,13 @@ describe('serve /v1/* — the conductor plane', () => {
         body.data.map((m: { display_name: string }) => m.display_name),
         ['dv-acp/SWE X', 'dv-acp/SWE Y']
       );
+      // the lane rides the row as its own field — a reader must never
+      // have to guess it back out of the id, whose head is a formatted
+      // string and a model's name may carry a slash of its own
+      assert.deepEqual(
+        body.data.map((m: { source: string }) => m.source),
+        ['dv-acp', 'dv-acp']
+      );
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
         headers: { ...auth, 'content-type': 'application/json' },

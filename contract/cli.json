@@ -1004,6 +1004,16 @@
       "plan": false,
       "external": false
     },
+    "router": {
+      "name": "router",
+      "summary": "The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]",
+      "spellings": ["router"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "brouter",
+      "plan": false,
+      "external": false
+    },
     "setup": {
       "name": "setup",
       "summary": "Wire bro into the current repo",

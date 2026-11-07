@@ -77,7 +77,10 @@ describe('plugin registry', () => {
     // `wait` is dep-plane, not thread-plane — a `mesh` membership
     // would shadow the mesh host's own `wait` subcommand (the
     // specs/cross-repo spelling is `bro wait`, top-level by design)
-    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait']);
+    // `router` is a NAMESPACE HOST, not a capability member — it
+    // mounts the brouter sub-CLI (models|clients|client|ask|acp) as
+    // one plugin, so it has no members of its own to group (bro-3bplj)
+    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait', 'router']);
     const groups = pluginGroups();
     for (const p of PLUGINS) {
       if (p.hidden || p.external) continue;
