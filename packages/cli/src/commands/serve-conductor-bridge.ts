@@ -22,6 +22,9 @@ export interface AcpToolCall {
   kind?: string | null;
   rawInput?: unknown;
   toolCallId?: string;
+  /** the call's own status — a call that arrives already terminal has
+   *  run, and a report is not a request */
+  status?: string | null;
 }
 
 /** The client's tool call — the name and the input the client executes. */
@@ -61,6 +64,11 @@ export function clientCall(
 ): ClientCall | undefined {
   if (!contract.allowed) return undefined;
   if (u.sessionUpdate !== 'tool_call') return undefined;
+  // a call that arrives already TERMINAL has run — the agent did it in
+  // its own sandbox, and it is a report, not a request. Bridging it
+  // would make the client execute the same call a second time, on the
+  // client's own machine.
+  if (u.status === 'completed' || u.status === 'failed') return undefined;
   const wanted = capabilityOf(u.kind);
   if (wanted === undefined) return undefined;
   const raw = recordOf(u.rawInput);

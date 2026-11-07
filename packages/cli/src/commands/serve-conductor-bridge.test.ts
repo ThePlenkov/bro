@@ -63,6 +63,44 @@ test("the agent's 'path' is the client's 'file_path'", () => {
   assert.deepEqual(call?.input, { file_path: '/tmp/x' });
 });
 
+test('a call that already ran is a report, not a request', () => {
+  // the agent ran it in its own sandbox and the update says so: a
+  // tool_use would make the CLIENT run the same call a second time, on
+  // the client's own machine
+  assert.equal(
+    clientCall(
+      {
+        sessionUpdate: 'tool_call',
+        kind: 'execute',
+        rawInput: { command: 'rm -rf /' },
+        status: 'completed',
+      },
+      CLAUDE_TOOLS
+    ),
+    undefined
+  );
+  assert.equal(
+    clientCall(
+      { sessionUpdate: 'tool_call', kind: 'execute', rawInput: { command: 'ls' }, status: 'failed' },
+      CLAUDE_TOOLS
+    ),
+    undefined
+  );
+  // a call still in flight is a request, and it is bridged
+  assert.equal(
+    clientCall(
+      {
+        sessionUpdate: 'tool_call',
+        kind: 'execute',
+        rawInput: { command: 'ls' },
+        status: 'pending',
+      },
+      CLAUDE_TOOLS
+    )?.name,
+    'Bash'
+  );
+});
+
 test('the first candidate whose required fields are covered wins', () => {
   const edit = clientCall(
     {
