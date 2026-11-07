@@ -206,8 +206,14 @@ Writing is not the point; the **proof** is:
 - the written block is what this client version reads;
 - a model the client does not know is still served, and the warning
   "model X isn't recognized" does not appear for the models the router serves;
-- the context window the client assumes is the served model's own, not the
-  200k default;
+- the client stops assuming the 200k default for the models the router
+  serves: the row pins the CLIENT-SIDE PROFILE it borrows (`behavesAs`),
+  and the client applies that profile's handling. The window that follows
+  is the BORROWED model's window — the served model's own window only when
+  the served model IS that Claude model; the client's vocabulary has no
+  window of its own for anything else, and the operator's lever is the
+  client's own `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (layer 4's spec says so in
+  full);
 - the loop from layer 3 is gone in the same session.
 
 The write is opt-in (`--write`), the dry-run shows the diff before anything
