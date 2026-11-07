@@ -8,8 +8,9 @@ import { glabTry } from './glab.ts'
 import { gitlabReview, hostFor } from './reviews.ts'
 import { gitlabQueries } from './queries.ts'
 import { gitlabStacks } from './stacks.ts'
+import { gitlabTasks, gitlabTasksAsync } from './tasks.ts'
 
-export { gitlabReview, gitlabQueries, gitlabStacks }
+export { gitlabReview, gitlabQueries, gitlabStacks, gitlabTasks, gitlabTasksAsync }
 
 export const gitlabConnector: Connector = {
   name: 'gitlab',
@@ -34,7 +35,13 @@ export const gitlabConnector: Connector = {
       ? null
       : `glab not authenticated for ${host} — run \`glab auth login\``
   },
+  /** `tasks` exists but is name-only — a gitlab remote must not flip a
+   *  beads repo's task store by detection. Pin it:
+   *  `"connectors": {"tasks": "gitlab"}`. */
+  optInFacades: ['tasks', 'tasksAsync'],
   reviews: (ctx) => gitlabReview(ctx.dir),
   queries: (ctx) => gitlabQueries(ctx.dir),
   stacks: (ctx) => gitlabStacks(ctx.dir),
+  tasks: (ctx) => gitlabTasks(ctx.dir),
+  tasksAsync: (ctx) => gitlabTasksAsync(ctx.dir),
 }
