@@ -1,0 +1,85 @@
+import { describe, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '../../..')
+const HOOKS = join(ROOT, 'plugins/codex/bro/hooks/hooks.json')
+
+describe('codex plugin adapter', () => {
+  test('hooks/hooks.json wires Codex lifecycle events to bro hooks', () => {
+    const parsed = JSON.parse(readFileSync(HOOKS, 'utf8')) as {
+      hooks: Record<string, unknown>
+    }
+    const events = [
+      'SessionStart',
+      'PreCompact',
+      'PostCompact',
+      'UserPromptSubmit',
+      'PreToolUse',
+      'PostToolUse',
+      'PermissionRequest',
+      'Stop',
+    ]
+    for (const ev of events) {
+      assert.ok(parsed.hooks[ev], `missing Codex hook event ${ev}`)
+    }
+    const session = JSON.stringify(parsed.hooks.SessionStart)
+    assert.match(
+      session,
+      /startup\|resume\|clear\|compact/,
+      'SessionStart should rehydrate every Codex source'
+    )
+    const preTool = JSON.stringify(parsed.hooks.PreToolUse)
+    assert.match(preTool, /Bash/, 'PreToolUse should match Bash tool')
+    assert.match(preTool, /pre-tool/, 'PreToolUse should call bro pre-tool')
+    const postTool = JSON.stringify(parsed.hooks.PostToolUse)
+    assert.match(postTool, /Bash/, 'PostToolUse should match Bash tool')
+    assert.match(postTool, /post-tool/, 'PostToolUse should call bro post-tool')
+    const perm = JSON.stringify(parsed.hooks.PermissionRequest)
+    assert.match(perm, /permission/, 'PermissionRequest should call bro permission')
+    const body = readFileSync(HOOKS, 'utf8')
+    assert.match(body, /\$\{PLUGIN_ROOT\}\/hooks\/run\.sh/, 'Codex hooks call run.sh via PLUGIN_ROOT')
+    assert.doesNotMatch(body, /DEVIN_PLUGIN_ROOT|CLAUDE_PLUGIN_ROOT|npx/, 'resolution stays in run.sh')
+    assert.doesNotMatch(body, /\$comment/, 'Codex rejects $comment in hooks.json')
+    assert.match(body, /"description"/, 'Codex hooks.json should use description')
+  })
+
+  test('Codex instructions route native commands and stay out of the skill tree', () => {
+    const text = readFileSync(join(ROOT, 'plugins/codex/bro/INSTRUCTIONS.md'), 'utf8')
+    assert.match(text, /\/goal/)
+    assert.match(text, /\/plan/)
+    assert.match(text, /\/ps/)
+    assert.match(text, /bro act/)
+    assert.equal(existsSync(join(ROOT, 'skills/codex/SKILL.md')), false)
+  })
+
+  test('Codex loads the Agent Plugin skills tree, not a host copy', () => {
+    const adapterSkills = join(ROOT, 'plugins/codex/bro/skills')
+    assert.equal(existsSync(adapterSkills), false, 'plugins/codex/bro must not carry skills')
+    const skills = join(ROOT, 'skills')
+    const manifest = JSON.parse(
+      readFileSync(join(ROOT, '.codex-plugin/plugin.json'), 'utf8')
+    ) as { skills?: string; hooks?: string }
+    assert.equal(manifest.skills, './skills/')
+    assert.equal(manifest.hooks, './plugins/codex/bro/hooks/hooks.json')
+    const market = JSON.parse(
+      readFileSync(join(ROOT, '.agents/plugins/marketplace.json'), 'utf8')
+    ) as { plugins?: { source?: string }[] }
+    assert.equal(market.plugins?.[0]?.source, '.')
+    for (const name of readdirSync(skills)) {
+      const dir = join(skills, name)
+      if (!statSync(dir).isDirectory()) continue
+      if (!statSync(join(dir, 'SKILL.md'), { throwIfNoEntry: false })?.isFile()) continue
+      const yaml = readFileSync(join(dir, 'agents/openai.yaml'), 'utf8')
+      assert.match(yaml, /display_name:/, `${name} openai.yaml missing display_name`)
+      assert.match(yaml, /short_description:/, `${name} openai.yaml missing short_description`)
+      assert.match(
+        yaml,
+        /allow_implicit_invocation: true/,
+        `${name} must load into the Codex prompt automatically`
+      )
+    }
+  })
+})
