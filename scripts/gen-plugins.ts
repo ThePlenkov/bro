@@ -699,8 +699,41 @@ const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
 const drift = [];
 
+/** Remove symlinked path components above `path` so generated writes can't
+ *  follow a link outside the checkout. Returns true when drift was recorded
+ *  (check mode) so the caller can skip. */
+function guardSymlinkedParents(path) {
+  const parts = path.split(/[\\/]/);
+  let cur = ROOT;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    let pst: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pst = lstatSync(cur);
+    } catch {
+      pst = undefined;
+    }
+    if (!pst?.isSymbolicLink()) {
+      continue;
+    }
+    if (CHECK) {
+      drift.push(path);
+      return true;
+    }
+    rmSync(cur, { recursive: true, force: true });
+  }
+  return false;
+}
+
 function emit(path, content) {
   const p = join(ROOT, path);
+  // Guard every path component: if any parent (or the file itself) is a
+  // symlink, the write/read would follow it and could touch a file outside
+  // the checkout. Treat a symlinked component as stale drift in check mode
+  // and remove + recreate it as a real directory in write mode.
+  if (guardSymlinkedParents(path)) {
+    return;
+  }
   // lstat, not exists/stat: a stale directory or symlink where a file is
   // expected must be REPLACED — readFileSync would crash on the dir and
   // writeFileSync would write through the link to an external target
@@ -814,9 +847,11 @@ emit(
 // `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
 // the canonical content: devin resolves skills as slash commands, codex
 // and every skills/-linked adapter read the same file. Claude's native
-// surface is commands/bro.md — derived from the skill body here so a
-// hand edit on either side surfaces as check:plugins drift. opencode's
-// /bro is native (opencode-tui.ts), no file to check.
+// surface is commands/bro.md; opencode's is .opencode/commands/bro.md —
+// derived from the skill body here so a hand edit on either side surfaces
+// as check:plugins drift. (Codex has no custom prompt surface: it reads
+// the canonical skills/bro/SKILL.md.) opencode's /bro is also native
+// (opencode-tui.ts), but the command file ships too.
 const BRO_SKILL = 'skills/bro/SKILL.md';
 if (!existsSync(join(ROOT, BRO_SKILL))) {
   // same convention as the `null` adapter entries: generation can't
@@ -856,6 +891,11 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
   emit(
     'commands/bro.md',
     `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // opencode command dir (plural) — same body, opencode frontmatter.
+  emit(
+    '.opencode/commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
   );
 }
 
@@ -950,6 +990,17 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       }
     }
     if (wantRunSh) {
+      // run.sh is a real file, never a symlink: remove a stale link/dir
+      // first so cpSync cannot follow it outside the checkout
+      let rsh: ReturnType<typeof lstatSync> | undefined;
+      try {
+        rsh = lstatSync(join(ROOT, runShOut));
+      } catch {
+        rsh = undefined;
+      }
+      if (rsh?.isSymbolicLink() || rsh?.isDirectory()) {
+        rmSync(join(ROOT, runShOut), { recursive: true, force: true });
+      }
       mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true });
       cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut));
     }
