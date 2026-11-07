@@ -104,7 +104,7 @@ connector. Beads-specific features (e.g. certain projections/imports) remain
 beads-centric; connectors document their capabilities and honest absences
 explicitly.
 
-**Facade → connector → capabilities (quick matrix)**
+### Facade → connector → capabilities (quick matrix)
 
 | Facade | Connectors | Selection | Notes |
 | --- | --- | --- | --- |
