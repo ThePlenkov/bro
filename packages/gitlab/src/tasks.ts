@@ -324,39 +324,9 @@ function queryIssuesSync(dir: string, states: string[], limit: number): GitLabIs
   return out.slice(0, limit)
 }
 
-async function queryIssuesAsync(dir: string, states: string[], limit: number): Promise<GitLabIssue[]> {
-  const projectPath = resolveProjectPath(dir)
-  const out: GitLabIssue[] = []
-  for (const state of states) {
-    const endpoint = `${api(projectPath, 'issues')}?state=${state}&per_page=100`
-    try {
-      const rows = await glabPagedAsync<GitLabIssue>(endpoint, { ...gopts(dir), limit: Math.max(0, limit - out.length) })
-      out.push(...rows)
-      if (out.length >= limit) {
-        break
-      }
-    } catch (err) {
-      throw err
-    }
-    if (out.length >= limit) {
-      break
-    }
-  }
-  return out.slice(0, limit)
-}
-
 function getIssueSync(dir: string, ref: { projectPath: string; iid: number }): GitLabIssue | undefined {
   try {
     const issue = glabJson<GitLabIssue>(['api', api(ref.projectPath, `issues/${ref.iid}`)], gopts(dir))
-    return issue
-  } catch {
-    return undefined
-  }
-}
-
-async function getIssueAsync(dir: string, ref: { projectPath: string; iid: number }): Promise<GitLabIssue | undefined> {
-  try {
-    const issue = await glabJsonAsync<GitLabIssue>(['api', api(ref.projectPath, `issues/${ref.iid}`)], gopts(dir))
     return issue
   } catch {
     return undefined
@@ -646,6 +616,6 @@ export function gitlabTasksAsync(dir: string): TaskStoreAsync {
     neighbors: async () => {
       throw new Error('gitlab tasks: neighbors not supported')
     },
-    actor: async () => sync.actor(),
+    actor: async () => (sync.actor ? sync.actor() : ''),
   }
 }
