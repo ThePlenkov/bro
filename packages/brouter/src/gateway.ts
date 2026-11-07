@@ -16,6 +16,41 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { servedModels, type ServedModel } from './catalog.ts';
 import type { RouterEndpoint } from './adapter.ts';
 
+/** The hosts a session token may cross to in cleartext: this machine only.
+ *  A Set, not a pattern — the host list is three names long, and a
+ *  nested quantifier is a denial-of-service waiting for a caller. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** The router's URL, checked against the credential it carries.
+ *
+ *  The URL is the token's crossing point: the catalog read sends the
+ *  session token in headers, and the proxy sends it again on the model
+ *  call. A tampered state file — or a `--url` naming a foreign host —
+ *  would carry the token there in cleartext, so the URL must be one
+ *  this machine may carry it to: https anywhere, cleartext only to a
+ *  loopback router. */
+export function routerUrl(raw: string): string {
+  const url = URL.parse(raw);
+  if (url === null) {
+    throw new Error(`the router's url is not a valid URL`);
+  }
+  if (url.username !== '' || url.password !== '') {
+    // a url with credentials in it: the token would ride to a host that
+    // asks for a password, and the password would land in every log
+    // that prints the refusal
+    throw new Error(`the router's url carries credentials — a router url never carries a password`);
+  }
+  const safe =
+    url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
+  if (!safe) {
+    throw new Error(
+      `the router's url ${url.protocol}//${url.host} cannot carry the session token — https or a ` +
+        `loopback router (http://127.0.0.1:<port>) only; a plain-http host would carry it cleartext`
+    );
+  }
+  return raw.replace(/\/+$/, '');
+}
+
 /** The git common dir — the directory every linked worktree shares.
  *  Pure: walk up for `.git`; a directory IS the common dir, a file (a
  *  linked worktree) names the worktree's gitdir, whose `worktrees/`
@@ -59,7 +94,9 @@ export function routerStatePath(dir: string): string | undefined {
 }
 
 /** The endpoint the router published — undefined when there is no
- *  state file or it is torn (a half-written record is not a router). */
+ *  state file or it is torn (a half-written record is not a router).
+ *  A record whose URL cannot carry the token is NOT "no router": the
+ *  router is running and bro refuses it, loudly. */
 export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
   const path = routerStatePath(dir);
   if (path === undefined) return undefined;
@@ -74,17 +111,23 @@ export function readRouterEndpoint(dir: string): RouterEndpoint | undefined {
   const url = typeof bag.url === 'string' ? bag.url.trim() : '';
   const token = typeof bag.token === 'string' ? bag.token.trim() : '';
   if (url === '' || token === '') return undefined;
-  return { url: url.replace(/\/+$/, ''), token };
+  return { url: routerUrl(url), token };
 }
 
 /** The catalog, read from the router. A router that is not up is an
- *  honest error — never an empty catalog that reads like a whole one. */
+ *  honest error — never an empty catalog that reads like a whole one.
+ *
+ *  The read asks ONE url — the router's own /v1/models — and it does
+ *  not follow redirects: the client carries the request's headers to
+ *  the hop's target, so the session token would ride to a host the
+ *  guard never checked, over cleartext if the hop chose it. A redirect
+ *  is an error that names its target. */
 export async function readCatalog(
   endpoint: RouterEndpoint,
   opts: { limit?: number; timeoutMs?: number } = {}
 ): Promise<{ models: ServedModel[]; dropped: number }> {
   const limit = opts.limit ?? 1000;
-  const url = `${endpoint.url}/v1/models?limit=${limit}`;
+  const url = `${routerUrl(endpoint.url)}/v1/models?limit=${limit}`;
   const res = await fetch(url, {
     headers: {
       'x-api-key': endpoint.token,
@@ -92,7 +135,17 @@ export async function readCatalog(
       'anthropic-version': '2023-06-01',
     },
     signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
+    // never auto-follow — the session token would ride to a host the
+    // guard never checked
+    redirect: 'manual',
   });
+  const location = res.headers.get('location');
+  if (res.status >= 300 && res.status < 400 && location !== null) {
+    throw new Error(
+      `the router answered ${res.status} with a redirect to ${location} — the catalog read does not ` +
+        `follow redirects: the session token would ride to a host the guard never checked`
+    );
+  }
   if (!res.ok) {
     throw new Error(`the router answered ${res.status} on ${url}`);
   }
