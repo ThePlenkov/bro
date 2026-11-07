@@ -3,6 +3,9 @@ import { spawnSync } from 'node:child_process'
 import { readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 function isE2eTest(name: string): boolean {
   return name.endsWith('.e2e.test.ts')
@@ -46,13 +49,14 @@ const pattern = process.argv[2] || 'src/**/*.test.ts'
 if (pattern.includes('.e2e')) {
   const pkgDir = dirname(fileURLToPath(import.meta.url))
   const repoRoot = join(pkgDir, '..', '..')
-  const build = spawnSync(process.execPath, ['./node_modules/.bin/nx', 'run', '@broject/bro:build'], {
+  const build = spawnSync(process.execPath, [require.resolve('nx'), 'run', '@broject/bro:build'], {
     stdio: 'inherit',
     cwd: repoRoot,
   })
   if (build.status !== 0) {
     // Fallback: try building from package dir if nx not available in expected form
-    const build2 = spawnSync(process.execPath, ['../../node_modules/.bin/tsdown', 'src/index.ts'], {
+    const tsdownEntry = join(dirname(require.resolve('tsdown/package.json')), 'dist', 'run.mjs')
+    const build2 = spawnSync(process.execPath, [tsdownEntry, 'src/index.ts'], {
       stdio: 'inherit',
       cwd: join(pkgDir, '..'),
     })
