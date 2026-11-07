@@ -102,6 +102,11 @@ export interface SyncMemberInput extends StackBranch {
   rebaseable: boolean
   /** Why rebaseable is false, for the skip report. */
   blocked?: string
+  /** The member's branch still carries the head of the branch it stands
+   *  on — false when that head MOVED under the member (the base's name
+   *  is the same, its commits are not). Undefined when the heads could
+   *  not be read: an unknown truth never schedules a rewrite. */
+  containsBaseHead?: boolean
 }
 
 export interface SyncPlanItem<T extends SyncMemberInput = SyncMemberInput> {
@@ -134,7 +139,10 @@ export function planSync<T extends SyncMemberInput>(
     const desiredBase = liveTip
     const oldBase = m.edgeBase ?? m.prBase ?? desiredBase
     const merged = m.prState === 'MERGED'
-    const rebase = !merged && oldBase !== desiredBase
+    // the base's HEAD moved under the member: the name is the same, the
+    // commits are not — a fix landed below, and the member has to ride it
+    const stale = m.containsBaseHead === false
+    const rebase = !merged && (oldBase !== desiredBase || stale)
     const item: SyncPlanItem<T> = {
       member: m,
       desiredBase,

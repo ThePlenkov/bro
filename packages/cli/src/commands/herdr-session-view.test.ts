@@ -1,0 +1,571 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { describe, test } from 'node:test';
+import { fleetStatusPath, type FleetPaneState, writeFleetState } from '@broject/herdr-kit';
+import {
+  SESSION_PANE_AGENT,
+  sessionAgentOf,
+  sessionMetaArgs,
+  sessionReleaseArgs,
+  sessionReportArgs,
+} from '@broject/herdr-kit';
+import { resolveTarget, runSessionView, targetKey, viewVerdict } from './herdr-session-view.ts';
+
+const NOW = Date.now();
+
+/** The state doc a pass renders — the daemon projector's side of the
+ *  contract, verbatim, with the session-view fields riding. */
+const doc = (over: Partial<FleetPaneState> = {}): FleetPaneState => ({
+  v: 1,
+  worktree: '/repo/trees/t1',
+  workspace: 'w1',
+  title: 'Ship the thing',
+  slug: 'bro-nwl5g',
+  status: 'working',
+  led: { state: 'working' },
+  ts: NOW,
+  ...over,
+});
+
+describe('sessionReportArgs / sessionReleaseArgs — the bro:fleet contract', () => {
+  test('report carries source, bro-session agent, seq, state', () => {
+    const a = sessionReportArgs('w1:p2', { state: 'working' }, 42);
+    assert.deepEqual(a, [
+      'pane',
+      'report-agent',
+      'w1:p2',
+      '--source',
+      'bro:fleet',
+      '--agent',
+      'bro-session',
+      '--seq',
+      '42',
+      '--state',
+      'working',
+    ]);
+    // the session pane is NOT bro-status — a recycled pane id must
+    // fail the status backstop's foreign-agent check
+    assert.equal(SESSION_PANE_AGENT, 'bro-session');
+  });
+
+  test('release clears name and state for the same source/agent', () => {
+    const a = sessionReleaseArgs('w1:p2', 43);
+    assert.deepEqual(a, [
+      'pane',
+      'release-agent',
+      'w1:p2',
+      '--source',
+      'bro:fleet',
+      '--agent',
+      'bro-session',
+      '--seq',
+      '43',
+    ]);
+  });
+});
+
+describe('resolveTarget — provider config gates the acp attach', () => {
+  const acpProviders = {
+    oc: { type: 'acp', command: 'opencode acp' },
+    cl: { type: 'cli', command: 'claude -p' },
+    api: { type: 'api', baseUrl: 'http://x', models: {} },
+  } as const;
+
+  test('acp provider + session id → session target resolved', () => {
+    const t = resolveTarget(
+      doc({ provider: 'oc', acpSessionId: 'ses_1', model: 'm1', agent: 'opencode' }),
+      '/repo/trees/t1',
+      { ...acpProviders }
+    );
+    assert.deepEqual(t?.session, {
+      id: 'ses_1',
+      command: 'opencode acp',
+      provider: 'oc',
+      model: 'm1',
+    });
+    assert.equal(targetKey(t), 'acp|opencode acp|ses_1');
+  });
+
+  test('cli/api/missing providers never spawn — no session target', () => {
+    for (const p of ['cl', 'api', 'gone']) {
+      const t = resolveTarget(
+        doc({ provider: p, acpSessionId: 'ses_1', log: '/l.log' }),
+        '/repo/trees/t1',
+        { ...acpProviders }
+      );
+      assert.equal(t?.session, undefined, p);
+      assert.equal(t?.log, '/l.log');
+      assert.equal(targetKey(t), 'log|/l.log');
+    }
+  });
+
+  test('no session id means no attach even for an acp provider', () => {
+    const t = resolveTarget(doc({ provider: 'oc', log: '/l.log' }), '/repo/trees/t1', {
+      ...acpProviders,
+    });
+    assert.equal(t?.session, undefined);
+    assert.equal(t?.log, '/l.log');
+  });
+
+  test('no session and no log resolves to the empty view', () => {
+    const t = resolveTarget(doc({ provider: 'oc' }), '/repo/trees/t1', { ...acpProviders });
+    assert.equal(targetKey(t), 'none');
+    assert.equal(viewVerdict(t, { mode: 'none', acp: 'none' }).led.state, 'unknown');
+  });
+
+  test('undefined state is the waiting verdict', () => {
+    const t = resolveTarget(undefined, '/repo/trees/t1', {});
+    assert.equal(targetKey(t), 'waiting');
+    assert.equal(viewVerdict(t, { mode: 'none', acp: 'none' }).mode, 'waiting for projector');
+  });
+});
+
+describe('viewVerdict — the pane reports its own feed', () => {
+  const t = resolveTarget(
+    doc({ provider: 'oc', acpSessionId: 'ses_1', log: '/l' }),
+    '/repo/trees/t1',
+    { oc: { type: 'acp', command: 'opencode acp' } }
+  )!;
+
+  test('acp attach postures → working/idle', () => {
+    assert.deepEqual(viewVerdict(t, { mode: 'acp', acp: 'connecting' }), {
+      led: { state: 'working' },
+      mode: 'attaching',
+    });
+    assert.deepEqual(viewVerdict(t, { mode: 'acp', acp: 'live' }), {
+      led: { state: 'working' },
+      mode: 'session/load',
+    });
+    assert.deepEqual(viewVerdict(t, { mode: 'acp', acp: 'ended' }), {
+      led: { state: 'idle' },
+      mode: 'session ended',
+    });
+  });
+
+  test('log mode follows the worker verdict — live tail works, dead idles', () => {
+    assert.equal(viewVerdict(t, { mode: 'log', acp: 'none' }).led.state, 'working');
+    const dead = resolveTarget(doc({ led: { state: 'idle' }, log: '/l' }), '/repo/trees/t1', {})!;
+    assert.deepEqual(viewVerdict(dead, { mode: 'log', acp: 'none' }), {
+      led: { state: 'idle' },
+      mode: 'log tail',
+    });
+  });
+
+  test('events mode — the archive verdict, the worker floor (spec bro-l8wqu)', () => {
+    const ev = resolveTarget(
+      doc({ events: '/a.events.jsonl', led: { state: 'idle' } }),
+      '/repo/trees/t1',
+      {}
+    )!;
+    assert.equal(targetKey(ev), 'events|/a.events.jsonl');
+    // a proven-idle worker beats a stale mid-turn archive row — a
+    // crash or silence mid-turn must not pass for live work
+    assert.deepEqual(
+      viewVerdict(ev, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'working' },
+        rowMode: 'streaming',
+      }),
+      { led: { state: 'idle' }, mode: 'worker quiet' }
+    );
+    // a stopped turn reads idle
+    assert.deepEqual(
+      viewVerdict(ev, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'idle' },
+        rowMode: 'turn complete',
+      }),
+      { led: { state: 'idle' }, mode: 'turn complete' }
+    );
+    // no rows yet — the worker verdict carries (working → working)
+    const live = resolveTarget(doc({ events: '/a.events.jsonl' }), '/repo/trees/t1', {})!;
+    assert.deepEqual(viewVerdict(live, { mode: 'events', acp: 'none' }), {
+      led: { state: 'working' },
+      mode: 'session events',
+    });
+    // a blocked worker verdict wins over a stale working archive —
+    // and a non-blocked row's mode must not dress the worker's stop
+    const blocked = resolveTarget(
+      doc({ events: '/a.events.jsonl', led: { state: 'blocked' } }),
+      '/repo/trees/t1',
+      {}
+    )!;
+    assert.deepEqual(
+      viewVerdict(blocked, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'working' },
+        rowMode: 'streaming',
+      }),
+      { led: { state: 'blocked' }, mode: 'worker exited' }
+    );
+  });
+});
+
+describe('sessionMetaArgs — two-call display contract', () => {
+  test('call 1 clears, call 2 sets display-agent + state-label', () => {
+    const t = resolveTarget(doc({ agent: 'opencode' }), '/repo/trees/t1', {});
+    const calls = sessionMetaArgs(
+      'w1:p2',
+      sessionAgentOf(t),
+      { state: 'working' },
+      'session/load',
+      7
+    );
+    assert.equal(calls.length, 2);
+    assert.ok(calls[0]!.includes('--clear-state-labels'));
+    assert.ok(!calls[0]!.includes('--display-agent'));
+    const set = calls[1]!;
+    assert.equal(set[set.indexOf('--display-agent') + 1], 'opencode');
+    assert.deepEqual(set.slice(set.indexOf('--state-label')), [
+      '--state-label',
+      'working=session/load',
+    ]);
+  });
+
+  test('provider names the pane when no agent binary resolves', () => {
+    const t = resolveTarget(doc({ provider: 'oc', acpSessionId: 's' }), '/repo/trees/t1', {
+      oc: { type: 'acp', command: 'opencode acp' },
+    });
+    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'x', 7);
+    assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'oc');
+  });
+
+  test('escapes in display text are stripped', () => {
+    const t = resolveTarget(doc({ agent: 'a[2J' }), '/repo/trees/t1', {});
+    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'm', 7);
+    assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'a[2J');
+  });
+});
+
+/** A fake `herdr` that only logs argv — the pane's reports are
+ *  fire-and-forget, so logging is the whole contract. */
+const FAKE_HERDR = `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.env.FAKE_HERDR_LOG) {
+  fs.appendFileSync(process.env.FAKE_HERDR_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+}
+`;
+
+/** A minimal NDJSON ACP agent: answers initialize with loadSession,
+ *  replays canned updates on session/load, idles until killed. */
+const FAKE_AGENT = `#!/usr/bin/env node
+const rl = require('node:readline').createInterface({ input: process.stdin });
+const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
+rl.on('line', l => {
+  const m = JSON.parse(l);
+  if (m.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: m.id, result: {
+      protocolVersion: m.params.protocolVersion,
+      agentInfo: { name: 'fake', version: '0' },
+      agentCapabilities: { loadSession: true },
+      authMethods: [],
+    }});
+  } else if (m.method === 'session/load') {
+    send({ jsonrpc: '2.0', method: 'session/update', params: {
+      sessionId: m.params.sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED-LINE' } },
+    }});
+    send({ jsonrpc: '2.0', id: m.id, result: {} });
+  } else if (m.id !== undefined) {
+    send({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'nf' } });
+  }
+});
+`;
+
+/** Apply an env map — `undefined` deletes the key. Shared by the
+ *  bind and the restore so the loop body lives once. */
+const putEnv = (env: Record<string, string | undefined>): void => {
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+};
+
+/** Env bound for one call — the command reads it per invocation.
+ *  `undefined` unbinds: the ambient shell may itself run inside
+ *  herdr, so absence is a value a test must be able to force.
+ *  Async-aware: an awaited fn keeps its env for the whole call —
+ *  restoring on the synchronous return would unbind mid-attach,
+ *  and the fire-and-forget `call()` swallow hides the miss. */
+async function withEnv<T>(
+  env: Record<string, string | undefined>,
+  fn: () => T | Promise<T>
+): Promise<T> {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of Object.keys(env)) saved[k] = process.env[k];
+  try {
+    putEnv(env);
+    return await fn();
+  } finally {
+    putEnv(saved);
+  }
+}
+
+const callsOf = (log: string): string[][] =>
+  readFileSync(log, 'utf8')
+    .trim()
+    .split('\n')
+    .map(l => JSON.parse(l) as string[]);
+
+/** A fixture: temp worktree + fake herdr + a captured render stream
+ *  (the `out` seam — patching process.stdout would eat the TAP
+ *  reporter's own output mid-run). */
+function fixture(): {
+  worktree: string;
+  dir: string;
+  env: Record<string, string>;
+  log: string;
+  opts: { out: (line: string) => void };
+  stdout: () => string;
+  write: (rel: string, text: string) => string;
+} {
+  const worktree = mkdtempSync(join(tmpdir(), 'sesv-tree-'));
+  const dir = mkdtempSync(join(tmpdir(), 'sesv-'));
+  const fake = join(dir, 'fake-herdr.js');
+  const log = join(dir, 'calls.jsonl');
+  writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+  rmSync(log, { force: true });
+  const lines: string[] = [];
+  return {
+    worktree,
+    dir,
+    log,
+    opts: { out: line => lines.push(line) },
+    stdout: () => lines.join('\n'),
+    env: { HERDR_ENV: '1', HERDR_PANE_ID: 'w1:p2', HERDR_BIN_PATH: fake, FAKE_HERDR_LOG: log },
+    write: (rel, text) => {
+      const p = join(worktree, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, text);
+      return p;
+    },
+  };
+}
+
+describe('runSessionView --once', () => {
+  test('a log-only state tails the native log and reports log tail', async () => {
+    const f = fixture();
+    const logPath = f.write('agent.log', 'session ses_1 (cwd /x)\nmodel m\nhello-world\n');
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(statePath, doc({ worktree: f.worktree, log: logPath }));
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    const text = f.stdout();
+    assert.match(text, /hello-world/);
+    assert.match(text, /tailing the native log|log tail/);
+    const calls = callsOf(f.log);
+    const report = calls.find(c => c[1] === 'report-agent');
+    assert.equal(report?.[2], 'w1:p2');
+    assert.equal(report?.[report.indexOf('--agent') + 1], 'bro-session');
+    // the worker's verdict is live — a live log tail reports working
+    assert.equal(report?.[report.indexOf('--state') + 1], 'working');
+  });
+
+  test('an acp provider state spawns the command and replays the load', async () => {
+    const f = fixture();
+    const agent = f.write('fake-agent.cjs', FAKE_AGENT);
+    f.write(
+      'bro.config.json',
+      JSON.stringify({ providers: { fakeacp: { type: 'acp', command: `node ${agent}` } } })
+    );
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(
+      statePath,
+      doc({
+        worktree: f.worktree,
+        provider: 'fakeacp',
+        acpSessionId: 'ses_x',
+        agent: 'fake',
+        log: f.write('agent.log', 'LOG-FALLBACK'),
+      })
+    );
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    const text = f.stdout();
+    assert.match(text, /REPLAYED-LINE/, 'the replayed update must render');
+    assert.match(text, /ses_x/, 'the session id shows in the banner');
+    const calls = callsOf(f.log);
+    const report = calls.find(c => c[1] === 'report-agent');
+    assert.equal(report?.[report.indexOf('--state') + 1], 'working');
+  });
+
+  test('an events archive renders through the live wire — rows, turn bookends, permission (spec bro-l8wqu)', async () => {
+    const f = fixture();
+    const eventsPath = f.write(
+      'a.events.jsonl',
+      [
+        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
+        {
+          ts: '2026-01-01T00:00:01Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ARCHIVE-CHUNK\nARCHIVE-LINE2' },
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:01.500Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            title: 'Bash',
+            kind: 'execute',
+            rawInput: { command: 'ls /tmp' },
+            status: 'in_progress',
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:01.750Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 't1',
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: 'OUT-LINE' } }],
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:02Z',
+          session: 'ses_1',
+          kind: 'turn',
+          phase: 'stop',
+          stopReason: 'end_turn',
+        },
+        {
+          ts: '2026-01-01T00:00:03Z',
+          session: 'ses_1',
+          kind: 'permission',
+          title: 'rm -rf /',
+          verdict: 'denied',
+        },
+      ]
+        .map(r => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(
+      statePath,
+      doc({ worktree: f.worktree, events: eventsPath, lane: 'acp', status: 'working·#7' })
+    );
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    const text = f.stdout();
+    assert.match(text, /ARCHIVE-CHUNK/, 'the archived update renders verbatim');
+    // rich rendering flows through the archive leg — real paragraphs,
+    // the argged tool header, the indented output card
+    assert.match(text, /ARCHIVE-CHUNK\nARCHIVE-LINE2/, 'a chunk newline is a real line break');
+    // kind+arg ride in separate dim spans — match inside each
+    assert.match(text, /⣿ Bash/, 'the live edge prints');
+    assert.match(text, /\[execute\]/, 'the kind tag rides the header');
+    assert.match(text, /ls \/tmp/, 'the header picks the kind-guided arg');
+    assert.match(text, /✓.*Bash/, 'the completion edge re-prints');
+    assert.match(text, /│ {2}OUT-LINE/, 'the output card indents under the call');
+    assert.match(text, /── turn complete \(end_turn\) ──/, 'the stop row prints the boundary');
+    assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
+    // `bro: status` folds in — the projector's status string prints once
+    assert.match(text, /── working·#7 ──/);
+    const calls = callsOf(f.log);
+    const reports = calls.filter(c => c[1] === 'report-agent');
+    // the archive verdict moved through the stream: working while the
+    // turn ran, idle at the stop, blocked at the permission row
+    const states = reports.map(c => c[c.indexOf('--state') + 1]);
+    assert.deepEqual(states[states.length - 1], 'blocked');
+    assert.ok(states.includes('working'));
+  });
+
+  test('a direct --events/--agent binding renders without the fleet doc', async () => {
+    const f = fixture();
+    const eventsPath = f.write(
+      'a.events.jsonl',
+      [
+        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
+        {
+          ts: '2026-01-01T00:00:01Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'DIRECT-CHUNK' },
+          },
+        },
+        { ts: '2026-01-01T00:00:02Z', session: 'ses_1', kind: 'turn', phase: 'stop' },
+      ]
+        .map(r => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    // no fleet doc at all — the line-mode pane the builders arm
+    // (`session-view <wt> --events <e> --agent <id>`) must still
+    // render; worktree-only resolution dropped native journals
+    await withEnv(f.env, () =>
+      runSessionView([f.worktree, '--once', '--events', eventsPath, '--agent', 'native-x'], f.opts)
+    );
+    const text = f.stdout();
+    assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
+    const calls = callsOf(f.log);
+    const reports = calls.filter(c => c[1] === 'report-agent' && c.includes('--state'));
+    // the FINAL report is the verdict — the first fires before the
+    // archive drains and would read 'idle' even on an empty journal;
+    // the floor is 'unknown' (no registry entry), so the archive's
+    // own verdict (turn stopped → idle) is what rides on top
+    const report = reports.at(-1);
+    assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
+    const meta = calls.find(c => c.includes('--display-agent'));
+    assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');
+  });
+
+  test('a cli provider state never spawns — the log tail renders', async () => {
+    const f = fixture();
+    const agent = f.write('fake-agent.cjs', 'process.exit(99)');
+    const logPath = f.write('agent.log', 'CLI-LOG-LINE');
+    f.write(
+      'bro.config.json',
+      JSON.stringify({
+        providers: { fakecli: { type: 'cli', command: `node ${agent}` } },
+      })
+    );
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(
+      statePath,
+      doc({ worktree: f.worktree, provider: 'fakecli', acpSessionId: 'ses_x', log: logPath })
+    );
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    const text = f.stdout();
+    assert.match(text, /CLI-LOG-LINE/);
+    assert.match(text, /no acp session resolved/);
+  });
+
+  test('no state file binds unknown, no session', async () => {
+    const f = fixture();
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    f.stdout();
+    const report = callsOf(f.log).find(c => c[1] === 'report-agent');
+    assert.equal(report?.[report.indexOf('--state') + 1], 'unknown');
+  });
+
+  test('outside herdr the command is a silent no-op', async () => {
+    const f = fixture();
+    // the ambient dev shell may itself be a herdr pane — the herdr
+    // vars must go, not merely be overridden
+    await withEnv(
+      {
+        HERDR_ENV: undefined,
+        HERDR_PANE_ID: undefined,
+        HERDR_BIN_PATH: f.env.HERDR_BIN_PATH!,
+        FAKE_HERDR_LOG: f.log,
+      },
+      () => runSessionView([f.worktree, '--once'], f.opts)
+    );
+    f.stdout();
+    assert.throws(() => callsOf(f.log));
+  });
+});

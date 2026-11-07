@@ -449,9 +449,11 @@ describe('janitor — locks', () => {
 
   test('junk-only and pin/tomb/capture debris reap — files and dirs alike', () => {
     withBro(bro => {
+      // a pid no process can hold (pid_max tops out at 4194304) — a
+      // LIVE pid would read as a held lock and the reap would refuse
       const junkLock = join(bro, 'junk.json.lock');
       mkdirSync(junkLock);
-      writeFileSync(join(junkLock, 'pid'), '123'); // debt-store shape — not an h- entry
+      writeFileSync(join(junkLock, 'pid'), '99999999'); // debt-store shape — not an h- entry (dead owner)
       touch(join(bro, 'y.lock.pin-1-ab12'), '1:x', 2 * 60_000);
       touch(join(bro, 'z.lock.tomb-2-cd34'), '2:y', 2 * 60_000);
       const staleDir = join(bro, 'w.lock.stale-3-ef56');
