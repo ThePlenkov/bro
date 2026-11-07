@@ -4,7 +4,7 @@
  * 2. Tarball carries pack.json (npm pack --dry-run)
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -52,10 +52,10 @@ if (
 // needs to be on PATH (SonarCloud S4036). Fail closed: an unverified
 // tarball cannot be reported as ok.
 const npmCliCandidates = [
+  join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   '/home/linuxbrew/.linuxbrew/lib/node_modules/npm/bin/npm-cli.js',
   '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
   '/usr/lib/node_modules/npm/bin/npm-cli.js',
-  '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
   '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
 ];
 const npmCli = npmCliCandidates.find(c => existsSync(c));
