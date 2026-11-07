@@ -18,6 +18,7 @@ import { Readable, Writable } from 'node:stream';
 import { agent, ndJsonStream } from '@agentclientprotocol/sdk';
 import { loadConfig } from '@broject/core';
 import { acpOpen, acpSessionRetain, promptText } from '@broject/providers';
+import type { AcpPeer, AcpRetainedSession } from '@broject/providers';
 import { acpEntry, resolveProvider } from './ask.ts';
 
 /** The facade request. */
@@ -55,8 +56,18 @@ export async function runAcpFacade(request: AcpFacadeRequest, dir: string): Prom
   // waits on that child's unref'd stdio, and without a ref the event
   // loop empties mid-handshake and node exits under the client
   const keepAlive = setInterval(() => undefined, 60_000);
-  const peer = await acpOpen(provider, entry, wire, Date.now() + timeoutMs);
-  const session = await acpSessionRetain(peer, entry, wire, Date.now() + timeoutMs);
+  let peer: AcpPeer;
+  let session: AcpRetainedSession;
+  try {
+    peer = await acpOpen(provider, entry, wire, Date.now() + timeoutMs);
+    session = await acpSessionRetain(peer, entry, wire, Date.now() + timeoutMs);
+  } catch (err) {
+    // the handshake never completed: the interval would keep the event
+    // loop alive forever, so the failure would hang instead of reaching
+    // the caller — the keep-alive outlives the handshake only
+    clearInterval(keepAlive);
+    throw err;
+  }
   const sessionId = localSessionId();
 
   const app = agent({ name: 'brouter' });
