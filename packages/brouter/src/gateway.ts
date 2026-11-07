@@ -39,8 +39,10 @@ function withoutTrailingSlashes(text: string): string {
  *  with a password would print it in every log that names the
  *  refusal. */
 function parseRouterUrl(raw: string): URL {
-  const url = URL.parse(raw);
-  if (url === null) {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
     throw new Error(`the router's url is not a valid URL`);
   }
   if (url.username !== '' || url.password !== '') {

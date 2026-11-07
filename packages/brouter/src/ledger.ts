@@ -65,6 +65,10 @@ export async function recordTurn(turn: {
   now?: number;
 }): Promise<boolean> {
   const now = turn.now ?? Date.now();
+  // the tokens are the agent's own report — an external number — and
+  // the ledger's counters are integers: a fractional or negative value
+  // would corrupt them, so a number that is not a count counts nothing
+  const tokens = Number.isInteger(turn.tokens) && turn.tokens >= 0 ? turn.tokens : 0;
   const handle = openStore(routerStorePath());
   if (!handle.ok) {
     return false;
@@ -80,7 +84,7 @@ export async function recordTurn(turn: {
       model: turn.model,
       windowStart: windowStart(now),
       requests: 1,
-      tokens: turn.tokens,
+      tokens,
     });
     await openSession(handle.db, {
       id: session,
