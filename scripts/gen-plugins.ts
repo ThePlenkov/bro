@@ -681,12 +681,10 @@ const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
 const drift = [];
 
-function emit(path, content) {
-  const p = join(ROOT, path);
-  // Guard every path component: if any parent (or the file itself) is a
-  // symlink, the write/read would follow it and could touch a file outside
-  // the checkout. Treat a symlinked component as stale drift in check mode
-  // and remove + recreate it as a real directory in write mode.
+/** Remove symlinked path components above `path` so generated writes can't
+ *  follow a link outside the checkout. Returns true when drift was recorded
+ *  (check mode) so the caller can skip. */
+function guardSymlinkedParents(path) {
   const parts = path.split(/[\\/]/);
   let cur = ROOT;
   for (let i = 0; i < parts.length - 1; i++) {
@@ -697,13 +695,26 @@ function emit(path, content) {
     } catch {
       pst = undefined;
     }
-    if (pst?.isSymbolicLink()) {
-      if (CHECK) {
-        drift.push(path);
-        return;
-      }
-      rmSync(cur, { recursive: true, force: true });
+    if (!pst?.isSymbolicLink()) {
+      continue;
     }
+    if (CHECK) {
+      drift.push(path);
+      return true;
+    }
+    rmSync(cur, { recursive: true, force: true });
+  }
+  return false;
+}
+
+function emit(path, content) {
+  const p = join(ROOT, path);
+  // Guard every path component: if any parent (or the file itself) is a
+  // symlink, the write/read would follow it and could touch a file outside
+  // the checkout. Treat a symlinked component as stale drift in check mode
+  // and remove + recreate it as a real directory in write mode.
+  if (guardSymlinkedParents(path)) {
+    return;
   }
   // lstat, not exists/stat: a stale directory or symlink where a file is
   // expected must be REPLACED — readFileSync would crash on the dir and
