@@ -25,9 +25,18 @@ function asReason(written: string): HealthReason {
   return REASONS.find(r => r === written) ?? 'rate-limited';
 }
 
+/** The snapshot — a map with NO prototype. The key is bro's own
+ *  `<provider>/<model>` (a lane without a model keys as the bare
+ *  provider), and a provider named `__proto__` must land as an ordinary
+ *  own entry — a wall the router knows — instead of a write to
+ *  `Object.prototype`. */
+function emptySnapshot(): HealthSnapshot {
+  return Object.create(null) as HealthSnapshot;
+}
+
 /** The walls — a model that cannot serve until the reset comes. */
 async function wallVerdicts(db: RouterDb, now: number): Promise<HealthSnapshot> {
-  const snapshot: HealthSnapshot = {};
+  const snapshot = emptySnapshot();
   for (const limit of await activeLimits(db, now)) {
     const key = healthKey(limit.provider, limit.model);
     snapshot[key] = {

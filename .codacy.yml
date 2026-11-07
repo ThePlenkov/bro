@@ -52,3 +52,13 @@ exclude_paths:
   # data; the same shape already ships on main
   # (packages/devin/src/usage.ts) unflagged.
   - 'packages/router-store/src/store.ts'
+
+  # The health snapshot IS a keyed map: the key is bro's own
+  # `<provider>/<model>` (a lane without a model keys as the bare
+  # provider), and Codacy's object-injection rule reads every dynamic key
+  # as uncontrolled data. The snapshot has NO prototype — a provider named
+  # `__proto__` lands as an ordinary own entry, a wall the router knows,
+  # not a write to Object.prototype — so the rule has nothing to catch
+  # here. The async rule fires on the read-model's own awaits: an
+  # unreadable ledger must fail loudly, never answer an empty snapshot.
+  - 'packages/router-store/src/health.ts'

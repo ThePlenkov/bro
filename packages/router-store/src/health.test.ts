@@ -40,7 +40,28 @@ test('a wall makes the model unavailable, with the reason and the reset', async 
 test('a wall the ledger never heard of is not a wall', async () => {
   const s = await store('silent');
   const snapshot = await healthSnapshot(s.db, 500);
-  assert.deepEqual(snapshot, {});
+  assert.deepEqual(Object.keys(snapshot), []);
+  s.close();
+});
+
+test('a provider named __proto__ is an ordinary entry, not a prototype write', async () => {
+  const s = await store('proto');
+  // a lane without a model keys as the bare provider — and that key is
+  // whatever the provider is called
+  await recordLimit(s.db, {
+    provider: '__proto__',
+    model: '',
+    resetAt: 900,
+    reason: 'rate-limited',
+    source: 'src',
+    seenAt: 1,
+  });
+  const snapshot = await healthSnapshot(s.db, 2);
+  // the wall is an OWN entry — the snapshot has no prototype to write to
+  const bare = '__proto__';
+  assert.equal(snapshot[bare]?.available, false);
+  assert.equal(Object.getPrototypeOf(snapshot), null);
+  assert.equal(({} as Record<string, unknown>).available, undefined);
   s.close();
 });
 
