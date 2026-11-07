@@ -52,12 +52,20 @@ the chain as the host's server-side stack. Layer 1 bases on `feat/router-routes`
 explicitly — the stack roots on PR #922, not on `main`, because the arc's code
 exists only there.
 
-**The sync that keeps that root is not in this branch.** The sync in this tree
-roots every chain on `main`: after layer 1 merges it would retarget layer 2 to
-`main` and pull #922's changes into the layer's diff. The chain-rooted sync is
-PR #947 (`bro-awbgd`), and it lands on `main` before the layers do. Until then
-the layers are rebased and retargeted by hand against `feat/router-routes`, and
-`bro stack sync` is not run on this stack.
+**The sync keeps that root.** The chain-rooted sync landed on `main`
+(PR #947, `bro-awbgd`) and is in this branch: a chain roots on its OWN
+base — the first member's recorded edge base, else its PR base — not on
+`main`. This chain's first member is layer 1, whose PR base is
+`feat/router-routes`, so `bro stack sync router` retargets the layers
+against that branch. The root is read from the stack, not from the merge
+state: layer 1 stays a member after it merges, so the sync keeps using
+`feat/router-routes` as the chain's base.
+
+**Check the recorded root before syncing.** `bro stack list router`
+prints every member's effective base and its PR target; the chain's root
+is the first member's base. A root that reads `main` instead of
+`feat/router-routes` would pull #922's changes into the layer's diff —
+retarget the stack's root first, then sync.
 
 ### The rules
 
@@ -101,11 +109,12 @@ regex; `core/src/config.ts` — cognitive complexity 20.
 **Codacy (17 added)** — the per-file detail needs the account
 (app.codacy.com, or an API token); the PR's own check carries the list.
 
-The bar the layer answers to is the repo's own (`.codescene/code-health-rules.json`):
-function CC ≤ 9, file mean CC ≤ 4, function LoC ≤ 50, args ≤ 4, nesting ≤ 4,
-duplication ≥ 10 LoC @ 75 %, ≤ 4 consecutive asserts — and the critical rules
-(Low Cohesion, Deep Nested Logic, Bumpy Road, Brain/God Functions) must not
-fire at all.
+The bar the layer answers to is the repo's own (`.codescene/code-health-rules.json`).
+A pinned threshold is the value at which the rule FIRES, so the clean bar
+is one below it: function CC ≤ 8 (the pinned 9 fires), file mean CC ≤ 4,
+function LoC ≤ 50, args ≤ 4, nesting ≤ 4, duplication < 10 LoC @ 75 %,
+≤ 4 consecutive asserts — and the critical rules (Low Cohesion, Deep Nested
+Logic, Bumpy Road, Brain/God Functions) must not fire at all.
 
 **Acceptance:** `npm run check:codescene` on the layer's delta is green; the
 CodeScene, SonarCloud and Codacy checks on the layer's PR pass; no finding is
@@ -185,9 +194,14 @@ Writing is not the point; the **proof** is:
   200k default;
 - the loop from layer 3 is gone in the same session.
 
-The write is opt-in (`--write`), the dry-run shows the diff before anything
-lands, and the operator's own `~/.claude/settings.json` is never overwritten
-silently.
+The write is opt-in (`--write`), the dry-run prints the block that would
+land, and the operator's own `~/.claude/settings.json` is never overwritten
+silently. The dry-run is the BLOCK, not a line-by-line diff against the
+file: the write replaces the `modelPicker` key wholesale, so curated rows
+the router no longer serves are dropped by design — the block is
+regenerated, not accumulated — and every other key of the file survives. A
+diff that names the rows a write would REMOVE is planned functionality,
+not a promise this layer makes.
 
 **Acceptance:** the written block round-trips through the adapter's reader; a
 live check with the real client against a running router shows the models
