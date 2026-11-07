@@ -128,6 +128,7 @@ import {
   writeHeadMemory,
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
+import { resolveAgentConnector } from '../agent-connectors.ts';
 import { collectAgents } from './fleet.ts';
 import { projectFleet } from './herdr-projector.ts';
 import {
@@ -1533,10 +1534,29 @@ async function spawnFixerAgent(ctx: Ctx, pr: number, s: FixerSpawn): Promise<PrV
       donors.push(entry);
     }
     const donor = donors[0];
-    const spawnProvider = donor?.provider;
-    const spawnResume = donor?.acpSessionId;
+    // A donor pins an ACP provider, which resolveSpawnProvider turns
+    // into an argv/ACP SpawnWorker. Backends that own their provider
+    // session (gascity's city.toml), dispatch remotely (copilot), or
+    // never spawn (devin) reject a worker-bearing spawn — so an ACP
+    // donor on such a backend would force a config refusal. Drop the
+    // donor (fresh spawn, no resume) when the resolved connector cannot
+    // run provider workers. (review #732)
+    let connectorAcceptsWorkers = true;
+    try {
+      const conn = resolveAgentConnector(
+        { dir: ctx.mainRoot },
+        { connector: ctx.connector },
+        ctx.env
+      );
+      connectorAcceptsWorkers = conn.capabilities().workers !== false;
+    } catch {
+      connectorAcceptsWorkers = true;
+    }
+    const useDonor = connectorAcceptsWorkers;
+    const spawnProvider = useDonor ? donor?.provider : undefined;
+    const spawnResume = useDonor ? donor?.acpSessionId : undefined;
     const spawnPrompt =
-      donor !== undefined && typeof donor.acpSessionId === 'string'
+      useDonor && donor !== undefined && typeof donor.acpSessionId === 'string'
         ? `${s.prompt}\nSession: ${donor.acpSessionId}\n`
         : s.prompt;
     try {
