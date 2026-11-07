@@ -80,6 +80,7 @@ BRO                        GC (Gas City)
 ```
 
 **Recovery notes:**
+
 - Crash between spawn steps → registry may have partial state; BRO must detect via liveness and only respawn on confirmed lost/exited.
 - Orphan session from failed `session new` (unparseable output) → closed by alias.
 - Sling failure → session closed by failure path, registry entry marked with `spawnError` and remains respawn-able as appropriate.
@@ -92,12 +93,14 @@ BRO                        GC (Gas City)
 - **Versioned real-gc conformance:** add support for running against a real `gc` binary when explicitly enabled (e.g. `BRO_REAL_GC=1` and `gc` on PATH at a known tested version). Record `gc --version` (or equivalent) as the tested version in test output/evidence. Conformance fixtures must be captured against that version and referenced as versioned evidence (not ad hoc manual runs). Tests that hit real gc must be opt-in and clearly marked (skipped by default). Evidence of passing runs against the pinned version is required for acceptance.
 
 ## Acceptance criteria
+
 - [ ] Lifecycle diagram and ownership table included (with recovery) in this spec/docs.
 - [ ] Single owner defined per phase: claims/spawn/retry/reconciliation/shutdown/gate.
 - [ ] Documentation/runbook published (see docs below) stating Gas City is complement (not Gas Town), no second scheduler.
 - [x] Fixture coverage backed by versioned real-gc conformance evidence (not only stub tests) — opt-in real-gc tests + version capture.
 
 ## Implementation plan
+
 1. **Spec first (SDD):** this file is the spec (bro.config.json has `sdd.mode: "gate"`).
 2. **Document ownership/runbook:** add integration runbook under `docs/` (or update README) with ownership table and lifecycle diagram; reference from gascity connector header.
 3. **Tighten ownership comments in code:** ensure connector comments/state ownership clearly (BRO owns policy/dedup/retry/gate/claims coordination; gc owns provider/execution/supervisor/lifecycle mechanics). No redesign.
@@ -105,6 +108,7 @@ BRO                        GC (Gas City)
 5. **Regression checks:** keep existing fake-gc tests passing; add any missing ownership assertions if needed.
 
 ## Non-negotiables
+
 - Spec first per SDD gate.
 - Preserve grouped CLI + permanent flat compatibility aliases, one portable skills tree, existing semantic facades.
 - No breaking redesign without owner alignment.

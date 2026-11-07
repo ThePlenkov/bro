@@ -53,6 +53,7 @@ sequenceDiagram
 ```
 
 **Recovery cases:**
+
 - **Crash mid-spawn:** partial registry entry; reconciliation treats missing as lost only if supervisor running.
 - **Orphan session:** `session new` returns unparseable JSON → BRO closes by alias.
 - **Sling failure:** session closed, entry gets `spawnError`, respawn-able per policy.
