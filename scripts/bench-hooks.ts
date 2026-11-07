@@ -425,23 +425,29 @@ function checkUnbudgetedRows(
   return failed;
 }
 
+interface BudgetEntry {
+  key: string;
+  lane: Lane;
+  cap: number;
+}
+
 function enforce(
   rows: Map<string, Row>,
-  budget: Record<string, number>,
+  entries: BudgetEntry[],
   lanes: Lane[],
+  budgetKeys: Set<string>,
   say: (line: string) => void
 ): boolean {
   let failed = false;
-  for (const [key, cap] of Object.entries(budget)) {
-    const lane = key.split(':')[0] as Lane;
-    if (LANES.includes(lane) && !lanes.includes(lane)) {
+  for (const entry of entries) {
+    if (LANES.includes(entry.lane) && !lanes.includes(entry.lane)) {
       continue;
     }
-    if (checkBudgetRow(key, rows.get(key), cap, say)) {
+    if (checkBudgetRow(entry.key, rows.get(entry.key), entry.cap, say)) {
       failed = true;
     }
   }
-  if (checkUnbudgetedRows(rows, budget, say)) {
+  if (checkUnbudgetedRows(rows, Object.fromEntries(entries.map(e => [e.key, e.cap])), say)) {
     failed = true;
   }
   return failed;
@@ -454,6 +460,12 @@ function main(): void {
     process.exit(2);
   }
   const budget = loadBudget(opts.budgetFile);
+  const entries: BudgetEntry[] = Object.entries(budget).map(([key, cap]) => ({
+    key,
+    lane: key.split(':')[0] as Lane,
+    cap,
+  }));
+  const budgetKeys = new Set(Object.keys(budget));
   const { cwd, env } = buildFixture();
   const rows = runBench(opts, cwd, env);
   writeReport(rows, budget, opts);
@@ -464,7 +476,7 @@ function main(): void {
     : (line: string): void => {
         console.log(line);
       };
-  if (opts.enforce && enforce(rows, budget, opts.lanes, say)) {
+  if (opts.enforce && enforce(rows, entries, opts.lanes, budgetKeys, say)) {
     process.exit(1);
   }
 }
