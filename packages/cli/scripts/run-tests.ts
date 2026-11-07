@@ -9,7 +9,7 @@ function isE2eTest(name: string): boolean {
 }
 
 function shouldInclude(name: string, wantE2e: boolean): boolean {
-  if (!name.match(/\.test\.ts$/)) return false
+  if (!/\.test\.ts$/.test(name)) return false
   const isE2e = isE2eTest(name)
   if (wantE2e) return isE2e
   return !isE2e
@@ -46,17 +46,15 @@ const pattern = process.argv[2] || 'src/**/*.test.ts'
 if (pattern.includes('.e2e')) {
   const pkgDir = dirname(fileURLToPath(import.meta.url))
   const repoRoot = join(pkgDir, '..', '..')
-  const build = spawnSync('npx', ['nx', 'run', '@broject/bro:build'], {
+  const build = spawnSync(process.execPath, ['./node_modules/.bin/nx', 'run', '@broject/bro:build'], {
     stdio: 'inherit',
     cwd: repoRoot,
-    shell: process.platform === 'win32',
   })
   if (build.status !== 0) {
     // Fallback: try building from package dir if nx not available in expected form
-    const build2 = spawnSync('npx', ['tsdown', 'src/index.ts'], {
+    const build2 = spawnSync(process.execPath, ['../../node_modules/.bin/tsdown', 'src/index.ts'], {
       stdio: 'inherit',
       cwd: join(pkgDir, '..'),
-      shell: process.platform === 'win32',
     })
     if (build2.status !== 0 && build.status !== null) {
       // continue anyway; tests will fail clearly if dist missing
@@ -64,7 +62,7 @@ if (pattern.includes('.e2e')) {
   }
 }
 
-const files = walk('src', pattern).sort()
+const files = walk('src', pattern).sort((a, b) => a.localeCompare(b))
 
 if (files.length === 0 && pattern.includes('.e2e')) {
   console.error('No E2E test files found')
