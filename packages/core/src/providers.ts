@@ -74,6 +74,11 @@ export type ProviderEntry =
       /** Secret-store command (secret-tool/pass/op …) whose stdout is
        *  the key — the secure alternative to apiKeyEnv. */
       apiKeyCommand?: string;
+      /** The key for THIS call — a RUNTIME field: the config never holds
+       *  a key value (it names a source — an env var or a secret-store
+       *  command). The key travels with the entry, so two calls in one
+       *  process cannot read each other's key. */
+      apiKey?: string;
     }
   | {
       type: 'acp';
@@ -469,6 +474,11 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   };
   if (!isPlainObject(raw)) {
     return fail('must be an object');
+  }
+  // a key in the config is a leak the operator must hear about — the
+  // runtime field is not a config field (the config names a SOURCE)
+  if (raw.apiKey !== undefined) {
+    return fail('carries apiKey — the config cannot hold a key (use apiKeyEnv or apiKeyCommand)');
   }
   const kindRes = parseProviderKind(raw);
   if ('err' in kindRes) {
