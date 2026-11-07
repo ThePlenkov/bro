@@ -194,14 +194,16 @@ Writing is not the point; the **proof** is:
   200k default;
 - the loop from layer 3 is gone in the same session.
 
-The write is opt-in (`--write`), the dry-run prints the block that would
-land, and the operator's own `~/.claude/settings.json` is never overwritten
-silently. The dry-run is the BLOCK, not a line-by-line diff against the
-file: the write replaces the `modelPicker` key wholesale, so curated rows
-the router no longer serves are dropped by design — the block is
-regenerated, not accumulated — and every other key of the file survives. A
-diff that names the rows a write would REMOVE is planned functionality,
-not a promise this layer makes.
+The write is opt-in (`--write`), the dry-run shows the diff before anything
+lands, and the operator's own `~/.claude/settings.json` is never overwritten
+silently.
+
+The diff is the CLIENT LAYER's (layer 4, #942), and it is a diff of the
+SETTINGS OBJECT, key by key: the client's own key is replaced — with the
+row count before and after — and every other key is untouched. It names the
+KEYS, not the rows: a curated row the router no longer serves is not listed
+one by one, because the block is regenerated, not accumulated. The block
+itself is printed on its own.
 
 **Acceptance:** the written block round-trips through the adapter's reader; a
 live check with the real client against a running router shows the models
