@@ -71,6 +71,21 @@ request did not offer is a tool the client cannot run.
 
 `clientCall(update, tools)` → the client's `{name, input}` or undefined.
 
+The bridge is four small files, one concern each — the bar below demands
+it: a file's MEAN cyclomatic complexity is capped at 4, and a translation
+that grows a branch grows the mean of the file it sits in.
+
+- **`serve-conductor-bridge.ts`** — the translation: the capability the
+  call asks for, and the first candidate the client's schema accepts.
+- **`serve-conductor-bridge-input.ts`** — the raw input (the agent's own
+  shape) into the client's: the fields that map onto the client's own
+  properties, the rest dropped.
+- **`serve-conductor-bridge-schema.ts`** — the client's schema, the last
+  word: whether a value fits the type the client declared, and whether the
+  client's own schema accepts the call.
+- **`serve-conductor-bridge-status.ts`** — the call's own status: a report
+  is not a request.
+
 - **The capability decides the tool.** ACP's `execute` → the client's `Bash`,
   `read` → `Read`, `edit` → `Edit` (or `Write`), `search`/`fetch` → the client's
   own greps and fetches. The first candidate whose REQUIRED properties the
@@ -130,8 +145,9 @@ of 80 lines. Every one of those is already a finding, so a change that
 GROWS one is a "degraded" finding — the gate's blocker. The bridge therefore:
 
 - lives in its own files (`serve-conductor-tools.ts` — the vocabulary,
-  `serve-conductor-bridge.ts` — the translation), so the conductor's own
-  functions do not grow;
+  `serve-conductor-bridge.ts` — the translation, and the two files beside
+  it — the input and the schema), so the conductor's own functions do not
+  grow;
 - splits `continuationTurn`'s repin branch into `repinModel`, which pays for
   the replay rule's branch (cc 14 → 11 — the finding IMPROVES);
 - adds no nested block and no multi-part condition to the conductor (the
