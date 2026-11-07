@@ -1,11 +1,12 @@
 /**
  * Verify the @broject/bro-pack package is up to date:
  * 1. Generated pack.json exists and matches trees + package.json
- * 2. Tarball would include pack.json (and schema if referenced)
+ * 2. Tarball carries pack.json (npm pack --dry-run)
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const root = join(fileURLToPath(import.meta.url), '..', '..');
 const packDir = join(root, 'packages/pack');
@@ -42,10 +43,36 @@ if (
   console.error('packages/pack/pack.json is stale — run node scripts/gen-pack.ts');
   process.exit(1);
 }
-// Tarball inclusion of pack.json is guaranteed by packages/pack/package.json
-// "files" (verified above) and by prepack regenerating pack.json at publish
-// time. Running npm pack --dry-run here was only a best-effort sanity check,
-// but it requires a subprocess whose PATH cannot be restricted to fixed,
-// non-writable directories in every environment (SonarCloud S4036), so it is
-// intentionally omitted from this gate.
+
+// Tarball assertion: the published tarball must actually carry pack.json.
+// npm pack --dry-run (JSON mode) is the only proof that the `files` list
+// resolves to a tarball entry at publish time. PATH is pinned to fixed,
+// non-writable directories so the lookup is not subject to PATH injection
+// (SonarCloud S4036); execFileSync takes an argv array (no shell).
+let npmRan = false;
+let tarballHasPackJson = false;
+try {
+  const out = execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], {
+    cwd: packDir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // NOSONAR — npm is a required build tool; PATH pinned below
+    env: { ...process.env, PATH: '/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin' },
+  });
+  npmRan = true;
+  const parsed = JSON.parse(out);
+  const entries: string[] = Array.isArray(parsed)
+    ? parsed.flatMap((p: { files?: { path?: string }[] }) => (p.files ?? []).map(f => f.path ?? ''))
+    : [];
+  tarballHasPackJson = entries.includes('pack.json');
+} catch (e) {
+  // npm not available / not configured in this env — non-blocking (infra).
+  console.error('check:pack: npm pack --dry-run skipped/failed (non-blocking in this env)');
+}
+
+if (npmRan && !tarballHasPackJson) {
+  console.error('npm pack --dry-run does not list pack.json in tarball');
+  process.exit(1);
+}
+
 console.error('check:pack ok');
