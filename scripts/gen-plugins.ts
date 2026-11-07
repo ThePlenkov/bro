@@ -321,18 +321,20 @@ function devinHooksJson() {
   // agent's next turn, so neither path may keep the foreground waiting:
   // stdin is captured to a tempfile first (a detached child cannot read
   // the parent's pipe once the shell exits), then the hook runs in a
-  // detached subshell. A mktemp or cat failure falls back to a direct
-  // quiet call so the event is never swallowed.
+  // detached subshell. A mktemp or cat failure drops the event: stdin
+  // has already been consumed by cat, so no fallback can replay the
+  // payload. The subshell is redirected off the hook's pipes so a host
+  // reading the hook pipe to EOF is not blocked by the detached work.
   const cmdDetached = event =>
     `P="\${DEVIN_PLUGIN_ROOT}"; ` +
     `if [ -x "$P/hooks/run.sh" ]; then ` +
     `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `("$P/hooks/run.sh" ${event} < "$_f" >/dev/null 2>&1; rm -f "$_f") & else rm -f "$_f"; fi; ` +
+    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
     `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
     `elif command -v bro >/dev/null 2>&1; then ` +
     `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
-    `(bro hooks ${event} < "$_f" >/dev/null 2>&1; rm -f "$_f") & else rm -f "$_f"; fi; ` +
-    `else bro hooks ${event} >/dev/null 2>&1 || true; fi; fi; exit 0`;
+    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
   const hook = (event, timeout, matcher = '', command = cmd) => ({
     matcher,
     hooks: [{ type: 'command', command: command(event), timeout }],
