@@ -257,6 +257,53 @@ describe('gitStacks', () => {
     }
   })
 
+  test('mergeChain --rebase refuses a member carrying merge commits', () => {
+    const { dir, cleanup } = chainRepo()
+    try {
+      // a --no-ff merge of a side branch puts a merge commit inside
+      // stack/s/1-a's fork..head range — cherry-pick can't preserve its
+      // conflict resolution, so the member refuses instead of dropping it
+      git(['checkout', '-q', '-b', 'side', 'stack/s/1-a'], dir)
+      writeFileSync(join(dir, 'side.txt'), 'side\n')
+      git(['add', 'side.txt'], dir)
+      git(['commit', '-qm', 'add side.txt'], dir)
+      git(['checkout', '-q', 'stack/s/1-a'], dir)
+      git(['merge', '--no-ff', '-qm', 'merge side into stack/s/1-a', 'side'], dir)
+      git(['checkout', '-q', 'main'], dir)
+      const r = gitStacks(dir).mergeChain?.(CHAIN, { method: 'rebase' })
+      assert.deepEqual(r?.merged, [])
+      assert.ok(r?.lines.some((l) => l.includes('contains merge commits')))
+      // nothing landed — main still has only the base commit, worktree clean
+      assert.equal(git(['rev-list', '--count', 'main'], dir).trim(), '1')
+      assert.equal(git(['status', '--porcelain'], dir).trim(), '')
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('mergeChain --rebase refuses a mid-chain merge commit after landing the members below', () => {
+    const { dir, cleanup } = chainRepo()
+    try {
+      // member 1 is linear and lands; member 2 carries the merge commit,
+      // so the refusal stops the climb with the partial cascade preserved
+      git(['checkout', '-q', '-b', 'side', 'stack/s/2-b'], dir)
+      writeFileSync(join(dir, 'side.txt'), 'side\n')
+      git(['add', 'side.txt'], dir)
+      git(['commit', '-qm', 'add side.txt'], dir)
+      git(['checkout', '-q', 'stack/s/2-b'], dir)
+      git(['merge', '--no-ff', '-qm', 'merge side into stack/s/2-b', 'side'], dir)
+      git(['checkout', '-q', 'main'], dir)
+      const r = gitStacks(dir).mergeChain?.(CHAIN, { method: 'rebase' })
+      assert.deepEqual(r?.merged, ['stack/s/1-a'])
+      assert.ok(r?.lines.some((l) => l.includes('contains merge commits')))
+      // base + replayed a — member 2 never landed
+      assert.equal(git(['rev-list', '--count', 'main'], dir).trim(), '2')
+      assert.equal(git(['status', '--porcelain'], dir).trim(), '')
+    } finally {
+      cleanup()
+    }
+  })
+
   test('a conflicted --squash merge cleans the worktree — no stale conflict state', () => {
     const { dir, cleanup } = chainRepo()
     try {
