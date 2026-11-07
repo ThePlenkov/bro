@@ -25,6 +25,7 @@ import {
   armDetail,
   otherLiveWork,
   recordGuardEvents,
+  takeStopGateBlock,
   traceEntry,
 } from './hooks.ts';
 import { procStat } from '@broject/core';
@@ -133,6 +134,14 @@ describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
     assert.equal(classifyExecCommand('gh pr merge 42 --squash'), 'pr-merge');
     assert.equal(classifyExecCommand('cd x && gh pr merge --auto'), 'pr-merge');
+  });
+
+  test('detects a PR opened with gh’s global flags', () => {
+    // `gh -R owner/repo pr create` opens a PR like any other — the
+    // registration the hook does must not miss it
+    assert.equal(classifyExecCommand('gh -R owner/repo pr create'), 'pr-create');
+    assert.equal(classifyExecCommand('gh --repo owner/repo pr create --fill'), 'pr-create');
+    assert.equal(classifyExecCommand('gh -R owner/repo pr merge 7'), 'pr-merge');
   });
 
   test('detects gh pr create', () => {
@@ -324,6 +333,62 @@ describe('classifySkillMutation', () => {
 describe('readArmed', () => {
   test('returns an empty set for a session with no marker', () => {
     assert.equal(readArmed('definitely-no-such-session-id').size, 0);
+  });
+});
+
+describe('takeStopGateBlock', () => {
+  /** Rewind this session's one-shot marker past the TTL — a session
+   *  that left a week ago and came back. Returns the marker path. */
+  const staleMarker = (main: string, sessionId: string, aspect: string): string => {
+    const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+    const marker = join(common, 'bro', 'hooks', 'hinted', `${sessionId}.stop-gate-block.${aspect}`);
+    const weekAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(marker, weekAgo, weekAgo);
+    return marker;
+  };
+
+  test('the hard block goes back once per session and aspect, never as a loop', () => {
+    const { root, main } = initRepo('bro-stop-gate-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-once', 'work'), true);
+      // a blocked stop wakes the host as a new turn whose stop would
+      // block again on the same claim — that is the ping-pong the
+      // one-shot exists to stop (gates, not loops)
+      assert.equal(takeStopGateBlock('gate-once', 'work'), false);
+      assert.equal(takeStopGateBlock('gate-once', 'work'), false);
+      // another aspect keeps its own shot — an early spec or claim
+      // block must not spend the worktree gate's block (GATE_PRIORITY
+      // says uncommitted work is never shadowed)
+      assert.equal(takeStopGateBlock('gate-once', 'act'), true);
+      assert.equal(takeStopGateBlock('gate-once', 'act'), false);
+      // another session keeps its own gate
+      assert.equal(takeStopGateBlock('gate-other', 'work'), true);
+    });
+  });
+
+  test('a TTL-stale marker is a session that came back — the gate re-arms', () => {
+    const { root, main } = initRepo('bro-stop-gate-stale-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-return', 'work'), true);
+      staleMarker(main, 'gate-return', 'work');
+      assert.equal(takeStopGateBlock('gate-return', 'work'), true);
+      // the re-armed marker is fresh — a repeat still demotes
+      assert.equal(takeStopGateBlock('gate-return', 'work'), false);
+    });
+  });
+
+  test('a re-armed stale marker leaves no residue a second steal could re-fire', () => {
+    const { root, main } = initRepo('bro-stop-gate-race-');
+    inside(main, root, () => {
+      assert.equal(takeStopGateBlock('gate-race', 'work'), true);
+      const marker = staleMarker(main, 'gate-race', 'work');
+      // the re-arm steals the stale file aside and removes it — the
+      // hinted/ dir must not keep `.stolen.*` residue a later caller
+      // could mistake for a marker, nor a stale file to steal twice
+      assert.equal(takeStopGateBlock('gate-race', 'work'), true);
+      assert.deepEqual(readdirSync(dirname(marker)).sort(), ['gate-race.stop-gate-block.work']);
+      assert.equal(takeStopGateBlock('gate-race', 'work'), false);
+    });
   });
 });
 

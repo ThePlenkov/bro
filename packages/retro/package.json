@@ -1,6 +1,6 @@
 {
   "name": "@broject/retro",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "smol-toml": "^1.9.0",
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.3.0"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",

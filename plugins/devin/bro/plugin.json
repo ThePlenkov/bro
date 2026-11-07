@@ -1,13 +1,29 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "bro",
-  "version": "0.2.5",
-  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: claim beads, spawn the fleet, pour convoy molecules, gate reviews, sweep debt, mesh across repos. All mechanics in the bro CLI over gh + beads — not another orchestrator",
+  "version": "0.3.0",
+  "description": "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
   "author": {
     "name": "Petr Plenkov"
   },
   "homepage": "https://github.com/ThePlenkov/bro#readme",
   "repository": "https://github.com/ThePlenkov/bro",
   "license": "MIT",
-  "keywords": ["agent-rig", "orchestration", "fleet", "convoy", "mesh", "pr-review", "merge-gate", "review-debt", "beads", "drill", "retro", "retrospect", "wtf", "self-correction", "agent-workflow"]
+  "keywords": [
+    "agent-rig",
+    "orchestration",
+    "fleet",
+    "convoy",
+    "mesh",
+    "pr-review",
+    "merge-gate",
+    "review-debt",
+    "beads",
+    "drill",
+    "retro",
+    "retrospect",
+    "wtf",
+    "self-correction",
+    "agent-workflow"
+  ]
 }

@@ -1,100 +1,91 @@
 /**
  * Collect unresolved review threads from a merged PR into DebtRecords.
  */
-import type { ReviewFacade, ReviewThread } from '@broject/core'
-import type {
-  AuthorPolicy,
-  DebtNeeds,
-  DebtPriority,
-  DebtRecord,
-} from './types.ts'
-import { loadAuthorPolicy } from './store.ts'
-import { bodyPreview, deriveArea, fingerprint } from './text.ts'
+import type { ReviewFacade, ReviewThread } from '@broject/core';
+import type { AuthorPolicy, DebtNeeds, DebtPriority, DebtRecord } from './types.ts';
+import { loadAuthorPolicy } from './store.ts';
+import { bodyPreview, deriveArea, fingerprint } from './text.ts';
 
-export function classifyThread(opts: {
-  author: string
-  bot?: boolean
-  config: AuthorPolicy
-}): {
-  priority: DebtPriority
-  needs: DebtNeeds
-  harvest: boolean
+export function classifyThread(opts: { author: string; bot?: boolean; config: AuthorPolicy }): {
+  priority: DebtPriority;
+  needs: DebtNeeds;
+  harvest: boolean;
 } {
-  const login = opts.author.toLowerCase()
-  if (opts.config.excluded_authors.some((a) => a.toLowerCase() === login)) {
-    return { priority: 'noise', needs: 'skip', harvest: false }
+  const login = opts.author.toLowerCase();
+  if (opts.config.excluded_authors.some(a => a.toLowerCase() === login)) {
+    return { priority: 'noise', needs: 'skip', harvest: false };
   }
   // App actors (coderabbitai, cubic-dev-ai, ...) report no [bot] suffix —
   // the facade's bot flag is the reliable discriminator.
-  const isBot = opts.bot === true || login.endsWith('[bot]')
+  const isBot = opts.bot === true || login.endsWith('[bot]');
   if (!isBot) {
-    return { priority: 'human', needs: 'code_change', harvest: true }
+    return { priority: 'human', needs: 'code_change', harvest: true };
   }
-  if (opts.config.non_actionable_authors.some((a) => a.toLowerCase() === login)) {
-    return { priority: 'nit', needs: 'code_change', harvest: true }
+  if (opts.config.non_actionable_authors.some(a => a.toLowerCase() === login)) {
+    return { priority: 'nit', needs: 'code_change', harvest: true };
   }
-  return { priority: 'nit', needs: 'code_change', harvest: true }
+  return { priority: 'nit', needs: 'code_change', harvest: true };
 }
 
 export interface CollectPrResult {
-  pr: number
-  incoming: DebtRecord[]
-  skipped: number
-  skippedOutdated: number
-  skippedThreadAuthor: number
+  pr: number;
+  incoming: DebtRecord[];
+  skipped: number;
+  skippedOutdated: number;
+  skippedThreadAuthor: number;
 }
 
-type SkipReason = 'outdated' | 'thread_author' | 'config' | 'no_comment'
+type SkipReason = 'outdated' | 'thread_author' | 'config' | 'no_comment';
 type ThreadAction =
   | { kind: 'skip'; reason: SkipReason }
-  | { kind: 'harvest'; author: string; classification: ReturnType<typeof classifyThread> }
+  | { kind: 'harvest'; author: string; classification: ReturnType<typeof classifyThread> };
 
 function authorMatchesFilter(author: string, threadAuthor: string | null): boolean {
-  const needle = threadAuthor?.toLowerCase()
-  return !needle || author.toLowerCase().includes(needle)
+  const needle = threadAuthor?.toLowerCase();
+  return !needle || author.toLowerCase().includes(needle);
 }
 
 function classifyThreadAction(opts: {
-  thread: ReviewThread
-  threadAuthor: string | null
-  config: AuthorPolicy
+  thread: ReviewThread;
+  threadAuthor: string | null;
+  config: AuthorPolicy;
 }): ThreadAction | null {
   if (opts.thread.resolved || opts.thread.outdated) {
-    return opts.thread.outdated ? { kind: 'skip', reason: 'outdated' } : null
+    return opts.thread.outdated ? { kind: 'skip', reason: 'outdated' } : null;
   }
-  const comment = opts.thread.comment
+  const comment = opts.thread.comment;
   // A comment-less thread (deleted/minimized) harvests into an empty
   // unusable record — skip it instead.
   if (!comment) {
-    return { kind: 'skip', reason: 'no_comment' }
+    return { kind: 'skip', reason: 'no_comment' };
   }
-  const author = comment.author
+  const author = comment.author;
   if (!authorMatchesFilter(author, opts.threadAuthor)) {
-    return { kind: 'skip', reason: 'thread_author' }
+    return { kind: 'skip', reason: 'thread_author' };
   }
   const classification = classifyThread({
     author,
     bot: comment?.bot,
     config: opts.config,
-  })
+  });
   if (!classification.harvest) {
-    return { kind: 'skip', reason: 'config' }
+    return { kind: 'skip', reason: 'config' };
   }
-  return { kind: 'harvest', author, classification }
+  return { kind: 'harvest', author, classification };
 }
 
 function toDebtRecord(opts: {
-  thread: ReviewThread
-  meta: { title: string; url: string; mergedAt: string; mergeSha: string }
-  pr: number
-  runId: string
-  harvestedAt: string
-  classification: ReturnType<typeof classifyThread>
+  thread: ReviewThread;
+  meta: { title: string; url: string; mergedAt: string; mergeSha: string };
+  pr: number;
+  runId: string;
+  harvestedAt: string;
+  classification: ReturnType<typeof classifyThread>;
 }): DebtRecord {
-  const comment = opts.thread.comment
-  const author = comment?.author ?? 'unknown'
-  const path = comment?.path ?? ''
-  const body = comment?.body ?? ''
+  const comment = opts.thread.comment;
+  const author = comment?.author ?? 'unknown';
+  const path = comment?.path ?? '';
+  const body = comment?.body ?? '';
 
   return {
     thread_id: opts.thread.id,
@@ -120,47 +111,47 @@ function toDebtRecord(opts: {
     fix_pr: null,
     fixed_at: null,
     notes: null,
-  }
+  };
 }
 
 /** Pure half of collectPr — threads + meta → DebtRecords. The bulk-scan
  *  path (ReviewFacade.scanMergedPrs) calls this directly so a repo-wide
  *  collect shares one classification pipeline with the serial probe. */
 export function collectThreads(opts: {
-  meta: { title: string; url: string; mergedAt: string; mergeSha: string }
-  threads: ReviewThread[]
-  pr: number
-  runId: string
-  threadAuthor?: string | null
-  cwd?: string
-  harvestedAt?: string
+  meta: { title: string; url: string; mergedAt: string; mergeSha: string };
+  threads: ReviewThread[];
+  pr: number;
+  runId: string;
+  threadAuthor?: string | null;
+  cwd?: string;
+  harvestedAt?: string;
 }): CollectPrResult {
-  const config = loadAuthorPolicy(opts.cwd)
-  const harvestedAt = opts.harvestedAt ?? new Date().toISOString()
+  const config = loadAuthorPolicy(opts.cwd);
+  const harvestedAt = opts.harvestedAt ?? new Date().toISOString();
 
-  const incoming: DebtRecord[] = []
-  let skipped = 0
-  let skippedOutdated = 0
-  let skippedThreadAuthor = 0
+  const incoming: DebtRecord[] = [];
+  let skipped = 0;
+  let skippedOutdated = 0;
+  let skippedThreadAuthor = 0;
 
   for (const thread of opts.threads) {
     const action = classifyThreadAction({
       thread,
       threadAuthor: opts.threadAuthor ?? null,
       config,
-    })
+    });
     if (!action) {
-      continue
+      continue;
     }
     if (action.kind === 'skip') {
       if (action.reason === 'outdated') {
-        skippedOutdated += 1
+        skippedOutdated += 1;
       } else if (action.reason === 'thread_author') {
-        skippedThreadAuthor += 1
+        skippedThreadAuthor += 1;
       } else {
-        skipped += 1
+        skipped += 1;
       }
-      continue
+      continue;
     }
     incoming.push(
       toDebtRecord({
@@ -171,25 +162,35 @@ export function collectThreads(opts: {
         harvestedAt,
         classification: action.classification,
       })
-    )
+    );
   }
 
-  return { pr: opts.pr, incoming, skipped, skippedOutdated, skippedThreadAuthor }
+  return { pr: opts.pr, incoming, skipped, skippedOutdated, skippedThreadAuthor };
 }
 
 export async function collectPr(
   rev: ReviewFacade,
   opts: {
-    repo: string
-    pr: number
-    mergedSha?: string
-    runId: string
-    threadAuthor?: string | null
-    cwd?: string
+    repo: string;
+    pr: number;
+    mergedSha?: string;
+    runId: string;
+    threadAuthor?: string | null;
+    cwd?: string;
   }
 ): Promise<CollectPrResult> {
-  const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha)
-  const harvestedAt = new Date().toISOString()
-  const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr })
-  return collectThreads({ ...opts, meta, threads, harvestedAt })
+  const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha);
+  const harvestedAt = new Date().toISOString();
+  const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr });
+  return collectThreads({
+    ...opts,
+    meta: {
+      title: meta.title,
+      url: meta.url,
+      mergedAt: meta.mergedAt ?? meta.closedAt ?? '',
+      mergeSha: meta.mergeSha,
+    },
+    threads,
+    harvestedAt,
+  });
 }

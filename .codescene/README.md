@@ -12,7 +12,7 @@ bro's Code Health policy, expressed as code. Three files carry it:
 
 | Rung | Profile                       | Who carries it                                                                                                  |
 | ---- | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 3    | `pay_down_tech_debt`          | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
+| 3    | `pay_down_tech_debt`          | **64 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
 | 2    | `bare_minimum`                | **135 files** — no _critical_ rule fires. The critical-rule safety net plus "no new debt".                      |
 | 1    | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
 
@@ -86,7 +86,7 @@ carries the policy it enforces.
 The same delta analysis, before you push:
 
 ```bash
-npm run check:codescene                    # delta vs origin/main
+npm run check:codescene                    # delta vs the merge-base with origin/main
 node scripts/codescene-gate.ts <report>    # evaluate a saved report
 node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing findings
 ```
