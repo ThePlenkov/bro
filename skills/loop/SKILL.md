@@ -93,6 +93,18 @@ open-PR cap (default 3) — `worktreeMb` / `diskMinSlots`, the disk
 floor below — and `batch` / `batchMinPriority`, the clump
 knobs below.
 
+**Spawn guard invariant (spec bro-eqi2d)** — every spawn the loop
+prepares passes the external-agent exclusion first: while an agent this
+rig does not own is actively working on the host (an interactive devin
+or opencode session, a foreign worker, a live copilot task, a session
+that armed `.work`/`.task` markers here), the pass refuses `cap` —
+`external agent active — <kind>: <detail>` — and holds for the next
+tick. The session goes idle after `spawn.externalIdleSec` (default
+480s) of no proven activity; `spawn.externalBlock: false` opts out.
+The quota lanes (`agents.<kind>.maxSessions/maxWorkers/
+maxBatchWorkers`) and provider walls refuse on their own — the two
+guards are independent, both must hold.
+
 ## Commands
 
 | Command                                 | What it does                                                                                                                                                                                                                                                            |

@@ -12,6 +12,7 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  clearExternalPlanes,
   localLeaseStore,
   projectId,
   readAgentRegistry,
@@ -27,6 +28,9 @@ import {
 } from './agent-connectors.ts';
 import { initRepo } from './commands/testrepo.ts';
 
+// real host planes would flake spawn tests — fixtures opt out via
+// spawn.externalBlock; the registry clear is the belt
+clearExternalPlanes();
 // work leases are TTL-governed foreign stamps now — a spawn's row
 // stays live past a dead spawner pid until expiry, so fixtures must
 // never write into the real state dir: a leftover row would collide
@@ -207,6 +211,7 @@ function fixture(
     city,
     env: {
       agents: { gascity: { command: 'fake-agent', configDir: city, ...knobs } },
+      spawn: { externalBlock: false, externalIdleSec: 480 },
       connectors: {},
     },
     prevPath,

@@ -23,6 +23,7 @@ import {
   agentExitFileName,
   agentRegistryPath,
   bdActor,
+  clearExternalPlanes,
   type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
@@ -33,6 +34,7 @@ import {
   projectId,
   readLedgerWalls,
   recordWall,
+  registerExternalPlane,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -77,6 +79,11 @@ import {
   unregisterAgentConnector,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
+
+// the guard reads REAL host state — clear the registered external planes
+// so spawn-mechanics tests stay deterministic on any machine; the
+// exclusion block registers its own stubs
+clearExternalPlanes();
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -356,7 +363,7 @@ function fixture(
     beadsDir,
     binDir,
     db,
-    env: { agents, connectors: {} },
+    env: { agents, connectors: {}, spawn: { externalBlock: false, externalIdleSec: 480 } },
     prevPath,
     prevTmuxFakeHome,
     prevDockerFakeHome,
@@ -3946,6 +3953,122 @@ describe('fleet chain walk spawn integration', () => {
       if (info !== undefined) {
         await conn(f).stop(info.id);
       }
+      cleanup(f);
+    }
+  });
+});
+
+describe('external-agent exclusion (spec bro-eqi2d)', () => {
+  const ACTIVE: { kind: string; externalActivity: () => { active: boolean; detail: string } } = {
+    kind: 'stub',
+    externalActivity: () => ({ active: true, detail: "interactive session 'foreign-1'" }),
+  };
+  const nativeConn = (f: Fixture, env?: Partial<AgentConnectorEnv>) =>
+    makeNativeConnector({ dir: f.main }, { ...f.env, ...env });
+
+  /** Scripted devin state dirs pinning the quota lane to one live
+   *  session: a lock on process.pid whose scripted /proc reads argv0
+   *  devin and a BRO_AGENT_ID environ (live for the quota, owned for
+   *  the exclusion — the two planes judge the same pid differently). */
+  const devinDirs = (root: string): Record<string, unknown> => {
+    const lockDir = join(root, 'dv-locks');
+    const procDir = join(root, 'dv-proc');
+    const transcriptsDir = join(root, 'dv-trans');
+    const logsDir = join(root, 'dv-logs');
+    for (const d of [lockDir, procDir, transcriptsDir, logsDir]) {
+      mkdirSync(d, { recursive: true });
+    }
+    mkdirSync(join(procDir, String(process.pid), 'fd'), { recursive: true });
+    writeFileSync(join(procDir, String(process.pid), 'cmdline'), 'devin\0acp\0');
+    writeFileSync(join(procDir, String(process.pid), 'environ'), 'BRO_AGENT_ID=n-x\0');
+    writeFileSync(join(lockDir, 'w.lock'), String(process.pid));
+    return { lockDir, procDir, transcriptsDir, logsDir, sessionKind: undefined, maxSessions: 1 };
+  };
+
+  test('external active + quota ok → refused, reason names the external agent', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      await assert.rejects(
+        nativeConn(f, { spawn: { externalBlock: true, externalIdleSec: 480 } }).spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'true')
+        ),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /external agent active — stub: interactive session 'foreign-1'/.test(e.message) &&
+          /spawn of fx-1 refused/.test(e.message)
+      );
+      // no claim, no registry row — a refused spawn leaves no half-state
+      assert.equal(f.dbRows()[0]!.status, 'open');
+      assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+    } finally {
+      clearExternalPlanes();
+      cleanup(f);
+    }
+  });
+
+  test('external active + quota full → the external refusal still wins the report', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      // the quota lane armed against a live scripted devin session — an
+      // independent refusal that must not mask the external one
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
+        agents: { ...f.env.agents, devin: { ...devinDirs(f.root), maxSessions: 1 } },
+      };
+      env.agents['native'] = { ...env.agents['native'], sessionKind: 'devin' };
+      await assert.rejects(
+        nativeConn(f, env).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        (e: unknown) => e instanceof SpawnError && /external agent active/.test(e.message)
+      );
+    } finally {
+      clearExternalPlanes();
+      cleanup(f);
+    }
+  });
+
+  test('external idle + quota full → the quota lane refuses on its own', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    try {
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
+        agents: {
+          ...f.env.agents,
+          devin: { ...devinDirs(f.root), maxSessions: 1 },
+        },
+      };
+      env.agents['native'] = { ...env.agents['native'], sessionKind: 'devin' };
+      await assert.rejects(
+        nativeConn(f, env).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /devin session quota reached/.test(e.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('externalBlock:false admits past an active external report', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      const info = await nativeConn(f, {
+        spawn: { externalBlock: false, externalIdleSec: 480 },
+      }).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.ok(pidAlive(info.pid!));
+      await nativeConn(f).stop(info.id);
+    } finally {
+      clearExternalPlanes();
       cleanup(f);
     }
   });

@@ -63,6 +63,7 @@ import {
   deriveProviderWalls,
   emitLifecycle,
   entryRunId,
+  externalPlanes,
   type FleetLeaseTtls,
   type FleetProfile,
   type FleetRouter,
@@ -145,6 +146,16 @@ import {
   devinSessionPlane,
 } from '@broject/devin';
 import './session-planes/copilot.ts';
+import {
+  COPILOT_COUNT_TTL_MS,
+  copilotCountFile,
+  readCopilotCount,
+  writeCopilotCount,
+} from './session-planes/copilot.ts';
+// external-activity planes self-register on import — the spawn guard
+// reads every ecosystem's "an agent bro does not own is working" probe
+import './session-planes/markers.ts';
+import './session-planes/opencode.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
 import {
@@ -153,7 +164,6 @@ import {
   laneGateTake,
   reconcileLanePauseForRegistry,
 } from './lane.ts';
-import { writeCopilotCount } from './session-planes/copilot.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -179,6 +189,10 @@ export interface AgentConnectorEnv {
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
   providers?: Record<string, ProviderEntry>;
+  /** Spawn-guard knobs (spec bro-eqi2d) — the external-agent exclusion
+   *  (`externalBlock`) and its idle window (`externalIdleSec`). Absent
+   *  on hand-built envs: externalGuardOf falls back to DEFAULT_CONFIG. */
+  spawn?: { externalBlock: boolean; externalIdleSec: number };
   /** The model-centric routing registry (spec: specs/bro-n1p0s.md) —
    *  consulted only when no provider is named anywhere: a `--model`
    *  that resolves through the static index takes its primary route.
@@ -275,6 +289,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
+    spawn?: { externalBlock: boolean; externalIdleSec: number };
     brouter?: BrouterConfig;
   };
   return {
@@ -283,6 +298,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     loop: cfg.loop,
     fleet: cfg.fleet,
     providers: cfg.providers,
+    spawn: cfg.spawn,
     brouter: cfg.brouter,
   };
 }
@@ -721,7 +737,7 @@ export function resolveAgentConnector(
         `agent connector "${prefer}" is not registered (known: ${agentConnectorNames().join(', ') || 'none'})`
       );
     }
-    return makeAgentConnector(hit, ctx, env);
+    return guardPrimed(makeAgentConnector(hit, ctx, env), ctx.dir, env);
   }
   const url = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin']);
   const remote = url.code === 0 ? url.out.trim() : '';
@@ -738,7 +754,23 @@ export function resolveAgentConnector(
       console.error(`warning: agent connector "${n}" skipped — failed to initialize: ${why}`);
     }
   }
-  return chosen;
+  return guardPrimed(chosen, ctx.dir, env);
+}
+
+/** Wrap the resolved connector's spawn with the external guard's
+ *  remote preflight (spec bro-eqi2d) — every spawn path funnels
+ *  through resolution (the facade's, the loop's direct connector,
+ *  serve/convoy/delegate alike), so the copilot inventory refresh
+ *  rides here once, BEFORE the connector's registry-lock critical
+ *  section: a gh fetch inside that lock would stall every spawn. */
+function guardPrimed(conn: AgentConnector, dir: string, env: AgentConnectorEnv): AgentConnector {
+  return {
+    ...conn,
+    spawn: spec => {
+      primeCopilotForExternalGuard(dir, env);
+      return conn.spawn(spec);
+    },
+  };
 }
 
 /** Probe-construct each registered backend in registry order and return
@@ -1240,7 +1272,10 @@ function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
     }),
     gcSupervisor: memo(() => gcSupervisorRunning()),
     dockerLive: memo(() => dockerLiveContainers()),
-    copilotLive: memo(() => copilotLiveTaskIds()),
+    copilotLive: memo(() => {
+      const res = copilotLiveTaskIds();
+      return res?.ids;
+    }),
   };
 }
 
@@ -1306,7 +1341,7 @@ export interface BudgetCause {
  *  accounting CAN be wrong (double-persisted spawns, rewritten history)
  *  which is why the snapshot says so in-band instead of relying on docs. */
 export const BUDGET_LIMITS: readonly string[] = [
-  'counts bro registry agents only — interactive sessions and foreign tools are invisible',
+  'counts bro registry agents only — interactive sessions and foreign tools are visible to the spawn-guard planes (external-planes) but their request burn is not counted here',
   'spawn history is bounded by janitor retention — reaped entries no longer count',
   "causes classify from log tails — a provider wall that prints nothing reads 'crash'",
   "the registry keeps the latest run per step — earlier failures' causes are gone",
@@ -1784,6 +1819,58 @@ export function batchWallRefusal(
   );
 }
 
+/** The external-agent exclusion (spec bro-eqi2d) — bro never starts a
+ *  session while an agent it does not own is actively working, on ANY
+ *  provider: interactive sessions and foreign workers draw on the same
+ *  account as the fleet, and a spawn that lands beside them burns a
+ *  shared allowance neither gate counts alone. Every registered
+ *  external-activity plane probes; the first active report refuses the
+ *  spawn 'cap' — transient pressure a caller waits out, not a conflict.
+ *  A probe's own SpawnError ('unavailable') surfaces verbatim: an
+ *  unverifiable plane fails closed like the quota lanes. */
+function enforceExternalGuard(
+  dir: string,
+  spec: SpawnSpec,
+  guard: { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined
+): void {
+  if (guard === undefined) {
+    return;
+  }
+  const ctx = {
+    dir,
+    agents: guard.agents,
+    workerEnv: spec.env,
+    env: process.env,
+    holdMs: guard.holdMs,
+    now: Date.now(),
+  };
+  for (const plane of externalPlanes()) {
+    const hit = plane.externalActivity(ctx);
+    if (hit.active) {
+      throw new SpawnError(
+        `external agent active — ${plane.kind}: ${hit.detail ?? 'a session outside this rig is working'}` +
+          ` — spawn of ${spec.molStep} refused`,
+        'cap'
+      );
+    }
+  }
+}
+
+/** The guard payload a spawn opts into — undefined when the operator
+ *  disabled the exclusion (`spawn.externalBlock: false`): the knob is
+ *  an explicit opt-out, defaults armed. `holdMs` is `externalIdleSec`
+ *  in probe units; `agents` is the bag map each plane reads its
+ *  overrides from. */
+export function externalGuardOf(
+  env: AgentConnectorEnv
+): { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined {
+  const spawn = env.spawn ?? DEFAULT_CONFIG.spawn;
+  if (spawn.externalBlock === false) {
+    return undefined;
+  }
+  return { holdMs: spawn.externalIdleSec * 1000, agents: env.agents };
+}
+
 /** Which wall holds longer — quota outranks rate_limited (the registry
  *  fold's own dominance rule), and within a cause the later `until`
  *  wins, an absent one meaning indefinite. */
@@ -2038,6 +2125,11 @@ function prepareSpawn(
     /** The resolved command the spawn will run — used for cross-kind
      *  admission (judging all session kinds the command starts). */
     spawnCommand?: string;
+    /** External-agent exclusion — externalGuardOf's payload. Refuses
+     *  while an agent this rig does not own is actively working, after
+     *  the wall check and before fleet admission — a refusal lands
+     *  before any reservation is claimed. */
+    external?: { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined;
   }
 ): {
   agentId: string;
@@ -2116,6 +2208,10 @@ function prepareSpawn(
     }
     throw wallRefusal;
   }
+  // the external-agent exclusion — after the wall (registry-derived,
+  // cheap) and before fleet admission: a refusal here leaves no
+  // half-spawned state, and no reservation is claimed on the way out
+  enforceExternalGuard(dir, spec, opts.external);
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap);
@@ -3465,6 +3561,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           env,
           sessionQuota: () => sessionQuotaOf(env, 'native', spec, command),
           spawnCommand: command,
+          external: externalGuardOf(env),
         });
         // the launcher crashed after the reservation — registry+claim
         // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
@@ -4032,6 +4129,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             env,
             sessionQuota: () => sessionQuotaOf(env, 'tmux', spec, command),
             spawnCommand: command,
+            external: externalGuardOf(env),
           });
           spawnLease = lease;
           const session = `bro-${agentId}`;
@@ -4867,6 +4965,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             sessionQuota: () =>
               sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
             spawnCommand: gcEffectiveCommand(city, command),
+            external: externalGuardOf(env),
           }
         );
         let sessionId: string | undefined;
@@ -5670,6 +5769,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           env,
           sessionQuota: () => sessionQuotaOf(env, 'docker', spec, command),
           spawnCommand: command,
+          external: externalGuardOf(env),
         });
         const name = `bro-${agentId}`;
         const envFile = join(home, `${agentId}.env`);
@@ -6120,9 +6220,10 @@ function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; er
 /** The account's live task id set — filtered, paginated listings for
  *  the fleet walk and the session-plane count refresh. `undefined` =
  *  the API couldn't answer (fail closed — an unverifiable count
- *  occupies, never frees). A short page ends the walk; the page bound
- *  keeps a pathological account from stalling the spawn lock. */
-function copilotLiveTaskIds(): Set<string> | undefined {
+ *  occupies, never frees). An incomplete inventory is marked explicitly
+ *  (pagination hit the limit) so callers can fail closed rather than
+ *  caching a truncated set as complete. */
+function copilotLiveTaskIds(): { ids: Set<string>; incomplete: boolean } | undefined {
   const ids = new Set<string>();
   for (let page = 1; page <= 10; page++) {
     const r = ghRun([
@@ -6143,13 +6244,17 @@ function copilotLiveTaskIds(): Set<string> | undefined {
         ids.add(id);
       }
       if (batch.length < 100) {
-        return ids;
+        return { ids, incomplete: false };
+      }
+      if (page === 10) {
+        // full page at the limit — cannot tell complete from truncated
+        return { ids, incomplete: true };
       }
     } catch {
       return undefined;
     }
   }
-  return ids;
+  return { ids, incomplete: false };
 }
 
 /** copilot occupancy — the remote probe is the same honesty rule as
@@ -6396,22 +6501,62 @@ function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string
 }
 
 /** Refresh the count cache the copilot plane serves — best-effort and
- *  only while a copilot lane is armed (an unarmed plane has no reader;
- *  the extra gh call is pure waste). A failed refresh just leaves the
+ *  only while the cache has a reader (an unarmed copilot quota AND a
+ *  disarmed external guard means none; the extra gh call is pure
+ *  waste). A failed refresh just leaves the
  *  cache stale, which countLive already fails closed on. The landed
- *  sweep retires this repo's reservations the remote count now sees. */
+ *  sweep retires this repo's reservations the remote count now sees.
+ *  Readers are the quota lanes AND the external guard's copilot probe —
+ *  either one armed keeps the refresh paying. An incomplete inventory is
+ *  not cached as complete; when pagination hits the limit we do not write
+ *  a complete cache. */
 function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
-  if (sessionQuotaConfig(env.agents, 'copilot') === undefined) {
+  // an unarmed copilot lane has no reader — unless the external guard
+  // is armed: its copilot probe reads the same cache, so a rig that
+  // never dispatches copilot work still refreshes it (spec bro-eqi2d)
+  if (
+    sessionQuotaConfig(env.agents, 'copilot') === undefined &&
+    externalGuardOf(env) === undefined
+  ) {
     return;
   }
   const resDir = env.agents['copilot']?.['reservationsDir'];
   const observedAt = Date.now();
-  const ids = copilotLiveTaskIds();
-  if (ids !== undefined) {
+  const res = copilotLiveTaskIds();
+  if (res !== undefined) {
+    if (res.incomplete) {
+      // Do not cache a truncated/incomplete inventory as complete.
+      // Leave existing cache as-is (or absent); probe will treat absent/stale as not active,
+      // but better to not write partial complete state - explicitly don't write complete cache.
+      return;
+    }
     const slots = sessionSlotsDir('copilot', typeof resDir === 'string' ? resDir : undefined);
-    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids], observedAt);
-    copilotSweepLandedSlots(dir, slots, ids);
+    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...res.ids], observedAt);
+    copilotSweepLandedSlots(dir, slots, res.ids);
   }
+}
+
+/** The external guard's remote preflight — refresh the copilot
+ *  inventory when it is absent or stale so the guard's copilot plane
+ *  sees foreign remote tasks even on a rig that never dispatches
+ *  copilot work (the connector's own refreshes only fire on copilot
+ *  lanes). Runs OUTSIDE the spawn critical section — the gh call must
+ *  not stall the registry lock. Best-effort like every refresh: a
+ *  failed fetch leaves the cache absent/stale and the plane reports
+ *  quiet rather than inventing remote state. */
+export function primeCopilotForExternalGuard(dir: string, env: AgentConnectorEnv): void {
+  if (externalGuardOf(env) === undefined) {
+    return;
+  }
+  const resDir = env.agents['copilot']?.['reservationsDir'];
+  const cache = readCopilotCount(copilotCountFile(typeof resDir === 'string' ? resDir : undefined));
+  if (cache !== undefined) {
+    const age = Date.now() - cache.at;
+    if (age >= 0 && age < COPILOT_COUNT_TTL_MS) {
+      return; // fresh enough — the plane trusts it inside the TTL
+    }
+  }
+  copilotRefreshCount(dir, env);
 }
 
 export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
@@ -6621,6 +6766,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           cap: { max: fleetCapOf(env), env },
           env,
           sessionQuota: copilotSessionQuota(env),
+          external: externalGuardOf(env),
         });
         try {
           const { task, taskId } = dispatchTask(home, agentId, spec, target);
