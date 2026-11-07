@@ -1,32 +1,30 @@
-import {
-  bdJson,
-  getConnector,
-  resolveRepo,
-  type BeadStore,
-  type BroContext,
-  type IssuesConnector,
-  type RigContext,
-  type ReviewsConnector,
-  type TasksConnector,
-} from '@broject/core'
-import { rigNext } from '@broject/rig'
+import type { BeadStore } from '@broject/core'
+import { rigNext, type RigNext } from '@broject/rig'
 
-export async function runRigNext(opts: {
+// Re-export the engine symbols so consumers (drive.ts, etc.) that
+// historically imported them from this adapter keep resolving.
+export { rigNext, type RigNext }
+
+export async function runRigNext(
+  dir: string = process.cwd(),
+  item?: string | { json?: boolean; cwd?: string; dir?: string; store?: BeadStore },
   json?: boolean
-  cwd?: string
-  dir?: string
-  store?: BeadStore
-} = {}): Promise<number> {
-  const cwd = opts.dir ?? opts.cwd ?? process.cwd()
-  const ctx: BroContext = { cwd }
-  const repo = await resolveRepo(ctx)
-  const tasks = getConnector<TasksConnector>('tasks')
-  const issues = getConnector<IssuesConnector>('issues')
-  const reviews = getConnector<ReviewsConnector>('reviews')
-  const rig: RigContext = { repo }
-  const rctx = { repo, cwd }
-  const verdict = await rigNext({ repo: rctx, tasks, issues, reviews, store: opts.store })
-  if (opts.json) {
+): Promise<number> {
+  let resolvedDir = dir
+  let resolvedItem: string | undefined
+  let resolvedJson = json ?? false
+  let store: BeadStore | undefined
+  if (typeof item === 'object' && item !== null) {
+    resolvedDir = item.dir ?? item.cwd ?? dir
+    resolvedJson = item.json ?? resolvedJson
+    store = item.store
+    resolvedItem = undefined
+  } else {
+    resolvedItem = item
+  }
+
+  const verdict = rigNext(resolvedDir, resolvedItem, { store })
+  if (resolvedJson) {
     console.log(JSON.stringify(verdict, null, 2))
     return exitCode(verdict)
   }
@@ -35,42 +33,21 @@ export async function runRigNext(opts: {
   return exitCode(verdict)
 }
 
-function formatVerdict(v: Awaited<ReturnType<typeof rigNext>>): string {
-  if (v.kind === 'step') {
-    const bead = v.bead.id
-    const slug = v.bead.slug
-    const title = v.bead.title
-    const gate = v.gate ? ` [${v.gate}]` : ''
-    return `step ${bead} ${slug} ${title}${gate}`
+function formatVerdict(v: RigNext): string {
+  const verdict = v.verdict
+  const id = v.id
+  const detail = v.detail
+  let line = `rig next: ${verdict}`
+  if (id !== undefined) {
+    line += ` ${id}`
   }
-  if (v.kind === 'block') {
-    const bead = v.bead.id
-    const slug = v.bead.slug
-    const title = v.bead.title
-    const gate = v.gate ? ` [${v.gate}]` : ''
-    return `block ${bead} ${slug} ${title}${gate}`
+  if (detail !== undefined) {
+    line += ` — ${detail}`
   }
-  if (v.kind === 'wait') {
-    const bead = v.bead.id
-    const slug = v.bead.slug
-    const title = v.bead.title
-    const gate = v.gate ? ` [${v.gate}]` : ''
-    return `wait ${bead} ${slug} ${title}${gate}`
-  }
-  if (v.kind === 'done') {
-    return `done ${v.reason}`
-  }
-  if (v.kind === 'idle') {
-    return 'idle'
-  }
-  return `unknown`
+  return line
 }
 
-function exitCode(v: Awaited<ReturnType<typeof rigNext>>): number {
-  if (v.kind === 'step') return 0
-  if (v.kind === 'block') return 1
-  if (v.kind === 'wait') return 2
-  if (v.kind === 'done') return 0
-  if (v.kind === 'idle') return 0
-  return 1
+function exitCode(v: RigNext): number {
+  if (v.verdict === 'blocked') return 1
+  return 0
 }

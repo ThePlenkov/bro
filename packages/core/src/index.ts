@@ -29,6 +29,7 @@ export {
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
+  worktreePathFor,
   worktreeGitDir,
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
@@ -306,6 +307,7 @@ export {
   preToolVerdicts,
   promptContextLines,
   registerConnector,
+  unregisterConnector,
   reviewHost,
   specStore,
   sessionPinnedClaims,

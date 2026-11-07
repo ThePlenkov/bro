@@ -240,11 +240,16 @@ describe('rigFocus — the no-arg item resolution', () => {
   test('the frame queue top beats the ready list', () => {
     const f = fixture()
     try {
+      f.row('q-1', bead('q-1', { labels: ['queue:root', 'qrank:1'] }))
       f.listed([bead('q-1', { labels: ['queue:root', 'qrank:1'] })])
       f.ready([bead('r-1')])
       assert.equal(rigFocus(f.dir), 'q-1')
       // and the no-arg verdict walks the same pick
-      assert.equal(rigNext(f.dir).id, 'q-1')
+      assert.deepEqual(rigNext(f.dir), {
+        verdict: 'blocked',
+        id: 'q-1',
+        detail: 'dep-gated or deferred',
+      })
     } finally {
       f.restore()
     }
@@ -279,7 +284,7 @@ describe('rigFocus — the no-arg item resolution', () => {
 
 describe('rigNext — the gate probe', () => {
   const reviews = (open: number[], all: number[]): ReviewFacade =>
-    ({ prsForBranch: (_b, state) => (state === 'all' ? all : open) }) as ReviewFacade
+    ({ prsForBranch: (b, state) => (b.startsWith('work/') ? (state === 'all' ? all : open) : []) }) as ReviewFacade
 
   /** The gate probe's shared stage: a bro.config connector pin, the
    *  registered reviews host, the staged open row, and a linked

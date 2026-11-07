@@ -69,11 +69,12 @@ function wakePredicate(row: TaskRow): string | undefined {
  *  ambient session's queue, not the probed checkout's. */
 export function rigFocus(dir: string, opts?: { store?: TaskStore }): string | undefined {
   const scope: NextScope = { dir, store: opts?.store ?? storeFor(dir) }
-  const top = queueItems(queueScope(scope), scope)[0]
+  const frame = queueScope(undefined, scope.dir, { store: scope.store })
+  const top = queueItems(frame, scope.dir, { store: scope.store })[0]
   if (top !== undefined) {
     return top.id
   }
-  const leaf = currentFrame(scope)
+  const leaf = currentFrame(scope.dir, { store: scope.store })
   if (leaf) {
     return leaf.id
   }
@@ -246,7 +247,7 @@ function workVerdict(ctx: VerdictCtx, row: TaskRow): RigNext {
   if (!readyBeads(ctx.dir, { store: ctx.store }).some((r) => r.id === ctx.id)) {
     return { verdict: 'blocked', id: ctx.id, detail: 'dep-gated or deferred' }
   }
-  const rank = queueItems(queueScope(ctx), ctx).find((q) => q.id === ctx.id)?.rank
+  const rank = queueItems(queueScope(undefined, ctx.dir, { store: ctx.store }), ctx.dir, { store: ctx.store }).find((q) => q.id === ctx.id)?.rank
   return { verdict: 'step', id: ctx.id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
 }
 

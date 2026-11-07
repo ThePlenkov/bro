@@ -52,15 +52,17 @@ export function listDrills(dir?: string, opts?: { store?: TaskStore }): DrillRow
   })
   // ephemeral frames live in the wisp namespace, outside `bd list`
   let wisps: DrillRow[] = []
-  try {
-    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir)
-    wisps = (out.wisps ?? []).filter(isDrill)
-  } catch (err) {
-    // tolerate only an explicitly unsupported command (older bd) — a
-    // failed or malformed listing must not silently hide live wisps
-    const msg = err instanceof Error ? err.message : String(err)
-    if (!/unknown command|unrecognized command/i.test(msg)) {
-      throw err
+  if (opts?.store === undefined) {
+    try {
+      const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir)
+      wisps = (out.wisps ?? []).filter(isDrill)
+    } catch (err) {
+      // tolerate only an explicitly unsupported command (older bd) — a
+      // failed or malformed listing must not silently hide live wisps
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/unknown command|unrecognized command/i.test(msg)) {
+        throw err
+      }
     }
   }
   return [...persistent, ...wisps]

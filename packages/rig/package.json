@@ -33,8 +33,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@broject/core": "^0.2.0",
-    "@broject/drill": "^0.2.5"
+    "@broject/core": "^0.3.0",
+    "@broject/drill": "^0.3.0"
   },
   "description": "bro lifecycle engine — the stateless re-entry verdict over durable state (specs bro-oy3k1)",
   "keywords": [

@@ -1,12 +1,6 @@
 import {
   bd,
   bdJson,
-  claimBeadStep,
-  findClaimedBeadForBranch,
-  findClaimedBeadForPath,
-  findWorktreeClaims,
-  getConfig,
-  getConnector,
   git,
   gitCommonDir,
   gitTryAsync,
@@ -14,28 +8,15 @@ import {
   resolveRepo,
   worktreePathFor,
   type Bead,
-  type BeadStore,
-  type BroContext,
-  type DrillsConnector,
-  type RigContext,
-  type RigNext,
-  type TasksConnector,
 } from '@broject/core'
 import { rigNext } from '@broject/rig'
+import { classify, claimUpTo, epicParentIds, nextScope } from './next.ts'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import pc from 'picocolors'
-import { loadPlanFromFile, parsePlan } from '../plan.ts'
-import {
-import { rigNext } from '@broject/rig'
-import { createHash } from 'node:crypto'
-import fs from 'node:fs/promises'
-import path from 'node:path'
-import { pathToFileURL } from 'node:url'
-import pc from 'picocolors'
-import { loadPlanFromFile, parsePlan } from '../plan.ts'
+import { loadPlanFromFile, parsePlan } from './plan.ts'
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { MIN_INTERVAL_SEC } from './drive-config.ts';
@@ -3544,21 +3525,3 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     process.removeListener('SIGTERM', onSigterm);
   }
 }
-=======
-  branchForBead,
-  branchNameFor,
-  claimMarkerPath,
-  clearClaimMarker,
-  listWorktreeEntries,
-  loadClaimMarker,
-  loadSessions,
-  saveClaimMarker,
-  saveSessions,
-  touchLease,
-  withWorktreeLock,
-  worktreeClaim,
-  writeWorktreeClaim,
-  type ClaimMarker,
-  type Lease,
-  type SessionInfo,
-} from './work.ts'

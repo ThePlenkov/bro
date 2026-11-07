@@ -631,7 +631,11 @@ export async function runRigCommand(argv: string[]): Promise<void> {
     cmdStatus(resolved, argv)
   }
   if (sub === 'next') {
-    runRigNext(cwd, pos[1], argv.includes('--json') || argv.some((a) => a.startsWith('--json=')))
+    const code = await runRigNext(cwd, pos[1], argv.includes('--json') || argv.some((a) => a.startsWith('--json=')))
+    if (code !== 0) {
+      process.exitCode = code
+    }
+    return
   }
   if (sub === 'watch') {
     await cmdWatch(argv, cfg, resolved)

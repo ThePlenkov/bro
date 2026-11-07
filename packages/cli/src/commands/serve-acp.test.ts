@@ -93,14 +93,7 @@ const listenAcp = (fake: FakeAcpAgent) =>
 
 describe('serve /api/v1/acp — the native ACP transport', () => {
   test('initialize answers the upstream handshake with brokered capabilities masked', async () => {
-    const fake = fakeAcpAgent({
-      authMethods: [{ id: 'devin', name: 'Devin login' }],
-      agentCapabilities: {
-        loadSession: true,
-        providers: {},
-        sessionCapabilities: { list: {}, resume: {}, close: {} },
-      },
-    })
+    const fake = fakeAcpAgent({ authMethods: [{ id: 'devin', name: 'Devin login' }], agentCapabilities: { loadSession: true, providers: {}, sessionCapabilities: { list: {}, resume: {}, close: {} } } })
     const { url, close } = await listenAcp(fake)
     const c = openClient(url)
     try {
@@ -108,28 +101,13 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       assert.equal(res.protocolVersion, PROTOCOL_VERSION)
       assert.equal(res.agentInfo?.name, 'fake-acp')
       assert.deepEqual(res.authMethods, [{ id: 'devin', name: 'Devin login' }])
-      // unimplemented methods' flags are stripped — the broker never
-      // advertises a call that answers method-not-found
-      const caps = res.agentCapabilities as {
-        loadSession?: boolean
-        providers?: unknown
-        sessionCapabilities?: Record<string, unknown>
-      }
+      const caps = res.agentCapabilities as any
       assert.equal(caps.loadSession !== true, true)
       assert.equal(caps.providers === undefined, true)
       assert.deepEqual(caps.sessionCapabilities, { close: {} })
-      // and upstream saw the broker's capability union, not the
-      // client's literal advertisement (the fake's schema parse adds
-      // normalized fields like auth:{terminal:false} — assert the
-      // advertised surface)
-      const seen = fake.clientCapabilities as {
-        fs?: { readTextFile?: boolean; writeTextFile?: boolean }
-        terminal?: boolean
-        elicitation?: { form?: unknown; url?: unknown }
-      }
+      const seen = fake.clientCapabilities as any
       assert.deepEqual(seen.fs, { readTextFile: true, writeTextFile: true })
       assert.equal(seen.terminal, true)
-      // elicitation/create is bridged — the union advertises both modes
       assert.deepEqual(seen.elicitation, { form: {}, url: {} })
     } finally {
       await c.conn.close()
@@ -152,9 +130,6 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
         _meta: { bead: 'bro-ymbq1' },
       })) as { sessionId: string }
       assert.equal(s.sessionId, 'sess-1')
-      // verbatim passthrough: cwd, mcpServers, _meta all reached the
-      // agent (the fake's schema parse normalizes the shape — assert
-      // the values it must not have touched)
       const req = fake.sessionRequests[0]
       assert.ok(req)
       assert.equal(req.cwd, '/work/bro--bro-ymbq1')
@@ -171,17 +146,8 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
     const gate = defer()
     const fake = fakeAcpAgent({
       updates: [
-        {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'hello ' },
-        },
-        {
-          sessionUpdate: 'tool_call',
-          toolCallId: 'tc-1',
-          title: 'ls /tmp',
-          kind: 'execute',
-          status: 'in_progress',
-        } as SessionUpdate,
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello ' } },
+        { sessionUpdate: 'tool_call', toolCallId: 'tc-1', title: 'ls /tmp', kind: 'execute', status: 'in_progress' } as SessionUpdate,
       ],
       holdPromptUntil: gate.promise,
     })
@@ -190,12 +156,7 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
     try {
       await c.agent.request('initialize', INIT_PARAMS)
       await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
-      const p = c.agent.request('session/prompt', {
-        sessionId: 'sess-1',
-        prompt: [{ type: 'text', text: 'say hi' }],
-      })
-      // the upstream turn is HELD — updates arriving now are live
-      // fan-out, not a post-hoc batch
+      const p = c.agent.request('session/prompt', { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'say hi' }] })
       await until(() => c.updates.length === 2, 'session/update fan-out')
       assert.equal(c.updates[0]?.update.sessionUpdate, 'agent_message_chunk')
       assert.equal(c.updates[1]?.update.sessionUpdate, 'tool_call')

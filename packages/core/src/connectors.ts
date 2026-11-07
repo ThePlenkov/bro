@@ -511,6 +511,16 @@ export function registerConnector(c: Connector): void {
   registry.push(c);
 }
 
+/** Remove a previously registered plugin connector by name — test
+ *  cleanup counterpart to registerConnector. Built-in connectors
+ *  (beads, git) are not removable through this. */
+export function unregisterConnector(name: string): void {
+  const idx = registry.findIndex((x) => x.name === name)
+  if (idx >= 0) {
+    registry.splice(idx, 1)
+  }
+}
+
 export function connectors(): readonly Connector[] {
   return registry;
 }
