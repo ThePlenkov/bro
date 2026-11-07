@@ -57,6 +57,12 @@ interface Opts {
   brouter?: BrouterConfig;
   /** Test seam — stdout capture; default console.log. */
   out?: (line: string) => void;
+  /** The catalog read's budget — absolute ms. Absent keeps the 30s the
+   *  acp catalog has always had; a caller that OWNS a budget (the serve
+   *  conductor, whose lane carries the operator's timeout) passes its
+   *  own, so a slow agent is bounded by the lane's deadline and not by a
+   *  constant baked into the provider layer. */
+  deadline?: number;
 }
 
 /** A catalog row — `id` is `<name>/<model-id>`; `name` is the
@@ -75,7 +81,12 @@ export interface CatalogModel {
 export async function catalogModels(
   name: string,
   entry: ProviderEntry,
-  opts: { acp?: AcpSeam; exec?: (command: string) => string | Promise<string> } = {}
+  opts: {
+    acp?: AcpSeam;
+    exec?: (command: string) => string | Promise<string>;
+    /** The read's budget — absolute ms; absent keeps the 30s default. */
+    deadline?: number;
+  } = {}
 ): Promise<CatalogModel[]> {
   return providerModels(name, entry, opts);
 }
@@ -99,11 +110,15 @@ async function providerModels(
       if (entry.models !== undefined) {
         // async exec — the conductor serves this path on /v1/models and a
         // sync spawn would stall the event loop; the timeout matches the
-        // acp catalog's 30s bound
+        // acp catalog's bound, or the caller's own deadline when it has one
+        const budget =
+          opts.deadline === undefined
+            ? 30_000
+            : Math.min(2_147_483_647, Math.max(1, opts.deadline - Date.now()));
         const exec =
           opts.exec ??
           (async (cmd: string) =>
-            (await execFile('sh', ['-c', cmd], { encoding: 'utf8', timeout: 30_000 })).stdout); // NOSONAR — operator-configured models template, same contract as command
+            (await execFile('sh', ['-c', cmd], { encoding: 'utf8', timeout: budget })).stdout); // NOSONAR — operator-configured models template, same contract as command
         ids.push(
           ...(await exec(entry.models))
             .split('\n')
@@ -118,7 +133,8 @@ async function providerModels(
     }
     case 'acp': {
       const { acpModels } = await import('@broject/providers');
-      const listed = await acpModels(name, entry, { acp: opts.acp });
+      // the deadline rides in — a lane's budget bounds its own catalog read
+      const listed = await acpModels(name, entry, { acp: opts.acp }, opts.deadline);
       if (entry.model !== undefined && !listed.some(m => m.value === entry.model)) {
         listed.push({ value: entry.model });
       }
