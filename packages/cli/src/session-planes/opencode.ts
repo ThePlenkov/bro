@@ -215,6 +215,35 @@ export function opencodeActivityMs(dataDir: string): number | undefined {
   return at;
 }
 
+/** The configured override wins when set — else the pid's own
+ *  env-derived data dir. */
+function dataDirFor(override: unknown, own: string | undefined): string | undefined {
+  return typeof override === 'string' && override.trim() !== '' ? override : own;
+}
+
+/** One foreign session's verdict — the active row when its stamp is
+ *  unprovable or inside the hold window, else the stamp the caller
+ *  folds into the freshest-idle evidence. */
+function opencodeEntryActivity(
+  entry: { pid: number; dataDir?: string; unknown: boolean },
+  dataDir: string | undefined,
+  ctx: ExternalProbeCtx,
+  detail: (pid: number, note: string) => ExternalActivity
+): ExternalActivity | number {
+  if (entry.unknown || dataDir === undefined) {
+    return detail(entry.pid, 'no provable activity stamp');
+  }
+  const at = opencodeActivityMs(dataDir);
+  if (at === undefined || ctx.now - at < ctx.holdMs) {
+    const note =
+      at === undefined
+        ? 'no provable activity stamp'
+        : `last activity ${Math.round(Math.max(0, ctx.now - at) / 1000)}s ago`;
+    return { ...detail(entry.pid, note), activityAtMs: at };
+  }
+  return at;
+}
+
 /** The probe — live foreign sessions PLUS proof of work inside the
  *  hold window. Each foreign pid's activity is read from its own data
  *  directory; the global agents.opencode.dataDir override applies to
@@ -222,42 +251,28 @@ export function opencodeActivityMs(dataDir: string): number | undefined {
  *  stamp is active. */
 export function opencodeExternalActivity(ctx: ExternalProbeCtx): ExternalActivity {
   const bag = ctx.agents['opencode'] ?? {};
-  const procDir = opencodeProcDir(bag);
-  const entries = foreignOpencodePids(procDir);
+  const entries = foreignOpencodePids(opencodeProcDir(bag));
   if (entries.length === 0) {
     return { active: false };
   }
   const override = bag?.['dataDir'];
+  const detail = (pid: number, note: string): ExternalActivity => ({
+    active: true,
+    detail: `${entries.length} opencode session(s) live outside this rig (pid ${pid}) — ${note}`,
+  });
   let freshest: number | undefined;
   for (const entry of entries) {
-    if (entry.unknown) {
-      return {
-        active: true,
-        detail: `${entries.length} opencode session(s) live outside this rig (pid ${entry.pid}) — no provable activity stamp`,
-      };
+    const verdict = opencodeEntryActivity(
+      entry,
+      dataDirFor(override, entry.dataDir),
+      ctx,
+      detail
+    );
+    if (typeof verdict !== 'number') {
+      return verdict;
     }
-    const dataDir =
-      typeof override === 'string' && override.trim() !== '' ? override : entry.dataDir;
-    if (dataDir === undefined) {
-      return {
-        active: true,
-        detail: `${entries.length} opencode session(s) live outside this rig (pid ${entry.pid}) — no provable activity stamp`,
-      };
-    }
-    const at = opencodeActivityMs(dataDir);
-    if (at !== undefined && (freshest === undefined || at > freshest)) {
-      freshest = at;
-    }
-    if (at === undefined || ctx.now - at < ctx.holdMs) {
-      const age =
-        at === undefined
-          ? 'no provable activity stamp'
-          : `last activity ${Math.round(Math.max(0, ctx.now - at) / 1000)}s ago`;
-      return {
-        active: true,
-        detail: `${entries.length} opencode session(s) live outside this rig (pid ${entry.pid}) — ${age}`,
-        activityAtMs: at,
-      };
+    if (freshest === undefined || verdict > freshest) {
+      freshest = verdict;
     }
   }
   return { active: false, activityAtMs: freshest };
