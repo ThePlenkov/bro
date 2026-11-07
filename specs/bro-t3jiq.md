@@ -61,11 +61,27 @@ against that branch. The root is read from the stack, not from the merge
 state: layer 1 stays a member after it merges, so the sync keeps using
 `feat/router-routes` as the chain's base.
 
-**Check the recorded root before syncing.** `bro stack list router`
-prints every member's effective base and its PR target; the chain's root
-is the first member's base. A root that reads `main` instead of
-`feat/router-routes` would pull #922's changes into the layer's diff —
-retarget the stack's root first, then sync.
+**Check the recorded root before syncing.** The root the sync uses is the
+chain's first member's RECORDED EDGE, and `bro stack list` shows the PR's
+declared base when a PR exists — the two can differ, and the list can look
+right while the sync targets another branch. The edge is a file per branch
+under `<git-common-dir>/bro/stack/` (the file's name is the branch,
+url-encoded); read it directly:
+
+```bash
+cat "$(git rev-parse --git-common-dir)/bro/stack/stack%2Frouter%2F1-code-health"
+```
+
+An edge that names `main` instead of `feat/router-routes` would pull #922's
+changes into the layer's diff — retarget the stack's root first, then sync.
+
+**When layer 1 leaves the stack.** A merged member with no worktree leaves
+the chain: the sync removes its edge and its branch. A member ABOVE it that
+was dirty at that moment keeps its edge, and that edge now names a branch
+that is gone — the next sync reads the base, cannot find it, and skips that
+member with a reason. The recovery is manual: re-record the edge under
+`<git-common-dir>/bro/stack/<branch>` with the base the member should stand
+on, or delete that file and let the base fall back to the PR's own base.
 
 ### The rules
 

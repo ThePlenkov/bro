@@ -32,6 +32,10 @@ function gitDirFromFile(dot: string): string | undefined {
   const named = /^gitdir:[ \t]*(.*)/m.exec(readFileSync(dot, 'utf8'));
   if (named?.[1] === undefined) return undefined;
   const path = named[1].trim();
+  // an empty gitdir names no gitdir: resolving it would answer the
+  // directory that holds the .git file, and that directory is not the
+  // common dir
+  if (path === '') return undefined;
   return isAbsolute(path) ? path : resolve(dirname(dot), path);
 }
 

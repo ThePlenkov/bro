@@ -52,8 +52,10 @@ function urlForError(url: URL): string {
  *  land in the middle of that path — the read would ask for
  *  `/?trace=1/v1/models`. */
 export function routerUrl(raw: string): string {
-  const url = URL.parse(raw);
-  if (url === null) {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
     throw new Error(`the router's url is not a valid URL`);
   }
   if (url.username || url.password) {
