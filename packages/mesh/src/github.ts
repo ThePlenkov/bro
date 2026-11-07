@@ -77,7 +77,7 @@ export class GitHubIssueThread {
 
   static fromIssue(repo: GitHubRepo | { owner: string; repo: string }, n: number): GitHubIssueThread {
     const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo)
-    if (!Number.isSafeInteger(n)) {
+    if (!Number.isSafeInteger(n) || n < 0) {
       return new GitHubIssueThread(r, null)
     }
     return new GitHubIssueThread(r, n)
