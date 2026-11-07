@@ -429,6 +429,13 @@
             "mode"
           ]
         },
+        "providerCaps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
         "walls": {
           "type": "object",
           "properties": {
@@ -1563,6 +1570,15 @@
               "additionalProperties": false
             }
           ]
+        },
+        "upstream": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "apiKeyEnv": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
         },
         "client": {
           "type": "object",

@@ -3,24 +3,24 @@
  * Mirrors drive: `bro loop install` arms `<git-common>/bro/loop.json`; every lifecycle event then re-checks
  * the want against the supervisor's liveness and spawns `bro daemon run --loop`.
  */
-import type { Connector, ConnectorCtx } from '@broject/core'
+import type { Connector, ConnectorCtx } from '@broject/core';
 
 async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
   try {
-    const { loopRearm, supervisorUp } = await import('./daemon.ts')
-    const r = loopRearm(dir)
+    const { loopRearm, supervisorUp } = await import('./daemon.ts');
+    const r = loopRearm(dir);
     if (r.kind !== 'rearm') {
-      return []
+      return [];
     }
-    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true, loop: true })
+    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true, loop: true });
     return up.kind === 'spawned'
       ? [
           `loop supervisor rearmed on ${where} — spawned ` +
             `\`bro daemon run --loop --every ${r.everySec}\` (pid ${up.pid})`,
         ]
-      : []
+      : [];
   } catch {
-    return []
+    return [];
   }
 }
 
@@ -28,10 +28,10 @@ export const loopConnector: Connector = {
   name: 'loop',
   hooks: () => ({
     sessionStart(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'session start')
+      return supervisorCheckpoint(ctx.dir, 'session start');
     },
     postTool(ctx: ConnectorCtx) {
-      return supervisorCheckpoint(ctx.dir, 'tool call')
+      return supervisorCheckpoint(ctx.dir, 'tool call');
     },
   }),
-}
+};
