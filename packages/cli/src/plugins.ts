@@ -15,7 +15,9 @@ import {
   configPolicyErrors,
   debtSection,
   definePlugin,
+  hasHelpFlag,
   loadConfig,
+  printUsage,
   busConnector,
   mailboxConnector,
   notifyConnector,
@@ -195,6 +197,11 @@ registerConnector(busConnector);
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
+
+/** The telemetry plane's usage — the plane had no help of its own, and
+ *  `bro telemetry --help` ran the report. */
+const TELEMETRY_USAGE =
+  'bro telemetry [--session <id>] [--json]   Hook + command latency report'
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -731,7 +738,15 @@ export const PLUGINS: BroPlugin[] = [
     group: 'fleet',
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
-    run: argv => runHooksCommand(['perf', ...argv]),
+    run: argv => {
+      // a help request never runs the report: the plane reads the perf
+      // journal, and the token that leads the argv says help, not run
+      if (hasHelpFlag(argv)) {
+        printUsage(TELEMETRY_USAGE, 0)
+        return
+      }
+      return runHooksCommand(['perf', ...argv])
+    },
   }),
   definePlugin({
     name: 'trace',

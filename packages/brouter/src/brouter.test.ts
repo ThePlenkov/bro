@@ -9,6 +9,7 @@ import { runClient } from './commands.ts';
 import { modelFamily, modelSource, servedModels } from './catalog.ts';
 import { claudeCodeAdapter, claudeCodeRows } from './clients/claude-code.ts';
 import { readCatalog, readRouterEndpoint, routerStatePath } from './gateway.ts';
+import { routerUrl } from './router-url.ts';
 import { clientById, clientIds } from './registry.ts';
 import { configuredProviders } from './providers.ts';
 import { clientInventory, connectorInventory, isInstalled } from './agents.ts';
@@ -115,6 +116,56 @@ test('the router state file is the discovery — and a torn record is not a rout
   assert.equal(readRouterEndpoint(repo), undefined);
 });
 
+test('the token crosses over https or to this machine — nowhere else', () => {
+  assert.equal(routerUrl('http://127.0.0.1:44927'), 'http://127.0.0.1:44927');
+  assert.equal(routerUrl('http://localhost:44927/'), 'http://localhost:44927');
+  assert.equal(routerUrl('https://router.example.com'), 'https://router.example.com');
+  assert.throws(() => routerUrl('http://router.example.com'), /cannot carry the session token/);
+  assert.throws(() => routerUrl('ftp://router.example.com'), /cannot carry the session token/);
+  assert.throws(() => routerUrl('not a url'), /not a valid URL/);
+});
+
+test('a url with credentials is refused — and the refusal never prints the password', () => {
+  assert.throws(
+    () => routerUrl('http://user:hunter2@127.0.0.1:44927'),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /credentials/);
+      assert.equal(message.includes('hunter2'), false);
+      return true;
+    }
+  );
+});
+
+test('the refusal names the host — never the url\'s query or fragment', () => {
+  assert.throws(
+    () => routerUrl('http://router.example.com/base?token=hunter2'),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /router\.example\.com/);
+      assert.equal(message.includes('hunter2'), false);
+      return true;
+    }
+  );
+});
+
+test('a router bro refuses is not a router bro did not find', () => {
+  const gitDir = join(scratch, 'remote', '.git');
+  mkdirSync(join(gitDir, 'bro'), { recursive: true });
+  writeFileSync(
+    join(gitDir, 'bro', 'serve.json'),
+    JSON.stringify({ pid: 1, url: 'http://router.example.com', dir: scratch, token: 'tok' })
+  );
+  assert.throws(() => readRouterEndpoint(join(scratch, 'remote')), /cannot carry the session token/);
+});
+
+test('the catalog is not fetched over cleartext to a remote host', async () => {
+  await assert.rejects(
+    () => readCatalog({ url: 'http://router.example.com', token: 'tok' }),
+    /cannot carry the session token/
+  );
+});
+
 test('the catalog is read from the router with the credential', async () => {
   const seen: Array<Record<string, string | undefined>> = [];
   const server = createServer((req, res) => {
@@ -138,6 +189,83 @@ test('the catalog is read from the router with the credential', async () => {
     assert.match(String(seen[0]?.url), /\/v1\/models\?limit=1000$/);
   } finally {
     server.close();
+  }
+});
+
+test('the base URL keeps no query and no fragment — the catalog path is appended to it', () => {
+  assert.equal(routerUrl('http://127.0.0.1:44927/?trace=1'), 'http://127.0.0.1:44927');
+  assert.equal(routerUrl('https://router.example.com/base#frag'), 'https://router.example.com/base');
+});
+
+test('the catalog read asks the models path — not the base URL\'s query', async () => {
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url ?? '');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ object: 'list', data: [] }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  try {
+    await readCatalog({ url: `http://127.0.0.1:${port}/?trace=1`, token: 'tok' });
+    assert.equal(seen[0], '/v1/models?limit=1000');
+  } finally {
+    server.close();
+  }
+});
+
+test('a redirect is refused — the session token rides no hop', async () => {
+  const hops: string[] = [];
+  const seen: Array<string | undefined> = [];
+  const target = createServer((req, res) => {
+    seen.push(req.headers['x-api-key'] as string);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ object: 'list', data: [] }));
+  });
+  await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve));
+  const targetAddress = target.address();
+  const targetPort = typeof targetAddress === 'object' && targetAddress !== null ? targetAddress.port : 0;
+  const origin = createServer((req, res) => {
+    hops.push(req.url ?? '');
+    res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/v1/models` });
+    res.end();
+  });
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  const originAddress = origin.address();
+  const originPort = typeof originAddress === 'object' && originAddress !== null ? originAddress.port : 0;
+  try {
+    await assert.rejects(
+      () => readCatalog({ url: `http://127.0.0.1:${originPort}`, token: 'tok' }),
+      /does not follow redirects/
+    );
+    // the hop was never asked — the token never crossed to the target
+    assert.equal(hops.length, 1);
+    assert.equal(seen.length, 0);
+  } finally {
+    origin.close();
+    target.close();
+  }
+});
+
+test('the refused redirect names its target — the read never leaves the router', async () => {
+  const hops: string[] = [];
+  const origin = createServer((req, res) => {
+    hops.push(req.url ?? '');
+    res.writeHead(302, { location: 'http://router.example.com/v1/models' });
+    res.end();
+  });
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  const address = origin.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  try {
+    await assert.rejects(
+      () => readCatalog({ url: `http://127.0.0.1:${port}`, token: 'tok' }),
+      /redirect to http:\/\/router\.example\.com\/v1\/models/
+    );
+    assert.equal(hops.length, 1);
+  } finally {
+    origin.close();
   }
 });
 

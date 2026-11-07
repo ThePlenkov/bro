@@ -35,29 +35,29 @@ client's own vocabulary, written into the client's own settings.
 
 ## Commands
 
-| Command                                                          | What it does                                                           |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `brouter models [--json]`                                        | the served catalog, read off the running router                        |
-| `brouter clients [--json]`                                       | the client adapters — id, title, settings key, settings path           |
-| `brouter client <id> [--write] [--settings P] [--wire] [--json]` | render the model block; `--write` merges it into the client's settings |
-| `brouter store path \| migrate \| stats [--path P] [--json]`     | the router's own ledger — where it lives, what it holds                |
-| `brouter routes list \| validate [--routes P]`                   | the route table — the routes, or the problems                          |
-| `brouter health [--json] [--path P]`                              | what can serve right now — the walls and the open sessions             |
-| `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why |
-| `brouter ask "<question>" [--provider P] [--model M] [--explain[=SLICES]]` | ask one agent — `--explain` says which agent served, which model, and what it cost |
-| `bro router …`                                                   | the same surfaces, bro's spelling (the wrapper)                        |
+| Command                                                                                   | What it does                                                                       |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `brouter models [--json]`                                                                 | the served catalog, read off the running router                                    |
+| `brouter clients [--json]`                                                                | the client adapters — id, title, settings key, settings path                       |
+| `brouter client <id> [--write] [--settings P] [--wire] [--json]`                          | render the model block; `--write` merges it into the client's settings             |
+| `brouter store path \| migrate \| stats [--path P] [--json]`                              | the router's own ledger — where it lives, what it holds                            |
+| `brouter routes list \| validate [--routes P]`                                            | the route table — the routes, or the problems                                      |
+| `brouter health [--json] [--path P]`                                                      | what can serve right now — the walls and the open sessions                         |
+| `brouter route "<task>" [--routes P] [--type T] [--complexity C] [--priority P] [--json]` | which route serves this task — the route, the chain, and the why                   |
+| `brouter ask "<question>" [--provider P] [--model M] [--explain[=SLICES]]`                | ask one agent — `--explain` says which agent served, which model, and what it cost |
+| `bro router …`                                                                            | the same surfaces, bro's spelling (the wrapper)                                    |
 
 ## The explain surface
 
 `--explain` answers WHY a request went where it went. The vocabulary is
 SLICES, not levels — the user asks questions, so the flag names them:
 
-| Slice    | What it answers                                                       |
-| -------- | --------------------------------------------------------------------- |
-| `route`  | the route, the chain, the candidates, every reject with its reason    |
-| `model`  | the model that serves, and who pinned it (you, the route, the entry)  |
-| `health` | what the router knew at decision time — the walls, the sessions       |
-| `cost`   | the turn's context and cost, and the ledger's window counters         |
+| Slice    | What it answers                                                      |
+| -------- | -------------------------------------------------------------------- |
+| `route`  | the route, the chain, the candidates, every reject with its reason   |
+| `model`  | the model that serves, and who pinned it (you, the route, the entry) |
+| `health` | what the router knew at decision time — the walls, the sessions      |
+| `cost`   | the turn's context and cost, and the ledger's window counters        |
 
 - `--explain` — every slice. `--explain=route,model` — only those.
 - `brouter route --explain` → stdout (the explanation IS the output).
