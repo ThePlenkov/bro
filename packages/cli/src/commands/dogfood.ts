@@ -68,9 +68,9 @@ function usage(exitCode: ExitCode = 2): never {
   bro self dogfood status [run-id] [--json]
   bro self dogfood report <run-id>
   bro self dogfood benchmark corpus
-  bro self dogfood benchmark run [--targets <path>] [--out <path>]
+  bro self dogfood benchmark run [--targets <path>]
   bro self benchmark corpus
-  bro self benchmark run [--targets <path>] [--out <path>]`,
+  bro self benchmark run [--targets <path>]`,
     exitCode
   );
 }
@@ -358,8 +358,7 @@ async function provisionRepo(
     `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
   );
   execFileSync('git', ['-C', repo, 'add', '-A']); // NOSONAR — PATH lookup is the contract
-  execFileSync('git', [
-    // NOSONAR — PATH lookup is the contract
+  execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
     repo,
     // identity pinned — a scratch must never depend on ambient
@@ -398,7 +397,7 @@ async function provisionRepo(
  *  finding the spawned ids. */
 function runEnv(dir: string, scratch: string): AgentConnectorEnv {
   const env = loadAgentEnv(dir);
-  const providers = { ...(env.providers ?? {}) };
+  const providers = { ...env.providers };
   let touched = false;
   for (const l of loadConfigLayers(scratch).layers) {
     if (l.layer === 'global') continue;
@@ -704,8 +703,8 @@ function isRecordedServe(
     /* /proc absent (macOS) or the pid is gone — try argv evidence */
   }
   try {
+    // NOSONAR — PATH lookup is the contract
     const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
-      // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
     });
     const port = state.url?.match(/:(\d+)/)?.[1];
@@ -854,62 +853,78 @@ function loadBenchmarkJson(path: string, what: string): BenchmarkJson {
   return doc as BenchmarkJson;
 }
 
+function isValidCorpusTask(task: unknown): boolean {
+  const t = task as { taskId?: unknown; revision?: unknown };
+  return (
+    typeof task === 'object' &&
+    task !== null &&
+    typeof t.taskId === 'string' &&
+    t.taskId !== '' &&
+    typeof t.revision === 'string' &&
+    t.revision !== ''
+  );
+}
+
+/** Every emitted row must carry taskId + revision (schema-required) —
+ *  a task missing them would write an invalid line while reporting
+ *  success, so the corpus validates before anything is emitted. */
+function assertValidCorpusTasks(corpusPath: string, tasks: unknown[]): void {
+  for (const task of tasks) {
+    if (!isValidCorpusTask(task)) {
+      die(`invalid benchmark corpus task in ${corpusPath}: missing required taskId/revision`);
+    }
+  }
+}
+
+function assertValidTargetsFile(targetsFlag: string): void {
+  if (!existsSync(targetsFlag)) {
+    die(`no targets file found: ${targetsFlag}`);
+  }
+  const doc = loadBenchmarkJson(targetsFlag, 'targets file');
+  if (typeof doc.targets !== 'object' || doc.targets === null) {
+    die(`invalid targets file: ${targetsFlag} — expected a { targets } document`);
+  }
+}
+
+function benchmarkCorpus(dir: string): void {
+  const corpus = benchmarkCorpusPath(dir);
+  if (!existsSync(corpus)) {
+    die('no benchmark corpus found');
+  }
+  console.log(readFileSync(corpus, 'utf8'));
+}
+
+function benchmarkRun(dir: string, argv: string[]): void {
+  positionals(argv.slice(1), new Set(['--targets']), { strict: true });
+  const targetsFlag = flag(argv, '--targets');
+  // the corpus always comes from the pinned path — `--targets` is a
+  // targets override, never the corpus itself (a targets-shaped file
+  // has no .tasks and would silently emit zero rows)
+  const corpusPath = benchmarkCorpusPath(dir);
+  if (!existsSync(corpusPath)) {
+    die('no benchmark corpus found');
+  }
+  const corpus = loadBenchmarkJson(corpusPath, 'benchmark corpus');
+  assertValidCorpusTasks(corpusPath, Array.isArray(corpus.tasks) ? corpus.tasks : []);
+  if (targetsFlag !== undefined) {
+    assertValidTargetsFile(targetsFlag);
+  }
+  // the spec's own contract — no claims without a baseline. Emitting
+  // zero-metric 'pass' rows would fabricate a baseline into the shared
+  // evidence store, so the scaffold refuses rather than write made-up
+  // measurements (spec bro-l8c4f.9, targets first).
+  die('paired benchmark execution is not implemented — refusing to emit fabricated results');
+}
+
 function cmdBenchmark(dir: string, argv: string[]): void {
   const sub = argv[0];
-  if (sub === undefined) {
-    usage();
-  }
   if (sub === 'corpus') {
-    const corpus = benchmarkCorpusPath(dir);
-    if (!existsSync(corpus)) {
-      die('no benchmark corpus found');
-    }
-    console.log(readFileSync(corpus, 'utf8'));
+    benchmarkCorpus(dir);
     return;
   }
   if (sub === 'run') {
-    positionals(argv.slice(1), new Set(['--targets', '--out']), { strict: true });
-    const targetsFlag = flag(argv, '--targets');
-    // the corpus always comes from the pinned path — `--targets` is a
-    // targets override, never the corpus itself (a targets-shaped file
-    // has no .tasks and would silently emit zero rows)
-    const corpusPath = benchmarkCorpusPath(dir);
-    if (!existsSync(corpusPath)) {
-      die('no benchmark corpus found');
-    }
-    const corpus = loadBenchmarkJson(corpusPath, 'benchmark corpus');
-    // every emitted row must carry taskId + revision (schema-required) —
-    // a task missing them would write an invalid line while reporting
-    // success, so the corpus validates before anything is emitted
-    const tasks = Array.isArray(corpus.tasks) ? corpus.tasks : [];
-    for (const task of tasks) {
-      if (
-        typeof task !== 'object' ||
-        task === null ||
-        typeof task.taskId !== 'string' ||
-        task.taskId === '' ||
-        typeof task.revision !== 'string' ||
-        task.revision === ''
-      ) {
-        die(
-          `invalid benchmark corpus task in ${corpusPath}: missing required taskId/revision`
-        );
-      }
-    }
-    if (targetsFlag !== undefined) {
-      if (!existsSync(targetsFlag)) {
-        die(`no targets file found: ${targetsFlag}`);
-      }
-      const doc = loadBenchmarkJson(targetsFlag, 'targets file');
-      if (typeof doc.targets !== 'object' || doc.targets === null) {
-        die(`invalid targets file: ${targetsFlag} — expected a { targets } document`);
-      }
-    }
-    // the spec's own contract — no claims without a baseline. Emitting
-    // zero-metric 'pass' rows would fabricate a baseline into the shared
-    // evidence store, so the scaffold refuses rather than write made-up
-    // measurements (spec bro-l8c4f.9, targets first).
-    die('paired benchmark execution is not implemented — refusing to emit fabricated results');
+    benchmarkRun(dir, argv);
+    return;
   }
   usage();
 }
@@ -951,7 +966,7 @@ export async function runDogfoodCommand(argv: string[]): Promise<void> {
   }
 }
 
-export async function runBenchmarkCommand(argv: string[]): Promise<void> {
+export function runBenchmarkCommand(argv: string[]): void {
   const dir = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
   if (hasHelpFlag(argv)) {
     usage(0);
