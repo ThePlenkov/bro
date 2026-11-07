@@ -430,7 +430,9 @@ function isValidWantedRow(w: unknown): w is WantedRow {
     typeof w === 'object' &&
     w !== null &&
     typeof (w as WantedRow).id === 'string' &&
-    typeof (w as WantedRow).title === 'string'
+    (w as WantedRow).id.trim() !== '' &&
+    typeof (w as WantedRow).title === 'string' &&
+    (w as WantedRow).title.trim() !== ''
   );
 }
 
