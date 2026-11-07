@@ -17,9 +17,13 @@ import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { agent, ndJsonStream } from '@agentclientprotocol/sdk';
 import { loadConfig } from '@broject/core';
+import type { ProviderEntry } from '@broject/core';
 import { acpOpen, acpSessionRetain, promptText } from '@broject/providers';
-import type { AcpPeer, AcpRetainedSession } from '@broject/providers';
+import type { AcpPeer, AcpRetainedSession, ProviderWireOpts } from '@broject/providers';
 import { acpEntry, resolveProvider } from './ask.ts';
+
+/** The acp entry — the provider kind the facade can drive. */
+type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
 /** The facade request. */
 export interface AcpFacadeRequest {
@@ -39,6 +43,35 @@ export function localSessionId(): string {
   return randomUUID();
 }
 
+/** The handshake — the peer and the session it retains, with the
+ *  keep-alive that holds the event loop while it runs.
+ *
+ *  The target agent is spawned UNREF'd (the binding's discipline: a
+ *  pooled peer must not hold the host open), so the facade keeps its
+ *  own ref'd handle from the FIRST await — the handshake itself waits
+ *  on that child's unref'd stdio, and without a ref the event loop
+ *  empties mid-handshake and node exits under the client.
+ *
+ *  The keep-alive belongs to the handshake: a handshake that failed
+ *  clears it, or the interval would keep the process alive and the
+ *  failure would hang instead of reaching the caller. */
+async function openSession(
+  provider: string,
+  entry: AcpEntry,
+  wire: ProviderWireOpts,
+  timeoutMs: number
+): Promise<{ peer: AcpPeer; session: AcpRetainedSession; keepAlive: NodeJS.Timeout }> {
+  const keepAlive = setInterval(() => undefined, 60_000);
+  try {
+    const peer = await acpOpen(provider, entry, wire, Date.now() + timeoutMs);
+    const session = await acpSessionRetain(peer, entry, wire, Date.now() + timeoutMs);
+    return { peer, session, keepAlive };
+  } catch (err) {
+    clearInterval(keepAlive);
+    throw err;
+  }
+}
+
 /** Serve the ACP endpoint over stdio until the client disconnects. */
 export async function runAcpFacade(request: AcpFacadeRequest, dir: string): Promise<void> {
   const providers = loadConfig(dir).providers ?? {};
@@ -50,24 +83,7 @@ export async function runAcpFacade(request: AcpFacadeRequest, dir: string): Prom
     ...(request.cwd === undefined ? {} : { acp: { cwd: request.cwd } }),
   };
 
-  // the target agent is spawned UNREF'd (the binding's discipline: a
-  // pooled peer must not hold the host open), so the facade keeps its
-  // own ref'd handle from the FIRST await — the handshake itself
-  // waits on that child's unref'd stdio, and without a ref the event
-  // loop empties mid-handshake and node exits under the client
-  const keepAlive = setInterval(() => undefined, 60_000);
-  let peer: AcpPeer;
-  let session: AcpRetainedSession;
-  try {
-    peer = await acpOpen(provider, entry, wire, Date.now() + timeoutMs);
-    session = await acpSessionRetain(peer, entry, wire, Date.now() + timeoutMs);
-  } catch (err) {
-    // the handshake never completed: the interval would keep the event
-    // loop alive forever, so the failure would hang instead of reaching
-    // the caller — the keep-alive outlives the handshake only
-    clearInterval(keepAlive);
-    throw err;
-  }
+  const { peer, session, keepAlive } = await openSession(provider, entry, wire, timeoutMs);
   const sessionId = localSessionId();
 
   const app = agent({ name: 'brouter' });

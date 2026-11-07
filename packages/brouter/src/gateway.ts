@@ -21,6 +21,40 @@ import type { RouterEndpoint } from './adapter.ts';
  *  nested quantifier is a denial-of-service waiting for a caller. */
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** The URL without its trailing slashes — a loop, not a pattern: the
+ *  scanners read these files, and a trailing slash is not worth a
+ *  pattern. */
+function withoutTrailingSlashes(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '/') {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+/** The router's URL, parsed — and without credentials in it: a url
+ *  with a password would print it in every log that names the
+ *  refusal. */
+function parseRouterUrl(raw: string): URL {
+  const url = URL.parse(raw);
+  if (url === null) {
+    throw new Error(`the router's url is not a valid URL`);
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new Error(`the router's url carries credentials — a router url never carries a password`);
+  }
+  return url;
+}
+
+/** Whether an origin may carry the session token: https anywhere,
+ *  cleartext only to this machine. */
+function tokenSafeOrigin(url: URL): boolean {
+  if (url.protocol === 'https:') {
+    return true;
+  }
+  return url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname);
+}
+
 /** The router's URL, checked against the credential it carries.
  *
  *  The URL is the token's crossing point: the catalog read sends the
@@ -30,25 +64,14 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
  *  this machine may carry it to: https anywhere, cleartext only to a
  *  loopback router. */
 export function routerUrl(raw: string): string {
-  const url = URL.parse(raw);
-  if (url === null) {
-    throw new Error(`the router's url is not a valid URL`);
-  }
-  if (url.username !== '' || url.password !== '') {
-    // a url with credentials in it: the token would ride to a host that
-    // asks for a password, and the password would land in every log
-    // that prints the refusal
-    throw new Error(`the router's url carries credentials — a router url never carries a password`);
-  }
-  const safe =
-    url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
-  if (!safe) {
+  const url = parseRouterUrl(raw);
+  if (!tokenSafeOrigin(url)) {
     throw new Error(
       `the router's url ${url.protocol}//${url.host} cannot carry the session token — https or a ` +
         `loopback router (http://127.0.0.1:<port>) only; a plain-http host would carry it cleartext`
     );
   }
-  return raw.replace(/\/+$/, '');
+  return withoutTrailingSlashes(raw);
 }
 
 /** The git common dir — the directory every linked worktree shares.

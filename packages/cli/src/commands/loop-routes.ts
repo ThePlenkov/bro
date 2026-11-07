@@ -46,6 +46,21 @@ async function ledgerHealth(): Promise<{ snapshot: HealthSnapshot; known: boolea
   }
 }
 
+/** The health the table decides against. A ledger that cannot be read
+ *  is not a ledger without walls — it is no answer at all, and routing
+ *  as if there were no walls would walk straight into a walled model. */
+async function routingHealth(): Promise<HealthSnapshot> {
+  const { snapshot, known } = await ledgerHealth();
+  if (!known) {
+    throw new SpawnError(
+      'the router health ledger could not be read — the route table decides with the walls it can see, ' +
+        'and a wall nobody can see is not a wall',
+      'config'
+    );
+  }
+  return snapshot;
+}
+
 /** The task's shape — the bead's class and priority, in the table's
  *  vocabulary. A bead without a label simply has no type. */
 function taskShape(opts: { class?: string; label?: string; priority?: number }) {
@@ -104,18 +119,7 @@ export async function routeTableLane(opts: {
     );
   }
   assertServed(table, file, opts.served ?? {});
-  const { snapshot, known } = await ledgerHealth();
-  if (!known) {
-    // the table's walls are the health ledger's: a ledger that cannot
-    // be read is not a ledger without walls — it is no answer at all,
-    // and routing as if there were no walls would walk straight into a
-    // walled model
-    throw new SpawnError(
-      'the router health ledger could not be read — the route table decides with the walls it can see, ' +
-        'and a wall nobody can see is not a wall',
-      'config'
-    );
-  }
+  const snapshot = await routingHealth();
   const decision = resolveRoute(table, taskShape(opts), snapshot);
   const route = decision.route;
   if (route === undefined) {
