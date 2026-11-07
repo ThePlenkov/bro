@@ -1,8 +1,24 @@
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { readAgentRegistry, SpawnError, AgentNotFound, clearExternalPlanes } from '@broject/core';
+import {
+  clearExternalPlanes,
+  localLeaseStore,
+  projectId,
+  readAgentRegistry,
+  SpawnError,
+  AgentNotFound,
+} from '@broject/core';
 import {
   agentConnectorNames,
   loadAgentEnv,
@@ -15,6 +31,18 @@ import { initRepo } from './commands/testrepo.ts';
 // real host planes would flake spawn tests — fixtures opt out via
 // spawn.externalBlock; the registry clear is the belt
 clearExternalPlanes();
+// work leases are TTL-governed foreign stamps now — a spawn's row
+// stays live past a dead spawner pid until expiry, so fixtures must
+// never write into the real state dir: a leftover row would collide
+// with the next run's projectId
+const previousLeaseStateHome = process.env.XDG_STATE_HOME;
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-gc-lease-state-'));
+process.env.XDG_STATE_HOME = leaseStateHome;
+after(() => {
+  if (previousLeaseStateHome === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = previousLeaseStateHome;
+  rmSync(leaseStateHome, { recursive: true, force: true });
+});
 
 /** bd shim — JSON store at $BEADS_DIR/store.json; same coverage as the
  *  native connector tests (show, update --claim/--assignee, actor). */
@@ -349,6 +377,24 @@ describe('gascity connector', () => {
       const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
       await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError);
+    } finally {
+      cleanup(fx);
+    }
+  });
+
+  test('the work lease is born foreign — a gc session outlives the spawner CLI', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      // gc hands back a session id, never a worker pid — so the lease
+      // must be TTL-governed: pidAlive:()=>false plays the spawner
+      // already gone, and a local stamp would read dead + free the key
+      const lease = localLeaseStore(projectId(fx.main), { pidAlive: () => false }).read(
+        'bead/fx-1'
+      );
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
     } finally {
       cleanup(fx);
     }

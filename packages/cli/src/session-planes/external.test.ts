@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ExternalProbeCtx } from '@broject/core';
@@ -112,13 +112,9 @@ describe('opencode external plane (spec bro-eqi2d)', () => {
         ['/usr/local/bin/oc', '--session', 'ses_x'].join('\0') + '\0'
       );
       writeFileSync(join(dir, 'environ'), 'PATH=/bin\0');
-      try {
-        const exeLink = join(dir, 'exe');
-        // create symlink pointing to opencode
-        try {
-          require('fs').symlinkSync('/usr/bin/opencode', exeLink);
-        } catch {}
-      } catch {}
+      // launch via a renamed symlink — the resolved exe, not argv[0]'s
+      // basename, is what counts the process as an opencode session
+      symlinkSync('/usr/bin/opencode', join(dir, 'exe'));
       const agents = { opencode: { procDir, dataDir } };
       assert.equal(opencodeExternalActivity(CTX({ agents })).active, true);
     } finally {

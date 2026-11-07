@@ -63,13 +63,16 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
   agentRegistryPath,
   awaitFileLock,
+  busSocketPath,
+  busSubscribe,
   checkBeads,
   emitLifecycle,
   ensureAuth,
@@ -77,6 +80,9 @@ import {
   facadeName,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
+  projectId,
   patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
@@ -84,6 +90,7 @@ import {
   stampPrOwnership,
   type AgentInfo,
   type AgentRegistryEntry,
+  type BusSubscription,
   type CheckInfo,
   type IgnoreCheckRule,
   type PrMeta,
@@ -129,7 +136,7 @@ import {
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
 import { collectAgents } from './fleet.ts';
-import { projectFleet } from './herdr-projector.ts';
+import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
   driveSection,
   MAX_INTERVAL_SEC,
@@ -2495,7 +2502,14 @@ async function driveOnce(ctx: Ctx): Promise<void> {
  *  Reachability changes are the only lines worth logging — a pass
  *  with no writes is the steady state, not an event. */
 let herdrWasReachable: boolean | undefined;
+let projectionFailedQuiet = false;
 function herdrProjectorTick(ctx: Ctx): void {
+  // the event trigger re-arms lazily here — a broker that came up since
+  // the last pass restores event mode without a daemon restart
+  void armProjectorEvents(ctx);
+  // and the write points without an envelope get their fs.watch fast
+  // path the same way — armed once, loop mode only
+  armProjectorWatches(ctx);
   try {
     const r = projectFleet(ctx.mainRoot);
     if (r.reachable !== herdrWasReachable) {
@@ -2512,8 +2526,196 @@ function herdrProjectorTick(ctx: Ctx): void {
     if (r.writes > 0) {
       say(ctx, `herdr: ${r.writes} label write(s)`);
     }
+    projectionFailedQuiet = false;
+  } catch (err) {
+    // a failed projection retries next pass — never a pass failure;
+    // log once per failure streak so stale LEDs are diagnosable
+    if (!projectionFailedQuiet) {
+      projectionFailedQuiet = true;
+      say(
+        ctx,
+        `herdr: projection failed — ${err instanceof Error ? err.message : String(err)} (retrying each pass)`
+      );
+    }
+  }
+}
+
+// --- event-triggered re-projection (spec bro-xmd9l) ------------------------------
+
+/** The cooldown between event-kicked projections — an exit-harvest
+ *  burst lands ONE pass, not one per envelope; leading-edge when the
+ *  projector has been quiet at least this long, else scheduled at the
+ *  cooldown end. 1.5s is snappy against the 300s tick and cheap
+ *  against a churning fleet. */
+const PROJECTOR_KICK_MS = 1_500;
+
+/** A coalescing scheduler for re-projection kicks: the returned
+ *  function absorbs kicks while one is pending (the scheduled pass
+ *  re-derives all state anyway, so it sees the merged event set).
+ *  Leading-edge when idle ≥`kickMs`, cooldown-trailing under load —
+ *  exported so tests drive it with an injected `fire`. */
+export function projectorKicker(fire: () => void, kickMs = PROJECTOR_KICK_MS): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let readyAt = 0;
+  return () => {
+    if (timer !== undefined) {
+      return;
+    }
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        readyAt = Date.now() + kickMs;
+        fire();
+      },
+      Math.max(0, readyAt - Date.now())
+    );
+    timer.unref?.();
+  };
+}
+
+let projectorKickFn: (() => void) | undefined;
+/** Latest daemon ctx — rebound on every kick source call so a standby
+ *  takeover never fires the projector through the first invocation's
+ *  closure. */
+let projectorCtx: Ctx | undefined;
+function kickProjector(ctx: Ctx): void {
+  projectorCtx = ctx;
+  projectorKickFn ??= projectorKicker(() => {
+    if (projectorCtx !== undefined) herdrProjectorTick(projectorCtx);
+  });
+  projectorKickFn();
+}
+
+/** The in-process bus subscription (no new process — spec bro-xmd9l):
+ *  every `worker`/`worktree` envelope the lifecycle mirror already
+ *  publishes (spawn, exit, silence, add/remove) kicks a re-projection,
+ *  and a `gap` (missed events — broker restart, replay overflow) is
+ *  the same kick since the pass re-derives anyway. `onClose` drops the
+ *  handle; the next tick's lazy re-arm restores event mode when the
+ *  broker returns. Only armed in loop mode — a `--once` pass is a
+ *  report, not supervision. */
+let projectorSub: BusSubscription | undefined;
+let projectorSubQuiet = false;
+let projectorArming = false;
+async function armProjectorEvents(ctx: Ctx): Promise<void> {
+  if (projectorSub !== undefined || projectorArming || ctx.everySec === undefined) {
+    return;
+  }
+  const socket = busSocketPath(ctx.mainRoot);
+  if (socket === null) {
+    return;
+  }
+  // the await below can overlap a second caller (kick + tick landing in
+  // the same window) — without the flag both open a socket and one
+  // subscription leaks with its handle overwritten
+  projectorArming = true;
+  try {
+    projectorSub = await busSubscribe(
+      socket,
+      { topics: ['worker', 'worktree'] },
+      {
+        onEvent: () => kickProjector(ctx),
+        onGap: () => kickProjector(ctx),
+        onClose: () => {
+          projectorSub = undefined;
+        },
+      }
+    );
+    if (projectorSubQuiet) {
+      say(ctx, 'herdr: event feed back — LEDs ride worker transitions');
+      projectorSubQuiet = false;
+    }
+    // transitions during the disconnect window have no envelope —
+    // one kick re-derives whatever the feed missed (coalesced, cheap)
+    kickProjector(ctx);
   } catch {
-    // a failed projection retries next pass — never a pass failure
+    projectorSub = undefined;
+    if (!projectorSubQuiet) {
+      say(ctx, 'herdr: no event feed — projector rides the tick only');
+      projectorSubQuiet = true;
+    }
+  } finally {
+    projectorArming = false;
+  }
+}
+
+// --- write-point watches (spec bro-9me97) -------------------------------------
+
+/** Filename-filtered dir watches kicking the projector on the write
+ *  points the bus does not cover: a `.exit` lands the instant a worker
+ *  dies but `agent-exit` only journals at the next harvest;
+ *  `agents.json` mutates outside lifecycle emits; plugin ledgers have
+ *  no bus path at all. Everything funnels into the same coalescing
+ *  kicker, and a missed/overflowed inotify event still has the tick
+ *  behind it — the watch is a fast path, never the only path.
+ *  Exported so tests drive it with injected dirs + kick. */
+export function projectorWatcher(
+  dirs: { dir: string; hit: (name: string) => boolean }[],
+  kick: () => void
+): FSWatcher[] {
+  const out: FSWatcher[] = [];
+  for (const { dir, hit } of dirs) {
+    try {
+      const w = watch(dir, (_e, name) => {
+        if (typeof name === 'string' && hit(name)) {
+          kick();
+        }
+      });
+      // an inotify limit or a dir removed mid-watch degrades to the
+      // tick — never a crash inside the supervisor loop
+      w.on('error', () => {});
+      w.unref?.();
+      out.push(w);
+    } catch {
+      // an absent dir (a ledger root the plugin never created) is a
+      // no-watch, not a failure
+    }
+  }
+  return out;
+}
+
+interface ProjectorWatchSlot {
+  dir: string;
+  hit: (name: string) => boolean;
+  w?: FSWatcher;
+}
+
+let projectorWatchSpec: ProjectorWatchSlot[] | undefined;
+function armProjectorWatches(ctx: Ctx): void {
+  if (ctx.everySec === undefined) {
+    return;
+  }
+  projectorCtx = ctx;
+  if (projectorWatchSpec === undefined) {
+    const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
+    projectorWatchSpec = [
+      // registry mutations the lifecycle mirror does not emit for
+      { dir: join(common, 'bro'), hit: name => name === 'agents.json' },
+      // death before the harvest — the wrapper's .exit write point
+      { dir: join(common, 'bro', 'agents'), hit: name => name.endsWith('.exit') },
+      // plugin workspace/status bindings — no bus coverage at all
+      ...pluginLedgerDirs().map(dir => ({ dir, hit: (name: string) => name.startsWith('state') })),
+    ];
+  }
+  // re-attach every slot that is not watched yet — `bro/agents` only
+  // exists after the first native spawn, ledger roots after the first
+  // plugin run; a one-shot arm would leave those points tick-bound
+  // forever (same lazy re-arm shape as armProjectorEvents)
+  for (const d of projectorWatchSpec) {
+    if (d.w !== undefined) {
+      continue;
+    }
+    const [w] = projectorWatcher([d], () => {
+      if (projectorCtx !== undefined) kickProjector(projectorCtx);
+    });
+    if (w !== undefined) {
+      const drop = (): void => {
+        d.w = undefined;
+      };
+      w.on('error', drop);
+      w.on('close', drop);
+      d.w = w;
+    }
   }
 }
 
@@ -2608,21 +2810,52 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   // the same PRs raced fixer spawns and merge probes overnight
   // (retro bro-l63ji). Taken before auth/facade planes so a standby
   // stays a cheap local wait.
-  const driveLock = driveLockPath(main.path);
-  const releaseSupervisor =
-    driveLock === null
-      ? () => {}
-      : await awaitFileLock(driveLock, {
-          label: 'drive supervisor lock',
-          onStandby: pid =>
-            console.error(
-              `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
-        });
+  const env = loadAgentEnv(main.path);
+  const store = localLeaseStore(projectId(main.path));
+  const abort = new AbortController();
+  let roleLease: { release: () => void } | undefined;
+  let releaseSupervisor = () => {};
+  const releaseAll = (): void => {
+    releaseSupervisor();
+    roleLease?.release();
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort();
+    releaseAll();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.kill(process.pid, signal);
+  };
+  const onInt = (): void => onSignal('SIGINT');
+  const onTerm = (): void => onSignal('SIGTERM');
+  const onExit = (): void => releaseAll();
   try {
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    process.on('exit', onExit);
+    roleLease = await holdRoleLease(
+      store,
+      'drive',
+      { host: hostname(), pid: process.pid, rig: basename(main.path) },
+      (env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    );
+    const driveLock = driveLockPath(main.path);
+    if (driveLock !== null) {
+      releaseSupervisor = await awaitFileLock(driveLock, {
+        label: 'drive supervisor lock',
+        onStandby: pid =>
+          console.error(
+            `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+          ),
+      });
+    }
     await runDrive(main.path, broCfg, drive, args);
   } finally {
-    releaseSupervisor();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.removeListener('exit', onExit);
+    releaseAll();
   }
 }
 
@@ -2663,6 +2896,10 @@ async function runDrive(
     await driveOnce(ctx);
     return;
   }
+  // event-triggered re-projection (bro-xmd9l) — LED transitions ride
+  // worker/worktree envelopes between passes; the tick stays the
+  // backstop + herdr-restart rehydrator
+  await armProjectorEvents(ctx);
   for (;;) {
     try {
       await driveOnce(ctx);

@@ -107,6 +107,79 @@
       },
       "additionalProperties": false
     },
+    "brouter": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                      },
+                      "model": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "provider"
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        },
+                        "model": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "provider"
+                      ]
+                    }
+                  ]
+                },
+                "minItems": 1
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "check": {
       "type": "object",
       "properties": {
@@ -328,6 +401,41 @@
             "provider",
             "mode"
           ]
+        },
+        "providerCaps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "walls": {
+          "type": "object",
+          "properties": {
+            "rateTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "quotaTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "leases": {
+          "type": "object",
+          "properties": {
+            "roleTtlSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "workTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -706,6 +814,11 @@
           "minLength": 1,
           "pattern": "\\S"
         },
+        "everySec": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 2147483.647
+        },
         "stallMin": {
           "type": "number",
           "minimum": 1
@@ -721,6 +834,9 @@
         "fixRounds": {
           "type": "number",
           "minimum": 0
+        },
+        "autoMerge": {
+          "type": "boolean"
         },
         "maxItems": {
           "type": "number",
@@ -1183,140 +1299,164 @@
     },
     "providers": {
       "type": "object",
-      "additionalProperties": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "const": "api"
-              },
-              "baseUrl": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "apiKeyEnv": {
-                "type": "string",
-                "pattern": "^[A-Z_][A-Z0-9_]*$"
-              },
-              "apiKeyCommand": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "models": {
-                "type": "object",
-                "minProperties": 1,
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "enum": [
-                        "systemone",
-                        "openai-compat"
-                      ]
-                    },
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "wire": {
-                          "enum": [
-                            "systemone",
-                            "openai-compat"
-                          ]
-                        }
+      "patternProperties": {
+        "^(?!__proto__$)": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "api"
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "apiKeyEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Z_][A-Z0-9_]*$"
+                },
+                "apiKeyCommand": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "models": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "systemone",
+                          "openai-compat"
+                        ]
                       },
-                      "additionalProperties": false
-                    }
-                  ]
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "wire": {
+                            "enum": [
+                              "systemone",
+                              "openai-compat"
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
                 }
-              }
+              },
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "baseUrl",
+                "models"
+              ]
             },
-            "additionalProperties": false,
-            "required": [
-              "type",
-              "baseUrl",
-              "models"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "const": "acp"
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "acp"
+                },
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "profile": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "apiKeyEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Z_][A-Z0-9_]*$"
+                },
+                "sessionRm": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "autoApprove": {
+                  "type": "boolean"
+                },
+                "wallPause": {
+                  "type": "boolean"
+                }
               },
-              "command": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "profile": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "apiKeyEnv": {
-                "type": "string",
-                "pattern": "^[A-Z_][A-Z0-9_]*$"
-              },
-              "sessionRm": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "autoApprove": {
-                "type": "boolean"
-              }
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "command"
+              ]
             },
-            "additionalProperties": false,
-            "required": [
-              "type",
-              "command"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "const": "cli"
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "cli"
+                },
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "models": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "wallPause": {
+                  "type": "boolean"
+                }
               },
-              "command": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              },
-              "models": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
-              }
-            },
-            "additionalProperties": false,
-            "required": [
-              "type",
-              "command"
-            ]
-          }
-        ]
-      }
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "command"
+              ]
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "query": {
       "type": "object",
@@ -1380,6 +1520,38 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        },
+        "providers": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            },
+            {
+              "type": "object",
+              "patternProperties": {
+                "^(?!__proto__$)[^\\/]*[^\\s\\/][^\\/]*$": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "upstream": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "apiKeyEnv": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
         }
       },
       "additionalProperties": false
@@ -1451,160 +1623,6 @@
           "beads",
           "gitref"
         ]
-      }
-    },
-    "sweep": {
-      "type": "object",
-      "properties": {
-        "olderThanDays": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "dir": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
-        },
-        "flatten": {
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": false
-    },
-    "sync": {
-      "type": "object",
-      "properties": {
-        "ref": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
-        },
-        "remote": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
-        },
-        "beads": {
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": {
-        "type": "string",
-        "minLength": 1,
-        "pattern": "\\S"
-      }
-    },
-    "telemetry": {
-      "type": "object",
-      "properties": {
-        "otlp": {
-          "type": "object",
-          "properties": {
-            "endpoint": {
-              "type": "string"
-            },
-            "signalUrl": {
-              "type": "boolean"
-            },
-            "headers": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              }
-            },
-            "serviceName": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "\\S"
-            },
-            "flushMs": {
-              "type": "number",
-              "minimum": 1
-            },
-            "timeoutMs": {
-              "type": "number",
-              "minimum": 1
-            }
-          },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "watch": {
-      "type": "object",
-      "properties": {
-        "intervalSec": {
-          "type": "number",
-          "minimum": 0.1,
-          "maximum": 2147483.647
-        },
-        "pulseSec": {
-          "type": "number",
-          "minimum": 0.1,
-          "maximum": 2147483.647
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  "additionalProperties": true
-}    "skills": {
-      "type": "object",
-      "properties": {
-        "install": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          }
-        },
-        "agents": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          }
-        },
-        "bin": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
-        }
-      },
-      "additionalProperties": false
-    },
-    "spawn": {
-      "type": "object",
-      "properties": {
-        "externalBlock": {
-          "type": "boolean"
-        },
-        "externalIdleSec": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
-"stack": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "enum": ["auto", "manual"]
-        }
-      },
-      "additionalProperties": false
-    },
-    "store": {
-      "enum": ["jsonl", "beads", "gitref"]
-    },
-    "stores": {
-      "type": "array",
-      "items": {
-        "enum": ["jsonl", "beads", "gitref"]
       }
     },
     "sweep": {

@@ -23,6 +23,10 @@ import {
 import {
   clearExternalPlanes,
   readAgentRegistry,
+  readLedgerWalls,
+  recordWall,
+  localLeaseStore,
+  projectId,
   writeAgentRegistry,
   type Verdict,
 } from '@broject/core';
@@ -109,28 +113,11 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
       // registry still points at before the tmpdir (and it) goes away
       try {
         for (const e of Object.values(readAgentRegistry(main))) {
-<<<<<<< HEAD
           // tests register pid: process.pid to fake 'running' — killRun
           // never signals self/parent; the handle's group dies beside
           // the recorded one (they differ under a fork-style scope,
           // bro-ybo8z)
-          killRun(main, { pid: e.pid, runId: e.runId, agentId: e.agentId })
-=======
-          // tests register pid: process.pid to fake 'running' — if this
-          // process led its own group, kill(-pid) would kill the runner
-          if (
-            typeof e.pid === 'number' &&
-            e.pid > 0 &&
-            e.pid !== process.pid &&
-            e.pid !== process.ppid
-          ) {
-            try {
-              process.kill(-e.pid, 'SIGKILL'); // detached → own process group
-            } catch {
-              // already gone
-            }
-          }
->>>>>>> e9fd84bb (test(spawn): e2e hermeticity + schema regen (bro-eqi2d))
+          killRun(main, { pid: e.pid, runId: e.runId, agentId: e.agentId });
         }
       } catch {
         // no readable registry — nothing spawned
@@ -1177,7 +1164,11 @@ describe('bro agents up — class routing', () => {
       JSON.stringify({
         agents: { native: { command: 'node {promptFile}' } },
         providers: {
-          local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+          local: {
+            type: 'cli',
+            command: 'node {promptFile} -m {model}',
+            account: 'local-account',
+          },
           alt: { type: 'cli', command: 'node {promptFile}' },
         },
         fleet: {
@@ -1209,6 +1200,7 @@ describe('bro agents up — class routing', () => {
       const entry = readAgentRegistry(fx.main)['fx-1']!;
       assert.equal(entry.class, 'sweep');
       assert.equal(entry.provider, 'local');
+      assert.equal(entry.account, 'local-account');
       assert.equal(entry.model, 'sweep-1');
       const st = await agents(['status', 'fx-1']);
       assert.match(st.out.join('\n'), /class\s+sweep/);
@@ -1569,6 +1561,45 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
 });
 
 describe('bro agents down <target>', () => {
+  test('down updates the local entry without clearing a host ledger wall', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(fx.root, 'state');
+    try {
+      recordWall({
+        account: 'shared-account',
+        cause: 'quota',
+        observedAt: new Date().toISOString(),
+        provider: 'router',
+        rig: 'other-repo',
+        step: 'fx-1',
+      });
+      const up = await agents([
+        'up',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+        '--prompt-file',
+        fx.promptFile(LONG_RUN),
+      ]);
+      assert.equal(up.code, 0);
+      const down = await agents(['down', 'fx-1']);
+      assert.equal(down.code, 0);
+      // the lease went down with the stop — nothing is left to release
+      assert.equal(localLeaseStore(projectId(fx.main)).forceRelease('bead/fx-1'), false);
+      assert.equal(
+        readLedgerWalls().some(wall => wall.account === 'shared-account'),
+        true
+      );
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      fx.restore();
+    }
+  });
+
   test('stops by molStep and is idempotent for gone agents', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
@@ -1669,19 +1700,18 @@ describe('bro agents down <target>', () => {
 
   test('a setsid-escaped descendant dies with the unit — the tree spans every group it leads', async () => {
     // setsid moves the child into its own session AND process group —
-<<<<<<< HEAD
     // kill(-wrapperPgid) cannot reach it, but it is still a tree member,
     // so the pre-signal snapshot's pgid set signals it directly
     // (bro-ybo8z's fork-style scope hardening closes the escapee blind
     // spot bro-l8c4f.3 documented).
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
       writeFileSync(
         join(fx.main, 'bro.config.json'),
         JSON.stringify({
           agents: { native: { command: 'setsid sleep 30 & wait $! # {promptFile}' } },
         })
-      )
+      );
       const up = await agents([
         'up',
         'fx-1',
@@ -1691,29 +1721,115 @@ describe('bro agents down <target>', () => {
         fx.beads,
         '--prompt-file',
         fx.promptFile(LONG_RUN),
-      ])
-      assert.equal(up.code, 0)
-      const agentId = readAgentRegistry(fx.main)['fx-1']!.agentId
-      const down = await agents(['down', 'fx-1'])
-      assert.equal(down.code, 0)
-      assert.match(down.out.join('\n'), new RegExp(`stopped ${String(agentId)}`))
-      const status = await agents(['status', 'fx-1'])
-      assert.match(status.out.join('\n'), /state\s+stopped/)
-=======
-    // the group probe cannot see it; the pre-signal tree snapshot is
-    // what stops the marker landing over a live writer (bro-l8c4f.3).
-    // Once the wrapper dies the survivor reparents to init — the state
-    // read then says `lost`, so the verdict is unverified.
-    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
-    try {
-      const { down, status } = await surviveDown(fx, 'setsid sleep 30 & wait $! # {promptFile}');
-      assert.match(down.err.join('\n'), /stop unconfirmed/);
-      // the escapee lives on in its own session — the state read is
-      // lost (no death record), which is exactly why the verdict stays
-      // unverified; it exits on its own ~30 s out
-      assert.match(status.out.join('\n'), /state\s+lost/);
->>>>>>> e9fd84bb (test(spawn): e2e hermeticity + schema regen (bro-eqi2d))
+      ]);
+      assert.equal(up.code, 0);
+      const agentId = readAgentRegistry(fx.main)['fx-1']!.agentId;
+      const down = await agents(['down', 'fx-1']);
+      assert.equal(down.code, 0);
+      assert.match(down.out.join('\n'), new RegExp(`stopped ${String(agentId)}`));
+      const status = await agents(['status', 'fx-1']);
+      assert.match(status.out.join('\n'), /state\s+stopped/);
     } finally {
+      fx.restore();
+    }
+  });
+
+  test("down releases the stopped generation's lease without dropping a successor's live one", async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(fx.root, 'state');
+    try {
+      const up = await agents([
+        'up',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+        '--prompt-file',
+        fx.promptFile(LONG_RUN),
+      ]);
+      assert.equal(up.code, 0);
+      const store = localLeaseStore(projectId(fx.main));
+      assert.ok(store.read('bead/fx-1') !== undefined);
+      // a successor legitimately acquires the key once the stopped
+      // worker is gone — its fresh token must survive the release the
+      // stale stop issues for the dead generation; a blind
+      // forceRelease(key) would delete this live row and re-open the
+      // double-spawn window
+      store.forceRelease('bead/fx-1');
+      const successor = store.acquire(
+        'bead/fx-1',
+        { host: 'other-host', pid: 9876, rig: 'other-rig', agentId: 'other-agent' },
+        60_000
+      );
+      assert.equal(successor.ok, true);
+      if (!successor.ok) return;
+      const down = await agents(['down', 'fx-1']);
+      assert.equal(down.code, 0);
+      assert.equal(store.read('bead/fx-1')?.token, successor.lease.token);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      fx.restore();
+    }
+  });
+
+  test('down on an unlisted entry releases only a token-matched lease', async () => {
+    const fx = fixture();
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(fx.root, 'state');
+    try {
+      const store = localLeaseStore(projectId(fx.main));
+      // a stale generation's row — the registry entry still names its token
+      const stale = store.acquire('bead/fx-ghost', { host: 'h', pid: 1, rig: 'r' }, 60_000);
+      assert.equal(stale.ok, true);
+      if (!stale.ok) return;
+      writeAgentRegistry(fx.main, {
+        'fx-ghost': {
+          agentId: 'ghost-dead00',
+          // no connector lists a 'ghost-backend' agent — the entry
+          // reaches down's not-found lease path without a live agent
+          backend: 'ghost-backend',
+          spawnedAt: new Date().toISOString(),
+          leaseKey: 'bead/fx-ghost',
+          leaseToken: stale.lease.token,
+          leaseRecord: stale.lease,
+        },
+      });
+      // a successor legitimately took the key — the recorded token is stale
+      store.forceRelease('bead/fx-ghost');
+      const live = store.acquire('bead/fx-ghost', { host: 'h', pid: 2, rig: 'r' }, 60_000);
+      assert.equal(live.ok, true);
+      if (!live.ok) return;
+      const down = await agents(['down', 'fx-ghost']);
+      assert.equal(down.code, 0);
+      assert.match(down.out.join('\n'), /nothing to stop/);
+      assert.equal(store.read('bead/fx-ghost')?.token, live.lease.token);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      fx.restore();
+    }
+  });
+
+  test('down on a key with no entry still force-releases it — the operator path', async () => {
+    const fx = fixture();
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(fx.root, 'state');
+    try {
+      const store = localLeaseStore(projectId(fx.main));
+      assert.equal(
+        store.acquire('bead/fx-ghost', { host: 'h', pid: 1, rig: 'r' }, 60_000).ok,
+        true
+      );
+      const down = await agents(['down', 'fx-ghost']);
+      assert.equal(down.code, 0);
+      assert.match(down.out.join('\n'), /nothing to stop/);
+      assert.equal(store.read('bead/fx-ghost'), undefined);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
       fx.restore();
     }
   });

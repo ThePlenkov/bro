@@ -228,6 +228,7 @@ export function opencodeExternalActivity(ctx: ExternalProbeCtx): ExternalActivit
     return { active: false };
   }
   const override = bag?.['dataDir'];
+  let freshest: number | undefined;
   for (const entry of entries) {
     if (entry.unknown) {
       return {
@@ -244,6 +245,9 @@ export function opencodeExternalActivity(ctx: ExternalProbeCtx): ExternalActivit
       };
     }
     const at = opencodeActivityMs(dataDir);
+    if (at !== undefined && (freshest === undefined || at > freshest)) {
+      freshest = at;
+    }
     if (at === undefined || ctx.now - at < ctx.holdMs) {
       const age =
         at === undefined
@@ -256,7 +260,7 @@ export function opencodeExternalActivity(ctx: ExternalProbeCtx): ExternalActivit
       };
     }
   }
-  return { active: false };
+  return { active: false, activityAtMs: freshest };
 }
 
 export const opencodeExternalPlane: ExternalActivityPlane = {
