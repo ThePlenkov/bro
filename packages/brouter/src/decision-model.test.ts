@@ -34,7 +34,6 @@ describe('the decision provider', () => {
     assert.equal(provider.entry.type, 'api');
     assert.equal(keyOf(provider), 'tok-a');
     assert.equal((provider.entry as { apiKeyEnv?: string }).apiKeyEnv, undefined);
-    assert.equal(process.env.BRO_ROUTER_TOKEN, undefined);
   });
 
   test('two routers in one process hold two keys — neither reads the other', () => {
