@@ -120,6 +120,7 @@ import {
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { maybeSpawnTraceStamp } from './trace-resolve.ts';
+import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
@@ -250,10 +251,13 @@ export function readCodexInstructions(pluginRoot: string | undefined): string | 
 /** Which gh lifecycle a shell command belongs to, if any. `gh` must sit at
  * a command position — `echo "gh pr merge"` is text, not a merge. */
 export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | null {
-  if (/(^|[;&|]\s*)gh\s+pr\s+merge\b/.test(cmd)) {
+  // the global flags gh takes BEFORE the subcommand (`gh -R owner/repo pr
+  // create`) are part of the same command — a PR opened that way is a PR
+  const flags = '(?:\\s+-{1,2}[\\w-]+(?:[= ]\\S+)?)*';
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+merge\\b`).test(cmd)) {
     return 'pr-merge';
   }
-  if (/(^|[;&|]\s*)gh\s+pr\s+create\b/.test(cmd)) {
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+create\\b`).test(cmd)) {
     return 'pr-create';
   }
   return null;
@@ -1614,6 +1618,9 @@ async function emitPostTool(input: HookInput): Promise<void> {
     // verifies against the registry, not proof
     if (classifyExecCommand(cmd) === 'pr-create') {
       maybeSpawnTraceStamp(process.cwd());
+      // the PR IS a chain member — the chain registers itself with the
+      // host, so nobody adds the PRs to the stack by hand (bro-awbgd)
+      maybeSpawnStackPublish(process.cwd());
     }
   }
   if (outcome === true) {
