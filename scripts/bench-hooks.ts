@@ -435,7 +435,6 @@ function enforce(
   rows: Map<string, Row>,
   entries: BudgetEntry[],
   lanes: Lane[],
-  budgetKeys: Set<string>,
   say: (line: string) => void
 ): boolean {
   let failed = false;
@@ -465,7 +464,6 @@ function main(): void {
     lane: key.split(':')[0] as Lane,
     cap,
   }));
-  const budgetKeys = new Set(Object.keys(budget));
   const { cwd, env } = buildFixture();
   const rows = runBench(opts, cwd, env);
   writeReport(rows, budget, opts);
@@ -476,7 +474,7 @@ function main(): void {
     : (line: string): void => {
         console.log(line);
       };
-  if (opts.enforce && enforce(rows, entries, opts.lanes, budgetKeys, say)) {
+  if (opts.enforce && enforce(rows, entries, opts.lanes, say)) {
     process.exit(1);
   }
 }
