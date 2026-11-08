@@ -77,7 +77,7 @@ the plan is even made: the platform deletes a merged member's branch
 branch mid-cascade. Then there is no SHA to capture.
 
 The member's OWN history still remembers: its reflog's CREATION entry —
-"branch: Created from <base>" — names the base's tip of that moment,
+`branch: Created from <base>` — names the base's tip of that moment,
 and the entry's SHA is that tip. Not merely the OLDEST entry: a reflog
 that was truncated or expired has no creation entry left, and its
 oldest survivor is a later commit — a fork there would drop the
