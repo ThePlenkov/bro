@@ -617,6 +617,31 @@ export function chainRootBase(
   return alive(defaultBase) ? defaultBase : undefined;
 }
 
+/** Where the member's own work began — the commit its branch was
+ *  created at, read from its OWN reflog ("branch: Created from <base>"
+ *  names the base's tip of that moment). The base's ref may be GONE —
+ *  the platform deletes a merged member's branch — and the member's
+ *  history still remembers.
+ *
+ *  The oldest reflog entry is that point, and it is used only while it
+ *  is still an ancestor of the member's tip: after a rebase the member's
+ *  history no longer carries it, and the reflog's answer is then a
+ *  question the plan cannot answer. */
+function forkFromReflog(branch: string, wt: string): string | undefined {
+  const out = gitTry(['-C', wt, 'reflog', 'show', '--format=%H', branch]).out;
+  const oldest = out
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (oldest === undefined) {
+    return undefined;
+  }
+  return gitTry(['-C', wt, 'merge-base', '--is-ancestor', oldest, 'HEAD']).code === 0
+    ? oldest
+    : undefined;
+}
+
 /**
  * Where the child's own work starts — the fork point for a rebase onto a
  * base whose history moved. The plain merge-base is right when the child
@@ -678,12 +703,14 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
   // The plan's fork — the base's tip as the plan saw it, and only when
   // the member still CARRIES it: then the member's own work starts right
   // after that commit, and the replay is the member's work alone. When
-  // the base was rewritten under the child, the tip is not in the member
-  // — `forkPoint` answers that case from the base's reflog.
+  // the base's ref is GONE (the platform deleted it after the merge),
+  // the member's own reflog remembers where its work began. When the
+  // base was rewritten under the child, `forkPoint` answers that case
+  // from the base's reflog.
   const fork =
     m.containsBaseHead === true && m.forkSha !== undefined
       ? m.forkSha
-      : forkPoint(item.desiredBase, wt.path);
+      : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
   const rb =
     fork === ''
       ? { code: 1, err: `no merge-base with ${item.desiredBase}` }

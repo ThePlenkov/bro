@@ -69,6 +69,30 @@ the replay is exactly the member's own work; when it is not, git takes
 the merge-base of the SHA and the member — the same answer, but from a
 commit that cannot move under the cascade.
 
+### The member's own reflog answers for a base that is GONE
+
+The plan's SHA comes from a REF — and the base's ref may be gone before
+the plan is even made: the platform deletes a merged member's branch
+(GitHub's delete-on-merge), and the sync retires a merged member's
+branch mid-cascade. Then there is no SHA to capture.
+
+The member's OWN history still remembers: its reflog's oldest entry is
+the commit its branch was created at — "branch: Created from <base>"
+names the base's tip of that moment. That commit is used only while it
+is still an ancestor of the member's tip: after a rebase the member's
+history no longer carries it, and the reflog's answer is then a
+question the plan cannot answer.
+
+```ts
+const fork =
+  m.containsBaseHead === true && m.forkSha !== undefined
+    ? m.forkSha
+    : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
+```
+
+Three answers, in order of how well they know the truth: the plan's
+immutable SHA, the member's own creation point, and the base's reflog.
+
 ### The late name resolution is gone
 
 `rebaseMember` used to answer the fork with `item.oldBase` — a branch
@@ -92,8 +116,11 @@ member carries `forkSha` the way it carries `containsBaseHead`.
 - [x] the CLI captures it in the same pass that reads the base's head.
 - [x] `rebaseMember` starts the replay from the captured SHA; the late
       branch-name resolution is gone.
-- [x] a test: the replay carries the member's own commits only, when the
-      base's ref moves during the cascade.
+- [x] a base whose ref is gone: the member's own reflog says where its
+      work began.
+- [x] tests: the replay carries the member's own commits only — when the
+      base's branch is retired mid-cascade, and when the host deleted it
+      before the sync (that one fails on the old code).
 
 ## Verify
 
@@ -114,16 +141,16 @@ member carries `forkSha` the way it carries `containsBaseHead`.
 
 ## Risks named up front
 
-- **A base whose ref is GONE has no SHA to capture.** The fallback is
-  `forkPoint()` — the base's reflog and the patch-equivalence list.
-  After a squash-merge the patch list cannot recognise the squashed
-  commits, so that fallback can still land too early. The honest answer
-  for that case is the member's OWN reflog (where its work began), and
-  it is a separate change — bro-3xeav fixes the reachable bug, not the
-  whole family.
+- **A base whose ref is GONE has no SHA to capture.** The member's own
+  reflog answers that case — its oldest entry is the commit its branch
+  was created at, and it is used while that commit is still an ancestor
+  of the member. Behind it, `forkPoint()` reads the BASE's reflog: after
+  a squash-merge the patch-equivalence list cannot recognise the
+  squashed commits, so that last resort can still land too early.
 - **The capture is a point in time.** It is read in the plan phase, so
   it describes the chain as it stood when the plan was made. That is
   the truth the plan is about.
-- **The reflog is the last resort.** `forkPoint()` reads the base's
-  reflog; a repository with `core.logAllRefUpdates` off has no such
-  record, and the plan's SHA is then the only answer.
+- **A reflog can expire.** The member's creation point lives in the
+  member's reflog; a repository with `core.logAllRefUpdates` off, or a
+  reflog pruned past its expiry, has no such record — and the plan's
+  SHA is then the only answer.
