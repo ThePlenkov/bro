@@ -86,6 +86,8 @@ describe('loopSection', () => {
       autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
+      maxOpenTotal: 10,
+      worktreeWarn: 40,
       worktreeMb: 350,
       diskMinSlots: 3,
       batch: 6,

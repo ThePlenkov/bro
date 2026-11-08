@@ -873,6 +873,14 @@
           "type": "number",
           "minimum": 1
         },
+        "maxOpenTotal": {
+          "type": "number",
+          "minimum": 0
+        },
+        "worktreeWarn": {
+          "type": "number",
+          "minimum": 0
+        },
         "worktreeMb": {
           "type": "number",
           "minimum": 1

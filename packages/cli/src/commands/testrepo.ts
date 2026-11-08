@@ -959,6 +959,18 @@ const facade = {
     }
     return s.prOpened ? [s.pr ?? 7] : []
   }),
+  // the fleet listing the ceiling + reconcile read — same projection
+  // rules as prsForBranch (prs map authoritative, flat flag legacy)
+  openPrs: () => withState((s) => {
+    if (s.prs) {
+      return Object.values(s.prs)
+        .filter((p) => (p.state ?? s.prState ?? 'OPEN') === 'OPEN')
+        .map((p) => ({ pr: p.number, headRef: p.headRef }))
+    }
+    return s.prOpened
+      ? [{ pr: s.pr ?? 7, headRef: s.openPrHead ?? s.headRef ?? 'loop/fx-a' }]
+      : []
+  }),
   parsePrRef: () => null,
   prMeta: (t) => withState((s) => {
     // readQueues.meta — the same mid-flight race scripting as
@@ -1309,6 +1321,7 @@ const markPrOpened = (s) => {
     }
   }
   s.prOpened = true
+  s.openPrHead = branch
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this
