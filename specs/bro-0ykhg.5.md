@@ -19,14 +19,14 @@ out and are counted).
 
 Contenders (each is a provider entry, nothing hard-wired):
 
-| contender               | how it runs                               | why                                   |
-| ----------------------- | ----------------------------------------- | ------------------------------------- |
-| static table            | T0 only, no model                         | the baseline every model must beat    |
-| T1 recall               | FTS5 top-k over outcomes                  | the free contender                    |
-| Jev (System One)        | `systemone` connector, typed answers      | typed + calibrated by design          |
-| Arch-Router 1.5B        | local, llama.cpp / ollama                 | trained for task → route-by-description |
-| small open model        | Qwen3 0.6–4B / Gemma small, local, grammar-constrained JSON | free, local |
-| cheap hosted            | a Flash-Lite / nano / Haiku-class lane    | latency / price reference             |
+| contender               | how it runs                                                 | why                                     |
+| ----------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| static table            | T0 only, no model                                           | the baseline every model must beat      |
+| T1 recall               | FTS5 top-k over outcomes                                    | the free contender                      |
+| Jev (System One)        | `systemone` connector, typed answers                        | typed + calibrated by design            |
+| Arch-Router 1.5B        | local, llama.cpp / ollama                                   | trained for task → route-by-description |
+| small open model        | Qwen3 0.6–4B / Gemma small, local, grammar-constrained JSON | free, local                             |
+| cheap hosted            | a Flash-Lite / nano / Haiku-class lane                      | latency / price reference               |
 
 Metrics per contender: agreement with the oracle, calibration (reliability
 buckets — `judge stats` already has them), p50/p95 latency, cost per 1k

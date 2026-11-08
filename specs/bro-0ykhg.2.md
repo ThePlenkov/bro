@@ -13,12 +13,12 @@ the workers need, and its latency sits on the spawn path.
 Stages, cheapest first. Each stage either decides or passes the surviving
 candidate set on; each stage is optional and fail-open.
 
-| stage | what decides                                                        | cost             |
-| ----- | ------------------------------------------------------------------- | ---------------- |
+| stage | what decides                                                                                      | cost             |
+| ----- | ------------------------------------------------------------------------------------------------- | ---------------- |
 | T0    | code: `match` on what the task already carries (bead type, labels, path globs, repo), then health | ~0, no model     |
-| T1    | recall: the outcome rows of similar past tasks (bro-0ykhg.4)        | local, ms        |
-| T2    | the judge: the formula's questions (bro-0ykhg.1)                    | one typed call   |
-| T3    | escalation: a stronger judge, only when T2 is low-confidence        | rare             |
+| T1    | recall: the outcome rows of similar past tasks (bro-0ykhg.4)                                      | local, ms        |
+| T2    | the judge: the formula's questions (bro-0ykhg.1)                                                  | one typed call   |
+| T3    | escalation: a stronger judge, only when T2 is low-confidence                                      | rare             |
 
 **When to ask** — `brouter.router.invoke`:
 
