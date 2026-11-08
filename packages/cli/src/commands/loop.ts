@@ -49,8 +49,10 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   statfsSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -61,6 +63,7 @@ import {
   agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
+  bodyMeta,
   CLASS_LABEL_PREFIX,
   commandCliName,
   emitLifecycle,
@@ -69,12 +72,14 @@ import {
   facadeName,
   getTasks,
   gitBranchLog,
+  gitCommonDir,
   gitTry,
   holdRoleLease,
   localLeaseStore,
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  pidAlive,
   procStat,
   projectId,
   releaseSessionSlot,
@@ -134,7 +139,6 @@ import {
   ceilingHeld,
   clumpMembers,
   coveredBeadIds,
-  deterministicHeadSlug,
   diskFloorBreach,
   diskFloorBytes,
   expandAgentCmd,
@@ -1425,9 +1429,20 @@ async function finalizeMerge(
               continue;
             }
             const r = processesRootedIn(t.path);
-            if (r.length === 0) {
+            // same contract as the primary removal: a live process or
+            // uncommitted work keeps the checkout — --force would burn
+            // files nothing else holds (and strand the process on them)
+            const st =
+              r.length === 0
+                ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                : { code: 1, out: '', err: '' };
+            if (r.length === 0 && st.code === 0 && st.out.trim() === '') {
               gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
               gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+            } else if (r.length === 0) {
+              ctx.tails.push(
+                `worktree ${t.path} kept — has uncommitted changes or status unreadable; branch ${item.branch} kept with it`
+              );
             } else {
               ctx.tails.push(
                 `worktree ${t.path} kept — hosts live process(es): ${r.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
@@ -1470,18 +1485,10 @@ async function finalizeMerge(
       }
     }
     // delete remote branch on merge/close (spec bro-jis0c)
-    try {
-      gitTry(['-C', ctx.root, 'push', 'origin', '--delete', item.branch]);
-    } catch {
-      /* best effort */
-    }
+    deleteRemoteBranch(ctx, item.branch, '');
   } else {
     // even if worktree kept due to live processes, try to delete remote branch if possible
-    try {
-      gitTry(['-C', ctx.root, 'push', 'origin', '--delete', item.branch]);
-    } catch {
-      /* best effort */
-    }
+    deleteRemoteBranch(ctx, item.branch, '');
   }
   say(ctx, `loop: ${beads.map(b => b.id).join(', ')} landed via ${prRef(ctx, pr)}`);
   return 'landed';
@@ -2606,17 +2613,25 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'closed': {
       gateRow('closed', { action: 'closed' });
       // closePr cleanup: delete remote branch + reap worktree/branch
-      try {
-        gitTry(['-C', ctx.root, 'push', 'origin', '--delete', m.item.branch]);
-      } catch {
-        /* best effort */
-      }
+      deleteRemoteBranch(ctx, m.item.branch, 'on PR close');
       try {
         const rooted = processesRootedIn(m.item.worktreeDir);
-        if (rooted.length === 0) {
+        // a live process or uncommitted work keeps the checkout —
+        // --force removes dirty trees, and those files have no other
+        // copy (the base behavior kept the worktree on close)
+        const st =
+          rooted.length === 0
+            ? gitTry(['-C', m.item.worktreeDir, 'status', '--porcelain'])
+            : { code: 1, out: '', err: '' };
+        if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
           gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
           gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
           gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
+        } else if (rooted.length === 0) {
+          ctx.tails.push(
+            `worktree ${m.item.worktreeDir} kept on PR close — has uncommitted changes or status unreadable; branch ${m.item.branch} kept with it`
+          );
+          console.error(`loop: ${ctx.tails.at(-1)}`);
         }
       } catch {
         /* best effort */
@@ -3542,6 +3557,19 @@ interface RefTails {
   errors: string[];
 }
 
+/** Every linked worktree this clone holds — the spec's `worktreeWarn`
+ *  mark counts checkouts, and disk/coordination pressure doesn't care
+ *  which branch a checkout sits on. The main worktree heads `worktree
+ *  list`, so linked = rows − 1. undefined when the listing fails —
+ *  an unreadable count warns nothing. */
+function linkedWorktreeCount(root: string): number | undefined {
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
+  if (wt.code !== 0) {
+    return undefined;
+  }
+  return Math.max(0, parseWorktreePorcelain(wt.out).length - 1);
+}
+
 /** loop/* worktrees still checked out + loop/* branches with no
  *  worktree — both are run tails; a `--stack` run owns its `stack/<name>/*`
  *  branches the same way. A failed git probe reports as an error line,
@@ -3692,10 +3720,11 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
     );
-    if (ctx.cfg.worktreeWarn > 0 && worktrees.length > ctx.cfg.worktreeWarn) {
+    const linked = linkedWorktreeCount(ctx.root);
+    if (ctx.cfg.worktreeWarn > 0 && linked !== undefined && linked > ctx.cfg.worktreeWarn) {
       say(
         ctx,
-        `loop: worktrees ${worktrees.length} > ${ctx.cfg.worktreeWarn} (disk/coordination pressure)`
+        `loop: linked worktrees ${linked} > ${ctx.cfg.worktreeWarn} (disk/coordination pressure)`
       );
     }
     const claimed = claimedTails(ctx.tasks, seen);
@@ -3989,14 +4018,33 @@ interface QueueState {
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
+  /** Fleet PRs whose host can't close — reported once per run, not
+   *  once per pass (the reconcile retries every tick). */
+  unclosableNoted: Set<number>;
+  /** Branch → ceiling reservation file — released when the member
+   *  leaves the stack; an open PR on the branch consumes it earlier
+   *  via the fleet listing. */
+  ceilingRes: Map<string, string>;
 }
+
+/** The widest listing cap a TaskStore backend can silently impose —
+ *  the github task store stops at QUERY_CAP (packages/github/
+ *  src/tasks.ts) and returns the truncated page as a complete
+ *  snapshot. A full page is indistinguishable from a huge store, and
+ *  either way a reconcile on it can bury PRs whose live beads fell
+ *  past the cap — so a capped read answers 'unknown', not 'complete'.
+ *  The reconcile is an optimization; skipping it closes nothing. */
+const TASK_LIST_SNAPSHOT_CAP = 1000;
 
 /** Build slug -> bead map for reconcile. Returns null if the listing is unknown. */
 function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> | null {
   const out = new Map<string, ReconcileBead>();
   try {
-    const rows = ctx.tasks.list({ all: true } as any);
-    for (const r of rows as any[]) {
+    const rows = ctx.tasks.list({ all: true });
+    if (rows.length >= TASK_LIST_SNAPSHOT_CAP) {
+      return null;
+    }
+    for (const r of rows) {
       if (!r?.id) continue;
       const slug = loopSlug(r.id);
       if (!out.has(slug)) {
@@ -4013,8 +4061,8 @@ function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> | null {
 function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
   const rows: FleetPrRow[] = [];
   try {
-    if (typeof (ctx.rev as any).openPrs === 'function') {
-      const list = (ctx.rev as any).openPrs(ctx.repo) as Array<{ pr: number; headRef: string }>;
+    if (typeof ctx.rev.openPrs === 'function') {
+      const list = ctx.rev.openPrs(ctx.repo);
       for (const p of list ?? []) {
         if (p?.headRef && isFleetHead(p.headRef)) {
           rows.push({ pr: p.pr, headRef: p.headRef });
@@ -4026,17 +4074,35 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
     // PR listing failed — cannot produce complete listing
     return null;
   }
-  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown
+  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
+  // LOCAL refs alone undercount: a pushed head whose local branch was already
+  // deleted (land cleanup, another clone's push) is still a live fleet PR, so
+  // remote heads join the scan — `ls-remote` answers the authoritative set.
+  const prefixes = FLEET_HEAD_PREFIXES;
   try {
-    const prefixes =
-      ctx.stack === undefined
-        ? ['loop/', 'work/', 'fix/', 'stack/']
-        : ['loop/', 'work/', 'fix/', 'stack/'];
     const tails = loopRefTails(ctx.root, prefixes);
-    if (tails.errors && tails.errors.length > 0) {
+    if (tails.errors.length > 0) {
       return null;
     }
-    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches])];
+    const remote: string[] = [];
+    for (const prefix of prefixes) {
+      const ls = gitTry(['-C', ctx.root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
+      if (ls.code !== 0) {
+        // no origin at all is a complete answer (the fleet is local-only);
+        // an unreachable remote is 'unknown'
+        if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
+          continue;
+        }
+        return null;
+      }
+      remote.push(
+        ...ls.out
+          .split('\n')
+          .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
+          .filter(Boolean)
+      );
+    }
+    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
     for (const b of branches) {
       try {
         for (const pr of ctx.rev.prsForBranch(b)) {
@@ -4055,96 +4121,214 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
   }
 }
 
+/** `push origin --delete <branch>` as a tails verdict — a remote that
+ *  already dropped the ref answers "does not exist", which IS the
+ *  end state we want (the host's own merge-time deleteBranch beat us
+ *  to it), never a leftover. Every other failure leaves a remote
+ *  branch the report should name. */
+function deleteRemoteBranch(ctx: Ctx, branch: string, why: string): void {
+  const del = gitTry(['-C', ctx.root, 'push', 'origin', '--delete', branch]);
+  if (del.code === 0 || /remote ref does not exist|Couldn't find remote ref/i.test(del.err)) {
+    return;
+  }
+  ctx.tails.push(
+    `remote branch ${branch} not deleted${why === '' ? '' : ` ${why}`} — ${del.err.trim()}`
+  );
+  console.error(`loop: ${ctx.tails.at(-1)}`);
+}
+
+/** The member ids a `loop/` PR's provenance trailer stamps — `bead:
+ *  "id1,id2"` written by stampLoopPr when the clump pushed. null when
+ *  the list can't be proven: no prBody capability on the host, a fetch
+ *  error, or a batch head with no trailer. An unenumerated batch is
+ *  never a burial order. */
+function fleetPrMemberIds(ctx: Ctx, row: FleetPrRow): string[] | null {
+  if (typeof ctx.rev.prBody !== 'function') {
+    return null;
+  }
+  let meta: Record<string, unknown>;
+  try {
+    meta = bodyMeta(ctx.rev.prBody({ repo: ctx.repo, pr: row.pr }));
+  } catch {
+    return null;
+  }
+  const raw = meta.bead;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return null;
+  }
+  const ids = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return ids.length === 0 ? null : ids;
+}
+
+/** Member ids → bead rows against a listing — a member the listing
+ *  can't find reads 'unknown', and 'unknown' is never dead. */
+function memberBeads(
+  ids: readonly string[],
+  beadsById: ReadonlyMap<string, ReconcileBead>
+): ReconcileBead[] {
+  return ids.map(id => beadsById.get(id) ?? { id, status: 'unknown' });
+}
+
 /** Reconcile orphaned fleet PRs not on the current stack. */
 async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
   try {
     const fleet = listOpenFleetPrs(ctx);
     if (fleet === null || fleet.length === 0) return;
     const stackPrs = new Set<number>();
+    const stackBranches = new Set<string>();
     for (const m of q.stack) {
       if (m.pr !== undefined) stackPrs.add(m.pr);
+      // a worker-pending member has no PR number until its .exit lands
+      // — its about-to-open PR protects by branch, not by number
+      stackBranches.add(m.item.branch);
     }
     const beadsBySlug = buildBeadsBySlug(ctx);
     if (beadsBySlug === null) {
       // Bead listing unknown — skip reconciliation to avoid false closures
       return;
     }
+    const beadsById = new Map([...beadsBySlug.values()].map(b => [b.id, b] as const));
     for (const row of fleet) {
-      if (stackPrs.has(row.pr)) continue;
-      const bead = beadForHead(row.headRef, beadsBySlug);
-      const verdict = orphanVerdict(row.headRef, bead);
+      if (stackPrs.has(row.pr) || stackBranches.has(row.headRef)) continue;
+      const bead = beadForHead(row, beadsBySlug);
+      let verdict = orphanVerdict(row, bead);
       if (verdict.kind === 'close') {
-        try {
-          let closed = false;
-          if (typeof (ctx.rev as any).closePr === 'function') {
-            try {
-              (ctx.rev as any).closePr({ repo: ctx.repo, pr: row.pr });
-              closed = true;
-            } catch {
-              closed = false;
-            }
-          }
-          if (!closed && typeof (ctx.rev as any).closePr !== 'function') {
-            // Host does not support closing PRs; leave PR open to avoid retry churn
-            continue;
-          }
-          if (!closed) {
-            // closePr exists but failed; avoid reporting a close and retrying aggressively
-            continue;
-          }
-          say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
+        // a batch head shares its branch across members — the lead's
+        // status is not the clump's. Any member not positively closed
+        // (open, in_progress, deferred, unreadable) keeps the PR. A
+        // `bead:` trailer overrides the single-bead read on ANY head;
+        // a `loop/` head is stamped at open, so a missing trailer
+        // there is 'unknown' — and unknown never buries a batch.
+        const ids = fleetPrMemberIds(ctx, row);
+        if (ids !== null) {
+          verdict = orphanVerdict(row, bead, memberBeads(ids, beadsById));
+        } else if (row.headRef.startsWith('loop/')) {
+          verdict = { kind: 'keep' };
+        }
+      }
+      if (verdict.kind !== 'close') {
+        continue;
+      }
+      // the verdict rode a snapshot a whole pass old — reread before
+      // burying: a bead reopened since must not close its live work
+      const fresh = buildBeadsBySlug(ctx);
+      if (fresh === null) {
+        continue;
+      }
+      const freshBead = beadForHead(row, fresh);
+      const freshById = new Map([...fresh.values()].map(b => [b.id, b] as const));
+      const freshIds = fleetPrMemberIds(ctx, row);
+      const recheck =
+        freshIds === null && row.headRef.startsWith('loop/')
+          ? { kind: 'keep' as const }
+          : orphanVerdict(
+              row,
+              freshBead,
+              freshIds === null ? undefined : memberBeads(freshIds, freshById)
+            );
+      if (recheck.kind !== 'close') {
+        continue;
+      }
+      try {
+        let closed = false;
+        if (typeof ctx.rev.closePr === 'function') {
           try {
-            gitTry(['-C', ctx.root, 'push', 'origin', '--delete', row.headRef]);
+            ctx.rev.closePr({ repo: ctx.repo, pr: row.pr });
+            closed = true;
           } catch {
-            /* best effort */
+            closed = false;
           }
+        }
+        if (!closed && typeof ctx.rev.closePr !== 'function') {
+          // a host with no closePr keeps the PR — name why once per
+          // run, then let the next pass check silently again
+          if (!q.unclosableNoted.has(row.pr)) {
+            q.unclosableNoted.add(row.pr);
+            say(
+              ctx,
+              `loop: reconcile keeps ${prRef(ctx, row.pr)} (${row.headRef}) — host has no closePr; ${verdict.why}`
+            );
+          }
+          continue;
+        }
+        if (!closed) {
+          // closePr exists but failed; avoid reporting a close and retrying aggressively
+          continue;
+        }
+        say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
+        deleteRemoteBranch(ctx, row.headRef, 'after reconcile close');
+        try {
+          // try to remove local worktree/branch if any
           try {
-            // try to remove local worktree/branch if any
-            try {
-              const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
-              if (wt.code === 0) {
-                const trees = parseWorktreePorcelain(wt.out);
-                for (const t of trees) {
-                  if (t.branch === row.headRef && t.path) {
-                    const rooted = processesRootedIn(t.path);
-                    if (rooted.length === 0) {
-                      gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
-                      gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
-                    } else {
+            const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt.code === 0) {
+              const trees = parseWorktreePorcelain(wt.out);
+              for (const t of trees) {
+                if (t.branch === row.headRef && t.path) {
+                  const rooted = processesRootedIn(t.path);
+                  // a live process or uncommitted work keeps the
+                  // checkout — --force removes dirty trees, and those
+                  // files have no other copy
+                  const st =
+                    rooted.length === 0
+                      ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                      : { code: 1, out: '', err: '' };
+                  if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+                    gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+                    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+                    if (rm.code !== 0) {
                       ctx.tails?.push(
-                        `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                        `worktree ${t.path} not removed (orphan reconcile) — ${rm.err.trim()}`
                       );
                     }
-                    break;
+                  } else {
+                    ctx.tails?.push(
+                      rooted.length > 0
+                        ? `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                        : `worktree ${t.path} kept (orphan reconcile) — has uncommitted changes or status unreadable; branch ${row.headRef} kept with it`
+                    );
                   }
+                  break;
                 }
               }
-            } catch {
-              /* best effort */
-            }
-            // Only delete branch if no worktree is still using it
-            try {
-              const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
-              if (wt2.code === 0) {
-                const trees2 = parseWorktreePorcelain(wt2.out);
-                const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
-                if (!stillCheckedOut) {
-                  gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
-                } else {
-                  ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
-                }
-              } else {
-                gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
-              }
-            } catch {
-              gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
             }
           } catch {
             /* best effort */
           }
-        } catch (err) {
-          console.error(`loop: reconcile failed for ${prRef(ctx, row.pr)} — ${String(err)}`);
+          // Only delete branch if no worktree is still using it
+          try {
+            const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt2.code === 0) {
+              const trees2 = parseWorktreePorcelain(wt2.out);
+              const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
+              if (!stillCheckedOut) {
+                const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+                if (br.code !== 0) {
+                  ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+                }
+              } else {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
+              }
+            } else {
+              const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+              if (br.code !== 0) {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+              }
+            }
+          } catch {
+            const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+            if (br.code !== 0) {
+              ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+            }
+          }
+        } catch {
+          /* best effort */
         }
+      } catch (err) {
+        console.error(`loop: reconcile failed for ${prRef(ctx, row.pr)} — ${String(err)}`);
       }
     }
   } catch (err) {
@@ -4166,6 +4350,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       continue;
     }
     q.stack.splice(q.stack.indexOf(m), 1);
+    // the member's ceiling reservation dies with its tenure — landed
+    // or failed, no PR of its own keeps arriving to consume it
+    releaseMemberReservation(q, m);
     q.tally[verdict] += 1;
     if (verdict === 'parked') {
       for (const b of m.beads) {
@@ -4261,6 +4448,127 @@ function settleOutcome(
   }
 }
 
+/** One admitted-but-PR-less claim, as a file other loop processes can
+ *  count. The ceiling lock only spans the check; the claim→spawn→open
+ *  window sits outside it, and two loops that each read n<max in that
+ *  window both admit — the listing can't see a PR that doesn't exist
+ *  yet. A reservation file closes the window: written under the lock
+ *  at admission, re-stamped with the branch once the member exists,
+ *  consumed when the branch's PR lists, released on every
+ *  non-member outcome and on member splice, and swept when the
+ *  owning pid is dead. Lives in the COMMON git dir so linked
+ *  worktrees of this clone coordinate (separate clones share only
+ *  the remote listing — a remote reservation ref is follow-up work).
+ */
+interface CeilingRes {
+  pid: number;
+  pidStart?: string;
+  branch?: string;
+  ts: number;
+}
+
+const CEILING_RES_PREFIX = 'res-';
+
+/** Count admitted-but-PR-less claims across loops sharing this common
+ *  dir — and collect the ones already discharged. Consumed: the
+ *  branch's PR now lists (the listing counts it). Released: the owner
+ *  pid is dead (its claim can never spawn). Anything else — alive
+ *  owner, branch not yet listed, unreadable file — counts: an
+ *  unverifiable reservation is a held slot, never a free one. */
+function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const heads = new Set(fleet.map(r => r.headRef));
+  let live = 0;
+  for (const name of names) {
+    if (!name.startsWith(CEILING_RES_PREFIX) || !name.endsWith('.json')) {
+      continue;
+    }
+    const p = join(dir, name);
+    let res: CeilingRes | undefined;
+    try {
+      res = JSON.parse(readFileSync(p, 'utf8')) as CeilingRes;
+    } catch {
+      res = undefined;
+    }
+    if (res !== undefined && res.branch !== undefined && heads.has(res.branch)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    if (res !== undefined && typeof res.pid === 'number' && !pidAlive(res.pid, res.pidStart)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    live += 1;
+  }
+  return live;
+}
+
+/** Write one reservation under the caller's lock — null when the file
+ *  can't be proven to exist (the slot then counts as held, not free). */
+function reserveCeilingSlot(dir: string): string | null {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, `${CEILING_RES_PREFIX}${process.pid}-${Date.now()}.json`);
+    const res: CeilingRes = {
+      pid: process.pid,
+      pidStart: procStat(process.pid)?.start,
+      ts: Date.now(),
+    };
+    writeFileSync(p, JSON.stringify(res), 'utf8');
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** The member's branch joined the reservation — the file now names
+ *  the head its future PR will list under, so the next sweep can tell
+ *  'worker still spawning' from 'listing already counts this slot'. */
+function stampCeilingReservation(file: string, branch: string): void {
+  try {
+    const res = JSON.parse(readFileSync(file, 'utf8')) as CeilingRes;
+    res.branch = branch;
+    writeFileSync(file, JSON.stringify(res), 'utf8');
+  } catch {
+    /* the file stays counted either way — a branchless reservation is the same held slot */
+  }
+}
+
+function releaseCeilingFile(file: string | null): void {
+  if (file === null) {
+    return;
+  }
+  try {
+    unlinkSync(file);
+  } catch {
+    /* already gone */
+  }
+}
+
+/** A member left the stack — its reservation (if the PR never listed
+ *  it away) dies with the tenure. */
+function releaseMemberReservation(q: QueueState, member: GateMember): void {
+  const file = q.ceilingRes.get(member.item.branch);
+  if (file === undefined) {
+    return;
+  }
+  q.ceilingRes.delete(member.item.branch);
+  releaseCeilingFile(file);
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -4274,10 +4582,16 @@ async function tryClaim(
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false;
   }
-  // Hard ceiling on TOTAL open fleet PRs
+  // Hard ceiling on TOTAL open fleet PRs — plus every admitted-but-
+  // PR-less claim a sibling loop holds a reservation for. The
+  // reservation is what makes the bound atomic: without it two loops
+  // sharing this common dir can both read n<max in the claim→spawn→open
+  // window and each admit a clump.
+  let ceilingRes: string | null = null;
   if (ctx.cfg.maxOpenTotal > 0) {
     try {
-      const fleetLock = gitCommonDir(ctx.root);
+      const fleetCommon = gitCommonDir(ctx.root);
+      const resDir = fleetCommon === null ? null : join(fleetCommon, 'bro', 'ceiling.reserved');
       let held = false;
       const doCeilCheck = (): boolean => {
         const fleet = listOpenFleetPrs(ctx);
@@ -4289,26 +4603,43 @@ async function tryClaim(
           }
           return true;
         }
-        // Count in-flight workers/pending members in this process? Also count our gate stack
-        // but to be globally correct, count all open fleet PRs + in-flight spawns across fleet
-        // For now, be conservative: if at or over ceiling, hold
-        if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
+        const pending = resDir === null ? 0 : sweepCeilingReservations(resDir, fleet);
+        const open = fleet.length + pending;
+        if (ceilingHeld(open, ctx.cfg.maxOpenTotal)) {
           if (
             !ctx.claimsHeld ||
-            ctx.claimsHeld.open !== fleet.length ||
+            ctx.claimsHeld.open !== open ||
             ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
           ) {
-            ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
-            say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
+            ctx.claimsHeld = { open, max: ctx.cfg.maxOpenTotal };
+            say(
+              ctx,
+              `loop: claims held — ceiling ${fleet.length} open + ${pending} reserved/${ctx.cfg.maxOpenTotal}`
+            );
           }
           return true;
         }
         ctx.claimsHeld = undefined;
+        // admit = reserve, still under the lock — the claim→spawn→open
+        // window is then visible to the next loop's count
+        if (resDir !== null) {
+          ceilingRes = reserveCeilingSlot(resDir);
+          if (ceilingRes === null) {
+            if (!ctx.claimsHeld) {
+              ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+              say(
+                ctx,
+                `loop: claims held — ceiling reservation unwritable/${ctx.cfg.maxOpenTotal}`
+              );
+            }
+            return true;
+          }
+        }
         return false;
       };
-      if (fleetLock !== null) {
+      if (fleetCommon !== null) {
         try {
-          withFileLock(join(fleetLock, 'bro', 'loop.ceiling.lock'), () => {
+          withFileLock(join(fleetCommon, 'bro', 'loop.ceiling.lock'), () => {
             held = doCeilCheck();
           });
         } catch {
@@ -4317,7 +4648,14 @@ async function tryClaim(
       } else {
         held = doCeilCheck();
       }
-      if (held) return false;
+      if (held) {
+        // drain beats the hold — an empty queue behind the ceiling has
+        // nothing to wait for (same rule as the disk floor)
+        if (queueDrained(ctx, scope, q.seen)) {
+          q.drained = true;
+        }
+        return false;
+      }
     } catch {
       // a listing that can't be produced holds too (fail closed)
       if (!ctx.claimsHeld) {
@@ -4336,6 +4674,7 @@ async function tryClaim(
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
+    releaseCeilingFile(ceilingRes);
     return holdForDisk(ctx, scope, q, breach);
   }
   if (q.diskHeld) {
@@ -4357,12 +4696,14 @@ async function tryClaim(
   try {
     clump = claimClump(ctx, scope, q.seen, budget);
   } catch (err) {
+    releaseCeilingFile(ceilingRes);
     const msg = err instanceof Error ? err.message : String(err);
     say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
     return false;
   }
   if (clump === undefined) {
+    releaseCeilingFile(ceilingRes);
     q.drained = true;
     return false;
   }
@@ -4372,13 +4713,35 @@ async function tryClaim(
   }
   q.claimed += clump.length;
   ctx.bead = clump[0]!.id;
-  const out = await pushItem(ctx, clump);
+  let out: PushOutcome;
+  try {
+    out = await pushItem(ctx, clump);
+  } catch (err) {
+    // an uncaught push failure is still an admission that never
+    // produced a member — the slot goes back, not into a leak that
+    // only a dead-pid sweep would find
+    releaseCeilingFile(ceilingRes);
+    throw err;
+  }
   if (out.kind === 'hold') {
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
+    releaseCeilingFile(ceilingRes);
     unseeClump(ctx, q, clump);
     return false;
+  }
+  if (out.kind === 'member') {
+    if (ceilingRes !== null) {
+      // the reservation lives until the member's PR lists (swept then)
+      // or the member leaves the stack without one
+      stampCeilingReservation(ceilingRes, out.member.item.branch);
+      q.ceilingRes.set(out.member.item.branch, ceilingRes);
+      ceilingRes = null;
+    }
+  } else {
+    // parked/failed — no PR will ever list for this admission
+    releaseCeilingFile(ceilingRes);
   }
   recordClaimOutcome(ctx, q, ids, out);
   return true;
@@ -4464,6 +4827,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
     pushHoldUntil: 0,
     diskHeld: false,
     diskProbeWarned: new Set(),
+    unclosableNoted: new Set(),
+    ceilingRes: new Map(),
   };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid

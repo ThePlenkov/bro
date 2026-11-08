@@ -74,11 +74,13 @@ function findLongestPrefixMatch(
   const tail = headRef.slice(slash + 1);
   let best: ReconcileBead | undefined;
   let bestLen = -1;
+  const owners = new Set<string>();
 
   for (const [slug, bead] of beadsBySlug) {
     if (tail !== slug && !tail.startsWith(`${slug}-`)) {
       continue;
     }
+    owners.add(bead.id);
     const len = loopSlug(bead.id).length;
     if (best === undefined || len > bestLen) {
       best = bead;
@@ -86,6 +88,14 @@ function findLongestPrefixMatch(
     }
   }
 
+  // A `work/`/`fix/` tail is a human label, not a bead contract — when
+  // two DIFFERENT beads both prefix it (`work/bro-a-retry` matches a
+  // live `bro-a` and a closed `bro-a-retry`) the longest-prefix pick is
+  // a guess that can name the closed bead and bury the live owner's
+  // branch. Ambiguous ownership answers nothing: the head keeps.
+  if (owners.size > 1) {
+    return undefined;
+  }
   return best;
 }
 
@@ -96,17 +106,17 @@ function findLongestPrefixMatch(
  *  is the caller's loopSlug(id) map, so sanitized ids resolve exactly
  *  like their branches do. */
 export function beadForHead(
-  headRef: string,
+  row: FleetPrRow,
   beadsBySlug: ReadonlyMap<string, ReconcileBead>
 ): ReconcileBead | undefined {
-  const { det, bead } = tryDeterministicBead(headRef, beadsBySlug);
+  const { det, bead } = tryDeterministicBead(row.headRef, beadsBySlug);
   if (det !== undefined) {
     if (bead !== undefined) {
       return bead;
     }
     return undefined;
   }
-  return findLongestPrefixMatch(headRef, beadsBySlug);
+  return findLongestPrefixMatch(row.headRef, beadsBySlug);
 }
 
 /** What the reconcile pass does with an open fleet PR not on this
@@ -115,19 +125,45 @@ export function beadForHead(
  *  namespace), so the PR is pure review/merge-budget spend. */
 export type OrphanVerdict = { kind: 'close'; bead?: string; why: string } | { kind: 'keep' };
 
+/** The statuses that keep a PR open — `open`/`in_progress` are live
+ *  work; `deferred` is the park's snooze (spec bro-hl22w): the woken
+ *  claim re-uses the kept worktree and its open PR, so burying it
+ *  deletes unlanded work. Anything else (closed, or a backend's
+ *  terminal state) is non-live; an unreadable/absent status keeps —
+ *  an unknown bead is never a burial order. */
+function isLiveStatus(status: string | undefined): boolean {
+  return status === 'open' || status === 'in_progress' || status === 'deferred';
+}
+
 function isNonLiveStatus(status: string | undefined): boolean {
   if (typeof status !== 'string') {
     return false;
   }
-  return status !== 'open' && status !== 'in_progress';
+  return !isLiveStatus(status);
 }
 
 /** Bead closed → close; deterministic head with no bead row → close
  *  (obsolete); live or unverifiable → keep. A kept live PR is drive's
- *  territory — it owns the fixer and the merge. */
-export function orphanVerdict(headRef: string, bead: ReconcileBead | undefined): OrphanVerdict {
+ *  territory — it owns the fixer and the merge.
+ *
+ *  `members` is the batch's full bead set (the `bead` provenance
+ *  trailer stamps every clump id on the PR body — `loop/<lead>` heads
+ *  share the branch across members). Any LIVE member keeps the PR:
+ *  the lead's closure says nothing about an `open`/`in_progress`/
+ *  `deferred` sibling's unlanded commits. A member missing from the
+ *  listing is as dead as a closed one — the same provably-obsolete
+ *  rule the deterministic head namespace already applies. */
+export function orphanVerdict(
+  row: FleetPrRow,
+  bead: ReconcileBead | undefined,
+  members?: readonly ReconcileBead[]
+): OrphanVerdict {
+  if (members !== undefined && members.some(m => isLiveStatus(m.status))) {
+    return { kind: 'keep' };
+  }
+
   if (bead === undefined) {
-    if (deterministicHeadSlug(headRef) === undefined) {
+    if (deterministicHeadSlug(row.headRef) === undefined) {
       return { kind: 'keep' };
     }
     return { kind: 'close', why: 'no bead — obsolete' };

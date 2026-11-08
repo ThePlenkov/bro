@@ -29,25 +29,51 @@ The tick becomes closure-first. Order per pass:
    path carried `deleteBranch`, an outside merge does not).
 2. **Reconcile orphaned fleet PRs** — open PRs on fleet heads
    (`work/`, `loop/`, `stack/`, `fix/bro-`) that are NOT on this run's
-   stack. The branch slug resolves a bead row (`loop/<slug>`,
-   `stack/<name>/<n>-<slug>`, or a bead-id prefix match for work//fix/
-   heads). Bead **closed** → the PR is dead weight: `closePr` + remote
-   branch delete + local branch/worktree reap. Bead **missing** on a
-   `loop/`/`stack/` head (deterministic bead namespaces) → same
-   verdict; on `work/`/`fix/` heads a missing row is unverifiable →
-   keep. Bead **open/in_progress** → keep — a live PR is `bro drive`'s
-   territory (it spawns the fixer and owns the merge); the loop only
-   buries the dead. Hosts without `closePr` report once and keep
-   counting.
+   stack (a stack member protects by PR number AND by branch — a
+   worker-pending member has no number yet). The branch slug resolves
+   a bead row (`loop/<slug>`, `stack/<name>/<n>-<slug>`, or a bead-id
+   prefix match for work//fix/ heads; a tail two different beads
+   prefix is ambiguous and keeps). Bead **closed** → the PR is dead
+   weight: `closePr` + remote branch delete + local branch/worktree
+   reap — and the verdict is re-read against a fresh listing before
+   the close, so a bead reopened mid-pass is never buried. Bead
+   **missing** on a `loop/`/`stack/` head (deterministic bead
+   namespaces) → same verdict; on `work/`/`fix/` heads a missing row
+   is unverifiable → keep. Bead **open/in_progress/deferred** → keep
+   (a parked member's snooze wakes back to its PR) — a live PR is
+   `bro drive`'s territory; the loop only buries the dead. A head
+   whose body carries the `bead:` provenance trailer answers as its
+   whole membership instead of its lead: the PR keeps while ANY
+   stamped member id is not positively closed. A `loop/` head is
+   stamped at open, so membership that can't be read there keeps —
+   an unproven batch is never a burial order; on the other
+   namespaces a missing trailer falls back to the single-bead
+   verdict. Cleanup never force-removes a worktree a live process
+   roots or uncommitted changes sit in, and every failed delete
+   lands in the tails. Hosts without `closePr` report once per PR
+   per run and keep counting.
 3. **Ceiling check, then claim** — `loop.maxOpenTotal` (default 10,
    `0` = off) counts every open PR on a fleet head, one
-   `rev.openPrs(repo)` listing per interval (per-branch scan as the
-   no-listing fallback). Count ≥ ceiling → `claims held — ceiling
-   N/M` (once per episode) and the push half is skipped; gate service
-   and reconcile still run. A listing that can't be produced holds
-   too — a hard ceiling that cannot see admits nothing. Under the
-   ceiling the normal admission order applies: fleet cap → disk floor
-   → claim.
+   `rev.openPrs(repo)` listing per interval (per-branch scan over
+   local AND `ls-remote` heads as the no-listing fallback — a
+   remote-only head another clone pushed still counts; any
+   enumeration gap reads as 'unknown'), PLUS each
+   admitted-but-PR-less claim holding
+   a reservation file in the common git dir (`bro/ceiling.reserved/`,
+   written under `loop.ceiling.lock` at admission — the lock alone
+   released at the check, so two loops in linked worktrees could both
+   read n<max inside one claim→spawn→open window). A reservation is
+   stamped with the member's branch once the clump lands, consumed
+   when that branch's PR lists, released on every non-member outcome
+   and on stack splice, and swept when its owner pid is dead.
+   Reservations coordinate loops in this clone's worktrees; separate
+   clones still share only the remote listing. Count ≥ ceiling →
+   `claims held — ceiling N open + R reserved/M` (once per episode)
+   and the push half is skipped — but an empty queue still reports
+   drained first; gate service and reconcile still run. A listing
+   that can't be produced holds too — a hard ceiling that cannot see
+   admits nothing. Under the ceiling the normal admission order
+   applies: fleet cap → disk floor → claim.
 
 **Serial by default** — `loop.maxOpen` default moves 3 → 1: the
 single in-flight branch forks from the freshest main, which is the
