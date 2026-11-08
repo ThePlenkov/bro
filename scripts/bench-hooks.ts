@@ -166,9 +166,17 @@ function parseArgs(argv: string[]): Options {
   };
 }
 
-function assertBudgetCaps(parsed: Record<string, unknown>): void {
+const isPositiveFinite = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+function assertBudgetCaps(
+  parsed: Record<string, unknown>
+): asserts parsed is Record<string, number> {
   for (const [key, cap] of Object.entries(parsed)) {
-    if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) {
+    if (!isPositiveFinite(cap)) {
       throw new Error(`cap for ${key} must be a positive finite number`);
     }
   }
@@ -176,11 +184,11 @@ function assertBudgetCaps(parsed: Record<string, unknown>): void {
 
 function readBudgetFile(file: string): Record<string, number> {
   const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error('budget must be an object');
   }
-  assertBudgetCaps(parsed as Record<string, unknown>);
-  return parsed as Record<string, number>;
+  assertBudgetCaps(parsed);
+  return parsed;
 }
 
 function loadBudget(file: string | undefined): Record<string, number> {

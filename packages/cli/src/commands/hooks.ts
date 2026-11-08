@@ -440,33 +440,30 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (!/^\s*npx\b/.test(cmd)) {
     return false;
   }
-  const tokens = cmd.trim().split(/\s+/).slice(1);
-  // Reject package overrides and any flag that selects a package.
-  for (const t of tokens) {
-    if (t === '-p' || t === '--package' || t.startsWith('--package=') || t.startsWith('-p=')) {
-      return false;
-    }
+  const exec = npxExecutable(cmd.trim().split(/\s+/).slice(1));
+  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
+}
+
+/** `-p`/`--package` in every spelling npx accepts — the package-set
+ *  selector means `bro` in the argv is not necessarily what runs. */
+const NPX_PACKAGE_RE = /^(?:-p|--package)(?:=|$)/;
+
+/** Flags that take no value and change nothing about what runs —
+ *  the only flags allowed between `npx` and its executable. */
+const NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '--quiet']);
+
+/** The executable npx will run, or undefined when the argv says `bro`
+ *  isn't it: a package override anywhere vetoes, and the first token
+ *  that is not a known no-value flag must be the executable — a flag
+ *  in its place can rename the run (`--call`), repoint the fetch
+ *  (`--registry`), or eat the next token as its value (`--prefix`,
+ *  `--cache`), so the command falls through to a prompt. */
+function npxExecutable(tokens: string[]): string | undefined {
+  if (tokens.some(t => NPX_PACKAGE_RE.test(t))) {
+    return undefined;
   }
-  // Only known no-value flags may precede the executable. Any other flag
-  // can select a registry or shell command (`--call`, `--registry`,
-  // `--prefix`, `--cache`), or consume the next token as its value —
-  // either way `bro` stops being what npx runs, so the command prompts.
-  const NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '--quiet']);
-  let exec: string | undefined;
-  for (const t of tokens) {
-    if (NO_VALUE_NPX_FLAGS.has(t)) {
-      continue;
-    }
-    if (t.startsWith('-')) {
-      return false;
-    }
-    exec = t;
-    break;
-  }
-  if (exec === undefined) {
-    return false;
-  }
-  return /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
+  const exec = tokens.find(t => !NO_VALUE_NPX_FLAGS.has(t));
+  return exec !== undefined && !exec.startsWith('-') ? exec : undefined;
 }
 
 // --- session arming -----------------------------------------------------------
@@ -1435,6 +1432,19 @@ export function recordGuardEvents(
   }
 }
 
+/** The guard sweep's trace half — this session's tail entries
+ *  relativized through the learn index. An unloaded learn package or a
+ *  relativize throw degrades to an empty trace, never a thrown event:
+ *  a guard losing its match haystack is a miss, not a broken hook. */
+async function guardTrace(dir: string, entries: any[]): Promise<any[]> {
+  try {
+    const learn = await lazyLearn().catch(() => null);
+    return learn ? learn.relativize(dir, entries) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** One guard-engine call per emit path (spec: bro-nkn6). Declarations
  *  resolve here — connectors only contribute `guards()`, evaluation is
  *  centralized. Fail-open like every probe: a wedged engine emits
@@ -1633,16 +1643,9 @@ export async function collectSessionContext(
     // tail the learn connector assembles
     guardLines(dir, 'session-start', sessionId, async () => {
       const tail = await previousTraceTail(dir, sessionId);
-      let trace: any[] = [];
-      try {
-        const learn = await lazyLearn().catch(() => null);
-        trace = learn ? learn.relativize(dir, tail.entries) : [];
-      } catch {
-        trace = [];
-      }
       return {
         text: `${await sessionContextTextCached(dir, sessionId)}\n${tail.raw}`,
-        trace,
+        trace: await guardTrace(dir, tail.entries),
       };
     }),
   ]);
@@ -1671,14 +1674,7 @@ export async function collectPromptContext(
     // keys see this session's tail, state sees the live repo
     guardLines(dir, 'prompt-submit', sessionId, async () => {
       const tail = await sessionTail(dir, sessionId);
-      let trace: any[] = [];
-      try {
-        const learn = await lazyLearn().catch(() => null);
-        trace = learn ? learn.relativize(dir, tail.entries) : [];
-      } catch {
-        trace = [];
-      }
-      return { text: prompt, trace };
+      return { text: prompt, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
   return { lines: [...promptLines, ...guards] };
@@ -1827,14 +1823,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
     // landing included — journalTrace ran first), state sees live repo
     guardLines(dir, 'post-tool', sessionId, async () => {
       const tail = await sessionTail(dir, sessionId);
-      let trace: any[] = [];
-      try {
-        const learn = await lazyLearn().catch(() => null);
-        trace = learn ? learn.relativize(dir, tail.entries) : [];
-      } catch {
-        trace = [];
-      }
-      return { text: tail.raw, trace };
+      return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
   lines.push(...postLines, ...guards);
@@ -1914,6 +1903,27 @@ function stopGateVerdict(
   return { hint: c.armedHint ?? c.passive };
 }
 
+/** The contribution walk of the stop gate — first block in aspect
+ *  order wins the emit; every non-block verdict's hint rides along so
+ *  a block still drops them (they journal as verdict rows regardless). */
+function stopGateOutcome(
+  contributions: GateContribution[],
+  armed: Set<string>,
+  sessionId: string
+): { block?: string; hints: string[] } {
+  const hints: string[] = [];
+  for (const c of contributions) {
+    const verdict = stopGateVerdict(c, armed, sessionId);
+    if (verdict.block !== undefined) {
+      return { block: verdict.block, hints };
+    }
+    if (verdict.hint !== undefined) {
+      hints.push(verdict.hint);
+    }
+  }
+  return { hints };
+}
+
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
@@ -1942,27 +1952,15 @@ async function emitStopGateBody(
     ),
     guardLines(dir, 'stop', sessionId, async () => {
       const tail = await sessionTail(dir, sessionId);
-      let trace: any[] = [];
-      try {
-        const learn = await lazyLearn().catch(() => null);
-        trace = learn ? learn.relativize(dir, tail.entries) : [];
-      } catch {
-        trace = [];
-      }
-      return { text: tail.raw, trace };
+      return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
-  const gateHints: string[] = [];
-  for (const c of contributions) {
-    const verdict = stopGateVerdict(c, armed, sessionId);
-    if (verdict.block !== undefined) {
-      emit({ decision: 'block', reason: verdict.block });
-      return;
-    }
-    if (verdict.hint) {
-      gateHints.push(verdict.hint);
-    }
+  const outcome = stopGateOutcome(contributions, armed, sessionId);
+  if (outcome.block !== undefined) {
+    emit({ decision: 'block', reason: outcome.block });
+    return;
   }
+  const gateHints = outcome.hints;
   // any Stop context re-wakes the host as a new turn — repeating an
   // unchanged gate hint every stop turns an idle wait into a loop
   const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])];
