@@ -1190,13 +1190,6 @@
       "matching_content_path": "packages/acp/tui/pane.test.tsx"
     },
     {
-      "quality_gates": {
-        "new_code_health": true
-      },
-      "quality_gates_doc": "Rung 1 (floor) \u2014 the legacy backlog: new code must not introduce technical debt, pre-existing debt is tolerated. This is the wave-1 baseline; files graduate as waves clear them.",
-      "matching_content_path": "**/*"
-    },
-    {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/cli/src/commands/hooks.ts"
@@ -1205,6 +1198,13 @@
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 \u2014 advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/bench-hooks.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": true
+      },
+      "quality_gates_doc": "Rung 1 (floor) \u2014 the legacy backlog: new code must not introduce technical debt, pre-existing debt is tolerated. This is the wave-1 baseline; files graduate as waves clear them.",
+      "matching_content_path": "**/*"
     }
   ]
 }

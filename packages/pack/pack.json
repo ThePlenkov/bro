@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/@broject/bro/schemas/pack.schema.json",
   "name": "@broject/bro-pack",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "requires": {
     "bro": ">=0.2.5"
   },
@@ -9,6 +9,9 @@
     "acp",
     "act",
     "agents",
+    "bro",
+    "bro-herdr",
+    "brouter",
     "check",
     "convoy",
     "daemon",
@@ -18,8 +21,10 @@
     "dogfood",
     "drill",
     "drive",
+    "exec",
     "goal",
     "guard",
+    "herdr-orchestrate",
     "judge",
     "learn",
     "loop",
@@ -27,6 +32,7 @@
     "mesh",
     "next",
     "notify",
+    "otel",
     "provider",
     "providers",
     "pulse",
@@ -36,6 +42,7 @@
     "rig",
     "sdd",
     "serve",
+    "skills",
     "stack",
     "status",
     "sweep",
@@ -46,5 +53,8 @@
     "work",
     "wtf"
   ],
-  "formulas": ["debt-pipeline.formula.toml", "ship-bead.formula.toml"]
+  "formulas": [
+    "debt-pipeline.formula.toml",
+    "ship-bead.formula.toml"
+  ]
 }

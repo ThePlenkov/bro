@@ -641,8 +641,8 @@ if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; 
   if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
     if [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; then
       printf '%s\n' 'bro-hooks: dispatch failed' >&2
+      cursor_permission_ask
     fi
-    cursor_permission_ask
     exit 0
   fi
   [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }

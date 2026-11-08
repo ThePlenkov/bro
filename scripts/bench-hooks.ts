@@ -166,27 +166,32 @@ function parseArgs(argv: string[]): Options {
   };
 }
 
+function assertBudgetCaps(parsed: Record<string, unknown>): void {
+  for (const [key, cap] of Object.entries(parsed)) {
+    if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) {
+      throw new Error(`cap for ${key} must be a positive finite number`);
+    }
+  }
+}
+
+function readBudgetFile(file: string): Record<string, number> {
+  const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('budget must be an object');
+  }
+  assertBudgetCaps(parsed as Record<string, unknown>);
+  return parsed as Record<string, number>;
+}
+
 function loadBudget(file: string | undefined): Record<string, number> {
   if (file === undefined) {
     return BUDGET_P50_MS;
   }
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('budget must be an object');
-    }
-    for (const [key, cap] of Object.entries(parsed)) {
-      if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) {
-        console.error(
-          `bench-hooks: --budget ${file}: cap for ${key} must be a positive finite number`
-        );
-        process.exit(2);
-      }
-    }
-    return { ...BUDGET_P50_MS, ...(parsed as Record<string, number>) };
+    return { ...BUDGET_P50_MS, ...readBudgetFile(file) };
   } catch (e) {
     console.error(
-      `bench-hooks: cannot read --budget ${file} — ${e instanceof Error ? e.message : String(e)}`
+      `bench-hooks: --budget ${file} — ${e instanceof Error ? e.message : String(e)}`
     );
     process.exit(2);
   }

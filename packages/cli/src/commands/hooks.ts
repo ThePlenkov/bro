@@ -122,7 +122,6 @@ const lazyJudgeConfig = async () => (await import('@broject/judge')).judgeConfig
 const lazyJudgeFacade = async () => (await import('@broject/judge')).judgeFacade;
 const lazyOtelSpan = async () => (await import('@broject/providers')).otelSpan;
 const lazyLearn = async () => import('@broject/learn');
-const lazyGUARD_EVENTS = async () => (await import('@broject/core')).GUARD_EVENTS;
 const lazyGithooks = async () => import('./githooks.ts');
 const lazyGoal = async () => import('./goal.ts');
 const lazyHeartbeat = async () => import('./watch-heartbeat.ts');
@@ -448,11 +447,18 @@ export function isSelfToolCommand(cmd: string): boolean {
       return false;
     }
   }
-  // Find the first non-flag token: that is the executable npx will run.
+  // Only known no-value flags may precede the executable. Any other flag
+  // can select a registry or shell command (`--call`, `--registry`,
+  // `--prefix`, `--cache`), or consume the next token as its value —
+  // either way `bro` stops being what npx runs, so the command prompts.
+  const NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '--quiet']);
   let exec: string | undefined;
   for (const t of tokens) {
-    if (t.startsWith('-')) {
+    if (NO_VALUE_NPX_FLAGS.has(t)) {
       continue;
+    }
+    if (t.startsWith('-')) {
+      return false;
     }
     exec = t;
     break;
@@ -1372,28 +1378,8 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  mid-write sees a stale stamp or a stale extra file, both of which
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
-const DEFAULT_GUARD_EVENTS: readonly string[] = [
-  'session-start',
-  'prompt-submit',
-  'post-tool',
-  'stop',
-];
-
-function guardEventsFromCore(): readonly string[] {
-  try {
-    const core = require('@broject/core');
-    const events = core?.GUARD_EVENTS;
-    if (Array.isArray(events)) {
-      return events as readonly string[];
-    }
-  } catch {
-    // fall through
-  }
-  return DEFAULT_GUARD_EVENTS;
-}
-
 function pruneStaleGuardEvents(gdir: string, coverageEvents: readonly string[]): void {
-  for (const ev of guardEventsFromCore()) {
+  for (const ev of GUARD_EVENTS) {
     if (!coverageEvents.includes(ev)) {
       try {
         rmSync(join(gdir, ev), { force: true });
@@ -1891,7 +1877,7 @@ async function emitStopGate(input: HookInput): Promise<void> {
     try {
       const g = await lazyGoal();
       const tail = await sessionTail(process.cwd(), sessionId);
-      return g.goalStopLines(process.cwd(), sessionId, {
+      return await g.goalStopLines(process.cwd(), sessionId, {
         trace: tail.raw,
         context: contextP,
       });
