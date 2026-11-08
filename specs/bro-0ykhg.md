@@ -52,14 +52,16 @@ of how the previous routing turned out:
 | bro-0ykhg.6  | client adapters out of brouter, into their own plugin           | specs/bro-0ykhg.6.md  |
 | bro-l8c4f.9  | the lift bench: one prompt, bare agent vs agent + bro (arena)   | specs/bro-l8c4f.9.md  |
 
-Order: .1 → .2 → .3; .4 feeds .2's scoring and .5's oracle; .6 is
+Order: .1 → .2 → .3; .4 feeds .1's scoring, .2's T1 recall, and .5's
+historical labels; .6 is
 independent. bro-l8c4f.9 proves the product claim, .5 proves the router's.
 
 ## Non-negotiables (inherited, restated)
 
 - The model answers questions; **code** picks the route, reads the health,
   walks the chain. A model never names a provider.
-- Fail-open: no judge, no recall, no cache → the table's own order stands.
+- Fail-open: no judge, no recall, no cache → table order among candidates
+  that pass code-owned hard filters and health; no safe route fails loud.
 - `off | shadow | enforce` stays the trust axis. When to ASK the judge
   (bro-0ykhg.2) and whether to REUSE an answer (bro-0ykhg.3) are separate
   axes, not new values of `mode`.

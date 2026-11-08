@@ -34,14 +34,14 @@ for correctness, not outcome benchmarking.
   `successCriteria[]`, and `targets{timeToGreenMs,humanInterventions,controlPlaneCalls,tokens{input,output,cacheRead,cacheWrite},duplicateWorkCount,abandonedWorkCount,mergedFindingsWithoutFollowup}`.
   Each task is a reproducible unit with a known starting state and
   success criteria.
-- **Paired runs**: run the same corpus against (a) native automation
-  baseline (configurable per provider) and (b) BRO, recording runs in a
+- **Paired runs**: run the same corpus against (a) bare agent baseline
+  and (b) BRO (native automation is an optional third variant), recording runs in a
   paired manner tied by task id and revision via `bro self dogfood benchmark run`
   (and flat alias `bro self benchmark run`).
 - **Metrics schema**: publish a stable JSON Schema at
   `packages/cli/schemas/benchmark/paired-results.schema.json` (draft-07)
   and write JSONL results validated by it. Each line captures `taskId`,
-  `revision`, `runId`, `variant` (`native|bro`), `model`, `startedAt`,
+  `revision`, `runId`, `variant` (`bare|bro|native`), `model`, `startedAt`,
   `finishedAt` (ISO 8601 date-time), `timeToGreenMs` (integer ≥0),
   `humanInterventions` (integer ≥0), `controlPlaneCalls` (integer ≥0),
   `tokens{input,output,cacheRead,cacheWrite}` (integers ≥0, all required),
@@ -82,10 +82,15 @@ execution, cost and context.
   SWE-bench) are task SOURCES, not the harness.
 - **Result first**: `outcome` is decided by deterministic checks (tests,
   `bro review act status` green on the PR) before the judge; the judge only
-  scores what checks cannot see.
-- **Metrics added to the schema**: `costUsd` (nullable — unknown is not 0),
-  `contextPeakTokens`, `toolCalls`, `actRounds`, `wallMs`, `repeat` (run
-  index). Each (task, agent, variant) runs ≥3 times; reports carry the
+  scores what checks cannot see. The harness runs the act check externally
+  after each trial; it does not install bro or expose it to the bare agent.
+- **Metrics added to the schema**: extend the draft-07 schema above before
+  emitting new rows: `variant` allows `bare|bro|native`; `costUsd` is a
+  required non-negative number or null (unknown is not 0),
+  `contextPeakTokens`, `toolCalls`, `actRounds`, and `wallMs` are required
+  non-negative integers, and `repeat` is a required integer ≥1 (run index).
+  Keep `additionalProperties: false`; no ad-hoc fields bypass validation.
+  Each (task, agent, variant) runs ≥3 times; reports carry the
   spread, not one number.
 - **Corpus from history**: a closed bead + its merged PR is a task with a
   known starting revision, a reference diff and tests as checks. The corpus
@@ -93,7 +98,8 @@ execution, cost and context.
   (hooks, skill text) is real on one-shot tasks, and the report states the
   task length at which `bro` starts winning, or that it does not.
 
-Acceptance adds: one published paired `bare` vs `bro` run on ≥5 history
+This update supersedes the native-baseline requirement above; `native`
+is optional. Acceptance requires one published paired `bare` vs `bro` run on ≥5 history
 tasks × ≥3 repeats for at least two agents (one Claude Code, one
 opencode/kilo), with targets set before the run.
 
@@ -101,6 +107,9 @@ opencode/kilo), with targets set before the run.
 
 - Task corpus published with pinned revisions and model/CI pins.
 - JSONL schema published and used for paired results.
-- Paired native-vs-BRO results recorded with targets set before
-  measurements; claims about economy are not made without baseline.
+- Paired bare-vs-bro results on ≥5 history tasks × ≥3 repeats for at least
+  two agents (Claude Code and opencode/kilo), with targets set before
+  measurement; native is optional and claims require the paired baseline.
+- Schema fixtures accept bare/bro/native and all declared metrics, reject
+  unknown fields or invalid ranges, and preserve null unknown cost.
 - `npm run build && npm run typecheck && npm test` pass.

@@ -18,7 +18,10 @@ review and release cycle.
 ## Design
 
 - New package `@broject/client-adapters` (name open for the operator) with
-  its own skill (the client half of `skills/brouter/SKILL.md` moves there).
+  its own CLI implementation. The client half of `skills/brouter/SKILL.md`
+  moves to a skill under the existing root `skills/` tree, alongside the
+  one root `plugin.json`; the package adds no portable manifest or skill
+  tree. Generated host adapters continue to point at that same root.
 - Moves: `clients/`, `client-plugins.ts`, `settings.ts`, `settings-diff.ts`,
   `client-roundtrip.test.ts`, `scripts/claude-code-live-check.ts`, the
   `client`/`clients` commands.
