@@ -358,8 +358,7 @@ async function provisionRepo(
     `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
   );
   execFileSync('git', ['-C', repo, 'add', '-A']); // NOSONAR — PATH lookup is the contract
-  execFileSync('git', [
-    // NOSONAR — PATH lookup is the contract
+  execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
     repo,
     // identity pinned — a scratch must never depend on ambient
@@ -710,8 +709,7 @@ function isRecordedServe(
     /* /proc absent (macOS) or the pid is gone — try argv evidence */
   }
   try {
-    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
-      // NOSONAR — PATH lookup is the contract
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
     });
     const port = state.url?.match(/:(\d+)/)?.[1];
