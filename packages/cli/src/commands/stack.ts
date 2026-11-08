@@ -556,11 +556,42 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
  * that roots on something other than the default branch (the router's arc
  * roots on its own PR) must not be planned onto the default: the root is
  * the chain's own, and the plan follows it.
+ *
+ * A member that MERGED left the chain: its base is the branch it landed
+ * on, and that branch is gone with it. The chain then stands on the
+ * default branch — the same answer `planSync` gives the member that
+ * follows ("its successor's base becomes the nearest lower member still
+ * open, or the default branch").
+ *
+ * A DEAD ref is never a base. The recorded edge names a branch that may
+ * itself have merged and been deleted (the arc's base merges before the
+ * layer above it does) — planning onto it is what made the sync refuse
+ * to move the members that were still in the chain. So the candidate
+ * must be a branch that still EXISTS; otherwise the chain falls back to
+ * the default branch, which is where the dead branch's work landed.
+ *
+ * `alive` answers "does this branch still exist" — the caller reads it
+ * from the git truth, so this stays a pure function of its inputs. It is
+ * REQUIRED, with no default: a caller that forgot to check would fail
+ * OPEN (every dead branch reads as alive), which is the failure this
+ * whole guard exists to prevent.
+ *
+ * `undefined` when NO branch is alive — not even the default branch.
+ * There is nothing to stand on, and the caller must say so rather than
+ * plan onto a dead ref.
  */
-function chainRootBase(members: MemberView[], defaultBase: string): string {
+export function chainRootBase(
+  members: SyncMemberInput[],
+  defaultBase: string,
+  alive: (branch: string) => boolean
+): string | undefined {
   const first = members[0];
-  if (first === undefined) return defaultBase;
-  return first.edgeBase ?? first.prBase ?? defaultBase;
+  if (first !== undefined && first.prState !== 'MERGED') {
+    for (const candidate of [first.edgeBase, first.prBase]) {
+      if (candidate !== undefined && alive(candidate)) return candidate;
+    }
+  }
+  return alive(defaultBase) ? defaultBase : undefined;
 }
 
 /**
@@ -1016,7 +1047,18 @@ export function syncStack(
     lines: [],
   };
   const members = collectMembers(name, root, ctx.rev);
-  ctx.defaultBase = chainRootBase(members, ctx.trunk);
+  // a branch that no longer exists cannot carry the chain — the git truth
+  // decides, so the root falls back to the default branch
+  const chainRoot = chainRootBase(members, ctx.trunk, (b) => localBranch(root, b));
+  if (chainRoot === undefined) {
+    // not even the default branch exists locally: there is nothing to
+    // stand on, and planning onto a dead ref is what this guard is for
+    ctx.lines.push(
+      `  ${name} — the chain's root ${ctx.trunk} does not exist; nothing to sync onto`
+    );
+    return ctx.lines;
+  }
+  ctx.defaultBase = chainRoot;
   markBaseHeads(members, root, ctx.defaultBase);
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the
