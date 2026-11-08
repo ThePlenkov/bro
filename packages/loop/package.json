@@ -1,6 +1,6 @@
 {
   "name": "@broject/loop",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -33,7 +33,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.3.0"
   },
   "description": "Autonomous backlog loop for bro — claim beads, spawn agents in worktrees, drive the act gate",
   "keywords": [

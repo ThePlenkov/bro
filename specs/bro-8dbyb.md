@@ -100,12 +100,13 @@ the only bro invocations stay read verbs (`fleet status`, `act status`).
   unchanged pass writes nothing.
 - Renames stay inside the existing drift rule: only managed workspaces,
   only when the rendered label differs.
-- **`pane report-agent` is deliberately unused** — verified: agent
-  identity binds to a live pane process; reports on dead panes are
-  silently dropped (and the vocabulary is `idle|working|blocked|
-  unknown` — no `done`). Semantic status on live panes adds nothing the
-  label doesn't already carry, and a dead workspace's state is the
-  reaper's territory, not a stale agent record's.
+- **`pane report-agent` was deliberately unused at the time** — verified:
+  agent identity binds to a live pane process; reports on dead panes
+  are silently dropped (and the vocabulary is `idle|working|blocked|
+  unknown` — no `done`). Spec bro-awqde later superseded this: the
+  daemon projector (never a session plugin) reports the fleet
+  projection onto busy ledger panes every tick, exactly because the
+  authority is process-bound and non-persistent.
 
 ### One renderer pane per workspace (`renderers.ts` new)
 

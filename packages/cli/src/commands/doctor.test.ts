@@ -397,19 +397,25 @@ describe('bro doctor', () => {
     }));
 
   test('env-scope — an allowlist without strictEnv is an inert warn, never an enabled scope', () =>
-    withEnv({ config: { agents: { native: { envAllowlist: ['PATH'] } } }, bins: ['gh', 'bro'] }, dir => {
-      const checks = runDoctorChecks(dir);
-      const inert = byName(checks, 'env-scope-inert');
-      assert.equal(inert?.status, 'warn', JSON.stringify(inert));
-      assert.ok(inert?.detail.includes('native'), inert?.detail);
-      assert.equal(byName(checks, 'env-scope'), undefined);
-    }));
+    withEnv(
+      { config: { agents: { native: { envAllowlist: ['PATH'] } } }, bins: ['gh', 'bro'] },
+      dir => {
+        const checks = runDoctorChecks(dir);
+        const inert = byName(checks, 'env-scope-inert');
+        assert.equal(inert?.status, 'warn', JSON.stringify(inert));
+        assert.ok(inert?.detail.includes('native'), inert?.detail);
+        assert.equal(byName(checks, 'env-scope'), undefined);
+      }
+    ));
 
   test('env-scope — strictEnv (or credentialScope) reports the explicit trust boundary', () =>
     withEnv(
       {
         config: {
-          agents: { native: { envAllowlist: ['PATH'], strictEnv: true }, docker: { credentialScope: {} } },
+          agents: {
+            native: { envAllowlist: ['PATH'], strictEnv: true },
+            docker: { credentialScope: {} },
+          },
         },
         bins: ['gh', 'bro'],
       },
@@ -1121,7 +1127,26 @@ describe('bro doctor', () => {
         withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
-          assert.match(c.detail, /HEAD drift unverifiable/);
+          assert.match(c.detail, /drift unverifiable \(no reflog\)/);
+        });
+      })
+  );
+
+  test(
+    'daemon: an upstream reflog never stands in for a missing HEAD reflog',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'], remote: true }, dir => {
+        // @{u}'s reflog proves the tracking ref moved, not HEAD — with
+        // logs/HEAD gone the drift stays unverifiable, never ok
+        const entry = fakeSourceCheckout(dir);
+        execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+        execFileSync('git', ['-C', dir, 'branch', '--set-upstream-to=origin/main']);
+        rmSync(join(dir, '.git', 'logs', 'HEAD'));
+        withFakeDaemon(dir, [process.execPath, entry], () => {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /drift unverifiable \(no reflog\)/);
         });
       })
   );
@@ -1409,6 +1434,71 @@ describe('bro doctor', () => {
       },
       dir => {
         assert.equal(byName(runDoctorChecks(dir), 'mesh-peers').status, 'warn');
+      }
+    );
+    // github-derived peer without login warns
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              badlogin: { rig: 'mesh://acme/other', remote: 'https://github.com/acme/other.git' },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
+      }
+    );
+    // github-derived peer with login set is ok
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              goodlogin: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: 'bot',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'ok');
+        assert.match(c.detail ?? '', /1 peer\(s\)/);
+      }
+    );
+    // whitespace-only login is treated as missing
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              ws: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: '   ',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
       }
     );
   });

@@ -58,10 +58,14 @@ export interface FakeAcpAgent {
   closes: string[];
   /** session/fork requests the agent received (source session ids). */
   forks: string[];
-  /** session/load requests the agent received (session ids). */
-  loads: string[];
+  /** session/load requests the agent received — {sessionId, cwd} pairs
+   *  (bro-nwl5g's viewer attach). */
+  loads: Array<{ sessionId: string; cwd: string }>;
   /** session/resume requests the agent received (session ids). */
   resumes: string[];
+  /** The load's client context — lets a test push post-load live
+   *  updates the way a still-running session would. */
+  loadClient?: AgentContext;
   /** What the client advertised at initialize — the brokered link's
    *  capability union shows up here (bro-ymbq1). */
   clientCapabilities?: unknown;
@@ -165,6 +169,13 @@ export function fakeAcpAgent(
      *  real gate for an agent whose advertised authMethods are not
      *  covered by stored credentials. */
     failNew?: 'auth';
+    /** session/new fails with THIS message — a long agent diagnostic
+     *  (a stack trace, a banner) that a caller must survive in a
+     *  response header. */
+    failNewMessage?: string;
+    /** session/new answers only after this many ms — a slow agent, for
+     *  a caller whose budget must bound the wait (the catalog read). */
+    delayNewMs?: number;
     /** Mint a distinct `sess-N` per session/new instead of always
      *  'sess-1' — multi-session tests need real distinct ids. */
     uniqueSessions?: boolean;
@@ -180,9 +191,16 @@ export function fakeAcpAgent(
     /** Advertise `sessionCapabilities.resume` and serve session/resume —
      *  the ladder's second rung. */
     resumeCapable?: boolean;
-    /** session/load|resume throws (the session is gone — old PR, dead
-     *  store); the worker must fall back to session/new. */
+    /** session/load support — the replay sequence emitted (as
+     *  session/update notifications) before the load response.
+     *  `failLoad` fails the load instead — session/load|resume throws
+     *  (the session is gone — old PR, dead store); the worker must
+     *  fall back to session/new. */
+    loadUpdates?: SessionUpdate[];
     failLoad?: boolean;
+    /** The load's prompt-side gate — resolve it to release the load
+     *  response after the replay ran (post-load observation window). */
+    holdLoadUntil?: Promise<void>;
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -213,9 +231,15 @@ export function fakeAcpAgent(
         },
       };
     })
-    .onRequest('session/new', ctx => {
+    .onRequest('session/new', async ctx => {
       if (opts.failNew === 'auth') {
         throw RequestError.authRequired();
+      }
+      if (opts.failNewMessage !== undefined) {
+        throw RequestError.internalError(undefined, opts.failNewMessage);
+      }
+      if (opts.delayNewMs !== undefined) {
+        await new Promise<void>(resolve => setTimeout(resolve, opts.delayNewMs));
       }
       seen.sessions.push({ cwd: ctx.params.cwd });
       seen.sessionRequests.push(ctx.params);
@@ -228,11 +252,19 @@ export function fakeAcpAgent(
       seen.forks.push(ctx.params.sessionId);
       return { sessionId: `sess-fork-${seen.forks.length}` };
     })
-    .onRequest('session/load', ctx => {
-      seen.loads.push(ctx.params.sessionId);
+    .onRequest('session/load', async ctx => {
+      seen.loads.push({ sessionId: ctx.params.sessionId, cwd: ctx.params.cwd });
       if (opts.failLoad === true) {
         throw new Error(`session ${ctx.params.sessionId} not found`);
       }
+      seen.loadClient = ctx.client;
+      for (const update of opts.loadUpdates ?? []) {
+        await ctx.client.notify('session/update', {
+          sessionId: ctx.params.sessionId,
+          update,
+        });
+      }
+      await opts.holdLoadUntil;
       return { configOptions: opts.configOptions ?? [] };
     })
     .onRequest('session/resume', ctx => {
@@ -241,9 +273,6 @@ export function fakeAcpAgent(
         throw new Error(`session ${ctx.params.sessionId} not found`);
       }
       return { configOptions: opts.configOptions ?? [] };
-    })
-    .onNotification('session/cancel', ctx => {
-      seen.cancels.push(ctx.params.sessionId);
     })
     .onRequest('session/close', ctx => {
       seen.closes.push(ctx.params.sessionId);

@@ -104,6 +104,23 @@ describe('acpWorkerArgv', () => {
     assert.ok(!argv.includes('--session-rm'));
     assert.ok(!argv.some(a => a.includes('sessionId')));
   });
+
+  test('mcpServers never reach argv — descriptors ride the worker payload to a 0600 file', () => {
+    // stdio `env` credentials on argv would be world-readable in
+    // ps/procfs; the backend lands them via BRO_MCP_FILE instead
+    const servers = [
+      {
+        type: 'stdio',
+        name: 'bro',
+        command: 'bro',
+        args: ['mcp'],
+        env: [{ name: 'K', value: 'sk-x' }],
+      },
+    ];
+    const argv = acpWorkerArgv(['bro'], { type: 'acp', command: 'kilo acp', mcpServers: servers });
+    assert.ok(!argv.includes('--mcp-servers'));
+    assert.ok(!argv.some(a => a.includes('sk-x')), `argv leaked env credential: ${argv.join(' ')}`);
+  });
 });
 
 describe('runAcpWorker', () => {
@@ -164,7 +181,8 @@ describe('runAcpWorker', () => {
       });
       assert.deepEqual(
         probed.events.map(e => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
-        ['turn:start', 'tool_call:open', 'turn:stop']
+        // the journaled prompt rides the bus too (bro-l8wqu addendum 3)
+        ['turn:start', 'prompt:undefined', 'tool_call:open', 'turn:stop']
       );
       for (const e of probed.events) {
         assert.equal(e.key, agentId);
@@ -272,6 +290,78 @@ describe('runAcpWorker', () => {
     }
   });
 
+  test('opt-in mcpServers reach session/new; without opt-in the list is empty', async () => {
+    const servers = [
+      { type: 'stdio', name: 'bro', command: 'bro', args: ['mcp', '--planes', 'tasks'], env: [] },
+    ];
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, dir } = workerSpec({ peer: fake.app, mcpServers: servers });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 0);
+      const got = fake.sessionRequests[0]?.mcpServers;
+      assert.equal(Array.isArray(got) ? got.length : -1, 1);
+      assert.equal((got?.[0] as { name?: string } | undefined)?.name, 'bro');
+      assert.equal((got?.[0] as { command?: string } | undefined)?.command, 'bro');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const empty = fakeAcpAgent({ replyText: 'done' });
+    const noOpt = workerSpec({ peer: empty.app });
+    try {
+      await runAcpWorker(noOpt.spec);
+      assert.deepEqual(empty.sessionRequests[0]?.mcpServers, []);
+    } finally {
+      rmSync(noOpt.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('unsupported MCP transport fails with remediation and does not leak descriptor secrets', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [
+        {
+          type: 'http',
+          name: 'x',
+          url: 'https://x',
+          headers: [{ name: 'Authorization', value: 'SECRET_TOKEN' }],
+        },
+      ],
+    });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 1);
+      const msg = lines.join('\n');
+      assert.match(msg, /transport 'http'/);
+      assert.match(msg, /stdio descriptor/i);
+      assert.doesNotMatch(msg, /SECRET_TOKEN|Authorization/);
+      assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a malformed stdio env entry fails before session/new — values never echoed', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      mcpServers: [
+        { type: 'stdio', name: 'x', command: 'c', args: [], env: [{ name: 'K', value: 42 }] },
+      ],
+    });
+    try {
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 1);
+      const msg = lines.join('\n');
+      assert.match(msg, /mcpServers\[0\]\.env\[0\].*\{name, value\}/);
+      assert.deepEqual(fake.sessionRequests, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('advertised authMethods are an offer — stored credentials still open a session', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' }],
@@ -316,7 +406,7 @@ describe('runAcpWorker', () => {
     try {
       assert.equal(await runAcpWorker(spec), 0);
       // load, never new — the coder's own session got the follow-up turn
-      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
       assert.equal(fake.sessions.length, 0);
       assert.deepEqual(fake.prompts, ['PROMPT-TEXT']);
       // the registry records the RESUMED id — before/after identity is
@@ -354,7 +444,7 @@ describe('runAcpWorker', () => {
     const { spec, dir } = workerSpec({ peer: fake.app, resumeSessionId: 'sess-old' });
     try {
       assert.equal(await runAcpWorker(spec), 0);
-      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
       assert.equal(fake.resumes.length, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -388,7 +478,7 @@ describe('runAcpWorker', () => {
     });
     try {
       assert.equal(await runAcpWorker(spec), 0);
-      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
       assert.equal(fake.sessions.length, 1);
       assert.match(lines.join('\n'), /resume failed.*fresh session/);
     } finally {

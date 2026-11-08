@@ -7,17 +7,50 @@
  * fleet's own registry identity stands.
  */
 import { flag, positionals } from './args.ts';
+import { readFileSync } from 'node:fs';
 import { patchAgentRegistry } from '@broject/core';
+
+/** MCP server descriptors reach the worker as a FILE, never inline on
+ *  argv — a stdio server's `env` credentials would be world-readable in
+ *  ps/procfs. Spawned workers get the path via the BRO_MCP_FILE pin;
+ *  `--mcp-servers-file` is the same contract for a manual run. */
+function mcpServersFromFile(argv: string[]): unknown[] | undefined {
+  const mcpFile = flag(argv, '--mcp-servers-file') ?? process.env.BRO_MCP_FILE;
+  if (mcpFile === undefined || mcpFile === '') {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(mcpFile, 'utf8'));
+  } catch (err) {
+    // SyntaxError text can quote the offending source slice — the file
+    // carries env credentials, so a parse failure must never echo
+    // parser details into an aggregated stderr log.
+    console.error(
+      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof SyntaxError ? 'invalid JSON' : err instanceof Error ? err.message : String(err)}`
+    );
+    process.exit(2);
+  }
+  if (!Array.isArray(parsed)) {
+    console.error(`bro acp-worker: MCP servers file ${mcpFile} must contain a JSON array`);
+    process.exit(2);
+  }
+  return parsed;
+}
 
 export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   const command = flag(argv, '--command');
   const model = flag(argv, '--model');
   const autoApprove = argv.includes('--auto-approve');
   const resumeSessionId = flag(argv, '--resume');
-  const pos = positionals(argv, new Set(['--command', '--model', '--resume']));
+  const mcpServers = mcpServersFromFile(argv);
+  const pos = positionals(
+    argv,
+    new Set(['--command', '--model', '--resume', '--mcp-servers-file'])
+  );
   if (command === undefined || pos.length !== 1) {
     console.error(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--resume <sessionId>] <promptFile>'
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--resume <sessionId>] [--mcp-servers-file <path>] <promptFile>'
     );
     process.exit(2);
   }
@@ -29,6 +62,7 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
     model,
     autoApprove,
     resumeSessionId,
+    mcpServers,
     promptFile,
     cwd: process.cwd(),
     provider: process.env.BRO_AGENT_PROVIDER,

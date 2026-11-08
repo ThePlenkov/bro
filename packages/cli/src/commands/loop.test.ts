@@ -12,6 +12,7 @@ import {
   type ProviderEntry,
   type RoutingTable,
   type SpawnWorker,
+  type Lease,
 } from '@broject/core';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop';
 import {
@@ -22,9 +23,32 @@ import {
   resolveBeadsDir,
   resolveLoopLane,
   resumeSessionFor,
+  skipLeasedBeads,
 } from './loop.ts';
 import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
+
+test('loop picker skips live bead leases held by another process', () => {
+  const lease: Lease = {
+    key: 'bead/leased',
+    token: 'token',
+    holder: { host: 'other-host', pid: 44, rig: 'other-rig' },
+    acquiredAt: new Date(0).toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const logs: string[] = [];
+  assert.deepEqual(
+    skipLeasedBeads(
+      [{ id: 'leased' }, { id: 'free' }],
+      key => (key === 'bead/leased' ? lease : undefined),
+      line => logs.push(line),
+      'local',
+      10
+    ),
+    [{ id: 'free' }]
+  );
+  assert.deepEqual(logs, ['loop: skipping leased — leased by other-rig@other-host pid 44']);
+});
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 
@@ -295,6 +319,39 @@ describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
     const lane = await resolveLoopLane(env, {}, laneCfg({ agent: 'x {promptFile}' }), undefined);
     assert.equal(lane.class, undefined);
     assert.equal(lane.provider, undefined);
+  });
+
+  // bro-mmmodel: a profile's model is a PAIR with its provider (the same
+  // rule chain[0]'s {provider, model} pin follows) — a routed provider
+  // must never inherit a foreign profile's model.
+  test('a routed provider never inherits a foreign profile model (bro-mmmodel)', async () => {
+    const env = routedEnv({ fancy: { provider: 'fancy', model: 'm-9' } });
+    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
+    // the default class routes to devin while loop.profile names the
+    // fancy provider — m-9 belongs to fancy's lane (omp refused exactly
+    // this leak: an alien model handed to the routed provider)
+    const confd = await resolveLoopLane(env, {}, laneCfg({ profile: 'fancy' }), route);
+    assert.equal(confd.provider, 'devin');
+    assert.equal(confd.model, undefined);
+    // an explicit provider beside a flag-named profile drops its model too
+    const over = await resolveLoopLane(
+      env,
+      { profile: 'fancy', provider: 'devin' },
+      laneCfg(),
+      route
+    );
+    assert.equal(over.provider, 'devin');
+    assert.equal(over.model, undefined);
+  });
+
+  test('a profile naming the routed provider still supplies its model (bro-mmmodel)', async () => {
+    const env = routedEnv({ devinf: { provider: 'devin', model: 'dev-2' } });
+    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
+    // loop.profile pins devin's model and the default class routes to
+    // devin — same provider, so the standing default still inherits
+    const lane = await resolveLoopLane(env, {}, laneCfg({ profile: 'devinf' }), route);
+    assert.equal(lane.provider, 'devin');
+    assert.equal(lane.model, 'dev-2');
   });
 });
 
