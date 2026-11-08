@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { forkPoint } from './stack.ts'
+import { forkFor, forkPoint } from './stack.ts'
 import { git, initRepo } from './testrepo.ts'
 
 /** A repo with one file committed on `main`. */
@@ -86,5 +86,38 @@ test('a base that GAINED content still forks at the child’s own work', () => {
   const fork = forkPoint('base', main)
   assert.equal(fork, baseWork, 'the fork is where the child’s own work starts')
   assert.notEqual(fork, git(['merge-base', 'base', 'HEAD'], main).trim())
+  assert.ok(root.length > 0)
+})
+
+test('the fork comes from the base the member forked FROM, not from where it goes', () => {
+  // `main` → `parent` (the base's work) → `child` (forked at the base's
+  // tip) → and the base ADVANCES afterwards. The member's line left
+  // `parent`, so only `parent` knows where that line began; `main` — the
+  // desired base — knows where the CHAIN left the trunk, and a fork from
+  // there replays the base's own commits on top of the new base.
+  const { root, main } = repo()
+  const trunkWork = git(['rev-parse', 'HEAD'], main).trim()
+  git(['checkout', '-q', '-b', 'parent'], main)
+  writeFileSync(join(main, 'parent.txt'), 'parent\n')
+  git(['add', '-A'], main)
+  git(['commit', '-q', '-m', 'parent work'], main)
+  const parentWork = git(['rev-parse', 'HEAD'], main).trim()
+  git(['checkout', '-q', '-b', 'child'], main)
+  writeFileSync(join(main, 'child.txt'), 'child\n')
+  git(['add', '-A'], main)
+  git(['commit', '-q', '-m', 'child work'], main)
+  // the base advances AFTER the member forked off it
+  git(['checkout', '-q', 'parent'], main)
+  writeFileSync(join(main, 'later.txt'), 'later\n')
+  git(['add', '-A'], main)
+  git(['commit', '-q', '-m', 'parent moves on'], main)
+  git(['checkout', '-q', 'child'], main)
+  // the member's own reflog is gone — the creation entry that named the
+  // base's tip has expired, and the plan's SHA is not available either
+  git(['reflog', 'expire', '--expire=now', '--expire-unreachable=now', 'refs/heads/child'], main)
+
+  const fork = forkFor('child', undefined, 'parent', 'main', main)
+  assert.equal(fork, parentWork, 'the fork is the base’s tip at the fork')
+  assert.notEqual(fork, trunkWork, 'the trunk is not the fork — it replays the base’s commits')
   assert.ok(root.length > 0)
 })

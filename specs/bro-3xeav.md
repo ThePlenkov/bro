@@ -57,7 +57,7 @@ the patch-equivalence list:
 
 ```ts
 const fork =
-  m.containsBaseHead === true && m.forkSha !== undefined
+  m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
     ? m.forkSha
     : forkPoint(item.desiredBase, wt.path);
 ```
@@ -76,22 +76,48 @@ the plan is even made: the platform deletes a merged member's branch
 (GitHub's delete-on-merge), and the sync retires a merged member's
 branch mid-cascade. Then there is no SHA to capture.
 
-The member's OWN history still remembers: its reflog's oldest entry is
-the commit its branch was created at — "branch: Created from <base>"
-names the base's tip of that moment. That commit is used only while it
-is still an ancestor of the member's tip: after a rebase the member's
-history no longer carries it, and the reflog's answer is then a
-question the plan cannot answer.
+The member's OWN history still remembers: its reflog's CREATION entry —
+"branch: Created from <base>" — names the base's tip of that moment,
+and the entry's SHA is that tip. Not merely the OLDEST entry: a reflog
+that was truncated or expired has no creation entry left, and its
+oldest survivor is a later commit — a fork there would drop the
+member's own commits. That commit is used only while it is still an
+ancestor of the member's tip: after a rebase the member's history no
+longer carries it, and the reflog's answer is then a question the plan
+cannot answer.
 
 ```ts
 const fork =
-  m.containsBaseHead === true && m.forkSha !== undefined
+  m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
     ? m.forkSha
     : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
 ```
 
-Three answers, in order of how well they know the truth: the plan's
-immutable SHA, the member's own creation point, and the base's reflog.
+### The fork is asked of the base the member FORKED FROM
+
+`forkPoint(base, wt)` asks one question: *where was `base` when this
+member's line branched off it?* — `git merge-base --fork-point` reads
+`base`'s reflog for it. The question has an exact answer only for the
+branch the member's line actually left.
+
+- `item.oldBase` — the base the member forked from (the recorded edge,
+  else the PR's base). The question fits: the answer is the base's tip
+  at the fork, and the replay carries the member's work alone.
+- `item.desiredBase` — the base the member is GOING to. A different
+  question: where the desired base forked from the member's line. When
+  the desired base is the trunk and the member left another branch, the
+  answer is where the CHAIN left the trunk — too old, and a replay from
+  there carries the base's old commits, which conflict with the
+  squash-merge on the new base.
+
+So the fallback reads `oldBase` first and `desiredBase` last. Measured
+on the same chain (`--fork-point` against a base that advanced after
+the member forked off it):
+
+```text
+форк от oldBase      = e1a9a68  ← базовый tip в момент форка: replay несёт 1 коммит
+форк от desiredBase  = 9ef3f7a  ← точка выхода ветки с транка: replay тащит базу
+```
 
 ### The late name resolution is gone
 
@@ -118,9 +144,16 @@ member carries `forkSha` the way it carries `containsBaseHead`.
       branch-name resolution is gone.
 - [x] a base whose ref is gone: the member's own reflog says where its
       work began.
+- [x] the fork is asked of the base the member forked FROM; the desired
+      base is the last resort.
+- [x] the plan's SHA is revalidated against the member's current head —
+      a rewritten member does not carry it, and a commit it does not
+      carry is not a fork.
 - [x] tests: the replay carries the member's own commits only — when the
       base's branch is retired mid-cascade, and when the host deleted it
-      before the sync (that one fails on the old code).
+      before the sync (that one fails on the old code); and the fork
+      comes from the base the member forked from, not from the desired
+      base.
 
 ## Verify
 

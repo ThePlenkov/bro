@@ -705,6 +705,45 @@ export function forkPoint(base: string, wt: string): string {
   return fork === '' ? mergeBase : fork;
 }
 
+/** Where the member's replay must start — the fork, in the order of how
+ *  well each answer knows the truth.
+ *
+ *  1. THE PLAN'S SHA — the base's tip as the plan saw it — but only
+ *     while the member's CURRENT history still carries it: the member
+ *     may have been rewritten since the plan (the platform's follow),
+ *     and a commit the member does not carry is not a fork.
+ *  2. THE MEMBER'S OWN CREATION POINT — the base's ref may be GONE (the
+ *     platform deleted it after the merge), and the member's history
+ *     still remembers where its work began.
+ *  3. THE BASE THE MEMBER FORKED FROM (`oldBase`) — the branch the
+ *     member's line actually left, so `forkPoint` asks the right
+ *     question: where was that base when the member branched off it.
+ *  4. THE DESIRED BASE — where the member is GOING. Its reflog answers
+ *     a DIFFERENT question (where the desired base forked from the
+ *     member's line), and its answer is OLDER than the truth: it is
+ *     where the chain left the trunk, so a replay from there carries
+ *     the base's old commits — the blunt fallback, and the last one. */
+export function forkFor(
+  branch: string,
+  forkSha: string | undefined,
+  oldBase: string,
+  desiredBase: string,
+  wt: string
+): string {
+  if (forkSha !== undefined && carriesCommit(branch, forkSha, wt) === true) {
+    return forkSha;
+  }
+  const own = forkFromReflog(branch, wt);
+  if (own !== undefined) {
+    return own;
+  }
+  const fromOldBase = oldBase === desiredBase ? '' : forkPoint(oldBase, wt);
+  if (fromOldBase !== '') {
+    return fromOldBase;
+  }
+  return forkPoint(desiredBase, wt);
+}
+
 /** Rebase a member's branch onto its new base and force-push the result
  *  when a PR rides it. The fork point is the base's tip AS THE PLAN SAW
  *  IT — a SHA captured before the cascade moved any ref. A branch name
@@ -714,23 +753,7 @@ export function forkPoint(base: string, wt: string): string {
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  // The plan's fork — the base's tip as the plan saw it, and only while
-  // the member's CURRENT history still carries it: then the member's own
-  // work starts right after that commit, and the replay is the member's
-  // work alone. The member may have been rewritten since the plan (the
-  // platform's follow), and a fork it no longer carries is no fork.
-  //
-  // Then the member's OWN creation point — the base's ref may be GONE
-  // (the platform deleted it after the merge), and the member's history
-  // still remembers where its work began.
-  //
-  // And last the DESIRED base's reflog: that is a different question
-  // (where the desired base forked from the member's line), and it is
-  // the blunt answer the fallback has always been.
-  const fork =
-    m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
-      ? m.forkSha
-      : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
+  const fork = forkFor(m.branch, m.forkSha, item.oldBase, item.desiredBase, wt.path);
   const rb =
     fork === ''
       ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
