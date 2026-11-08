@@ -107,6 +107,12 @@ export interface SyncMemberInput extends StackBranch {
    *  is the same, its commits are not). Undefined when the heads could
    *  not be read: an unknown truth never schedules a rewrite. */
   containsBaseHead?: boolean
+  /** The base's tip as a SHA — the fork the member's replay starts
+   *  from, read in the PLAN phase, before the cascade moves any ref.
+   *  A branch name is not a fork point: by the time the rebase reads
+   *  it, the cascade has already moved it. Undefined when the base's
+   *  ref is gone: `forkPoint` answers that case. */
+  forkSha?: string
 }
 
 export interface SyncPlanItem<T extends SyncMemberInput = SyncMemberInput> {

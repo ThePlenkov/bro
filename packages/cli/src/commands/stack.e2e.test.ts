@@ -387,6 +387,43 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('the replay carries the member\'s own work when the merged base\'s branch is gone', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      const wa = join(f.root, 'main--fx-a')
+      // the layer's file — the trunk's squash of it carries OTHER content,
+      // so the layer's old commit cannot be dropped as already-upstream
+      writeFileSync(join(wa, 'a.txt'), 'layer\n')
+      git(['add', '-A'], wa)
+      git(['commit', '-qm', 'add a.txt'], wa)
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
+      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+      const wb = join(f.root, 'main--fx-b')
+      commitIn(wb, 'b.txt')
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+      // the squash merge on the trunk — the same file, other content
+      commitIn(f.main, 'a.txt')
+      git(['push', '-q', 'origin', 'main'], f.main)
+      // the merged member leaves NO worktree: the sync retires its branch
+      // mid-cascade, so the child's fork cannot be read from a ref
+      git(['worktree', 'remove', '--force', wa], f.main)
+      mergedBottomPrs(f)
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.doesNotMatch(r.stdout, /rebase onto main failed/)
+      assert.match(r.stdout, /stack\/s\/2-fx-b rebased onto main/)
+      // the child's branch: the trunk + the child's OWN commit only. The
+      // merged member's old commit rode along when the fork was read from
+      // a ref the cascade had already moved — and conflicted.
+      assert.equal(
+        git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
+        git(['rev-parse', 'main'], f.main).trim()
+      )
+      assert.match(git(['log', '--format=%s', 'main..stack/s/2-fx-b'], f.main), /add b\.txt/)
+    })
+  })
+
   test('a fix that landed below rides the whole chain', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {

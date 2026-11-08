@@ -538,14 +538,37 @@ function carriesBaseHead(branch: string, base: string, root: string): boolean | 
   return gitTry(['-C', root, 'merge-base', '--is-ancestor', baseHead, memberHead]).code === 0;
 }
 
+/** The base's tip, read as a SHA. The ref's TIP — the commit the
+ *  member's own work starts after — and a SHA does not move: the
+ *  cascade rewrites the base's ref, and a name read after that points
+ *  somewhere else. */
+function baseTip(root: string, base: string): string | undefined {
+  const sha = gitTry([
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${base}^{commit}`,
+  ]).out.trim();
+  return sha === '' ? undefined : sha;
+}
+
 /** The heads the plan reads — one flag per member. A merged member
  *  leaves the chain: the member above it stands on the one below the
- *  merged one, exactly as `planSync`'s own live tip walks. */
+ *  merged one, exactly as `planSync`'s own live tip walks.
+ *
+ *  The plan's FORK rides along: the base's tip as a SHA, read HERE —
+ *  in the plan phase, before the cascade moves any ref. The rebase
+ *  starts the member's replay from that commit, so the replay carries
+ *  the member's own work and never the base's old commits. */
 function markBaseHeads(members: MemberView[], root: string, defaultBase: string): void {
   let prev = defaultBase;
   for (const m of members) {
     if (m.prState !== 'MERGED') {
-      m.containsBaseHead = carriesBaseHead(m.branch, baseOf(m, prev), root);
+      const base = baseOf(m, prev);
+      m.containsBaseHead = carriesBaseHead(m.branch, base, root);
+      m.forkSha = baseTip(root, base);
       prev = m.branch;
     }
   }
@@ -644,19 +667,17 @@ export function forkPoint(base: string, wt: string): string {
 }
 
 /** Rebase a member's branch onto its new base and force-push the result
- *  when a PR rides it. The fork point is the recorded old base — under
- *  squash merges a merge-base can predate the parent's commits and
- *  replay already-squashed changes; the edge is the truthful fork. */
+ *  when a PR rides it. The fork point is the base's tip AS THE PLAN SAW
+ *  IT — a SHA captured before the cascade moved any ref. A branch name
+ *  read here would be the base's NEW tip, and git would fall back to
+ *  the merge-base: too old, and the parent's old commits ride along as
+ *  add/add conflicts. */
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  const oldRef =
-    item.oldBase !== item.desiredBase &&
-    gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', `refs/heads/${item.oldBase}`])
-      .code === 0
-      ? item.oldBase
-      : undefined;
-  const fork = oldRef ?? forkPoint(item.desiredBase, wt.path);
+  // the plan's fork — immutable. The base's reflog answers the rest
+  // (the base rewritten under the child): `forkPoint`.
+  const fork = m.forkSha ?? forkPoint(item.desiredBase, wt.path);
   const rb =
     fork === ''
       ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
