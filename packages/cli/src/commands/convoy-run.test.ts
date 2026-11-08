@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   AgentNotFound,
-  BATCH_MARKER_ENV,
   SpawnError,
   type AgentCause,
   type AgentInfo,
@@ -544,7 +543,7 @@ describe('runnerSpawnReq', () => {
     assert.equal(req.molStep, 'm-1');
     assert.equal(req.worktree, '/repo');
     assert.equal(req.beadsDir, '/repo/.beads');
-    assert.equal(req.env?.[BATCH_MARKER_ENV], '1');
+    assert.equal(req.lane, 'batch');
     assert.match(req.prompt ?? '', /m-1/);
   });
 });

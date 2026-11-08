@@ -607,6 +607,7 @@ const SPAWN_FIELDS = new Set([
   'profile',
   'class',
   'autoApprove',
+  'lane',
 ]);
 
 /** POST body → StepSpawnRequest — strict: a misspelled field must be a
@@ -643,7 +644,15 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
   if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {
     throw new HttpError(400, 'field "molStep" is required');
   }
+  let lane: 'batch' | 'interactive' = 'interactive';
+  if (req.lane !== undefined) {
+    if (req.lane !== 'batch' && req.lane !== 'interactive') {
+      throw new HttpError(400, 'field "lane" must be "batch" or "interactive"');
+    }
+    lane = req.lane as 'batch' | 'interactive';
+  }
   return {
+    lane,
     molStep: req.molStep as string,
     worktree: req.worktree as string | undefined,
     prompt: req.prompt as string | undefined,

@@ -73,6 +73,7 @@ import {
   stepClassInfo,
   taskStoreAt,
   type AgentConnector,
+  BATCH_MARKER_ENV,
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
@@ -620,6 +621,8 @@ export class SpawnInputError extends Error {
  *  provider/model beats the preset's) → agents.<backend>.provider →
  *  the legacy command template. */
 export interface StepSpawnRequest {
+  /** The spawn's lane — REQUIRED, no default. */
+  lane: 'batch' | 'interactive';
   molStep: string;
   connector?: string;
   worktree?: string;
@@ -677,6 +680,16 @@ export function spawnStepAgent(
   // '' would slip past `??` below and spawn an agent with no instructions
   if (req.prompt?.trim() === '') {
     throw new SpawnInputError('prompt must not be empty');
+  }
+  const lane: 'batch' | 'interactive' = req.lane ?? 'interactive';
+  if (
+    lane === 'interactive' &&
+    req.env !== undefined &&
+    Object.prototype.hasOwnProperty.call(req.env, BATCH_MARKER_ENV)
+  ) {
+    throw new SpawnInputError(
+      `lane "interactive" conflicts with caller-set env[${BATCH_MARKER_ENV}]`
+    );
   }
   // --profile expands piecewise BEFORE connector resolution — the
   // preset's `backend` picks the connector only when --connector was
@@ -787,11 +800,19 @@ export function spawnStepAgent(
           repoRoot,
           beadsDir: beads,
           prompt,
-          env: {
-            ...req.env,
-            TRACEPARENT: tp,
-            ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
-          },
+          env: (() => {
+            const merged: Record<string, string> = {
+              ...(req.env ?? {}),
+              TRACEPARENT: tp,
+              ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
+            };
+            if (lane === 'batch') {
+              merged[BATCH_MARKER_ENV] = '1';
+            } else {
+              delete merged[BATCH_MARKER_ENV];
+            }
+            return merged;
+          })(),
           provider: pick.provider,
           account: pick.account,
           model: pick.model,
@@ -1008,6 +1029,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
+      lane: 'interactive',
       molStep,
       connector: connectorName,
       worktree: flag(argv, '--worktree'),
@@ -1344,6 +1366,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
+      lane: 'interactive',
       molStep,
       connector: flag(argv, '--connector'),
       worktree: flag(argv, '--worktree'),

@@ -345,7 +345,7 @@ describe('bro agents up <step>', () => {
     const env = { agents: {}, connectors: {} } as AgentConnectorEnv;
     for (const prompt of ['', '   ']) {
       assert.throws(
-        () => spawnStepAgent('/nonexistent', env, { molStep: 'fx-1', prompt }),
+        () => spawnStepAgent('/nonexistent', env, { lane: 'interactive', molStep: 'fx-1', prompt }),
         SpawnInputError
       );
     }
@@ -1371,6 +1371,7 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
       fx.main,
       loadAgentEnv(fx.main),
       {
+        lane: 'interactive',
         molStep: 'fx-1',
         worktree: fx.main,
         beadsDir: fx.beads,

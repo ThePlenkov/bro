@@ -98,7 +98,6 @@ import {
   type ReviewThread,
   type TaskRow,
   type TaskStore,
-  BATCH_MARKER_ENV,
   hasHelpFlag,
   printUsage,
 } from '@broject/core';
@@ -1511,11 +1510,12 @@ async function spawnFixerAgent(ctx: Ctx, pr: number, s: FixerSpawn): Promise<PrV
     }
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
+        lane: 'batch',
         molStep: bead.id,
         worktree: s.wt,
         prompt: s.prompt,
         connector: ctx.connector,
-        env: { BRO_PR: String(pr), BRO_PR_URL: link, [BATCH_MARKER_ENV]: '1' },
+        env: { BRO_PR: String(pr), BRO_PR_URL: link },
       });
       if (s.attempt !== undefined) {
         recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls);
