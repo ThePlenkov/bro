@@ -98,7 +98,7 @@ export interface ReviewThread {
 
 export interface MergedPr {
   number: number;
-  mergedAt: string;
+  mergedAt: string | null;
   updatedAt: string | null;
   author: string;
   labels: string[];
@@ -106,13 +106,17 @@ export interface MergedPr {
    *  can retire onto these. */
   headRef: string;
   headSha: string;
+  state?: string;
+  closedAt?: string | null;
 }
 
 export interface MergedPrInfo {
   title: string;
   url: string;
-  mergedAt: string;
+  mergedAt: string | null;
   mergeSha: string;
+  state?: string;
+  closedAt?: string | null;
 }
 
 /** Everything a post-merge debt scan needs about one PR — meta + threads
@@ -159,6 +163,13 @@ export interface MergedPrQuery {
    *  explicit-ids path ignores it — named PRs are the selection. A
    *  caller that needs a hard guarantee still filters the result. */
   mergedSince?: string;
+  /** Terminal-state selection. List path: 'merged' (default) returns
+   *  merged PRs, 'closed' returns closed-unmerged, 'all' returns both.
+   *  Explicit-ids path: the ids are the selection — `state` only widens
+   *  which terminal states are accepted: 'closed'/'all' admit
+   *  closed-unmerged rows while the default keeps the merged-only
+   *  contract for callers that mean "merged" (judge replay, cleanup). */
+  state?: 'merged' | 'closed' | 'all';
 }
 
 export interface MergeOpts {
@@ -250,8 +261,8 @@ export interface ReviewFacade {
    *  shape typechecking, and the fetch normalizes it away. */
   humanApproved?(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict | boolean;
   humanApprovedAsync?(t: PrTarget, opts?: ApprovalProbeOpts): Promise<ApprovalVerdict | boolean>;
-  /** Merged-PR detail for harvest — throws when the PR isn't merged or a
-   *  MERGED PR reports no mergedAt. */
+  /** PR detail for harvest — throws when the PR isn't merged/closed in a
+   *  harvestable state or a MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo;
   mergedPrs(repo: string, q?: MergedPrQuery): MergedPr[];
 

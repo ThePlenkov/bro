@@ -298,6 +298,7 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     mergedAt: string | null;
     mergeCommit?: { oid: string };
     state: string;
+    closedAt?: string | null;
   }>([
     'pr',
     'view',
@@ -305,20 +306,24 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     '--repo',
     t.repo,
     '--json',
-    'title,url,mergedAt,mergeCommit,state',
+    'title,url,mergedAt,mergeCommit,state,closedAt',
   ]);
 
-  if (viewed.state !== 'MERGED') {
-    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged (state=${viewed.state})`);
+  if (viewed.state !== 'MERGED' && viewed.state !== 'CLOSED') {
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged or closed (state=${viewed.state})`);
   }
-  if (!viewed.mergedAt) {
+  if (viewed.state === 'MERGED' && !viewed.mergedAt) {
     throw new Error(`PR ${prLink(t.repo, t.pr)} is MERGED but reports no mergedAt`);
   }
+  // A CLOSED-unmerged PR may carry no timestamp at all — still
+  // harvestable; mergedAt just falls back to ''.
   return {
     title: viewed.title,
     url: viewed.url,
-    mergedAt: viewed.mergedAt,
+    mergedAt: viewed.mergedAt ?? viewed.closedAt ?? '',
     mergeSha: mergeSha || viewed.mergeCommit?.oid || '',
+    state: viewed.state,
+    closedAt: viewed.closedAt ?? null,
   };
 }
 
@@ -331,30 +336,34 @@ interface MergedPrRow {
   labels?: Array<{ name: string }>;
   headRefName?: string;
   headRefOid?: string;
+  closedAt?: string | null;
 }
 
-const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
+const toMergedPr = (row: MergedPrRow): MergedPr => ({
   number: row.number,
-  mergedAt: row.mergedAt,
+  mergedAt: row.mergedAt ?? row.closedAt ?? null,
   updatedAt: row.updatedAt,
   author: row.author?.login ?? 'unknown',
   labels: (row.labels ?? []).map(l => l.name),
   headRef: row.headRefName ?? '',
   headSha: row.headRefOid ?? '',
+  state: row.state,
+  closedAt: row.closedAt ?? null,
 });
 
 function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
+  const state = q.state ?? 'merged';
   const args = [
     'pr',
     'list',
     '--repo',
     repo,
     '--state',
-    'merged',
+    state,
     '--limit',
     String(q.limit ?? 100),
     '--json',
-    'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid',
+    'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid,state,closedAt',
   ];
   if (q.author) {
     args.push('--author', q.author);
@@ -362,46 +371,101 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   if (q.label) {
     args.push('--label', q.label);
   }
-  if (q.mergedSince) {
+  const search: string[] = [];
+  if (q.mergedSince && state === 'merged') {
     // server-side cutoff — the list caps by recency, so a mergedAt
     // filter applied after the cap would lose eligible PRs. The
     // merged: qualifier takes a YYYY-MM-DD date — slice the ISO stamp;
     // the over-inclusive day edge is fine, callers filter exactly.
-    args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`);
+    search.push(`merged:>=${q.mergedSince.slice(0, 10)}`);
+  } else if (q.mergedSince) {
+    // 'closed'/'all': closedAt covers closed-unmerged and merged rows
+    // alike — `merged:` would exclude the closed half of 'all'
+    search.push(`closed:>=${q.mergedSince.slice(0, 10)}`);
   }
-  return ghJson<MergedPrRow[]>(args)
-    .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
-    .map(toMergedPr);
+  // `--state closed` returns merged rows and `--state all` returns open
+  // rows — both eat the listing cap before the client filter below
+  // drops them, so merged/open history can crowd the whole window out.
+  // The search qualifier moves the drop server-side, where the limit
+  // counts only rows the caller keeps.
+  if (state === 'closed') {
+    search.push('is:unmerged');
+  } else if (state === 'all') {
+    search.push('is:closed');
+  }
+  if (search.length > 0) {
+    args.push('--search', search.join(' '));
+  }
+  const rows = ghJson<MergedPrRow[]>(args);
+  if (state === 'merged') {
+    return rows
+      .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
+      .map(toMergedPr);
+  }
+  // `--state closed` also returns merged PRs (a merged PR is closed) —
+  // the debt harvest wants closed-unmerged only.
+  if (state === 'closed') {
+    return rows.filter(row => row.state !== 'MERGED').map(toMergedPr);
+  }
+  // 'all' adds open PRs to the host response — harvest only reads
+  // terminal states, so drop them here rather than in every caller.
+  return rows.filter(row => row.state !== 'OPEN').map(toMergedPr);
 }
 
-function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
+/** One named-id fetch → MergedPr | null (warned skips). `acceptClosed`
+ *  widens the accepted terminal states to include closed-unmerged. */
+function explicitMergedPr(repo: string, number: number, acceptClosed: boolean): MergedPr | null {
+  const link = prLink(repo, number);
+  const viewed = ghJson<MergedPrRow>([
+    'pr',
+    'view',
+    String(number),
+    '--repo',
+    repo,
+    '--json',
+    'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid,closedAt',
+  ]);
+  if (viewed.state === 'MERGED') {
+    if (!viewed.mergedAt) {
+      console.error(`warning: PR ${link} is merged but missing mergedAt — skipped`);
+      return null;
+    }
+    return toMergedPr({ ...viewed, mergedAt: viewed.mergedAt });
+  }
+  if (viewed.state === 'CLOSED' && acceptClosed) {
+    // closed-unmerged — harvestable for debt
+    return toMergedPr(viewed);
+  }
+  console.error(`warning: PR ${link} is not merged — skipped`);
+  return null;
+}
+
+function explicitMergedPrs(
+  repo: string,
+  ids: number[],
+  state?: MergedPrQuery['state']
+): MergedPr[] {
   const out: MergedPr[] = [];
   const failures: unknown[] = [];
+  // ids are the selection — `state` only widens which terminal states
+  // are accepted: 'closed'/'all' also admit closed-unmerged PRs while
+  // the default keeps the merged-only contract for callers that mean
+  // "merged" (judge replay, cleanup).
+  const acceptClosed = state === 'closed' || state === 'all';
   // Dedup at the facade — the old pipeline's `parseCsvInts` deduplicated
   // upstream, and duplicate ids would produce duplicate rows that
   // double-count in consumer aggregations.
   const unique = [...new Set(ids)];
   for (const number of unique) {
-    const link = prLink(repo, number);
     try {
-      const viewed = ghJson<MergedPrRow>([
-        'pr',
-        'view',
-        String(number),
-        '--repo',
-        repo,
-        '--json',
-        'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid',
-      ]);
-      if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
-        console.error(`warning: PR ${link} is not merged — skipped`);
-        continue;
+      const row = explicitMergedPr(repo, number, acceptClosed);
+      if (row !== null) {
+        out.push(row);
       }
-      out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }));
     } catch (err) {
       failures.push(err);
       console.error(
-        `warning: PR ${link} fetch failed — ${err instanceof Error ? err.message : err}`
+        `warning: PR ${prLink(repo, number)} fetch failed — ${err instanceof Error ? err.message : err}`
       );
     }
   }
@@ -422,7 +486,7 @@ function mergedPrs(repo: string, q: MergedPrQuery = {}): MergedPr[] {
   // `ids` present — even empty — is an explicit selection; only its
   // absence means "list merged PRs with the filters".
   if (q.ids !== undefined) {
-    return explicitMergedPrs(repo, q.ids);
+    return explicitMergedPrs(repo, q.ids, q.state);
   }
   return listMergedPrs(repo, q);
 }
@@ -1020,7 +1084,7 @@ function readAsyncMerge(res: { out: string; err: string }): AsyncMergeResult {
     }
     try {
       const body = JSON.parse(text.slice(start)) as {
-        status?: AsyncMergeResult['status'];
+        status: AsyncMergeResult['status'];
         message?: string;
         details?: { uuid?: string; message?: string };
       };
@@ -1195,9 +1259,11 @@ interface ScanNode {
   title?: string;
   url?: string;
   mergedAt?: string | null;
+  closedAt?: string | null;
   updatedAt?: string | null;
   mergeCommit?: { oid?: string };
   labels?: { nodes?: Array<{ name?: string }> };
+  state?: string;
   reviewThreads?: {
     pageInfo?: { hasNextPage?: boolean };
     nodes?: ThreadPage['nodes'];
@@ -1224,13 +1290,51 @@ function parseAliasedPrs<T extends object>(
 }
 
 const SCAN_PR_FIELDS = `
-  title url mergedAt updatedAt
+  title url mergedAt closedAt updatedAt state
   mergeCommit { oid }
   labels(first: 50) { nodes { name } }
   reviewThreads(first: 100) {
     pageInfo { hasNextPage }
     nodes { id isResolved isOutdated comments(first: 100) { nodes { author { login __typename } path line body createdAt } } }
   }`;
+
+/** One chunk-row → MergedPrScan | null. Non-terminal PRs stay out —
+ *  merged rows carry mergedAt, closed-unmerged rows carry state=CLOSED
+ *  + a closedAt stamp (an undated close would poison downstream date
+ *  sorting); the caller's serial path decides anything else. */
+async function scanPrNode(t: PrTarget, node: ScanNode | null): Promise<MergedPrScan | null> {
+  if (!node) {
+    return null;
+  }
+  const state = node.state?.toUpperCase();
+  const mergedAt = node.mergedAt ?? null;
+  const closedAt = node.closedAt ?? null;
+  if (!mergedAt && !(state === 'CLOSED' && closedAt)) {
+    return null;
+  }
+  let threads = toReviewThreads(node.reviewThreads?.nodes ?? []);
+  // >100 threads on one PR is rare — full paginated fetch per-PR.
+  if (node.reviewThreads?.pageInfo?.hasNextPage) {
+    try {
+      threads = await reviewThreads(t); // NOSONAR — rare per-PR fallback inside the chunk loop
+    } catch {
+      return null;
+    }
+  }
+  return {
+    info: {
+      title: node.title ?? '',
+      url: node.url ?? `https://github.com/${t.repo}/pull/${t.pr}`,
+      mergedAt: mergedAt ?? closedAt ?? '',
+      mergeSha: node.mergeCommit?.oid ?? '',
+      state: node.state,
+      closedAt: closedAt ?? null,
+    },
+    threads,
+    labels: (node.labels?.nodes ?? []).map(l => l.name ?? ''),
+    updatedAt: node.updatedAt ?? null,
+  };
+}
 
 /** Aliased-GraphQL probe: one `gh api graphql` call per ~15 PRs covers
  *  meta + threads + labels + updatedAt; chunks overlap under a small
@@ -1271,31 +1375,10 @@ async function scanMergedPrs(
       return;
     }
     for (const [i, t] of chunk.entries()) {
-      const node = rows[i];
-      // Non-merged / missing PRs stay out — the serial fallback decides.
-      if (!node?.mergedAt) {
-        continue;
+      const scan = await scanPrNode(t, rows[i] ?? null); // NOSONAR — serial within a chunk; chunks overlap
+      if (scan !== null) {
+        out.set(t.pr, scan);
       }
-      let threads = toReviewThreads(node.reviewThreads?.nodes ?? []);
-      // >100 threads on one PR is rare — full paginated fetch per-PR.
-      if (node.reviewThreads?.pageInfo?.hasNextPage) {
-        try {
-          threads = await reviewThreads(t); // NOSONAR — rare per-PR fallback inside the chunk loop
-        } catch {
-          continue;
-        }
-      }
-      out.set(t.pr, {
-        info: {
-          title: node.title ?? '',
-          url: node.url ?? `https://github.com/${t.repo}/pull/${t.pr}`,
-          mergedAt: node.mergedAt,
-          mergeSha: node.mergeCommit?.oid ?? '',
-        },
-        threads,
-        labels: (node.labels?.nodes ?? []).map(l => l.name ?? ''),
-        updatedAt: node.updatedAt ?? null,
-      });
     }
     done += chunk.length;
     opts?.onProgress?.(done, targets.length);
@@ -1379,13 +1462,27 @@ async function labelPrs(
 // --- mutations ----------------------------------------------------------------
 
 /** Auto-close keywords GitHub recognizes — a body already carrying one
- *  for a ref is wired; re-stamping must not duplicate the line. */
-const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i;
+ *  for a ref is wired; re-stamping must not duplicate the line. The
+ *  token after `#` lands in a capture so the ref compare is a literal
+ *  prefix + boundary test: a `new RegExp` built on the ref needs
+ *  escaping (a bug farm) and trips dynamic-pattern scanners. */
+const CLOSER_TOKEN_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\S+)/gi;
 
-const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-const isWired = (body: string, ref: string): boolean =>
-  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body);
+/** The original contract — `\bcloser\s+#<ref>\b` case-insensitive:
+ *  the token must open with the ref and end it on a word boundary, so
+ *  `#bro-7d5nb.3` wires ref `bro-7d5nb` (its `.` is a boundary) while
+ *  `#bro-1x` does not wire `bro-1`. */
+const isWired = (body: string, ref: string): boolean => {
+  if (ref === '') return false;
+  const wanted = ref.toLowerCase();
+  for (const m of body.matchAll(CLOSER_TOKEN_RE)) {
+    const tok = m[1];
+    if (tok.toLowerCase().startsWith(wanted) && !/\w/.test(tok.charAt(wanted.length))) {
+      return true;
+    }
+  }
+  return false;
+};
 
 /** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
  *  `Fixes #N` line per newly-linked ref, inserted before the bro
@@ -1498,10 +1595,21 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // REST endpoint itself — `gh pr list` has no sort flags and pages
       // by creation time, so its first 500 could miss a freshly updated
       // older PR (the cap then only reorders a stale subset)
-      return ghJson<Array<{ number: number; head?: { ref?: string } }>>(
-        ['api', `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`],
+      //
+      // `--jq` projects the two fields this reads. The REST pull objects
+      // carry every body and reaction count, so one busy page answered
+      // ~1.9 MB — past Node's spawnSync buffer, which killed the child
+      // and read as a bare 'gh api failed: '. The projection answers
+      // ~3.5 KB for the same page.
+      return ghJson<Array<{ number: number; head?: string }>>(
+        [
+          'api',
+          `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
+          '--jq',
+          '[.[]|{number,head:.head.ref}]',
+        ],
         dir
-      ).map(p => ({ pr: p.number, headRef: p.head?.ref ?? '' }));
+      ).map(p => ({ pr: p.number, headRef: p.head ?? '' }));
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text);

@@ -30,6 +30,11 @@ export interface LoopConfig {
   /** Model override for the provider lane — meaningless on a raw
    *  template (the template carries its own flags). */
   model: string;
+  /** Seconds between supervised re-scans — `bro loop --every` and the
+   *  `loop install` want-marker cadence. The gate's own in-run poll
+   *  stays `--interval`; this is the outer pass cadence the daemon
+   *  re-enters the queue on. */
+  everySec: number;
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string;
@@ -45,12 +50,18 @@ export interface LoopConfig {
   mergeTimeoutMin: number;
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
   fixRounds: number;
+  /** The worker's merge mode: true arms GitHub auto-merge on its PR
+   *  (`gh pr merge --auto --squash --delete-branch`) and the order ends
+   *  there — no orchestrator gate, no fix rounds; false keeps the
+   *  order's 'do not merge' rule (the supervisor drives the act gate).
+   *  Withheld when `act.requireApproval` is set — a human sign-off
+   *  must still gate the land. */
+  autoMerge: boolean;
   /** Max beads per `bro loop` run — 0 = until the queue is gated/idle. */
   maxItems: number;
   /** Max open PRs the run's gate stack may hold — at cap pushes stop
    *  and only gate service runs until a merge frees a slot. 1 is the
-   *  serial default (spec bro-jis0c): the single in-flight branch
-   *  forks from the freshest main — the cheapest conflict exposure. */
+   *  near-serial shape (spec bro-zsmwq). */
   maxOpen: number;
   /** Hard ceiling on TOTAL open fleet PRs — every open PR on a fleet
    *  head (`work/`, `loop/`, `stack/`, `fix/bro-`), not just this
@@ -100,13 +111,15 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   provider: '',
   profile: '',
   model: '',
+  everySec: 300,
   bootstrap: '',
   stallMin: 45,
   crashExitMs: 10_000,
   mergeTimeoutMin: 45,
   fixRounds: 3,
+  autoMerge: false,
   maxItems: 0,
-  maxOpen: 1,
+  maxOpen: 3,
   maxOpenTotal: 10,
   worktreeWarn: 40,
   worktreeMb: 400,

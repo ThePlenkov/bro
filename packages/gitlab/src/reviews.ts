@@ -127,6 +127,17 @@ export function hostFor(dir: string): string {
 
 // --- MR rows -----------------------------------------------------------------
 
+/** Terminal-state gate for a scanned MR — merged rows carry merged_at,
+ *  closed-unmerged rows carry state=closed + a closed_at stamp (an
+ *  undated close would poison downstream date sorting). */
+const scannableMr = (mr: MrRow): boolean => {
+  const state = (mr.state ?? '').toUpperCase();
+  if (state === 'MERGED') {
+    return mr.merged_at != null;
+  }
+  return state === 'CLOSED' && mr.closed_at != null;
+};
+
 interface MrRow {
   iid: number;
   state?: string; // opened | locked | merged | closed
@@ -144,6 +155,7 @@ interface MrRow {
   description?: string;
   updated_at?: string | null;
   merged_at?: string | null;
+  closed_at?: string | null;
   merge_commit_sha?: string | null;
   squash_commit_sha?: string | null;
   /** Current diff refs — a note whose position.head_sha differs from
@@ -199,14 +211,16 @@ function toMergeState(mr: MrRow): string {
 const isDraft = (mr: MrRow): boolean =>
   mr.draft === true || mr.work_in_progress === true || /^draft:/i.test(mr.title ?? '');
 
-const toMergedPr = (row: MrRow & { merged_at: string }): MergedPr => ({
+const toMergedPr = (row: MrRow): MergedPr => ({
   number: row.iid,
-  mergedAt: row.merged_at,
+  mergedAt: row.merged_at ?? row.closed_at ?? null,
   updatedAt: row.updated_at ?? null,
   author: row.author?.username ?? 'unknown',
   labels: row.labels ?? [],
   headRef: row.source_branch ?? '',
   headSha: row.sha ?? '',
+  state: row.state?.toUpperCase(),
+  closedAt: row.closed_at ?? null,
 });
 
 // --- threads: discussions -----------------------------------------------------
@@ -433,52 +447,99 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
 
   function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     const mr = getMr(t);
-    if (mr.state !== 'merged') {
-      throw new Error(`MR ${link(t.repo, t.pr)} is not merged (state=${mr.state})`);
+    if (mr.state !== 'merged' && mr.state !== 'closed') {
+      throw new Error(`MR ${link(t.repo, t.pr)} is not merged or closed (state=${mr.state})`);
     }
-    if (!mr.merged_at) {
+    if (mr.state === 'merged' && !mr.merged_at) {
       throw new Error(`MR ${link(t.repo, t.pr)} is merged but reports no merged_at`);
     }
+    const ts = mr.merged_at ?? mr.closed_at ?? '';
     return {
       title: mr.title ?? '',
       url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
-      mergedAt: mr.merged_at,
+      mergedAt: ts || '',
       mergeSha: mergeSha || mr.merge_commit_sha || mr.squash_commit_sha || '',
+      state: mr.state?.toUpperCase(),
+      closedAt: mr.closed_at ?? null,
     };
   }
 
   function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
-    let endpoint = api(repo, 'merge_requests?state=merged&order_by=updated_at');
+    const state = q.state ?? 'merged';
+    // merged|closed|all are already GitLab's own state values
+    const glState = state;
+    let endpoint = api(repo, `merge_requests?state=${glState}&order_by=updated_at`);
     if (q.author) {
       endpoint += `&author_username=${encodeURIComponent(q.author)}`;
     }
     if (q.label) {
       endpoint += `&labels=${encodeURIComponent(q.label)}`;
     }
-    if (q.mergedSince) {
+    if (q.mergedSince && state === 'merged') {
       // server-side cutoff — the list caps by updated_at, so a
       // merged_at filter applied after the cap would lose eligible MRs
       endpoint += `&merged_after=${encodeURIComponent(q.mergedSince)}`;
+    } else if (q.mergedSince) {
+      // 'closed'/'all': updated_at covers closed-unmerged and merged
+      // rows alike — merged_after would exclude the closed half of 'all'
+      endpoint += `&updated_after=${encodeURIComponent(q.mergedSince)}`;
     }
-    return glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 })
-      .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
-      .map(toMergedPr);
+    const rows = glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 });
+    if (state === 'merged') {
+      return rows
+        .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
+        .map(r => toMergedPr({ ...r, merged_at: r.merged_at }));
+    }
+    if (state === 'closed') {
+      return rows.filter(row => row.state !== 'merged').map(toMergedPr);
+    }
+    // 'all' adds open/locked MRs — the facade contract is terminal
+    // states only, so drop them here rather than in every caller
+    return rows.filter(row => row.state === 'closed' || row.state === 'merged').map(toMergedPr);
   }
 
-  function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
+  /** One named-id fetch → MergedPr | null (warned skips). `acceptClosed`
+   *  widens the accepted terminal states to include closed-unmerged. */
+  function explicitMergedPr(repo: string, number: number, acceptClosed: boolean): MergedPr | null {
+    const mr = getMr({ repo, pr: number });
+    if (mr.state === 'merged') {
+      if (!mr.merged_at) {
+        console.error(
+          `warning: MR ${link(repo, number)} is merged but missing merged_at — skipped`
+        );
+        return null;
+      }
+      return toMergedPr({ ...mr, merged_at: mr.merged_at } as MrRow);
+    }
+    if (mr.state === 'closed' && acceptClosed) {
+      // closed-unmerged — harvestable for debt
+      return toMergedPr(mr);
+    }
+    console.error(`warning: MR ${link(repo, number)} is not merged — skipped`);
+    return null;
+  }
+
+  function explicitMergedPrs(
+    repo: string,
+    ids: number[],
+    state?: MergedPrQuery['state']
+  ): MergedPr[] {
     const out: MergedPr[] = [];
     const failures: unknown[] = [];
+    // ids are the selection — `state` only widens which terminal states
+    // are accepted: 'closed'/'all' also admit closed-unmerged MRs while
+    // the default keeps the merged-only contract for callers that mean
+    // "merged" (judge replay, cleanup).
+    const acceptClosed = state === 'closed' || state === 'all';
     // Dedup at the facade — duplicate ids would produce duplicate rows
     // that double-count in consumer aggregations.
     const unique = [...new Set(ids)];
     for (const number of unique) {
       try {
-        const mr = getMr({ repo, pr: number });
-        if (mr.state !== 'merged' || !mr.merged_at) {
-          console.error(`warning: MR ${link(repo, number)} is not merged — skipped`);
-          continue;
+        const row = explicitMergedPr(repo, number, acceptClosed);
+        if (row !== null) {
+          out.push(row);
         }
-        out.push(toMergedPr({ ...mr, merged_at: mr.merged_at }));
       } catch (err) {
         failures.push(err);
         console.error(
@@ -502,12 +563,44 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
 
   function mergedPrs(repo: string, q: MergedPrQuery = {}): MergedPr[] {
     if (q.ids !== undefined) {
-      return explicitMergedPrs(repo, q.ids);
+      return explicitMergedPrs(repo, q.ids, q.state);
     }
     return listMergedPrs(repo, q);
   }
 
   // --- bulk probes ----------------------------------------------------------------
+
+  /** One MR → MergedPrScan | null. Non-terminal MRs stay out —
+   *  merged rows carry merged_at, closed-unmerged rows carry
+   *  state=closed + a closed_at stamp (an undated close would poison
+   *  downstream date sorting); the caller's serial path reports them. */
+  async function scanOneMr(t: PrTarget): Promise<MergedPrScan | null> {
+    const mr = await glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts());
+    if (!scannableMr(mr)) {
+      return null;
+    }
+    const threads = toThreads(
+      await glabPagedAsync<GlDiscussion>(
+        api(t.repo, `merge_requests/${t.pr}/discussions`),
+        gopts()
+      ),
+      t,
+      mr.diff_refs?.head_sha
+    );
+    return {
+      info: {
+        title: mr.title ?? '',
+        url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
+        mergedAt: mr.merged_at ?? mr.closed_at ?? '',
+        mergeSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? '',
+        state: mr.state?.toUpperCase(),
+        closedAt: mr.closed_at ?? null,
+      },
+      threads,
+      labels: mr.labels ?? [],
+      updatedAt: mr.updated_at ?? null,
+    };
+  }
 
   /** Pooled REST probe — GitLab has no aliased bulk query, but the pool
    *  still overlaps each MR's meta+discussions pair. Misses stay out of
@@ -520,33 +613,10 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     let done = 0;
     await pooled(targets, opts?.concurrency ?? 4, async t => {
       try {
-        const mr = await glabJsonAsync<MrRow>(
-          ['api', api(t.repo, `merge_requests/${t.pr}`)],
-          gopts()
-        );
-        // non-merged/missing MRs stay out — the serial fallback decides
-        if (mr.state !== 'merged' || !mr.merged_at) {
-          return;
+        const scan = await scanOneMr(t);
+        if (scan !== null) {
+          out.set(t.pr, scan);
         }
-        const threads = toThreads(
-          await glabPagedAsync<GlDiscussion>(
-            api(t.repo, `merge_requests/${t.pr}/discussions`),
-            gopts()
-          ),
-          t,
-          mr.diff_refs?.head_sha
-        );
-        out.set(t.pr, {
-          info: {
-            title: mr.title ?? '',
-            url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
-            mergedAt: mr.merged_at,
-            mergeSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? '',
-          },
-          threads,
-          labels: mr.labels ?? [],
-          updatedAt: mr.updated_at ?? null,
-        });
       } catch (err) {
         console.error(
           `warning: bulk scan of ${link(t.repo, t.pr)} failed — ` +
