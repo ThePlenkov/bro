@@ -38,7 +38,7 @@ test('the root is the default branch when the first member merged', () => {
       member({ n: 3, slug: 'tool-use', edgeBase: 'main', prState: 'OPEN' }),
     ],
     'trunk',
-    alive('main')
+    alive('main', 'trunk')
   );
   // the merged member's base is the branch it landed on — and that branch
   // is gone; the chain stands on the default branch, the same answer the
@@ -75,6 +75,17 @@ test('a dead edge falls back to the PR base when that one lives', () => {
     alive('trunk')
   );
   assert.equal(root, 'trunk');
+});
+
+test('no live branch at all — there is nothing to stand on', () => {
+  // not even the default branch exists: the chain has no root, and the
+  // sync must say so instead of planning onto a dead ref
+  const root = chainRootBase(
+    [member({ n: 1, slug: 'code-health', edgeBase: 'feat/router-routes', prState: 'OPEN' })],
+    'trunk',
+    alive()
+  );
+  assert.equal(root, undefined);
 });
 
 test("a member's PR base stands in when the edge is missing", () => {

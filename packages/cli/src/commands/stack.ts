@@ -571,20 +571,27 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
  * the default branch, which is where the dead branch's work landed.
  *
  * `alive` answers "does this branch still exist" — the caller reads it
- * from the git truth, so this stays a pure function of its inputs.
+ * from the git truth, so this stays a pure function of its inputs. It is
+ * REQUIRED, with no default: a caller that forgot to check would fail
+ * OPEN (every dead branch reads as alive), which is the failure this
+ * whole guard exists to prevent.
+ *
+ * `undefined` when NO branch is alive — not even the default branch.
+ * There is nothing to stand on, and the caller must say so rather than
+ * plan onto a dead ref.
  */
 export function chainRootBase(
   members: SyncMemberInput[],
   defaultBase: string,
-  alive: (branch: string) => boolean = () => true
-): string {
+  alive: (branch: string) => boolean
+): string | undefined {
   const first = members[0];
-  if (first === undefined) return defaultBase;
-  if (first.prState === 'MERGED') return defaultBase;
-  for (const candidate of [first.edgeBase, first.prBase]) {
-    if (candidate !== undefined && alive(candidate)) return candidate;
+  if (first !== undefined && first.prState !== 'MERGED') {
+    for (const candidate of [first.edgeBase, first.prBase]) {
+      if (candidate !== undefined && alive(candidate)) return candidate;
+    }
   }
-  return defaultBase;
+  return alive(defaultBase) ? defaultBase : undefined;
 }
 
 /**
@@ -1042,7 +1049,16 @@ export function syncStack(
   const members = collectMembers(name, root, ctx.rev);
   // a branch that no longer exists cannot carry the chain — the git truth
   // decides, so the root falls back to the default branch
-  ctx.defaultBase = chainRootBase(members, ctx.trunk, (b) => localBranch(root, b));
+  const chainRoot = chainRootBase(members, ctx.trunk, (b) => localBranch(root, b));
+  if (chainRoot === undefined) {
+    // not even the default branch exists locally: there is nothing to
+    // stand on, and planning onto a dead ref is what this guard is for
+    ctx.lines.push(
+      `  ${name} — the chain's root ${ctx.trunk} does not exist; nothing to sync onto`
+    );
+    return ctx.lines;
+  }
+  ctx.defaultBase = chainRoot;
   markBaseHeads(members, root, ctx.defaultBase);
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the

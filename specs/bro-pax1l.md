@@ -65,16 +65,25 @@ So the candidate must be a branch that still EXISTS. The chain falls
 back to the default branch — where the dead branch's work landed:
 
 ```ts
-for (const candidate of [first.edgeBase, first.prBase]) {
-  if (candidate !== undefined && alive(candidate)) return candidate;
+const first = members[0];
+if (first !== undefined && first.prState !== 'MERGED') {
+  for (const candidate of [first.edgeBase, first.prBase]) {
+    if (candidate !== undefined && alive(candidate)) return candidate;
+  }
 }
-return defaultBase;
+return alive(defaultBase) ? defaultBase : undefined;
 ```
 
 `alive` is the git truth, read by the caller (`refs/heads/<branch>`
 resolves), so `chainRootBase` stays a pure function of its inputs: the
 same list of members and the same default branch always give the same
-root.
+root. It is REQUIRED — a caller that forgot the check would fail OPEN
+(every dead branch reads as alive), which is the failure this whole
+guard exists to prevent.
+
+When NOT EVEN the default branch exists, there is nothing to stand on:
+the root is `undefined` and the sync says so instead of planning onto a
+dead ref.
 
 A chain that never merged keeps its own root — the arc's own branch, not
 the default branch.
@@ -99,6 +108,8 @@ the member sits on.
 - [x] `chainRootBase` gives the default branch to a chain whose first
       member merged.
 - [x] `chainRootBase` refuses a candidate that no longer exists.
+- [x] the liveness check is required, and the sync refuses a chain with
+      no live base at all.
 - [x] tests: a chain whose first member merged roots at the default
       branch; a dead edge falls back to the default branch; a chain that
       never merged keeps its own root.
@@ -107,7 +118,8 @@ the member sits on.
 
 - `npx tsx --test packages/cli/src/commands/stack-root.test.ts` — a chain
   whose first member merged roots at the default branch; a dead edge falls
-  back to the default branch; a chain that never merged keeps its own root.
+  back to the default branch; a chain with no live branch at all has no
+  root; a chain that never merged keeps its own root.
 - `npx tsx --test packages/cli/src/commands/stack.e2e.test.ts` — the
   cascade's own end-to-end story still holds.
 - `bro stack sync <name>` after the bottom members merged: the rest are
@@ -120,7 +132,8 @@ the member sits on.
 - **A dead ref is never a base.** The sync must not name a branch that
   does not exist — neither the merged member's dead edge nor the arc's
   dead base. The chain falls back to the default branch, where that
-  work landed.
+  work landed; when not even the default branch exists, the sync says
+  so and moves nothing.
 - **The merged member's work stays merged.** A member that left the chain
   keeps its commits in the default branch; nothing is rewritten out of the
   chain's history.
@@ -144,5 +157,6 @@ the member sits on.
 - **A branch that exists only as a remote-tracking ref counts as dead.**
   The sync's own operations (the head check, the rebase) read local
   branches; a ref the plan names but git cannot resolve is a dead ref.
-  A repository whose default branch has no local branch is a separate
-  gap (tracked as its own bead).
+  A repository whose default branch has no local branch therefore gets a
+  refusal with a reason instead of a silent skip — the honest answer
+  until the ref is resolved to a usable commit-ish (bro-yi9sz).
