@@ -110,7 +110,7 @@ reconcile/settle reaps do the shrinking.
   `maxOpen` default 1, pure `ceiling.ts` (head-prefix set, hold
   verdict, head→bead-slug resolution, reconcile verdict) + tests
 - [ ] `ReviewFacade.closePr?` — core contract, github (`gh pr close`)
-  + gitlab (`state_event=close`) connectors
+  and gitlab (`state_event=close`) connectors
 - [ ] `loop.ts`: `--max-open-total` flag, ceiling hold in tryClaim,
   reconcile pass, closed-member remote-branch + reap, externally-
   merged remote delete, worktree-count warn
