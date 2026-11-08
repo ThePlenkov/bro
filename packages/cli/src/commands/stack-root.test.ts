@@ -88,6 +88,13 @@ test('no live branch at all — there is nothing to stand on', () => {
   assert.equal(root, undefined);
 });
 
+test('a member with neither an edge nor a PR base falls back to the default', () => {
+  const members = [member({ n: 1, slug: 'code-health', prState: 'OPEN' })];
+  assert.equal(chainRootBase(members, 'trunk', alive('trunk')), 'trunk');
+  // and the default branch is not alive either — still no root
+  assert.equal(chainRootBase(members, 'trunk', alive()), undefined);
+});
+
 test("a member's PR base stands in when the edge is missing", () => {
   const root = chainRootBase(
     [member({ n: 3, slug: 'tool-use', prBase: 'main', prState: 'OPEN' })],

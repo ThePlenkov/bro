@@ -45,13 +45,7 @@ may land). Its base is the branch it landed ON, and that branch is gone.
 So a merged first member gives the chain the default branch — the same
 answer the sync PLAN already gives the member that follows ("its
 successor's base becomes the nearest lower member still open, or the
-default branch"):
-
-```ts
-const first = members[0];
-if (first === undefined) return defaultBase;
-if (first.prState === 'MERGED') return defaultBase;
-```
+default branch").
 
 ### A dead ref is never a base
 
@@ -62,7 +56,9 @@ no longer exists. Planning onto that edge is the same failure one layer
 lower: the sync cannot rebase or retarget a member whose base is gone.
 
 So the candidate must be a branch that still EXISTS. The chain falls
-back to the default branch — where the dead branch's work landed:
+back to the default branch — where the dead branch's work landed — and
+the default branch itself must exist, or there is nothing to stand on.
+The whole function, in one piece:
 
 ```ts
 const first = members[0];
@@ -118,7 +114,8 @@ the member sits on.
 
 - `npx tsx --test packages/cli/src/commands/stack-root.test.ts` — a chain
   whose first member merged roots at the default branch; a dead edge falls
-  back to the default branch; a chain with no live branch at all has no
+  back to the default branch; a member with neither an edge nor a PR base
+  falls back to the default; a chain with no live branch at all has no
   root; a chain that never merged keeps its own root.
 - `npx tsx --test packages/cli/src/commands/stack.e2e.test.ts` — the
   cascade's own end-to-end story still holds.
