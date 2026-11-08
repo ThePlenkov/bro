@@ -127,6 +127,44 @@ function pushedMergedStack(f: Fixture): { wa: string; wb: string } {
   return { wa, wb }
 }
 
+/** The router arc's shape: the merged member's branch carries the arc's
+ *  commit and then the layer's change to the same file, so the trunk's
+ *  squash of that branch is ONE commit — and the arc's own commit cannot
+ *  be dropped as already-upstream. Replayed, it conflicts. */
+function arcChain(f: Fixture): { wa: string; wb: string } {
+  assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+  const wa = join(f.root, 'main--fx-a')
+  writeFileSync(join(wa, 'a.txt'), 'arc\n')
+  git(['add', '-A'], wa)
+  git(['commit', '-qm', 'add a.txt'], wa)
+  writeFileSync(join(wa, 'a.txt'), 'layer\n')
+  git(['add', '-A'], wa)
+  git(['commit', '-qm', 'change a.txt'], wa)
+  git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
+  assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+  const wb = join(f.root, 'main--fx-b')
+  commitIn(wb, 'b.txt')
+  git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+  // the trunk's own squash of the layer — the same file, other content
+  writeFileSync(join(f.main, 'a.txt'), 'trunk\n')
+  git(['add', '-A'], f.main)
+  git(['commit', '-qm', 'add a.txt'], f.main)
+  git(['push', '-q', 'origin', 'main'], f.main)
+  return { wa, wb }
+}
+
+/** The child's branch after the sync: the trunk + the child's own commit
+ *  and NOTHING else. The merged member's old commit must not ride along,
+ *  and the trunk's file must survive. */
+function assertChildCarriesOnlyItsWork(f: Fixture): void {
+  assert.equal(
+    git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
+    git(['rev-parse', 'main'], f.main).trim()
+  )
+  assert.equal(git(['log', '--format=%s', 'main..stack/s/2-fx-b'], f.main).trim(), 'add b.txt')
+  assert.equal(git(['show', 'stack/s/2-fx-b:a.txt'], f.main).trim(), 'trunk')
+}
+
 /** Both members OPEN on the host — the child targets the bottom member. */
 function openPrs(f: Fixture, extra: Record<string, unknown> = {}): void {
   writeHostState(f.hostState, {
@@ -390,28 +428,7 @@ describe('bro stack e2e', () => {
   test('the mid-cascade retirement of the merged base does not break the child\'s replay', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      // the arc's work, then the layer's work on the same file — the
-      // router arc's shape. The trunk's squash of that branch is ONE
-      // commit, so the arc's own commit cannot be dropped as
-      // already-upstream: replayed, it conflicts.
-      writeFileSync(join(wa, 'a.txt'), 'arc\n')
-      git(['add', '-A'], wa)
-      git(['commit', '-qm', 'add a.txt'], wa)
-      writeFileSync(join(wa, 'a.txt'), 'layer\n')
-      git(['add', '-A'], wa)
-      git(['commit', '-qm', 'change a.txt'], wa)
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
-      // the trunk's own squash of the layer — the same file, other content
-      writeFileSync(join(f.main, 'a.txt'), 'trunk\n')
-      git(['add', '-A'], f.main)
-      git(['commit', '-qm', 'add a.txt'], f.main)
-      git(['push', '-q', 'origin', 'main'], f.main)
+      const { wa } = arcChain(f)
       // the merged member leaves NO worktree: the sync retires its branch
       // mid-cascade, so the child's fork cannot be read from a ref
       git(['worktree', 'remove', '--force', wa], f.main)
@@ -420,45 +437,14 @@ describe('bro stack e2e', () => {
       assert.equal(r.code, 0, r.stderr)
       assert.doesNotMatch(r.stdout, /rebase onto main failed/)
       assert.match(r.stdout, /stack\/s\/2-fx-b rebased onto main/)
-      // the child's branch: the trunk + the child's OWN commit only. The
-      // merged member's old commit rode along when the fork was read from
-      // a ref the cascade had already moved — and conflicted.
-      assert.equal(
-        git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
-        git(['rev-parse', 'main'], f.main).trim()
-      )
-      // the child's own commit and NOTHING else — the merged member's old
-      // commit must not ride along, and the trunk's file must survive
-      assert.equal(git(['log', '--format=%s', 'main..stack/s/2-fx-b'], f.main).trim(), 'add b.txt')
-      assert.equal(git(['show', 'stack/s/2-fx-b:a.txt'], f.main).trim(), 'trunk')
+      assertChildCarriesOnlyItsWork(f)
     })
   })
 
   test('the replay carries the member\'s own work when the host already deleted the base', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      // the arc's work, then the layer's work on the same file — the
-      // router arc's shape. The trunk's squash of that branch is ONE
-      // commit, so the arc's own commit cannot be dropped as
-      // already-upstream: replayed, it conflicts.
-      writeFileSync(join(wa, 'a.txt'), 'arc\n')
-      git(['add', '-A'], wa)
-      git(['commit', '-qm', 'add a.txt'], wa)
-      writeFileSync(join(wa, 'a.txt'), 'layer\n')
-      git(['add', '-A'], wa)
-      git(['commit', '-qm', 'change a.txt'], wa)
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
-      // the trunk's own squash of the layer — the same file, other content
-      writeFileSync(join(f.main, 'a.txt'), 'trunk\n')
-      git(['add', '-A'], f.main)
-      git(['commit', '-qm', 'add a.txt'], f.main)
-      git(['push', '-q', 'origin', 'main'], f.main)
+      const { wa } = arcChain(f)
       // the HOST retired the merged member: no worktree, no branch — the
       // child's fork cannot be read from a ref any more
       git(['worktree', 'remove', '--force', wa], f.main)
@@ -468,13 +454,7 @@ describe('bro stack e2e', () => {
       assert.equal(r.code, 0, r.stderr)
       assert.doesNotMatch(r.stdout, /rebase onto main failed/)
       assert.match(r.stdout, /stack\/s\/2-fx-b rebased onto main/)
-      // the child's own commit and NOTHING else
-      assert.equal(
-        git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
-        git(['rev-parse', 'main'], f.main).trim()
-      )
-      assert.equal(git(['log', '--format=%s', 'main..stack/s/2-fx-b'], f.main).trim(), 'add b.txt')
-      assert.equal(git(['show', 'stack/s/2-fx-b:a.txt'], f.main).trim(), 'trunk')
+      assertChildCarriesOnlyItsWork(f)
     })
   })
 
