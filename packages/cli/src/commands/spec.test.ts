@@ -7,13 +7,15 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
-import { loadConfig, registerConnector, scrubEnv, specStore, testGit } from '@broject/core'
+import { loadConfig, procStat, registerConnector, scrubEnv, specStore, testGit } from '@broject/core'
 import type { ConnectorCtx, SpecNode, SpecStore, TaskRow, TaskStore } from '@broject/core'
 import { tmpDir } from './testrepo.ts'
 
@@ -148,6 +150,41 @@ function withRepo(
 }
 
 const ctx = (dir: string): ConnectorCtx => ({ dir, sessionId: 's1' })
+
+/** statx-btime probe — claim ordering rides the marker's birth time
+ *  where the fs reports one (mtime otherwise, where a re-arm
+ *  legitimately re-orders: the ordering tests skip on such a fs). */
+const birthStable = (dir: string): boolean => {
+  const p = join(dir, '.btime-probe')
+  writeFileSync(p, 'x')
+  const birth = statSync(p).birthtimeMs
+  writeFileSync(p, 'y')
+  const stable = birth > 0 && statSync(p).birthtimeMs === birth
+  rmSync(p)
+  return stable
+}
+
+/** Create `path` with a birth strictly newer than `floor`. Creation
+ *  order is the claim order, but a coarse-btime clock can stamp two
+ *  writes inside one tick — delete+recreate past it, bounded; false
+ *  when the fs never separates them (the caller skips). */
+const birthAfter = (path: string, body: string, floor: number): boolean => {
+  const deadline = Date.now() + 2000
+  for (;;) {
+    rmSync(path, { force: true })
+    writeFileSync(path, body)
+    if (statSync(path).birthtimeMs > floor) {
+      return true
+    }
+    if (Date.now() >= deadline) {
+      return false
+    }
+    const wait = Date.now() + 25
+    while (Date.now() < wait) {
+      // spin past the clock's tick
+    }
+  }
+}
 
 /** Write spec files under specs/, creating intermediate dirs. */
 const writeSpecs = (dir: string, files: Record<string, string>): void => {
@@ -286,11 +323,13 @@ describe('sddConnector', () => {
   test('gate: own claim without spec blocks under aspect task', async () => {
     await withRepo({ claims: ['b1'] }, async (dir) => {
       const h = probe(dir)
+      // the prompt reports first — the set it records must not mute
+      // the gate/start, which always report truth
+      assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
       const gate = await h.stopGate!(ctx(dir))
       assert.equal(gate.length, 1)
       assert.equal(gate[0]!.aspect, 'task')
       assert.match(gate[0]!.block ?? '', /b1 thing/)
-      assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
       assert.match((await h.sessionStart!(ctx(dir))).join('\n'), /spec missing: b1/)
     })
   })
@@ -359,6 +398,208 @@ describe('sddConnector', () => {
       const h = probe(dir)
       assert.match((await h.sessionStart!(ctx(dir)))[0] ?? '', /SDD \(gate\)/)
       assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+    })
+  })
+
+  // bro-6a3dq — the delegated-claim scope: a bead ANOTHER live session
+  // claims under a newer .task marker is foreign work (the executor
+  // owns its spec), excluded from every probe at once
+  test('a claim a newer live sibling marker also holds is delegated — never nudged', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      // s1 claimed first (the fixture marker); the executor session's
+      // fresher claim wins the bead and its spec obligation
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      // the orchestrator's claim is the OLDER one — the markers may be
+      // written inside one millisecond, so age s1's back explicitly
+      const s1 = join(hooks, 's1.task')
+      const claimedAt = new Date(Date.now() - 60_000)
+      utimesSync(s1, claimedAt, claimedAt)
+      // the executor's claim reads strictly NEWER by birth — a coarse
+      // clock may stamp both inside one tick, so recreate s2 until its
+      // birth separates (mtime order is already older)
+      if (
+        !birthAfter(join(hooks, 's2.task'), '2026-01-01T00:00:00Z\nb1\n', statSync(s1).birthtimeMs)
+      )
+        return
+      const h = probe(dir)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+      const start = await h.sessionStart!(ctx(dir))
+      assert.equal(start.filter((l) => l.includes('spec missing')).length, 0)
+    })
+  })
+
+  test('an older sibling claim does not take the bead — ours still nudges', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      const s2 = join(hooks, 's2.task')
+      writeFileSync(s2, ['2026-01-01T00:00:00Z', 'b1'].join('\n'))
+      // inside the live window but OLDER than our marker — the newer
+      // own claim keeps the bead
+      const old = new Date(Date.now() - 60_000)
+      utimesSync(s2, old, old)
+      assert.match((await probe(dir).promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
+    })
+  })
+
+  test("a dead sibling's claim is residue — the nudge stays ours", async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      const s2 = join(hooks, 's2.task')
+      writeFileSync(s2, ['2026-01-01T00:00:00Z', 'b1'].join('\n'))
+      // ownerless and past the live window — a crashed session's
+      // leftover claim never masks the nudge
+      const dead = new Date(Date.now() - 25 * 60 * 60 * 1000)
+      utimesSync(s2, dead, dead)
+      assert.match((await probe(dir).promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
+    })
+  })
+
+  test("a marker stamped by this agent's own process tree is a folded claim, not foreign", async () => {
+    const st = procStat(process.pid)
+    assert.ok(st)
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      // bro-7022c: restart rotates the session id but the owner tag
+      // still names this agent root — own work even though the file
+      // is not s1.task and is newer than it
+      writeFileSync(
+        join(hooks, 'rotated.task'),
+        `${Date.now()} ${process.pid} ${st.start}\nb1\n`
+      )
+      const me: ConnectorCtx = {
+        dir,
+        sessionId: 's1',
+        owner: { pid: process.pid, start: st.start },
+      }
+      assert.match((await probe(dir).promptSubmit!(me, 'p'))[0] ?? '', /b1 thing/)
+    })
+  })
+
+  test("a sibling's re-arm does not take an older shared claim — birth order survives rewrites", async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      // fs without statx-btime keeps mtime order, where a re-arm
+      // legitimately re-orders — nothing to prove there
+      if (!birthStable(hooks)) return
+      const s2 = join(hooks, 's2.task')
+      writeFileSync(s2, '2026-01-01T00:00:00Z\nb1\n')
+      // s1's is the NEWER claim — recreate its marker past s2's birth
+      // so file creation order reads claim order
+      const s1 = join(hooks, 's1.task')
+      const body = readFileSync(s1, 'utf8')
+      if (!birthAfter(s1, body, statSync(s2).birthtimeMs)) return
+      // s2 now arms fresh unrelated work — armSession rewrites the
+      // whole marker, refreshing stamp + mtime for every detail; under
+      // mtime order b1 would flip delegated and eat the nudge
+      writeFileSync(s2, `${Date.now()}\nb1\nb9\n`)
+      const gate = await probe(dir).stopGate!(ctx(dir))
+      assert.equal(gate.length, 1)
+      assert.match(gate[0]!.block ?? '', /b1 thing/)
+    })
+  })
+
+  test('a re-arm of this session does not take back delegated work', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      if (!birthStable(hooks)) return
+      // the executor claimed after us — its birth strictly newer →
+      // b1 is delegated, nothing to nag
+      const s1 = join(hooks, 's1.task')
+      if (
+        !birthAfter(join(hooks, 's2.task'), '2026-01-01T00:00:00Z\nb1\n', statSync(s1).birthtimeMs)
+      )
+        return
+      const h = probe(dir)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      // we arm more work — the rewrite refreshes our marker's stamp +
+      // mtime; under mtime order b1 would flip back to ours and re-nag
+      writeFileSync(s1, `${Date.now()}\nb1\nb9\n`)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+    })
+  })
+
+  test('a gate block the session cannot see must not consume the nudge', async () => {
+    await withRepo({}, async (dir) => {
+      // a spawned worker's claim rides the env pin — no s1.task
+      // marker exists, so emitStopGateBody drops the 'gate'
+      // contribution for this session; recording the set there
+      // would eat a nudge nobody was shown
+      process.env.BRO_BEAD_ID = 'b1'
+      const h = probe(dir)
+      const gate = await h.stopGate!(ctx(dir))
+      assert.equal(gate.length, 1)
+      assert.match(gate[0]!.block ?? '', /b1 thing/)
+      assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
+    })
+  })
+
+  // bro-6a3dq — report-once dedup: the missing set persists under the
+  // session's marker area and emits only when it changes
+  test('the missing set reports once per change — not on every prompt', async () => {
+    await withRepo(
+      {
+        claims: ['b1'],
+        list: '[{"id":"b1","status":"in_progress","title":"one","issue_type":"task"},{"id":"b2","status":"in_progress","title":"two","issue_type":"task"}]',
+      },
+      async (dir) => {
+        const hooks = join(dir, '.git', 'bro', 'hooks')
+        const h = probe(dir)
+        assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 one/)
+        // the stamp lands beside the other per-session dedup marks
+        assert.ok(existsSync(join(hooks, 'hinted', 's1.sdd-missing')))
+        // the unchanged set is told once
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        // a new claim changes the set → report again
+        writeFileSync(
+          join(hooks, 's1.task'),
+          ['2026-01-01T00:00:00Z', 'b1', 'b2'].join('\n')
+        )
+        const grown = await h.promptSubmit!(ctx(dir), 'p')
+        assert.match(grown[0] ?? '', /b1 one/)
+        assert.match(grown[0] ?? '', /b2 two/)
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        // a spec shrinks the set → the change reports too
+        mkdirSync(join(dir, 'specs'))
+        writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n')
+        const shrunk = await h.promptSubmit!(ctx(dir), 'p')
+        assert.match(shrunk[0] ?? '', /b2 two/)
+        assert.doesNotMatch(shrunk[0] ?? '', /b1/)
+        // resolved entirely — the empty set records, so the claim
+        // returning reports again
+        writeFileSync(join(dir, 'specs', 'b2.md'), '# spec\n')
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        rmSync(join(dir, 'specs', 'b2.md'))
+        assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b2 two/)
+      }
+    )
+  })
+
+  test('a gate-mode stop block does not consume the nudge — the next prompt still reports', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const h = probe(dir)
+      assert.equal((await h.stopGate!(ctx(dir))).length, 1)
+      // gate mode stamps only the empty set — emitStopGateBody may
+      // have dropped the block (an armed drill/work/act block outranks
+      // 'task'), so the prompt re-reports once, records, then quiet
+      assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      // session-start rehydrate still re-reminds — post-compaction
+      // needs the signal back
+      assert.match((await h.sessionStart!(ctx(dir))).join('\n'), /spec missing: b1/)
+    })
+  })
+
+  test('a remind-mode gate hint did surface — the next prompt stays quiet', async () => {
+    await withRepo({ config: { sdd: { mode: 'remind' } }, claims: ['b1'] }, async (dir) => {
+      const h = probe(dir)
+      const gate = await h.stopGate!(ctx(dir))
+      assert.equal(gate.length, 1)
+      assert.match(gate[0]!.passive ?? '', /b1 thing/)
+      // the passive lands as context every stop → the stamp is a real
+      // tell, so the next prompt does not repeat it
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
     })
   })
 })

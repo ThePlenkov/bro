@@ -41,6 +41,7 @@ import {
   busProbe,
   busSocketPath,
   dropMailbox,
+  emitWorkerSilent,
   git,
   gitTry,
   janitorDidWork,
@@ -50,6 +51,7 @@ import {
   prOwnershipMark,
   hasHelpFlag,
   printUsage,
+  readAgentRegistry,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
@@ -264,6 +266,16 @@ function agentAttention(rows: FleetRow[]): string[] {
   return out
 }
 
+/** A run's silence in whole minutes once it crosses loop.stallMin —
+ *  the shared predicate behind the attention line and the
+ *  `worker.silent` bus emit (bro-294hf); null when the run is dead,
+ *  unverifiable, or still under the bound. */
+export function silentRunMin(loop: WatchLoop, r: LoopRunView): number | null {
+  return loop.stallMin > 0 && r.state !== 'dead' && r.silentMs !== null && r.silentMs >= loop.stallMin * 60_000
+    ? Math.floor(r.silentMs / 60_000)
+    : null
+}
+
 /** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
  *  record whose pid is gone (a crashed loop's residue). Reported for the
  *  orchestrator's judgment; watch never stops or respawns anything. */
@@ -274,14 +286,9 @@ function loopAttention(loop: WatchLoop): string[] {
       out.push(`loop agent ${r.beadId} — pid ${r.pid ?? '?'} gone — crashed run's record`)
       continue
     }
-    if (
-      loop.stallMin > 0 &&
-      r.silentMs !== null &&
-      r.silentMs >= loop.stallMin * 60_000
-    ) {
-      out.push(
-        `loop agent ${r.beadId} — output silent ${Math.floor(r.silentMs / 60_000)}m — inspect?`
-      )
+    const silentMin = silentRunMin(loop, r)
+    if (silentMin !== null) {
+      out.push(`loop agent ${r.beadId} — output silent ${silentMin}m — inspect?`)
     }
   }
   return out
@@ -300,6 +307,80 @@ function prAttention(prs: WatchPrGate[]): string[] {
     }
   }
   return out
+}
+
+/** `worker.silent` on the bus — the silence computation already runs
+ *  every tick; a per-process Set turns it into transitions (loud→silent
+ *  emits once, a run that speaks again re-arms). No heartbeat poller is
+ *  invented — the --every cadence is the existing one (bro-294hf).
+ *  agentId resolves best-effort off the registry; a run the registry
+ *  never claimed still emits keyed on its beadId. */
+function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
+  pruneSilentSeen(snap.loop.runs, seen)
+  let reg: ReturnType<typeof readAgentRegistry> | undefined
+  const registry = (): ReturnType<typeof readAgentRegistry> => {
+    if (reg === undefined) {
+      try {
+        reg = readAgentRegistry(dir)
+      } catch {
+        reg = {} // a wedged registry is no agentId, never a dead tick
+      }
+    }
+    return reg
+  }
+  for (const r of snap.loop.runs) {
+    trackSilentTransition(dir, snap.loop, r, seen, registry)
+  }
+}
+
+/** A run that ended while silent leaves no row to re-clear its entry —
+ *  prune gone beads or a respawn on the same bead can never emit again. */
+function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
+  const live = new Set(runs.map(r => r.beadId))
+  for (const beadId of seen) {
+    if (!live.has(beadId)) {
+      seen.delete(beadId)
+    }
+  }
+}
+
+/** One run's edge: loud/dead re-arms, the first tick past stallMin
+ *  emits `worker.silent` once per silent stretch. */
+function trackSilentTransition(
+  dir: string,
+  loop: WatchLoop,
+  r: LoopRunView,
+  seen: Set<string>,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const silentMin = silentRunMin(loop, r)
+  if (silentMin === null) {
+    seen.delete(r.beadId)
+    return
+  }
+  if (seen.has(r.beadId)) {
+    return
+  }
+  seen.add(r.beadId)
+  emitRunSilent(dir, r, silentMin, registry)
+}
+
+/** One run past its silence bound → a keyed `worker.silent` envelope.
+ *  agentId resolves best-effort off the registry; a run the registry
+ *  never claimed still emits keyed on its beadId. */
+function emitRunSilent(
+  dir: string,
+  r: LoopRunView,
+  silentMin: number,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const entry = registry()[r.beadId]
+  emitWorkerSilent(dir, {
+    bead: r.beadId,
+    silentMin,
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
+    ...(r.log !== undefined ? { log: r.log } : {}),
+  })
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every
@@ -1066,8 +1147,12 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // The dedup key is the snapshot minus its timestamp — --notify re-emits
   // only on transitions, a heartbeat reports change not noise.
   let lastNotified = ''
+  // beadIds already reported silent this process — the transition edge
+  // for worker.silent (cleared when a run goes loud or settles)
+  const silentSeen = new Set<string>()
   const tick = async (): Promise<void> => {
     const { snap, text } = await tickOnce(dir)
+    publishSilentTransitions(dir, snap, silentSeen)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
     try {
       // the durable heartbeat file — mailbox drops expire in an hour,

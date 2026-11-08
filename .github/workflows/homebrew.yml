@@ -35,12 +35,12 @@ jobs:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: No tap token — formula stays manual
-        if: env.TAP_TOKEN == ''
+        if: env.TAP_TOKEN == '' && !contains(env.TAG, '-')
         run: |
           echo "::warning::HOMEBREW_TAP_TOKEN is not set — bump Formula/bro.rb in ThePlenkov/homebrew-brew by hand (url + sha256 for $TAG)"
 
       - name: Resolve npm tarball (waits out publish.yml)
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_TOKEN != '' && !contains(env.TAG, '-')
         id: tar
         run: |
           # workflow_dispatch input is free text — require a full vX.Y.Z
@@ -71,13 +71,13 @@ jobs:
           echo "sha256=$sha" >>"$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_TOKEN != '' && !contains(env.TAG, '-')
         with:
           repository: ThePlenkov/homebrew-brew
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Bump formula, push
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_TOKEN != '' && !contains(env.TAG, '-')
         env:
           # outputs travel via env, never ${{ }} inside run — an apostrophe
           # in a dispatched tag would otherwise break out of the sed quotes

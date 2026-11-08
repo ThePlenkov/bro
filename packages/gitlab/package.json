@@ -1,6 +1,6 @@
 {
   "name": "@broject/gitlab",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -13,10 +13,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.3.0"
   },
   "devDependencies": {
-    "@broject/github": "^0.2.0",
+    "@broject/github": "^0.3.0",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
