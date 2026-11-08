@@ -562,12 +562,29 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
  * default branch — the same answer `planSync` gives the member that
  * follows ("its successor's base becomes the nearest lower member still
  * open, or the default branch").
+ *
+ * A DEAD ref is never a base. The recorded edge names a branch that may
+ * itself have merged and been deleted (the arc's base merges before the
+ * layer above it does) — planning onto it is what made the sync refuse
+ * to move the members that were still in the chain. So the candidate
+ * must be a branch that still EXISTS; otherwise the chain falls back to
+ * the default branch, which is where the dead branch's work landed.
+ *
+ * `alive` answers "does this branch still exist" — the caller reads it
+ * from the git truth, so this stays a pure function of its inputs.
  */
-export function chainRootBase(members: SyncMemberInput[], defaultBase: string): string {
+export function chainRootBase(
+  members: SyncMemberInput[],
+  defaultBase: string,
+  alive: (branch: string) => boolean = () => true
+): string {
   const first = members[0];
   if (first === undefined) return defaultBase;
   if (first.prState === 'MERGED') return defaultBase;
-  return first.edgeBase ?? first.prBase ?? defaultBase;
+  for (const candidate of [first.edgeBase, first.prBase]) {
+    if (candidate !== undefined && alive(candidate)) return candidate;
+  }
+  return defaultBase;
 }
 
 /**
@@ -1023,7 +1040,9 @@ export function syncStack(
     lines: [],
   };
   const members = collectMembers(name, root, ctx.rev);
-  ctx.defaultBase = chainRootBase(members, ctx.trunk);
+  // a branch that no longer exists cannot carry the chain — the git truth
+  // decides, so the root falls back to the default branch
+  ctx.defaultBase = chainRootBase(members, ctx.trunk, (b) => localBranch(root, b));
   markBaseHeads(members, root, ctx.defaultBase);
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the
