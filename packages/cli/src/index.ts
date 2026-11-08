@@ -13,7 +13,7 @@
  * group) is reachable both ways.
  */
 import { defineCommand, runCommand, type CommandPlugin } from '@broject/command';
-import { CommandError, EXIT, printUsage } from '@broject/core';
+import { EXIT, isCommandError, printUsage, type CommandError } from '@broject/core';
 import { journalCommand } from './commands/hooks.ts';
 import { registerTelegramSink } from './commands/sinks-telegram.ts';
 import { otelSpan, setAmbient } from '@broject/providers';
@@ -97,30 +97,24 @@ const cli = defineCommand({
 runCommand(cli, process.argv.slice(2), { mounted: true }).catch((err: unknown) => {
   // A command throws CommandError instead of exiting — this catch is
   // the single dispatcher exit the type exists for: usage text and
-  // code ride the error, the stream follows the code. The name check
-  // covers a CommandError from a bundled duplicate module instance.
-  if (
-    err instanceof CommandError ||
-    (err !== null &&
-      typeof err === 'object' &&
-      (err as { name?: unknown }).name === 'CommandError')
-  ) {
-    const e = err as CommandError;
-    if (e.usage !== undefined) {
+  // code ride the error, the stream follows the code (isCommandError
+  // also catches a bundled duplicate module's copy of the type).
+  if (isCommandError(err)) {
+    const e = err;
+    const code = typeof e.code === 'number' ? e.code : 1;
+    // A printUsage-thrown error already wrote its usage (message===usage
+    // marks that case); a directly-thrown one prints the error line then
+    // its usage — exactly once each, conventional order.
+    const out = code === EXIT.ok ? console.log : console.error;
+    if (e.message && e.message !== e.usage) out(e.message);
+    if (e.usage !== undefined && e.message !== e.usage) {
       try {
         printUsage(e.usage, e.code);
       } catch {
         // printUsage itself throws CommandError — the write already landed
       }
     }
-    const code = typeof e.code === 'number' ? e.code : 1;
-    if (code === EXIT.ok) {
-      if (e.message && e.message !== e.usage) console.log(e.message);
-      process.exit(0);
-    }
-    if (e.message && e.message !== e.usage) console.error(e.message);
-    else if (e.usage === undefined && e.message) console.error(e.message);
-    process.exit(code);
+    process.exit(code === EXIT.ok ? 0 : code);
   }
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);

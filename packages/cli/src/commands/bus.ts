@@ -14,6 +14,7 @@
  */
 import {
   CommandError,
+  isCommandError,
   EXIT,
   busPublish,
   busSocketPath,
@@ -134,7 +135,7 @@ async function cmdServe(rest: string[]): Promise<void> {
   try {
     broker = await startBusBroker(process.cwd())
   } catch (err) {
-    if (err instanceof CommandError) throw err
+    if (isCommandError(err)) throw err
     die(err instanceof Error ? err.message : String(err))
   }
   const payload = { socketPath: broker.socketPath, pid: process.pid, seq: broker.seq }
@@ -265,7 +266,9 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
       onClose: end,
     }, since !== undefined ? { since } : {})
   } catch (err) {
-    if (err instanceof CommandError) {
+    process.removeListener('SIGINT', end)
+    process.removeListener('SIGTERM', end)
+    if (isCommandError(err)) {
       throw err
     }
     if (err instanceof Error && err.message.startsWith('error:')) {
@@ -273,7 +276,15 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
     }
     die(err instanceof Error ? err.message : String(err))
   }
-  await ended
+  try {
+    await ended
+  } finally {
+    // the once() listeners detach on a signal; a broker-driven close
+    // leaves them armed — an embedding host that catches the return
+    // must not inherit this command's listeners
+    process.removeListener('SIGINT', end)
+    process.removeListener('SIGTERM', end)
+  }
   sub.close()
 }
 

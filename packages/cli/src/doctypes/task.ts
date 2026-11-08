@@ -16,7 +16,7 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process'
-import { CommandError, EXIT, facade } from '@broject/core'
+import { CommandError, EXIT, facade, passthroughExitCode } from '@broject/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, ExitCode, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
 import { requireGlobalStore } from './store.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -133,11 +133,22 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
           enoent
             ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
             : `error: bd failed — ${res.error.message}`,
-          res.status === null ? EXIT.error : ((res.status as ExitCode) ?? EXIT.error)
+          res.status === null ? EXIT.error : passthroughExitCode(res.status)
+        )
+      }
+      if (res.status === null) {
+        // spawn failure threw above; a null status here means bd died
+        // on a signal — never render that as a bare exit-1
+        throw new CommandError(
+          `error: bd terminated by ${res.signal ?? 'signal'}`,
+          EXIT.error
         )
       }
       if (res.status !== 0) {
-        throw new CommandError('', ((res.status ?? 1) >= 0 && (res.status ?? 1) <= 4) ? ((res.status ?? 1) as ExitCode) : EXIT.error)
+        // raw passthrough: bd's own exit code IS the contract — callers
+        // key off its taxonomy (0 free · 1 unreadable · 2 unresolved ·
+        // 3 actionable · 4 timeout, plus any bd adds); never clamp
+        throw new CommandError('', passthroughExitCode(res.status))
       }
     },
   }

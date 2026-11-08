@@ -12,7 +12,7 @@
  * Project and global beads never mix: the store is a plain `bd init`
  * directory addressed by cwd, not by merged state.
  */
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { CommandError, DEFAULT_GLOBAL_BEADS_DIR, EXIT, gitTry, taskStore } from '@broject/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core'
@@ -97,10 +97,64 @@ function initFailed(err: unknown, dir: string, drop: () => void): never {
   const msg = enoent
     ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
     : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
-  try {
-    drop()
-  } catch {}
+  drop()
   throw new CommandError(msg, EXIT.error)
+}
+
+/** One init at a time per store dir. The rollback in `initStore`
+ *  deletes what the snapshots say this run created — without a lock,
+ *  a concurrent `bro store init` can finish inside that window and a
+ *  losing process's drop() deletes the winner's live store. The lock
+ *  is a pid-stamped dir: mkdir is atomic create-or-fail, and a dead
+ *  owner's lock is reclaimed like the ceiling reservations do. */
+const INIT_LOCK = '.bro-init.lock'
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // ESRCH → gone; EPERM → alive but not ours
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function takeInitLock(dir: string): { release: () => void } {
+  const lock = join(dir, INIT_LOCK)
+  try {
+    mkdirSync(lock)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    let owner: number | undefined
+    try {
+      owner = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
+    } catch {
+      owner = undefined
+    }
+    if (owner !== undefined && Number.isInteger(owner) && !pidAlive(owner)) {
+      rmSync(lock, { recursive: true, force: true })
+      return takeInitLock(dir)
+    }
+    throw new CommandError(
+      `error: another store init is running in ${dir} — retry when it finishes`,
+      EXIT.error
+    )
+  }
+  try {
+    writeFileSync(join(lock, 'pid'), String(process.pid))
+  } catch {
+    // best effort — an unstamped lock is still a lock, it just can't
+    // be reclaimed until a human removes it
+  }
+  return {
+    release: () => {
+      try {
+        rmSync(lock, { recursive: true, force: true })
+      } catch {
+        // a stuck empty lock dir is harmless — the pid check reclaims it
+      }
+    },
+  }
 }
 
 /** Exported for tests — the ENOENT/prefix paths are the contract a
@@ -110,52 +164,64 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
   const prefix = flags['prefix'] ?? (name === 'global' ? 'global' : undefined)
   const created = !existsSync(dir)
   mkdirSync(dir, { recursive: true })
-  // only what THIS run made may be removed on failure — the dir itself,
-  // or the .beads init added to an existing one. A store that pre-dates
-  // this run is the user's data: a validation exit must not delete it
-  const freshStore = !existsSync(join(dir, '.beads'))
-  const drop = (): void => {
-    if (created) {
-      rmSync(dir, { recursive: true, force: true })
-    } else if (freshStore) {
-      rmSync(join(dir, '.beads'), { recursive: true, force: true })
-    }
-  }
-  const store = taskStore(dir) // a .beads dir is always beads — the connector's init capability
+  // the lock is what makes the snapshots below trustworthy: with it
+  // held, no second init can create .beads between our check and our
+  // rollback — drop() can only ever remove what THIS run made
+  const lock = takeInitLock(dir)
   try {
-    const out = store.init?.({ prefix })
-    if (out) {
-      process.stdout.write(out.endsWith('\n') ? out : `${out}\n`)
+    // only what THIS run made may be removed on failure — the dir itself,
+    // or the .beads init added to an existing one. A store that pre-dates
+    // this run is the user's data: a validation exit must not delete it
+    const freshStore = !existsSync(join(dir, '.beads'))
+    const drop = (): void => {
+      try {
+        if (created) {
+          rmSync(dir, { recursive: true, force: true })
+        } else if (freshStore) {
+          rmSync(join(dir, '.beads'), { recursive: true, force: true })
+        }
+      } catch (err) {
+        // rollback is best-effort but never silent — a stranded partial
+        // store the operator can't see is the worst of both states
+        console.error(
+          `warning: could not remove partial store under ${dir} — ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
     }
-  } catch (err) {
-    initFailed(err, dir, drop)
-  }
-  // validate: a store that can't answer is broken, not created — and a
-  // store that accepts --prefix but doesn't apply it must not report a
-  // prefix it never set, so verify what it actually recorded
-  let reported: string | undefined
-  try {
-    reported = store.prefix()
-  } catch (err) {
+    const store = taskStore(dir) // a .beads dir is always beads — the connector's init capability
     try {
-      drop()
-    } catch {}
-    throw new CommandError(
-      `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`,
-      EXIT.error
-    )
-  }
-  if (prefix && reported !== prefix) {
+      const out = store.init?.({ prefix })
+      if (out) {
+        process.stdout.write(out.endsWith('\n') ? out : `${out}\n`)
+      }
+    } catch (err) {
+      initFailed(err, dir, drop)
+    }
+    // validate: a store that can't answer is broken, not created — and a
+    // store that accepts --prefix but doesn't apply it must not report a
+    // prefix it never set, so verify what it actually recorded
+    let reported: string | undefined
     try {
+      reported = store.prefix()
+    } catch (err) {
       drop()
-    } catch {}
-    throw new CommandError(
-      `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`,
-      EXIT.error
-    )
+      throw new CommandError(
+        `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`,
+        EXIT.error
+      )
+    }
+    if (prefix && reported !== prefix) {
+      drop()
+      throw new CommandError(
+        `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`,
+        EXIT.error
+      )
+    }
+    const suffix = prefix ? ` (prefix ${prefix})` : ''
+    console.log(`${name} store ready: ${dir}${suffix}`)
+  } finally {
+    lock.release()
   }
-  const suffix = prefix ? ` (prefix ${prefix})` : ''
-  console.log(`${name} store ready: ${dir}${suffix}`)
 }
 
 function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {

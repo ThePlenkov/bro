@@ -915,7 +915,7 @@ export const PLUGINS: BroPlugin[] = [
       const code = await applyQueryPlan(plan as QueryPlan);
       if (code !== 0) {
         const core = await import('@broject/core')
-        throw new core.CommandError('', code as any)
+        throw new core.CommandError('', core.passthroughExitCode(code))
       }
     },
   }),

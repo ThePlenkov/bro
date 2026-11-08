@@ -28,6 +28,7 @@ import {
   taskStore,
   CommandError,
   EXIT,
+  type ExitCode,
   type TaskRow,
 } from '@broject/core'
 import { beadsDir, inlineFormulaDoc, pourFormula } from '@broject/convoy'
@@ -39,8 +40,8 @@ import { loadBroConfig } from '../plugins.ts'
 const DAY_MS = 86_400_000
 const MARK = 'sweep:distilled'
 
-function fail(msg: string, code: number = EXIT.usage): never {
-  throw new CommandError(`error: ${msg}`, code as any)
+function fail(msg: string, code: ExitCode = EXIT.usage): never {
+  throw new CommandError(`error: ${msg}`, code)
 }
 
 interface SweepCfg {
@@ -346,7 +347,7 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
     for (const r of gate) {
       console.error(`  ${r.id}\t${r.title ?? ''}`)
     }
-    process.exit(1)
+    throw new CommandError(`sweep: gate refused — ${gate.length} bead(s) listed above`, EXIT.error)
   }
 
   if (burn.length === 0) {

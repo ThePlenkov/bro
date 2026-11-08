@@ -6,7 +6,7 @@
  * apply to it directly. The ACP session id is diagnostic only; the
  * fleet's own registry identity stands.
  */
-import { CommandError, EXIT, patchAgentRegistry } from '@broject/core';
+import { CommandError, EXIT, passthroughExitCode, patchAgentRegistry } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { readFileSync } from 'node:fs';
 
@@ -83,6 +83,6 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
           },
   });
   if (code !== 0) {
-    throw new CommandError('', code as any);
+    throw new CommandError('', passthroughExitCode(code));
   }
 }

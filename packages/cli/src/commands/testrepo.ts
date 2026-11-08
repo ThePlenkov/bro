@@ -1802,10 +1802,16 @@ export async function capture(
     }
     if (e && (e.name === 'CommandError' || e.constructor?.name === 'CommandError')) {
       const code = typeof e.code === 'number' ? e.code : 1
-      if (e.message && !err.length && !out.length) {
-        // best effort capture
-        if (e.usage) err.push(e.usage.replace(/\n$/, ''))
-        else err.push(e.message.replace(/\n$/, ''))
+      // mirror the dispatcher: a printUsage-thrown error already wrote
+      // itself through usageWriter (message===usage marks that case);
+      // anything else prints message and usage exactly once each —
+      // regardless of what the command already emitted before throwing
+      const target = code === 0 ? out : err
+      if (e.message && e.message !== e.usage) {
+        target.push(String(e.message).replace(/\n$/, ''))
+      }
+      if (e.usage !== undefined && e.usage !== e.message) {
+        target.push(String(e.usage).replace(/\n$/, ''))
       }
       return { code, out, err }
     }

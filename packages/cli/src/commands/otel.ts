@@ -263,7 +263,7 @@ export function runOtelCommand(argv: string[]): void {
       return
     default:
       throw new CommandError(
-        sub === undefined ? OTEL_USAGE_TEXT : `error: unknown otel subcommand: ${sub}\n\n${OTEL_USAGE_TEXT}`,
+        sub === undefined ? OTEL_USAGE_TEXT : `error: unknown otel subcommand: ${sub}`,
         EXIT.usage,
         OTEL_USAGE_TEXT
       )

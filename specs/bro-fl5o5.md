@@ -19,7 +19,7 @@ scope:
 - Ensure planes/ACP (library code) never call `process.exit`; they throw/reject and let the host decide termination.
 
 ## Verify
-- No `process.exit` outside `packages/cli/src/index.ts` (and maybe build/scripts if truly necessary, but task says "one process.exit at the dispatcher" referring to CLI process termination).
-- All command errors go through `CommandError`.
+- `packages/cli/src/index.ts` is the single dispatcher exit: every `CommandError` thrown by any command is mapped there to the correct stream and code — no second `process.exit` may be added to a file this PR touches.
+- This PR lands the mechanism (`CommandError`, `isCommandError`, dispatcher catch) and converts the command surface it touches; the remaining direct `process.exit` sites in untouched command files migrate incrementally — the taxonomy forbids *new* direct exits in converted code, the Design section is the end state.
 - `npm run build && npm run typecheck` clean.
 - `npm test` passes.

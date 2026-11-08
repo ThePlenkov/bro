@@ -103,6 +103,14 @@ export const usageWriter = {
  *  The code is typed ExitCode — only the documented taxonomy may exit. */
 import { CommandError } from './errors.ts'
 
+/** A foreign process's exit code rides through verbatim — exec/passthrough
+ *  contracts (task exec → bd, acp worker, plugin runPlan) can't clamp into
+ *  bro's own taxonomy without losing the subprocess's codes. One audited
+ *  cast site instead of `code as any` scattered per call. */
+export function passthroughExitCode(code: number): ExitCode {
+  return code as ExitCode
+}
+
 export function printUsage(text: string, code: ExitCode): never {
   usageWriter.write(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`)
   if (code === EXIT.ok) {
