@@ -1100,18 +1100,22 @@ let perfBuf: PerfRow[] | null = null;
 function probeReporter(event: string, probe: string): ProbeReporter {
   let span: any | undefined;
   let pendingEnd: Record<string, unknown> | undefined;
-  void lazyOtelSpan().then((otelSpan: any) => {
-    try {
-      const created = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
-      if (pendingEnd) {
-        created.end(pendingEnd);
-      } else {
-        span = created;
+  void lazyOtelSpan()
+    .then((otelSpan: any) => {
+      try {
+        const created = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
+        if (pendingEnd) {
+          created.end(pendingEnd);
+        } else {
+          span = created;
+        }
+      } catch {
+        span = undefined;
       }
-    } catch {
-      span = undefined;
-    }
-  });
+    })
+    // a failed dynamic import is fail-open — span stays undefined,
+    // ends land in pendingEnd and drop
+    .catch(() => {});
   return rows => {
     const attrs = { 'hook.rows': rows.length };
     try {
@@ -1516,45 +1520,6 @@ async function guardLines(
  *  Shared by the session-start collector and the cursor-hydrate leg of
  *  prompt-submit — cloud agents never fire SessionStart, so their
  *  first prompt carries the same rehydration. */
-// Small caches for cheap per-invocation reads (best-effort, fail-open)
-const GOAL_CACHE_TTL_MS = 5_000;
-const goalCache = new Map<string, { ts: number; lines: string[] }>();
-const HB_CACHE_TTL_MS = 2_000;
-const hbCache = new Map<string, { ts: number; line: string | null }>();
-
-function cachedGoalLines(dir: string, sessionId: string): string[] {
-  const key = `${dir}|${sessionId}|goal`;
-  const now = Date.now();
-  const hit = goalCache.get(key);
-  if (hit && now - hit.ts < GOAL_CACHE_TTL_MS) {
-    return hit.lines;
-  }
-  void lazyGoal()
-    .then(m => {
-      const lines = m.goalContextLines(dir, sessionId);
-      goalCache.set(key, { ts: Date.now(), lines });
-    })
-    .catch(() => {});
-  // return cached or empty on first call
-  return hit?.lines ?? [];
-}
-
-function cachedHeartbeatLine(dir: string): string | null {
-  const key = `${dir}|hb`;
-  const now = Date.now();
-  const hit = hbCache.get(key);
-  if (hit && now - hit.ts < HB_CACHE_TTL_MS) {
-    return hit.line;
-  }
-  void lazyHeartbeat()
-    .then(m => {
-      const line = m.heartbeatLine(dir);
-      hbCache.set(key, { ts: Date.now(), line });
-    })
-    .catch(() => {});
-  return hit?.line ?? null;
-}
-
 async function rehydrateLines(
   dir: string,
   sessionId: string,
@@ -1571,9 +1536,7 @@ async function rehydrateLines(
   // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
   try {
     if (goalMod) {
-      const goalLines = goalMod.goalContextLines(dir, sessionId);
-      goalCache.set(`${dir}|${sessionId}|goal`, { ts: Date.now(), lines: goalLines });
-      parts.push(...goalLines);
+      parts.push(...goalMod.goalContextLines(dir, sessionId));
     }
   } catch {
     // ignore
@@ -1584,7 +1547,6 @@ async function rehydrateLines(
   try {
     if (hbMod) {
       const hb = hbMod.heartbeatLine(dir);
-      hbCache.set(`${dir}|hb`, { ts: Date.now(), line: hb });
       if (hb !== null) {
         parts.push(`watch heartbeat: ${hb}`);
       }
@@ -2530,25 +2492,28 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
       | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
       | undefined,
   };
-  void lazyOtelSpan().then((otelSpan: any) => {
-    try {
-      const span = otelSpan('hook.event', {
-        'hook.event': event,
-        'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
-      });
-      if (spanState.evSpanEnded) {
-        try {
-          span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
-        } catch {
-          // ignore
+  void lazyOtelSpan()
+    .then((otelSpan: any) => {
+      try {
+        const span = otelSpan('hook.event', {
+          'hook.event': event,
+          'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+        });
+        if (spanState.evSpanEnded) {
+          try {
+            span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
+          } catch {
+            // ignore
+          }
+          return;
         }
-        return;
+        spanState.evSpan = span;
+      } catch {
+        spanState.evSpan = undefined;
       }
-      spanState.evSpan = span;
-    } catch {
-      spanState.evSpan = undefined;
-    }
-  });
+    })
+    // a failed dynamic import is fail-open — no span, no unhandled rejection
+    .catch(() => {});
   const ok = await dispatchWithSpan(event, raw, input, spanState);
   clearTimeout(deadlineTimer);
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
