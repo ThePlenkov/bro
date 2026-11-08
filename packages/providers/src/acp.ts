@@ -345,6 +345,35 @@ interface AcpReply {
   usage?: DecideResult['usage'];
 }
 
+/** The turn's token usage — the agent's OWN numbers, when it reports any.
+ *  The ACP protocol carries usage on the prompt response; an agent that
+ *  reports none leaves this undefined, and an undefined usage is NOT a
+ *  zero (a free turn and an unreported one are different facts). */
+export interface AcpUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+/** The usage of a prompt response — the reported numbers, or nothing. */
+function acpUsage(response: PromptResponse): AcpUsage | undefined {
+  const usage = response.usage;
+  if (usage === undefined || usage === null) {
+    return undefined;
+  }
+  const out: AcpUsage = {};
+  if (Number.isSafeInteger(usage.inputTokens)) {
+    out.inputTokens = usage.inputTokens;
+  }
+  if (Number.isSafeInteger(usage.outputTokens)) {
+    out.outputTokens = usage.outputTokens;
+  }
+  if (Number.isSafeInteger(usage.totalTokens)) {
+    out.totalTokens = usage.totalTokens;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** The initialize handshake — once per connection, not per session.
  *  `req(d)` mints per-request cancel options against ANY deadline so a
  *  pooled caller's per-turn budget is what bounds its requests.
@@ -479,14 +508,11 @@ async function acpOp(
     if (r.stopReason !== 'end_turn') {
       throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`);
     }
-    const usage = r.response.usage;
+    const usage = acpUsage(r.response);
     return {
       text: r.text,
       model,
-      usage:
-        usage != null && Number.isSafeInteger(usage.inputTokens)
-          ? { inputTokens: usage.inputTokens }
-          : undefined,
+      usage: usage?.inputTokens === undefined ? undefined : { inputTokens: usage.inputTokens },
     };
   } finally {
     session.dispose();
@@ -623,7 +649,7 @@ export async function acpConverse(
   onUpdate: (update: SessionUpdate) => void,
   deadline = Date.now() + 120_000,
   signal?: AbortSignal
-): Promise<{ stopReason: StopReason; text: string; model: string }> {
+): Promise<{ stopReason: StopReason; text: string; model: string; usage?: AcpUsage }> {
   const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' });
   return withAcp(by, entry, opts, deadline, async ctx => {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
@@ -656,7 +682,7 @@ export async function acpConverse(
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
       });
-      return { ...r, model };
+      return { ...r, model, usage: acpUsage(r.response) };
     } catch (err) {
       sessSpan.end({ error: errMsg(err) }, 'error');
       span.end({ error: errMsg(err) }, 'error');

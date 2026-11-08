@@ -15,7 +15,9 @@ import {
   configPolicyErrors,
   debtSection,
   definePlugin,
+  hasHelpFlag,
   loadConfig,
+  printUsage,
   busConnector,
   mailboxConnector,
   notifyConnector,
@@ -124,6 +126,7 @@ import { runMeshCommand } from './commands/mesh.ts';
 import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
+import { runRouterCommand } from './commands/router.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
 import { runExecCommand } from './commands/exec.ts';
@@ -194,6 +197,11 @@ registerConnector(busConnector);
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
+
+/** The telemetry plane's usage — the plane had no help of its own, and
+ *  `bro telemetry --help` ran the report. */
+const TELEMETRY_USAGE =
+  'bro telemetry [--session <id>] [--json]   Hook + command latency report'
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -730,7 +738,15 @@ export const PLUGINS: BroPlugin[] = [
     group: 'fleet',
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
-    run: argv => runHooksCommand(['perf', ...argv]),
+    run: argv => {
+      // a help request never runs the report: the plane reads the perf
+      // journal, and the token that leads the argv says help, not run
+      if (hasHelpFlag(argv)) {
+        printUsage(TELEMETRY_USAGE, 0)
+        return
+      }
+      return runHooksCommand(['perf', ...argv])
+    },
   }),
   definePlugin({
     name: 'trace',
@@ -813,6 +829,13 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Provider registry — models catalog as <provider>/<model> [name…]',
     run: runProvidersCommand,
     skill: 'providers',
+  }),
+  definePlugin({
+    name: 'router',
+    summary:
+      'The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]',
+    run: runRouterCommand,
+    skill: 'brouter',
   }),
   definePlugin({
     name: 'setup',
