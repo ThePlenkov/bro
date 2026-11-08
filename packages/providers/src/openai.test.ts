@@ -74,6 +74,27 @@ describe('openaiCompatChat', () => {
       )
     }))
 
+  test('the runtime key wins over the env — the key travels with the call', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      await openaiCompatChat({ ...ENTRY, apiKey: 'runtime-key' }, { fetch })(
+        'the prompt',
+        DEADLINE()
+      )
+      assert.equal(calls[0]!.init.headers?.authorization, 'Bearer runtime-key')
+    }))
+
+  test('an EMPTY runtime key is no key — the configured one is used', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      await openaiCompatChat({ ...ENTRY, apiKey: '' }, { fetch })('p', DEADLINE())
+      assert.equal(
+        calls[0]!.init.headers?.authorization,
+        'Bearer sk-test',
+        'an empty Bearer would be a malformed credential'
+      )
+    }))
+
   test('no apiKeyEnv means no auth header — some endpoints are open', async () => {
     const open = {
       baseUrl: 'http://localhost:8080/v1',

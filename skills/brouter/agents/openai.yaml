@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Router"
+  short_description: "The model router — served catalog, client adapters, and the bro-side wrapper"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $brouter to inspect the served model catalog or render it for a client."
+policy:
+  allow_implicit_invocation: true
