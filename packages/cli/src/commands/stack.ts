@@ -675,9 +675,15 @@ export function forkPoint(base: string, wt: string): string {
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  // the plan's fork — immutable. The base's reflog answers the rest
-  // (the base rewritten under the child): `forkPoint`.
-  const fork = m.forkSha ?? forkPoint(item.desiredBase, wt.path);
+  // The plan's fork — the base's tip as the plan saw it, and only when
+  // the member still CARRIES it: then the member's own work starts right
+  // after that commit, and the replay is the member's work alone. When
+  // the base was rewritten under the child, the tip is not in the member
+  // — `forkPoint` answers that case from the base's reflog.
+  const fork =
+    m.containsBaseHead === true && m.forkSha !== undefined
+      ? m.forkSha
+      : forkPoint(item.desiredBase, wt.path);
   const rb =
     fork === ''
       ? { code: 1, err: `no merge-base with ${item.desiredBase}` }

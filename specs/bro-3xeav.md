@@ -46,17 +46,28 @@ where it stood. The old base's tip is read there and kept as a SHA:
 m.forkSha = shaOf(root, baseOf(m, prev));   // the plan phase
 ```
 
-A SHA does not move. The rebase then starts from it:
+A SHA does not move. The rebase then starts from it — but only when the
+member still CARRIES that tip (`containsBaseHead` says exactly that):
+then the member's own work starts right after that commit, and the
+replay is the member's work alone.
+
+When the base was rewritten under the child, the tip is not in the
+member — and `forkPoint` answers that case, from the base's reflog and
+the patch-equivalence list:
 
 ```ts
-const fork = m.forkSha ?? forkPoint(item.desiredBase, wt.path);
+const fork =
+  m.containsBaseHead === true && m.forkSha !== undefined
+    ? m.forkSha
+    : forkPoint(item.desiredBase, wt.path);
 ```
 
-`git rebase --onto <base> <sha>` resolves the fork from an immutable
-commit: when the SHA is an ancestor of the member, the replay is
-exactly the member's own work; when it is not (the base was rewritten
-under the child), git takes the merge-base of the SHA and the member —
-the same answer, but from a commit that cannot move under the cascade.
+So the fork is an immutable commit whenever the member carries it, and
+the reflog's answer otherwise. `git rebase --onto <base> <sha>` resolves
+the fork from that commit: when the SHA is an ancestor of the member,
+the replay is exactly the member's own work; when it is not, git takes
+the merge-base of the SHA and the member — the same answer, but from a
+commit that cannot move under the cascade.
 
 ### The late name resolution is gone
 
