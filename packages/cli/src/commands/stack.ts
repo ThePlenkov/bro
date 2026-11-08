@@ -524,6 +524,14 @@ function carriesBaseHead(branch: string, base: string, root: string): boolean | 
     '--quiet',
     `refs/heads/${base}`,
   ]).out.trim();
+  return carriesCommit(branch, baseHead, root);
+}
+
+/** Does the branch still carry this COMMIT? The chain's base==prev-head
+ *  invariant, read from the git truth — and the same question the fork
+ *  asks: the fork is only the member's own work when the base's commit
+ *  is inside the member's history. */
+function carriesCommit(branch: string, baseHead: string, root: string): boolean | undefined {
   const memberHead = gitTry([
     '-C',
     root,
@@ -541,7 +549,10 @@ function carriesBaseHead(branch: string, base: string, root: string): boolean | 
 /** The base's tip, read as a SHA. The ref's TIP — the commit the
  *  member's own work starts after — and a SHA does not move: the
  *  cascade rewrites the base's ref, and a name read after that points
- *  somewhere else. */
+ *  somewhere else.
+ *
+ *  ONE read, ONE answer: the containment check and the fork use the
+ *  same commit, so the base cannot slip between the two reads. */
 function baseTip(root: string, base: string): string | undefined {
   const sha = gitTry([
     '-C',
@@ -567,8 +578,11 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
   for (const m of members) {
     if (m.prState !== 'MERGED') {
       const base = baseOf(m, prev);
-      m.containsBaseHead = carriesBaseHead(m.branch, base, root);
-      m.forkSha = baseTip(root, base);
+      const tip = baseTip(root, base);
+      m.forkSha = tip;
+      // the containment check reads the SAME commit the fork will use —
+      // one answer, so the base cannot slip between the two reads
+      m.containsBaseHead = tip === undefined ? undefined : carriesCommit(m.branch, tip, root);
       prev = m.branch;
     }
   }
@@ -623,23 +637,23 @@ export function chainRootBase(
  *  the platform deletes a merged member's branch — and the member's
  *  history still remembers.
  *
- *  The oldest reflog entry is that point, and it is used only while it
- *  is still an ancestor of the member's tip: after a rebase the member's
- *  history no longer carries it, and the reflog's answer is then a
- *  question the plan cannot answer. */
+ *  The CREATION entry, not merely the oldest one: a reflog that was
+ *  truncated or expired has no creation entry left, and its oldest
+ *  survivor is a later commit — a fork that would drop the member's own
+ *  commits. No creation entry means no answer, and the caller falls
+ *  through to the base's reflog. */
 function forkFromReflog(branch: string, wt: string): string | undefined {
-  const out = gitTry(['-C', wt, 'reflog', 'show', '--format=%H', branch]).out;
-  const oldest = out
-    .split('\n')
-    .map(s => s.trim())
-    .filter(Boolean)
-    .at(-1);
-  if (oldest === undefined) {
-    return undefined;
+  const out = gitTry(['-C', wt, 'reflog', 'show', '--format=%H %gs', branch]).out;
+  for (const line of out.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    const [sha, ...rest] = trimmed.split(' ');
+    if (!rest.join(' ').startsWith('branch: Created')) continue;
+    return gitTry(['-C', wt, 'merge-base', '--is-ancestor', sha, 'HEAD']).code === 0
+      ? sha
+      : undefined;
   }
-  return gitTry(['-C', wt, 'merge-base', '--is-ancestor', oldest, 'HEAD']).code === 0
-    ? oldest
-    : undefined;
+  return undefined;
 }
 
 /**
@@ -700,15 +714,21 @@ export function forkPoint(base: string, wt: string): string {
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  // The plan's fork — the base's tip as the plan saw it, and only when
-  // the member still CARRIES it: then the member's own work starts right
-  // after that commit, and the replay is the member's work alone. When
-  // the base's ref is GONE (the platform deleted it after the merge),
-  // the member's own reflog remembers where its work began. When the
-  // base was rewritten under the child, `forkPoint` answers that case
-  // from the base's reflog.
+  // The plan's fork — the base's tip as the plan saw it, and only while
+  // the member's CURRENT history still carries it: then the member's own
+  // work starts right after that commit, and the replay is the member's
+  // work alone. The member may have been rewritten since the plan (the
+  // platform's follow), and a fork it no longer carries is no fork.
+  //
+  // Then the member's OWN creation point — the base's ref may be GONE
+  // (the platform deleted it after the merge), and the member's history
+  // still remembers where its work began.
+  //
+  // And last the DESIRED base's reflog: that is a different question
+  // (where the desired base forked from the member's line), and it is
+  // the blunt answer the fallback has always been.
   const fork =
-    m.containsBaseHead === true && m.forkSha !== undefined
+    m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
       ? m.forkSha
       : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
   const rb =
