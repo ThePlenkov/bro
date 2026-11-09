@@ -22,7 +22,6 @@
     "build": "tsdown src/index.ts src/opencode.ts src/opencode-tui.ts --format esm --dts --clean"
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.2.6",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"

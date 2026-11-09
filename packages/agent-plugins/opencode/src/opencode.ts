@@ -3,7 +3,7 @@
  * bro — OpenCode server plugin (modern API).
  *
  * Follows https://opencode.ai/docs/build/plugins/server/
- * `import { Plugin } from "@opencode/plugin"` + `Plugin.define({ id, setup })`.
+ * `export default { id, setup }` (OpenCode server plugin contract).
  *
  * Rehydrates bro state into sessions, gates premature stops (re-prompt once),
  * approves safe bro self-tool commands, exposes bro read tools and `/bro`,
@@ -17,7 +17,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Plugin } from '@opencode/plugin';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
@@ -1089,7 +1088,7 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
   };
 }
 
-export default Plugin.define({
+export default {
   id: 'bro',
   setup: BroSetup,
-});
+};
