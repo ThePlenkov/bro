@@ -48,14 +48,25 @@ export class AcpDeadLoopError extends Error {
   /** Which measure tripped — the conversation's own churn, or the peer's. */
   readonly kind: 'scope' | 'peer';
 
-  constructor(detail: { scope: string; opens: number; budget: number; kind?: 'scope' | 'peer' }) {
+  constructor(detail: {
+    scope: string;
+    opens: number;
+    budget: number;
+    kind?: 'scope' | 'peer';
+    /** Why this refusal — the plain text after the measure. */
+    reason?: string;
+  }) {
     const kind = detail.kind ?? 'scope';
+    const why =
+      detail.reason ?? (kind === 'scope'
+        ? 'the churn is refused, no session was opened'
+        : 'the peer was killed, the next request respawns it');
     super(
       kind === 'scope'
         ? `acp dead loop: scope '${detail.scope}' opened ${detail.opens} sessions without a ` +
-            `completed turn (budget ${detail.budget}) — the churn is refused, no session was opened`
+            `completed turn (budget ${detail.budget}) — ${why}`
         : `acp dead loop: peer '${detail.scope}' opened ${detail.opens} sessions without a ` +
-            `completed turn (budget ${detail.budget}) — the peer was killed, the next request respawns it`
+            `completed turn (budget ${detail.budget}) — ${why}`
     );
     this.scope = detail.scope;
     this.opens = detail.opens;
@@ -92,7 +103,14 @@ interface Tally {
   since: number;
   /** When the scope may be probed again, ms (0 = not tripped). */
   trippedUntil: number;
+  /** A half-open probe is in flight — the scope admits ONE open until
+   *  the probe answers. A failed probe never answers, so the scope stays
+   *  half-open until the cooldown ends. */
+  probeInFlight: boolean;
 }
+
+/** How many tallies the maps hold before the prune runs. */
+const PRUNE_AT = 256;
 
 const DEFAULTS = {
   maxOpens: 8,
@@ -124,15 +142,43 @@ export class AcpDeadLoopGuard {
   open(target: AcpTarget): void {
     const now = Date.now();
     const tally = this.tally(this.scopes, target.scope, now);
+    // was the scope tripped before this call? — the open that follows the
+    // cooldown is the probe, and only the probe
+    const halfOpened = tally.trippedUntil > 0;
     if (tally.trippedUntil > now) {
       throw new AcpDeadLoopError({ scope: target.scope, opens: tally.pending, budget: this.maxOpens });
     }
     if (tally.trippedUntil > 0) {
       // the cooldown expired — the burst that tripped the scope is stale.
-      // The scope is half-open now: exactly one probe gets through, and
-      // its completion clears the trip (a failure trips it again).
+      // The scope is half-open now: exactly ONE probe gets through, and
+      // its completion clears the trip (a failure never answers, so the
+      // scope stays half-open until the next cooldown).
       tally.trippedUntil = 0;
       tally.pending = 0;
+      tally.probeInFlight = false;
+    }
+    if (tally.probeInFlight) {
+      // the probe has not answered — no second open. A half-open scope
+      // admits one open per cooldown, not a fresh budget.
+      throw new AcpDeadLoopError({
+        scope: target.scope,
+        opens: tally.pending,
+        budget: this.maxOpens,
+        reason: 'the half-open probe has not answered, no session was opened',
+      });
+    }
+    // the peer's churn is systemic — the loop may live inside the child.
+    // Checked BEFORE anything is counted: a refused open opens nothing.
+    if (target.peer !== undefined) {
+      const peerTally = this.tally(this.peers, target.peer, now);
+      if (peerTally.pending + 1 > this.maxAbandoned) {
+        throw new AcpDeadLoopError({
+          scope: target.peer,
+          opens: peerTally.pending + 1,
+          budget: this.maxAbandoned,
+          kind: 'peer',
+        });
+      }
     }
     // the open that would cross the budget never happens — the refusal
     // is the point: no session, no quota
@@ -150,6 +196,12 @@ export class AcpDeadLoopGuard {
     if (target.peer !== undefined) {
       this.tally(this.peers, target.peer, now).pending += 1;
     }
+    // the scope was tripped a moment ago — this open IS the probe
+    if (halfOpened) {
+      tally.probeInFlight = true;
+    }
+    this.prune(this.scopes, now);
+    this.prune(this.peers, now);
   }
 
   /** The scope's turn completed — the session it opened is resolved and
@@ -162,6 +214,8 @@ export class AcpDeadLoopGuard {
       tally.pending -= 1;
     }
     tally.trippedUntil = 0;
+    // the probe answered — the scope is healthy again
+    tally.probeInFlight = false;
     if (target.peer !== undefined) {
       const peerTally = this.tally(this.peers, target.peer, now);
       if (peerTally.pending > 0) {
@@ -170,8 +224,10 @@ export class AcpDeadLoopGuard {
     }
   }
 
-  /** The peer churned past its budget — the caller breaks the peer (the
-   *  loop may live inside the child). False while the peer is healthy. */
+  /** The peer's churn is OVER its budget — the sessions it opened and
+   *  never completed. The open's refusal is prospective (the next open
+   *  crosses the budget); this reads the state that is already there.
+   *  False while the peer is healthy. */
   peerChurn(target: AcpTarget): boolean {
     return this.peerTrip(target) !== undefined;
   }
@@ -207,12 +263,27 @@ export class AcpDeadLoopGuard {
     return this.tally(this.scopes, target.scope, Date.now()).pending;
   }
 
+  /** The tallies are keyed by client-supplied scopes — they must not
+   *  grow without bound. The prune drops the entries whose window
+   *  closed; it runs only when the map grew past the threshold, so the
+   *  hot path stays a map lookup. */
+  private prune(map: Map<string, Tally>, now: number): void {
+    if (map.size < PRUNE_AT) {
+      return;
+    }
+    for (const [key, t] of map) {
+      if (now - t.since >= this.windowMs) {
+        map.delete(key);
+      }
+    }
+  }
+
   /** The tally for a key, created on first use — a window that expired
    *  starts empty again. */
   private tally(map: Map<string, Tally>, key: string, now: number): Tally {
     const fresh = map.get(key);
     if (fresh === undefined) {
-      const created: Tally = { pending: 0, since: now, trippedUntil: 0 };
+      const created: Tally = { pending: 0, since: now, trippedUntil: 0, probeInFlight: false };
       map.set(key, created);
       return created;
     }
@@ -223,6 +294,8 @@ export class AcpDeadLoopGuard {
       // it tripped in is already gone.
       fresh.pending = 0;
       fresh.since = now;
+      // the probe's window is over — the scope is not half-open anymore
+      fresh.probeInFlight = false;
     }
     return fresh;
   }

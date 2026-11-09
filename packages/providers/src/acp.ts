@@ -799,16 +799,12 @@ function guardDone(gc: AcpGuardCtx | undefined): void {
   gc?.guard.done(gc);
 }
 
-/** A failed turn — the peer's own churn may now be systemic: the loop
- *  can live inside the child, and a fresh child is the only cure for a
- *  loop that survived in the old one. The peer is killed (the child with
- *  it) and the failure is named. A healthy peer is left alone. */
-function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
-  if (gc?.peer === undefined) {
-    return;
-  }
-  const trip = gc.guard.peerTrip(gc);
-  if (trip === undefined) {
+/** A peer refusal breaks the peer — the loop may live inside the child,
+ *  and a fresh child is the only cure for a loop that survived in the
+ *  old one. The child dies with the link; the pool respawns on the next
+ *  request. A scope refusal leaves the peer alone. */
+function breakPeer(err: unknown, peer: AcpPeer): void {
+  if (!(err instanceof AcpDeadLoopError) || err.kind !== 'peer') {
     return;
   }
   try {
@@ -816,7 +812,6 @@ function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
   } catch {
     // the kill is the point — one stubborn peer can't block the rest
   }
-  throw trip;
 }
 
 /** The stall bound — a turn that produces no `session/update` for this
@@ -1403,12 +1398,10 @@ export async function acpPooledTurn(
       throw err;
     }
     if (err instanceof AcpDeadLoopError) {
-      // the scope's own refusal — it already cost no session
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
       throw err;
     }
-    // the peer's churn may now be systemic: the loop can live inside the
-    // child, and a fresh child is the only cure (spec bro-b961a)
-    guardFail(turn.guard, peer);
     const tail = peer.tail();
     throw new JudgeUnavailable(
       `acp ${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`,
@@ -1593,9 +1586,8 @@ export async function acpSessionRetain(
           } catch {
             // already gone — the drop is the point
           }
-          if (!(err instanceof AcpDeadLoopError)) {
-            // the peer's churn may now be systemic — kill it and name it
-            guardFail(turn.guard, peer);
+          if (err instanceof AcpDeadLoopError) {
+            breakPeer(err, peer);
           }
           throw classifyWire(err);
         }
@@ -1610,10 +1602,10 @@ export async function acpSessionRetain(
       throw err;
     }
     if (err instanceof AcpDeadLoopError) {
-      // the scope's own refusal — it already cost no session
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
       throw err;
     }
-    guardFail(turn.guard, peer);
     const tail = peer.tail();
     const detail = tail === '' ? '' : ` (${tail})`;
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {

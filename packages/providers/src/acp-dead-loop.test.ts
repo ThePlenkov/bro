@@ -72,6 +72,8 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
     try {
       const guard = new AcpDeadLoopGuard({ maxAbandoned: 1 });
       const ctx = { guard, scope: 'conv-1', peer: 'conductor:t' };
+      // the first turn opens a session and answers nothing — the peer's
+      // churn is one unfinished session
       await assert.rejects(
         acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
           by: 'conductor:t',
@@ -79,8 +81,9 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
         }),
         JudgeUnavailable
       );
-      // the second failure puts the peer over its budget — the peer is
-      // killed and the churn is named
+      assert.equal(fake.sessions.length, 1);
+      // the next open crosses the peer's budget — it is refused BEFORE the
+      // session opens, and the peer is killed (the child with it)
       await assert.rejects(
         acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
           by: 'conductor:t',
@@ -88,6 +91,8 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
         }),
         (err: unknown) => err instanceof AcpDeadLoopError && err.kind === 'peer'
       );
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(peer.signal.aborted, true);
     } finally {
       peer.close();
     }
