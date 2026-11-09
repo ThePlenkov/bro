@@ -58,7 +58,10 @@ jobs:
           check-latest: true
           cache: npm
 
-      - run: npm ci --no-audit --no-fund
+      # --ignore-scripts: the gate installs dependencies from the lockfile on
+      # every PR — lifecycle scripts must not execute on untrusted code
+      # (the same reason publish.yml/release.yml/site.yml skip them).
+      - run: npm ci --no-audit --no-fund --ignore-scripts
 
       - run: npm run build
 
@@ -66,7 +69,7 @@ jobs:
       # the gate would wait for nothing. It passes; the `ready_for_review`
       # event runs the real gate on the same head.
       - name: Skip the gate for a draft
-        if: github.event.pull_request.draft
+        if: ${{ github.event.pull_request.draft }}
         run: echo "draft — the gate does not apply yet"
 
       - name: Evaluate the act gate

@@ -4,6 +4,7 @@
     "autoMerge": true
   },
   "act": {
+    "selfCheck": "act-gate",
     "ignoreChecks": ["kilo", "github-advanced-security"],
     "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
   },

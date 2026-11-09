@@ -275,6 +275,12 @@ function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
 
 export const actSection: ConfigSection<{
   ignoreChecks: IgnoreCheckRule[];
+  /** The check that IS the gate — the gate never counts itself. A
+   *  project that publishes the gate as a required check (the workflow
+   *  `.github/workflows/act-gate.yml`) would otherwise wait for its own
+   *  pending check forever: the gate could never go green, and the
+   *  required context could never report success. */
+  selfCheck: string;
   maxRounds: number;
   docsPaths: string[];
   docsMaxRounds: number;
@@ -284,6 +290,7 @@ export const actSection: ConfigSection<{
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     ignoreChecks?: unknown;
+    selfCheck?: unknown;
     maxRounds?: unknown;
     docsPaths?: unknown;
     docsMaxRounds?: unknown;
@@ -307,6 +314,11 @@ export const actSection: ConfigSection<{
     ignoreChecks: Array.isArray(obj.ignoreChecks)
       ? obj.ignoreChecks.map(normalizeIgnoreEntry).filter((r): r is IgnoreCheckRule => r !== null)
       : [],
+    // the gate's own context — an empty string means "no self check"
+    selfCheck:
+      typeof obj.selfCheck === 'string' && obj.selfCheck.trim() !== ''
+        ? obj.selfCheck.trim()
+        : '',
     maxRounds:
       typeof obj.maxRounds === 'number' && Number.isInteger(obj.maxRounds) && obj.maxRounds >= 0
         ? obj.maxRounds
@@ -362,6 +374,7 @@ actSection.jsonSchema = js.obj({
       ],
     },
   },
+  selfCheck: js.str,
   maxRounds: js.int(),
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
@@ -1475,6 +1488,8 @@ export interface BroConfig {
      *  activity inside `threadWindowDays` — otherwise it surfaces as a
      *  silent-reviewer alert (still non-blocking). */
     ignoreChecks: IgnoreCheckRule[];
+    /** The check that IS the gate — never counted by the gate itself. */
+    selfCheck: string;
     /** Inline fix-round cap — past it, remaining threads must defer to
      *  debt beads instead of another push. 0 disables the cap. */
     maxRounds: number;
@@ -1601,6 +1616,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },
   act: {
     ignoreChecks: [],
+    selfCheck: '',
     maxRounds: 3,
     // no '*.txt' — requirements.txt and test fixtures are not docs
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],

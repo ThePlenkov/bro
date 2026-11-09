@@ -49,15 +49,25 @@ on:
     inputs:
       pr: {description: "PR number to evaluate", required: true, type: string}
 
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
 jobs:
   act-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@<sha>   # pinned
         with:
           ref: main          # the rules of the game — not the PR's code
-      - run: npm ci && npm run build
-      - run: bro review act wait "$PR" --timeout 20
+      - run: npm ci --no-audit --no-fund --ignore-scripts
+      - run: npm run build
+      - name: Skip the gate for a draft
+        if: ${{ github.event.pull_request.draft }}
+        run: echo "draft — the gate does not apply yet"
+      - run: node packages/cli/dist/index.js review act wait "$PR" --timeout 20
         env:
           PR: ${{ github.event.inputs.pr || github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
@@ -66,6 +76,30 @@ jobs:
 The job's check lands on the PR's **head SHA** and is refreshed on every
 push — the same SHA the ruleset evaluates. Its conclusion is the gate:
 green only when the reviewers have reported and no thread is open.
+
+### The gate never counts itself
+
+While the gate job runs, its own check is **pending on the PR's head SHA** —
+`gh pr checks` reports it like any other check. A gate that counts itself
+waits for itself: the job never settles, it hits the timeout, and the
+required context can never report success. The deadlock is real, not
+theoretical (codeant-ai and kilo both flagged it on this PR).
+
+The exclusion is **project policy**, not connector logic: `act.selfCheck`
+names the check that IS the gate, and the gate drops it from its own
+input — never from anyone else's.
+
+```json
+{ "act": { "selfCheck": "act-gate" } }
+```
+
+The name match is case- and separator-insensitive (`act-gate` matches
+`Act gate`): a setting that silently matched nothing would restore the
+very deadlock it exists to prevent. The connector stays
+provider-agnostic — no gate name is hardcoded in shared code, and the
+exclusion is not `act.ignoreChecks` (that path reports a "reviewer may be
+down" alert for a failing check without thread activity — noise the gate
+would raise on itself).
 
 ### Why the workflow polls instead of publishing a check
 
@@ -115,7 +149,7 @@ before the ruleset change, and how an operator re-evaluates on demand).
 ## Risks
 
 | risk | what happens | mitigation |
-|---|---|---|
+| --- | --- | --- |
 | CI minutes | the gate job polls while the reviewers run (≈3–8 min after a push) | `--timeout 20`; a blocked PR fails with the blockers listed, and the next push starts a fresh run |
 | a reviewer never reports | the gate waits, then fails — the PR blocks visibly with the reason | the failure names the pending reviewer; the operator can override the ruleset rule |
 | the workflow itself breaks | the required context never appears → PRs block | the ruleset rule can be disabled in one API call; the rule id is in the spec |
@@ -125,6 +159,8 @@ before the ruleset change, and how an operator re-evaluates on demand).
 
 - [x] `.github/workflows/act-gate.yml` — the gate job, plus the
       `workflow_dispatch` lever for the PRs that predate it
+- [x] `act.selfCheck` — the gate's own check never counts as CI (config
+      section + state filter + unit tests + config schema + docs)
 - [x] the formula's merge step states the division of labour: the project
       lands the PR (auto-merge), the agent fixes the findings, the step
       closes on the PR's state
