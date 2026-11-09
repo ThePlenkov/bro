@@ -82,10 +82,51 @@ function endpointHost(addr: string | undefined): string {
   return h;
 }
 
-/** One lsof TCP line's endpoint pair → the owning `mac:<pid>` when the
- *  row is the peer's socket — matched on ADDRESS AND PORT both ways so
- *  an IPv4 and an IPv6 client sharing a port pair can't attribute each
- *  other's PID. */
+/** One lsof TCP line → its two `host:port` endpoints (state suffix
+ *  like `(ESTABLISHED)` stripped without a backtracking regex), or
+ *  undefined for a non-connection row. */
+function lsofEndpoints(line: string): { left: string; right: string } | undefined {
+  const nameIdx = line.indexOf('TCP');
+  if (nameIdx === -1) {
+    return undefined;
+  }
+  const afterTcp = line.slice(nameIdx);
+  const arrowIdx = afterTcp.indexOf('->');
+  if (arrowIdx === -1) {
+    return undefined;
+  }
+  const rightRaw = afterTcp.slice(arrowIdx + 2);
+  const paren = rightRaw.indexOf('(');
+  return {
+    left: afterTcp.slice(0, arrowIdx).trim(),
+    right: (paren === -1 ? rightRaw : rightRaw.slice(0, paren)).trim(),
+  };
+}
+
+/** One lsof row → `mac:<pid>` when its endpoints are the peer's socket
+ *  — matched on ADDRESS AND PORT both ways so an IPv4 and an IPv6
+ *  client sharing a port pair can't attribute each other's PID. The
+ *  peer's row has local = its end (remotePort from our view) and
+ *  remote = ours (localPort); the endpoint split after the last ':'
+ *  never misreads adjacent digits, and the host half disambiguates
+ *  v4/v6 twins on the same port pair. */
+function lsofPeerRow(
+  line: string,
+  remotePort: number,
+  localPort: number,
+  remoteHost: string,
+  localHost: string
+): string | undefined {
+  const ep = lsofEndpoints(line);
+  if (ep === undefined) return undefined;
+  if (endpointPort(ep.left) !== String(remotePort)) return undefined;
+  if (endpointHost(ep.left.slice(0, ep.left.lastIndexOf(':'))) !== remoteHost) return undefined;
+  if (endpointPort(ep.right) !== String(localPort)) return undefined;
+  if (endpointHost(ep.right.slice(0, ep.right.lastIndexOf(':'))) !== localHost) return undefined;
+  const parts = line.trim().split(/\s+/);
+  return parts.length > 1 && /^\d+$/.test(parts[1]) ? `mac:${parts[1]}` : undefined;
+}
+
 function peerInodeDarwinMatch(
   out: string,
   remotePort: number,
@@ -94,27 +135,9 @@ function peerInodeDarwinMatch(
   localHost: string
 ): string | undefined {
   for (const line of out.split('\n')) {
-    if (!line.includes('TCP') || !line.includes('->')) continue;
-    const nameIdx = line.indexOf('TCP');
-    const afterTcp = line.slice(nameIdx);
-    const arrowIdx = afterTcp.indexOf('->');
-    if (arrowIdx === -1) continue;
-    const left = afterTcp.slice(0, arrowIdx).trim();
-    const right = afterTcp
-      .slice(arrowIdx + 2)
-      .replace(/\s*\(.*\)\s*$/, '')
-      .trim();
-    // The peer's row has local = its end (remotePort from our view) and
-    // remote = ours (localPort); lsof prints host:port — the endpoint
-    // split after the last ':' never misreads adjacent digits, and the
-    // host half disambiguates v4/v6 twins on the same port pair.
-    if (endpointPort(left) !== String(remotePort)) continue;
-    if (endpointHost(left.slice(0, left.lastIndexOf(':'))) !== remoteHost) continue;
-    if (endpointPort(right) !== String(localPort)) continue;
-    if (endpointHost(right.slice(0, right.lastIndexOf(':'))) !== localHost) continue;
-    const parts = line.trim().split(/\s+/);
-    if (parts.length > 1 && /^\d+$/.test(parts[1])) {
-      return `mac:${parts[1]}`;
+    const hit = lsofPeerRow(line, remotePort, localPort, remoteHost, localHost);
+    if (hit !== undefined) {
+      return hit;
     }
   }
   return undefined;
@@ -300,9 +323,15 @@ async function peerInodeDarwinAsync(
 async function procRowAsync(pid: number): Promise<ProcRow | undefined> {
   try {
     const out = await execOut('ps', ['-o', 'pid=,ppid=,comm=', '-p', String(pid)], 500);
-    const m = out.trim().match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
-    if (!m) return undefined;
-    return { pid: Number(m[1]), ppid: Number(m[2]), comm: basename(m[3].trim()) };
+    // whitespace-split instead of a backtracking regex — comm may
+    // carry spaces, so only the first two fields are fixed columns
+    const fields = out.trim().split(/\s+/);
+    const rowPid = Number(fields[0]);
+    const rowPpid = Number(fields[1]);
+    if (fields.length < 3 || !Number.isInteger(rowPid) || !Number.isInteger(rowPpid)) {
+      return undefined;
+    }
+    return { pid: rowPid, ppid: rowPpid, comm: basename(fields.slice(2).join(' ')) };
   } catch {
     return undefined;
   }
@@ -343,7 +372,7 @@ async function resolvePeerAsync(sock: Socket): Promise<PeerInfo | undefined> {
     tree.push(cur.comm);
     if (agent === undefined && AGENT.test(cur.comm)) agent = cur.comm;
     if (cur.ppid <= 1 || cur.ppid === cur.pid) break;
-    cur = await procRowAsync(cur.ppid);
+    cur = await procRowAsync(cur.ppid); // NOSONAR — the ancestor walk is sequential by definition; each hop's ps is already bounded
     hops++;
   }
   return {

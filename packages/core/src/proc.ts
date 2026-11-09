@@ -33,11 +33,15 @@ export function procStat(pid: number): { state: string; start: string } | null {
     const env = { ...process.env, TZ: 'UTC', LC_ALL: 'C', LC_TIME: 'C' };
     try {
       // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
-      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], {
-        encoding: 'utf8',
-        timeout: 1000,
-        env,
-      });
+      const out = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-p', String(pid), '-o', 'state=,lstart='],
+        {
+          encoding: 'utf8',
+          timeout: 1000,
+          env,
+        }
+      );
       const lines = out.trim().split('\n').filter(Boolean);
       if (lines.length === 0) return null;
       const line = lines[0];
@@ -52,11 +56,15 @@ export function procStat(pid: number): { state: string; start: string } | null {
       }
       // Try with pid in output format
       try {
-        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], {
-          encoding: 'utf8',
-          timeout: 1000,
-          env,
-        });
+        const out2 = execFileSync(
+          'ps', // NOSONAR — PATH lookup is the contract
+          ['-p', String(pid), '-o', 'pid=,state=,lstart='],
+          {
+            encoding: 'utf8',
+            timeout: 1000,
+            env,
+          }
+        );
         const lines2 = out2.trim().split('\n').filter(Boolean);
         if (lines2.length === 0) return null;
         const line2 = lines2[0];
@@ -78,10 +86,14 @@ export function procStat(pid: number): { state: string; start: string } | null {
       }
       // Fallback to just state
       try {
-        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
-          encoding: 'utf8',
-          timeout: 1000,
-        });
+        const out2 = execFileSync(
+          'ps', // NOSONAR — PATH lookup is the contract
+          ['-p', String(pid), '-o', 'state='],
+          {
+            encoding: 'utf8',
+            timeout: 1000,
+          }
+        );
         const st = out2.trim()[0] ?? '';
         return { state: st, start: '' };
       } catch {
@@ -194,10 +206,14 @@ function mergePathFragment(tokens: string[], i: number): { text: string; count: 
 /** `ps <args> -p <pid>` — the darwin/BSD stand-in for /proc reads.
  *  Throws like execFileSync does; callers own the fallback chain. */
 function psOut(pid: number, args: string[]): string {
-  return execFileSync('ps', [...args, '-p', String(pid)], {
-    encoding: 'utf8',
-    timeout: 1000,
-  });
+  return execFileSync(
+    'ps', // NOSONAR — PATH lookup is the contract
+    [...args, '-p', String(pid)],
+    {
+      encoding: 'utf8',
+      timeout: 1000,
+    }
+  );
 }
 
 /** Environment entries out of `ps eww` on darwin/BSD — the eww row is
@@ -239,7 +255,7 @@ function psEwwEnvTry(pid: number, ewwArgs: string[]): string[] | null {
   const head = 4 + argTokens.length;
   if (rowTokens.length < head) return null;
   if (!argTokens.every((t, i) => rowTokens[4 + i] === t)) return null;
-  return rowTokens.slice(head).filter(t => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
+  return rowTokens.slice(head).filter(t => /^[A-Za-z_]\w*=/.test(t));
 }
 
 export interface ProcEntry {

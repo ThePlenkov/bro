@@ -73,7 +73,11 @@ const PS_PLATFORMS = new Set(['darwin', 'freebsd', 'openbsd']);
 /** `ps <args> -p <pid>` output — the darwin stand-in for /proc reads.
  *  Throws like execFileSync does; callers own the fallback chain. */
 function psText(pid: string, args: string[], timeout = 500): string {
-  return execFileSync('ps', [...args, '-p', pid], { encoding: 'utf8', timeout });
+  return execFileSync(
+    'ps', // NOSONAR — PATH lookup is the contract
+    [...args, '-p', pid],
+    { encoding: 'utf8', timeout }
+  );
 }
 
 /** darwin/BSD cmdline — `args=` first, `command=` spellings after;
@@ -148,10 +152,14 @@ function procPpid(dir: string): number {
   }
   if (PS_PLATFORMS.has(process.platform) && /^\d+$/.test(pid)) {
     try {
-      const out = execFileSync('ps', ['-o', 'ppid=', '-p', pid], {
-        encoding: 'utf8',
-        timeout: 500,
-      });
+      const out = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-o', 'ppid=', '-p', pid],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
       const ppid = out.trim();
       return ppid === '' ? 0 : Number(ppid);
     } catch {
@@ -347,11 +355,31 @@ function procOverrideActive(procDir: string): boolean {
 
 /** Every pid `ps` can name — the scan set for the darwin walks. */
 function darwinPids(): number[] {
-  const out = execFileSync('ps', ['-axo', 'pid='], { encoding: 'utf8', timeout: 2000 });
+  const out = execFileSync(
+    'ps', // NOSONAR — PATH lookup is the contract
+    ['-axo', 'pid='],
+    { encoding: 'utf8', timeout: 2000 }
+  );
   return out
     .split('\n')
     .filter(p => /^\d+$/.test(p.trim()))
     .map(p => Number(p.trim()));
+}
+
+/** one `lsof -Fn` batch → `p<pid>`/`n<path>` rows folded into the
+ *  cwd map — the row parser, split out so the chunk loop stays flat */
+function lsofCwdRows(lout: string, cwdMap: Map<number, string>): void {
+  let currentPid: number | null = null;
+  for (const l of lout.split('\n')) {
+    if (l.startsWith('p')) {
+      const v = Number(l.slice(1));
+      currentPid = Number.isInteger(v) ? v : null;
+      continue;
+    }
+    if (l.startsWith('n') && currentPid !== null) {
+      cwdMap.set(currentPid, l.slice(1));
+    }
+  }
 }
 
 /** pid → cwd for a whole pid list, batched through chunked lsof runs.
@@ -362,21 +390,15 @@ function lsofCwdMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], {
-        encoding: 'utf8',
-        timeout: 2000,
-      });
-      let currentPid: number | null = null;
-      for (const l of lout.split('\n')) {
-        if (l.startsWith('p')) {
-          const v = Number(l.slice(1));
-          currentPid = Number.isInteger(v) ? v : null;
-          continue;
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
         }
-        if (l.startsWith('n') && currentPid !== null) {
-          cwdMap.set(currentPid, l.slice(1));
-        }
-      }
+      );
+      lsofCwdRows(lout, cwdMap);
     } catch {
       // continue to next chunk
     }
@@ -391,10 +413,14 @@ function psArgsMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const coutAll = execFileSync('ps', ['-ww', '-o', 'pid=,args=', '-p', chunk.join(',')], {
-        encoding: 'utf8',
-        timeout: 2000,
-      });
+      const coutAll = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-ww', '-o', 'pid=,args=', '-p', chunk.join(',')],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
+        }
+      );
       for (const l of coutAll.split('\n')) {
         const m = l.match(/^\s*(\d+)\s+(.*)$/s);
         if (m) {
@@ -418,10 +444,14 @@ function darwinProcCwd(pid: number, cwdMap: Map<number, string>, deadline: numbe
   const left = deadline - Date.now();
   if (left <= 0) return null;
   try {
-    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-      encoding: 'utf8',
-      timeout: Math.min(500, left),
-    });
+    const lout = execFileSync(
+      'lsof', // NOSONAR — PATH lookup is the contract
+      ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+      {
+        encoding: 'utf8',
+        timeout: Math.min(500, left),
+      }
+    );
     return (
       lout
         .split('\n')
@@ -437,16 +467,24 @@ function darwinProcCwd(pid: number, cwdMap: Map<number, string>, deadline: numbe
  *  every ps spelling fails. */
 function darwinArgs(pid: number): string {
   try {
-    return execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: 500,
-    });
-  } catch {
-    try {
-      return execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+    return execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-ww', '-o', 'args=', '-p', String(pid)],
+      {
         encoding: 'utf8',
         timeout: 500,
-      });
+      }
+    );
+  } catch {
+    try {
+      return execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-ww', '-o', 'command=', '-p', String(pid)],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
     } catch {
       return '';
     }

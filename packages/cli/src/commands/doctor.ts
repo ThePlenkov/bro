@@ -1750,6 +1750,47 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
   return undefined;
 }
 
+/** `KEY=VALUE` token list → env map (proc environ's NUL-split, ps
+ *  eww's arg-trailing tokens — same shape once split). */
+function environMap(tokens: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const kv of tokens) {
+    const eq = kv.indexOf('=');
+    if (eq > 0) {
+      out[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
+  }
+  return out;
+}
+
+/** The running server's env: `/proc/<pid>/environ` on linux, darwin
+ *  `ps eww` tokens otherwise; {} when neither leg can read. */
+function readServeEnviron(pid: number): Record<string, string> {
+  try {
+    const out = environMap(readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0'));
+    if (Object.keys(out).length > 0) {
+      return out;
+    }
+  } catch {
+    // unreadable — raced exit or a platform without /proc
+  }
+  return process.platform === 'darwin' ? environMap(psEwwEnvTokens(pid)) : {};
+}
+
+/** same-process env — CURRENT process.env is the truth: the /proc
+ *  snapshot predates anything the caller set after start (test
+ *  fixtures mutate process.env mid-run) */
+function ownEnviron(): Record<string, string> | undefined {
+  const own: Record<string, string> = {};
+  for (const k of Object.keys(process.env)) {
+    const v = process.env[k];
+    if (typeof v === 'string') {
+      own[k] = v;
+    }
+  }
+  return Object.keys(own).length > 0 ? own : undefined;
+}
+
 /** The running server's env, once — `/proc/<pid>/environ` is the
  *  authoritative leg for "what did this serve boot with"; on darwin
  *  `ps eww` carries the same data (env tokens trail the arg vector —
@@ -1761,40 +1802,11 @@ function serveEnviron(
   if (serve === undefined) {
     return undefined;
   }
-  const out: Record<string, string> = {};
-  try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0) {
-        out[kv.slice(0, eq)] = kv.slice(eq + 1);
-      }
-    }
-  } catch {
-    // unreadable — raced exit or a platform without /proc
-  }
-  if (Object.keys(out).length === 0 && process.platform === 'darwin') {
-    for (const t of psEwwEnvTokens(serve.pid)) {
-      const eq = t.indexOf('=');
-      if (eq > 0) {
-        out[t.slice(0, eq)] = t.slice(eq + 1);
-      }
-    }
-  }
-  // same-process serves: the CURRENT process.env is the truth — the
-  // /proc snapshot predates any env the caller set or deleted after
-  // start (test fixtures mutate process.env mid-run)
   if (serve.pid === process.pid) {
-    const own: Record<string, string> = {};
-    for (const k of Object.keys(process.env)) {
-      const v = process.env[k];
-      if (typeof v === 'string') {
-        own[k] = v;
-      }
-    }
-    return Object.keys(own).length > 0 ? own : undefined;
+    return ownEnviron();
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  const env = readServeEnviron(serve.pid);
+  return Object.keys(env).length > 0 ? env : undefined;
 }
 
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when

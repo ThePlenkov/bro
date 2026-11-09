@@ -188,7 +188,10 @@ export function refGuardVerdict(
     opts.isAncestor ??
     ((o: string, n: string): boolean | null => {
       const r = gitTry(['-C', opts.cwd, 'merge-base', '--is-ancestor', o, n]);
-      return r.code === 0 ? true : r.code === 1 ? false : null;
+      if (r.code === 0) {
+        return true;
+      }
+      return r.code === 1 ? false : null;
     });
   const resolveRef =
     opts.resolveRef ??
@@ -231,16 +234,24 @@ function readProcArgv(pid: number): string[] | undefined {
       // Try to get args in a way that's less ambiguous
       let out: string;
       try {
-        out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
-          encoding: 'utf8',
-          timeout: 500,
-        });
-      } catch {
-        try {
-          out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+        out = execFileSync(
+          'ps', // NOSONAR — PATH lookup is the contract
+          ['-ww', '-o', 'args=', '-p', String(pid)],
+          {
             encoding: 'utf8',
             timeout: 500,
-          });
+          }
+        );
+      } catch {
+        try {
+          out = execFileSync(
+            'ps', // NOSONAR — PATH lookup is the contract
+            ['-ww', '-o', 'command=', '-p', String(pid)],
+            {
+              encoding: 'utf8',
+              timeout: 500,
+            }
+          );
         } catch {
           return undefined;
         }

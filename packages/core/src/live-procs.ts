@@ -230,7 +230,7 @@ function lstartComm(parts: string[]): { lstart: string; comm: string } | null {
   for (let start = 2; start <= parts.length - 1; start++) {
     for (let len = 5; len >= 4 && start + len <= parts.length; len--) {
       const candidate = parts.slice(start, start + len).join(' ');
-      if (!isNaN(Date.parse(candidate))) {
+      if (!Number.isNaN(Date.parse(candidate))) {
         return {
           lstart: candidate,
           comm: parts
@@ -249,6 +249,22 @@ function commBase(comm: string): string {
   return (comm.includes('/') ? (comm.split('/').pop() ?? comm) : comm) || '';
 }
 
+/** one `lsof -Fn` batch → `p<pid>`/`n<path>` rows folded into the
+ *  cwd map — the row parser, split out so the chunk loop stays flat */
+function lsofCwdRows(lout: string, cwdMap: Map<number, string>): void {
+  let currentPid: number | null = null;
+  for (const l of lout.split('\n')) {
+    if (l.startsWith('p')) {
+      const v = Number(l.slice(1));
+      currentPid = Number.isInteger(v) ? v : null;
+      continue;
+    }
+    if (l.startsWith('n') && currentPid !== null) {
+      cwdMap.set(currentPid, l.slice(1));
+    }
+  }
+}
+
 /** pid → cwd for every live pid, batched through chunked
  *  `lsof -d cwd` runs (a single -p list would blow argv on a busy
  *  box). A failed chunk just leaves its pids to the per-pid fallback. */
@@ -258,21 +274,15 @@ function lsofCwdMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], {
-        encoding: 'utf8',
-        timeout: 2000,
-      });
-      let currentPid: number | null = null;
-      for (const l of lout.split('\n')) {
-        if (l.startsWith('p')) {
-          const v = Number(l.slice(1));
-          currentPid = Number.isInteger(v) ? v : null;
-          continue;
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
         }
-        if (l.startsWith('n') && currentPid !== null) {
-          cwdMap.set(currentPid, l.slice(1));
-        }
-      }
+      );
+      lsofCwdRows(lout, cwdMap);
     } catch {
       // continue to next chunk — per-pid fallback covers the gap
     }
@@ -296,10 +306,14 @@ function darwinCwd(pid: number, cwdMap: Map<number, string>, deadline: number): 
   const left = deadline - Date.now();
   if (left <= 0) return null;
   try {
-    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-      encoding: 'utf8',
-      timeout: Math.min(500, left),
-    });
+    const lout = execFileSync(
+      'lsof', // NOSONAR — PATH lookup is the contract
+      ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+      {
+        encoding: 'utf8',
+        timeout: Math.min(500, left),
+      }
+    );
     const cline = lout.split('\n').find(l => l.startsWith('n'));
     return cline === undefined ? null : cline.slice(1);
   } catch {
@@ -312,10 +326,14 @@ function batchParentComms(ppids: number[]): Map<number, string | null> {
   const parentComms = new Map<number, string | null>();
   if (ppids.length === 0) return parentComms;
   try {
-    const pout = execFileSync('ps', ['-p', ppids.join(','), '-o', 'pid=,comm='], {
-      encoding: 'utf8',
-      timeout: 1000,
-    });
+    const pout = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', ppids.join(','), '-o', 'pid=,comm='],
+      {
+        encoding: 'utf8',
+        timeout: 1000,
+      }
+    );
     for (const l of pout.split('\n').filter(Boolean)) {
       const t = l.trim().split(/\s+/);
       if (t.length >= 2) {
@@ -343,10 +361,14 @@ function darwinParentComm(
   const left = deadline - Date.now();
   if (left <= 0) return null;
   try {
-    const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], {
-      encoding: 'utf8',
-      timeout: Math.min(500, left),
-    });
+    const pout = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(ppid), '-o', 'comm='],
+      {
+        encoding: 'utf8',
+        timeout: Math.min(500, left),
+      }
+    );
     return commBase(pout.trim()) || null;
   } catch {
     return null;
@@ -378,11 +400,15 @@ function darwinRow(
 function readProcRowsDarwin(): ProcRow[] {
   let lines: string[];
   try {
-    const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], {
-      encoding: 'utf8',
-      timeout: 2000,
-      env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' },
-    });
+    const out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-axo', 'pid=,ppid=,lstart=,comm='],
+      {
+        encoding: 'utf8',
+        timeout: 2000,
+        env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' },
+      }
+    );
     lines = out.split('\n').filter(Boolean);
   } catch {
     return [];
