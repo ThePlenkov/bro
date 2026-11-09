@@ -93,11 +93,13 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
   const git = (args: string[], cwd = process.cwd()): string =>
-    execFileSync('git', ['-C', cwd, ...args], {
-      // NOSONAR — PATH lookup is the contract
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    execFileSync(
+      // NOSONAR must sit on the program-name token's line — Sonar pins
+      // S4036 there; a comment on the options line does not reach it
+      'git', // NOSONAR — PATH lookup is the contract
+      ['-C', cwd, ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    ).trim();
   let root: string;
   try {
     root = git(['rev-parse', '--show-toplevel']);
@@ -121,10 +123,13 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], {
-        // NOSONAR — git PATH lookup is the contract
-        stdio: 'ignore',
-      });
+      execFileSync(
+        // NOSONAR must sit on the program-name token's line — Sonar pins
+        // S4036 there; a comment on the options line does not reach it
+        'git', // NOSONAR — git PATH lookup is the contract
+        ['-C', process.cwd(), 'check-ignore', '-q', '--', name],
+        { stdio: 'ignore' }
+      );
       return true;
     } catch {
       return false;
@@ -169,11 +174,13 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], {
-      // NOSONAR — git PATH lookup is the contract
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const tracked = execFileSync(
+      // NOSONAR must sit on the program-name token's line — Sonar pins
+      // S4036 there; a comment on the options line does not reach it
+      'git', // NOSONAR — git PATH lookup is the contract
+      ['-C', root, 'ls-files', '--', 'bro.config.local.*'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
     if (tracked !== '') {
       console.error(
         'warning: bro.config.local.* has tracked files — .git/info/exclude ' +
