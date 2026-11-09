@@ -805,6 +805,8 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
       ),
   });
 
+  const pendingPromptContext = new Map<string, string>();
+
   return Promise.resolve({
     async 'experimental.chat.system.transform'(hookInput, output) {
       const sessionID = hookInput.sessionID;
@@ -814,6 +816,11 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
       const text = await hydrate(sessionID, 'session-start');
       if (text) {
         output.system.push(text);
+      }
+      const pending = pendingPromptContext.get(sessionID);
+      if (pending) {
+        output.system.push(pending);
+        pendingPromptContext.delete(sessionID);
       }
     },
 
@@ -834,8 +841,10 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
       const text = contextOf(
         await probe('prompt-submit', { session_id: hookInput.sessionID, prompt })
       );
-      if (text) {
-        output.parts.push({ type: 'text', text });
+      if (text && hookInput.sessionID) {
+        // keep the injected context out of the visible message parts —
+        // it rides the system prompt instead (see system.transform above)
+        pendingPromptContext.set(hookInput.sessionID, text);
       }
     },
 
@@ -1092,6 +1101,7 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
         : undefined,
   });
 
+  const pendingPromptContext = new Map<string, string>();
   const registrations: Promise<V2Registration | undefined>[] = [];
   const register = (r: Promise<V2Registration | undefined> | undefined): void => {
     // a hook domain that rejects registration (drifted shape, disabled
@@ -1112,6 +1122,13 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
       const text = await core.hydrate(sessionID, 'session-start');
       if (text) {
         event.system.push({ type: 'text', text });
+      }
+      if (sessionID) {
+        const pending = pendingPromptContext.get(sessionID);
+        if (pending && event.system !== undefined) {
+          event.system.push({ type: 'text', text: pending });
+          pendingPromptContext.delete(sessionID);
+        }
       }
     })
   );
@@ -1139,8 +1156,10 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
           prompt: prompt.text ?? '',
         })
       );
-      if (text) {
-        prompt.text = `${prompt.text ?? ''}\n\n${text}`;
+      if (text && event.sessionID) {
+        // keep injected context out of the visible prompt — it rides the
+        // system context instead (see the context hook above)
+        pendingPromptContext.set(event.sessionID, text);
       }
     })
   );
