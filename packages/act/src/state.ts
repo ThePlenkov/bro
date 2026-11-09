@@ -30,10 +30,12 @@ import type { PrActState } from './types.ts';
 const AI_REVIEWER_RE =
   /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i;
 
-/** Static-scanner check-name stems — the must-fix set. A check matching
- *  one of these can NEVER be advisory-ignored: a scanner's failed job
- *  or error annotation is a real project finding, not reviewer flake —
- *  the proof-of-life model does not apply to it. */
+/** Static-scanner check-name stems — the must-fix set BY DEFAULT. A
+ *  scanner's failed job or error annotation is a real project finding,
+ *  not reviewer flake — the proof-of-life model does not apply to it.
+ *  An explicit act.ignoreChecks entry overrides this default (the
+ *  operator named the scanner advisory; advisoryFilter's rule lookup
+ *  runs first for exactly that reason). */
 const SAST_NAMES = [
   'sonarcloud',
   'sonarqube',
@@ -126,9 +128,10 @@ function countFindings(
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
- *  annotations endpoint stays infra noise). Static scanners are never
- *  advisory-ignored (advisoryFilter returns them gated), so the counts
- *  below are the whole story — findings here are must-fix. */
+ *  annotations endpoint stays infra noise). The input set here is
+ *  already advisory-filtered — a scanner survives into these counts
+ *  unless the operator explicitly named it in act.ignoreChecks —
+ *  findings on surviving checks are must-fix. */
 async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
@@ -225,14 +228,14 @@ function advisoryFilter(
   headSha: string,
   alerts: string[]
 ): boolean {
-  // a static scanner is must-fix, never advisory: a failed job or an
-  // error annotation IS the finding — the flaky-reviewer proof-of-life
-  // model (streak + fresh threads) does not apply to it
-  if (isSast(c.name)) {
-    return true;
-  }
   const rule = rules.find(r => c.name.toLowerCase().includes(r.name.toLowerCase()));
   if (rule === undefined) {
+    // a static scanner is must-fix BY DEFAULT: a failed job or an error
+    // annotation IS the finding, not reviewer flake — so a SAST-named
+    // check gates unless an explicit act.ignoreChecks entry overrides.
+    // The override is deliberate operator policy: naming a scanner is
+    // never a silent no-op, and a failing one still surfaces as an
+    // alert until proven flaky and alive (below).
     return true;
   }
   history?.record({
