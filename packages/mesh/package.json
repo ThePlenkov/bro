@@ -10,22 +10,21 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@broject/core": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Inter-rig work federation for bro — mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
+  "description": "Inter-rig work federation for bro \u2014 mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
   "keywords": [
     "federation",
     "agents",

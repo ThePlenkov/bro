@@ -208,7 +208,7 @@ describe('filelock', () => {
           `assert.throws(() => acquireFileLock(lock, { waitMs: Infinity }), RangeError)\n` +
           `assert.throws(() => acquireFileLock(lock, { waitMs: -1 }), RangeError)\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30_000 });
       assert.equal(child.status, 0, child.error ? String(child.error) : child.stderr);
     } finally {
       done();
@@ -224,7 +224,7 @@ describe('filelock', () => {
         script,
         `import { acquireFileLock } from ${JSON.stringify(join(here, 'filelock.ts'))}\nacquireFileLock(${JSON.stringify(lock)})\nprocess.exit(0)\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8' });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8' });
       assert.equal(child.status, 0, child.stderr);
       assert.equal(existsSync(lock), false);
     } finally {
@@ -317,7 +317,7 @@ describe('filelock', () => {
           `  console.log('released')\n` +
           `})\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30_000 });
       assert.equal(child.status, 0, child.stderr);
       assert.match(child.stdout, /patch-visible:true/);
       assert.match(child.stdout, /held:h-\d+/);
@@ -348,7 +348,7 @@ describe('filelock', () => {
           `  console.log('released')\n` +
           `})\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30_000 });
       assert.equal(child.status, 0, child.stderr);
       // LINKTRIED proves the patch reached filelock's named import —
       // the steal then fell back to the no-link(2) degraded path
@@ -379,7 +379,7 @@ describe('filelock', () => {
           `  catch (e) { console.log('ERR:' + e.name) }\n` +
           `})\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30_000 });
       assert.equal(child.status, 0, child.stderr);
       assert.match(child.stdout, /patch-visible:true/);
       assert.match(child.stdout, /ERR:LockTimeout/);
@@ -516,17 +516,17 @@ describe('filelock', () => {
       const aScript = join(dir, 'a.ts');
       writeFileSync(
         aScript,
-        `import { writeFileSync } from 'node:fs'\n` +
+        `import { accessSync, writeFileSync } from 'node:fs'\n` +
           `import { acquireFileLock } from ${JSON.stringify(join(here, 'filelock.ts'))}\n` +
           `const release = acquireFileLock(${JSON.stringify(lock)})\n` +
           `writeFileSync(${JSON.stringify(aPidFile)}, String(process.pid))\n` +
           `writeFileSync(${JSON.stringify(aReady)}, '')\n` +
           `const iv = setInterval(() => {\n` +
-          `  try { require('node:fs').accessSync(${JSON.stringify(aGo)}); clearInterval(iv); release(); process.exit(0) }\n` +
+          `  try { accessSync(${JSON.stringify(aGo)}); clearInterval(iv); release(); process.exit(0) }\n` +
           `  catch {}\n` +
           `}, 20)\n`
       );
-      const a = spawn('npx', ['tsx', aScript], { stdio: 'ignore' });
+      const a = spawn(process.execPath, [aScript], { stdio: 'ignore' });
       assert.equal(await waitFor(aReady), true, 'A never acquired');
       const aPid = Number(readFileSync(aPidFile, 'utf8'));
       // simulate the steal the abandoned bound permits: A's entry is
@@ -548,7 +548,7 @@ describe('filelock', () => {
           `writeFileSync(${JSON.stringify(bReady)}, '')\n` +
           `setTimeout(() => {}, 30_000)\n`
       );
-      const b = spawn('npx', ['tsx', bScript], { stdio: 'ignore' });
+      const b = spawn(process.execPath, [bScript], { stdio: 'ignore' });
       assert.equal(await waitFor(bReady), true, 'B never acquired');
       const bPid = Number(readFileSync(bPidFile, 'utf8'));
       const bIno = statSync(lock).ino;
@@ -669,7 +669,7 @@ describe('filelock', () => {
           `  console.log('released')\n` +
           `})\n`
       );
-      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 });
+      const child = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30_000 });
       assert.equal(child.status, 0, child.stderr);
       // 'swapped' proves the interleaving actually ran — without the
       // patch reaching filelock the test would pass unexercised
@@ -701,7 +701,7 @@ describe('filelock', () => {
           `  release()\n` +
           `}\n`
       );
-      const kids = [0, 1, 2].map(() => spawn('npx', ['tsx', script], { stdio: 'ignore' }));
+      const kids = [0, 1, 2].map(() => spawn(process.execPath, [script], { stdio: 'ignore' }));
       await Promise.all(
         kids.map(
           k =>
@@ -772,7 +772,7 @@ describe('filelock', () => {
           `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\n` +
           `setTimeout(() => {}, 1200)\n`
       );
-      const child = spawn('npx', ['tsx', script], { stdio: 'ignore' });
+      const child = spawn(process.execPath, [script], { stdio: 'ignore' });
       for (let i = 0; i < 50 && !existsSync(pidFile); i++) {
         await new Promise(r => setTimeout(r, 100));
       }

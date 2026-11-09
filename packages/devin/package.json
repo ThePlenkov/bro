@@ -13,19 +13,18 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "The devin facade for bro — the session plane (live sessions, worker/batch split), the CLI's session grammar and the store-backed lane telemetry",
+  "description": "The devin facade for bro \u2014 the session plane (live sessions, worker/batch split), the CLI's session grammar and the store-backed lane telemetry",
   "keywords": [
     "devin",
     "agent",

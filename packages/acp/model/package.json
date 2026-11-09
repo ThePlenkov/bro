@@ -11,22 +11,21 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.7.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "repository": {
     "type": "git",
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Framework-free ACP session model — reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)",
+  "description": "Framework-free ACP session model \u2014 reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)",
   "bro": {
     "kind": "capability",
     "status": "beta"

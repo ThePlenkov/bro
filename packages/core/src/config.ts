@@ -14,7 +14,7 @@
  * inherit), `.ts` beats `.json` inside one dir, first file found wins
  * the layer. Layers deep-merge onto DEFAULT_CONFIG: plain objects
  * merge per key, arrays/scalars replace. The .ts file loads synchronously via createRequire —
- * native type stripping handles it on Node ≥22.18. `export default {…}`
+ * native type stripping handles it on Node ≥26.13. `export default {…}`
  * is the canonical form (works in ESM and CJS repos); `module.exports`
  * only works where the repo is CommonJS. No bro import is required, so
  * the config resolves under a global install too.
@@ -1721,12 +1721,12 @@ function unwrapDefault(mod: unknown): unknown {
 }
 
 function loadTsConfig(name: string, path: string): unknown {
-  // the published CLI still installs on Node 22.0–22.17 where type
-  // stripping is absent — detect it up front, not by catching the
-  // require failure
+  // engines only warns at install, so the CLI can still land on a Node
+  // without type stripping (too old, or --no-strip-types) — detect it up
+  // front, not by catching the require failure
   if (!(process.features as { typescript?: unknown }).typescript) {
     console.error(
-      `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
+      `warning: ${name} needs Node >=26.13 (native type stripping) — using jsonl-only stores`
     );
     return undefined;
   }

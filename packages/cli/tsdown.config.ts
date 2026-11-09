@@ -24,9 +24,10 @@ const main = defineConfig({
     'src/kilo.ts',
   ],
   format: ['esm'],
+  fixedExtension: false,
   dts: true,
   // Bundle workspace libs into the published CLI — consumers get one file.
-  noExternal: [/^@broject\//],
+  deps: { alwaysBundle: [/^@broject\//] },
   plugins: [
     {
       name: 'bro-embedded',
@@ -58,16 +59,18 @@ const pi = defineConfig({
   entry: ['src/adapter/pi.ts'],
   outDir: 'dist',
   format: ['esm'],
+  fixedExtension: false,
   dts: true,
-  noExternal: [/^@broject\//],
+  deps: { alwaysBundle: [/^@broject\//] },
 });
 
 const omp = defineConfig({
   entry: ['src/adapter/omp.ts'],
   outDir: 'dist',
   format: ['esm'],
+  fixedExtension: false,
   dts: true,
-  noExternal: [/^@broject\//],
+  deps: { alwaysBundle: [/^@broject\//] },
 });
 
 export default [main, pi, omp];

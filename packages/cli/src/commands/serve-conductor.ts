@@ -1133,7 +1133,10 @@ class StopFilter {
   sawText = false;
   hit: string | undefined;
 
-  constructor(private readonly seqs: string[]) {}
+  private readonly seqs: string[];
+  constructor(seqs: string[]) {
+    this.seqs = seqs;
+  }
 
   feed(s: string): string {
     // the input ARRIVED — the turn's text landed, even when the cut holds
@@ -1220,9 +1223,12 @@ abstract class TagPump {
   private pending = '';
   private inCall = false;
 
+  private readonly tools: boolean;
   /** tools=false — the request withheld the tool contract; markup an
    *  agent emits anyway stays raw text, matching the recorded reply. */
-  constructor(private readonly tools = true) {
+  constructor(tools = true) {
+    this.tools = tools;
+
     // no base state — the flag is the whole constructor
   }
 
@@ -1324,17 +1330,23 @@ class LiveTurn extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
+  private readonly res: ServerResponse;
+  private readonly stops: StopFilter | undefined;
+  private readonly contract: ToolContract;
   constructor(
-    private readonly res: ServerResponse,
+    res: ServerResponse,
     model: string,
     inputTokens: number,
-    private readonly stops: StopFilter | undefined,
+    stops: StopFilter | undefined,
     pingMs?: number,
     tools = true,
     clientTools: ClientTool[] = [],
-    private readonly contract: ToolContract = OPEN_CONTRACT
+    contract: ToolContract = OPEN_CONTRACT
   ) {
     super(tools);
+    this.res = res;
+    this.stops = stops;
+    this.contract = contract;
     this.clientTools = clientTools;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
@@ -2946,17 +2958,29 @@ class RespLive extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
+  private readonly res: ServerResponse;
+  private readonly respId: string;
+  private readonly model: string;
+  private readonly inputTokens: number;
+  private readonly store: boolean;
+  private readonly cap?: number;
   constructor(
-    private readonly res: ServerResponse,
-    private readonly respId: string,
-    private readonly model: string,
-    private readonly inputTokens: number,
-    private readonly store: boolean,
+    res: ServerResponse,
+    respId: string,
+    model: string,
+    inputTokens: number,
+    store: boolean,
     tools = true,
-    private readonly cap?: number,
+    cap?: number,
     pingMs?: number
   ) {
     super(tools);
+    this.res = res;
+    this.respId = respId;
+    this.model = model;
+    this.inputTokens = inputTokens;
+    this.store = store;
+    this.cap = cap;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
         if (res.writableEnded || res.destroyed) {
@@ -3917,17 +3941,29 @@ class ChatLive extends TagPump {
 
   private ping?: NodeJS.Timeout;
 
+  private readonly res: ServerResponse;
+  private readonly id: string;
+  private readonly model: string;
+  private readonly created: number;
+  private readonly cap?: number;
+  private readonly stops?: StopFilter;
   constructor(
-    private readonly res: ServerResponse,
-    private readonly id: string,
-    private readonly model: string,
-    private readonly created: number,
+    res: ServerResponse,
+    id: string,
+    model: string,
+    created: number,
     tools = true,
-    private readonly cap?: number,
-    private readonly stops?: StopFilter,
+    cap?: number,
+    stops?: StopFilter,
     pingMs?: number
   ) {
     super(tools);
+    this.res = res;
+    this.id = id;
+    this.model = model;
+    this.created = created;
+    this.cap = cap;
+    this.stops = stops;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
         if (this.res.writableEnded || this.res.destroyed) {

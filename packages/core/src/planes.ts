@@ -33,13 +33,11 @@ export interface PlaneFilter {
 /** Client bug — undeclared verb/read name, malformed args. */
 export class PlaneVerbError extends Error {
   override name = 'PlaneVerbError';
-  constructor(
-    public readonly plane: string,
-    verb: string,
-    detail?: string
-  ) {
+  readonly plane: string;
+  constructor(plane: string, verb: string, detail?: string) {
     const suffix = detail === undefined ? '' : `: ${detail}`;
     super(`${plane}.${verb}${suffix}`);
+    this.plane = plane;
   }
 }
 
@@ -47,11 +45,10 @@ export class PlaneVerbError extends Error {
  *  fake empty list. */
 export class PlaneUnavailable extends Error {
   override name = 'PlaneUnavailable';
-  constructor(
-    public readonly plane: string,
-    detail: string
-  ) {
+  readonly plane: string;
+  constructor(plane: string, detail: string) {
     super(`${plane}: ${detail}`);
+    this.plane = plane;
   }
 }
 

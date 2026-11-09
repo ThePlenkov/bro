@@ -9,13 +9,12 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@broject/core": "^0.3.0",
@@ -25,7 +24,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "router-store — the router's own ledger: the health facts a route decision reads",
+  "description": "router-store \u2014 the router's own ledger: the health facts a route decision reads",
   "keywords": [
     "router",
     "sqlite",

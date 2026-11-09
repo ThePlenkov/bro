@@ -4,7 +4,7 @@
   "type": "module",
   "dependencies": {
     "@broject/core": "^0.3.0",
-    "smol-toml": "^1.9.0"
+    "smol-toml": "^1.9.1"
   },
   "exports": {
     ".": {
@@ -13,19 +13,18 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Pipeline formulas for bro — declarative gate stages (classify→route→work→review→merge→capture) interpreted by core",
+  "description": "Pipeline formulas for bro \u2014 declarative gate stages (classify\u2192route\u2192work\u2192review\u2192merge\u2192capture) interpreted by core",
   "keywords": [
     "beads",
     "workflow",

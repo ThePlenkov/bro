@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -20,15 +20,14 @@
     "@broject/providers": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "repository": {
     "type": "git",
@@ -38,7 +37,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro-side herdr bridge kit — pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions",
+  "description": "bro-side herdr bridge kit \u2014 pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions",
   "bro": {
     "kind": "capability",
     "status": "beta"

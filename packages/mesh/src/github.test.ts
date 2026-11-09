@@ -304,7 +304,7 @@ describe('github e2e (gated)', () => {
       title: `mesh e2e ${Date.now()}`,
       body: 'e2e scratch — close me',
     });
-    assert.ok(posted.issue, posted.error);
+    assert.ok(posted.issue, posted.error ?? 'no error');
     const issue = posted.issue;
     const n = issueKey({ thread: issue }).n;
     assert.ok(n !== null);

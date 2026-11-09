@@ -169,7 +169,7 @@ function checkNode(): DoctorCheck {
     'node',
     'warn',
     `v${process.versions.node} — no native type stripping`,
-    'bro.config.ts needs Node ≥22.18 — bro.config.json still works'
+    'bro.config.ts needs Node ≥26.13 — bro.config.json still works'
   );
 }
 

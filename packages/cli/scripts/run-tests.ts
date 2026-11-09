@@ -97,7 +97,7 @@ if (files.length === 0 && pattern.includes('.e2e')) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
+const result = spawnSync(process.execPath, ['--test', ...files], {
   stdio: 'inherit',
 });
 process.exit(result.status ?? 1);

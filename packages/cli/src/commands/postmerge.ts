@@ -241,7 +241,7 @@ function spawnDetached(cwd: string, logFd: number): void {
 }
 
 /** The entry script this process was launched as — `packages/cli/dist/
- *  index.js` on installs, `src/index.ts` in dev (node ≥22.18 strips
+ *  index.js` on installs, `src/index.ts` in dev (node ≥26.13 strips
  *  types). Null when argv is not bro-shaped (tests import directly). */
 function entrypoint(): string | null {
   return SELF_ENTRY !== null && existsSync(SELF_ENTRY) ? SELF_ENTRY : null;

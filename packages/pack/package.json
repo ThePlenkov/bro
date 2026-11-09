@@ -12,13 +12,12 @@
   "scripts": {
     "prepare": "node ../../scripts/gen-pack.ts",
     "prepack": "node ../../scripts/gen-pack.ts",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist",
@@ -27,7 +26,7 @@
     "pack.json"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -38,7 +37,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Default capability pack for bro — skills/ + formulas/ trees installed by `bro setup --pack`",
+  "description": "Default capability pack for bro \u2014 skills/ + formulas/ trees installed by `bro setup --pack`",
   "keywords": [
     "bro",
     "pack",

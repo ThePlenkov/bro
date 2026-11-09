@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Node ≥22.18 is required for native .ts execution (gen-pack, bro.config.ts).
+# Node ≥26.13 is required for native .ts execution (gen-pack, bro.config.ts).
 export PATH="/usr/local/bin:${PATH:-}"
 
 fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$@"; }
@@ -9,7 +9,7 @@ fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$@"; }
 need_node() {
   node -e '
     const p = process.versions.node.split(".").map(Number);
-    const ok = (p[0] === 22 && p[1] >= 18) || (p[0] === 23 && p[1] >= 6) || p[0] >= 24;
+    const ok = p[0] > 26 || (p[0] === 26 && p[1] >= 13);
     process.exit(ok ? 0 : 1);
   '
 }
@@ -18,7 +18,7 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 if ! need_node 2>/dev/null; then
-  NODE_VERSION="${NODE_VERSION:-22.23.3}"
+  NODE_VERSION="${NODE_VERSION:-26.13.0}"
   case "$(uname -m)" in
     x86_64)        NODE_ARCH=x64 ;;
     aarch64|arm64) NODE_ARCH=arm64 ;;
