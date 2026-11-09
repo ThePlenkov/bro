@@ -4614,7 +4614,7 @@ async function tryClaim(
             ctx.claimsHeld = { open, max: ctx.cfg.maxOpenTotal };
             say(
               ctx,
-              `loop: claims held — ceiling ${fleet.length} open + ${pending} reserved/${ctx.cfg.maxOpenTotal}`
+              `loop: claims held — ceiling ${open}/${ctx.cfg.maxOpenTotal} (${fleet.length} open + ${pending} reserved/${ctx.cfg.maxOpenTotal})`
             );
           }
           return true;
