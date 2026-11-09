@@ -60,6 +60,14 @@ export function isSast(name: string): boolean {
   return SAST_NAMES.some(s => lower.includes(s));
 }
 
+/** A check name, normalized for matching: case-folded, every run of
+ *  non-alphanumerics collapsed to one space. 'act-gate', 'Act Gate' and
+ *  'act_gate' are the same name — a self-check setting that missed its
+ *  own check would restore the deadlock it exists to prevent. */
+function normalizeCheckName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 // SKIPPED means the run never produced output — every other conclusion
 // (SUCCESS, NEUTRAL included) can still carry failure-level annotations
 const isLiveSast = (c: CheckInfo): boolean => isSast(c.name) && c.state !== 'SKIPPED';
@@ -263,6 +271,11 @@ const orSync = <T, A extends unknown[]>(
 
 export interface FetchPrActStateOpts {
   ignoreChecks?: IgnoreCheckEntry[];
+  /** The check that IS the gate (act.selfCheck) — a name substring. The
+   *  gate never counts itself: a gate published as a required check is
+   *  pending while it runs, and a gate that waits for its own check can
+   *  never go green. */
+  selfCheck?: string;
   checkHistory?: CheckHistory | null;
   maxRounds?: number;
   docsPaths?: string[];
@@ -416,8 +429,32 @@ async function fetchState(
   const rules = ignoreRules(opts?.ignoreChecks ?? []);
   const alerts: string[] = [];
   const history = opts?.checkHistory ?? null;
-  const checks = checksAll.filter(c =>
-    advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+  // The gate's own check is not part of the gate's input — a gate that
+  // publishes itself as a required check is pending while it runs, and
+  // waiting for it means the gate can never settle green. Matched by
+  // NAME (act.selfCheck): the normalized name must BE the gate's name,
+  // or end with it as the job segment of a composite 'workflow / job'
+  // name. A substring match would drop unrelated checks from the gate —
+  // the one thing the gate must never do (Kody rule: no substring
+  // checks as semantic tests).
+  const selfName = opts?.selfCheck;
+  const isSelf = (c: CheckInfo): boolean => {
+    // absent is not the same as empty: a missing setting means "this
+    // project has no gate check", an empty one means "the gate names
+    // nothing" — neither excludes a check, and neither is a sentinel
+    // for the other (Kody rule: discriminate on presence).
+    if (selfName === undefined) {
+      return false;
+    }
+    const self = normalizeCheckName(selfName);
+    if (self === '') {
+      return false;
+    }
+    const name = normalizeCheckName(c.name);
+    return name === self || name.endsWith(` ${self}`);
+  };
+  const checks = checksAll.filter(
+    c => !isSelf(c) && advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
   );
 
   // "CI green" means every check — an optional check that fails is still
