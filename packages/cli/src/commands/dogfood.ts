@@ -358,21 +358,25 @@ async function provisionRepo(
     `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
   );
   execFileSync('git', ['-C', repo, 'add', '-A']); // NOSONAR — PATH lookup is the contract
-  execFileSync('git', [
-    // NOSONAR — PATH lookup is the contract
-    '-C',
-    repo,
-    // identity pinned — a scratch must never depend on ambient
-    // user.name/user.email living in global config (or a host-only one)
-    '-c',
-    'user.name=bro-dogfood',
-    '-c',
-    'user.email=dogfood@localhost',
-    'commit',
-    '-q',
-    '-m',
-    'dogfood scratch',
-  ]);
+  execFileSync(
+    // NOSONAR must sit on the program-name token's line — Sonar pins
+    // S4036 there; a comment inside the argv array does not reach it
+    'git', // NOSONAR — PATH lookup is the contract
+    [
+      '-C',
+      repo,
+      // identity pinned — a scratch must never depend on ambient
+      // user.name/user.email living in global config (or a host-only one)
+      '-c',
+      'user.name=bro-dogfood',
+      '-c',
+      'user.email=dogfood@localhost',
+      'commit',
+      '-q',
+      '-m',
+      'dogfood scratch',
+    ]
+  );
   // the store must be a real bd database, not just a dir — best-effort:
   // a scripted bd (tests) may not implement init; initErr rides into
   // the step-bead create's failure so the real cause is never buried
@@ -710,10 +714,13 @@ function isRecordedServe(
     /* /proc absent (macOS) or the pid is gone — try argv evidence */
   }
   try {
-    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
-      // NOSONAR — PATH lookup is the contract
-      encoding: 'utf8',
-    });
+    const args = execFileSync(
+      // NOSONAR must sit on the program-name token's line — Sonar pins
+      // S4036 there, a trailing comment on the callee line does not reach it
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(pid), '-o', 'args='],
+      { encoding: 'utf8' }
+    );
     const port = state.url?.match(/:(\d+)/)?.[1];
     return /\bserve\b/.test(args) && (port === undefined || args.includes(port));
   } catch {
