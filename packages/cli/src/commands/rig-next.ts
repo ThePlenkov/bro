@@ -1,4 +1,4 @@
-import type { BeadStore } from '@broject/core'
+import type { TaskStore } from '@broject/core'
 import { rigNext, type RigNext } from '@broject/rig'
 
 // Re-export the engine symbols so consumers (drive.ts, etc.) that
@@ -7,13 +7,13 @@ export { rigNext, type RigNext }
 
 export async function runRigNext(
   dir: string = process.cwd(),
-  item?: string | { json?: boolean; cwd?: string; dir?: string; store?: BeadStore },
+  item?: string | { json?: boolean; cwd?: string; dir?: string; store?: TaskStore },
   json?: boolean
 ): Promise<number> {
   let resolvedDir = dir
   let resolvedItem: string | undefined
   let resolvedJson = json ?? false
-  let store: BeadStore | undefined
+  let store: TaskStore | undefined
   if (typeof item === 'object' && item !== null) {
     resolvedDir = item.dir ?? item.cwd ?? dir
     resolvedJson = item.json ?? resolvedJson
