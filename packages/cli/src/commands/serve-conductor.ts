@@ -59,6 +59,7 @@ import { peerAttrs } from './peer.ts';
 import { type CatalogModel, catalogModels } from './providers.ts';
 import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
 import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
+import { forwardBody, providerConfig, type ProviderConfig } from './serve-provider.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -100,10 +101,28 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number;
+  /** The fast lane (spec bro-6asnu) — classifier-shaped calls
+   *  byte-forward to the direct upstream instead of paying
+   *  session/new. Absent when the lane is disabled or no upstream
+   *  key is configured. */
+  fast?: FastLane;
+  /** Set when FAST_LANE=off|0|false or serve.fastLane:false killed the
+   *  lane — a disabled lane is intentional routing, not a missing
+   *  upstream key, so `unrouted` must not claim one. */
+  fastDisabled?: boolean;
   /** The `agents.<kind>` bags — the session cap's knobs (spec
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+}
+
+/** The fast lane — the byte proxy's upstream pair plus the routing
+ *  knobs: `model` rewrites the forwarded body when the client names
+ *  a conductor-only id (devin/swe-2-max), `maxTokens` is the
+ *  classifier shape's output cap. */
+export interface FastLane extends ProviderConfig {
+  model?: string;
+  maxTokens: number;
 }
 
 /** The routes a config answers to — the config's own table, or the
@@ -214,6 +233,41 @@ function resolveCatalog(
 /** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
  *  no registry knows is a loud startup error naming what IS configured,
  *  never a silent fall back to the byte proxy. */
+/** The fast-lane resolution (spec bro-6asnu) — the direct upstream is
+ *  the byte proxy's own pair: the conductor intercepts `/v1/*` ahead of
+ *  it, so the same env that would have proxied becomes the lane.
+ *  `BRO_PROVIDER_FAST_LANE=off|0|false` or `serve.fastLane:false`
+ *  returns every call to the session lane; no upstream key leaves the
+ *  lane unarmed (fast-shaped calls still conduct). */
+/** The disable half of the lane's arming — kept apart so `unrouted`
+ *  means "no upstream key", never "operator turned it off". */
+function fastLaneDisabled(env: NodeJS.ProcessEnv, serve: { fastLane?: boolean }): boolean {
+  const flag = env.BRO_PROVIDER_FAST_LANE?.trim().toLowerCase();
+  return flag === 'off' || flag === '0' || flag === 'false' || serve.fastLane === false;
+}
+
+function resolveFastLane(
+  env: NodeJS.ProcessEnv,
+  serve: { upstream?: string; apiKeyEnv?: string; fastModel?: string; fastLane?: boolean }
+): FastLane | undefined {
+  if (fastLaneDisabled(env, serve)) {
+    return undefined;
+  }
+  // the file layer's upstream/apiKeyEnv resolves exactly like the byte
+  // proxy's — a config-only upstream must steer the lane, never send
+  // credentials to the default host instead
+  const pair = providerConfig(env, serve);
+  if (pair === undefined) {
+    return undefined;
+  }
+  const model = env.BRO_PROVIDER_FAST_MODEL?.trim();
+  return {
+    ...pair,
+    model: model === undefined || model === '' ? serve.fastModel : model,
+    maxTokens: positiveEnvInt(env, 'BRO_PROVIDER_FAST_MAX_TOKENS', FAST_MAX_TOKENS),
+  };
+}
+
 export function conductorConfig(
   env: NodeJS.ProcessEnv,
   dir: string,
@@ -301,6 +355,8 @@ export function conductorConfig(
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
+    fast: resolveFastLane(env, cfg.serve),
+    fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
@@ -345,6 +401,9 @@ interface MessagesRequest {
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
   stream?: boolean;
+  /** API-required output cap — the fast lane's shape signal (spec
+   *  bro-6asnu): internal calls cap ≤ ~1k, session turns ask 32k. */
+  max_tokens?: number;
 }
 
 // --- translation -----------------------------------------------------
@@ -2217,10 +2276,12 @@ function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
 async function parseMessagesBody(
   req: IncomingMessage,
   res: ServerResponse
-): Promise<MessagesRequest | undefined> {
+): Promise<{ body: MessagesRequest; raw: string } | undefined> {
   let body: MessagesRequest;
+  let raw: string;
   try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest;
+    raw = await readBody(req);
+    body = JSON.parse(raw) as MessagesRequest;
   } catch (err) {
     if (err instanceof Error && err.message === 'request body too large') {
       tooLarge(req, res);
@@ -2252,7 +2313,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return canonical;
+  return { body: canonical, raw };
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
@@ -2376,15 +2437,84 @@ function messagesStreamOpener(
   };
 }
 
+/** The default classifier cap — the env pin rides resolveFastLane;
+ *  this is the fallback the shape test uses when the lane is unarmed
+ *  (the unrouted marker still needs a boundary). */
+const FAST_MAX_TOKENS = 2048;
+
+/** The client-internal shape (spec bro-6asnu) — both signals must
+ *  hold: `tools` absent or empty (a claude-code main turn always
+ *  carries the catalog, internal calls never do) AND `max_tokens`
+ *  within the cap (the field is API-required so it is always present;
+ *  internal calls cap ≤ ~1k where session turns ask 32k). Ambiguity
+ *  always resolves to the session lane — a false fast-lane hit would
+ *  answer a real turn with the wrong model, a false session hit only
+ *  costs latency the client already budgets. */
+function fastShaped(body: MessagesRequest, maxTokens: number): boolean {
+  if (body.tools !== undefined && body.tools.length > 0) {
+    return false;
+  }
+  const cap = body.max_tokens;
+  return typeof cap === 'number' && Number.isFinite(cap) && cap > 0 && cap <= maxTokens;
+}
+
+/** The fast-lane decision once per /v1/messages — `fast` forwards
+ *  upstream, `session` conducts. `unrouted` marks a fast-shaped call
+ *  the session lane still answers for lack of an upstream key — the
+ *  observability for "wire a fast upstream". */
+function fastLaneOf(
+  body: MessagesRequest,
+  cfg: ConductorConfig
+): { lane: 'fast' | 'session'; unrouted?: true } {
+  if (!fastShaped(body, cfg.fast?.maxTokens ?? FAST_MAX_TOKENS)) {
+    return { lane: 'session' };
+  }
+  if (cfg.fast !== undefined) {
+    return { lane: 'fast' };
+  }
+  // a disabled lane is the operator's intent — only a missing upstream
+  // key earns the unrouted observability marker
+  return cfg.fastDisabled === true
+    ? { lane: 'session' }
+    : { lane: 'session', unrouted: true };
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
   wire: WireCtx,
   parent: OtelCtx | undefined
 ): Promise<void> {
-  const body = await parseMessagesBody(req, res);
-  if (body === undefined) return;
+  const parsed = await parseMessagesBody(req, res);
+  if (parsed === undefined) return;
+  const { body, raw } = parsed;
   const t0 = Date.now();
+  // the fast lane (spec bro-6asnu) — a classifier-shaped call byte-
+  // forwards to the direct upstream instead of paying session/new
+  const fl = fastLaneOf(body, wire.cfg);
+  otelEvent('conductor.lane', {
+    backend: wire.cfg.backend,
+    lane: fl.lane,
+    ...(fl.unrouted === true ? { unrouted: true } : {}),
+    ...(typeof body.model === 'string' ? { model: body.model.slice(0, 120) } : {}),
+  });
+  if (fl.lane === 'fast') {
+    const fast = wire.cfg.fast as FastLane; // fastLaneOf proved the lane armed
+    // the upstream answers the id the client sent — the model pin
+    // exists for the inherited-lane case (devin/swe-2-max names a
+    // conductor-only wire no upstream serves)
+    // the upstream gets the client's own bytes — the canonicalized body
+    // carries lifted `systemTurns` a strict Messages upstream rejects.
+    // The model pin rewrites the RAW json so no other field changes
+    // shape (the pin exists for the inherited-lane case: devin/swe-2-max
+    // names a conductor-only wire no upstream serves).
+    const payload =
+      fast.model === undefined
+        ? raw
+        : JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: fast.model });
+    await forwardBody(req, res, fast, { payload, timeoutMs: wire.cfg.timeoutMs });
+    return;
+  }
   const key = conversationKey(req, body);
   const stopSeqs = stopSeqsOf(body) ?? [];
   const stopKey = stopKeyOf(stopSeqs);

@@ -76,11 +76,7 @@ interface Invocation {
 }
 
 /** Identity helper — typed declaration sites, same role as definePlugin. */
-export function defineCommand(
-  spec: CommandSpec,
-  parentPath?: string,
-  rootPath?: string
-): Command {
+export function defineCommand(spec: CommandSpec, parentPath?: string, rootPath?: string): Command {
   const path = parentPath === undefined ? spec.name : `${parentPath} ${spec.name}`;
   const root = rootPath ?? path;
   return {
@@ -89,7 +85,7 @@ export function defineCommand(
     rootPath: root,
     ...(spec.summary === undefined ? {} : { summary: spec.summary }),
     plugins: spec.plugins ?? [],
-    commands: (spec.commands ?? []).map((c) => defineCommand(c, path, root)),
+    commands: (spec.commands ?? []).map(c => defineCommand(c, path, root)),
     ...(spec.usageLines === undefined ? {} : { usageLines: spec.usageLines }),
     ...(spec.examples === undefined ? {} : { examples: spec.examples }),
     ...(spec.version === undefined ? {} : { version: spec.version }),
@@ -109,10 +105,7 @@ export function pluginsOf(command: Command): CommandPlugin[] {
 export function membersOf(command: Command): CommandPlugin[] {
   const seen = new Set<string>();
   const out: CommandPlugin[] = [];
-  for (const p of [
-    ...pluginsOf(command),
-    ...command.commands.flatMap((c) => pluginsOf(c)),
-  ]) {
+  for (const p of [...pluginsOf(command), ...command.commands.flatMap(c => pluginsOf(c))]) {
     if (seen.has(p.name)) continue;
     seen.add(p.name);
     out.push(p);
@@ -122,8 +115,8 @@ export function membersOf(command: Command): CommandPlugin[] {
 
 function memberList(members: CommandPlugin[]): string {
   return members
-    .filter((p) => !p.hidden)
-    .map((p) => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
+    .filter(p => !p.hidden)
+    .map(p => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
     .join(' ');
 }
 
@@ -134,8 +127,8 @@ function memberLabel(p: CommandPlugin): string {
 /** The member table of a command — what a bare or unknown member asks for. */
 export function groupTable(command: Command, group: CommandPlugin[]): string {
   const rows = group
-    .filter((p) => !p.hidden)
-    .map((p) => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
+    .filter(p => !p.hidden)
+    .map(p => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
     .join('\n');
   return (
     `${command.path} — ${command.summary ?? ''}\n\n` +
@@ -147,16 +140,13 @@ export function groupTable(command: Command, group: CommandPlugin[]): string {
 /** The help text of a command. */
 export function usageText(command: Command): string {
   const groups = command.commands
-    .filter((c) => membersOf(c).some((p) => !p.hidden))
-    .map(
-      (c) =>
-        `  ${c.name.padEnd(8)} ${c.summary ?? ''}\n             ${memberList(membersOf(c))}`
-    )
+    .filter(c => membersOf(c).some(p => !p.hidden))
+    .map(c => `  ${c.name.padEnd(8)} ${c.summary ?? ''}\n             ${memberList(membersOf(c))}`)
     .join('\n');
   // a grouped plugin belongs to its group's table, not the top-level one
   const commands = pluginsOf(command)
-    .filter((p) => !p.hidden && !p.aliasOf && !p.group)
-    .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
+    .filter(p => !p.hidden && !p.aliasOf && !p.group)
+    .map(p => `  ${p.name.padEnd(12)} ${p.summary}`)
     .join('\n');
   const usage = command.usageLines ?? [];
   const examples = command.examples ?? [];
@@ -177,7 +167,7 @@ Options:
   --help       This text (also: ${command.path} help, ${command.path} help <cmd>)
 
 Examples:
-${examples.map((e) => `  ${e}`).join('\n')}`
+${examples.map(e => `  ${e}`).join('\n')}`;
 }
 
 /** Runs a member reached via `<cli> <group> <member>`. */
@@ -200,7 +190,7 @@ function memberOf(
   inv: Invocation,
   host: CommandPlugin
 ): CommandPlugin | undefined {
-  return pluginsOf(nested).find((p) => p.name === inv.rest[0] && p.name !== host.name);
+  return pluginsOf(nested).find(p => p.name === inv.rest[0] && p.name !== host.name);
 }
 
 /** Is this a flat invocation the group spelling retires? FLAT means the
@@ -217,12 +207,8 @@ function isFlatRetirement(command: Command, plugin: CommandPlugin): boolean {
 
 /** The plugin argv names — the host case first: a nested command's own
  *  members win when argv names one. */
-async function runPlugin(
-  command: Command,
-  plugin: CommandPlugin,
-  inv: Invocation
-): Promise<void> {
-  const nested = command.commands.find((c) => c.name === inv.head);
+async function runPlugin(command: Command, plugin: CommandPlugin, inv: Invocation): Promise<void> {
+  const nested = command.commands.find(c => c.name === inv.head);
   if (nested !== undefined) {
     const member = memberOf(nested, inv, plugin);
     if (member !== undefined) {
@@ -246,11 +232,7 @@ async function runPlugin(
 
 /** A nested command reached by argv — its member table when argv asks
  *  for help, the command itself otherwise. */
-async function runNested(
-  command: Command,
-  nested: Command,
-  inv: Invocation
-): Promise<void> {
+async function runNested(command: Command, nested: Command, inv: Invocation): Promise<void> {
   const first = inv.rest[0];
   if (first === undefined || HELP_TOKENS.has(first)) {
     printUsage(groupTable(nested, membersOf(nested)), EXIT.ok);
@@ -265,12 +247,12 @@ async function resolve(command: Command, inv: Invocation): Promise<boolean> {
   if (inv.head === undefined) {
     return false;
   }
-  const plugin = pluginsOf(command).find((p) => p.name === inv.head);
+  const plugin = pluginsOf(command).find(p => p.name === inv.head);
   if (plugin !== undefined) {
     await runPlugin(command, plugin, inv);
     return true;
   }
-  const nested = command.commands.find((c) => c.name === inv.head);
+  const nested = command.commands.find(c => c.name === inv.head);
   if (nested !== undefined) {
     await runNested(command, nested, inv);
     return true;
@@ -305,9 +287,9 @@ function helpFirst(argv: readonly string[]): string[] {
   const sep = argv.indexOf('--');
   const head = sep === -1 ? argv : argv.slice(0, sep);
   const tail = sep === -1 ? [] : argv.slice(sep);
-  const at = head.findIndex((a) => HELP_TOKENS.has(a));
+  const at = head.findIndex(a => HELP_TOKENS.has(a));
   if (at === -1) return [...argv];
-  const rest = head.filter((a) => !HELP_TOKENS.has(a));
+  const rest = head.filter(a => !HELP_TOKENS.has(a));
   return [head[at] ?? '--help', ...rest, ...tail];
 }
 
@@ -331,11 +313,7 @@ function printBareUsage(command: Command, opts: { mounted?: boolean }): never {
 
 /** The UNKNOWN token is argv[0] here — it is what makes this a usage
  *  error rather than a bare command. */
-function printUnknown(
-  command: Command,
-  inv: Invocation,
-  opts: { mounted?: boolean }
-): never {
+function printUnknown(command: Command, inv: Invocation, opts: { mounted?: boolean }): never {
   const members = membersOf(command);
   if (opts.mounted !== true && members.length > 0) {
     printUsage(groupTable(command, members), EXIT.usage);

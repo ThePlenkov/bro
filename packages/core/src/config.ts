@@ -25,7 +25,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
@@ -910,7 +910,9 @@ function serveApiKeyEnv(raw: unknown): string | undefined {
  *  `upstream` is the Messages-API base for the byte proxy (owned by
  *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
  *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
- *  / `ANTHROPIC_*` override). */
+ *  / `ANTHROPIC_*` override). `fastModel` pins the upstream model the
+ *  conductor's fast lane rewrites, and `fastLane:false` returns every
+ *  call to the session lane (spec bro-6asnu). */
 /** One thin client's own knobs — where `bro router client` writes the
  *  model block, and which binary the launch stage execs.
  *
@@ -976,6 +978,8 @@ export const serveSection: ConfigSection<{
   upstream?: string;
   apiKeyEnv?: string;
   client?: ServeClients;
+  fastModel?: string;
+  fastLane?: boolean;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -983,6 +987,8 @@ export const serveSection: ConfigSection<{
     upstream?: unknown;
     apiKeyEnv?: unknown;
     client?: unknown;
+    fastModel?: unknown;
+    fastLane?: unknown;
   };
   const out: {
     backend?: string;
@@ -990,6 +996,8 @@ export const serveSection: ConfigSection<{
     upstream?: string;
     apiKeyEnv?: string;
     client?: ServeClients;
+    fastModel?: string;
+    fastLane?: boolean;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1002,6 +1010,9 @@ export const serveSection: ConfigSection<{
   if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
   const client = serveClients(obj.client);
   if (client !== undefined) out.client = client;
+  const fastModel = trimmedField(obj.fastModel);
+  if (fastModel !== undefined) out.fastModel = fastModel;
+  if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1026,7 +1037,10 @@ serveSection.jsonSchema = js.obj({
       command: js.str,
     })
   ),
+  fastModel: js.str,
+  fastLane: js.bool,
 });
+
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -1124,8 +1138,11 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
     console.error('bro.config: fleet.profiles must be an object — section dropped');
     return {};
   }
-  const out: Record<string, FleetProfile> = {};
+  const out: Record<string, FleetProfile> = Object.create(null);
   for (const [name, v] of Object.entries(raw)) {
+    if (name === 'constructor' || name === 'prototype' || name === '__proto__') {
+      continue;
+    }
     const prof = fleetProfile(name, v);
     if (prof !== null) {
       out[name] = prof;
@@ -1317,16 +1334,23 @@ export const meshSection: ConfigSection<{
   };
   const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> =
     {};
-  if (typeof obj.peers === 'object' && obj.peers !== null) {
+  if (Array.isArray(obj.peers)) {
+    // ignore arrays to avoid treating numeric indices as peer aliases
+  } else if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
-      if (alias === '__proto__') {
+      if (alias === '__proto__' || alias === 'constructor' || alias === 'prototype') {
         continue;
       }
       const p = meshPeerEntry(entry);
       if (p !== null) {
-        peers[alias] = p;
+        Object.defineProperty(peers, alias, {
+          value: p,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
       }
     }
   }
@@ -1536,12 +1560,17 @@ export interface BroConfig {
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. `providers` lists the
    *  other acp entries the gateway routes to. `upstream`/`apiKeyEnv`
-   *  configure the byte proxy (env overrides and supplies the secret). */
+   *  configure the byte proxy (env overrides and supplies the secret).
+   *  `fastModel` pins the upstream model the conductor's fast lane
+   *  rewrites classifier calls to (spec bro-6asnu); `fastLane:false`
+   *  returns every call to the session lane. */
   serve: {
     backend?: string;
     providers?: ServeProviders;
     upstream?: string;
     apiKeyEnv?: string;
+    fastModel?: string;
+    fastLane?: boolean;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */

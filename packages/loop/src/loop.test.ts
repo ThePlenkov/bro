@@ -312,6 +312,9 @@ describe('expandAgentCmd', () => {
     // the prompt path never enters the line — injection by filename is
     // impossible no matter what the artifact is called
     assert.equal(expandAgentCmd(''), '"$BRO_PROMPT_FILE"');
-    assert.equal(expandAgentCmd('a {promptFile} b {promptFile}'), 'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"');
+    assert.equal(
+      expandAgentCmd('a {promptFile} b {promptFile}'),
+      'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"'
+    );
   });
 });
