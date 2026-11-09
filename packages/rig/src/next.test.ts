@@ -23,7 +23,7 @@ case "$1" in
     f="$FAKE_BD_DIR/show-$2.json"
     if [ -f "$f" ]; then cat "$f"; else echo "Issue $2 not found" >&2; exit 1; fi ;;
   ready) cat "$FAKE_BD_READY" ;;
-  dep) echo '[]' ;;
+  dep) cat "$FAKE_BD_DEPS" ;;
   undefer) echo '[]' ;;
   list)
     case "$*" in
@@ -42,6 +42,8 @@ interface Fixture {
   row: (id: string, row: Record<string, unknown>) => void
   /** what `bd ready` answers */
   ready: (rows: unknown[]) => void
+  /** what `bd dep list` answers — hydrated neighbor rows */
+  deps: (rows: unknown[]) => void
   /** what `bd list -l queue:*` / `-l drill` answer */
   listed: (rows: unknown[], label?: 'queue' | 'drill') => void
   /** `<git-common>/bro/agents.json` entries */
@@ -65,9 +67,11 @@ function fixture(prefix = 'bro-rig-'): Fixture {
   writeFileSync(join(fakeDir, 'bd'), FAKE_BD)
   chmodSync(join(fakeDir, 'bd'), 0o755)
   const readyFile = join(fakeDir, 'ready.json')
+  const depsFile = join(fakeDir, 'deps.json')
   const queueFile = join(fakeDir, 'queue.json')
   const drillFile = join(fakeDir, 'drill.json')
   writeFileSync(readyFile, '[]')
+  writeFileSync(depsFile, '[]')
   writeFileSync(queueFile, '[]')
   writeFileSync(drillFile, '[]')
   const prev: Record<string, string | undefined> = {}
@@ -79,6 +83,7 @@ function fixture(prefix = 'bro-rig-'): Fixture {
   set('PATH', `${fakeDir}:${process.env.PATH}`)
   set('FAKE_BD_DIR', fakeDir)
   set('FAKE_BD_READY', readyFile)
+  set('FAKE_BD_DEPS', depsFile)
   set('FAKE_BD_QUEUE', queueFile)
   set('FAKE_BD_DRILL', drillFile)
   set('BEADS_ACTOR', 'tester')
@@ -91,6 +96,7 @@ function fixture(prefix = 'bro-rig-'): Fixture {
     row: (id, row) =>
       writeFileSync(join(fakeDir, `show-${id}.json`), JSON.stringify([row])),
     ready: (rows) => writeFileSync(readyFile, JSON.stringify(rows)),
+    deps: (rows) => writeFileSync(depsFile, JSON.stringify(rows)),
     listed: (rows, label = 'queue') =>
       writeFileSync(label === 'queue' ? queueFile : drillFile, JSON.stringify(rows)),
     agents: (entries) => {
@@ -202,7 +208,8 @@ describe('rigNext — the verdict ladder', () => {
     try {
       f.row('c-1', bead('c-1', { status: 'in_progress', assignee: 'other-actor' }))
       f.row('c-2', bead('c-2', { status: 'in_progress', assignee: 'tester' }))
-      f.row('g-1', bead('g-1')) // open, but absent from the ready list
+      f.row('g-1', bead('g-1')) // open, gated by a live 'blocked' dep
+      f.deps([{ ...bead('x-1'), dependency_type: 'blocks' }])
       assert.equal(rigNext(f.dir, 'c-1').verdict, 'blocked')
       assert.match(rigNext(f.dir, 'c-1').detail ?? '', /claimed by other-actor/)
       assert.deepEqual(rigNext(f.dir, 'c-2'), {
@@ -211,7 +218,7 @@ describe('rigNext — the verdict ladder', () => {
         detail: 'own claim — resume',
       })
       assert.equal(rigNext(f.dir, 'g-1').verdict, 'blocked')
-      assert.match(rigNext(f.dir, 'g-1').detail ?? '', /dep-gated/)
+      assert.match(rigNext(f.dir, 'g-1').detail ?? '', /dep-gated by x-1/)
     } finally {
       f.restore()
     }
@@ -244,11 +251,12 @@ describe('rigFocus — the no-arg item resolution', () => {
       f.listed([bead('q-1', { labels: ['queue:root', 'qrank:1'] })])
       f.ready([bead('r-1')])
       assert.equal(rigFocus(f.dir), 'q-1')
-      // and the no-arg verdict walks the same pick
+      // and the no-arg verdict walks the same pick — the queue member
+      // steps with its rank as the detail
       assert.deepEqual(rigNext(f.dir), {
-        verdict: 'blocked',
+        verdict: 'step',
         id: 'q-1',
-        detail: 'dep-gated or deferred',
+        detail: 'queue rank 1',
       })
     } finally {
       f.restore()
@@ -312,8 +320,8 @@ describe('rigNext — the gate probe', () => {
         detail: 'pr=#7',
       })
       // gate:false skips the forge probe entirely — the open row's
-      // own status decides (blocked: not on the ready list)
-      assert.equal(rigNext(f.dir, 'g-1', { gate: false }).verdict, 'blocked')
+      // own status decides (an ungated open row steps)
+      assert.equal(rigNext(f.dir, 'g-1', { gate: false }).verdict, 'step')
       git(f.dir, ['worktree', 'remove', '--force', wt])
     } finally {
       unregisterConnector('fakegate')

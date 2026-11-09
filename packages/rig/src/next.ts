@@ -7,6 +7,7 @@
  *  Lives in @broject/rig (bro-jamp7): the CLI's `bro rig next` is the
  *  thin adapter over this — argv/stdout/exit stay in commands/. */
 import {
+  bdActor,
   facadeName,
   gitTry,
   mainWorktreeRoot,
@@ -227,27 +228,105 @@ function settledLegs(
   )
 }
 
+/** An in_progress claim: own claim resumes, a foreign one blocks.
+ *  Own means the assignee is this actor (shared claims comma-join
+ *  assignees on some backends) or the step id itself WITH a registry
+ *  pin — a spawn's claimAs worker identity binds the molStep, and an
+ *  unregistered claimAs string proves nothing. The SERVING store's
+ *  claim identity decides ownership — a pinned non-beads store's
+ *  assignee lives in a different identity space than `bd`'s actor
+ *  chain, and only a store without an actor probe falls back to it. */
+function claimVerdict(
+  ctx: VerdictCtx,
+  row: TaskRow,
+  entry: AgentRegistryEntry | undefined
+): RigNext {
+  const actor = ctx.store.actor?.() ?? bdActor(ctx.dir)
+  const own =
+    row.assignee !== undefined &&
+    ((row.assignee === ctx.id && entry !== undefined) ||
+      (actor !== '' &&
+        row.assignee
+          .split(',')
+          .map((a) => a.trim())
+          .includes(actor)))
+  return own
+    ? { verdict: 'step', id: ctx.id, detail: 'own claim — resume' }
+    : { verdict: 'blocked', id: ctx.id, detail: `claimed by ${row.assignee ?? '?'}` }
+}
+
+/** The status gate under in_progress — undefined when the row is
+ *  actionable. 'deferred' with a due wake reads open — only ready()
+ *  undefers snoozes and a known id never calls it, so a past-due
+ *  snooze parked here forever otherwise. But the wake must be PROVEN:
+ *  a missing or unparseable defer_until leaves the snooze intact.
+ *  Any other non-open status parks it — an undefined status proves
+ *  nothing either. */
+function statusVerdict(row: TaskRow, ctx: VerdictCtx, deferAt: number): RigNext | undefined {
+  if (row.status === 'open') {
+    return undefined
+  }
+  if (row.status === 'deferred') {
+    return Number.isFinite(deferAt)
+      ? undefined
+      : { verdict: 'blocked', id: ctx.id, detail: 'status deferred — wake unproven' }
+  }
+  return { verdict: 'blocked', id: ctx.id, detail: `status ${row.status ?? 'unproven'}` }
+}
+
 /** The work legs — reached only when no settled leg fired: an
- *  in-progress row steps for its owner alone, an open row steps only
- *  when the bd-side ready read counts it actionable (dep-gated or
- *  deferred rows aren't work — the same filtered list the focus read),
- *  and a queue member reports its rank as the step's detail. */
-function workVerdict(ctx: VerdictCtx, row: TaskRow): RigNext {
+ *  in-progress row steps for its owner alone, and an open row is
+ *  judged directly — a non-open status parks it, open 'blocked' deps
+ *  gate it, a live defer_until or a coordination label parks it, and
+ *  a queue member reports its rank as the step's detail. Page
+ *  membership in `ready` is NOT the test: the backend's default limit
+ *  truncates a deep queue and honest beads past the cut read as gated
+ *  — drive's fixers died on exactly that (spec bro-reufd). */
+function workVerdict(
+  ctx: VerdictCtx,
+  row: TaskRow,
+  entry: AgentRegistryEntry | undefined
+): RigNext {
   if (row.status === 'in_progress') {
-    // the SERVING store's claim identity decides ownership — a pinned
-    // non-beads store's assignee lives in a different identity space
-    // than `bd`'s actor chain, so '' (unverifiable) can never match
-    const actor = ctx.store.actor?.() ?? ''
-    return actor !== '' && row.assignee === actor
-      ? { verdict: 'step', id: ctx.id, detail: 'own claim — resume' }
-      : { verdict: 'blocked', id: ctx.id, detail: `claimed by ${row.assignee ?? '?'}` }
+    return claimVerdict(ctx, row, entry)
   }
-  // open: dep-gated/deferred beads aren't actionable work — the same
-  // bd-side filtered ready list the focus read
-  if (!readyBeads(ctx.dir, { store: ctx.store }).some((r) => r.id === ctx.id)) {
-    return { verdict: 'blocked', id: ctx.id, detail: 'dep-gated or deferred' }
+  const deferUntil = (row as { defer_until?: unknown }).defer_until
+  const deferAt = typeof deferUntil === 'string' ? Date.parse(deferUntil) : NaN
+  if (deferAt > Date.now()) {
+    return { verdict: 'blocked', id: ctx.id, detail: `deferred until ${deferUntil}` }
   }
-  const rank = queueItems(queueScope(undefined, ctx.dir, { store: ctx.store }), ctx.dir, { store: ctx.store }).find((q) => q.id === ctx.id)?.rank
+  const parked = statusVerdict(row, ctx, deferAt)
+  if (parked !== undefined) {
+    return parked
+  }
+  let blockers: TaskRow[]
+  try {
+    // 'down' follows id → its deps ('up' would answer dependents);
+    // with rel 'blocked' the down side IS the blocking set
+    blockers = ctx.store
+      .neighbors<TaskRow>(ctx.id, { direction: 'down', rel: 'blocked' })
+      .filter((r) => r.status !== 'closed' && r.status !== 'done')
+  } catch {
+    // fail closed — an unreadable dep read must not read as actionable
+    return { verdict: 'blocked', id: ctx.id, detail: 'deps unreadable' }
+  }
+  if (blockers.length > 0) {
+    return {
+      verdict: 'blocked',
+      id: ctx.id,
+      detail: `dep-gated by ${blockers.map((r) => r.id ?? '?').join(', ')}`,
+    }
+  }
+  if (row.labels?.includes('gt:slot')) {
+    return { verdict: 'blocked', id: ctx.id, detail: 'coordination slot' }
+  }
+  let rank: number | undefined
+  try {
+    rank = queueItems(queueScope(undefined, ctx.dir, { store: ctx.store }), ctx.dir, { store: ctx.store }).find((q) => q.id === ctx.id)?.rank
+  } catch {
+    // display-only — a queue read failure must not turn an
+    // actionable bead unreadable
+  }
   return { verdict: 'step', id: ctx.id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
 }
 
@@ -278,6 +357,7 @@ export function rigNext(
   if (early !== undefined) {
     return early
   }
-  const settled = settledLegs(ctx, registryEntry(ctx))
-  return settled ?? workVerdict(ctx, row)
+  const entry = registryEntry(ctx)
+  const settled = settledLegs(ctx, entry)
+  return settled ?? workVerdict(ctx, row, entry)
 }
