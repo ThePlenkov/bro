@@ -15,6 +15,7 @@
  *   thread plane — `bro mesh wait`'s reduction, reused for the
  *     stage/turn annotation and the reject-verdict check
  */
+import { join } from 'node:path';
 import { taskStore } from '@broject/core';
 import { formatRigUri, parseRigUri } from './identity.ts';
 import { localCheckout, type MeshPeer } from './peers.ts';
@@ -128,17 +129,56 @@ export interface DepRead {
   errors: string[];
 }
 
+/** the timeout-aware probe leg — a non-zero code or unparseable
+ *  payload is the read's error; `undefined` means the probe gave no
+ *  usable payload and the caller falls back to `store.list` */
+function probeProvides(
+  probe: (args: string[], timeoutMs?: number) => any,
+  id: string,
+  timeoutMs: number
+): { shipped?: boolean; error?: string } | undefined {
+  const res = probe(['list', '--json', '--label', `provides:${id}`, '--all'], timeoutMs);
+  if (res?.code !== 0) {
+    return { error: res?.err || `store list failed (${res?.code})` };
+  }
+  if (typeof res?.out !== 'string') {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(res.out);
+    const rows = Array.isArray(parsed) ? parsed : (parsed?.rows ?? []);
+    return { shipped: rows.some((r: any) => r?.status === 'closed') };
+  } catch (err) {
+    return {
+      error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 /** The ship rule on a `local` peer: `bd -C <checkout>` answers the
  *  closed `provides:<id>` row the inbox scan structurally cannot
  *  return (it drops closed rows). localCheckout's null is the
  *  gone-checkout probe — a deleted dir is unreadable, not unshipped. */
-function shippedOnCheckout(peer: MeshPeer, id: string): { shipped?: boolean; error?: string } {
+function shippedOnCheckout(
+  peer: MeshPeer,
+  id: string,
+  timeoutMs?: number
+): { shipped?: boolean; error?: string } {
   const checkout = localCheckout(peer.remote);
   if (checkout === null) {
     return { error: `local checkout ${peer.remote} does not resolve` };
   }
   try {
-    const rows = storeFor(checkout).list({
+    const store = storeFor(checkout);
+    // Prefer a timeout-aware probe if available; fall back to list
+    const probe = (store as any).probe;
+    if (typeof probe === 'function' && timeoutMs !== undefined) {
+      const probed = probeProvides(probe, id, timeoutMs);
+      if (probed !== undefined) {
+        return probed;
+      }
+    }
+    const rows = store.list<{ id: string; status?: string }>({
       labels: [`provides:${id}`],
       all: true,
       limit: 0,
@@ -149,22 +189,41 @@ function shippedOnCheckout(peer: MeshPeer, id: string): { shipped?: boolean; err
   }
 }
 
+/** the posting-store leg — `getWithTimeout` when the store offers a
+ *  bounded read, plain `get` otherwise; a throw is the caller's to
+ *  record as `unreadable`, never a fake null row */
+function readRequestRow(store: unknown, id: string, timeoutMs?: number): DepRead['request'] {
+  const s = store as {
+    get?<T>(id: string): T | null | undefined;
+    getWithTimeout?(id: string, timeoutMs: number): unknown;
+  };
+  if (typeof s.getWithTimeout === 'function' && timeoutMs !== undefined) {
+    const res = s.getWithTimeout(id, timeoutMs) as { value?: DepRead['request'] } | null;
+    return res !== null && 'value' in res ? (res.value ?? null) : (res as DepRead['request']);
+  }
+  if (typeof s.get === 'function') {
+    return s.get<NonNullable<DepRead['request']>>(id) ?? null;
+  }
+  return null;
+}
+
 /** One poll over the dep's two stores — the posting store's request
  *  bead (status/labels) and the peer plane's ship predicate. Errors
  *  collect into `errors`; a failed read never fakes a row. */
-export function readDepState(plane: WaitPlane, id: string): DepRead {
+export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): DepRead {
   const out: DepRead = { errors: [] };
+  const remaining = (ms?: number): number | undefined =>
+    ms === undefined ? undefined : Math.max(1, Math.floor(ms));
+  // one budget across the posting-store get and the ship read — a
+  // slow first read shrinks what the second gets; never re-grant the
+  // full slice
+  const t0 = performance.now();
+  const left = (): number | undefined =>
+    timeoutMs === undefined ? undefined : remaining(timeoutMs - (performance.now() - t0));
 
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir);
-    out.request =
-      store.get<{
-        id: string;
-        status?: string;
-        labels?: string[];
-        closed_at?: string;
-        updated_at?: string;
-      }>(id) ?? null;
+    out.request = readRequestRow(store, id, left());
   } catch (err) {
     out.errors.push(
       `${plane.peer.alias}: posting store unreadable — ` +
@@ -176,10 +235,11 @@ export function readDepState(plane: WaitPlane, id: string): DepRead {
     // the replica answers its own presence — no manifest/.dolt/root
     // stamp means nothing materialized yet; `bro mesh pull` is the fix
     out.replicaAgeMs = replicaAgeMs(plane.peerDir);
+    const shipTimeout = left();
     const shipped =
       out.replicaAgeMs === undefined
         ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
-        : shippedIssues(plane.peerDir, id);
+        : shippedIssues(plane.peerDir, id, shipTimeout);
     if (shipped.error !== undefined) {
       out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
     } else {
@@ -187,7 +247,8 @@ export function readDepState(plane: WaitPlane, id: string): DepRead {
     }
     return out;
   }
-  const shipped = shippedOnCheckout(plane.peer, id);
+  const checkoutTimeout = left();
+  const shipped = shippedOnCheckout(plane.peer, id, checkoutTimeout);
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`);
   } else {

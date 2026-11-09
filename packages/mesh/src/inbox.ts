@@ -91,8 +91,25 @@ function admitRow(peer: MeshPeer, bead: BeadLike, out: PeerRecord[]): void {
   }
 }
 
-function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const found = meshIssues(dir);
+function scanReplica(
+  dir: string,
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  timeoutMs?: number
+): void {
+  // one window for the whole replica scan — meshIssues plus every
+  // per-row label read must fit inside it, so each call gets the
+  // recomputed remainder, never the original slice again
+  const deadline = timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+  const rem = (): number | undefined =>
+    deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+  const first = rem();
+  if (first !== undefined && first < 1) {
+    errors.push(`${peer.alias}: replica scan budget exhausted`);
+    return;
+  }
+  const found = meshIssues(dir, first);
   if (found.error !== undefined) {
     errors.push(`${peer.alias}: ${found.error}`);
     return;
@@ -101,7 +118,12 @@ function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: str
     if (row.status === 'closed') {
       continue;
     }
-    const labels = issueLabels(dir, row.id);
+    const left = rem();
+    if (left !== undefined && left < 1) {
+      errors.push(`${peer.alias}: replica scan budget exhausted`);
+      return;
+    }
+    const labels = issueLabels(dir, row.id, left);
     if (labels.error !== undefined) {
       errors.push(`${peer.alias}: labels for ${row.id} failed — ${labels.error}`);
       continue;
@@ -112,13 +134,59 @@ function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: str
 
 /** beads-remote: sync the replica (clone||pull), query mesh-labelled
  *  issues, emit every envelope found. */
-function scanRemote(gitCommon: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const synced = syncReplica(gitCommon, peer.alias, peer.remote);
+function scanRemote(
+  gitCommon: string,
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  timeoutMs?: number
+): void {
+  // the budget is an absolute deadline — a slow clone/pull shrinks
+  // what the replica query gets, it does not earn a second full slice
+  const deadline = timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+  const rem = (): number | undefined =>
+    deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+  const synced = syncReplica(gitCommon, peer.alias, peer.remote, rem());
   if (synced.path === undefined) {
     errors.push(synced.error ?? `${peer.alias}: replica sync failed`);
     return;
   }
-  scanReplica(synced.path, peer, out, errors);
+  const left = rem();
+  if (left !== undefined && left < 1) {
+    errors.push(`${peer.alias}: replica scan budget exhausted by sync`);
+    return;
+  }
+  scanReplica(synced.path, peer, out, errors, left);
+}
+
+/** store responses land as a bare array or a `{rows}` envelope —
+ *  both unwrap to the same list */
+function rowsOf(res: unknown): (BeadLike & { status?: string })[] {
+  if (Array.isArray(res)) {
+    return res;
+  }
+  const rows = (res as { rows?: unknown } | null | undefined)?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** the local store read — bounded via `listWithTimeout` when the
+ *  backend offers it. `all`/`limit:0` keep closed rows and a
+ *  configured page from hiding envelopes before the caller filters. */
+function localRows(
+  store: ReturnType<typeof storeFor>,
+  closedLocal: boolean,
+  timeoutMs?: number
+): (BeadLike & { status?: string })[] {
+  const storeAny = store as {
+    listWithTimeout?(opts: unknown, timeoutMs: number): unknown;
+  };
+  if (typeof storeAny.listWithTimeout === 'function' && timeoutMs !== undefined) {
+    return rowsOf(storeAny.listWithTimeout({ all: closedLocal || undefined, limit: 0 }, timeoutMs));
+  }
+  return store.list<BeadLike & { status?: string }>({
+    all: closedLocal || undefined,
+    limit: 0,
+  });
 }
 
 /** local: read the peer's live store read-only — `bd -C <checkout>
@@ -131,7 +199,8 @@ function scanLocal(
   peer: MeshPeer,
   out: PeerRecord[],
   errors: string[],
-  closedLocal: boolean
+  closedLocal: boolean,
+  timeoutMs?: number
 ): void {
   const dir = localCheckout(peer.remote);
   if (dir === null) {
@@ -140,13 +209,7 @@ function scanLocal(
   }
   let rows: (BeadLike & { status?: string })[];
   try {
-    // closedLocal needs the store's own all-filter off too — the
-    // backend drops closed rows before this loop ever sees them.
-    // limit:0 likewise — a configured page must not hide envelopes
-    rows = storeFor(dir).list<BeadLike & { status?: string }>({
-      all: closedLocal || undefined,
-      limit: 0,
-    });
+    rows = localRows(storeFor(dir), closedLocal, timeoutMs);
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
@@ -166,8 +229,13 @@ function scanLocal(
  *  (thread.ts checks it against the binding's `login`). There is no
  *  replica to pull — every read is a live `gh` call, `pull:false`
  *  changes nothing. */
-function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const scan = scanGithub({ remote: peer.remote });
+function scanGithubPeer(
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  timeoutMs?: number
+): void {
+  const scan = scanGithub({ remote: peer.remote, timeoutMs });
   for (const e of scan.errors) {
     errors.push(`${peer.alias}: ${e}`);
   }
@@ -227,9 +295,7 @@ function admitOwnGithubRecord(
   ctx: { peers: MeshPeer[]; selfRig: string; selfLogin: string | undefined },
   out: PeerRecord[]
 ): void {
-  const bound = ctx.peers.find(
-    p => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase()
-  );
+  const bound = ctx.peers.find(p => p.login?.toLowerCase() === r.author.toLowerCase());
   // verdicts land as comments on the request's own issue — they count
   // only from an authenticated bound author, and they feed the
   // terminal set so a verdicted github request leaves the inbox
@@ -299,16 +365,22 @@ function scanOwnGithub(
  *  replica is simply empty. */
 function scanPeer(
   peer: MeshPeer,
-  ctx: { gitCommon: string; pull?: boolean; closedLocal?: boolean; selfRig?: string },
+  ctx: {
+    gitCommon: string;
+    pull?: boolean;
+    closedLocal?: boolean;
+    selfRig?: string;
+    timeoutMs?: number;
+  },
   out: PeerRecord[],
   errors: string[]
 ): void {
   if (peer.transport === 'local') {
-    scanLocal(peer, out, errors, ctx.closedLocal === true);
+    scanLocal(peer, out, errors, ctx.closedLocal === true, ctx.timeoutMs);
     return;
   }
   if (peer.transport === 'github') {
-    scanGithubPeer(peer, out, errors);
+    scanGithubPeer(peer, out, errors, ctx.timeoutMs);
     return;
   }
   if (peer.transport === 'wasteland') {
@@ -318,11 +390,11 @@ function scanPeer(
   if (ctx.pull === false) {
     const dir = replicaDir(ctx.gitCommon, peer.alias);
     if (existsSync(dir)) {
-      scanReplica(dir, peer, out, errors);
+      scanReplica(dir, peer, out, errors, ctx.timeoutMs);
     }
     return;
   }
-  scanRemote(ctx.gitCommon, peer, out, errors);
+  scanRemote(ctx.gitCommon, peer, out, errors, ctx.timeoutMs);
 }
 
 /** Pull + scan every configured peer — every mesh envelope, every
@@ -334,14 +406,29 @@ export function meshScan(
   dir: string,
   peers: MeshPeer[],
   gitCommon: string,
-  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string } = {}
+  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string; timeoutMs?: number } = {}
 ): ScanResult {
   const out: PeerRecord[] = [];
   const errors: string[] = [];
+  // the scan budget spans every peer — a slow peer must not hand the
+  // next one a fresh full slice; recompute the remainder per leg
+  const deadline = opts.timeoutMs === undefined ? undefined : performance.now() + opts.timeoutMs;
   for (const peer of peers) {
+    const left =
+      deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+    if (left !== undefined && left < 1) {
+      errors.push('mesh scan budget exhausted');
+      break;
+    }
     scanPeer(
       peer,
-      { gitCommon, pull: opts.pull, closedLocal: opts.closedLocal, selfRig: opts.selfRig },
+      {
+        gitCommon,
+        pull: opts.pull,
+        closedLocal: opts.closedLocal,
+        selfRig: opts.selfRig,
+        timeoutMs: left,
+      },
       out,
       errors
     );
