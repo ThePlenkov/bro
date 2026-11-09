@@ -522,6 +522,11 @@ const gitConnector: Connector = {
 
 const registry: Connector[] = [beadsConnector, gitConnector];
 
+/** Names that were in the registry at boot — unregisterConnector refuses
+ *  to drop them: removing a built-in breaks facade resolution for every
+ *  caller. */
+const builtinConnectorNames = new Set(registry.map(x => x.name));
+
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
  *  names are skipped — a plugin cannot shadow a built-in system. */
 export function registerConnector(c: Connector): void {
@@ -536,6 +541,9 @@ export function registerConnector(c: Connector): void {
  *  cleanup counterpart to registerConnector. Built-in connectors
  *  (beads, git) are not removable through this. */
 export function unregisterConnector(name: string): void {
+  if (builtinConnectorNames.has(name)) {
+    return
+  }
   const idx = registry.findIndex((x) => x.name === name)
   if (idx >= 0) {
     registry.splice(idx, 1)
