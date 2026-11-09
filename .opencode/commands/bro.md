@@ -8,16 +8,17 @@ description: bro dispatcher — orient on the board, then hand off to the named 
 
 The user invoked `/bro` with arguments: `$ARGUMENTS`
 
-`/bro` is ONE command across clients, not a mirror of `bro` argv: it
-orients, then hands the named family to the CLI and the matching skill.
-All mechanics live in the `bro` CLI — this surface is the pointer, never
-the policy.
+`/bro` is the **agent-plugin** dispatcher (narrow scope). It is **not** a mirror of the full `bro` CLI.
+All mechanics live in the `bro` CLI — this surface orients and hands off to the matching skill.
 
-## No arguments
+## `/bro` or `/bro help`
 
-Run `bro status --deep` and summarize the board — active beads, fleet workers,
-drill frame, PR gate. The digest plus the table below is the answer to
-"what does bro see right now".
+Print **plugin help only** (do **not** run `bro --help` / dump the full CLI):
+
+**Usage**
+- `/bro` or `/bro help` — this help
+- `/bro status` — run `bro status --deep` and summarize the board
+- `/bro <family> [args]` — hand off to the family below (read its skill first)
 
 ## Dispatch table
 
@@ -33,16 +34,11 @@ drill frame, PR gate. The digest plus the table below is the answer to
 | `/bro drive`    | `bro review drive` | `skills/drive/SKILL.md`  |
 | `/bro status`   | `bro status`       | `skills/status/SKILL.md` |
 
-Any other `/bro <name>` maps the same way — `bro <name> <args>` with
-`skills/<name>/SKILL.md` for mechanics when the skill exists; `bro help`
-lists the full surface.
+Other `/bro <name>` → `bro <name> <args>` with `skills/<name>/SKILL.md` when it exists. Full CLI: `bro help` (not `/bro`).
 
 ## Rules
 
-- **Read the skill before driving a family.** The dispatch target above
-  carries the policy (waiting, arming, stop-gate rules) — run the CLI
-  for state, read the skill for mechanics.
-- **Never re-derive mechanics here.** A family that needs more than its
-  row is a skill gap, not a longer prompt — extend `skills/<name>`.
+- **Read the skill before driving a family.** Policy (waiting, arming, stop-gate) lives in the skill — run the CLI for state.
+- **Never re-derive mechanics here.** A gap is a skill change, not a longer prompt.
 
 Requires `bro` on PATH or `npx -y @broject/bro@0.3`.
