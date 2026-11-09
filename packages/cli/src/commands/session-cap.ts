@@ -150,7 +150,9 @@ function keyPart(raw: string): string {
     .replace(/[^A-Za-z0-9._-]/g, '_')
     .replace(/\.{2,}/g, '_')
     .slice(0, 48);
-  const digest = createHash('sha1').update(raw).digest('hex').slice(0, 12);
+  // sha256 — the repo's digest convention; CodeQL reads session_id in a
+  // sha1 as weak-crypto-on-sensitive-data even though the key is not crypto
+  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 12);
   return `${safe}-${digest}`;
 }
 
