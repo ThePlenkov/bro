@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -6,11 +7,12 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
-import { describe, test } from 'node:test';
+import { basename, dirname, join, relative } from 'node:path';
+import { describe, test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -33,9 +35,12 @@ process.env.HERDR_PLUGIN_ROOT = join(HERE, '..');
 // line-mode fallback so the command assertions hold everywhere
 process.env.BUN_BIN_PATH = '';
 
-const { converge } = await import('../src/reconcile.ts');
-const { loadState, saveState, stateScope } = await import('../src/lib.ts');
-const { sessionCommand } = await import('../src/sessions.ts');
+const { converge, ensureSyncLoop } = await import('../src/reconcile.ts');
+const { loadState, PLUGIN_ROOT, gitTop, saveState, stateScope, syncPidPath } = await import(
+  '../src/lib.ts'
+);
+const { ensureSession, retireSession, sessionCommand } = await import('../src/sessions.ts');
+const { procStat } = await import('../../../packages/core/src/index.ts');
 type Planes = import('../src/planes.ts').Planes;
 
 const MAIN = join(TMP, 'main');
@@ -475,7 +480,10 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
   });
 
   test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
-    reset({ panes: [{ pane_id: 'pV' }, { pane_id: 'pX' }], paneIds: ['pV', 'pX'] });
+    reset({
+      panes: [{ pane_id: 'pV', label: 'bro: session' }, { pane_id: 'pX' }],
+      paneIds: ['pV', 'pX'],
+    });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
@@ -731,6 +739,111 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
   });
 });
 
+describe('live views — coverage by the session pane', () => {
+  test('a relative registry worktree still suppresses the second view', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — the repo main
+    // must be a REAL repo for the agents.json seed to be visible
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // the registry may carry a RELATIVE worktree — before the
+    // normalize-once fix the coverage check compared it against the
+    // armed set's absolute paths, never matched, and opened a second
+    // 🤖 view: workspace beside the session pane (PR #876 review)
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': {
+          log: join(repoMain, 'native-1.log'),
+          worktree: relative(repoMain, tree),
+          pid: process.pid,
+        },
+      })
+    );
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the session pane arms bound to the journal directly — the
+    // line-mode command carries --events/--agent too
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /--events .*native-1\.events\.jsonl.* --agent .*native-1/);
+    // coverage sees the same absolute path the armed set carries —
+    // NO second view workspace beside the session pane
+    assert.equal(called('workspace', 'create').length, 0);
+    assert.deepEqual(loadState(stateScope(repoMain)).liveViews, {});
+  });
+});
+
+describe('session panes — rebind backoff', () => {
+  test('a failed rebind backs off instead of churning panes each pass', () => {
+    reset({
+      // two free panes absorb the fallback surfaces a failed rebind no
+      // longer suppresses (sessionLive gates them): the renderer and
+      // status arms take p2/p3 without splitting, so the split count
+      // stays the rebind's own
+      panes: [{ pane_id: 'p1' }, { pane_id: 'p2' }, { pane_id: 'p3' }],
+      paneIds: ['p1', 'p2', 'p3'],
+      failSubcommands: ['pane run'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    // the registry read goes through gitCommonDir — a REAL repo main
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // a DIFFERENT live agent resolves for the tree → the recorded
+    // binding is stale and decideSession asks for a rebind
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': { log: join(repoMain, 'native-B.log'), worktree: tree, pid: process.pid },
+      })
+    );
+    const scope = stateScope(repoMain);
+    const s = loadState(scope);
+    s.sessions[tree] = {
+      workspace: 'wOpened',
+      worktree: tree,
+      pane_id: 'p1',
+      agent_id: 'native-A',
+    };
+    saveState(scope, s);
+    const p = armedAcpTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the arm failed — the stale pane stays, exactly ONE split+close,
+    // and the retry is armed for later
+    assert.equal(called('pane', 'split').length, 1);
+    assert.equal(called('pane', 'close', 'p1').length, 0);
+    const st1 = loadState(scope);
+    assert.equal(st1.sessions[tree]?.pane_id, 'p1');
+    assert.equal(typeof st1.sessions[tree]?.retryAt, 'number');
+    // the very next pass hits the backoff — no second split
+    converge(p);
+    assert.equal(called('pane', 'split').length, 1);
+    // the window expired AND the failure cleared — the retry lands:
+    // a second split, the stale pane closes, the binding rebinds
+    st1.sessions[tree]!.retryAt = 0;
+    saveState(scope, st1);
+    writeFileSync(SCENARIO, JSON.stringify({ panes: [{ pane_id: 'p1' }], paneIds: ['p1'] }));
+    converge(p);
+    assert.equal(called('pane', 'split').length, 2);
+    assert.equal(called('pane', 'close', 'p1').length, 1);
+    const st3 = loadState(scope).sessions[tree];
+    assert.equal(st3?.agent_id, 'native-B');
+    assert.notEqual(st3?.pane_id, 'p1');
+    assert.equal(st3?.retryAt, undefined);
+  });
+});
+
 describe('sessionCommand — the pane command (spec bro-q2edc)', () => {
   test('BUN_BIN_PATH set → the OpenTUI app runs in the pane', () => {
     process.env.BUN_BIN_PATH = '/opt/bun/bin/bun';
@@ -747,5 +860,176 @@ describe('sessionCommand — the pane command (spec bro-q2edc)', () => {
     process.env.BUN_BIN_PATH = '';
     const cmd = sessionCommand('/repo/trees/t1');
     assert.match(cmd, /herdr session-view '\/repo\/trees\/t1'/);
+  });
+});
+
+describe('session panes — the pending-close ledger', () => {
+  const TREE = join(TMP, 'ledger-tree');
+
+  const seed = (rec: Record<string, unknown>): void => {
+    const s = loadState(scope);
+    (s.sessions as Record<string, unknown>)[TREE] = {
+      workspace: 'wS',
+      worktree: TREE,
+      ...rec,
+    };
+    saveState(scope, s);
+  };
+
+  test('a recycled pane id drops off the ledger — never closed', () => {
+    reset({
+      panes: [
+        { pane_id: 'pS', label: 'bro: session' },
+        { pane_id: 'pUser', label: 'shell' },
+      ],
+    });
+    seed({ pane_id: 'pS', closePending: ['pUser'] });
+    // the ctx state is the in-memory record — converge owns the save
+    const state = loadState(scope);
+    ensureSession({ path: TREE, ws: 'wS', state });
+    // the pending id wears a foreign label now — a user took the pane
+    assert.equal(called('pane', 'close', 'pUser').length, 0);
+    assert.equal(state.sessions[TREE]?.closePending, undefined);
+  });
+
+  test('the ledger survives the rebind — armSession carries it forward', () => {
+    reset({
+      panes: [
+        { pane_id: 'pS', label: 'bro: session' },
+        { pane_id: 'pOld', label: 'bro: session' },
+      ],
+      failSubcommands: ['pane close'],
+    });
+    seed({ pane_id: 'pS', agent_id: 'native-old', closePending: ['pOld'] });
+    const state = loadState(scope);
+    const ok = ensureSession({
+      path: TREE,
+      ws: 'wS',
+      state,
+      agent: { id: 'native-new', events: '/e.jsonl' },
+    });
+    assert.equal(ok, true);
+    // retryClose failed on pOld, the rebind's own close of pS failed
+    // too — the fresh record keeps BOTH ids pending for later passes
+    assert.deepEqual(state.sessions[TREE]?.closePending, ['pOld', 'pS']);
+    assert.notEqual(state.sessions[TREE]?.pane_id, 'pS');
+  });
+
+  test('a failed rebind reports false — and the backoff adds no churn', () => {
+    reset({
+      panes: [{ pane_id: 'pS', label: 'bro: session' }],
+      failSubcommands: ['pane run'],
+    });
+    seed({ pane_id: 'pS', agent_id: 'native-old' });
+    const state = loadState(scope);
+    const ctx = {
+      path: TREE,
+      ws: 'wS',
+      state,
+      agent: { id: 'native-new', events: '/e.jsonl' },
+    };
+    // the replacement arm failed — the stale pane is bound to the OLD
+    // archive, so the pass must not call it the live session pane
+    assert.equal(ensureSession(ctx), false);
+    assert.equal(typeof state.sessions[TREE]?.retryAt, 'number');
+    const splits = called('pane', 'split').length;
+    // the very next pass hits the backoff — still not-live, no churn
+    assert.equal(ensureSession(ctx), false);
+    assert.equal(called('pane', 'split').length, splits);
+  });
+
+  test('retireSession drains the ledger before dropping the record', () => {
+    reset({
+      panes: [
+        { pane_id: 'pS', label: 'bro: session' },
+        { pane_id: 'pOld', label: 'bro: session' },
+        { pane_id: 'pUser', label: 'shell' },
+      ],
+    });
+    seed({ pane_id: 'pS', closePending: ['pOld', 'pUser'] });
+    const state = loadState(scope);
+    retireSession({ path: TREE, ws: 'wS', state });
+    assert.equal(called('pane', 'close', 'pS').length, 1);
+    // the ledger's session-labeled id is drained with the record; the
+    // recycled one (foreign label) is never ours to kill
+    assert.equal(called('pane', 'close', 'pOld').length, 1);
+    assert.equal(called('pane', 'close', 'pUser').length, 0);
+    assert.equal(state.sessions[TREE], undefined);
+  });
+});
+
+describe('the sync loop ensure', () => {
+  // PLUGIN_ROOT pins the plugin dir, so the ensure's repo resolves to
+  // THIS checkout's git top — the pid file lands under TMP/state
+  const pidFile = (): string => syncPidPath(stateScope(gitTop(PLUGIN_ROOT) ?? PLUGIN_ROOT));
+
+  test('a live pinned pid suppresses the open', () => {
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), `${process.pid} ${procStat(process.pid)?.start ?? ''}\n`);
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 0);
+  });
+
+  test('a dead loop opens the pane — pending lands BEFORE the open', () => {
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), '99999999 stale-start\n');
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 1);
+    // the marker was written before `pane open` returned — the fake's
+    // pane never writes its pid, so 'pending' is what the file holds
+    assert.equal(readFileSync(pidFile(), 'utf8').trim(), 'pending');
+  });
+
+  test('a fresh pending marker suppresses a second open', () => {
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), 'pending\n');
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 0);
+  });
+
+  test('a stale pending marker is a crashed opener — broken and replaced', () => {
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), 'pending\n');
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(pidFile(), old, old);
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 1);
+  });
+
+  test('a failed open keeps a real pid the pane already published', () => {
+    reset({ failSubcommands: ['plugin pane'] });
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    // the pane spawned anyway and wrote its handle before the CLI
+    // reported failure — that marker is a live loop's, not residue
+    writeFileSync(pidFile(), `${process.pid} ${procStat(process.pid)?.start ?? ''}\n`);
+    // the live probe wins before the open path is even reached
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 0);
+    assert.equal(existsSync(pidFile()), true);
+  });
+
+  test('a failed open leaves no pending marker behind', () => {
+    reset({ failSubcommands: ['plugin pane'] });
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), '99999999 stale-start\n');
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 1);
+    assert.equal(existsSync(pidFile()), false);
+  });
+
+  test('a foreign-owned live pid with its start token still counts as live', (t: TestContext) => {
+    const st = procStat(1);
+    if (st === null || st.start === '') return t.skip('no /proc to verify identity');
+    reset();
+    mkdirSync(dirname(pidFile()), { recursive: true });
+    writeFileSync(pidFile(), `1 ${st.start}\n`);
+    // kill(1,0) is EPERM for an unprivileged run — the shared probe
+    // still verifies identity through /proc instead of reading dead
+    ensureSyncLoop();
+    assert.equal(called('plugin', 'pane', 'open').length, 0);
   });
 });

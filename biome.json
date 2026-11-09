@@ -10,7 +10,10 @@
     "includes": [
       "**",
       "!**/schemas/**",
+      "!commands/bro.md",
+      "!.opencode/commands/bro.md",
       "!site/content/docs/reference/**",
+      "!specs/**/*.md",
       "!**/vendor/**",
       "!packages/acp/model/src/content.ts",
       "!packages/acp/model/src/index.ts",

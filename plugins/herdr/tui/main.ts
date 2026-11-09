@@ -19,14 +19,15 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
-import { dirname } from 'node:path';
+import { type FSWatcher, mkdirSync, readFileSync, statSync, watch } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import {
   type ArchiveRow,
   completePart,
   eventsFile,
   eventsVerdict,
+  fmtWhen,
   implArg,
   type PaneImpl,
   type PaneLed,
@@ -40,19 +41,23 @@ import {
 } from '../../../packages/acp/session/src/index.ts';
 import { serve } from '../../../packages/acp/tui/serve.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
+import { flag } from '../../../packages/cli/src/commands/args.ts';
 import {
   agentEntry,
+  displayAgentOf,
   type FleetPaneState,
   fleetStatusPath,
+  logStem,
   release as paneRelease,
   report as paneReport,
   parseFleetState,
-  pidAlive,
+  registryHomeOf,
   resolveTarget,
   SESSION_IDENTITY,
   type SessionTarget,
   sessionAgentOf,
   targetKey,
+  workerLedState,
 } from '../../../packages/herdr-kit/src/index.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
@@ -131,11 +136,18 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
   const base = gitCommonDir(worktree) ?? worktree;
   const state = readState(fleetStatusPath(base, worktree));
   const target = resolveTarget(state, worktree, providers(worktree));
+  // `--agent` may carry the registry run key while the journal sits
+  // on the entry's archive stem — resolve the path through its log,
+  // the same lookup the live pane does
+  const entry = agentEntry(base, agentArg);
   const eventsPath =
     eventsArg ??
-    (agentArg !== undefined ? eventsFile(base, agentArg) : undefined) ??
+    (agentArg !== undefined ? eventsFile(base, logStem(entry) ?? agentArg) : undefined) ??
     target?.events;
-  const impl = await pickImpl(implArg(argv));
+  // the dump's unflagged impl is `legacy` — the zero-extra-dep read
+  // (the pane's acp default is an explicit `--impl`/`BRO_TUI_IMPL`
+  // override away)
+  const impl = await pickImpl(implArg(argv), process.env, 'legacy');
   impl.setContext?.({ worktree, agent: agentArg ?? sessionAgentOf(target) });
   if (eventsPath !== undefined) {
     const tail = tailArchive(eventsPath);
@@ -147,10 +159,7 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
 
 // --- the TUI ---------------------------------------------------------------
 
-const opt = (argv: string[], flag: string): string | undefined => {
-  const i = argv.indexOf(flag);
-  return i >= 0 ? argv[i + 1] : undefined;
-};
+const opt = (argv: string[], name: string): string | undefined => flag(argv, name);
 
 /** Liveness floor for a direct `--agent` target — the archive's own
  *  verdict rides on top (eventsVerdict); pid probing replaces the
@@ -181,20 +190,66 @@ export async function runTui(argv: string[]): Promise<void> {
   // viewer at the archive itself — no fleet-status doc involved
   // (janitor-reaped files were the "waiting for projector" bug).
   const ctxDir = worktree ?? process.cwd();
-  const base0 = gitCommonDir(ctxDir) ?? ctxDir;
-  const entry = agentEntry(base0, agentArg);
+  // The registry home: the worktree's git common dir first. A
+  // worktree-less direct bind (the live view's argv) leaves ctxDir at
+  // the pane's scratch cwd — the journal's own
+  // <git-common>/bro/agents/ location is the next source, or the
+  // floor reads 'unknown' and a stale journal glows working
+  const base0 =
+    gitCommonDir(ctxDir) ??
+    (eventsArg !== undefined ? registryHomeOf(eventsArg) : undefined) ??
+    ctxDir;
+  /** The id the registry resolves — `--agent` first; a journal-only
+   *  bind (`--events` alone) still names its worker by the file's own
+   *  stem, or a provable crash reads 'unknown' forever. */
+  const entryId =
+    agentArg ??
+    (eventsArg !== undefined ? basename(eventsArg).replace(/\.events\.jsonl$/, '') : undefined);
+  const entry = agentEntry(base0, entryId);
+  /** The worker floor with its reason stamped — a blocked worker
+   *  reports WHEN it exited (the journal's last write), an idle one
+   *  when it went quiet; the verdict reads the message as its mode. */
+  const workerLedOf = (e: typeof entry, events: string | undefined): PaneLed => {
+    const state = workerLedState(e, events);
+    if (state === 'working' || state === 'unknown' || events === undefined) {
+      return { state };
+    }
+    try {
+      const when = fmtWhen(statSync(events).mtimeMs);
+      return { state, message: state === 'blocked' ? `exited ${when}` : `quiet since ${when}` };
+    } catch {
+      return { state };
+    }
+  };
+  /** The display agent — the true agent name (provider), resolved in
+   *  the kit next to agentKey/agentEntry. Re-probed in refresh(): a
+   *  late-landing registry record heals the cryptic archive stem the
+   *  first pass had to print. */
+  const displayAgentOf0 = (): string | undefined => displayAgentOf(base0, agentArg ?? entryId);
+  const displayAgent = displayAgentOf0();
+  // the journal's path resolved through the matched entry's log stem
+  // (a registry run key like `bro-2bv6q` never becomes the filename;
+  // the archive lives on the native stem) — a FUNCTION, not a const:
+  // a bind made before the registry harvest lands must heal on the
+  // next refresh, not keep stating a key-named file that never exists
+  // (the floor reads 'idle' and the watch never fires). A bare live
+  // pid still never stands in for a journal the floor cannot read
+  const eventsPathOf = (): string | undefined =>
+    eventsArg ??
+    (agentArg !== undefined
+      ? eventsFile(base0, logStem(agentEntry(base0, entryId)) ?? agentArg)
+      : undefined);
+  const resolvedEvents = eventsPathOf();
   const direct: SessionTarget | undefined =
-    eventsArg === undefined && agentArg === undefined
+    resolvedEvents === undefined && agentArg === undefined
       ? undefined
       : {
           worktree: entry?.worktree ?? ctxDir,
           status: 'live',
-          events: eventsArg ?? (agentArg !== undefined ? eventsFile(base0, agentArg) : undefined),
-          agent: agentArg,
+          ...(resolvedEvents !== undefined ? { events: resolvedEvents } : {}),
+          agent: displayAgent,
           slug: agentArg,
-          workerLed: {
-            state: entry?.pid !== undefined && pidAlive(entry.pid) ? 'working' : 'idle',
-          },
+          workerLed: workerLedOf(entry, resolvedEvents),
         };
 
   const base = base0;
@@ -202,7 +257,7 @@ export async function runTui(argv: string[]): Promise<void> {
   mkdirSync(dirname(statePath), { recursive: true });
 
   const impl = await pickImpl(implArg(argv));
-  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: agentArg });
+  impl.setContext?.({ worktree: entry?.worktree ?? ctxDir, agent: displayAgent });
 
   // the shell — renderer + JSX preload + mount + keymap — is
   // @broject/acp-tui's serve(); this process stays glue: target
@@ -308,8 +363,22 @@ export async function runTui(argv: string[]): Promise<void> {
   };
 
   /** The resolution poll — read the doc, re-arm the feed when the
-   *  attach identity moves, report the verdict. */
+   *  attach identity moves, report the verdict. The direct binding's
+   *  worker floor is re-probed every pass: a crash mid-turn leaves
+   *  the model 'running' forever, and only the fresh pid check makes
+   *  that read 'blocked' instead of lying working (dogfood finding —
+   *  a crashed agent's pane glowed working while its pid was gone). */
   const refresh = (): void => {
+    if (direct !== undefined) {
+      // re-read the registry too — a respawn swaps the record, and
+      // probing a stale entry's pid reads 'blocked' on a live worker;
+      // the display name and the journal path heal the same pass once
+      // the record lands (a late stem swap re-keys the feed below)
+      const events = eventsPathOf();
+      direct.workerLed = workerLedOf(agentEntry(base0, entryId), events);
+      if (events !== direct.events) direct.events = events;
+      direct.agent = displayAgentOf0();
+    }
     target = direct ?? resolveTarget(readState(statePath), ctxDir, providers(ctxDir));
     const key = targetKey(target);
     if (key !== cur?.key) {

@@ -74,9 +74,9 @@ class LegacyImpl implements PaneImpl {
   }
 }
 
-/** Impl factories — `acp` resolves lazily so Node-side tests (and
- *  the `--dump` path under plain bun without node_modules) never
- *  load `acp-model`. */
+/** Impl factories — `acp` resolves lazily so Node-side tests and
+ *  the `legacy` path never load `acp-model` (the pane's default IS
+ *  acp; only a deliberate `legacy` pick stays dep-free). */
 const IMPLS: Record<string, () => PaneImpl | Promise<PaneImpl>> = {
   legacy: () => new LegacyImpl(),
   acp: async () => new (await import('./acp-impl.ts')).AcpImpl(),
@@ -93,13 +93,16 @@ export function implArg(argv: readonly string[]): string | undefined {
   return eq?.slice('--impl='.length);
 }
 
-/** Resolve the impl: `--impl` argv > `BRO_TUI_IMPL` env > 'legacy'.
- *  Unknown names fail loud — a typo must not silently run legacy. */
+/** Resolve the impl: `--impl` argv > `BRO_TUI_IMPL` env > the
+ *  caller's fallback ('acp' for the pane). A readout that should
+ *  stay dependency-minimal passes 'legacy' — unknown names fail
+ *  loud either way: a typo must not silently run the wrong impl. */
 export async function pickImpl(
   name: string | undefined,
-  env: Record<string, string | undefined> = process.env
+  env: Record<string, string | undefined> = process.env,
+  fallback = 'acp'
 ): Promise<PaneImpl> {
-  const pick = name ?? env.BRO_TUI_IMPL ?? 'legacy';
+  const pick = name ?? env.BRO_TUI_IMPL ?? fallback;
   const factory = IMPLS[pick];
   if (factory === undefined) {
     throw new Error(`unknown --impl '${pick}' (known: ${IMPL_NAMES.join(', ')})`);

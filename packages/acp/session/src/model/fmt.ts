@@ -15,6 +15,20 @@ export const hhmm = (at: string | undefined): string => {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/** A footer/board-short timestamp: today's stamp is `HH:MM`, an older
+ *  same-year one `02 Nov 14:36`, and a cross-year one `02 Nov 2025
+ *  14:36` — "idle since" reads at a glance either way. A malformed
+ *  stamp renders '' rather than `NaN:NaN` nonsense. */
+export const fmtWhen = (ts: string | number): string => {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const yr = d.getFullYear() === now.getFullYear() ? '' : `${d.getFullYear()} `;
+  return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${yr}${hm}`;
+};
+
 /** `at` → the day-change label — `2 Mar` (British, no year: multi-day
  *  replays rarely cross one, and the head carries the minute too). */
 export const dayLabel = (at: string): string => {

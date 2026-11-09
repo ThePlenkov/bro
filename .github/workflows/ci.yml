@@ -49,6 +49,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test E2E
+        run: npm run test:e2e
+
       # network-bound (npm registry) — hermetic gates report first, a
       # registry outage can never hide a cheap local failure
       - name: Check onboarding dispatches on npm latest

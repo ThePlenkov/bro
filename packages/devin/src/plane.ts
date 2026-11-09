@@ -129,6 +129,31 @@ function isDevinProcess(pid: number, procDir = '/proc'): boolean {
   return argv0.slice(argv0.lastIndexOf('/') + 1) === 'devin';
 }
 
+/** A pid's controlling terminal (`tty_nr`, field 7 past the comm in
+ *  /proc/<pid>/stat) — 0 when the process answers to no terminal.
+ *  Undefined when the entry is absent or unparsable: the caller falls
+ *  back to its other probes, same undercount contract as the rest. */
+function controllingTty(pid: number, procDir: string): number | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(join(procDir, String(pid), 'stat'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  // the comm is parenthesised and may contain spaces — parse after the
+  // LAST ')': state ppid pgrp session tty_nr ...
+  const close = raw.lastIndexOf(')');
+  const fields =
+    close === -1
+      ? []
+      : raw
+          .slice(close + 1)
+          .trim()
+          .split(/\s+/);
+  const tty = Number(fields[4]);
+  return Number.isInteger(tty) ? tty : undefined;
+}
+
 /** Is this lock a live devin session? A lock names a pid; the pid
  *  must be alive AND still be the devin cli (a recycled number is a
  *  stale lock). */
@@ -250,9 +275,12 @@ const TTY_STDIN = /^\/dev\/(?:pts\/|tty|console)/;
  *  BRO_HOOKS=0 marks a machine backend (acp provider/conductor service
  *  child) as not a worker (never counted against
  *  agents.devin.maxWorkers) when no BRO_AGENT_ID is present (BRO_AGENT_ID
- *  wins); and a non-terminal stdin (`fd/0` outside the tty devices —
- *  headless pipes, null, sockets; interactive devin reads a terminal)
- *  classifies a worker.
+ *  wins); a controlling terminal (tty_nr) marks the interactive REPL's
+ *  own process tree — its spawned `devin acp` child holds the session
+ *  lock with a piped fd/0 but shares the REPL's pts — and takes
+ *  precedence over the stdin probe; and a non-terminal stdin (`fd/0`
+ *  outside the tty devices — headless pipes, null, sockets;
+ *  interactive devin reads a terminal) classifies a worker.
  *
  *  A pid neither probe verifies is NOT a worker: unreadable state only
  *  undercounts the worker lane — while phantom workers would refuse
@@ -280,6 +308,21 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
     }
   } catch {
     // unreadable environ — the stdin probe still applies
+  }
+  // An interactive session's own process tree is never a worker — and
+  // the controlling terminal proves it in a way the fd/0 probe cannot.
+  // The current devin CLI spawns a per-session `devin acp` child
+  // (chisel_acp_client::child) and records the CHILD's pid in the
+  // session lock: the child's fd/0 is a pipe (the REPL drives it over
+  // stdio) while it still answers to the REPL's controlling terminal
+  // (tty_nr != 0). Counting it as a spawned worker made every
+  // interactive session eat agents.devin.maxWorkers within seconds of
+  // opening — observed 2026-11-04: two operator REPLs read as
+  // 'devin workers: 2/1 live'. A badge-less pid with no terminal falls
+  // through to the stdin probe below.
+  const tty = controllingTty(pid, procDir);
+  if (tty !== undefined && tty !== 0) {
+    return false;
   }
   try {
     return !TTY_STDIN.test(readlinkSync(join(dir, 'fd', '0')));

@@ -92,6 +92,58 @@ test('decideSession — recorded live pane keeps; idle re-arms; none splits; fre
   );
 });
 
+test('decideSession — a different live agent rebinds the recorded pane', () => {
+  const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS', agent_id: 'native-old' };
+  const panes = [{ pane_id: 'pS', label: LABEL }];
+  const decide = (agent?: { id: string }) =>
+    decideSession({
+      rec,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+      agent,
+    });
+  // a new agent on the same worktree → close + re-arm, never keep tailing
+  assert.deepEqual(decide({ id: 'native-new' }), { kind: 'rebind', paneId: 'pS' });
+  // the same bound agent → the live pane keeps
+  assert.deepEqual(decide({ id: 'native-old' }), { kind: 'none' });
+  // an UNRESOLVED pass never rebinds — a transient registry miss must
+  // not close a live pane bound to a real agent
+  assert.deepEqual(decide(undefined), { kind: 'none' });
+  // a record without a binding + no resolved agent → no rebind storm
+  const bare = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
+  assert.deepEqual(
+    decideSession({
+      rec: bare,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+    }),
+    { kind: 'none' }
+  );
+  // …but a fresh agent against an unbound record rebinds (the pane was
+  // armed worktree-resolved; the direct archive is the better binding)
+  assert.deepEqual(
+    decideSession({
+      rec: bare,
+      panes,
+      bound: live(),
+      sessionLabel: LABEL,
+      broLabels: BRO_LABELS,
+      exists: () => true,
+      idle: () => false,
+      agent: { id: 'native-new' },
+    }),
+    { kind: 'rebind', paneId: 'pS' }
+  );
+});
+
 test('decideSessionRetire — recorded-if-live else orphan label', () => {
   const rec = { workspace: 'w', worktree: '/t', pane_id: 'pS' };
   // recorded pane still carries our label → close it
@@ -177,6 +229,17 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
   );
   assert.equal(sessionViewCommand('/t', { bro: 'bro' }, q), "'bro' herdr session-view '/t'");
   assert.equal(
+    sessionViewCommand('/t', { bun: 'bun', tui: '/main.ts', bro: 'bro' }, q, {
+      id: 'n1',
+      events: '/e.jsonl',
+    }),
+    "'bun' run '/main.ts' --events '/e.jsonl' --agent 'n1' '/t'"
+  );
+  assert.equal(
+    sessionViewCommand('/t', { bro: 'bro' }, q, { id: 'n1', events: '/e.jsonl' }),
+    "'bro' herdr session-view '/t' --events '/e.jsonl' --agent 'n1'"
+  );
+  assert.equal(
     liveViewCommand(
       { events: '/e.jsonl', id: 'n1', worktree: '/t' },
       { bun: 'bun', tui: '/main.ts', bro: 'bro' },
@@ -186,6 +249,6 @@ test('view commands — verbs bare, values quoted, the two lanes', () => {
   );
   assert.equal(
     liveViewCommand({ events: '/e.jsonl', id: 'n1' }, { bro: 'bro' }, q),
-    "'bro' herdr session-view '.'"
+    "'bro' herdr session-view '.' --events '/e.jsonl' --agent 'n1'"
   );
 });

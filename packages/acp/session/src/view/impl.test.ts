@@ -1,9 +1,10 @@
 /**
  * The pane impl seam (spec bro-q2edc, "Phase 2 — the seam"): the
- * registry resolves `--impl`/env to a `PaneImpl`, the default stays
- * `legacy`, and unknown names fail loud. The `acp` impl is Bun-only
- * (it loads `acp-model`), so these tests exercise the seam's
- * Node-safe half only — resolution and the legacy impl end to end.
+ * registry resolves `--impl`/env to a `PaneImpl`, the default is
+ * `acp` (the headless dump falls back to `legacy` unflagged), and
+ * unknown names fail loud. Both impls run under Node here — the
+ * `acp` cases exercise the seam end to end; only the Solid/TUI
+ * shell above them stays Bun-only.
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
@@ -15,10 +16,9 @@ describe('the pane impl seam', () => {
     assert.deepEqual(IMPL_NAMES.sort(), ['acp', 'legacy']);
   });
 
-  test('the default stays legacy — no flag, no env', async () => {
+  test('the default is acp — no flag, no env', async () => {
     const impl = await pickImpl(undefined, {});
-    assert.equal(impl.name, 'legacy');
-    assert.equal(impl.fold, 'legacy');
+    assert.equal(impl.name, 'acp');
   });
 
   test('argv beats env beats default', async () => {
@@ -55,5 +55,20 @@ describe('the pane impl seam', () => {
     assert.equal(appended[0]?.item.kind, 'message');
     assert.ok(impl.dump().length > 0);
     assert.equal(impl.drain().length, 0);
+  });
+
+  test('an archive turn start drives the acp LED to working', async () => {
+    const impl = await pickImpl('acp', {});
+    impl.feed({ kind: 'turn', phase: 'start', ts: '2026-01-01T00:00:00Z' });
+    impl.beginLive();
+    const on = impl.verdict;
+    assert.equal(on?.led.state, 'working');
+    assert.match(on?.mode ?? '', /^turn since /);
+    // the matching stop idles it again — the lifecycle still closes,
+    // and the footer carries the idle-since clock stamp
+    impl.feed({ kind: 'turn', phase: 'stop', ts: '2026-01-01T00:01:00Z' });
+    const v = impl.verdict;
+    assert.equal(v?.led.state, 'idle');
+    assert.match(v?.mode ?? '', /^since /);
   });
 });
