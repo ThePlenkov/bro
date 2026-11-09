@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { nextStep, stepKind, stepsOf } from './molecule.ts'
+import { nextStep, pourFormula, stepKind, stepsOf } from './molecule.ts'
 import type { Molecule, MolIssue } from './types.ts'
 
 const issue = (id: string, over: Partial<MolIssue> = {}): MolIssue => ({
@@ -170,4 +173,50 @@ describe('nextStep', () => {
     assert.equal(n.ready.length, 2)
     assert.equal(n.step!.id, 'a')
   })
+})
+
+/** A `bd` that takes the registration write but keeps its old type list —
+ *  the shape of an older bd that does not know `merge-step`. The pour
+ *  must never reach it: a flattened merge step closes without a verdict. */
+const OLD_BD = `#!/bin/sh
+case "$1" in
+  config)
+    case "$2" in
+      get) echo 'agent,human' ;;
+      set) : ;;
+    esac ;;
+  mol)
+    case "$2" in
+      pour) echo 'POURED ANYWAY' >&2; exit 1 ;;
+    esac ;;
+esac
+`
+
+function withOldBd(fn: () => void): () => void {
+  return () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-old-bd-'))
+    writeFileSync(join(dir, 'bd'), OLD_BD)
+    chmodSync(join(dir, 'bd'), 0o755)
+    const prev = process.env.PATH
+    process.env.PATH = `${dir}:${prev}`
+    try {
+      fn()
+    } finally {
+      process.env.PATH = prev
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+}
+
+describe('pourFormula', () => {
+  it(
+    'refuses to pour when the merge step type did not register',
+    { skip: process.platform === 'win32' },
+    withOldBd(() => {
+      assert.throws(
+        () => pourFormula('ship-bead'),
+        (err: Error) => /merge-step/.test(err.message) && !/POURED ANYWAY/.test(err.message)
+      )
+    })
+  )
 })

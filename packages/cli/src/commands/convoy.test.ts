@@ -17,7 +17,7 @@ case "$1" in
   info) echo '{"schema_version":1}' ;;
   config)
     case "$2" in
-      get) echo 'agent,human' ;;
+      get) echo 'agent,human,merge-step' ;;
       set) : ;;
     esac ;;
   mol)
