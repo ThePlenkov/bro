@@ -116,8 +116,29 @@ test('the fork comes from the base the member forked FROM, not from where it goe
   // base's tip has expired, and the plan's SHA is not available either
   git(['reflog', 'expire', '--expire=now', '--expire-unreachable=now', 'refs/heads/child'], main)
 
-  const fork = forkFor('child', undefined, 'parent', 'main', main)
+  const fork = forkFor('child', undefined, 'parent', main)
   assert.equal(fork, parentWork, 'the fork is the base’s tip at the fork')
   assert.notEqual(fork, trunkWork, 'the trunk is not the fork — it replays the base’s commits')
+  assert.ok(root.length > 0)
+})
+
+test('an unverifiable fork stops the rebase instead of replaying the base', () => {
+  // the base's history is REWRITTEN and the rewrite is NOT patch-
+  // equivalent, so the merge-base sits BEFORE the base's old commits: a
+  // replay from there carries them, and they conflict with the base's
+  // squash. With both reflogs gone nothing knows where the child's work
+  // began — so there is no fork, and no replay either.
+  const { root, main } = repo()
+  baseAndChild(main)
+  git(['checkout', '-q', 'base'], main)
+  writeFileSync(join(main, 'more.txt'), 'more\n')
+  git(['add', '-A'], main)
+  git(['commit', '-q', '--amend', '-m', 'base work, extended'], main)
+  git(['checkout', '-q', 'child'], main)
+  // both reflogs are gone — no fork-point, no creation entry
+  git(['reflog', 'expire', '--expire=now', '--expire-unreachable=now', '--all'], main)
+
+  assert.equal(forkPoint('base', main), '', 'no verified fork — the guess is refused')
+  assert.equal(forkFor('child', undefined, 'base', main), '', 'no fork, no rebase')
   assert.ok(root.length > 0)
 })

@@ -666,14 +666,21 @@ function forkFromReflog(branch: string, wt: string): string | undefined {
  *
  * Three answers, in order of how well they know the truth:
  *
- * 1. git's OWN fork point — the base's reflog remembers the tip the
+ * 1. the base's tip, already inside the child — the merge-base IS the
+ *    fork: the child's work starts right after it.
+ * 2. git's OWN fork point — the base's reflog remembers the tip the
  *    child was built on, so this is exact even when the rewrite changed
  *    the parent's CONTENT (an amend that adds a file is not patch-
  *    equivalent, and only the reflog still knows where the child began).
- * 2. the child's last commit the new base already holds BY PATCH — the
+ * 3. the child's last commit the new base already holds BY PATCH — the
  *    rewritten parent looks patch-equivalent to git.
- * 3. the merge-base — the blunt answer, and the one that replays the
- *    parent's old commits when nothing better is known.
+ *
+ * And when none of the three answers — NO FORK. The bare merge-base is a
+ * GUESS: it sits BEFORE the base's old commits, so a replay from there
+ * carries them (and their conflicts) along. When no reflog and no
+ * patch-equivalence can place the fork, the rebase does not happen and
+ * the owner resolves it — a member that is skipped is visible, a member
+ * that replays the base's commits is not.
  */
 export function forkPoint(base: string, wt: string): string {
   const mergeBase = gitTry(['-C', wt, 'merge-base', base, 'HEAD']).out.trim();
@@ -690,6 +697,11 @@ export function forkPoint(base: string, wt: string): string {
     return forked;
   }
   const cherry = gitTry(['-C', wt, 'cherry', base, 'HEAD']).out.trim();
+  if (cherry === '') {
+    // every commit the member carries is in the base by patch — there is
+    // no work of its own to replay, and the fork is its own tip
+    return gitTry(['-C', wt, 'rev-parse', 'HEAD']).out.trim();
+  }
   let fork = '';
   for (const line of cherry.split('\n')) {
     // The cherry list runs OLDEST first: the equivalent commits the
@@ -702,7 +714,7 @@ export function forkPoint(base: string, wt: string): string {
       fork = line.slice(2).trim();
     }
   }
-  return fork === '' ? mergeBase : fork;
+  return fork;
 }
 
 /** Where the member's replay must start — the fork, in the order of how
@@ -712,36 +724,39 @@ export function forkPoint(base: string, wt: string): string {
  *     while the member's CURRENT history still carries it: the member
  *     may have been rewritten since the plan (the platform's follow),
  *     and a commit the member does not carry is not a fork.
- *  2. THE MEMBER'S OWN CREATION POINT — the base's ref may be GONE (the
- *     platform deleted it after the merge), and the member's history
- *     still remembers where its work began.
- *  3. THE BASE THE MEMBER FORKED FROM (`oldBase`) — the branch the
+ *  2. THE BASE THE MEMBER FORKED FROM (`oldBase`) — the branch the
  *     member's line actually left, so `forkPoint` asks the right
  *     question: where was that base when the member branched off it.
- *  4. THE DESIRED BASE — where the member is GOING. Its reflog answers
- *     a DIFFERENT question (where the desired base forked from the
- *     member's line), and its answer is OLDER than the truth: it is
+ *     The BASE's reflog is the base's own history — the member's own
+ *     branch moves cannot rewrite it, so a member that was deleted and
+ *     recreated (a new creation entry, a later point) cannot fool it.
+ *  3. THE MEMBER'S OWN CREATION POINT — the base's ref may be GONE (the
+ *     platform deleted it after the merge), and the member's history
+ *     still remembers where its work began.
+ *  4. NOTHING — and that is an answer too. The desired base's reflog
+ *     answers a DIFFERENT question (where the desired base forked from
+ *     the member's line), and its answer is OLDER than the truth: it is
  *     where the chain left the trunk, so a replay from there carries
- *     the base's old commits — the blunt fallback, and the last one. */
+ *     the base's old commits. No fork, no rebase: the owner resolves
+ *     it. */
 export function forkFor(
   branch: string,
   forkSha: string | undefined,
   oldBase: string,
-  desiredBase: string,
   wt: string
 ): string {
   if (forkSha !== undefined && carriesCommit(branch, forkSha, wt) === true) {
     return forkSha;
   }
+  const fromBase = forkPoint(oldBase, wt);
+  if (fromBase !== '') {
+    return fromBase;
+  }
   const own = forkFromReflog(branch, wt);
   if (own !== undefined) {
     return own;
   }
-  const fromOldBase = oldBase === desiredBase ? '' : forkPoint(oldBase, wt);
-  if (fromOldBase !== '') {
-    return fromOldBase;
-  }
-  return forkPoint(desiredBase, wt);
+  return '';
 }
 
 /** Rebase a member's branch onto its new base and force-push the result
@@ -753,11 +768,18 @@ export function forkFor(
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  const fork = forkFor(m.branch, m.forkSha, item.oldBase, item.desiredBase, wt.path);
-  const rb =
-    fork === ''
-      ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
-      : gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork]);
+  const fork = forkFor(m.branch, m.forkSha, item.oldBase, wt.path);
+  if (fork === '') {
+    // No verified fork: the plan's SHA is not carried, the base's reflog
+    // cannot place the fork, and the member's own cannot either. A guess
+    // here would replay the base's old commits — so the member is left
+    // alone and its owner is told.
+    lines.push(
+      `  ${m.branch} skipped — the fork could not be established (the base's reflog is gone and the member's own does not answer); owner resolves on enter`
+    );
+    return false;
+  }
+  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(

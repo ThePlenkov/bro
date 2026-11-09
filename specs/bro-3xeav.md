@@ -59,7 +59,7 @@ the patch-equivalence list:
 const fork =
   m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
     ? m.forkSha
-    : forkPoint(item.desiredBase, wt.path);
+    : forkPoint(item.oldBase, wt.path);
 ```
 
 So the fork is an immutable commit whenever the member carries it, and
@@ -86,13 +86,6 @@ ancestor of the member's tip: after a rebase the member's history no
 longer carries it, and the reflog's answer is then a question the plan
 cannot answer.
 
-```ts
-const fork =
-  m.forkSha !== undefined && carriesCommit(m.branch, m.forkSha, wt.path) === true
-    ? m.forkSha
-    : (forkFromReflog(m.branch, wt.path) ?? forkPoint(item.desiredBase, wt.path));
-```
-
 ### The fork is asked of the base the member FORKED FROM
 
 `forkPoint(base, wt)` asks one question: *where was `base` when this
@@ -102,21 +95,45 @@ branch the member's line actually left.
 
 - `item.oldBase` — the base the member forked from (the recorded edge,
   else the PR's base). The question fits: the answer is the base's tip
-  at the fork, and the replay carries the member's work alone.
+  at the fork, and the replay carries the member's work alone. And the
+  BASE's reflog is the base's own history — the member's own branch
+  moves cannot rewrite it. A member that was deleted and recreated (a
+  new creation entry, a later point) cannot fool it.
 - `item.desiredBase` — the base the member is GOING to. A different
   question: where the desired base forked from the member's line. When
   the desired base is the trunk and the member left another branch, the
   answer is where the CHAIN left the trunk — too old, and a replay from
   there carries the base's old commits, which conflict with the
-  squash-merge on the new base.
+  squash-merge on the new base. **It is not asked at all.**
 
-So the fallback reads `oldBase` first and `desiredBase` last. Measured
-on the same chain (`--fork-point` against a base that advanced after
-the member forked off it):
+Measured on one chain, against a base that advanced after the member
+forked off it:
 
 ```text
 форк от oldBase      = e1a9a68  ← базовый tip в момент форка: replay несёт 1 коммит
 форк от desiredBase  = 9ef3f7a  ← точка выхода ветки с транка: replay тащит базу
+```
+
+So the order is: the plan's SHA (while the member still carries it) →
+the base the member forked from → the member's own creation point →
+nothing.
+
+### No fork, no rebase
+
+The bare merge-base is a GUESS. When the base was rewritten under the
+member and no reflog and no patch-equivalence can place the fork, the
+merge-base sits BEFORE the base's old commits — and a replay from there
+carries them, with their conflicts, into the member's PR.
+
+So the guess is refused: `forkPoint` returns no fork, and the member is
+SKIPPED with the reason. A member that is skipped is visible; a member
+that replays the base's commits is not.
+
+```ts
+if (fork === '') {
+  lines.push(`  ${m.branch} skipped — the fork could not be established …`);
+  return false;
+}
 ```
 
 ### The late name resolution is gone
@@ -144,16 +161,20 @@ member carries `forkSha` the way it carries `containsBaseHead`.
       branch-name resolution is gone.
 - [x] a base whose ref is gone: the member's own reflog says where its
       work began.
-- [x] the fork is asked of the base the member forked FROM; the desired
-      base is the last resort.
+- [x] the fork is asked of the base the member forked FROM — before the
+      member's own reflog, which a recreated branch can rewrite.
+- [x] the desired base's reflog is not asked at all: it answers a
+      different question and its answer is older than the truth.
 - [x] the plan's SHA is revalidated against the member's current head —
       a rewritten member does not carry it, and a commit it does not
       carry is not a fork.
+- [x] no verified fork, no rebase: the member is skipped with the
+      reason, instead of replaying the base's old commits.
 - [x] tests: the replay carries the member's own commits only — when the
       base's branch is retired mid-cascade, and when the host deleted it
-      before the sync (that one fails on the old code); and the fork
-      comes from the base the member forked from, not from the desired
-      base.
+      before the sync (that one fails on the old code); the fork comes
+      from the base the member forked from, not from the desired base;
+      and an unverifiable fork stops the rebase.
 
 ## Verify
 
