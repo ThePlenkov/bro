@@ -96,7 +96,14 @@ bro_hook_kill_journal() {
   # fail-open
   local _base=${DEVIN_PROJECT_DIR:-$PWD}
   local _common
-  _common=$(git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  # the rev-parse is bounded where timeout(1) exists — a wedged git
+  # must not stall the hook past the budget this code enforces;
+  # where it doesn't the call runs bare, same as it always did
+  if command -v timeout >/dev/null 2>&1; then
+    _common=$(timeout 2 git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  else
+    _common=$(git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  fi
   case "$_common" in
     /*) ;;
     ?*) _common=$_base/$_common ;;
@@ -106,13 +113,22 @@ bro_hook_kill_journal() {
   local _dir="$_common/bro/hooks/perf"
   mkdir -p "$_dir" 2>/dev/null || return 0
   local _ts _ev _budget
-  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%s)
+  # ISO only — an epoch-seconds fallback would write a second format
+  # into killed.jsonl and break consumers (kilo); the sentinel keeps
+  # the field parseable even if date somehow fails
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '1970-01-01T00:00:00Z')
   _ev=${1:-timeout}
   _budget=${2:-${BRO_HOOK_WATCHDOG_S:-8}}
   # try to use python/node if available for safe JSON; fallback to printf
   if command -v node >/dev/null 2>&1; then
     node -e "require('fs').appendFileSync(process.argv[1], JSON.stringify({ts:new Date().toISOString(),event:process.argv[2],budget_ms:Number(process.argv[3])*1000})+'\n');" "$_dir/killed.jsonl" "$_ev" "$_budget" 2>/dev/null && return 0
   fi
+  # printf fallback — sanitize first: the arithmetic dies on a
+  # non-digit budget, and quotes/backslashes/newlines in _ev would
+  # break the JSON row (kody)
+  _budget=$(printf '%s' "$_budget" | tr -cd '0-9')
+  [ -n "$_budget" ] || _budget=8
+  _ev=$(printf '%s' "$_ev" | tr -d '"\\\n\r\t')
   printf '{"ts":"%s","event":"%s","budget_ms":%d}\n' "$_ts" "$_ev" $((_budget * 1000)) >> "$_dir/killed.jsonl" 2>/dev/null || true
   return 0
 }
@@ -664,18 +680,25 @@ cursor_permission_ask() {
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
   _rc=$?
-  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
-    bro_hook_kill_journal "${EVENT:-unknown}" "${BRO_HOOK_WATCHDOG_S:-8}"
-    cursor_permission_ask; exit 0
+  # BRO_HOOKS_NO_FALLBACK=1 — the latency bench pins it so the in-tree
+  # dist result IS the measurement: a nonzero exit or an expired
+  # deadline is the error, never a PATH-bro swap. Never set it on a
+  # live session: it weakens the fail-open contract.
+  if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+    { [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; } && exit 1
+    exit 0
   fi
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
   [ "$_rc" -eq 0 ] && exit 0
 fi
+# same pin when dist or node is missing — the PATH fallback must not
+# hide it either
+[ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
-  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
-    bro_hook_kill_journal "${EVENT:-unknown}" "${BRO_HOOK_WATCHDOG_S:-8}"
-    cursor_permission_ask
-  fi
+  # run_bounded already journaled the kill — a second row here would
+  # double-count one expiry (kody: two killed.jsonl rows per kill)
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
 else
   cursor_permission_ask
 fi
