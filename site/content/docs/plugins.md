@@ -4,11 +4,6 @@ title: Plugins
 description: bro is a host — definePlugin, external loading, custom components.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 bro is a plugin system on top of beads and `gh`. Every built-in command
 is a plugin in one registry; external plugins load from config and get
 the same contract — command, skill, config section, plan schema.
@@ -18,8 +13,8 @@ bind external systems behind facades, and **agent plugins** install bro
 into clients. The portable Agent Plugin is one root `plugin.json` plus
 `skills/`; client-specific manifests and hooks package it for each client.
 See [agent plugins](/plugins) and the [connector marketplace](/marketplace).
-The separate “Claude Code on other agents” plugin is **planned**; today's
-client-catalog adapters still live in brouter, not that future plugin.
+The separate “Claude Code on other agents” plugin lets Claude Code act as
+a CLI client over configured agents such as OpenCode and Devin.
 
 ## Client adapters
 

@@ -22,7 +22,7 @@ function Home() {
           <em>agent workflows.</em>
         </h1>
         <p className="lede">
-          bro stays the core. Everything else connects.
+          bro stays the core. Everything else is a connector.
           <br />
           Close the loop, carry the policy, bring your own agents.
         </p>
@@ -47,12 +47,7 @@ function Home() {
                 <span aria-hidden="true">↗</span>
               </h3>
               <p>{product.description}</p>
-              <span className="card-link">
-                {product.path === 'brouter'
-                  ? 'Source CLI + planned direction'
-                  : 'Explore the product'}{' '}
-                →
-              </span>
+              <span className="card-link">Explore the product →</span>
             </a>
           ))}
         </div>

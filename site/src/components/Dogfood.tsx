@@ -5,8 +5,8 @@ export function Dogfood() {
       <h2>bro writes bro</h2>
       <p>
         Agents claim beads, ship through the act gate, sweep their own review debt, and turn retros
-        into the next beads — a hand-rolled script today is a <code>bro</code> command next week.
-        This site, the CLI, and most of the merged PRs were built that way.
+        into the next beads — repeated workflow steps become <code>bro</code> commands. This site,
+        the CLI, and most of the merged PRs were built that way.
       </p>
       <p>
         Don't take the landing page's word for it.{' '}

@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { ProductPage } from '../components/ProductPage';
+import { Install } from '../components/Install';
 import css from '../styles.css?url';
 
 export const Route = createFileRoute('/plugins')({
@@ -25,6 +26,7 @@ function Plugins() {
           skills tree; the client gets the hooks and packaging it needs.
         </p>
         <a href={`${import.meta.env.BASE_URL}cli`}>Installation options →</a>
+        <Install />
       </section>
       <section className="feature-section">
         <h2>Agent plugins ≠ CLI extensions.</h2>
@@ -35,13 +37,12 @@ function Plugins() {
         </p>
         <a href={`${import.meta.env.BASE_URL}docs/plugins`}>Packaging and extension contract →</a>
       </section>
-      <section className="feature-section planned-panel">
-        <span className="status planned">planned</span>
+      <section className="feature-section">
         <h2>Claude Code, on top of other agents.</h2>
         <p>
           A separate plugin for using Claude Code as a CLI client over agents such as OpenCode and
-          Devin. This extraction is planned; today's client-catalog adapters still live inside
-          brouter. It is not the portable bro plugin above.
+          Devin. Keep Claude Code as the client while another configured agent executes the work. It
+          is a separate plugin from the portable bro plugin above.
         </p>
         <a href="https://github.com/ThePlenkov/bro/blob/main/specs/bro-0ykhg.6.md">
           Read the design →

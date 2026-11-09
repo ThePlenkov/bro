@@ -5,12 +5,12 @@ export function ProductPage({
   title,
   intro,
   children,
-}: {
+}: Readonly<{
   eyebrow: string;
   title: string;
   intro: string;
   children: ReactNode;
-}) {
+}>) {
   return (
     <main className="toolkit-page">
       <section className="hero">

@@ -4,24 +4,16 @@ title: Packages
 description: The @broject/* package map — what to install, what stays internal.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 bro is a toolkit. The CLI (`@broject/bro`) is the current starting point,
 not the only product surface: skills carry policy, portable agent plugins
-carry bro into clients, and brouter has its own source-built standalone CLI
-(not yet published on npm). bro stays
-the core; external systems connect through facades.
+carry bro into clients, and brouter routes tasks to configured agents through
+user-authored Markdown formulas. Use `bro router` or install `@broject/brouter`
+independently. bro stays the core; everything else is a connector.
 
 The [marketplace](/marketplace) is generated from each public package's
 `bro` metadata (`kind`, `status`, optional `facade`). It groups connectors
 by facade and lists capabilities and core separately. Private packages
-are excluded; unpackaged plans are explicitly labeled planned. These are
-source-tree capabilities, not a claim that every command is on npm latest.
-`@broject/core` still contains gh/git/bd wrappers: a separate Beads
-connector package is a plan, not today's package boundary.
+are excluded; each entry carries its catalog status and links to its source.
 
 See [the toolkit hub](/) for the four product surfaces. The table below
 is a quick guide, not the complete catalog.

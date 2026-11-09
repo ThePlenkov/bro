@@ -19,11 +19,17 @@ Owns: `site/`, package `bro` metadata in `packages/*/package.json`,
   existing “bro writes bro” dogfood block. `/cli` retains the lifecycle
   closure wedge, interactive Terminal and Install. `/skills` covers policy,
   CLI mechanics, hooks/guard, packs and lock. `/plugins` covers one portable
-  Agent Plugin packaged for clients. `/brouter` separates today's standalone
-  source-built binary (not yet on npm) from the planned MD-formula task router,
-  feedback and lift bench.
-  It routes tasks to configured agents, not LLM requests. The separate
-  Claude-on-other-agents plugin is planned, not shipped.
+  Agent Plugin packaged for clients and the separate Claude-on-other-agents
+  plugin. `/brouter` presents an independent AI-native task router: user-authored
+  Markdown routing formulas, configured agents, outcome feedback and the
+  bare-agent versus agent+bro benchmark. It routes tasks, not LLM requests.
+- Product copy presents the finished toolkit in the present tense. The global
+  WIP banner owns the evolving-product caveat; catalog badges retain their
+  metadata status. Product pages do not hedge with publication, source-build
+  or roadmap disclaimers. Examples use the user interface: `npm i -g @broject/bro`,
+  `npx @broject/bro`, `bro router`, standalone `npm i @broject/brouter`, and client
+  plugin installation. No site example invokes internal scripts or dist files
+  with Node. This presentation contract does not implement new CLI mechanics.
 - A shared navigation component links products, docs, marketplace and GitHub.
   A non-dismissible work-in-progress banner lives in the root shell and is
   visible on every page, including docs and debt. Preserve the dark theme,
@@ -43,7 +49,8 @@ Owns: `site/`, package `bro` metadata in `packages/*/package.json`,
   speckit/openspec adapters remain embedded today, not standalone packages.
 - The same metadata validator runs in the catalog build and check-docs;
   missing/invalid public metadata fails loudly. Planned rows are validated
-  too. Empty groups are omitted; missing package descriptions are errors.
+  too. Facade identifiers use lowercase letters and hyphens, starting with a
+  letter. Empty groups are omitted; missing package descriptions are errors.
   Every new page is explicitly prerendered and linked for crawl discovery.
   Package/plugin docs explain the toolkit and point to the generated catalog.
 
@@ -54,5 +61,5 @@ Owns: `site/`, package `bro` metadata in `packages/*/package.json`,
 - Site build and typecheck; root typecheck; check-docs; diff check; commit
   hooks. Confirm prerendered HTML for all six new/updated entry pages.
 - Preview full-page screenshots of `/`, `/brouter`, `/marketplace`, `/docs`;
-  verify the root banner, layout, real/planned distinction and catalog cards.
+  verify the root banner, layout, finished-product copy and catalog status cards.
   Save evidence outside the repo. Leave the local preview running.

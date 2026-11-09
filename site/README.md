@@ -21,4 +21,4 @@ The root shell owns navigation and the work-in-progress banner, including
 on docs and debt. Vite's `bro-marketplace` plugin builds a virtual catalog
 from public `packages/*/package.json` metadata; private packages are excluded.
 `planned-connectors.json` is only for unpackaged plans. Run
-`node ../scripts/check-docs.ts` to check metadata with the same validator.
+`npm --prefix .. run check:docs` to check metadata with the same validator.

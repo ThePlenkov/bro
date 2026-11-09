@@ -50,17 +50,22 @@ test('catalog reads public metadata, excludes private packages and adds planned 
 
 test('empty catalog is valid', () => fixture(root => assert.deepEqual(buildCatalog(root), [])));
 
-test('missing or invalid public metadata and missing descriptions fail with package path', () => {
+test('missing or invalid public metadata fails independently of package descriptions', () => {
   fixture((root, pkg) => {
-    for (const bro of [
-      undefined,
-      {},
-      { kind: 'connector', status: 'beta' },
-      { kind: 'core', status: 'beta' },
-    ]) {
-      pkg('bad', { name: '@broject/bad', bro });
+    for (const bro of [undefined, {}, { kind: 'connector', status: 'beta' }]) {
+      pkg('bad', { name: '@broject/bad', description: 'Valid description', bro });
       assert.throws(() => buildCatalog(root), /packages\/bad\/package.json/);
     }
+  });
+});
+
+test('missing descriptions fail for otherwise valid public packages', () => {
+  fixture((root, pkg) => {
+    pkg('bad', { name: '@broject/bad', bro: { kind: 'core', status: 'beta' } });
+    assert.throws(
+      () => buildCatalog(root),
+      /packages\/bad\/package.json: Error: missing description/
+    );
   });
 });
 
@@ -75,6 +80,7 @@ test('planned entries reject invalid status, source and duplicate identity', () 
     for (const rows of [
       [{ ...row, bro: { ...row.bro, status: 'beta' } }],
       [{ ...row, source: '../escape' }],
+      [{ ...row, source: 'specs/a/../../etc/passwd' }],
       [row, row],
     ]) {
       writeFileSync(join(root, 'site/planned-connectors.json'), JSON.stringify(rows));

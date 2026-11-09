@@ -23,7 +23,7 @@ function Skills() {
           Each Agent Skill lives in <code>skills/&lt;name&gt;/SKILL.md</code>. Act, debt, drill,
           SDD, retro — thin policy wrappers over CLI commands, not another implementation.
         </p>
-        <a href={`${import.meta.env.BASE_URL}docs/skills`}>Meet the shipped skills →</a>
+        <a href={`${import.meta.env.BASE_URL}docs/skills`}>Explore the skills →</a>
       </section>
       <section className="feature-section">
         <h2>Hooks remember. Guard nudges.</h2>

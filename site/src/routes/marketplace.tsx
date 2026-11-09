@@ -12,7 +12,7 @@ export const Route = createFileRoute('/marketplace')({
   component: Marketplace,
 });
 
-function Cards({ entries }: { entries: CatalogEntry[] }) {
+function Cards({ entries }: Readonly<{ entries: readonly CatalogEntry[] }>) {
   return (
     <div className="catalog-grid">
       {entries.map(entry => (
@@ -43,7 +43,9 @@ function Cards({ entries }: { entries: CatalogEntry[] }) {
 
 function Marketplace() {
   const connectors = catalog.filter(entry => entry.kind === 'connector');
-  const facades = [...new Set(connectors.map(entry => entry.facade))].sort();
+  const facades = [...new Set(connectors.map(entry => entry.facade))].sort((a, b) =>
+    (a ?? '').localeCompare(b ?? '')
+  );
   return (
     <ProductPage
       eyebrow="marketplace / generated from the repo"
@@ -51,11 +53,9 @@ function Marketplace() {
       intro="Connectors bind your systems. Capabilities carry the workflow. This catalog is built from package metadata, not a hand-kept shopping list."
     >
       <aside className="catalog-note">
-        All current public packages are labeled beta. Private packages are excluded. Planned cards
-        have no separate npm package yet. <code>@broject/core</code> still contains gh/git/bd
-        wrappers — this is a direction, not a claim that every boundary is already extracted.
-        Package names and npm links identify the intended distribution; source presence does not
-        guarantee publication on npm latest.
+        bro stays the core. Everything else is a connector. Choose the systems behind each facade
+        and the capabilities that fit your workflow. Each card links to its package or source and
+        carries its catalog status.
       </aside>
       <section className="catalog-section">
         <h2>Connectors</h2>

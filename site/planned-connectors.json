@@ -1,31 +1,31 @@
 [
   {
     "name": "Beads connector",
-    "description": "Planned package extraction. The bd task-store wrapper still lives in @broject/core today.",
+    "description": "Connect Beads task tracking to bro's task facade.",
     "bro": { "kind": "connector", "facade": "tasks", "status": "planned" },
     "source": "packages/core/src/tasks.ts"
   },
   {
     "name": "OpenCode connector",
-    "description": "Planned standalone agent connector package; existing integration is embedded in CLI/provider wiring.",
+    "description": "Route work to OpenCode through the agent facade.",
     "bro": { "kind": "connector", "facade": "agents", "status": "planned" },
     "source": "packages/cli/src/agent-connectors.ts"
   },
   {
     "name": "Speckit connector",
-    "description": "Planned standalone SDD connector package. The current adapter is embedded in the CLI.",
+    "description": "Connect Speckit specifications to bro's SDD facade.",
     "bro": { "kind": "connector", "facade": "sdd", "status": "planned" },
     "source": "packages/cli/src/spec-connectors.ts"
   },
   {
     "name": "OpenSpec connector",
-    "description": "Planned standalone SDD connector package. The current adapter is embedded in the CLI.",
+    "description": "Connect OpenSpec specifications to bro's SDD facade.",
     "bro": { "kind": "connector", "facade": "sdd", "status": "planned" },
     "source": "packages/cli/src/spec-connectors.ts"
   },
   {
     "name": "Claude Code on other agents",
-    "description": "Planned separate plugin: Claude Code as a CLI client on top of agents such as OpenCode and Devin. Client adapters still live in brouter today.",
+    "description": "Use Claude Code as a CLI client on top of agents such as OpenCode and Devin.",
     "bro": { "kind": "connector", "facade": "clients", "status": "planned" },
     "source": "specs/bro-0ykhg.6.md"
   }

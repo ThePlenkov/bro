@@ -25,7 +25,7 @@ export const products = [
     name: 'brouter',
     tag: '04 / route the task',
     description:
-      'An independent router. Today: a source-built CLI. Direction: AI-native task routing, not LLM request routing.',
+      'An independent AI-native task router. Your Markdown formulas, your configured agents, feedback from real outcomes.',
   },
 ] as const;
 
