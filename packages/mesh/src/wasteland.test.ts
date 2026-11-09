@@ -138,6 +138,54 @@ describe('projectWanted', () => {
     assert.deepEqual(p.envelopes[0]?.refs, []);
   });
 
+  test('the refs trailer parses into refs and lifts back out of the body', () => {
+    const p = projectWanted({
+      row: row({
+        description:
+          'details\n\n<!-- mesh/1 refs -->\nmesh:ref:bead:bro-9eeld\nmesh:ref:url:https://x/y',
+      }),
+    });
+    const req = p.envelopes[0]!;
+    assert.deepEqual(req.refs, [
+      { kind: 'bead', ref: 'bro-9eeld' },
+      { kind: 'url', ref: 'https://x/y' },
+    ]);
+    // the envelope body is the posted prose — transport markers never
+    // leak into what a consumer renders (PR #887 threads)
+    assert.equal(req.body, 'details');
+  });
+
+  test('marker-looking lines outside the sentinel block stay prose', () => {
+    const p = projectWanted({
+      row: row({ description: 'details\nmesh:ref:bead:not-metadata\nmore' }),
+    });
+    const req = p.envelopes[0]!;
+    assert.deepEqual(req.refs, []);
+    assert.equal(req.body, 'details\nmesh:ref:bead:not-metadata\nmore');
+    // and a non-marker line ends the block — a marker buried after it
+    // is prose, not a late ref
+    const q = projectWanted({
+      row: row({
+        description:
+          'd\n\n<!-- mesh/1 refs -->\nmesh:ref:bead:a1\n\nsee mesh:ref:bead:also-prose\nmesh:ref:bead:not-this',
+      }),
+    });
+    assert.deepEqual(
+      q.envelopes[0]?.refs.map(r => r.ref),
+      ['a1']
+    );
+  });
+
+  test('a CRLF-stored row trims the \\r off the marker and the ref', () => {
+    const p = projectWanted({
+      row: row({
+        description: 'details\r\n\r\n<!-- mesh/1 refs -->\r\nmesh:ref:bead:bro-9eeld\r\n',
+      }),
+    });
+    assert.deepEqual(p.envelopes[0]?.refs, [{ kind: 'bead', ref: 'bro-9eeld' }]);
+    assert.equal(p.envelopes[0]?.body, 'details');
+  });
+
   test('an unprojectable poster is an error line, not an invented rig', () => {
     const p = projectWanted({ row: row({ posted_by: 'not a handle!' }) });
     assert.equal(p.envelopes.length, 0);
