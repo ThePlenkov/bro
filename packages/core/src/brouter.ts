@@ -15,6 +15,7 @@
  * the CLI layer; `brouterStaticCatalog` is the offline face.
  */
 import type { ProviderEntry } from './providers.ts';
+import type { FleetRouter } from './routing.ts';
 
 /** One declared route — the provider pick plus the upstream model id
  *  it serves. `model` absent = the registry key verbatim (the bare
@@ -28,9 +29,14 @@ export interface BrouterRoute {
  *  list; list order is preference order, [0] the primary pick. */
 export type BrouterModels = Record<string, BrouterRoute[]>;
 
-/** The `brouter` config section — `models` is the whole registry. */
+/** The `brouter` config section — the model's registry plus the path of
+ *  the route table that maps a task to a (provider, model) chain. */
 export interface BrouterConfig {
   models: BrouterModels;
+  /** the route table's path — the TOML file the routes live in */
+  routes?: string;
+  /** the decision model — the judge that picks the route (provider + mode) */
+  router?: FleetRouter;
 }
 
 /** Where a declared route sits — the model id it was declared under
@@ -68,10 +74,28 @@ const str = (v: unknown): string | undefined =>
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+/** A section's own bag — anything that is not a table is an empty bag. */
+const rawBag = (v: unknown): Record<string, unknown> => (isPlainObject(v) ? v : {});
+
 /** The label a parse warning names — `x`, or `x[2]` for the third
  *  route under key `x`. */
 function atLabel(at: RouteAt): string {
   return at.index === undefined ? at.key : `${at.key}[${at.index}]`;
+}
+
+/** The optional model — a present-but-bad model drops the field, not the
+ *  route. */
+function routeModel(at: RouteAt, v: Record<string, unknown>): string | undefined {
+  if (v.model === undefined) {
+    return undefined;
+  }
+  const model = str(v.model);
+  if (model === undefined) {
+    console.error(
+      `bro.config: brouter.models.${atLabel(at)}.model must be a non-empty string — field dropped`
+    );
+  }
+  return model;
 }
 
 /** The `{provider, model?}` route form — `provider` is required, a
@@ -82,12 +106,7 @@ function routeObject(at: RouteAt, v: Record<string, unknown>): BrouterRoute | nu
     console.error(`bro.config: brouter.models.${atLabel(at)} requires "provider" — route dropped`);
     return null;
   }
-  const model = v.model === undefined ? undefined : str(v.model);
-  if (v.model !== undefined && model === undefined) {
-    console.error(
-      `bro.config: brouter.models.${atLabel(at)}.model must be a non-empty string — field dropped`
-    );
-  }
+  const model = routeModel(at, v);
   return model === undefined ? { provider } : { provider, model };
 }
 
@@ -126,16 +145,25 @@ function routeList(at: RouteAt, v: unknown): BrouterRoute[] | null {
  *  parse independently; the absent registry is 'off', not an error). */
 function modelsBag(raw: unknown): Record<string, unknown> {
   if (!isPlainObject(raw)) {
-    if (raw !== undefined) {
-      console.error('bro.config: brouter must be an object — section dropped');
-    }
+    return droppedBag(raw);
+  }
+  if (raw.models === undefined) {
     return {};
   }
-  if (raw.models !== undefined && !isPlainObject(raw.models)) {
+  if (!isPlainObject(raw.models)) {
     console.error('bro.config: brouter.models must be an object — field dropped');
     return {};
   }
-  return isPlainObject(raw.models) ? raw.models : {};
+  return raw.models;
+}
+
+/** The whole section is not a table — the bag is empty, and a section
+ *  that WAS declared says so. */
+function droppedBag(raw: unknown): Record<string, unknown> {
+  if (raw !== undefined) {
+    console.error('bro.config: brouter must be an object — section dropped');
+  }
+  return {};
 }
 
 /** One registry entry's routes — null when the entry drops: an empty
@@ -167,6 +195,7 @@ function modelEntry(models: BrouterModels, id: string, v: unknown): ModelEntry |
  *  rule as `fleet.routing` chain entries). */
 export function parseBrouter(raw: unknown): BrouterConfig {
   const models: BrouterModels = {};
+  const bag = rawBag(raw);
   for (const [id, v] of Object.entries(modelsBag(raw))) {
     const entry = modelEntry(models, id, v);
     if (entry === null) {
@@ -182,7 +211,56 @@ export function parseBrouter(raw: unknown): BrouterConfig {
       configurable: true,
     });
   }
-  return { models };
+  const routes = routeTablePath(bag);
+  const router = decisionModel(bag.router);
+  return {
+    models,
+    ...(routes === undefined ? {} : { routes }),
+    ...(router === undefined ? {} : { router }),
+  };
+}
+
+/** The decision modes the table accepts. */
+const ROUTER_MODES = new Set(['shadow', 'enforce', 'off']);
+
+/** The mode — one of the three the table accepts. */
+function isRouterMode(mode: unknown): mode is FleetRouter['mode'] {
+  return typeof mode === 'string' && ROUTER_MODES.has(mode);
+}
+
+/** The decision model — the judge provider and the mode. Absent means the
+ *  table's own order decides; 'shadow' journals the model's opinion and
+ *  picks nothing; 'enforce' lets a confident pick win. */
+function decisionModel(raw: unknown): FleetRouter | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const o = rawBag(raw);
+  const provider = str(o.provider) ?? '';
+  const mode = o.mode;
+  if (provider === '' || !isRouterMode(mode)) {
+    console.error(
+      'bro.config: brouter.router requires provider + mode (shadow|enforce|off) — section dropped'
+    );
+    return undefined;
+  }
+  return { provider, mode };
+}
+
+/** The route table's path — a non-empty string, or nothing. */
+function routeTablePath(raw: unknown): string | undefined {
+  if (!isPlainObject(raw)) {
+    return undefined;
+  }
+  const value = raw.routes;
+  if (value === undefined) {
+    return undefined;
+  }
+  const path = str(value);
+  if (path === undefined) {
+    console.error('bro.config: brouter.routes must be a path — field dropped');
+  }
+  return path;
 }
 
 /** The registry's offline catalog — every model id statically known

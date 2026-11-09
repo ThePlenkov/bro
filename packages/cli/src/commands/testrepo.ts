@@ -213,11 +213,19 @@ for (let i = 0; i < args.length; i++) {
   if (t === '--json') continue
   if (t.startsWith('--')) {
     const k = t.slice(2)
-    if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
+    const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
-  } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+  } else if (/^-\\w$/.test(t)) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (valueFlagsShort.has(k)) {
+      fail('create -' + k + ' requires a value')
+    } else {
+      flags[k] = true
+    }
   } else pos.push(t)
 }
 // real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
@@ -281,7 +289,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       (r) => r.status === 'open' && !(r.labels || []).some((l) => ex.includes(l))
     )
     rows.sort((a, b) => (a.priority - b.priority) || String(a.created_at).localeCompare(String(b.created_at)))
-    jsonOut(rows)
+    // real bd truncates a deep queue to its page — tests can opt in
+    // with db.readyLimit to prove callers do not rely on membership
+    const lim = db.readyLimit
+    jsonOut(typeof lim === 'number' ? rows.slice(0, lim) : rows)
     break
   }
   case 'show': {
@@ -311,7 +322,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: flags.title || '',
+      title: typeof flags.title === 'string' ? flags.title : (flags.title === true ? fail('create --title requires a value') : (flags.title ? String(flags.title) : '')),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
@@ -327,7 +338,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
     }
     save(db)
-    jsonOut({ id })
+    // real bd answers create with the created row — callers read
+    // title/status back off it, not just the id
+    jsonOut(row(id))
     break
   }
   case 'update': {
@@ -429,8 +442,30 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       const r = row(pos[2])
       if (!r) fail('not found: ' + pos[2])
       db.deps = db.deps || []
-      db.deps.push({ from: pos[2], to: pos[3] })
+      // --type persists with the edge — a hydrated dep list filters
+      // on it, and bd's default is 'blocks'
+      db.deps.push({ from: pos[2], to: pos[3], type: flags.type || 'blocks' })
       save(db)
+      break
+    }
+    if (pos[1] === 'list' && pos.length === 3) {
+      // real bd answers a single-id dep list with hydrated neighbor
+      // rows carrying dependency_type; bare and multi-id queries keep
+      // the raw edge records (wiring asserts read those)
+      const want = pos[2]
+      const rels = flags.t === undefined ? undefined : [].concat(flags.t)
+      const up = Object.keys(flags).includes('direction=up')
+      const out = []
+      for (const e of db.deps || []) {
+        const from = e.issue_id !== undefined ? e.issue_id : e.from
+        const to = e.depends_on_id !== undefined ? e.depends_on_id : e.to
+        const other = up ? (to === want ? from : undefined) : (from === want ? to : undefined)
+        if (other === undefined) continue
+        if (rels !== undefined && !rels.includes(e.type)) continue
+        const r = row(other)
+        if (r !== undefined) out.push({ ...r, dependency_type: e.type })
+      }
+      jsonOut(out)
       break
     }
     jsonOut(db.deps || [])
@@ -554,16 +589,30 @@ echo "Error: No such object" >&2; exit 1
  *  `t.skip` should print. `undefined` means bd fully works. */
 export function bdStoreBlocker(): string | undefined {
   const dir = tmpDir('bro-bd-probe-');
-  if (bdTry(['--version'], 10_000, dir).code !== 0) {
-    return 'bd not installed';
+  try {
+    if (bdTry(['--version'], 10_000, dir).code !== 0) {
+      return 'bd not installed';
+    }
+    // a checkout-shaped scratch: a bd build that insists on a git
+    // worktree for init must probe "store works", never "dir had no git"
+    git(['init', '-q'], dir);
+    const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
+    return r.code === 0
+      ? undefined
+      : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
+  } finally {
+    // bd/dolt can spawn a background daemon on init; rmSync the probe dir
+    // must retry and not rely on the process-exit sweep (which races the
+    // still-starting daemon). Remove from the exit sweep to avoid double
+    // cleanup.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      const idx = tmpDirs.indexOf(dir);
+      if (idx >= 0) tmpDirs.splice(idx, 1);
+    } catch {
+      // keep the directory registered so the exit sweep still sees it
+    }
   }
-  // a checkout-shaped scratch: a bd build that insists on a git
-  // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q'], dir);
-  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
-  return r.code === 0
-    ? undefined
-    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
 }
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
@@ -909,6 +958,18 @@ const facade = {
       return p.state === 'OPEN' ? [p.number] : []
     }
     return s.prOpened ? [s.pr ?? 7] : []
+  }),
+  // the fleet listing the ceiling + reconcile read — same projection
+  // rules as prsForBranch (prs map authoritative, flat flag legacy)
+  openPrs: () => withState((s) => {
+    if (s.prs) {
+      return Object.values(s.prs)
+        .filter((p) => (p.state ?? s.prState ?? 'OPEN') === 'OPEN')
+        .map((p) => ({ pr: p.number, headRef: p.headRef }))
+    }
+    return s.prOpened
+      ? [{ pr: s.pr ?? 7, headRef: s.openPrHead ?? s.headRef ?? 'loop/fx-a' }]
+      : []
   }),
   parsePrRef: () => null,
   prMeta: (t) => withState((s) => {
@@ -1260,6 +1321,7 @@ const markPrOpened = (s) => {
     }
   }
   s.prOpened = true
+  s.openPrHead = branch
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this
