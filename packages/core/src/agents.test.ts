@@ -631,6 +631,28 @@ describe('classifyExitCause', () => {
     );
   });
 
+  test('an earlier non-duration phrase cannot hide a later reset (bro-9eeld)', () => {
+    const now = Date.parse('2026-10-27T17:04:50Z');
+    // 'retry in the app' matches the phrase regex but carries no
+    // duration — the later 'try again in 5 minutes' still lands
+    assert.equal(
+      classifyExitCause('rate limit — retry in the app or try again in 5 minutes', 1, now).resetAt,
+      '2026-10-27T17:11:20.000Z'
+    );
+    // an unrelated word after a number is not a unit — 'more' must
+    // not add 5 minutes onto the 30-second hold
+    assert.equal(
+      classifyExitCause('rate limit, retry in 30 seconds or 5 more', 1, now).resetAt,
+      '2026-10-27T17:06:50.000Z'
+    );
+    // and a bare 'h'/'s' word alone still parses, while prose like
+    // '5 minutes' stays exact — 'mint' is not minutes
+    assert.equal(
+      classifyExitCause('rate limit, try again in 1 h', 1, now).resetAt,
+      '2026-10-27T18:06:20.000Z'
+    );
+  });
+
   test('the quoted clock mark beats the relative paraphrase (bro-9eeld)', () => {
     // the churn message verbatim — 'in 54 minutes' read as 18:59:44
     // while the mark said 19:01; the mark wins, plus margin

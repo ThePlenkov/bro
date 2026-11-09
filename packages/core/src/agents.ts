@@ -125,13 +125,28 @@ function retryAfterReset(text: string, now: number): string | undefined {
  *  (bro-9eeld — the single-pair read truncated the deadline by the
  *  trailing units). */
 function relReset(text: string, now: number): string | undefined {
-  const rel = /(?:try again|retry|resets?|available|ready) in\b/i.exec(text);
-  if (rel === null) {
-    return undefined;
+  // every phrase gets its own scan — prose like "retry in the app"
+  // must not hide a later "try again in 5 minutes" behind one match
+  const REL = /(?:try again|retry|resets?|available|ready) in\b/gi;
+  let rel: RegExpExecArray | null;
+  while ((rel = REL.exec(text)) !== null) {
+    const got = relScanFrom(text, rel.index + rel[0].length);
+    if (got !== undefined) {
+      return toIso(now + got);
+    }
+    if (REL.lastIndex === rel.index) break; // paranoia — zero-width guard
   }
+  return undefined;
+}
+
+/** The duration tail of one `... in ` match — the summed number+unit
+ *  pairs in milliseconds (margin included), or undefined when the
+ *  phrase carries none. */
+function relScanFrom(text: string, start: number): number | undefined {
   let ms = 0;
   let found = false;
-  let i = rel.index + rel[0].length;
+  let i = start;
+  const relEnd = start;
   const len = text.length;
   while (i < len) {
     // skip whitespace (bounded scan to avoid polynomial backtracking)
@@ -145,7 +160,7 @@ function relReset(text: string, now: number): string | undefined {
         text.charCodeAt(i) === 11)
     ) {
       i++;
-      if (i - (rel.index + rel[0].length) > 4096) break;
+      if (i - relEnd > 4096) break;
     }
     if (i >= len) break;
     // optional comma
@@ -226,18 +241,32 @@ function relReset(text: string, now: number): string | undefined {
     }
     if (i === startUnit) break;
     const unit = text.slice(startUnit, i).toLowerCase();
-    let unitKey = unit[0];
-    if (unit.startsWith('hour') || unit.startsWith('hr')) unitKey = 'h';
-    else if (unit.startsWith('min')) unitKey = 'm';
-    else if (unit.startsWith('sec')) unitKey = 's';
-    // 'ms'/'msec'/'milli…' BEFORE the single-letter 'm' fallback — a
-    // sub-second reset is not a minutes-long block
-    else if (unit.startsWith('ms') || unit.startsWith('milli')) unitKey = 'ms';
-    else if (unitKey === 'h' || unitKey === 'm' || unitKey === 's') {
-      // ok
-    } else {
-      break;
-    }
+    // exact unit words only — a bare first-letter fallback maps any
+    // adjacent word ('30 seconds 5 more' → +5 minutes) into the hold
+    const unitKey =
+      unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours'
+        ? 'h'
+        : unit === 'm' ||
+            unit === 'min' ||
+            unit === 'mins' ||
+            unit === 'minute' ||
+            unit === 'minutes'
+          ? 'm'
+          : unit === 's' ||
+              unit === 'sec' ||
+              unit === 'secs' ||
+              unit === 'second' ||
+              unit === 'seconds'
+            ? 's'
+            : unit === 'ms' ||
+                unit === 'msec' ||
+                unit === 'milli' ||
+                unit === 'millis' ||
+                unit === 'millisecond' ||
+                unit === 'milliseconds'
+              ? 'ms'
+              : undefined;
+    if (unitKey === undefined) break;
     ms += num * (UNIT_MS[unitKey] ?? 1_000);
     found = true;
     // '_' closes the phrase ('5m_ago' is not a duration); a digit is the
@@ -252,8 +281,7 @@ function relReset(text: string, now: number): string | undefined {
   }
   // "try again in 0 seconds" is a valid immediate reset — do not leave
   // the entry blocked indefinitely (bro-9eeld)
-  const total = ms === 0 ? RESET_MARK_MARGIN_MS : ms + RESET_MARK_MARGIN_MS;
-  return toIso(now + total);
+  return ms === 0 ? RESET_MARK_MARGIN_MS : ms + RESET_MARK_MARGIN_MS;
 }
 
 /** The provider's quoted clock mark — `reset at 19:01 UTC`, `(reset

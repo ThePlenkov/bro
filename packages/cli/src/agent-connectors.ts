@@ -5502,6 +5502,17 @@ function copilotTerminalPatch(
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
   }
+  // terminal verdicts are idempotent — a repeated harvest of the same
+  // classified death must not stack another backoff streak, or one
+  // failure escalates 30s→60s→120s on nothing but status reads
+  if (entry.cause !== undefined && entry.cause !== 'ok') {
+    return {
+      exitStatus: typeof entry.exitStatus === 'number' ? entry.exitStatus : 1,
+      cause: entry.cause,
+      resetAt: entry.resetAt,
+      rateStreak: entry.rateStreak,
+    };
+  }
   const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
   const exitAt = Number.isNaN(stamp) ? Date.now() : stamp;
   const c =

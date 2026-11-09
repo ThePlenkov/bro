@@ -48,8 +48,9 @@ genuine hourly budget re-burn.
   mark is authoritative over the same message's "in N minutes"
   paraphrase. A mark followed by a `YYYY-MM-DD` date is left to
   `isoReset` (already exact).
-- Day-ambiguous marks resolve to the NEARER of today's/tomorrow's
-  occurrence at `now`: a mark already past reads as the lifted wall —
+- Day-ambiguous marks resolve to the NEAREST of yesterday's/today's/
+  tomorrow's occurrence at `now` — a previous-evening mark resolves to
+  yesterday: a mark already past reads as the lifted wall —
   lazy classification can read the tail hours after the death it stamps,
   and rolling a stale quote +24h would fabricate a day-long block.
 - Fuzzy forms get a safety margin — the observed early-unblock skew was
