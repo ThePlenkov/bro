@@ -22,7 +22,7 @@ import type {
   ScrollBoxRenderable,
 } from '@opentui/core';
 import { SyntaxStyle, TextAttributes } from '@opentui/core';
-import { onAnimationTick, render, useRenderer } from '@opentui/solid';
+import { onAnimationTick, render, useRenderer, useTerminalDimensions } from '@opentui/solid';
 import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import {
@@ -1252,6 +1252,7 @@ function Pane(props: {
   onToggleRow?: (id: number) => void;
 }) {
   const renderer = useRenderer();
+  const dims = useTerminalDimensions();
   const [frame, setFrame] = createSignal(0);
   onAnimationTick(10, () => setFrame(f => f + 1));
   const [scroller, setScroller] = createSignal<ScrollBoxRenderable>();
@@ -1341,7 +1342,14 @@ function Pane(props: {
                       item={item}
                       syntax={props.syntax}
                       selected={props.store.state.selected === id}
-                      width={() => Math.max(20, (scroller()?.viewport.width || renderer.width) - 2)}
+                      width={() =>
+                        // `dims()` is the reactive width source —
+                        // `scroller().viewport` is a live getter but
+                        // not a signal, so a pane resize never re-ran
+                        // the old accessor and rows kept the arm-time
+                        // (narrow-column) width. -3 = scrollbar+pad.
+                        Math.max(20, dims().width - 3)
+                      }
                       frame={frame}
                       findTool={findTool}
                       onToggleRow={props.onToggleRow}

@@ -582,6 +582,14 @@ describe('classifyExitCause', () => {
       '2026-10-06T00:00:00.000Z'
     );
     assert.equal(
+      classifyExitCause(
+        'Reached free model rate limit. Please try again at 2026-10-06T00:00:00Z',
+        1,
+        now
+      ).resetAt,
+      '2026-10-06T00:10:00.000Z'
+    );
+    assert.equal(
       classifyExitCause('x-ratelimit-reset: 1759700000', 1, now).resetAt,
       new Date(1759700000 * 1000).toISOString()
     );

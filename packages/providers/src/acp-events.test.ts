@@ -13,7 +13,7 @@ import {
   type BusBroker,
 } from '@broject/core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { agentEventRecord, agentTurnPlane } from './acp-events.ts';
+import { agentEventRecord, agentTurnPlane, DRAIN_DEFAULT_MS } from './acp-events.ts';
 
 // in-process git + the BRO_* badge read must never inherit the OUTER
 // session's pins — same scrub rule every fixture suite carries
@@ -309,6 +309,50 @@ describe('agentTurnPlane', () => {
         usages.map(e => (e.payload as { used: number }).used),
         [1, 5]
       );
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() honors a finite timeout override', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.stop('end_turn');
+      await plane.drain(50);
+      assert.ok(true);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() clamps an above-max timeout without throwing', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.stop('end_turn');
+      await plane.drain(3_000_000_000);
+      assert.ok(true);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() falls back to the default for NaN/0/negative', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      for (const v of [NaN, 0, -1]) {
+        const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+        plane.start();
+        plane.stop('end_turn');
+        await plane.drain(v);
+      }
+      assert.equal(DRAIN_DEFAULT_MS, 3_000);
     } finally {
       await broker.close();
     }

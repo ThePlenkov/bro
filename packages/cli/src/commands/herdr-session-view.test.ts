@@ -160,8 +160,8 @@ describe('viewVerdict — the pane reports its own feed', () => {
       {}
     )!;
     assert.equal(targetKey(ev), 'events|/a.events.jsonl');
-    // a streaming archive reports working even while the worker's
-    // doc verdict lags
+    // a proven-idle worker beats a stale mid-turn archive row — a
+    // crash or silence mid-turn must not pass for live work
     assert.deepEqual(
       viewVerdict(ev, {
         mode: 'events',
@@ -169,7 +169,7 @@ describe('viewVerdict — the pane reports its own feed', () => {
         rowLed: { state: 'working' },
         rowMode: 'streaming',
       }),
-      { led: { state: 'working' }, mode: 'streaming' }
+      { led: { state: 'idle' }, mode: 'worker quiet' }
     );
     // a stopped turn reads idle
     assert.deepEqual(
@@ -187,7 +187,8 @@ describe('viewVerdict — the pane reports its own feed', () => {
       led: { state: 'working' },
       mode: 'session events',
     });
-    // a blocked worker verdict wins over a stale working archive
+    // a blocked worker verdict wins over a stale working archive —
+    // and a non-blocked row's mode must not dress the worker's stop
     const blocked = resolveTarget(
       doc({ events: '/a.events.jsonl', led: { state: 'blocked' } }),
       '/repo/trees/t1',
@@ -200,7 +201,7 @@ describe('viewVerdict — the pane reports its own feed', () => {
         rowLed: { state: 'working' },
         rowMode: 'streaming',
       }),
-      { led: { state: 'blocked' }, mode: 'streaming' }
+      { led: { state: 'blocked' }, mode: 'worker exited' }
     );
   });
 });
@@ -479,6 +480,46 @@ describe('runSessionView --once', () => {
     const states = reports.map(c => c[c.indexOf('--state') + 1]);
     assert.deepEqual(states[states.length - 1], 'blocked');
     assert.ok(states.includes('working'));
+  });
+
+  test('a direct --events/--agent binding renders without the fleet doc', async () => {
+    const f = fixture();
+    const eventsPath = f.write(
+      'a.events.jsonl',
+      [
+        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
+        {
+          ts: '2026-01-01T00:00:01Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'DIRECT-CHUNK' },
+          },
+        },
+        { ts: '2026-01-01T00:00:02Z', session: 'ses_1', kind: 'turn', phase: 'stop' },
+      ]
+        .map(r => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    // no fleet doc at all — the line-mode pane the builders arm
+    // (`session-view <wt> --events <e> --agent <id>`) must still
+    // render; worktree-only resolution dropped native journals
+    await withEnv(f.env, () =>
+      runSessionView([f.worktree, '--once', '--events', eventsPath, '--agent', 'native-x'], f.opts)
+    );
+    const text = f.stdout();
+    assert.match(text, /DIRECT-CHUNK/, 'the bound archive renders verbatim');
+    const calls = callsOf(f.log);
+    const reports = calls.filter(c => c[1] === 'report-agent' && c.includes('--state'));
+    // the FINAL report is the verdict — the first fires before the
+    // archive drains and would read 'idle' even on an empty journal;
+    // the floor is 'unknown' (no registry entry), so the archive's
+    // own verdict (turn stopped → idle) is what rides on top
+    const report = reports.at(-1);
+    assert.equal(report?.[report.indexOf('--state') + 1], 'idle');
+    const meta = calls.find(c => c.includes('--display-agent'));
+    assert.equal(meta?.[meta.indexOf('--display-agent') + 1], 'native-x');
   });
 
   test('a cli provider state never spawns — the log tail renders', async () => {

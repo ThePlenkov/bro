@@ -30,6 +30,11 @@ export interface LoopConfig {
   /** Model override for the provider lane — meaningless on a raw
    *  template (the template carries its own flags). */
   model: string;
+  /** Seconds between supervised re-scans — `bro loop --every` and the
+   *  `loop install` want-marker cadence. The gate's own in-run poll
+   *  stays `--interval`; this is the outer pass cadence the daemon
+   *  re-enters the queue on. */
+  everySec: number;
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string;
@@ -58,6 +63,15 @@ export interface LoopConfig {
    *  and only gate service runs until a merge frees a slot. 1 is the
    *  near-serial shape (spec bro-zsmwq). */
   maxOpen: number;
+  /** Hard ceiling on TOTAL open fleet PRs — every open PR on a fleet
+   *  head (`work/`, `loop/`, `stack/`, `fix/bro-`), not just this
+   *  run's stack members. While the count is at or above it the loop
+   *  claims nothing: gate service and stale-PR reconcile run, pushes
+   *  hold (spec bro-jis0c). 0 = off. */
+  maxOpenTotal: number;
+  /** Linked-worktree hygiene mark — the run warns once it counts more
+   *  than this many checkouts (spec bro-jis0c). 0 = off. */
+  worktreeWarn: number;
   /** Estimated disk footprint of one open slot in MB — the worktree
    *  checkout plus bootstrap/agent litter (~350M observed for this
    *  repo's npm install). The disk floor prices every slot at this
@@ -97,6 +111,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   provider: '',
   profile: '',
   model: '',
+  everySec: 300,
   bootstrap: '',
   stallMin: 45,
   crashExitMs: 10_000,
@@ -105,6 +120,8 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   autoMerge: false,
   maxItems: 0,
   maxOpen: 3,
+  maxOpenTotal: 10,
+  worktreeWarn: 40,
   worktreeMb: 400,
   diskMinSlots: 2,
   batch: 1,

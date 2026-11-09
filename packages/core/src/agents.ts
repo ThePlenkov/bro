@@ -27,6 +27,8 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ConfigSection } from './config.ts';
+import type { Lease } from './leases.ts';
+import type { OnWall } from './routing.ts';
 import { acquireFileLock } from './filelock.ts';
 import { BD_NO_STORE } from './bd.ts';
 import { gitTry } from './git.ts';
@@ -370,21 +372,31 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
+const DEVIN_RATE_LIMIT_RE = /reached free model rate limit/i;
+const RATE_LIMIT_GRACE_MS = 10 * 60 * 1000;
+
 /** Provider reset extraction across the known header/prose forms —
  *  protocol-exact forms (retry-after seconds/HTTP-date, anchored ISO,
  *  epoch header) win over the fuzzy marks, and of the fuzzy forms the
  *  quoted clock mark still beats the same message's "in N minutes"
  *  paraphrase (bro-9eeld: the relative read unblocked ~66s before the
- *  mark the provider actually quoted). */
+ *  mark the provider actually quoted). A Devin free-tier wall
+ *  (`Reached free model rate limit …`) parks a grace beat past the
+ *  advertised reset — the window is a rolling refill, so spawning
+ *  exactly at the stamp re-drains it half-empty. */
 function parseResetAt(text: string, now: number): string | undefined {
-  return (
+  const base =
     retryAfterReset(text, now) ??
     httpDateReset(text) ??
     isoReset(text) ??
     epochReset(text) ??
     clockReset(text, now) ??
-    relReset(text, now)
-  );
+    relReset(text, now);
+  if (base === undefined || !DEVIN_RATE_LIMIT_RE.test(text)) {
+    return base;
+  }
+  const t = Date.parse(base);
+  return Number.isFinite(t) ? toIso(t + RATE_LIMIT_GRACE_MS) : base;
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
@@ -441,7 +453,34 @@ export type SpawnWorker =
       /** Display/agent-cli name for pins and trailers — the wrapped
        *  agent's own cli name, not the driver's. */
       cliName?: string;
+      /** ACP worker MCP server descriptors (opt-in). Bulk data rides
+       *  the payload — never argv, where a stdio server's `env`
+       *  credentials would be world-readable in ps/procfs. The backend
+       *  lands it as a 0600 artifact the worker reads via the
+       *  BRO_MCP_FILE pin. */
+      mcpServers?: unknown[];
     };
+
+/** The pipeline context a formula-driven spawn carries (spec
+ *  bro-7d5nb §traceability). Set by the pipeline driver — never by the
+ *  worker: the registry stamps it verbatim and the commit trailers it
+ *  feeds (`BRO-Formula`) are driver-attested hints `bro trace`
+ *  verifies against the registry, so a forged stamp is reported, not
+ *  trusted. Absent on ad-hoc and legacy spawns — provenance is never
+ *  fabricated. */
+export interface PipelineProvenance {
+  /** The formula's identity — its logical/file name. */
+  formula: string;
+  /** sha256 over the formula's raw bytes — the version identity
+   *  (`formulaSha()` in @broject/pipeline computes it). */
+  formulaSha: string;
+  /** The pipeline stage that produced this spawn (e.g. `work`). */
+  stage?: string;
+  /** The session the run attests — pinned into the worker's
+   *  BRO_SESSION_ID and recorded as the registry's `session_id`.
+   *  Defaults to the spawn's agentId pin. */
+  sessionId?: string;
+}
 
 /** What a backend needs to start a worker. `beadsDir` is the resolved
  *  shared-store identity — connectors MUST claim there, never in a
@@ -465,6 +504,8 @@ export interface SpawnSpec {
    *  spawn resolved to. Recorded into the registry and pinned into
    *  the worker's env; never set for the legacy template path. */
   provider?: string;
+  /** Opaque provider-account identity; defaults to the provider name. */
+  account?: string;
   /** The effective model (spawn flag > profile > provider entry). */
   model?: string;
   /** The routing lane the spawn resolved to (fleet.routing class —
@@ -476,8 +517,31 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Pipeline provenance — stamped into the registry and pinned into
+   *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
+   *  trailer). Absent on non-formula spawns. */
+  pipeline?: PipelineProvenance;
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker;
+  /** Pre-resolved fleet-routing candidates, in declared chain order.
+   *  prepareSpawn rewrites provider/account/model/worker/class from the
+   *  walked candidate under the registry lock; callers read them only
+   *  after prepareSpawn returns. */
+  route?: {
+    class: string;
+    onWall: OnWall;
+    candidates: Array<{
+      provider: string;
+      account: string;
+      model?: string;
+      worker: SpawnWorker;
+    }>;
+  };
+  /** The chain position the walk selected — prepareSpawn stamps it so
+   *  commitSpawn can pin the resume point (a respawn of a chain that
+   *  repeats a provider must continue from ITS occurrence). Callers
+   *  never set it; absent on unrouted spawns. */
+  routeIndex?: number;
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
    *  worktree under the registry lock before the claim lands, so
@@ -624,6 +688,12 @@ export interface AgentRegistryEntry {
   backend: string;
   spawnedAt: string;
   provider?: string;
+  /** Opaque account identity; legacy rows fall back to provider. */
+  account?: string;
+  leaseKey?: string;
+  leaseToken?: string;
+  leaseRecord?: Lease;
+  observedAt?: string;
   model?: string;
   acpSessionId?: string;
   /** Session-kind lane the run was admitted under — written at spawn so
@@ -632,6 +702,10 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string;
+  /** The chain position the routed run was admitted at — the resume
+   *  point the next chain walk reads when the chain repeats this
+   *  provider (spec bro-1x7p). Absent on unrouted entries. */
+  routeIndex?: number;
   /** agentId of the delegating agent (spec bro-z8tng) — same
    *  provenance role as provider/model; absent on direct spawns. */
   delegatedBy?: string;
@@ -640,6 +714,17 @@ export interface AgentRegistryEntry {
    *  bro-l8c4f.5). A respawn mints a fresh one; entries written before
    *  the handshake contract carry none. */
   runId?: string;
+  /** Pipeline provenance (spec bro-7d5nb §traceability) — the formula
+   *  the run was admitted under (id + sha256 over its raw bytes), the
+   *  stage that produced the spawn, and the session the run attests
+   *  (the pinned BRO_SESSION_ID value). Snake_case on purpose: these
+   *  are the spec's wire names, shared with the journal's `formula_sha`
+   *  rows, so every stamped surface speaks one vocabulary. Absent on
+   *  non-pipeline spawns. */
+  formula?: string;
+  formula_sha?: string;
+  session_id?: string;
+  pipeline_stage?: string;
   [key: string]: unknown;
 }
 

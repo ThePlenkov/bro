@@ -29,6 +29,13 @@ describe('loopSection', () => {
     assert.equal(cfg.maxItems, 0);
   });
 
+  test('everySec — the supervised re-scan cadence; a sub-second busy loop falls back', () => {
+    assert.equal(loopSection({ everySec: 120 }).everySec, 120);
+    assert.equal(loopSection({ everySec: 0.5 }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+    assert.equal(loopSection({ everySec: -1 }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+    assert.equal(loopSection({ everySec: 'fast' }).everySec, DEFAULT_LOOP_CONFIG.everySec);
+  });
+
   test('zero timeouts fall back — 0 would park every gate instantly', () => {
     const cfg = loopSection({ stallMin: 0, mergeTimeoutMin: 0, maxItems: 0 });
     assert.equal(cfg.stallMin, DEFAULT_LOOP_CONFIG.stallMin);
@@ -49,6 +56,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
+      everySec: 120,
       stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
@@ -70,6 +78,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
+      everySec: 120,
       stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
@@ -77,6 +86,8 @@ describe('loopSection', () => {
       autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
+      maxOpenTotal: 10,
+      worktreeWarn: 40,
       worktreeMb: 350,
       diskMinSlots: 3,
       batch: 6,
@@ -286,21 +297,24 @@ describe('prompts', () => {
 });
 
 describe('expandAgentCmd', () => {
-  test('placeholder is replaced with the quoted path', () => {
+  test('placeholder is replaced with the env reference', () => {
     assert.equal(
-      expandAgentCmd('devin --prompt-file {promptFile} -p', '/tmp/wt/p.md'),
-      "devin --prompt-file '/tmp/wt/p.md' -p"
+      expandAgentCmd('devin --prompt-file {promptFile} -p'),
+      'devin --prompt-file "$BRO_PROMPT_FILE" -p'
     );
   });
 
-  test('no placeholder → path appended as the last arg', () => {
-    assert.equal(expandAgentCmd('myagent run', '/tmp/p.md'), "myagent run '/tmp/p.md'");
+  test('no placeholder → the env reference appends as the last arg', () => {
+    assert.equal(expandAgentCmd('myagent run'), 'myagent run "$BRO_PROMPT_FILE"');
   });
 
-  test('paths with quotes are escaped', () => {
+  test('an empty template still names only the env reference', () => {
+    // the prompt path never enters the line — injection by filename is
+    // impossible no matter what the artifact is called
+    assert.equal(expandAgentCmd(''), '"$BRO_PROMPT_FILE"');
     assert.equal(
-      expandAgentCmd('a {promptFile}', "/tmp/o'brien/p.md"),
-      "a '/tmp/o'\\''brien/p.md'"
+      expandAgentCmd('a {promptFile} b {promptFile}'),
+      'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"'
     );
   });
 });
