@@ -197,6 +197,13 @@ function commandResolver(options: CliOptions | undefined): () => Promise<Command
         return { cmd: 'bro', args: [] };
       }
       if (await exitsZero('npx', ['--version'])) {
+        if (await exitsZero('npx', ['-y', '--prefer-offline', NPX_PIN, 'hooks'])) {
+          return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] };
+        }
+        const latest = '@broject/bro';
+        if (await exitsZero('npx', ['-y', '--prefer-offline', latest, 'hooks'])) {
+          return { cmd: 'npx', args: ['-y', '--prefer-offline', latest] };
+        }
         return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] };
       }
       return null;
