@@ -19,7 +19,7 @@ const full = (over: Partial<WatchdogBaselines> = {}): WatchdogBaselines => ({
   unit: { state: 'active', mainPid: 1583595, nRestarts: 0 },
   daemon: { pid: 6936, alive: true, logAgeSec: 10, etimedout: 24061 },
   loopOut: { lines: 17042, ageSec: 12, etimedout: 11888 },
-  prs: { open: 77, ours: 57, foreign: 20 },
+  prs: { open: 77, ours: 57, foreign: 20, capped: false },
   disk: { path: '/tmp', usePercent: 90 },
   memory: { swapUsedBytes: 8.5 * 1024 ** 3, memAvailableBytes: 5.4 * 1024 ** 3 },
   worktrees: { count: 87 },
@@ -104,10 +104,10 @@ describe('splitSlots', () => {
   });
 
   test('a live worker is in flight; a dead record is residue', () => {
-    const { slots, residue } = splitSlots(
-      [run({ slug: 'bro-live', pid: 4242 }), run({ slug: 'bro-dead', pid: 4343, state: 'dead' })],
-      1583595
-    );
+    const { slots, residue } = splitSlots({
+      runs: [run({ slug: 'bro-live', pid: 4242 }), run({ slug: 'bro-dead', pid: 4343, state: 'dead' })],
+      mainPid: 1583595,
+    });
     assert.deepEqual(
       slots.map(s => s.slug),
       ['bro-live']
@@ -119,10 +119,10 @@ describe('splitSlots', () => {
     // the real-world shape: 25 loop/ records carried the supervisor pid
     // because the run never settled — reporting them as in flight would
     // send the orchestrator chasing ghosts
-    const { slots, residue } = splitSlots(
-      [run({ slug: 'bro-ghost', pid: 1583595 }), run({ slug: 'bro-real', pid: 4242 })],
-      1583595
-    );
+    const { slots, residue } = splitSlots({
+      runs: [run({ slug: 'bro-ghost', pid: 1583595 }), run({ slug: 'bro-real', pid: 4242 })],
+      mainPid: 1583595,
+    });
     assert.deepEqual(
       slots.map(s => s.slug),
       ['bro-real']
@@ -131,7 +131,10 @@ describe('splitSlots', () => {
   });
 
   test('unit degraded (mainPid null): the filter falls silent and reports records as they are', () => {
-    const { slots, residue } = splitSlots([run({ slug: 'bro-ghost', pid: 1583595 })], null);
+    const { slots, residue } = splitSlots({
+      runs: [run({ slug: 'bro-ghost', pid: 1583595 })],
+      mainPid: null,
+    });
     assert.equal(slots.length, 1);
     assert.equal(residue, 0);
   });
@@ -223,7 +226,7 @@ describe('collectBaselines', () => {
   test('a fresh repo degrades honestly on the planes it cannot measure', () => {
     const { root, main } = initRepo('bro-watchdog-');
     inside(main, root, () => {
-      const b = collectBaselines(main, Date.UTC(2026, 10, 3, 10, 42, 1));
+      const b = collectBaselines({ dir: main, now: Date.UTC(2026, 10, 3, 10, 42, 1) });
       // no loop.out, no daemon record in a fresh repo → honest degradation
       assert.ok('unavailable' in b.loopOut, JSON.stringify(b.loopOut));
       assert.ok('unavailable' in b.daemon, JSON.stringify(b.daemon));
@@ -239,7 +242,7 @@ describe('collectBaselines', () => {
   test('host planes are well-formed either way, never half-objects', () => {
     const { root, main } = initRepo('bro-watchdog-host-');
     inside(main, root, () => {
-      const b = collectBaselines(main, Date.UTC(2026, 10, 3, 10, 42, 1));
+      const b = collectBaselines({ dir: main, now: Date.UTC(2026, 10, 3, 10, 42, 1) });
       assert.equal(b.ts, '2026-11-03T10:42:01Z');
       // git works here — a count, never a guess
       assert.ok(!('unavailable' in b.worktrees), JSON.stringify(b.worktrees));
@@ -260,16 +263,16 @@ describe('collectBaselines', () => {
   });
   test('meminfo parsing refuses malformed values instead of measuring zero', () => {
     const good = 'SwapTotal:       8192 kB\nSwapFree:  1024 kB\nMemAvailable:  4096 kB\n';
-    assert.deepEqual(parseMeminfo(good), {
+    assert.deepEqual(parseMeminfo({ text: good }), {
       swapUsedBytes: 7 * 1024 * 1024,
       memAvailableBytes: 4096 * 1024,
     });
     // an empty value is not a zero — cubic caught the parser reading it as one
-    assert.equal(parseMeminfo('SwapTotal:\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
+    assert.equal(parseMeminfo({ text: 'SwapTotal:\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
     // the unit and the digits are part of the measurement
-    assert.equal(parseMeminfo('SwapTotal: 1 gb\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
-    assert.equal(parseMeminfo('SwapTotal: abc kB\nSwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
-    assert.equal(parseMeminfo('SwapFree: 0 kB\nMemAvailable: 1 kB\n'), null);
+    assert.equal(parseMeminfo({ text: 'SwapTotal: 1 gb\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
+    assert.equal(parseMeminfo({ text: 'SwapTotal: abc kB\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
+    assert.equal(parseMeminfo({ text: 'SwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
   });
 });
 

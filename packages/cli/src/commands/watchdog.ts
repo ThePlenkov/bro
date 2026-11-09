@@ -71,6 +71,53 @@ const GH_TIMEOUT_MS = 10_000;
 export interface Unavailable {
   unavailable: string;
 }
+
+/** Probe input value objects — a signature takes the domain it reads,
+ *  never a bare string/number (the CodeScene primitive ceiling, same
+ *  fix the mesh package took for its own finding). */
+
+/** A file the probes read — the path plus nothing else. */
+interface ProbeFile {
+  path: string;
+}
+/** The watched checkout root — one probe, one repo. */
+interface ProbeDir {
+  dir: string;
+}
+/** Repo root plus the tick's clock — age math pins to the tick, never
+ *  to a now() read somewhere downstream. */
+interface ProbeAt extends ProbeDir {
+  now: number;
+}
+/** A scan window — the chunk plus where it ends (end defaults to the
+ *  buffer's own length). */
+interface ScanWindow {
+  buf: Buffer;
+  end?: number;
+}
+/** systemctl's raw `key=value` payload, unparsed. */
+interface UnitRowOut {
+  stdout: string;
+}
+/** daemon.log's probe facts — where it would be, whether it exists,
+ *  and the tick clock. */
+interface LogFileProbe {
+  path: string | null;
+  exists: boolean;
+  now: number;
+}
+/** The slot split's input — the run records plus the supervisor's pid
+ *  to exclude (null = unit degraded, exclude nothing). */
+export interface SlotSplit {
+  runs: readonly LoopRunView[];
+  mainPid: number | null;
+}
+/** The baseline frame — repo root plus an injectable clock so tests
+ *  pin the tick. */
+export interface BaselineProbe {
+  dir: string;
+  now?: number;
+}
 export interface WatchdogUnit {
   state: string;
   mainPid: number | null;
@@ -93,6 +140,9 @@ export interface WatchdogPrs {
   open: number;
   ours: number;
   foreign: number;
+  /** true at the --limit ceiling — exactly-N rows is indistinguishable
+   *  from a truncated sample, so rise/drop reads are unreliable then. */
+  capped: boolean;
 }
 export interface WatchdogDisk {
   path: string;
@@ -143,13 +193,13 @@ const isUnavailable = <T>(v: T | Unavailable): v is Unavailable =>
 
 const msg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-const firstLine = (text: string): string => {
-  const line = text.split('\n').find(l => l.trim() !== '') ?? '';
+const firstLine = (t: { text: string }): string => {
+  const line = t.text.split('\n').find(l => l.trim() !== '') ?? '';
   return line.trim().slice(0, 120);
 };
 
-const ageSec = (mtimeMs: number, now: number): number =>
-  Math.max(0, Math.round((now - mtimeMs) / 1000));
+const ageSec = (at: { mtimeMs: number; now: number }): number =>
+  Math.max(0, Math.round((at.now - at.mtimeMs) / 1000));
 
 /** Line count + the last-ETIMEDOUT line number over an append-only log,
  *  scanned in fixed byte chunks: neither loop.out nor daemon.log has a
@@ -166,10 +216,11 @@ const NEEDLE = Buffer.from('ETIMEDOUT');
  *  so the scan loop never nests a counting loop inside itself (CodeScene
  *  depth ceiling): the line number of a match at `end` is
  *  `countNewlines(...) + 1`. */
-const countNewlines = (buf: Buffer, end: number = buf.length): number => {
+const countNewlines = (w: ScanWindow): number => {
+  const end = w.end ?? w.buf.length;
   let n = 0;
   for (let i = 0; i < end; i++) {
-    if (buf[i] === 0x0a) {
+    if (w.buf[i] === 0x0a) {
       n++;
     }
   }
@@ -202,9 +253,10 @@ export function scanLog(readChunk: (buffer: Buffer) => number): {
     const window = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
     const at = window.lastIndexOf(NEEDLE);
     if (at !== -1) {
-      etimedout = linesBefore - countNewlines(tail) + countNewlines(window, at) + 1;
+      etimedout =
+        linesBefore - countNewlines({ buf: tail }) + countNewlines({ buf: window, end: at }) + 1;
     }
-    linesBefore += countNewlines(chunk);
+    linesBefore += countNewlines({ buf: chunk });
     // concat allocates, so the subarray view below is safe to retain —
     // unlike a view into the reused read buffer
     tail = Buffer.concat([tail, chunk]).subarray(-overlap);
@@ -214,10 +266,10 @@ export function scanLog(readChunk: (buffer: Buffer) => number): {
 
 /** `scanLog` over a real file — null when it cannot be opened (the
  *  caller degrades the plane rather than reporting a fabricated zero). */
-function scanLogFile(path: string): { lines: number; etimedout: number | null } | null {
+function scanLogFile(f: ProbeFile): { lines: number; etimedout: number | null } | null {
   let fd: number;
   try {
-    fd = openSync(path, 'r');
+    fd = openSync(f.path, 'r');
   } catch {
     return null;
   }
@@ -237,9 +289,9 @@ function scanLogFile(path: string): { lines: number; etimedout: number | null } 
   }
 }
 
-const readText = (path: string): string | null => {
+const readText = (f: ProbeFile): string | null => {
   try {
-    return readFileSync(path, 'utf8');
+    return readFileSync(f.path, 'utf8');
   } catch {
     return null;
   }
@@ -270,9 +322,9 @@ function spawnUnitRow(): string | null {
   }
 }
 
-function parseUnitRow(stdout: string): WatchdogUnit | Unavailable {
+function parseUnitRow(row: UnitRowOut): WatchdogUnit | Unavailable {
   const kv = new Map(
-    stdout.split('\n').map(l => {
+    row.stdout.split('\n').map(l => {
       const i = l.indexOf('=');
       return [i === -1 ? l : l.slice(0, i), i === -1 ? '' : l.slice(i + 1)] as const;
     })
@@ -283,7 +335,9 @@ function parseUnitRow(stdout: string): WatchdogUnit | Unavailable {
   }
   const num = (key: string): number | null => {
     const v = Number(kv.get(key));
-    return Number.isFinite(v) && v !== 0 ? v : null;
+    // external data: a fractional MainPID/NRestarts is malformed, not a
+    // count — only genuine integers survive, the rest degrade to null
+    return Number.isInteger(v) && v !== 0 ? v : null;
   };
   return {
     state,
@@ -297,7 +351,7 @@ function readUnit(): WatchdogUnit | Unavailable {
   if (stdout === null) {
     return unavailable('systemctl unavailable');
   }
-  return parseUnitRow(stdout);
+  return parseUnitRow({ stdout });
 }
 
 /** `gh pr list --state open --limit 100 --json …` spawn — its own
@@ -306,13 +360,13 @@ function readUnit(): WatchdogUnit | Unavailable {
  *  network (cubic P2). */
 type SpawnResult = { ok: true; out: string } | { ok: false; why: string };
 
-function spawnOpenPrs(dir: string): SpawnResult {
+function spawnOpenPrs(wd: ProbeDir): SpawnResult {
   try {
     const r = spawnSync(
       'gh', // NOSONAR — PATH lookup is the contract (same as gh/glab in @broject/core)
       PR_ARGS,
       {
-        cwd: dir,
+        cwd: wd.dir,
         encoding: 'utf8',
         timeout: GH_TIMEOUT_MS,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -322,7 +376,7 @@ function spawnOpenPrs(dir: string): SpawnResult {
       return { ok: false, why: r.error.message };
     }
     if (r.status !== 0) {
-      const why = firstLine(r.stderr ?? '') || `exit ${r.status}`;
+      const why = firstLine({ text: r.stderr ?? '' }) || `exit ${r.status}`;
       return { ok: false, why };
     }
     if (!r.stdout) {
@@ -334,8 +388,8 @@ function spawnOpenPrs(dir: string): SpawnResult {
   }
 }
 
-function readPrs(dir: string): WatchdogPrs | Unavailable {
-  const spawned = spawnOpenPrs(dir);
+function readPrs(wd: ProbeDir): WatchdogPrs | Unavailable {
+  const spawned = spawnOpenPrs(wd);
   if (!spawned.ok) {
     return unavailable(`gh pr list failed: ${spawned.why}`);
   }
@@ -345,7 +399,12 @@ function readPrs(dir: string): WatchdogPrs | Unavailable {
       return unavailable('gh pr list returned a non-array');
     }
     const ours = rows.filter(p => OURS.test(p.headRefName ?? '')).length;
-    return { open: rows.length, ours, foreign: rows.length - ours };
+    return {
+      open: rows.length,
+      ours,
+      foreign: rows.length - ours,
+      capped: rows.length >= PR_LIMIT,
+    };
   } catch (err) {
     return unavailable(`gh pr list unreadable: ${msg(err)}`);
   }
@@ -357,7 +416,8 @@ function readPrs(dir: string): WatchdogPrs | Unavailable {
  *  and the reserved-blocks shortcut `(blocks-bavail)/blocks` reads 18 —
  *  only `ceil(used / (used + avail))` reproduces 14 (and tmpfs's 72).
  *  Non-POSIX or a vanished mount degrades. */
-function readDisk(path: string = DISK_PATH): WatchdogDisk | Unavailable {
+function readDisk(f: ProbeFile = { path: DISK_PATH }): WatchdogDisk | Unavailable {
+  const path = f.path;
   try {
     const s = statfsSync(path);
     const total = s.blocks * s.bsize;
@@ -377,11 +437,11 @@ function readDisk(path: string = DISK_PATH): WatchdogDisk | Unavailable {
 /** /proc/meminfo — the swap/mem plane of the escalation thresholds. Only
  *  Linux carries it; anywhere else the line prints unavailable. */
 function readMemory(): WatchdogMemory | Unavailable {
-  const text = readText('/proc/meminfo');
+  const text = readText({ path: '/proc/meminfo' });
   if (text === null) {
     return unavailable('no /proc/meminfo (not Linux?)');
   }
-  const parsed = parseMeminfo(text);
+  const parsed = parseMeminfo({ text });
   if (parsed === null) {
     return unavailable('meminfo missing or malformed SwapTotal/SwapFree/MemAvailable');
   }
@@ -394,10 +454,10 @@ function readMemory(): WatchdogMemory | Unavailable {
  *  zero). Plain string parsing, never a constructed RegExp: a non-literal
  *  pattern is a security finding on every static engine (Codacy's
  *  critical on this PR). */
-export function parseMeminfo(text: string): WatchdogMemory | null {
+export function parseMeminfo(m: { text: string }): WatchdogMemory | null {
   const kb = (key: string): number | null => {
     const prefix = `${key}:`;
-    const line = text.split('\n').find(l => l.startsWith(prefix));
+    const line = m.text.split('\n').find(l => l.startsWith(prefix));
     if (line === undefined) {
       return null;
     }
@@ -427,10 +487,10 @@ export function parseMeminfo(text: string): WatchdogMemory | null {
   return { swapUsedBytes: Math.max(0, swapTotal - swapFree), memAvailableBytes: avail };
 }
 
-function readWorktrees(dir: string): WatchdogWorktrees | Unavailable {
-  const r = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']);
+function readWorktrees(wd: ProbeDir): WatchdogWorktrees | Unavailable {
+  const r = gitTry(['-C', wd.dir, 'worktree', 'list', '--porcelain']);
   if (r.code !== 0) {
-    const why = firstLine(r.err) || `exit ${r.code}`;
+    const why = firstLine({ text: r.err }) || `exit ${r.code}`;
     return unavailable(`git worktree list failed: ${why}`);
   }
   const count = r.out.split('\n').filter(l => l.startsWith('worktree ')).length;
@@ -440,20 +500,18 @@ function readWorktrees(dir: string): WatchdogWorktrees | Unavailable {
 /** daemon.log's age and ETIMEDOUT baseline — read apart from the record
  *  so each side stays under the complexity ceiling. */
 function readLogFacts(
-  path: string | null,
-  exists: boolean,
-  now: number
+  lf: LogFileProbe
 ): { logAgeSec: number | null; etimedout: number | null } {
-  if (path === null || !exists) {
+  if (lf.path === null || !lf.exists) {
     return { logAgeSec: null, etimedout: null };
   }
   let logAge: number | null = null;
   try {
-    logAge = ageSec(statSync(path).mtimeMs, now);
+    logAge = ageSec({ mtimeMs: statSync(lf.path).mtimeMs, now: lf.now });
   } catch {
     logAge = null;
   }
-  const stats = scanLogFile(path);
+  const stats = scanLogFile({ path: lf.path });
   return { logAgeSec: logAge, etimedout: stats === null ? null : stats.etimedout };
 }
 /** The daemon plane: `daemon.json`'s armer (alive?) plus daemon.log's age
@@ -462,14 +520,14 @@ function readLogFacts(
  *  degrades instead of reporting a row of nulls. Liveness pairs the pid
  *  with the record's `/proc` start time: a bare pid check lets a recycled
  *  pid impersonate the daemon (cubic P1). */
-function readDaemon(dir: string, now: number): WatchdogDaemon | Unavailable {
-  const rec = readDaemonRecord(dir);
-  const logPath = daemonLogPath(dir);
+function readDaemon(at: ProbeAt): WatchdogDaemon | Unavailable {
+  const rec = readDaemonRecord(at.dir);
+  const logPath = daemonLogPath(at.dir);
   const logExists = logPath !== null && existsSync(logPath);
   if (rec === null && !logExists) {
     return unavailable('no daemon record and no daemon.log');
   }
-  const facts = readLogFacts(logPath, logExists, now);
+  const facts = readLogFacts({ path: logPath, exists: logExists, now: at.now });
   return {
     pid: rec?.pid ?? null,
     alive: rec === null ? null : pidAlive(rec.pid, rec.pidStart),
@@ -477,19 +535,19 @@ function readDaemon(dir: string, now: number): WatchdogDaemon | Unavailable {
   };
 }
 
-function readLoopOut(dir: string, now: number): WatchdogLog | Unavailable {
-  const common = gitCommonDir(dir);
+function readLoopOut(at: ProbeAt): WatchdogLog | Unavailable {
+  const common = gitCommonDir(at.dir);
   if (common === null) {
     return unavailable('no git common dir');
   }
   const path = join(common, 'bro', 'loop.out');
-  const stats = scanLogFile(path);
+  const stats = scanLogFile({ path });
   if (stats === null) {
     return unavailable('loop.out unreadable or absent');
   }
   let ageSec_: number | null = null;
   try {
-    ageSec_ = ageSec(statSync(path).mtimeMs, now);
+    ageSec_ = ageSec({ mtimeMs: statSync(path).mtimeMs, now: at.now });
   } catch {
     ageSec_ = null;
   }
@@ -503,12 +561,11 @@ function readLoopOut(dir: string, now: number): WatchdogLog | Unavailable {
  *  otherwise read as a phantom worker and send an orchestrator chasing
  *  ghosts. With the unit degraded (`mainPid` null) the filter cannot
  *  distinguish and keeps its honest silence — records report as they are. */
-export function splitSlots(
-  runs: readonly LoopRunView[],
-  mainPid: number | null
-): { slots: LoopRunView[]; residue: number } {
-  const slots = runs.filter(r => r.state === 'running' && !(mainPid !== null && r.pid === mainPid));
-  return { slots, residue: runs.length - slots.length };
+export function splitSlots(v: SlotSplit): { slots: LoopRunView[]; residue: number } {
+  const slots = v.runs.filter(
+    r => r.state === 'running' && !(v.mainPid !== null && r.pid === v.mainPid)
+  );
+  return { slots, residue: v.runs.length - slots.length };
 }
 
 /** Every baseline, measured now. `now` is injectable so tests pin the
@@ -518,10 +575,11 @@ export function splitSlots(
  *  run); a directory that exists but cannot be read (EACCES and kin)
  *  → unavailable (unreadable ≠ none). residue mirrors the slots plane:
  *  a count of records we could not read is a guess, not a zero. */
-export function collectBaselines(dir: string, now: number = Date.now()): WatchdogBaselines {
+export function collectBaselines(probe: BaselineProbe): WatchdogBaselines {
+  const at: ProbeAt = { dir: probe.dir, now: probe.now ?? Date.now() };
   const unit = readUnit();
   const mainPid = isUnavailable(unit) ? null : unit.mainPid;
-  const runs = loopRunsDir(dir);
+  const runs = loopRunsDir(at.dir);
   let slotsPlane: WatchdogSlot[] | Unavailable;
   let residuePlane: number | Unavailable;
   if (runs === null) {
@@ -531,7 +589,7 @@ export function collectBaselines(dir: string, now: number = Date.now()): Watchdo
     try {
       // ENOENT = never ran (empty); anything else = could not read
       readdirSync(runs);
-      const split = splitSlots(collectLoopRuns(dir, now), mainPid);
+      const split = splitSlots({ runs: collectLoopRuns(at.dir, at.now), mainPid });
       slotsPlane = split.slots.map(r => ({
         slug: r.slug,
         beadId: r.beadId,
@@ -551,22 +609,23 @@ export function collectBaselines(dir: string, now: number = Date.now()): Watchdo
     }
   }
   return {
-    ts: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    ts: new Date(at.now).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     unit,
-    daemon: readDaemon(dir, now),
-    loopOut: readLoopOut(dir, now),
-    prs: readPrs(dir),
+    daemon: readDaemon(at),
+    loopOut: readLoopOut(at),
+    prs: readPrs(at),
     disk: readDisk(),
     memory: readMemory(),
-    worktrees: readWorktrees(dir),
+    worktrees: readWorktrees(at),
     slots: slotsPlane,
     residue: residuePlane,
   };
 }
 
-const gib = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)}G`;
+const gib = (g: { bytes: number }): string => `${(g.bytes / 1024 ** 3).toFixed(1)}G`;
 
-const secs = (n: number): string => (n >= 90 ? `${Math.round(n / 60)}m` : `${n}s`);
+const secs = (s: { n: number }): string =>
+  s.n >= 90 ? `${Math.round(s.n / 60)}m` : `${s.n}s`;
 
 const un = (v: Unavailable): string => `unavailable (${v.unavailable})`;
 
@@ -579,20 +638,20 @@ const formatUnit = (v: WatchdogUnit | Unavailable): string =>
     ? un(v)
     : `${v.state} MainPID=${v.mainPid ?? '?'} NRestarts=${v.nRestarts ?? '?'}`;
 
-const describeLiveness = (alive: boolean | null): string => {
-  if (alive === null) {
+const describeLiveness = (l: { alive: boolean | null }): string => {
+  if (l.alive === null) {
     return 'unknown';
   }
-  return alive ? 'alive' : 'DEAD';
+  return l.alive ? 'alive' : 'DEAD';
 };
 
 const formatDaemon = (v: WatchdogDaemon | Unavailable): string => {
   if (isUnavailable(v)) {
     return un(v);
   }
-  const head = v.pid === null ? 'no record' : `pid ${v.pid} ${describeLiveness(v.alive)}`;
+  const head = v.pid === null ? 'no record' : `pid ${v.pid} ${describeLiveness({ alive: v.alive })}`;
   const facts = [
-    v.logAgeSec === null ? 'log n/a' : `log age ${secs(v.logAgeSec)}`,
+    v.logAgeSec === null ? 'log n/a' : `log age ${secs({ n: v.logAgeSec })}`,
     v.etimedout === null ? '' : `ETIMEDOUT ${v.etimedout}`,
   ].filter(s => s !== '');
   return [head, ...facts].join(' · ');
@@ -604,14 +663,16 @@ const formatLog = (v: WatchdogLog | Unavailable): string => {
   }
   const facts = [
     `${v.lines} lines`,
-    v.ageSec === null ? '' : `age ${secs(v.ageSec)}`,
+    v.ageSec === null ? '' : `age ${secs({ n: v.ageSec })}`,
     v.etimedout === null ? '' : `ETIMEDOUT ${v.etimedout}`,
   ].filter(s => s !== '');
   return facts.join(' · ');
 };
 
 const formatPrs = (v: WatchdogPrs | Unavailable): string =>
-  isUnavailable(v) ? un(v) : `${v.open} open · ours ${v.ours} · foreign ${v.foreign}`;
+  isUnavailable(v)
+    ? un(v)
+    : `${v.open} open · ours ${v.ours} · foreign ${v.foreign}${v.capped ? ' · capped' : ''}`;
 
 const formatDisk = (v: WatchdogDisk | Unavailable): string =>
   isUnavailable(v) ? un(v) : `${v.path} ${v.usePercent}%`;
@@ -619,7 +680,7 @@ const formatDisk = (v: WatchdogDisk | Unavailable): string =>
 const formatMemory = (v: WatchdogMemory | Unavailable): string =>
   isUnavailable(v)
     ? un(v)
-    : `swap used ${gib(v.swapUsedBytes)} · avail ${gib(v.memAvailableBytes)}`;
+    : `swap used ${gib({ bytes: v.swapUsedBytes })} · avail ${gib({ bytes: v.memAvailableBytes })}`;
 
 const formatWorktrees = (v: WatchdogWorktrees | Unavailable): string =>
   isUnavailable(v) ? un(v) : String(v.count);
@@ -655,7 +716,8 @@ const formatResidue = (residue: number | Unavailable): string | null => {
 /** The brief — also the prompt `/bro` feeds back into the session, so the
  *  launch steps are imperative and the facts are labelled as measurements. */
 export function renderWatchdogBrief(b: WatchdogBaselines): string {
-  const row = (label: string, value: string): string => `  ${label.padEnd(10)} ${value}`;
+  const row = (r: { label: string; value: string }): string =>
+    `  ${r.label.padEnd(10)} ${r.value}`;
   const residue = formatResidue(b.residue);
 
   return [
@@ -669,15 +731,15 @@ export function renderWatchdogBrief(b: WatchdogBaselines): string {
     '  3. Spawn tick 1; report WAKE events to the operator, keep the chain alive.',
     '',
     `baselines @ ${b.ts}`,
-    row('unit', formatUnit(b.unit)),
-    row('daemon', formatDaemon(b.daemon)),
-    row('loop.out', formatLog(b.loopOut)),
-    row('prs', formatPrs(b.prs)),
-    row('disk', formatDisk(b.disk)),
-    row('memory', formatMemory(b.memory)),
-    row('worktrees', formatWorktrees(b.worktrees)),
-    row('slots', formatSlots(b.slots)),
-    ...(residue === null ? [] : [row('residue', residue)]),
+    row({ label: 'unit', value: formatUnit(b.unit) }),
+    row({ label: 'daemon', value: formatDaemon(b.daemon) }),
+    row({ label: 'loop.out', value: formatLog(b.loopOut) }),
+    row({ label: 'prs', value: formatPrs(b.prs) }),
+    row({ label: 'disk', value: formatDisk(b.disk) }),
+    row({ label: 'memory', value: formatMemory(b.memory) }),
+    row({ label: 'worktrees', value: formatWorktrees(b.worktrees) }),
+    row({ label: 'slots', value: formatSlots(b.slots) }),
+    ...(residue === null ? [] : [row({ label: 'residue', value: residue })]),
     '',
   ].join('\n');
 }
@@ -693,7 +755,7 @@ export function runWatchdogCommand(argv: string[]): void {
     console.error(`usage: bro watchdog [--json] (unknown: ${unknown.join(' ')})`);
     process.exit(2);
   }
-  const baselines = collectBaselines(process.cwd());
+  const baselines = collectBaselines({ dir: process.cwd() });
   if (argv.includes('--json')) {
     console.log(JSON.stringify({ ts: baselines.ts, skill: WATCHDOG_SKILL, baselines }, null, 2));
     return;
