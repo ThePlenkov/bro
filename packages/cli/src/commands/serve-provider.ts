@@ -7,12 +7,17 @@
  * the protocol — SSE frames, tool_use blocks, and beta surface all
  * pass through untouched, so the wire contract is the upstream's.
  *
- * Config (server-side env, never the client's):
- *   BRO_PROVIDER_UPSTREAM  default https://api.anthropic.com — any
- *                          Messages-API endpoint (Z.AI, DashScope,
- *                          a local model gateway)
- *   BRO_PROVIDER_API_KEY   the real credential — falls back to the
- *                          operator's ANTHROPIC_API_KEY / AUTH_TOKEN
+ * Config:
+ *   serve.upstream / BRO_PROVIDER_UPSTREAM  Messages-API base
+ *                                          (config owns the URL; env
+ *                                          overrides). Default
+ *                                          https://api.anthropic.com
+ *   serve.apiKeyEnv                         env var name holding the
+ *                                          real credential (config owns
+ *                                          the name; secret lives in env).
+ *                                          BRO_PROVIDER_API_KEY /
+ *                                          ANTHROPIC_API_KEY /
+ *                                          ANTHROPIC_AUTH_TOKEN override.
  *
  * Client-side wiring (documented, not enforced):
  *   env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
@@ -20,36 +25,83 @@
  *   prints it; possession of the 0600 file IS the auth boundary.
  */
 
-import { Readable } from 'node:stream'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export interface ProviderConfig {
   /** Messages-API base — the proxy forwards to `<upstream><req.url>`. */
-  upstream: string
+  upstream: string;
   /** The real credential — replaces the client's session token. */
-  apiKey: string
+  apiKey: string;
 }
 
-const DEFAULT_UPSTREAM = 'https://api.anthropic.com'
+const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 
-/** Provider config from the server's own environment — the upstream
- *  credential lives here, never in the client request. No key means
- *  the dep stays unwired and `/v1/*` 404s like any unknown path:
- *  a half-configured provider is a miss, not a degraded proxy. */
-export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefined {
-  // a set-but-blank override must not starve the fallbacks — scan in
-  // precedence order and take the first non-blank
-  const apiKey = [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN].find(
-    (v) => v !== undefined && v.trim() !== ''
-  )
+/** The first defined-and-non-blank value, trimmed — a set-but-blank env
+ *  override must not starve the fallbacks behind it. */
+function nonBlank(...values: Array<string | undefined>): string | undefined {
+  for (const v of values) {
+    if (v !== undefined && v.trim() !== '') {
+      return v.trim();
+    }
+  }
+  return undefined;
+}
+
+/** Credential resolution — env overrides (BRO_PROVIDER_API_KEY /
+ *  ANTHROPIC_*) beat the config-named var, which resolves last. The
+ *  secret channel stays env either way: config only picks its NAME. */
+function providerApiKey(
+  env: NodeJS.ProcessEnv,
+  serve?: { apiKeyEnv?: string }
+): string | undefined {
+  // env is a plain object — hasOwn keeps a magic name ('__proto__' &
+  // friends) from reaching outside the process's own variables
+  const named =
+    serve?.apiKeyEnv !== undefined && Object.hasOwn(env, serve.apiKeyEnv)
+      ? env[serve.apiKeyEnv]
+      : undefined;
+  return nonBlank(env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN, named);
+}
+
+/** Provider config: config owns upstream and the apiKey env-name; env is
+ *  the override+secret channel. No key means the dep stays unwired and
+ *  `/v1/*` 404s like any unknown path: a half-configured provider is a
+ *  miss, not a degraded proxy. */
+export function providerConfig(
+  env: NodeJS.ProcessEnv,
+  serve?: { upstream?: string; apiKeyEnv?: string }
+): ProviderConfig | undefined {
+  const apiKey = providerApiKey(env, serve);
   if (apiKey === undefined) {
-    return undefined
+    return undefined;
   }
-  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM
+  let upstream = nonBlank(env.BRO_PROVIDER_UPSTREAM, serve?.upstream) ?? DEFAULT_UPSTREAM;
   while (upstream.endsWith('/')) {
-    upstream = upstream.slice(0, -1)
+    upstream = upstream.slice(0, -1);
   }
-  return { upstream, apiKey }
+  // a slash-only override normalizes to '' — that is unset, not a base
+  return { upstream: upstream === '' ? DEFAULT_UPSTREAM : upstream, apiKey };
+}
+
+/** The file-layer half of providerConfig — `load` carries the caller's
+ *  layer scope (the host listener passes a global-only scan, `bro serve`
+ *  the full merge). A throwing config load degrades to env-only WITH a
+ *  warning — a user who pinned the credential name in bro.config must
+ *  see why the provider unwired, never silently lose it. */
+export function fileProviderConfig(
+  env: NodeJS.ProcessEnv,
+  load: () => { serve?: { upstream?: string; apiKeyEnv?: string } }
+): ProviderConfig | undefined {
+  try {
+    return providerConfig(env, load().serve);
+  } catch (err) {
+    console.error(
+      `warning: bro.config failed to load — serve.upstream/apiKeyEnv ignored ` +
+        `(${err instanceof Error ? err.message : String(err)})`
+    );
+    return providerConfig(env);
+  }
 }
 
 /** Headers that must not ride the proxy — hop-by-hop framing, the
@@ -68,7 +120,7 @@ const DROP_REQUEST = new Set([
   'content-length',
   'authorization',
   'x-api-key',
-])
+]);
 
 const DROP_RESPONSE = new Set([
   'connection',
@@ -79,37 +131,35 @@ const DROP_RESPONSE = new Set([
   'trailer',
   'transfer-encoding',
   'upgrade',
-])
+]);
 
 function forwardHeaders(req: IncomingMessage, apiKey: string): Record<string, string> {
-  const out: Record<string, string> = {}
+  const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(req.headers)) {
-    const lower = name.toLowerCase()
+    const lower = name.toLowerCase();
     if (DROP_REQUEST.has(lower) || value === undefined) {
-      continue
+      continue;
     }
-    out[lower] = Array.isArray(value) ? value.join(', ') : value
+    out[lower] = Array.isArray(value) ? value.join(', ') : value;
   }
   // the credential swap — the client proves the session token, the
   // upstream sees the real key; apiKeyHelper output never crosses
-  out['x-api-key'] = apiKey
-  out.authorization = `Bearer ${apiKey}`
+  out['x-api-key'] = apiKey;
+  out.authorization = `Bearer ${apiKey}`;
   // identity only — a gzip'd upstream body would arrive decompressed
   // by fetch while the response headers still said gzip + a stale
   // content-length; forcing identity keeps the pipe byte-honest
-  out['accept-encoding'] = 'identity'
-  return out
+  out['accept-encoding'] = 'identity';
+  return out;
 }
 
-const HAS_BODY = new Set(['POST', 'PUT', 'PATCH'])
+const HAS_BODY = new Set(['POST', 'PUT', 'PATCH']);
 
 /** The Anthropic-shaped transport error — claude-code surfaces the
  *  envelope it understands instead of a bare socket failure. */
 function sendUpstreamError(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(
-    `${JSON.stringify({ type: 'error', error: { type: 'api_error', message } })}\n`
-  )
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(`${JSON.stringify({ type: 'error', error: { type: 'api_error', message } })}\n`);
 }
 
 /** `(req, res)` raw-stream proxy for `/v1/*` — sits below the
@@ -119,14 +169,14 @@ export function providerProxy(
   cfg: ProviderConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
-    const method = req.method ?? 'GET'
-    const target = `${cfg.upstream}${req.url ?? '/'}`
+    const method = req.method ?? 'GET';
+    const target = `${cfg.upstream}${req.url ?? '/'}`;
     // the client going away must stop the upstream work — an SSE
     // generation otherwise runs to completion billing tokens against
     // nobody's session
-    const abort = new AbortController()
-    res.on('close', () => abort.abort())
-    let upstream: Response
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    let upstream: Response;
     try {
       upstream = await fetch(target, {
         method,
@@ -138,31 +188,31 @@ export function providerProxy(
         ...(HAS_BODY.has(method)
           ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const }
           : {}),
-      })
+      });
     } catch (err) {
       sendUpstreamError(
         res,
         502,
         `bro provider: upstream unreachable — ${err instanceof Error ? err.message : String(err)}`
-      )
-      return
+      );
+      return;
     }
 
-    const headers: Record<string, string> = {}
+    const headers: Record<string, string> = {};
     upstream.headers.forEach((value, name) => {
       if (!DROP_RESPONSE.has(name.toLowerCase())) {
-        headers[name] = value
+        headers[name] = value;
       }
-    })
-    res.writeHead(upstream.status, headers)
+    });
+    res.writeHead(upstream.status, headers);
     if (upstream.body === null) {
-      res.end()
-      return
+      res.end();
+      return;
     }
-    const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream)
+    const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
     // mid-stream failures can't re-send the status — destroy is the
     // honest end: the client's transport reports a truncated response
-    body.on('error', () => res.destroy())
-    body.pipe(res)
-  }
+    body.on('error', () => res.destroy());
+    body.pipe(res);
+  };
 }

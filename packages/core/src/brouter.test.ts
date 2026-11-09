@@ -45,6 +45,30 @@ describe('parseBrouter', () => {
     assert.deepEqual(parseBrouter({}), { models: {} });
   });
 
+  test('the route table path is a trimmed string, or nothing', () => {
+    assert.equal(parseBrouter({ routes: ' routes.toml ' }).routes, 'routes.toml');
+    assert.equal(parseBrouter({}).routes, undefined);
+    const lines = err(() => parseBrouter({ routes: '  ' }));
+    assert.ok(lines.some(l => /brouter\.routes must be a path/.test(l)));
+  });
+
+  test('the decision model is a provider and a mode — the three modes are all legal', () => {
+    const cfg = parseBrouter({ router: { provider: 'orca', mode: 'shadow' } });
+    assert.deepEqual(cfg.router, { provider: 'orca', mode: 'shadow' });
+    assert.deepEqual(parseBrouter({ router: { provider: 'orca', mode: 'off' } }).router, {
+      provider: 'orca',
+      mode: 'off',
+    });
+  });
+
+  test('a decision model without a provider or with an unknown mode drops the section', () => {
+    const lines = err(() => parseBrouter({ router: { provider: '', mode: 'shadow' } }));
+    assert.ok(lines.some(l => /brouter\.router requires provider \+ mode/.test(l)));
+    const bad = err(() => parseBrouter({ router: { provider: 'orca', mode: 'yes' } }));
+    assert.ok(bad.some(l => /brouter\.router requires provider \+ mode/.test(l)));
+    assert.equal(parseBrouter({ router: { provider: 'orca', mode: 'yes' } }).router, undefined);
+  });
+
   test('shorthand, object, and ordered-list routes normalize', () => {
     const cfg = parseBrouter({
       models: {

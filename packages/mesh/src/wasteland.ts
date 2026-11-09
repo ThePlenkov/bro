@@ -13,7 +13,7 @@
  * translation: reputation stamps and the board's own vocabulary
  * (project / type / effort / tags) stay board-local.
  */
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { MESH_VERSION, priorityTerm, type MeshEnvelope, type MeshRef } from './envelope.ts';
 import { formatRigUri, parseRigUri } from './identity.ts';
 
@@ -23,23 +23,41 @@ export interface WlResult {
   err: string;
 }
 
+function getSpawnError(p: ReturnType<typeof spawnSync>): string {
+  if (p.error !== undefined) {
+    return typeof p.error.message === 'string' ? p.error.message : '';
+  }
+  const stderr: unknown = p.stderr;
+  return typeof stderr === 'string' ? stderr : '';
+}
+
+function getSpawnOutput(p: ReturnType<typeof spawnSync>): string {
+  const stdout: unknown = p.stdout;
+  return typeof stdout === 'string' ? stdout : '';
+}
+
 function wl(call: { args: string[] }): WlResult {
-  const p = spawnSync('wl', call.args, {
-    // NOSONAR — PATH lookup is the contract (same as pull.ts's dolt)
+  const opts: SpawnSyncOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
-  });
-  const stdout: unknown = p.stdout;
-  const stderr: unknown = p.stderr;
-  const err = (
-    p.error !== undefined ? p.error.message : typeof stderr === 'string' ? stderr : ''
-  ).trim();
+  };
+  // PATH lookup is the contract (same as pull.ts's dolt)
+  const p = spawnSync('wl', call.args, opts); // NOSONAR
+  const err = getSpawnError(p).trim();
+  const out = getSpawnOutput(p);
+  if (p.error !== undefined) {
+    return {
+      code: p.status ?? 1,
+      out,
+      err: `wl unreachable — ${err || 'binary not found'}`,
+    };
+  }
   return {
     code: p.status ?? 1,
-    out: typeof stdout === 'string' ? stdout : '',
-    err: p.error !== undefined ? `wl unreachable — ${err || 'binary not found'}` : err,
+    out,
+    err,
   };
 }
 
@@ -67,19 +85,32 @@ export function termPriority(priority: number | undefined): string | undefined {
   return priority === undefined ? undefined : priorityTerm(priority);
 }
 
+function isHandleString(handle: string | undefined): handle is string {
+  return typeof handle === 'string' && handle !== '';
+}
+
+function tryDirectMeshHandle(handle: string): string | null {
+  const direct = parseRigUri(`mesh://${handle}`);
+  return direct === null ? null : formatRigUri(direct);
+}
+
+function isBareHandle(handle: string): boolean {
+  return /^[A-Za-z0-9_.-]+$/.test(handle);
+}
+
 /** `posted_by`/`claimed_by` are wasteland rig handles — `org/name`
  *  form maps straight to `mesh://org/name`; a bare handle lives in the
  *  commons namespace as `mesh://wasteland/<handle>`. Anything else is
  *  unprojectable — the caller reports the row, never invents a rig. */
 export function handleToRig(handle: string | undefined): string | null {
-  if (typeof handle !== 'string' || handle === '') {
+  if (!isHandleString(handle)) {
     return null;
   }
-  const direct = parseRigUri(`mesh://${handle}`);
+  const direct = tryDirectMeshHandle(handle);
   if (direct !== null) {
-    return formatRigUri(direct);
+    return direct;
   }
-  return /^[A-Za-z0-9_.-]+$/.test(handle) ? `mesh://wasteland/${handle.toLowerCase()}` : null;
+  return isBareHandle(handle) ? `mesh://wasteland/${handle.toLowerCase()}` : null;
 }
 
 /** The board's `wanted` row — a superset of the fields the projection
@@ -100,6 +131,30 @@ export interface WantedRow {
   completions?: { evidence?: string; state?: string }[];
 }
 
+function missingPosterError(row: WantedRow): string[] {
+  return [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`];
+}
+
+function claimerError(row: WantedRow, claimer: string | null): string[] {
+  const hasClaimed = row.claimed_by !== undefined && row.claimed_by !== '';
+  if (hasClaimed && claimer === null) {
+    return [`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`];
+  }
+  return [];
+}
+
+function makeBoardBase(row: WantedRow): BoardBase {
+  const { body, refs } = splitEmbeddedRefs(row.description);
+  return {
+    v: MESH_VERSION,
+    thread: row.id,
+    title: row.title,
+    body,
+    refs,
+    evidence: [] as MeshRef[],
+  };
+}
+
 /** Board row → the mesh records its state implies: a request always,
  *  a claim when `claimed_by` is set, a result when a completion row
  *  carries evidence, and the verdict when the board marks it accepted
@@ -115,26 +170,12 @@ export function projectWanted(input: { row: WantedRow; selfRig?: string }): {
   const self = input.selfRig;
   const poster = handleToRig(row.posted_by);
   if (poster === null) {
-    return {
-      envelopes: [],
-      errors: [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`],
-    };
+    return { envelopes: [], errors: missingPosterError(row) };
   }
   const claimer = handleToRig(row.claimed_by);
-  const errors =
-    row.claimed_by !== undefined && row.claimed_by !== '' && claimer === null
-      ? [`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`]
-      : [];
-  const { body, refs } = splitEmbeddedRefs(row.description);
+  const errors = claimerError(row, claimer);
   const ctx: BoardCtx = {
-    base: {
-      v: MESH_VERSION,
-      thread: row.id,
-      title: row.title,
-      body,
-      refs,
-      evidence: [] as MeshRef[],
-    },
+    base: makeBoardBase(row),
     poster,
     claimer,
   };
@@ -175,18 +216,78 @@ function projectRequest(input: { row: WantedRow; ctx: BoardCtx; selfRig?: string
 
 function projectClaim(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
   const { row, ctx } = input;
-  return ctx.claimer === null
-    ? []
-    : [
-        {
-          ...ctx.base,
-          id: `${row.id}#claim`,
-          kind: 'claim' as const,
-          from: ctx.claimer,
-          to: ctx.poster,
-          terms: {},
-        },
-      ];
+  if (ctx.claimer === null) {
+    return [];
+  }
+  return [
+    {
+      ...ctx.base,
+      id: `${row.id}#claim`,
+      kind: 'claim' as const,
+      from: ctx.claimer,
+      to: ctx.poster,
+      terms: {},
+    },
+  ];
+}
+
+function firstEvidence(completions: NonNullable<WantedRow['completions']>): string | undefined {
+  for (const c of completions) {
+    if (typeof c.evidence === 'string' && c.evidence !== '') {
+      return c.evidence;
+    }
+  }
+  return undefined;
+}
+
+function projectResult(input: {
+  row: WantedRow;
+  ctx: BoardCtx;
+  evidence: string | undefined;
+}): MeshEnvelope[] {
+  const { row, ctx, evidence } = input;
+  if (evidence === undefined || ctx.claimer === null) {
+    return [];
+  }
+  return [
+    {
+      ...ctx.base,
+      id: `${row.id}#result`,
+      kind: 'result' as const,
+      from: ctx.claimer,
+      to: ctx.poster,
+      terms: {},
+      evidence: [{ kind: 'url' as const, ref: evidence }],
+    },
+  ];
+}
+
+function projectExplicitVerdict(input: {
+  row: WantedRow;
+  ctx: BoardCtx;
+  verdict: NonNullable<WantedRow['completions']>[number];
+}): MeshEnvelope[] {
+  const { row, ctx, verdict } = input;
+  const kind = verdict.state === 'accepted' ? 'accept' : 'reject';
+  const to = ctx.claimer ?? ctx.poster;
+  return [{ ...ctx.base, id: `${row.id}#${kind}`, kind, from: ctx.poster, to, terms: {} }];
+}
+
+function projectImplicitAccept(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
+  const { row, ctx } = input;
+  if (row.status === 'completed' && ctx.claimer !== null) {
+    return [
+      {
+        ...ctx.base,
+        id: `${row.id}#accept`,
+        kind: 'accept' as const,
+        from: ctx.poster,
+        to: ctx.claimer,
+        terms: {},
+      },
+    ];
+  }
+  return [];
 }
 
 /** The post-claim rows: a completion carrying evidence is the result
@@ -194,23 +295,8 @@ function projectClaim(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] 
  *  completed board status with no verdict row reads as the accept. */
 function projectCompletion(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
   const { row, ctx } = input;
-  const evidence = (row.completions ?? [])
-    .flatMap(c => (typeof c.evidence === 'string' && c.evidence !== '' ? [c.evidence] : []))
-    .at(0);
-  const result =
-    evidence !== undefined && ctx.claimer !== null
-      ? [
-          {
-            ...ctx.base,
-            id: `${row.id}#result`,
-            kind: 'result' as const,
-            from: ctx.claimer,
-            to: ctx.poster,
-            terms: {},
-            evidence: [{ kind: 'url' as const, ref: evidence }],
-          },
-        ]
-      : [];
+  const evidence = firstEvidence(row.completions ?? []);
+  const result = projectResult({ row, ctx, evidence });
   return [...result, ...projectVerdict({ row, ctx })];
 }
 
@@ -222,30 +308,9 @@ function projectVerdict(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[
     c => c.state === 'accepted' || c.state === 'rejected'
   );
   if (verdict !== undefined) {
-    const kind = verdict.state === 'accepted' ? 'accept' : 'reject';
-    return [
-      {
-        ...ctx.base,
-        id: `${row.id}#${kind}`,
-        kind,
-        from: ctx.poster,
-        to: ctx.claimer ?? ctx.poster,
-        terms: {},
-      },
-    ];
+    return projectExplicitVerdict({ row, ctx, verdict });
   }
-  return row.status === 'completed' && ctx.claimer !== null
-    ? [
-        {
-          ...ctx.base,
-          id: `${row.id}#accept`,
-          kind: 'accept' as const,
-          from: ctx.poster,
-          to: ctx.claimer,
-          terms: {},
-        },
-      ]
-    : [];
+  return projectImplicitAccept({ row, ctx });
 }
 
 function wlJson<T>(call: { args: string[] }): { data?: T; error?: string } {
@@ -328,6 +393,25 @@ function splitEmbeddedRefs(text: string | undefined): { body: string; refs: Mesh
 
 /** Post a wanted item — `wl post` goes to the fork and proposes
  *  (PR mode); the returned `w-<hash>` is the thread id. */
+function addPostDescription(args: string[], body: string | undefined): void {
+  if (body !== undefined && body !== '') {
+    args.push('--description', body);
+  }
+}
+
+function addPostPriority(args: string[], priority: number | undefined): void {
+  if (priority === undefined) {
+    return;
+  }
+  const p = Math.max(0, Math.min(4, Math.trunc(priority)));
+  args.push('--priority', String(p));
+}
+
+function parsePostId(data: { id?: string } | undefined): string | undefined {
+  const id = data?.id;
+  return typeof id === 'string' && id !== '' ? id : undefined;
+}
+
 export function postWanted(input: {
   remote: string;
   title: string;
@@ -335,24 +419,16 @@ export function postWanted(input: {
   priority?: number;
   refs?: MeshRef[];
 }): { id?: string; error?: string } {
-  const description = embedRefs(input.body, input.refs);
-  const args = [
-    ...remoteArgs(input.remote),
-    'post',
-    '--title',
-    input.title,
-    ...(description !== undefined && description !== '' ? ['--description', description] : []),
-    ...(input.priority === undefined
-      ? []
-      : ['--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority))))]),
-    '--json',
-  ];
+  const args = [...remoteArgs(input.remote), 'post', '--title', input.title];
+  addPostDescription(args, embedRefs(input.body, input.refs));
+  addPostPriority(args, input.priority);
+  args.push('--json');
   const r = wlJson<{ id?: string }>({ args });
   if (r.error !== undefined) {
     return { error: `wl post failed — ${r.error}` };
   }
-  const id = r.data?.id;
-  return typeof id === 'string' && id !== '' ? { id } : { error: 'wl post returned no wanted id' };
+  const id = parsePostId(r.data);
+  return id !== undefined ? { id } : { error: 'wl post returned no wanted id' };
 }
 
 export function claimWanted(t: WlTarget): { error?: string } {
@@ -360,9 +436,21 @@ export function claimWanted(t: WlTarget): { error?: string } {
   return r.code === 0 ? {} : { error: `wl claim ${t.id} failed — ${r.err || r.out}` };
 }
 
+function findEvidenceRef(evidence: MeshRef[] | undefined): string | undefined {
+  if (!Array.isArray(evidence)) {
+    return undefined;
+  }
+  for (const e of evidence) {
+    if ((e.kind === 'url' || e.kind === 'pr') && typeof e.ref === 'string' && e.ref !== '') {
+      return e.ref;
+    }
+  }
+  return undefined;
+}
+
 export function completeWanted(t: WlTarget & { evidence?: MeshRef[] }): { error?: string } {
   const args = [...remoteArgs(t.remote), 'done', t.id];
-  const ev = t.evidence?.find(e => e.kind === 'url' || e.kind === 'pr')?.ref;
+  const ev = findEvidenceRef(t.evidence);
   if (ev !== undefined) {
     args.push('--evidence', ev);
   }
@@ -375,13 +463,38 @@ export function acceptWanted(t: WlTarget): { error?: string } {
   return r.code === 0 ? {} : { error: `wl accept ${t.id} failed — ${r.err || r.out}` };
 }
 
+function addRejectReason(args: string[], body: string | undefined): void {
+  if (body !== undefined && body !== '') {
+    args.push('--reason', body);
+  }
+}
+
 export function rejectWanted(t: WlTarget & { body?: string }): { error?: string } {
   const args = [...remoteArgs(t.remote), 'reject', t.id];
-  if (t.body !== undefined && t.body !== '') {
-    args.push('--reason', t.body);
-  }
+  addRejectReason(args, t.body);
   const r = wl({ args });
   return r.code === 0 ? {} : { error: `wl reject ${t.id} failed — ${r.err || r.out}` };
+}
+
+function extractWantedRows(data: WantedRow[] | { rows?: WantedRow[] } | undefined): WantedRow[] {
+  if (Array.isArray(data)) {
+    return data;
+  }
+  if (data && Array.isArray(data.rows)) {
+    return data.rows;
+  }
+  return [];
+}
+
+function isValidWantedRow(w: unknown): w is WantedRow {
+  return (
+    typeof w === 'object' &&
+    w !== null &&
+    typeof (w as WantedRow).id === 'string' &&
+    (w as WantedRow).id.trim() !== '' &&
+    typeof (w as WantedRow).title === 'string' &&
+    (w as WantedRow).title.trim() !== ''
+  );
 }
 
 /** The open board — `wl browse --json` over the commons, never the
@@ -394,8 +507,12 @@ export function browseWanted(remote: string): { rows: WantedRow[]; error?: strin
   if (r.error !== undefined) {
     return { rows: [], error: `wl browse failed — ${r.error}` };
   }
-  const rows = Array.isArray(r.data) ? r.data : (r.data?.rows ?? []);
-  return { rows: rows.filter(w => typeof w.id === 'string' && typeof w.title === 'string') };
+  const rows = extractWantedRows(r.data);
+  return { rows: rows.filter(w => isValidWantedRow(w)) };
+}
+
+function isValidWantedData(data: WantedRow | undefined): data is WantedRow {
+  return typeof data?.id === 'string' && data.id !== '';
 }
 
 /** One thread's board row — `wl status <id> --json` over the commons. */
@@ -404,7 +521,7 @@ export function wantedStatus(t: WlTarget): { row?: WantedRow; error?: string } {
   if (r.error !== undefined) {
     return { error: `wl status ${t.id} failed — ${r.error}` };
   }
-  return typeof r.data?.id === 'string'
+  return isValidWantedData(r.data)
     ? { row: r.data }
     : { error: `wl status ${t.id} returned no row` };
 }
