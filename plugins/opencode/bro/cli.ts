@@ -204,7 +204,6 @@ function commandResolver(options: CliOptions | undefined): () => Promise<Command
         if (await exitsZero('npx', ['-y', '--prefer-offline', latest, 'hooks'])) {
           return { cmd: 'npx', args: ['-y', '--prefer-offline', latest] };
         }
-        return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] };
       }
       return null;
     })());

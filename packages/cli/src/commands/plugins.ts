@@ -269,11 +269,13 @@ function ompArtifact(cwd: string): string | null {
 }
 
 /** omp's active agent directory — the user profile's config root.
- *  `PI_CODING_AGENT_DIR` relocates the default profile's directory;
- *  a named profile lives under `~/.omp/profiles/<name>/agent`. */
+ *  `OMP_AGENT_DIR` relocates it; `PI_CODING_AGENT_DIR` is accepted for
+ *  pi-coding-agent/OMP lineage compatibility; a named profile lives under
+ *  `~/.omp/profiles/<name>/agent`. */
 function ompAgentDir(env: NodeJS.ProcessEnv): string {
-  if (env.PI_CODING_AGENT_DIR !== undefined && env.PI_CODING_AGENT_DIR !== '') {
-    return env.PI_CODING_AGENT_DIR;
+  const override = env.OMP_AGENT_DIR || env.PI_CODING_AGENT_DIR;
+  if (override !== undefined && override !== '') {
+    return override;
   }
   const profile = env.OMP_PROFILE;
   if (profile !== undefined && profile !== '') {
