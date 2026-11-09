@@ -17,7 +17,7 @@ judge-vs-outcome agreement.
 npm i @broject/judge
 ```
 
-Requires Node ≥ 22.18. ESM only.
+Requires Node ≥ 26.13. ESM only.
 
 ## Surface
 

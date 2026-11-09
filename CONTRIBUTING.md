@@ -119,7 +119,7 @@ sibling module.
 
 ## Setup
 
-Prereqs: `node >= 22.18` (native TS type-stripping) and `gh` authenticated.
+Prereqs: `node >= 26.13` (native TS type-stripping) and `gh` authenticated.
 
 Nx plugins are regular npm deps (`@nx-devkit/*`); `npm install` is all it
 takes — no submodule, no patch step:
@@ -133,7 +133,7 @@ npm install
 ```bash
 npm run build      # gen-plugins + nx run-many -t build (packages only;
                    # skills-* excluded — skill build needs skills-compiler)
-npm test           # node:test via tsx
+npm test           # node --test, native type stripping
 npm run lint       # includes skill lint/validate targets
 npx nx show projects
 ```
@@ -217,7 +217,7 @@ skipped: a plugin cannot shadow a built-in.
 
 ## Conventions
 
-- **Node-native only.** The published CLI runs on `node >= 22.18` — no
+- **Node-native only.** The published CLI runs on `node >= 26.13` — no
   `Bun.*` APIs anywhere in `packages/`.
 - **The review host's CLI is a runtime dep of that connector** — GitHub
   shells out to `gh`, GitLab to `glab`. Domain code and skills call the

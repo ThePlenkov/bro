@@ -136,7 +136,7 @@ Developing bro itself: see CONTRIBUTING.md.
   fix here. And never iterate by pushing and waiting for the App's
   verdict: `npm run check:codescene` runs the same `cs delta` locally
   and lists every finding in one pass — fix them all, then push once.
-- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
+- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥26.13 runs `.ts` natively
   (unflagged type stripping); scripts and sources are always `.ts`,
   invoked directly (`node scripts/x.ts`).
 - **Plugin-shaped growth** — each capability ships as a CLI subcommand +

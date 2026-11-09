@@ -26,6 +26,26 @@
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
+    },
+    "./server": {
+      "types": "./dist/opencode.d.ts",
+      "default": "./dist/opencode.js"
+    },
+    "./tui": {
+      "types": "./dist/opencode-tui.d.ts",
+      "default": "./dist/opencode-tui.js"
+    },
+    "./kilo": {
+      "types": "./dist/kilo.d.ts",
+      "default": "./dist/kilo.js"
+    },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "default": "./dist/pi.js"
+    },
+    "./omp": {
+      "types": "./dist/omp.d.ts",
+      "default": "./dist/omp.js"
     }
   },
   "files": [
@@ -33,7 +53,7 @@
     "schemas"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "scripts": {
     "test": "node scripts/run-tests.ts 'src/**/*.test.ts'",
@@ -56,53 +76,36 @@
         "dependsOn": [
           "^build",
           "build"
-        ],
-        "inputs": [
-          "default",
-          "envGates",
-          "pluginSurface",
-          {
-            "dependentTasksOutputFiles": "**/*"
-          }
         ]
       },
       "test:e2e": {
         "dependsOn": [
           "^build",
           "build"
-        ],
-        "inputs": [
-          "default",
-          "envGates",
-          "pluginSurface",
-          {
-            "dependentTasksOutputFiles": "**/*"
-          }
         ]
       }
     }
   },
   "dependencies": {
     "@broject/bro-pack": "^0.3.0",
-    "@broject/brose": "^0.1.0",
-    "@broject/brotocol": "^0.1.0",
     "@broject/brouter": "^0.3.0",
-    "@broject/client-adapters": "^0.1.0",
     "@broject/command": "^0.3.0",
     "@broject/devin": "^0.3.0",
     "@broject/mcp": "^0.3.0",
     "@broject/router-routes": "^0.3.0",
     "@broject/router-store": "^0.3.0",
-    "@broject/spec": "^0.1.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "ip-address": "^10.7.4",
-    "smol-toml": "^1.9.0",
+    "smol-toml": "^1.9.1",
     "sverka": "^0.2.10"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@kilocode/plugin": "^7.8.3",
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3",
     "@broject/acp-session": "^0.3.0",
-    "@broject/herdr-kit": "^0.3.0",
-    "ajv": "^8.20.0"
+    "@broject/herdr-kit": "^0.3.0"
   },
   "license": "MIT",
   "repository": {

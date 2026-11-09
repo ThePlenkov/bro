@@ -139,7 +139,10 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
  *  `errors` array. `fail` returns undefined so field validators
  *  can `return c.fail(msg)` inline. */
 class Checks {
-  constructor(readonly errors: string[]) {}
+  readonly errors: string[];
+  constructor(errors: string[]) {
+    this.errors = errors;
+  }
   fail(msg: string): undefined {
     this.errors.push(msg);
     return undefined;
