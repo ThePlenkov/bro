@@ -238,6 +238,18 @@ describe('conductorConfig', () => {
     // a garbage pin falls back to the file's value
     const garbage = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: 'abc' }, dir);
     assert.equal(garbage?.acpStallMs, 120_000);
+    // a FRACTIONAL value is not a window nor a count: it must not floor
+    // into 0 and switch the watchdog off, nor become a 0.5 budget that
+    // refuses the first open
+    const fractional = conductorConfig(
+      { BRO_PROVIDER_ACP_STALL_MS: '0.5', BRO_PROVIDER_ACP_MAX_OPENS: '0.5' },
+      dir
+    );
+    assert.equal(fractional?.acpStallMs, 120_000);
+    assert.equal(fractional?.acpMaxOpens, 4);
+    // a window above node's timer ceiling is clamped — late, not instant
+    const huge = conductorConfig({ BRO_PROVIDER_IDLE_RELEASE_MS: '9999999999' }, dir);
+    assert.equal(huge?.idleReleaseMs, 2_147_483_647);
   });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(

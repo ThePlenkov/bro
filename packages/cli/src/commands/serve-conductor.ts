@@ -169,27 +169,47 @@ function positiveEnvInt(env: NodeJS.ProcessEnv, key: string, fallback: number): 
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
-/** The idle window (spec bro-7ira8) — the env pin wins over the file,
- *  and 0 is a deliberate "keep the peer". */
-function idleWindow(env: NodeJS.ProcessEnv, fallback: number): number {
-  const raw = env.BRO_PROVIDER_IDLE_RELEASE_MS?.trim();
+/** A whole-number env pin, else the fallback — a budget is a COUNT, and
+ *  a fractional one is not a count (0.5 would refuse the first open). */
+function positiveIntEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
   if (raw === undefined || raw === '') {
     return fallback;
   }
   const num = Number(raw);
-  return Number.isFinite(num) && num >= 0 ? Math.floor(num) : fallback;
+  return Number.isInteger(num) && num > 0 ? num : fallback;
+}
+
+/** Node's timer ceiling — a window above it wraps and fires at once, so
+ *  the release would be instant instead of late. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** The idle window (spec bro-7ira8) — the env pin wins over the file,
+ *  and 0 is a deliberate "keep the peer". A fractional value is not a
+ *  window; a window above the timer ceiling is clamped (late, not
+ *  instant). */
+function idleWindow(env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env.BRO_PROVIDER_IDLE_RELEASE_MS?.trim();
+  if (raw === undefined || raw === '') {
+    return Math.min(fallback, MAX_TIMER_MS);
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
 }
 
 /** The silence bound (spec bro-b961a) — the env pin wins over the file,
  *  and 0 is a deliberate "off". A negative or fractional value is not a
- *  window at all, so the fallback wins. */
+ *  window at all, so the fallback wins (a fractional 0.5 must not floor
+ *  into 0 and silently switch the watchdog OFF). */
 function stallWindow(env: NodeJS.ProcessEnv, fallback: number): number {
   const raw = env.BRO_PROVIDER_ACP_STALL_MS?.trim();
   if (raw === undefined || raw === '') {
     return fallback;
   }
   const num = Number(raw);
-  return Number.isFinite(num) && num >= 0 ? Math.floor(num) : fallback;
+  return Number.isInteger(num) && num >= 0 ? num : fallback;
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or
@@ -405,12 +425,12 @@ export function conductorConfig(
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     // the dead-loop budgets (spec bro-b961a) — the env pin wins over the
     // file, like BRO_PROVIDER_TIMEOUT_MS
-    acpMaxOpens: positiveEnvInt(
+    acpMaxOpens: positiveIntEnv(
       env,
       'BRO_PROVIDER_ACP_MAX_OPENS',
       cfg.serve?.acpMaxOpens ?? 8
     ),
-    acpMaxAbandoned: positiveEnvInt(
+    acpMaxAbandoned: positiveIntEnv(
       env,
       'BRO_PROVIDER_ACP_MAX_ABANDONED',
       cfg.serve?.acpMaxAbandoned ?? 32
