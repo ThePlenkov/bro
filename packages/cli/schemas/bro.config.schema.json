@@ -1619,6 +1619,22 @@
         },
         "fastLane": {
           "type": "boolean"
+        },
+        "idleReleaseMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acpMaxOpens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpMaxAbandoned": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpStallMs": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false

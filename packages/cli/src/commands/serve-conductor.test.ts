@@ -201,6 +201,60 @@ describe('conductorConfig', () => {
       assert.equal(cfg?.timeoutMs, 120_000, raw);
     }
   });
+  test('the provider windows read the config, and the env pins win', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: {
+          backend: 'dv-acp',
+          idleReleaseMs: 60_000,
+          acpMaxOpens: 4,
+          acpMaxAbandoned: 16,
+          acpStallMs: 120_000,
+        },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.idleReleaseMs, 60_000);
+    assert.equal(cfg?.acpMaxOpens, 4);
+    assert.equal(cfg?.acpMaxAbandoned, 16);
+    assert.equal(cfg?.acpStallMs, 120_000);
+    // the env pins are the operator's explicit knob — they win
+    const pinned = conductorConfig(
+      {
+        BRO_PROVIDER_IDLE_RELEASE_MS: '0',
+        BRO_PROVIDER_ACP_MAX_OPENS: '2',
+        BRO_PROVIDER_ACP_MAX_ABANDONED: '8',
+        BRO_PROVIDER_ACP_STALL_MS: '30000',
+      },
+      dir
+    );
+    assert.equal(pinned?.idleReleaseMs, 0);
+    assert.equal(pinned?.acpMaxOpens, 2);
+    assert.equal(pinned?.acpMaxAbandoned, 8);
+    assert.equal(pinned?.acpStallMs, 30_000);
+    // a garbage pin falls back to the file's value
+    const garbage = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: 'abc' }, dir);
+    assert.equal(garbage?.acpStallMs, 120_000);
+    // a FRACTIONAL value is not a window nor a count: it must not floor
+    // into 0 and switch the watchdog off, nor become a 0.5 budget that
+    // refuses the first open
+    const fractional = conductorConfig(
+      { BRO_PROVIDER_ACP_STALL_MS: '0.5', BRO_PROVIDER_ACP_MAX_OPENS: '0.5' },
+      dir
+    );
+    assert.equal(fractional?.acpStallMs, 120_000);
+    assert.equal(fractional?.acpMaxOpens, 4);
+    // a window above node's timer ceiling is clamped — late, not instant
+    const huge = conductorConfig({ BRO_PROVIDER_IDLE_RELEASE_MS: '9999999999' }, dir);
+    assert.equal(huge?.idleReleaseMs, 2_147_483_647);
+    // the stall bound takes the same clamp — an oversized pin must not
+    // wrap the watchdog into firing at once
+    const hugeStall = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: '9999999999' }, dir);
+    assert.equal(hugeStall?.acpStallMs, 2_147_483_647);
+  });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
       () => conductorConfig({ BRO_PROVIDER_BACKEND: 'nope' }, '/r', providers),
