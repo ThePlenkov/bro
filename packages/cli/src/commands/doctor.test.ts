@@ -1828,6 +1828,24 @@ describe('bro doctor', () => {
       }
     ));
 
+  test('conductor: serve.fastLane:false keeps the warn even with a key (bro-6asnu)', () =>
+    withEnv(
+      {
+        config: {
+          serve: { fastLane: false },
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp', BRO_PROVIDER_API_KEY: 'k' },
+      },
+      dir => {
+        liveServeClient(dir, 'http://127.0.0.1:44927');
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      }
+    ));
+
   test('conductor: a classifier pin on the acp wire reads ok once the lane is armed', () =>
     withEnv(
       {

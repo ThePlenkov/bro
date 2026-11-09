@@ -3077,4 +3077,51 @@ describe('conductor fast lane (bro-6asnu)', () => {
       await close();
     }
   });
+
+  test('a config-disabled lane conducts the fast-shaped call even with a key', async () => {
+    // serve.fastLane:false resolves to fast:undefined — the wire sees
+    // exactly this cfg; boot it end-to-end so the disable is honored
+    // through the routing decision, not just the config read
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fastoff-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', fastLane: false },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      })
+    );
+    const cfg = conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir);
+    assert.equal(cfg?.fast, undefined);
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, cfg as ConductorConfig);
+    try {
+      // model must name an id the agent actually serves — the routed
+      // gateway validates the id against the catalog, unlike bare CFG
+      const r = await post({ ...CLASSIFIER_BODY, model: 'swe-x' });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a fast-shaped streamed call conducts over SSE when the lane is unarmed', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: 'x' }],
+        stream: true,
+      });
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.equal(fake.sessions.length, 1);
+      await r.text(); // drain the stream so the server can close
+    } finally {
+      await close();
+    }
+  });
 });

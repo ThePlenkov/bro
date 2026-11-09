@@ -40,6 +40,7 @@ import {
   janitorDidWork,
   janitorLine,
   listDoltRemotes,
+  loadConfig,
   loadConfigLayers,
   pidAlive,
   printUsage,
@@ -1728,7 +1729,15 @@ const UPSTREAM_KEY_ENVS = [
  *  (a serve spawned from the same shell inherits it); the server's env
  *  decides when the two differ. Values are only inspected for
  *  presence/flag, never surfaced. */
-function fastLaneArmed(env: Record<string, string> | undefined): boolean {
+function fastLaneArmed(
+  env: Record<string, string> | undefined,
+  serveLane?: boolean
+): boolean {
+  // the config escape hatch — serve.fastLane:false disables the lane
+  // regardless of env evidence, exactly as resolveFastLane honors it
+  if (serveLane === false) {
+    return false;
+  }
   const flagsOff = (v: string | undefined): boolean => {
     const f = v?.trim().toLowerCase();
     return f === 'off' || f === '0' || f === 'false';
@@ -1940,7 +1949,7 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
-    fastArmed: fastLaneArmed(env),
+    fastArmed: fastLaneArmed(env, loadConfig(dir).serve.fastLane),
   };
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
   const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));
