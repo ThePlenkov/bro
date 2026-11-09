@@ -31,47 +31,47 @@
  *     takes the host's session down with it, and bro's policy is
  *     advisory everywhere except the stop gate.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** The one control object `bro hooks <event>` prints. */
 export interface HookControl {
-  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown }
-  decision?: string
-  reason?: unknown
+  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown };
+  decision?: string;
+  reason?: unknown;
 }
 
 /** A resolved bro CLI invocation. */
 export interface Command {
-  cmd: string
-  args: string[]
+  cmd: string;
+  args: string[];
 }
 
 /** Minimal structural read of `bro status --json` — fields the widget
  *  renders; everything else passes through unread. */
 export interface BoardStatus {
-  branch?: string
-  dirty?: number
+  branch?: string;
+  dirty?: number;
   beads?: {
-    inProgress?: Array<{ id?: string; title?: string }>
-    readyTotal?: number
-  }
+    inProgress?: Array<{ id?: string; title?: string; link?: string }>;
+    readyTotal?: number;
+  };
   fleet?: {
-    maxConcurrent?: number
-    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>
-  }
-  drill?: { frame?: { id?: string; title?: string; depth?: number } | null }
+    maxConcurrent?: number;
+    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>;
+  };
+  drill?: { frame?: { id?: string; title?: string; depth?: number } | null };
 }
 
 /** How long a normal hook probe may take. */
-export const HOOK_TIMEOUT_MS = 15_000
+export const HOOK_TIMEOUT_MS = 15_000;
 /** session-start/post-compaction list `bd ready` and scan worktrees —
  *  measured at 20-40s in a loaded repo. */
-export const REHYDRATION_TIMEOUT_MS = 45_000
+export const REHYDRATION_TIMEOUT_MS = 45_000;
 /** Cap on a hook's stdout — a runaway child must not eat the heap. */
-export const MAX_OUTPUT = 1 << 20
+export const MAX_OUTPUT = 1 << 20;
 
 /**
  * `node` on PATH, not process.execPath — a host may ship as a compiled
@@ -79,101 +79,100 @@ export const MAX_OUTPUT = 1 << 20
  * entry script would re-enter the host instead of running the script.
  */
 export function jsRuntime(): string {
-  return process.platform === 'win32' ? 'node.exe' : 'node'
+  return process.platform === 'win32' ? 'node.exe' : 'node';
 }
 
 /** The bro CLI bundled next to this adapter (`dist/index.js`). */
 export function siblingCli(): string | null {
   for (const rel of ['./index.js', '../dist/index.js']) {
-    const candidate = fileURLToPath(new URL(rel, import.meta.url))
+    const candidate = fileURLToPath(new URL(rel, import.meta.url));
     if (existsSync(candidate)) {
-      return candidate
+      return candidate;
     }
   }
-  return null
+  return null;
 }
 
 /** The bro CLI of the checkout this adapter was loaded from — the
  *  development path: the adapter's own source tree wins over any
  *  published package, so a local edit is live without a rebuild. */
 export function checkoutCli(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url))
+  let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
-    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js')
+    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js');
     if (existsSync(candidate)) {
-      return candidate
+      return candidate;
     }
-    const parent = dirname(dir)
+    const parent = dirname(dir);
     if (parent === dir) {
-      return null
+      return null;
     }
-    dir = parent
+    dir = parent;
   }
 }
 
 /** A kill timer — cleared once the child settles. */
-export type KillTimer = ReturnType<typeof setTimeout>
+export type KillTimer = ReturnType<typeof setTimeout>;
 
 /**
  * SIGKILL a hung child on a timer. The child is spawned detached, so
  * killing the pid's group takes the grandchildren down too — a hook
  * that spawns `bd` must not leave a dolt server behind.
  */
-export function killAfter(
-  child: ChildProcess,
-  ms: number,
-  onTimeout: () => void
-): KillTimer {
+export function killAfter(child: ChildProcess, ms: number, onTimeout: () => void): KillTimer {
   const timer = setTimeout(() => {
     try {
       if (child.pid !== undefined) {
-        process.kill(-child.pid, 'SIGKILL')
+        process.kill(-child.pid, 'SIGKILL');
       }
     } catch {
       try {
-        child.kill('SIGKILL')
+        child.kill('SIGKILL');
       } catch {
         // already gone
       }
     }
-    onTimeout()
-  }, ms)
-  timer.unref?.()
-  return timer
+    onTimeout();
+  }, ms);
+  timer.unref?.();
+  return timer;
 }
 
 /** Does this command exit zero? Used to probe whether a candidate CLI
  *  actually speaks bro's hook protocol — an older bro on PATH fails the
  *  probe instead of failing every hook. */
 export async function exitsZero(cmd: string, args: string[]): Promise<boolean> {
-  const { promise, resolve } = Promise.withResolvers<boolean>()
-  let child: ChildProcess
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  let child: ChildProcess;
   try {
-    child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+    child = spawn(cmd, args, {
+      stdio: ['pipe', 'ignore', 'ignore'],
+      detached: process.platform !== 'win32',
+    }); // NOSONAR typescript:S4036
   } catch {
-    return false
+    return false;
   }
-  const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false))
+  const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
   child.on('error', () => {
-    clearTimeout(timer)
-    resolve(false)
-  })
-  child.on('close', (code) => {
-    clearTimeout(timer)
-    resolve(code === 0)
-  })
-  child.stdin?.on('error', () => {})
-  child.stdin?.end('')
-  return promise
+    clearTimeout(timer);
+    resolve(false);
+  });
+  child.on('close', code => {
+    clearTimeout(timer);
+    resolve(code === 0);
+  });
+  child.stdin?.on('error', () => {});
+  child.stdin?.end('');
+  return promise;
 }
 
 /** Options for the CLI ladder. */
 export interface ResolveOptions {
   /** A caller-pinned CLI (config `options.command`) — wins over the
    *  local dist, because the operator asked for that binary. */
-  command?: string
+  command?: string;
   /** The pinned npx spec — the published version of this adapter. */
-  npxPin?: string
+  npxPin?: string;
 }
 
 /**
@@ -185,23 +184,23 @@ export interface ResolveOptions {
  */
 export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command | null> {
   if (opts.command !== undefined && opts.command !== '') {
-    const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== '')
+    const [cmd, ...args] = opts.command.split(/\s+/).filter(p => p !== '');
     if (cmd !== undefined && (await exitsZero(cmd, [...args, 'hooks']))) {
-      return { cmd, args }
+      return { cmd, args };
     }
   }
   for (const entry of [siblingCli(), checkoutCli()]) {
     if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
-      return { cmd: jsRuntime(), args: [entry] }
+      return { cmd: jsRuntime(), args: [entry] };
     }
   }
   if (await exitsZero('bro', ['hooks'])) {
-    return { cmd: 'bro', args: [] }
+    return { cmd: 'bro', args: [] };
   }
   if (opts.npxPin !== undefined && (await exitsZero('npx', ['--version']))) {
-    return { cmd: 'npx', args: ['-y', '--prefer-offline', opts.npxPin] }
+    return { cmd: 'npx', args: ['-y', '--prefer-offline', opts.npxPin] };
   }
-  return null
+  return null;
 }
 
 /**
@@ -215,44 +214,44 @@ export async function callHook(
   cwd: string,
   timeoutMs: number
 ): Promise<HookControl | null> {
-  const { promise, resolve } = Promise.withResolvers<HookControl | null>()
-  let child: ChildProcess
+  const { promise, resolve } = Promise.withResolvers<HookControl | null>();
+  let child: ChildProcess;
   try {
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
       cwd,
       stdio: ['pipe', 'pipe', 'ignore'],
       detached: process.platform !== 'win32',
-    })
+    });
   } catch {
-    return null
+    return null;
   }
-  let settled = false
+  let settled = false;
   const settle = (value: HookControl | null): void => {
     if (!settled) {
-      settled = true
-      resolve(value)
+      settled = true;
+      resolve(value);
     }
-  }
-  const timer = killAfter(child, timeoutMs, () => settle(null))
-  let out = ''
-  child.stdout?.setEncoding('utf8')
+  };
+  const timer = killAfter(child, timeoutMs, () => settle(null));
+  let out = '';
+  child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
-    const remaining = MAX_OUTPUT - out.length
+    const remaining = MAX_OUTPUT - out.length;
     if (remaining > 0) {
-      out += chunk.slice(0, remaining)
+      out += chunk.slice(0, remaining);
     }
-  })
+  });
   child.on('error', () => {
-    clearTimeout(timer)
-    settle(null)
-  })
-  child.on('close', (code) => {
-    clearTimeout(timer)
-    settle(code === 0 ? parseControl(out) : null)
-  })
-  child.stdin?.on('error', () => {})
-  child.stdin?.end(JSON.stringify(payload))
-  return promise
+    clearTimeout(timer);
+    settle(null);
+  });
+  child.on('close', code => {
+    clearTimeout(timer);
+    settle(code === 0 ? parseControl(out) : null);
+  });
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(JSON.stringify(payload));
+  return promise;
 }
 
 /**
@@ -261,20 +260,20 @@ export async function callHook(
  */
 export function parseControl(out: string): HookControl | null {
   for (const line of out.split('\n')) {
-    const text = line.trim()
+    const text = line.trim();
     if (text === '') {
-      continue
+      continue;
     }
     try {
-      const parsed = JSON.parse(text) as unknown
+      const parsed = JSON.parse(text) as unknown;
       if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as HookControl
+        return parsed as HookControl;
       }
     } catch {
       // keep scanning
     }
   }
-  return null
+  return null;
 }
 
 /**
@@ -282,8 +281,8 @@ export function parseControl(out: string): HookControl | null {
  * know" text. Empty means the hook had nothing to add.
  */
 export function contextOf(control: HookControl | null): string {
-  const text = control?.hookSpecificOutput?.additionalContext
-  return typeof text === 'string' ? text.trim() : ''
+  const text = control?.hookSpecificOutput?.additionalContext;
+  return typeof text === 'string' ? text.trim() : '';
 }
 
 /**
@@ -299,72 +298,72 @@ export function broEnabled(startDir: string): boolean {
     'bro.config.local.ts',
     'bro.config.local.json',
     '.beads',
-  ]
-  let dir = startDir
+  ];
+  let dir = startDir;
   for (;;) {
-    if (markers.some((m) => existsSync(join(dir, m)))) {
-      return true
+    if (markers.some(m => existsSync(join(dir, m)))) {
+      return true;
     }
-    const parent = dirname(dir)
+    const parent = dirname(dir);
     if (parent === dir) {
-      return false
+      return false;
     }
-    dir = parent
+    dir = parent;
   }
 }
 
 /** `bro status --json` — the board the widget renders. Null on any
  *  failure; the board is a convenience, never a gate. */
 export async function statusJson(command: Command, cwd: string): Promise<BoardStatus | null> {
-  const { promise, resolve } = Promise.withResolvers<BoardStatus | null>()
-  let child: ChildProcess
+  const { promise, resolve } = Promise.withResolvers<BoardStatus | null>();
+  let child: ChildProcess;
   try {
     child = spawn(command.cmd, [...command.args, 'status', '--json'], {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
       detached: process.platform !== 'win32',
-    })
+    });
   } catch {
-    return null
+    return null;
   }
-  const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null))
-  let out = ''
-  child.stdout?.setEncoding('utf8')
+  const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null));
+  let out = '';
+  child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {
-    const remaining = MAX_OUTPUT - out.length
+    const remaining = MAX_OUTPUT - out.length;
     if (remaining > 0) {
-      out += chunk.slice(0, remaining)
+      out += chunk.slice(0, remaining);
     }
-  })
+  });
   child.on('error', () => {
-    clearTimeout(timer)
-    resolve(null)
-  })
-  child.on('close', (code) => {
-    clearTimeout(timer)
+    clearTimeout(timer);
+    resolve(null);
+  });
+  child.on('close', code => {
+    clearTimeout(timer);
     if (code !== 0) {
-      resolve(null)
-      return
+      resolve(null);
+      return;
     }
     try {
-      const parsed = JSON.parse(out) as unknown
+      const parsed = JSON.parse(out) as unknown;
       resolve(
         parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
           ? (parsed as BoardStatus)
           : null
-      )
+      );
     } catch {
-      resolve(null)
+      resolve(null);
     }
-  })
-  return promise
+  });
+  return promise;
 }
 
-const ELLIPSIS = '…'
+const ELLIPSIS = '…';
 
 /** Clip to a width, marking the cut. */
 export function clip(text: string, width: number): string {
-  return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text
+  return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
 }
 
 /**
@@ -373,34 +372,35 @@ export function clip(text: string, width: number): string {
  * any host can render.
  */
 export function boardLines(s: BoardStatus): string[] {
-  const beads = s.beads?.inProgress ?? []
-  const running = (s.fleet?.agents ?? []).filter((a) => a.state === 'running')
-  const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : ''
+  const beads = s.beads?.inProgress ?? [];
+  const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running');
+  const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : '';
   const parts = [
     `◐ ${beads.length} bead${beads.length === 1 ? '' : 's'}`,
     `fleet ${running.length}${cap}`,
     `ready ${s.beads?.readyTotal ?? 0}`,
-  ]
+  ];
   if (s.drill?.frame) {
-    parts.push(`drill ${s.drill.frame.id}`)
+    parts.push(`drill ${s.drill.frame.id}`);
   }
   if ((s.dirty ?? 0) > 0) {
-    parts.push(`dirty ${s.dirty}`)
+    parts.push(`dirty ${s.dirty}`);
   }
-  const lines = [`bro · ${parts.join(' · ')}`]
+  const lines = [`bro · ${parts.join(' · ')}`];
   for (const b of beads.slice(0, 3)) {
-    lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}`)
+    const link = b.link ? `  ${b.link}` : '';
+    lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}${link}`);
   }
   for (const a of running.slice(0, 2)) {
-    const step = a.step ? `  ${a.step}` : ''
-    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`)
+    const step = a.step ? `  ${a.step}` : '';
+    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`);
   }
-  return lines
+  return lines;
 }
 
 /** The footer crumb — the one-glance form of the same board. */
 export function statusCrumb(s: BoardStatus): string {
-  const beads = s.beads?.inProgress?.length ?? 0
-  const running = (s.fleet?.agents ?? []).filter((a) => a.state === 'running').length
-  return `bro ◐${beads} ⬢${running}`
+  const beads = s.beads?.inProgress?.length ?? 0;
+  const running = (s.fleet?.agents ?? []).filter(a => a.state === 'running').length;
+  return `bro ◐${beads} ⬢${running}`;
 }

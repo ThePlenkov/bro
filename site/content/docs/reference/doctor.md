@@ -8,5 +8,6 @@ description: "Environment diagnostics: node, git, gh auth, bd, hooks, config, re
 | | |
 | --- | --- |
 | group | `utility` |
+| npm latest | `0.2.5` |
 | guide | [commands/utility](/docs/commands/utility) |
 

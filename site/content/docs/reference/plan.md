@@ -8,4 +8,5 @@ description: "Plan contract: list kinds + schema versions, validate a file"
 | | |
 | --- | --- |
 | group | `plan` |
+| npm latest | `0.2.5` |
 

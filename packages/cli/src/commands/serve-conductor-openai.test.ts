@@ -55,13 +55,16 @@ const CFG: ConductorConfig = {
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post(path, body) for /v1/* sends. */
-async function boot(fake: ReturnType<typeof fakeAcpAgent>): Promise<{
+async function boot(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  cfg: ConductorConfig = CFG
+): Promise<{
   url: string
   post: (path: string, body: unknown) => Promise<Response>
   close: () => Promise<void>
 }> {
   const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
   )
   const post = (path: string, body: unknown) =>
     fetch(`${url}${path}`, {
@@ -205,7 +208,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     }
   })
 
-  test('a tool_call turn cancelled backend-side replays the delivered status', async () => {
+  test('a tool_call turn cancelled backend-side answers the delivered status', async () => {
     // tool_use outranks the backend reason on the wire — the record must
     // store that verdict or the replay answers 'cancelled' for a turn the
     // client saw complete
@@ -226,7 +229,10 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.equal(((await t1.json()) as { status: string }).status, 'completed')
       const t2 = await call()
       assert.equal(((await t2.json()) as { status: string }).status, 'completed')
-      assert.equal(fake.prompts.length, 1)
+      // a tool answer is never replayed — the repeat asks the agent
+      // again, so the client never executes a recorded call twice
+      // (bro-sy4q3)
+      assert.equal(fake.prompts.length, 2)
     } finally {
       await close()
     }
@@ -364,6 +370,61 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.equal(c.status, 400)
       const errBody = (await c.json()) as { error: { message: string } }
       assert.match(errBody.error.message, /superseded/)
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-d63hu — an unknown predecessor must 400, never answer the bare
+  // delta history-less as if it were a fresh fingerprinted turn.
+
+  test('an unknown previous_response_id answers 400 — never a history-less turn', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const gone = await post('/v1/responses', {
+        input: 'x',
+        previous_response_id: 'resp_gone',
+        stream: false,
+      })
+      assert.equal(gone.status, 400)
+      const err = (await gone.json()) as { error: { type: string; message: string } }
+      assert.equal(err.error.type, 'invalid_request_error')
+      assert.match(err.error.message, /resp_gone.*expired or evicted/)
+      // a non-stored response registers no chain id either — chaining
+      // from it is equally refused, not a fresh fingerprint
+      const a = await post('/v1/responses', { input: 'one', store: false })
+      const idA = ((await a.json()) as { id: string }).id
+      const b = await post('/v1/responses', {
+        input: 'two',
+        previous_response_id: idA,
+        stream: false,
+      })
+      assert.equal(b.status, 400)
+      // the refused turns never reached the agent — only 'one' did
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  // a non-string previous_response_id must 400 at the shape gate — the
+  // unknown-chain template interpolates it, and an object with a
+  // non-callable toString throws outside the turn's try instead.
+  test('a non-string previous_response_id answers 400 — never a template throw', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const { post, close } = await boot(fake)
+    try {
+      const r = await post('/v1/responses', {
+        input: 'x',
+        previous_response_id: { toString: 5 },
+        stream: false,
+      })
+      assert.equal(r.status, 400)
+      const err = (await r.json()) as { error: { type: string; message: string } }
+      assert.equal(err.error.type, 'invalid_request_error')
+      assert.match(err.error.message, /previous_response_id: a string is required/)
+      assert.equal(fake.prompts.length, 0)
     } finally {
       await close()
     }
@@ -1056,6 +1117,59 @@ describe('output caps + loud input failures', () => {
       // cut must answer the same 'a', not the longer marker's ''
       assert.equal(body.choices[0].message.content, 'a')
       assert.equal(body.choices[0].finish_reason, 'stop')
+    } finally {
+      await close()
+    }
+  })
+})
+
+describe('serve /v1/* openai — keepalive', () => {
+  test('/v1/responses streams : ping while held and stops after terminal event', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fake = fakeAcpAgent({
+      updates: chunks('after'),
+      holdEnd: () => gate,
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake, { ...CFG, keepaliveMs: 40 })
+    try {
+      const r = await post('/v1/responses', { input: 'x', stream: true })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      release()
+      const raw = await r.text()
+      assert.ok(raw.includes(': ping'), 'ping comment frame present')
+      const tail = raw.slice(raw.lastIndexOf(': ping'))
+      assert.ok(
+        tail.includes('response.completed') || tail.includes('response.incomplete') || tail.includes('response.cancelled') || tail.includes('response.failed'),
+        'no ping after terminal event'
+      )
+    } finally {
+      await close()
+    }
+  })
+
+  test('/v1/chat/completions streams : ping while held and stops after terminal event', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fake = fakeAcpAgent({
+      updates: chunks('after'),
+      holdEnd: () => gate,
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake, { ...CFG, keepaliveMs: 40 })
+    try {
+      const r = await post('/v1/chat/completions', { messages: [{ role: 'user', content: 'x' }], stream: true })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      release()
+      const raw = await r.text()
+      assert.ok(raw.includes(': ping'), 'ping comment frame present')
+      const tail = raw.slice(raw.lastIndexOf(': ping'))
+      assert.ok(tail.includes('[DONE]'), 'no ping after terminal event')
     } finally {
       await close()
     }

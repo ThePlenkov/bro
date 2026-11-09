@@ -16,7 +16,19 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig, type LockedSkill, type SkillDrift } from '@broject/core'
+import {
+  checkSkillLock,
+  CONFIG_SCHEMA_URL,
+  hasHelpFlag,
+  initBeadsStealth,
+  PERSONALITIES,
+  printUsage,
+  readSkillLock,
+  withFileLock,
+  type BroConfig,
+  type LockedSkill,
+  type SkillDrift,
+} from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -169,6 +181,7 @@ function ensureLocalConfigExcluded(): void {
   }
 }
 
+/** Exported for tests — writes/merges the gitignored local layer. */
 export function writeConfig(opts: { beads: boolean; personality?: string }): string {
   // The written file is called "gitignored" by every doc that mentions
   // it — make that true here, not only in repos whose .gitignore
@@ -201,10 +214,15 @@ export function writeConfig(opts: { beads: boolean; personality?: string }): str
   if (opts.personality) {
     merged.personality = opts.personality as BroConfig['personality']
   }
-  if (existed && JSON.stringify(existing) === JSON.stringify(merged)) {
+  // $schema first — IDEs/agents get completion+validation for free;
+  // an existing $schema pin wins the spread (never clobbered). Compare
+  // the RAW file keys against the output — a file lacking $schema is a
+  // diff, so the upgrade lands on the next setup run
+  const out = { $schema: CONFIG_SCHEMA_URL, ...merged }
+  if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
     return 'bro.config.local.json already up to date'
   }
-  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+  writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8')
   const stores = merged.stores ?? effective.stores
   const hint = existed ? '' : ' — gitignored (machine-local overrides live here)'
   return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`
@@ -441,7 +459,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   // `npx skills add` rewrites the lockfile with the freshly fetched hash,
   // so re-reading it would make that new hash the expected value and
   // silently advance the lock instead of reporting drift.
-  const drift = checkSkillLock(locked, skillsDir)
+  const drift = checkSkillLock(locked, { skillsDir })
   reportSkillDrift(locked, drift)
 }
 

@@ -4,6 +4,16 @@
     {
       "quality_gates": "pay_down_tech_debt",
       "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/trace-resolve.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/pipeline/src/trace.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
       "matching_content_path": "packages/act/src/docs.ts"
     },
     {
@@ -679,6 +689,11 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/private-files.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/core/src/proc.ts"
     },
     {
@@ -949,12 +964,230 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/check-onboarding.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/gen-command-docs.ts"
     },
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/gen-plugins.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/gen-published.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/published-surface.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/view/acp-impl.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/tui/app.tsx"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/model/items.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/model/src/reducer.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/view/acp-lines.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/view/lines.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/model/src/sanitiser.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/fleet/classify.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/model/verdict.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "plugins/herdr/tui/main.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/import-graph.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/fleet/projector.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/view/state.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/views/decide.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "plugins/herdr/src/live-views.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "plugins/herdr/tui/acp/model.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/client/envelope.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/tui/serve.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/lines/session.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/import-graph.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/fleet/state.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "plugins/herdr/tui/acp/conform.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/model/src/import-graph.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/archive/tail.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/archive/verdict.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/session/src/model/items.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/fleet/target.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/herdr-kit/src/views/decide.test.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": false
+      },
+      "quality_gates_doc": "Moved-or-vendored extraction code (PR #873): the debt it carries is pre-existing code relocated, not new debt — new_code_health would gate every relocated file. Files stay listed individually so genuinely new files under these roots still gate.",
+      "matching_content_path": "packages/acp/tui/pane.test.tsx"
     },
     {
       "quality_gates": {

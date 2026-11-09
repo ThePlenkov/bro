@@ -289,7 +289,10 @@ function boardLines(s) {
 	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
 	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
 	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
+	for (const b of beads.slice(0, 3)) {
+		const link = b.link ? `  ${b.link}` : "";
+		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
+	}
 	for (const a of running.slice(0, 2)) {
 		const step = a.step ? `  ${a.step}` : "";
 		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
@@ -357,6 +360,7 @@ function sharedBinding(host) {
 			ctx.ui.setStatus(BOARD_KEY, void 0);
 		},
 		notify: host.notify,
+		argumentCompletions: void 0,
 		refuseStop: host.refuseStop,
 		stopAlreadyRefused: host.stopAlreadyRefused,
 		stopAborted: host.stopAborted,
@@ -582,6 +586,7 @@ function createBroDriver(host, api) {
 	*  renders. Both are the same on every host, so both live here. */
 	api.registerCommand("bro", {
 		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
+		getArgumentCompletions: host.argumentCompletions,
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
@@ -762,7 +767,7 @@ function installModeBridges(pi, source) {
 //#region packages/cli/src/adapter/omp.ts
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = "@broject/bro@0.2.5";
+const NPX_PIN = "@broject/bro@0.3.0";
 /**
 * The omp binding: the host's own shape, nothing else. Every
 * behavioral decision lives in the shared driver, so this file is the
