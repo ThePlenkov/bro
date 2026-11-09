@@ -7,21 +7,21 @@
  *  mechanics: the quota config shape, the reservation lifecycle, and
  *  the serialized admit. Vendor names never reach this file — planes
  *  register themselves, callers ask the registry. */
-import { randomBytes } from 'node:crypto'
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { SpawnError } from './agents.ts'
-import { LockTimeout, withFileLock } from './filelock.ts'
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { SpawnError } from './agents.ts';
+import { LockTimeout, withFileLock } from './filelock.ts';
 
 /** A session-kind admission plane. */
 export interface SessionPlane {
   /** The kind id — also the config bag key (`agents.<kind>`). */
-  readonly kind: string
+  readonly kind: string;
   /** Does this CLI identity (basename of the resolved spawn command)
    *  start one of this plane's sessions? Called with the worker's
    *  wrapped cliName for argv workers — never the driver argv[0]. */
-  detectsCli(cliName: string): boolean
+  detectsCli(cliName: string): boolean;
   /** How many sessions of this kind does this COMMAND start? The plane
    *  owns its CLI's grammar — one vendor's CLI opens a session with the
    *  bare binary, another's only with a subcommand, a third never (a
@@ -32,7 +32,7 @@ export interface SessionPlane {
    *  The answer is the START count, not a boolean: one command can open
    *  several sessions (`devin a & devin b`), and the cap is judged
    *  against `live + starts`. */
-  startsSessions?(command: string): number
+  startsSessions?(command: string): number;
   /** Live sessions of this kind on the host, per the plane's own state
    *  plane (lock dir, socket listing, local API). `bag` is the
    *  `agents.<kind>` config section — plane-local knobs (like a lockDir
@@ -40,7 +40,7 @@ export interface SessionPlane {
    *  run under, so a count can include the state dir the child will
    *  actually write to. Throws SpawnError('unavailable') when the
    *  count can't be established — admission fails closed. */
-  countLive(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  countLive(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number;
   /** The spawned-worker subset of countLive — the sessions
    *  `agents.<kind>.maxWorkers` gates. Planes that cannot tell a
    *  spawned worker from an interactive session leave this
@@ -51,7 +51,7 @@ export interface SessionPlane {
    *  which of its sessions' pids are already counted may also retire
    *  landed `.slot` reservations inside its count — the admission
    *  tally runs after it, so a landed spawn is not counted twice. */
-  countWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  countWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number;
   /** The BATCH subset of countWorkers — the workers the fleet owns
    *  (a drive fixer, a loop member). The split is by the supervisor
    *  marker the spawn's env carries (BRO_PR, BRO_MOL_ID): the marker
@@ -60,16 +60,13 @@ export interface SessionPlane {
    *  operator's own sessions. `agents.<kind>.maxBatchWorkers` gates
    *  this population; a plane that cannot split refuses 'config' when
    *  that cap is armed, never silently unguards it (spec bro-9h86l). */
-  countBatchWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  countBatchWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number;
   /** The live sessions as rows — the same lock/scan semantics countLive
    *  runs, kept per-session so a board names the session, not just the
    *  count. Optional: a plane without it contributes counts but no
    *  rows. Same SpawnError('unavailable') contract as countLive — an
    *  unverifiable scan throws, never silently reports "no sessions". */
-  listLive?(
-    bag: Record<string, unknown>,
-    workerEnv?: Record<string, string>
-  ): DiscoveredSession[]
+  listLive?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): DiscoveredSession[];
 }
 
 /** One live session a session-plane sees — a worker the registry never
@@ -79,39 +76,39 @@ export interface SessionPlane {
  *  folds the session into its agent row instead of counting the same
  *  work twice. */
 export interface DiscoveredSession {
-  pid: number
+  pid: number;
   /** The plane's name for the session (a lock-name, a socket id) when
    *  the state plane carries one. */
-  name?: string
+  name?: string;
   /** The session's working directory when the plane can read it —
    *  a same-repo similarity/admission check scopes by it. */
-  cwd?: string
+  cwd?: string;
   /** The plane's own worker classification — the same predicate
    *  countWorkers applies. False is "live, but not a worker" (an
    *  interactive session), not "unknown". */
-  worker?: boolean
+  worker?: boolean;
   /** The worker's BRO_AGENT_ID env badge when readable — the registry
    *  correlation id. */
-  agentId?: string
+  agentId?: string;
 }
 
 // --- plane registry ------------------------------------------------------------
 
-const planes = new Map<string, SessionPlane>()
+const planes = new Map<string, SessionPlane>();
 
 /** Register a plane — builtins register at import; external plugins
  *  register through the connector surface. Re-registering a kind the
  *  host already knows replaces it (tests reset via clearSessionPlanes). */
 export function registerSessionPlane(plane: SessionPlane): void {
-  planes.set(plane.kind, plane)
+  planes.set(plane.kind, plane);
 }
 
 export function sessionPlane(kind: string): SessionPlane | undefined {
-  return planes.get(kind)
+  return planes.get(kind);
 }
 
 export function sessionPlanes(): SessionPlane[] {
-  return [...planes.values()]
+  return [...planes.values()];
 }
 
 /** The plane a spawn command belongs to — first registered detector
@@ -119,15 +116,15 @@ export function sessionPlanes(): SessionPlane[] {
 export function sessionPlaneForCli(cliName: string): SessionPlane | undefined {
   for (const p of planes.values()) {
     if (p.detectsCli(cliName)) {
-      return p
+      return p;
     }
   }
-  return undefined
+  return undefined;
 }
 
 /** Test hook — drop all registrations. */
 export function clearSessionPlanes(): void {
-  planes.clear()
+  planes.clear();
 }
 
 // --- quota config ----------------------------------------------------------------
@@ -141,37 +138,37 @@ export function clearSessionPlanes(): void {
  *  (reservations are bro's own files); every other key in the bag is
  *  the plane's private config, handed to countLive/countWorkers. */
 export interface SessionQuota {
-  maxSessions: number
-  maxWorkers?: number
+  maxSessions: number;
+  maxWorkers?: number;
   /** The BATCH lane's own worker cap — the fleet's share of the worker
    *  budget. The interactive lane keeps the rest of `maxWorkers`. A
    *  batch spawn is one carrying a supervisor marker (BRO_PR for a drive
    *  fixer, BRO_MOL_ID for a loop member) — the marker rides into the
    *  worker process, so the plane can tell the two populations apart.
    *  Unset = one budget for everyone (spec bro-9h86l). */
-  maxBatchWorkers?: number
-  reservationsDir?: string
-  invalid?: boolean
-  invalidKey?: string
+  maxBatchWorkers?: number;
+  reservationsDir?: string;
+  invalid?: boolean;
+  invalidKey?: string;
 }
 
 /** One admission lane's parsed knob: a count, a malformed marker, or
  *  absent (uncapped). A present-but-malformed value is a config bug —
  *  it flags `invalid` and admission refuses loudly. */
-type QuotaLane = { n: number } | { invalid: true } | undefined
+type QuotaLane = { n: number } | { invalid: true } | undefined;
 
 function quotaLane(
   bag: Record<string, unknown>,
   key: 'maxSessions' | 'maxWorkers' | 'maxBatchWorkers'
 ): QuotaLane {
-  const v = bag[key]
+  const v = bag[key];
   if (v === undefined || v === 0) {
-    return undefined
+    return undefined;
   }
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-    return { invalid: true }
+    return { invalid: true };
   }
-  return { n: v }
+  return { n: v };
 }
 
 /** The first malformed lane's knob name — the one admission names when
@@ -179,54 +176,54 @@ function quotaLane(
 function firstBadLane(...lanes: Array<[string, QuotaLane]>): string | undefined {
   for (const [key, lane] of lanes) {
     if (lane !== undefined && 'invalid' in lane) {
-      return key
+      return key;
     }
   }
-  return undefined
+  return undefined;
 }
 
 /** A lane's count — undefined when the knob is absent. */
 function laneCount(lane: QuotaLane): number | undefined {
-  return lane !== undefined && 'n' in lane ? lane.n : undefined
+  return lane !== undefined && 'n' in lane ? lane.n : undefined;
 }
 
 export function sessionQuotaConfig(
   agents: Record<string, Record<string, unknown>> | undefined,
   kind: string
 ): SessionQuota | undefined {
-  const bag = agents?.[kind]
+  const bag = agents?.[kind];
   if (bag === undefined) {
-    return undefined
+    return undefined;
   }
   const reservationsDir =
-    typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
-  const sessions = quotaLane(bag, 'maxSessions')
-  const workers = quotaLane(bag, 'maxWorkers')
-  const batchWorkers = quotaLane(bag, 'maxBatchWorkers')
+    typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined;
+  const sessions = quotaLane(bag, 'maxSessions');
+  const workers = quotaLane(bag, 'maxWorkers');
+  const batchWorkers = quotaLane(bag, 'maxBatchWorkers');
   if (sessions === undefined && workers === undefined && batchWorkers === undefined) {
-    return undefined
+    return undefined;
   }
   const bad = firstBadLane(
     ['maxSessions', sessions],
     ['maxWorkers', workers],
     ['maxBatchWorkers', batchWorkers]
-  )
+  );
   if (bad !== undefined) {
-    return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad }
+    return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad };
   }
   const quota: SessionQuota = {
     maxSessions: laneCount(sessions) ?? 0,
     reservationsDir,
-  }
-  const maxWorkers = laneCount(workers)
+  };
+  const maxWorkers = laneCount(workers);
   if (maxWorkers !== undefined) {
-    quota.maxWorkers = maxWorkers
+    quota.maxWorkers = maxWorkers;
   }
-  const maxBatchWorkers = laneCount(batchWorkers)
+  const maxBatchWorkers = laneCount(batchWorkers);
   if (maxBatchWorkers !== undefined) {
-    quota.maxBatchWorkers = maxBatchWorkers
+    quota.maxBatchWorkers = maxBatchWorkers;
   }
-  return quota
+  return quota;
 }
 
 // --- slot reservations -----------------------------------------------------------
@@ -235,7 +232,7 @@ export function sessionQuotaConfig(
  *  own session mark lands within seconds of the child starting; 120s
  *  covers that handoff plus failure cleanup, then the file
  *  self-expires — a crashed parent never wedges the quota. */
-export const SESSION_SLOT_TTL_MS = 120_000
+export const SESSION_SLOT_TTL_MS = 120_000;
 
 /** Host-shared reservation dir per kind — `$XDG_DATA_HOME/bro/
  *  session-slots/<kind>`. Cross-repo by construction: every bro
@@ -244,11 +241,19 @@ export const SESSION_SLOT_TTL_MS = 120_000
  *  its own mark in the plane's state". */
 export function sessionSlotsDir(kind: string, resDir?: string): string {
   if (typeof resDir === 'string' && resDir.trim() !== '') {
-    return resDir
+    return resDir;
   }
-  const xdg = process.env['XDG_DATA_HOME']
-  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
-  return join(base, 'bro', 'session-slots', kind)
+  const xdg = process.env['XDG_DATA_HOME'];
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share');
+  return join(base, 'bro', 'session-slots', kind);
+}
+
+/** The per-kind admission mutex — the file every serialized
+ *  check+claim on this kind locks: the spawn's admission AND the
+ *  session cap's guard/conductor claims. A non-`.slot` name under the
+ *  slots dir, so the reservation tally never reads it as a claim. */
+export function sessionAdmissionLock(kind: string, resDir?: string): string {
+  return join(sessionSlotsDir(kind, resDir), 'admission.mutex');
 }
 
 /** Does this reservation file belong to the asked lane? The fleet's
@@ -256,10 +261,10 @@ export function sessionSlotsDir(kind: string, resDir?: string): string {
  *  them. */
 function reservationInLane(name: string, lane: ReservationLane | undefined): boolean {
   if (lane === undefined) {
-    return true
+    return true;
   }
-  const batch = name.endsWith('.batch.slot')
-  return lane === 'batch' ? batch : !batch
+  const batch = name.endsWith('.batch.slot');
+  return lane === 'batch' ? batch : !batch;
 }
 
 /** Fresh reservations — files younger than the TTL count as claimed
@@ -267,61 +272,57 @@ function reservationInLane(name: string, lane: ReservationLane | undefined): boo
  *  reservations; other read failures throw 'unavailable' — an
  *  unverifiable count fails closed, never silently admits. */
 export function countSessionReservations(resDir: string, lane?: ReservationLane): number {
-  let names: string[]
+  let names: string[];
   try {
-    names = readdirSync(resDir)
+    names = readdirSync(resDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return 0
+      return 0;
     }
     throw new SpawnError(
       `cannot verify session reservations — ${resDir}: ${(err as Error).message}`,
       'unavailable'
-    )
+    );
   }
-  const now = Date.now()
-  let fresh = 0
+  const now = Date.now();
+  let fresh = 0;
   for (const name of names) {
     if (!name.endsWith('.slot') || !reservationInLane(name, lane)) {
-      continue
+      continue;
     }
-    const path = join(resDir, name)
+    const path = join(resDir, name);
     try {
       if (now - statSync(path).mtimeMs < SESSION_SLOT_TTL_MS) {
-        fresh++
+        fresh++;
       } else {
-        rmSync(path, { force: true })
+        rmSync(path, { force: true });
       }
     } catch {
       // stat raced a reap — ignore
     }
   }
-  return fresh
+  return fresh;
 }
 
 /** Claim a host-wide slot — `wx` exclusive create plus a random suffix,
  *  so a same-named spawn from another repo never overwrites a live
  *  claim. Returns the reservation path for release on failure. */
-export function reserveSessionSlot(
-  resDir: string,
-  key: string,
-  lane: ReservationLane
-): string {
-  mkdirSync(resDir, { recursive: true })
+export function reserveSessionSlot(resDir: string, key: string, lane: ReservationLane): string {
+  mkdirSync(resDir, { recursive: true });
   // the lane rides the file name, and it is EXPLICIT: the batch cap
   // counts only the fleet's reservations, so an in-flight interactive
   // spawn never eats the fleet's share — and an untagged reservation
   // (a caller that forgot) would undercount the fleet
-  const tag = lane === 'batch' ? '.batch' : ''
-  const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}${tag}.slot`)
-  writeFileSync(path, String(Date.now()), { flag: 'wx' })
-  return path
+  const tag = lane === 'batch' ? '.batch' : '';
+  const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}${tag}.slot`);
+  writeFileSync(path, String(Date.now()), { flag: 'wx' });
+  return path;
 }
 
 /** Drop a reservation — spawn-failure cleanup; on success the file is
  *  left to expire behind the child's own session mark. */
 export function releaseSessionSlot(path: string): void {
-  rmSync(path, { force: true })
+  rmSync(path, { force: true });
 }
 
 /** Claim a slot ONCE — the same key never claims twice.
@@ -336,17 +337,17 @@ export function reserveSessionSlotOnce(
   key: string,
   lane: ReservationLane
 ): { path: string; fresh: boolean } {
-  mkdirSync(resDir, { recursive: true })
-  const tag = lane === 'batch' ? '.batch' : ''
-  const path = join(resDir, `${key}${tag}.slot`)
+  mkdirSync(resDir, { recursive: true });
+  const tag = lane === 'batch' ? '.batch' : '';
+  const path = join(resDir, `${key}${tag}.slot`);
   try {
-    writeFileSync(path, String(Date.now()), { flag: 'wx' })
-    return { path, fresh: true }
+    writeFileSync(path, String(Date.now()), { flag: 'wx' });
+    return { path, fresh: true };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      return { path, fresh: false }
+      return { path, fresh: false };
     }
-    throw err
+    throw err;
   }
 }
 
@@ -357,15 +358,15 @@ export function reserveSessionSlotOnce(
  *  carries it. The child's env is `{ ...process.env, ...spec.env }`, so
  *  the marker rides into the worker process and a plane can classify a
  *  live worker from its own environment. */
-export const BATCH_MARKER_ENV = 'BRO_BATCH'
+export const BATCH_MARKER_ENV = 'BRO_BATCH';
 
 /** The BATCH lane — a spawn the fleet owns. */
 export function isBatchSpawn(env: Record<string, string> | undefined): boolean {
   if (env === undefined) {
-    return false
+    return false;
   }
-  const marker = env[BATCH_MARKER_ENV]
-  return marker !== undefined && marker !== ''
+  const marker = env[BATCH_MARKER_ENV];
+  return marker !== undefined && marker !== '';
 }
 
 /** The lane checks inside the admission mutex. The plane counts run
@@ -385,11 +386,11 @@ function checkSessionLanes(
   resDir: string,
   opts: { molStep?: string; workerEnv?: Record<string, string> }
 ): void {
-  const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''
-  const maxWorkers = quota.maxWorkers ?? 0
-  const maxBatchWorkers = quota.maxBatchWorkers ?? 0
-  const batch = isBatchSpawn(opts.workerEnv)
-  const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0
+  const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : '';
+  const maxWorkers = quota.maxWorkers ?? 0;
+  const maxBatchWorkers = quota.maxBatchWorkers ?? 0;
+  const batch = isBatchSpawn(opts.workerEnv);
+  const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0;
   // The plane counts run BEFORE the reservation tally: a plane that
   // retires a landed spawn's still-fresh `.slot` inside its own count
   // must have that sweep VISIBLE to the tally, or a landed worker
@@ -398,31 +399,35 @@ function checkSessionLanes(
   const workers =
     maxWorkers > 0 && plane.countWorkers !== undefined
       ? plane.countWorkers(bag, opts.workerEnv)
-      : 0
+      : 0;
   const batchWorkers =
     maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
       ? plane.countBatchWorkers(bag, opts.workerEnv)
-      : 0
-  const reservations = countSessionReservations(resDir)
+      : 0;
+  const reservations = countSessionReservations(resDir);
   // the fleet's share counts the fleet's reservations only — an
   // interactive spawn in flight must not eat the batch lane's cap
-  const batchReservations = countSessionReservations(resDir, 'batch')
+  const batchReservations = countSessionReservations(resDir, 'batch');
   if (quota.maxSessions > 0 && sessions + reservations >= quota.maxSessions) {
     throw new SpawnError(
       `${plane.kind} session quota reached — ${sessions + reservations}/${quota.maxSessions} live sessions ` +
         `(agents.${plane.kind}.maxSessions in bro.config)` +
         refused,
       'cap'
-    )
+    );
   }
   if (maxBatchWorkers > 0 && batch) {
     // the fleet's own share of the worker budget
-    const budget: LaneBudget = { lane: 'maxBatchWorkers', cap: maxBatchWorkers, live: batchWorkers }
-    checkWorkerCap(plane, workerCap(plane, budget), { reservations: batchReservations, refused })
+    const budget: LaneBudget = {
+      lane: 'maxBatchWorkers',
+      cap: maxBatchWorkers,
+      live: batchWorkers,
+    };
+    checkWorkerCap(plane, workerCap(plane, budget), { reservations: batchReservations, refused });
   }
   if (maxWorkers > 0) {
-    const budget: LaneBudget = { lane: 'maxWorkers', cap: maxWorkers, live: workers }
-    checkWorkerCap(plane, workerCap(plane, budget), { reservations, refused })
+    const budget: LaneBudget = { lane: 'maxWorkers', cap: maxWorkers, live: workers };
+    checkWorkerCap(plane, workerCap(plane, budget), { reservations, refused });
   }
 }
 
@@ -435,43 +440,43 @@ function checkSessionLanes(
 /** Which lane a budget belongs to — the whole worker pool or the
  *  fleet's share of it. A named lane, not a loose string: the knob,
  *  the wording and the countable check all follow from it. */
-type WorkerLane = 'maxWorkers' | 'maxBatchWorkers'
+type WorkerLane = 'maxWorkers' | 'maxBatchWorkers';
 
 /** Which lane a RESERVATION belongs to — the fleet's or the operator's.
  *  Explicit at every call site: an untagged reservation would be
  *  counted as nobody's, and the fleet's cap would undercount its own
  *  in-flight spawns. */
-export type ReservationLane = 'batch' | 'interactive'
+export type ReservationLane = 'batch' | 'interactive';
 
 /** A lane's numbers — the cap and what is live against it. */
 interface LaneBudget {
-  lane: WorkerLane
-  cap: number
-  live: number
+  lane: WorkerLane;
+  cap: number;
+  live: number;
 }
 
 interface WorkerCap {
   /** the config knob (`agents.<kind>.<knob>`) */
-  knob: WorkerLane
+  knob: WorkerLane;
   /** the subject in the refusal — "worker" / "batch worker" */
-  subject: 'worker' | 'batch worker'
+  subject: 'worker' | 'batch worker';
   /** the counted population — "workers" / "batch workers" */
-  population: 'workers' | 'batch workers'
+  population: 'workers' | 'batch workers';
   /** what a plane that cannot split would be unable to tell apart */
-  undistinguishable: 'worker sessions' | 'batch workers'
+  undistinguishable: 'worker sessions' | 'batch workers';
   /** the cap */
-  cap: number
+  cap: number;
   /** the lane's live count (the plane counted it before the tally) */
-  live: number
+  live: number;
   /** can the plane tell this population apart at all? */
-  countable: boolean
+  countable: boolean;
 }
 
 /** One lane's cap — the whole budget (`maxWorkers`) or the fleet's
  *  share of it (`maxBatchWorkers`). One shape for both: the wording
  *  differs, the rule does not. */
 function workerCap(plane: SessionPlane, budget: LaneBudget): WorkerCap {
-  const batch = budget.lane === 'maxBatchWorkers'
+  const batch = budget.lane === 'maxBatchWorkers';
   return {
     knob: budget.lane,
     subject: batch ? 'batch worker' : 'worker',
@@ -479,10 +484,8 @@ function workerCap(plane: SessionPlane, budget: LaneBudget): WorkerCap {
     undistinguishable: batch ? 'batch workers' : 'worker sessions',
     cap: budget.cap,
     live: budget.live,
-    countable: batch
-      ? plane.countBatchWorkers !== undefined
-      : plane.countWorkers !== undefined,
-  }
+    countable: batch ? plane.countBatchWorkers !== undefined : plane.countWorkers !== undefined,
+  };
 }
 
 /** The lane's cap: a plane that cannot tell the population apart
@@ -499,7 +502,7 @@ function checkWorkerCap(
         `cannot distinguish ${cap.undistinguishable} from interactive sessions` +
         ctx.refused,
       'config'
-    )
+    );
   }
   if (cap.live + ctx.reservations >= cap.cap) {
     throw new SpawnError(
@@ -507,7 +510,7 @@ function checkWorkerCap(
         `(agents.${plane.kind}.${cap.knob} in bro.config)` +
         ctx.refused,
       'cap'
-    )
+    );
   }
 }
 
@@ -529,15 +532,15 @@ export function admitSessionSlot(
   agents: Record<string, Record<string, unknown>> | undefined,
   opts: { key: string; molStep?: string; workerEnv?: Record<string, string> }
 ): string | undefined {
-  const bag = agents?.[plane.kind] ?? {}
-  const quota = sessionQuotaConfig(agents, plane.kind)
+  const bag = agents?.[plane.kind] ?? {};
+  const quota = sessionQuotaConfig(agents, plane.kind);
   if (quota === undefined) {
-    return undefined
+    return undefined;
   }
-  const resDir = sessionSlotsDir(plane.kind, quota.reservationsDir)
+  const resDir = sessionSlotsDir(plane.kind, quota.reservationsDir);
   try {
     return withFileLock(
-      join(resDir, 'admission.mutex'),
+      sessionAdmissionLock(plane.kind, quota.reservationsDir),
       () => {
         if (quota.invalid === true) {
           // a present-but-unparsable cap is a config bug — refuse
@@ -546,21 +549,24 @@ export function admitSessionSlot(
             `agents.${plane.kind}.${quota.invalidKey ?? 'maxSessions'} must be a positive integer` +
               (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
             'config'
-          )
+          );
         }
-        checkSessionLanes(plane, bag, quota, resDir, opts)
+        checkSessionLanes(plane, bag, quota, resDir, opts);
         return reserveSessionSlot(
           resDir,
           opts.key,
           isBatchSpawn(opts.workerEnv) ? 'batch' : 'interactive'
-        )
+        );
       },
       { label: `${plane.kind} session quota admission` }
-    )
+    );
   } catch (err) {
     if (err instanceof LockTimeout) {
-      throw new SpawnError(`${plane.kind} quota admission lock held — ${err.message}`, 'unavailable')
+      throw new SpawnError(
+        `${plane.kind} quota admission lock held — ${err.message}`,
+        'unavailable'
+      );
     }
-    throw err
+    throw err;
   }
 }

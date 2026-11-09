@@ -195,6 +195,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const act = loadBroConfig().act;
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
+    selfCheck: act.selfCheck,
     checkHistory: checkHistory(process.cwd()),
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
@@ -293,6 +294,7 @@ async function cmdWait(argv: string[]): Promise<void> {
     async () => {
       const state = await fetchPrActState(rev, t, {
         ignoreChecks: act.ignoreChecks,
+        selfCheck: act.selfCheck,
         checkHistory: checkHistory(process.cwd()),
         maxRounds: act.maxRounds,
         docsPaths: act.docsPaths,
@@ -1062,6 +1064,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     // decision — a ≤ttl-old "green" must never land a PR (bro-0tcrl)
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: act.ignoreChecks,
+      selfCheck: act.selfCheck,
       checkHistory: checkHistory(process.cwd()),
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,

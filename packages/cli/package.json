@@ -95,6 +95,7 @@
     "@broject/router-routes": "^0.3.0",
     "@broject/router-store": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "ip-address": "^10.7.4",
     "smol-toml": "^1.9.0",
     "sverka": "^0.2.10"
   },
