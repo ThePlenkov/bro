@@ -41,7 +41,7 @@ import type {
   StopReason,
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
-import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { isSystemoneFamily, JudgeUnavailable, MAX_TIMER_MS, modelBase } from '@broject/core';
 import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
 import { otelEvent, otelSpan } from './otel.ts';
@@ -897,7 +897,11 @@ export async function pumpTurn(
       // the silence bound — a turn that reports nothing for stallMs is
       // ended (spec bro-b961a). The window resets on every update, so a
       // long tool call that reports itself is untouched.
-      const watchdog = stallMs <= 0 ? undefined : stallWatchdog(stallMs, by);
+      // a window above Node's timer ceiling wraps and fires at once —
+      // clamp it: late is honest, instant is a stall watchdog that never
+      // waited
+      const watchdog =
+        stallMs <= 0 ? undefined : stallWatchdog(Math.min(stallMs, MAX_TIMER_MS), by);
       const race: Array<Promise<ActiveSessionMessage>> = [
         // prompt failures surface on the queue itself — classify the
         // rejection through asAuthError the same as a direct throw

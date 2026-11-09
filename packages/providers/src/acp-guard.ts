@@ -164,22 +164,40 @@ export class AcpDeadLoopGuard {
     this.refuseBusyPeer(target, now);
     this.refuseOverBudget(target.scope, tally, now);
     tally.pending += 1;
-    // the window the charge was counted in — a rolled window already
-    // wrote this charge off, so resolve() checks it before freeing
-    const since = tally.since;
-    let peerTally: Tally | undefined;
-    let peerSince = 0;
-    if (target.peer !== undefined) {
-      peerTally = this.tally(this.peers, target.peer, now);
-      peerTally.pending += 1;
-      peerSince = peerTally.since;
-    }
+    const peer = this.chargePeer(target, now);
     // the scope was tripped a moment ago — this open IS the probe
     if (halfOpened) {
       tally.probeInFlight = true;
     }
     this.prune(this.scopes, now);
     this.prune(this.peers, now);
+    return this.charge(tally, peer);
+  }
+
+  /** The peer's half of the charge — the tally it was counted in and the
+   *  window it stood at. Undefined for a target with no peer. */
+  private chargePeer(
+    target: AcpTarget,
+    now: number
+  ): { tally: Tally; since: number } | undefined {
+    if (target.peer === undefined) {
+      return undefined;
+    }
+    const tally = this.tally(this.peers, target.peer, now);
+    tally.pending += 1;
+    return { tally, since: tally.since };
+  }
+
+  /** The charge the caller settles when the session's turn completes —
+   *  the scope's own debt and the peer's, each in the window it was
+   *  counted in. */
+  private charge(
+    tally: Tally,
+    peer: { tally: Tally; since: number } | undefined
+  ): AcpCharge {
+    // the window the charge was counted in — a rolled window already
+    // wrote this charge off, so resolve() checks it before freeing
+    const since = tally.since;
     let resolved = false;
     return {
       resolve: () => {
@@ -196,8 +214,8 @@ export class AcpDeadLoopGuard {
         tally.trippedUntil = 0;
         // the probe answered — the scope is healthy again
         tally.probeInFlight = false;
-        if (peerTally !== undefined) {
-          this.releasePending(peerTally, peerSince);
+        if (peer !== undefined) {
+          this.releasePending(peer.tally, peer.since);
         }
       },
     };
