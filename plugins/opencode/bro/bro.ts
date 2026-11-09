@@ -1019,25 +1019,41 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
     })
   );
 
-  // `/bro <args>` — run the verb, feed the output back as a prompt
+  // `/bro <args>` and shortcuts — run the verb, submit output as a prompt
   register(
     ctx.command?.transform?.(editor => {
+      const run = async (
+        sessionID: string | undefined,
+        argv: string[],
+        label: string
+      ): Promise<void> => {
+        if (!sessionID || !ctx.session?.prompt) {
+          return;
+        }
+        const { code, out, err } = await core.exec(argv);
+        const body = out || err || '(no output)';
+        const suffix = code === 0 ? '' : ` (exit ${code})`;
+        await ctx.session.prompt({
+          sessionID,
+          text: `${label}${suffix}:\n${body}`,
+        });
+      };
       editor.add?.({
         name: 'bro',
         description: 'bro orchestration — `/bro [args]` runs the CLI and submits the output',
         execute: async ({ sessionID, prompt }) => {
-          if (!sessionID || !ctx.session?.prompt) {
-            return;
-          }
           const args = splitArgs(prompt?.text ?? '');
           const verb = args.length > 0 ? args : ['status'];
-          const { code, out, err } = await core.exec(verb);
-          const body = out || err || '(no output)';
-          const suffix = code === 0 ? '' : ` (exit ${code})`;
-          await ctx.session.prompt({
-            sessionID,
-            text: `bro ${verb.join(' ')}${suffix}:\n${body}`,
-          });
+          await run(sessionID, verb, `bro ${verb.join(' ')}`);
+        },
+      });
+      editor.add?.({
+        name: 'act',
+        description: 'shortcut for `/bro act` — PR review gate/threads (bro act)',
+        execute: async ({ sessionID, prompt }) => {
+          const args = splitArgs(prompt?.text ?? '');
+          const verb = ['act', ...args];
+          await run(sessionID, verb, `bro ${verb.join(' ')}`);
         },
       });
     })
