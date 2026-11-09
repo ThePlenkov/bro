@@ -191,6 +191,9 @@ export function formulaSteps(formula: string): MolIssue[] {
 function registerStepTypes(): void {
   try {
     const current = bd(['config', 'get', 'types.custom']).trim()
+    // the existing value is read leniently — an operator's hand-written
+    // "agent human" must survive the rewrite as two types, not as one
+    // bogus name
     const types = new Set(current ? current.split(/[\s,]+/) : [])
     types.add('agent').add('human')
     types.add(MERGE_STEP_TYPE)
@@ -202,10 +205,17 @@ function registerStepTypes(): void {
   }
 }
 
-/** The types bd actually registered — the pour's own witness. */
+/** The types bd actually registered — the pour's own witness. The
+ *  read-back is parsed the way bd parses it: a COMMA-separated list. A
+ *  space-joined value is one type to bd, so reading it as three would
+ *  report a registration that never happened — and the pour would
+ *  flatten the merge step to task. */
 function registeredTypes(): string[] {
   try {
-    return bd(['config', 'get', 'types.custom']).trim().split(/[\s,]+/)
+    return bd(['config', 'get', 'types.custom'])
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t !== '')
   } catch {
     // registration unverifiable is a failure too
     return []
@@ -223,14 +233,17 @@ export function pourFormula(formula: string, vars: Record<string, string> = {}):
   if (!registered.includes('agent') || !registered.includes('human')) {
     throw new Error(
       'types.custom could not register agent/human — pouring would flatten declared gates to task. ' +
-        'Upgrade bd or register the types manually: bd config set types.custom "agent human"',
+        'Upgrade bd, or register the types by hand — bd reads a comma-separated list, ' +
+        'so keep the types you already have: ' +
+        'bd config set types.custom "agent,human"',
     )
   }
   if (!registered.includes(MERGE_STEP_TYPE)) {
     throw new Error(
       `types.custom could not register ${MERGE_STEP_TYPE} — pouring would flatten the merge step to task, ` +
         'and the step would close without a host verdict. ' +
-        `Register it manually: bd config set types.custom "agent human ${MERGE_STEP_TYPE}"`,
+        'Register it by hand — bd reads a comma-separated list, so keep the types you ' +
+        `already have: bd config set types.custom "agent,human,${MERGE_STEP_TYPE}"`,
     )
   }
   const args = ['mol', 'pour', formula]

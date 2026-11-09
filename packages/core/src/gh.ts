@@ -191,9 +191,10 @@ export function ghHost(): string {
 
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every
  *  user-facing PR reference must use; bare `#N` is just text. TSV/data rows
- *  keep the bare number — they are parsed, not read. */
-export function prLink(ownerRepo: string, pr: number): string {
-  return `[#${pr}](https://${ghHost()}/${ownerRepo}/pull/${pr})`;
+ *  keep the bare number — they are parsed, not read. The host defaults to
+ *  the connector's own — a claim that names another host links there. */
+export function prLink(ownerRepo: string, pr: number, host?: string): string {
+  return `[#${pr}](https://${host ?? ghHost()}/${ownerRepo}/pull/${pr})`;
 }
 
 /** `[#N](https://github.com/owner/repo/issues/N)` — the same clickable
@@ -269,9 +270,10 @@ function nextLink(text: string, from: number): MarkdownLink | null {
     }
     const urlEnd = text.indexOf(')', i + 2);
     if (urlEnd < 0) {
-      bracket = -1;
-      i += 1;
-      continue;
+      // no ')' left in the text — no later candidate can close a link
+      // either, so the scan ends here instead of re-reading the tail
+      // for every ']'
+      return null;
     }
     return { url: text.slice(i + 2, urlEnd), start: bracket, end: urlEnd + 1 };
   }
@@ -355,6 +357,11 @@ function linkRefs(links: MarkdownLink[]): PrRef[] {
 function bareRefs(text: string, links: MarkdownLink[]): PrRef[] {
   const out: PrRef[] = [];
   let i = 0;
+  // the link spans are ordered and disjoint — the cursor advances past
+  // the ones the scan has left behind, so a text with many links and
+  // many references costs one pass, not one pass per reference
+  let link = 0;
+  let span = links[link];
   while (i < text.length) {
     if (text[i] !== '#') {
       i += 1;
@@ -366,7 +373,11 @@ function bareRefs(text: string, links: MarkdownLink[]): PrRef[] {
     if (digits === 0) continue;
     const pr = Number(text.slice(at + 1, at + 1 + digits));
     if (!Number.isInteger(pr) || pr <= 0) continue;
-    if (links.some((l) => at >= l.start && at < l.end)) continue;
+    while (span !== undefined && span.end <= at) {
+      link += 1;
+      span = links[link];
+    }
+    if (span !== undefined && at >= span.start) continue;
     out.push({ pr });
   }
   return out;

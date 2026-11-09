@@ -36,6 +36,11 @@ esac
 const MERGE_TITLE = 'Merge — bro act wait --merge';
 const PR = 958;
 
+/** The fake `bd` is a shell script — Node cannot launch it as `bd` on
+ *  Windows, so the scenarios skip there (the molecule registration test
+ *  skips the same way). */
+const WIN32 = process.platform === 'win32';
+
 /** The molecule: a closed verify step and a ready merge step. */
 function moleculeJson(opts: { mergeType: string }): string {
   return JSON.stringify({
@@ -190,9 +195,11 @@ function assertOutcome(s: Scenario, f: Fixture, asked: number[]): void {
   const closes = f.closes();
   if (s.closed === undefined) {
     assert.equal(closes, '');
-    return;
+  } else {
+    for (const want of s.closed) assert.match(closes, want);
   }
-  for (const want of s.closed) assert.match(closes, want);
+  // the host calls are part of the outcome: a refusal must ask nobody,
+  // and a close must ask exactly the PR it names
   if (s.asked !== undefined) assert.deepEqual(asked, s.asked);
 }
 
@@ -274,7 +281,7 @@ const SCENARIOS: Scenario[] = [
   },
 ];
 
-describe('convoy done — the merge step closes on a verdict', () => {
+describe('convoy done — the merge step closes on a verdict', { skip: WIN32 }, () => {
   for (const s of SCENARIOS) {
     test(s.name, async () => {
       await runScenario(s);

@@ -43,6 +43,23 @@ describe('mergeClaimTarget', () => {
     assert.equal(target?.pr, 958);
   });
 
+  test('the handoff reads the verdict, not the claim appended to it', () => {
+    // the upstream merge step closed on PR #12 and its own sentence
+    // mentions another PR — the sentence is a claim, the verdict line is
+    // the evidence, so the handoff names one PR
+    const { target, message } = mergeClaimTarget({
+      result: 'merged it',
+      inputs: [
+        {
+          id: 'bro-mol-ho8k',
+          reason: 'verified: PR #12 MERGED (merge d11788ce, by ThePlenkov)\n\nPR #958 merged',
+        },
+      ],
+    });
+    assert.equal(target?.pr, 12);
+    assert.equal(message, undefined);
+  });
+
   test('two different PRs in one claim are ambiguous, not a guess', () => {
     const { target, message } = mergeClaimTarget({ result: 'PR #958 and PR #959 merged' });
     assert.equal(target, undefined);
@@ -156,5 +173,14 @@ describe('mergeCloseReason', () => {
       reason,
       /verified: \[#958\]\(https:\/\/github\.com\/o\/r\/pull\/958\) MERGED \(merge d11788ce, by ThePlenkov\)/
     );
+  });
+
+  test('the link names the host the PR lives on', () => {
+    const reason = mergeCloseReason(
+      { pr: 958, repo: 'o/r', host: 'ghe.example.com' },
+      { state: 'MERGED' },
+      { result: '' }
+    );
+    assert.match(reason, /\[#958\]\(https:\/\/ghe\.example\.com\/o\/r\/pull\/958\)/);
   });
 });

@@ -76,12 +76,28 @@ function explicitTarget(pr: number | undefined): { target?: MergeTarget; message
   return { target: { pr } };
 }
 
+/** The prefix of a verdict line — the close reason's evidence. */
+const VERDICT_PREFIX = 'verified: ';
+
+/**
+ * The evidence in a close reason: the verdict line when the step wrote
+ * one, the whole reason otherwise. What follows a verdict is the agent's
+ * own claim — prose that may name another PR, and a claim is not
+ * evidence: reading it as a candidate is how a merge step ends up
+ * refusing a PR it should verify.
+ */
+function evidenceOf(reason: string): string {
+  const [first] = reason.split('\n');
+  const head = (first ?? '').trim();
+  return head.startsWith(VERDICT_PREFIX) ? head : reason;
+}
+
 /** Where the PR may be named — the result's own text, then the
  *  upstream handoff's close reasons. */
 function claimSources(claim: MergeClaim): RefSource[] {
   return [
     { name: 'result', refs: prRefs(claim.result) },
-    { name: 'handoff', refs: (claim.inputs ?? []).flatMap((input) => prRefs(input.reason)) },
+    { name: 'handoff', refs: (claim.inputs ?? []).flatMap((input) => prRefs(evidenceOf(input.reason))) },
   ];
 }
 
@@ -167,10 +183,12 @@ export function mergeClaimTarget(claim: MergeClaim): { target?: MergeTarget; mes
 }
 
 /** How the PR reads in the verdict — the clickable link when the claim
- *  named the repository, the bare number when it did not. */
+ *  named the repository, the bare number when it did not. The link names
+ *  the host the claim named: a verdict must not point at another host's
+ *  PR. */
 function prRefText(target: MergeTarget): string {
   if (target.repo === undefined) return `PR #${target.pr}`;
-  return prLink(target.repo, target.pr);
+  return prLink(target.repo, target.pr, target.host);
 }
 
 /** The merge record — the sha that landed, and who landed it. */
@@ -190,7 +208,7 @@ export function mergeCloseReason(
   probe: MergeProbe,
   claim: MergeClaim
 ): string {
-  const head = `verified: ${prRefText(target)} MERGED${mergeDetail(probe)}`;
+  const head = `${VERDICT_PREFIX}${prRefText(target)} MERGED${mergeDetail(probe)}`;
   const said = claim.result.trim();
   return said === '' ? head : `${head}\n\n${said}`;
 }
