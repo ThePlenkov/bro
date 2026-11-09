@@ -53,7 +53,7 @@ interface Finding {
   source_pr: number
   source_pr_title?: string
   path?: string
-  line?: number
+  line?: number | null
   author?: string
   body_preview?: string
   area?: string
@@ -136,8 +136,8 @@ function readSnapshot(): CachedSnapshot | null {
           !Array.isArray((d as any).prs) ||
           (d as any).prs.some((pr: unknown) => typeof pr !== 'number' || !Number.isFinite(pr))
       ) ||
-      Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number') ||
-      Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number')
+      Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v)) ||
+      Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v))
     ) {
       return null
     }
@@ -149,7 +149,7 @@ function readSnapshot(): CachedSnapshot | null {
       parsed.rows.some((r: unknown) => {
         if (!isPlainObject(r)) return true
         if (typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') return true
-        if ((r as Row).fix_pr !== null && typeof (r as Row).fix_pr !== 'number') return true
+        if ((r as Row).fix_pr !== null && (typeof (r as Row).fix_pr !== 'number' || !Number.isFinite((r as Row).fix_pr))) return true
         if ((r as Row).fixed_at !== null && typeof (r as Row).fixed_at !== 'string') return true
         if ((r as Row).notes !== null && typeof (r as Row).notes !== 'string') return true
         return false
@@ -163,7 +163,7 @@ function readSnapshot(): CachedSnapshot | null {
         if ((f as Finding).priority !== undefined && typeof (f as Finding).priority !== 'string') return true
         if ((f as Finding).source_pr_title !== undefined && typeof (f as Finding).source_pr_title !== 'string') return true
         if ((f as Finding).path !== undefined && typeof (f as Finding).path !== 'string') return true
-        if ((f as Finding).line !== undefined && (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))) return true
+        if ((f as Finding).line !== undefined && (f as Finding).line !== null && (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))) return true
         if ((f as Finding).author !== undefined && typeof (f as Finding).author !== 'string') return true
         if ((f as Finding).body_preview !== undefined && typeof (f as Finding).body_preview !== 'string') return true
         if ((f as Finding).area !== undefined && typeof (f as Finding).area !== 'string') return true
@@ -532,15 +532,6 @@ function DebtDashboard() {
               ⚠ {error}
               {errorKind === 'rate_limited' && (
                 <>
-                  {!retryAfter && (error?.includes('reset') || true) && (
-                    <>
-                      {' '}
-                      {(() => {
-                        // Try to extract reset from error message or just show generic message
-                        return null
-                      })()}
-                    </>
-                  )}
                   {' '}
                   <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated requests.
                 </>
