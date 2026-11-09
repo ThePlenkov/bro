@@ -237,6 +237,41 @@ function memberNames(list: string): string[] {
   return out;
 }
 
+/** One line of a command block — a doc noun line, a doc verb line, a
+ *  command row, or a group's member list. Flat on purpose: the block
+ *  walk stays a walk, not a nest. */
+function readBlockLine(
+  line: string,
+  inGroups: boolean,
+  commands: Map<string, string>,
+  members: string[],
+  docNouns: string[],
+  docVerbs: string[]
+): void {
+  const dt = /^\s*doc types:\s+([^—]+)/.exec(line);
+  if (dt) {
+    docNouns.push(...dt[1]!.trim().split(/\s+/));
+    return;
+  }
+  const sh = /^\s*shorthand:\s+([^—]+)/.exec(line);
+  if (sh) {
+    docVerbs.push(...sh[1]!.trim().split(/\s+/));
+    return;
+  }
+  // the name is padded into a column — a name that fills the column
+  // exactly is followed by a single space, so the separator is one
+  // or more spaces, not two
+  const row = /^\s{2}([a-z][\w-]*)\s+(\S.*)$/.exec(line);
+  if (row) {
+    commands.set(row[1]!, row[2]!);
+    return;
+  }
+  // the group's members, indented past the name column
+  if (inGroups && /^\s{3,}\S/.test(line)) {
+    members.push(...memberNames(line.trim()));
+  }
+}
+
 /** `bro --help` → the command rows plus `doc types:`/`shorthand:`
  *  lines. Indentation-based: rows are `  name <spaces> summary`, the
  *  block ends at a blank line. */
@@ -256,31 +291,7 @@ function parseTopLevelHelp(out: string): TopHelp {
     if (!inCmds) {
       continue;
     }
-    const dt = /^\s*doc types:\s+([^—]+)/.exec(line);
-    if (dt) {
-      docNouns.push(...dt[1]!.trim().split(/\s+/));
-      continue;
-    }
-    const sh = /^\s*shorthand:\s+([^—]+)/.exec(line);
-    if (sh) {
-      docVerbs.push(...sh[1]!.trim().split(/\s+/));
-      continue;
-    }
-    // the name is padded into a column — a name that fills the column
-    // exactly is followed by a single space, so the separator is one
-    // or more spaces, not two
-    const row = /^\s{2}([a-z][\w-]*)\s+(\S.*)$/.exec(line);
-    if (row) {
-      commands.set(row[1]!, row[2]!);
-      continue;
-    }
-    if (inGroups) {
-      // the group's members, indented past the name column
-      if (/^\s{3,}\S/.test(line)) {
-        members.push(...memberNames(line.trim()));
-        continue;
-      }
-    }
+    readBlockLine(line, inGroups, commands, members, docNouns, docVerbs);
     if (line.trim() === '') {
       inCmds = false;
       inGroups = false;
