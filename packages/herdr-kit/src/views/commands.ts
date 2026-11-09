@@ -13,11 +13,18 @@ export interface ViewBins {
 
 /** The managed-workspace session pane — the OpenTUI app bound to the
  *  worktree when tui+bun resolve, `bro herdr session-view` else. */
-export function sessionViewArgv(worktree: string, bins: ViewBins): string[] {
+export function sessionViewArgv(
+  worktree: string,
+  bins: ViewBins,
+  agent?: { id: string; events: string }
+): string[] {
+  const direct = agent === undefined ? [] : ['--events', agent.events, '--agent', agent.id];
   if (bins.bun !== undefined && bins.tui !== undefined) {
-    return [bins.bun, 'run', bins.tui, worktree];
+    return [bins.bun, 'run', bins.tui, ...direct, worktree];
   }
-  return [bins.bro, 'herdr', 'session-view', worktree];
+  // the line-mode fallback carries the same binding — worktree-only
+  // resolution drops native journals the fleet doc never names
+  return [bins.bro, 'herdr', 'session-view', worktree, ...direct];
 }
 
 /** The per-agent live view — the OpenTUI app bound to the archive
@@ -30,7 +37,16 @@ export function liveViewArgv(
   if (bins.bun !== undefined && bins.tui !== undefined) {
     return [bins.bun, 'run', bins.tui, '--events', a.events, '--agent', a.id];
   }
-  return [bins.bro, 'herdr', 'session-view', a.worktree ?? '.'];
+  return [
+    bins.bro,
+    'herdr',
+    'session-view',
+    a.worktree ?? '.',
+    '--events',
+    a.events,
+    '--agent',
+    a.id,
+  ];
 }
 
 /** The pane command STRINGS — same argvs rendered with the caller's
@@ -39,12 +55,14 @@ export function liveViewArgv(
 export function sessionViewCommand(
   worktree: string,
   bins: ViewBins,
-  q: (s: string) => string
+  q: (s: string) => string,
+  agent?: { id: string; events: string }
 ): string {
+  const direct = agent === undefined ? '' : ` --events ${q(agent.events)} --agent ${q(agent.id)}`;
   if (bins.bun !== undefined && bins.tui !== undefined) {
-    return `${q(bins.bun)} run ${q(bins.tui)} ${q(worktree)}`;
+    return `${q(bins.bun)} run ${q(bins.tui)}${direct} ${q(worktree)}`;
   }
-  return `${q(bins.bro)} herdr session-view ${q(worktree)}`;
+  return `${q(bins.bro)} herdr session-view ${q(worktree)}${direct}`;
 }
 
 export function liveViewCommand(
@@ -55,5 +73,5 @@ export function liveViewCommand(
   if (bins.bun !== undefined && bins.tui !== undefined) {
     return `${q(bins.bun)} run ${q(bins.tui)} --events ${q(a.events)} --agent ${q(a.id)}`;
   }
-  return `${q(bins.bro)} herdr session-view ${q(a.worktree ?? '.')}`;
+  return `${q(bins.bro)} herdr session-view ${q(a.worktree ?? '.')} --events ${q(a.events)} --agent ${q(a.id)}`;
 }

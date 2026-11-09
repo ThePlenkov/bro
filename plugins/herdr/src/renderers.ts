@@ -40,6 +40,10 @@ export interface RenderCtx {
   path: string;
   ws: string;
   state: PluginState;
+  /** The workspace's live agent, when the registry resolves one — the
+   *  session pane binds its archive directly (`--events`/`--agent`),
+   *  no projector doc read (janitor reaps those files). */
+  agent?: { id: string; events: string };
 }
 
 /** Label the pane, run the tail, record it. False when `pane run`

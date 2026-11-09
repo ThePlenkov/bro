@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro"
+  short_description: "One dispatcher command — orient on the board, hand off to the named bro family"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $bro to orient on the live bro board."
+policy:
+  allow_implicit_invocation: true

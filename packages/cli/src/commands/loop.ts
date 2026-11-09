@@ -43,14 +43,27 @@
  * reuses (bro-hl22w).
  */
 import { spawnSync, spawn } from 'node:child_process';
-import { closeSync, existsSync, readFileSync, statfsSync, statSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statfsSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
   AgentNotFound,
   agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
+  bodyMeta,
   CLASS_LABEL_PREFIX,
   commandCliName,
   emitLifecycle,
@@ -61,14 +74,23 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  pidAlive,
   procStat,
+  projectId,
   releaseSessionSlot,
   reviewHost,
   routeStepClass,
+  type SpawnSpec,
   SpawnError,
+  releaseSessionStart,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionPlane,
   specStore,
   stampPrOwnership,
   stepClassInfo,
@@ -78,7 +100,12 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type BrouterModels,
   type ClaimCapability,
+  type ExitCode,
+  type ExplainSlice,
+  type Lease,
+  type LeaseStore,
   type MirrorPolicy,
   type ResolvedClass,
   type ReviewFacade,
@@ -86,11 +113,11 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   admitSessionSlot,
+  explainSlicesOrExit,
   hasHelpFlag,
   issueLink,
   printUsage,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -105,22 +132,29 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import {
+  beadForHead,
   buildFixPrompt,
   buildRebasePrompt,
   buildWorkPrompt,
+  ceilingHeld,
   clumpMembers,
   coveredBeadIds,
   diskFloorBreach,
   diskFloorBytes,
   expandAgentCmd,
+  FLEET_HEAD_PREFIXES,
+  isFleetHead,
   MB,
   memberAction,
+  orphanVerdict,
   planItem,
   projectBeads,
   type DiskProbe,
+  type FleetPrRow,
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
+  type ReconcileBead,
 } from '@broject/loop';
 import { loadBroConfig } from '../plugins.ts';
 import {
@@ -130,6 +164,7 @@ import {
   profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   sessionQuotaOf,
   type AgentConnectorEnv,
   type SpawnProviderPick,
@@ -141,6 +176,8 @@ import { runSyncCommand } from './sync.ts';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
 import { isStackName } from '@broject/stack';
 import { loopSlug } from '@broject/loop';
+import { routeTableLane, type RouteTableLane } from './loop-routes.ts';
+import { explainSpawn } from './loop-explain.ts';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -162,8 +199,9 @@ import {
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
-import { MIN_INTERVAL_SEC } from './drive-config.ts';
-
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
+import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -176,6 +214,7 @@ interface Ctx {
   backend: string;
   repo: string;
   root: string;
+  leaseStore?: LeaseStore;
   cfg: LoopConfig;
   /** The act gate's own section — service passes share the one read. */
   act: ReturnType<typeof loadBroConfig>['act'];
@@ -203,6 +242,10 @@ interface Ctx {
   routing: boolean;
   intervalS: number;
   json: boolean;
+  /** The explain slices — when the operator asked for the routing
+   *  decision's reasons, the spawn path prints them (stderr). Absent =
+   *  the run says nothing about its routing. */
+  explain?: ExplainSlice[];
   /** Declared label scope — `bro loop --label debt,ui` only claims
    *  beads carrying one of these labels; the rest of the shared queue
    *  stays untouched. */
@@ -222,6 +265,8 @@ interface Ctx {
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
    *  PR targeting the member below. */
   stack?: string;
+  /** Cease claiming new work — only service gate stack + reconcile. */
+  claimsHeld?: { open: number; max: number };
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[];
@@ -251,6 +296,9 @@ const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
     `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+       bro loop [--every SEC]        run in supervised loop mode
+       bro loop install [--every N] [--print]
+       bro loop uninstall
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -261,6 +309,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 class:<name> label, else 'default')
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
+  --explain[=SLICES]             print why the bead landed on this route —
+                                route, model, health, cost (or a subset)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --parked-wake MIN              parked bead's snooze before it wakes to
                                 open (loop.parkedWakeMin, 120; 0 = iced
@@ -269,7 +319,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 of these labels are claimable
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
-  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 1)
+  --max-open-total N             hard ceiling on total open fleet PRs (loop.maxOpenTotal, 10; 0 = off)
   --disk-min-slots N             disk floor in slot units — pushes hold while
                                 free disk < N×loop.worktreeMb on any fs the
                                 run writes to (loop.diskMinSlots, 2; 0 = off)
@@ -277,6 +328,7 @@ function usage(exitCode: ExitCode = 2): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
+  --every SEC                    supervised loop cadence, ≥${MIN_INTERVAL_SEC}s
   --interval SEC                 gate poll interval, ≥0.1s (60)`,
     exitCode
   );
@@ -401,11 +453,13 @@ export interface LoopLane {
   /** Resolved provider name + model — provenance pins and reporting
    *  (`bro agents up` prints the same pair). */
   provider?: string;
+  account?: string;
   model?: string;
   /** The routing lane the spawn resolved to (fleet.routing class — spec
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string;
+  route?: NonNullable<SpawnSpec['route']>;
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
@@ -428,7 +482,7 @@ export interface LoopLaneSel {
  *  is the facade's own — explicit flag pick → flag-named
  *  fleet.profiles preset → the routed chain head (spec bro-1x7p: a
  *  declared `fleet.routing` resolves the bead's class per spawn and its
- *  chain head supplies the provider) → config picks (`loop.profile`,
+ *  chain head supplies the initial provider) → config picks (`loop.profile`,
  *  `loop.provider`) → `agents.native.provider` → legacy template. A bad
  *  name throws SpawnError — the caller exits before a bead is claimed. */
 export async function resolveLoopLane(
@@ -447,7 +501,7 @@ export async function resolveLoopLane(
   if (sel.agent !== undefined && !agentIsProvider) {
     return templateEscape(sel, cfg, env);
   }
-  const { provider, model, autoApprove, profileSourced } = lanePicks(
+  const { provider, model, autoApprove, profileSourced, flagProvider } = lanePicks(
     env,
     sel,
     cfg,
@@ -461,7 +515,37 @@ export async function resolveLoopLane(
     pickTier(sel, agentIsProvider, profileSourced)
   );
   const lane = providerLaneOrEmpty(pick, model, autoApprove);
-  return route === undefined ? lane : { ...lane, class: route.class };
+  // a flag-named profile's provider is an explicit pick — outranks the
+  // table like --provider/--agent, so matching the chain head must not
+  // arm the walk. A config-named profile is the standing default and
+  // keeps routing (same tiers as lanePicks' provider order)
+  const routeSpec =
+    route !== undefined &&
+    sel.provider === undefined &&
+    !agentIsProvider &&
+    flagProvider === undefined &&
+    provider === route.provider
+      ? await resolveSpawnRoute(
+          env,
+          'native',
+          route,
+          {
+            model:
+              sel.model ??
+              (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
+            // the effective lane model — a config profile/loop.model
+            // the head would otherwise lose to the provider default
+            modelFallback: model,
+            autoApprove,
+          },
+          pickTier(sel, agentIsProvider, profileSourced)
+        )
+      : undefined;
+  return {
+    ...lane,
+    ...(route === undefined ? {} : { class: route.class }),
+    ...(routeSpec === undefined ? {} : { route: routeSpec }),
+  };
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -476,7 +560,15 @@ function lanePicks(
   cfg: LoopConfig,
   route: ResolvedClass | undefined,
   agentIsProvider: boolean
-): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
+): {
+  provider?: string;
+  model?: string;
+  autoApprove?: boolean;
+  profileSourced: boolean;
+  /** The flag-named (`--profile`) preset's provider — an explicit
+   *  pick that outranks the table; routing must not arm on it. */
+  flagProvider?: string;
+} {
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined);
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined;
   const flagProfile = sel.profile !== undefined ? profile : undefined;
@@ -502,6 +594,7 @@ function lanePicks(
     model,
     autoApprove: sel.autoApprove ?? profile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
+    flagProvider: flagProfile?.provider,
   };
 }
 
@@ -559,7 +652,12 @@ function providerLaneOrEmpty(
   autoApprove: boolean | undefined
 ): LoopLane {
   if (pick.worker !== undefined) {
-    return { worker: pick.worker, provider: pick.provider, model: pick.model };
+    return {
+      worker: pick.worker,
+      provider: pick.provider,
+      account: pick.account,
+      model: pick.model,
+    };
   }
   if (model !== undefined || autoApprove === true) {
     throw new SpawnError(
@@ -611,8 +709,9 @@ function beadClassInfo(
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
  *  (`--class` flag → `class:` label → `default`) and the chain head
- *  supplies the provider, exactly like `bro agents up`'s spawn path
- *  (routeStepClass → applyFleetRouter → resolveSpawnProvider). The
+ *  supplies the initial provider, exactly like `bro agents up`; the
+ *  registry-backed spawn may walk forward from the current provider.
+ *  The path is routeStepClass → applyFleetRouter → resolveSpawnProvider. The
  *  flag-tier picks still outrank the table piecewise; `ctx.lane` is the
  *  run's fixed lane when routing is off or bypassed. The judge router
  *  fires only on a genuinely unclassed bead — an explicit `--class` pin
@@ -623,11 +722,73 @@ function beadClassInfo(
  *  verdict). Throws SpawnError — a bad `class:` label or broken chain
  *  is a config error the caller settles as a failed item, never a
  *  silent template drop. */
+/** The task the route table is asked about — the bead's class and
+ *  label, plus the served universe the operator declared. */
+interface RouteTableTask {
+  /** the table's path */
+  table: string;
+  /** the bead's explicit class */
+  class?: string;
+  /** the bead's `class:` label */
+  label?: string;
+  /** the bead's priority */
+  priority?: number;
+  /** what the operator declared the router serves */
+  served?: BrouterModels;
+}
+
+function routeTableTask(
+  ctx: Ctx,
+  table: string,
+  label: { label?: string; priority?: number }
+): RouteTableTask {
+  const task: RouteTableTask = { table };
+  if (ctx.sel.class !== undefined) {
+    task.class = ctx.sel.class;
+  }
+  if (label.label !== undefined) {
+    task.label = label.label;
+  }
+  if (label.priority !== undefined) {
+    task.priority = label.priority;
+  }
+  const models = ctx.env.brouter?.models;
+  if (models !== undefined) {
+    task.served = models;
+  }
+  return task;
+}
+
+/** The route table's lane for one bead — undefined when the operator
+ *  declares no table (fleet.routing stays the compatibility face for the
+ *  runs that declare none). */
+async function routeTableLaneFor(
+  ctx: Ctx,
+  bead: ReadyBead
+): Promise<{ lane: LoopLane; routed: RouteTableLane } | undefined> {
+  const tablePath = ctx.env.brouter?.routes;
+  if (tablePath === undefined) {
+    return undefined;
+  }
+  const label = beadClassInfo(ctx, bead, false);
+  const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
+  return routed === undefined
+    ? undefined
+    : { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
+}
+
 async function resolveBeadLane(
   ctx: Ctx,
   bead: ReadyBead,
   opts: { router?: boolean } = {}
 ): Promise<LoopLane> {
+  // the route table is the router's own routing face — when the
+  // operator declares one, it answers
+  const tableLane = await routeTableLaneFor(ctx, bead);
+  if (tableLane !== undefined) {
+    explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
+    return tableLane.lane;
+  }
   if (!ctx.routing) {
     return ctx.lane;
   }
@@ -747,7 +908,7 @@ function spawnAgent(
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
+        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -833,10 +994,12 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
       [BATCH_MARKER_ENV]: '1',
     }),
     provider: lane.provider,
+    account: lane.account,
     model: lane.model,
     // the routing lane the spawn resolved to — provenance the registry
     // records and the BRO_AGENT_CLASS env pin both read spec.class
     class: lane.class,
+    ...(lane.route === undefined ? {} : { route: lane.route }),
     // an explicit worker keeps the backend's own command fallback from
     // re-reading loop.agent config — a --agent flag override would
     // otherwise be silently ignored
@@ -1255,14 +1418,196 @@ async function finalizeMerge(
       ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`);
       console.error(`loop: ${ctx.tails.at(-1)}`);
     }
-    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-    if (br.code !== 0) {
-      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-      console.error(`loop: ${ctx.tails.at(-1)}`);
+    // Remove any worktree checked out on this branch first (including possibly another one)
+    try {
+      const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt.code === 0) {
+        const trees = parseWorktreePorcelain(wt.out);
+        for (const t of trees) {
+          if (t.branch === item.branch && t.path) {
+            if (t.path === item.worktreeDir) {
+              continue;
+            }
+            const r = processesRootedIn(t.path);
+            // same contract as the primary removal: a live process or
+            // uncommitted work keeps the checkout — --force would burn
+            // files nothing else holds (and strand the process on them)
+            const st =
+              r.length === 0
+                ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                : { code: 1, out: '', err: '' };
+            if (r.length === 0 && st.code === 0 && st.out.trim() === '') {
+              gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+              gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+            } else if (r.length === 0) {
+              ctx.tails.push(
+                `worktree ${t.path} kept — has uncommitted changes or status unreadable; branch ${item.branch} kept with it`
+              );
+            } else {
+              ctx.tails.push(
+                `worktree ${t.path} kept — hosts live process(es): ${r.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+              );
+            }
+          }
+        }
+      }
+    } catch {
+      /* best effort */
     }
+    // Only delete branch if no worktree is still using it
+    try {
+      const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt2.code === 0) {
+        const trees2 = parseWorktreePorcelain(wt2.out);
+        const stillCheckedOut = trees2.some(t => t.branch === item.branch);
+        if (!stillCheckedOut) {
+          const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+          if (br.code !== 0) {
+            ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+            console.error(`loop: ${ctx.tails.at(-1)}`);
+          }
+        } else {
+          ctx.tails.push(`branch ${item.branch} not deleted — checked out in a worktree`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      } else {
+        const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+        if (br.code !== 0) {
+          ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      }
+    } catch {
+      const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+      if (br.code !== 0) {
+        ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+        console.error(`loop: ${ctx.tails.at(-1)}`);
+      }
+    }
+    // delete remote branch on merge/close (spec bro-jis0c)
+    deleteRemoteBranch(ctx, item.branch, '');
+  } else {
+    // even if worktree kept due to live processes, try to delete remote branch if possible
+    deleteRemoteBranch(ctx, item.branch, '');
   }
   say(ctx, `loop: ${beads.map(b => b.id).join(', ')} landed via ${prRef(ctx, pr)}`);
   return 'landed';
+}
+
+/** The command a raw-template spawn actually runs — the lane worker's
+ *  own payload when it carries one, else the resolved lane command. */
+function laneSpawnedCommand(lane: LoopLane, fallback: string): string {
+  if (lane.worker?.kind === 'argv') {
+    return [...(lane.worker.argv || []), '{promptFile}'].join(' ');
+  }
+  if (lane.worker?.kind === 'template') {
+    return lane.worker.command;
+  }
+  return fallback;
+}
+
+/** Cross-kind session admission: every OTHER session kind the spawned
+ *  command starts consumes its cap too (a `devin -p …` payload draws on
+ *  devin's budget from a native lane). Each claim runs under that
+ *  kind's own host-wide admission mutex — the same lock the connector's
+ *  admitSessionSlot holds — so a check-then-reserve here cannot race a
+ *  parallel start into overshooting the cap. The quota lane's kind is
+ *  skipped: admitSessionSlot covers its full lane, and claiming it
+ *  twice would double-reserve one spawn against the same plane.
+ *  Claimed paths append to `out` — a refusal mid-way is the caller's
+ *  rollback set. */
+function admitCrossKindSessions(
+  agents: Record<string, Record<string, unknown>>,
+  spawnedCmd: string,
+  quotaKind: string | undefined,
+  key: string,
+  molStep: string,
+  workerEnv: Record<string, string>,
+  out: string[]
+): void {
+  // a pre-flight refusal ahead of any claim; the authoritative count
+  // re-runs inside each kind's admission mutex below
+  const crossRefusal = sessionCapRefusalFor(spawnedCmd, agents, workerEnv);
+  if (crossRefusal !== undefined) {
+    throw new SpawnError(crossRefusal, 'cap');
+  }
+  for (const view of sessionCapViews(spawnedCmd, agents, workerEnv)) {
+    if (view.kind === quotaKind) {
+      continue;
+    }
+    const plane = sessionPlane(view.kind);
+    if (plane === undefined) {
+      continue;
+    }
+    for (let i = 0; i < view.starts; i++) {
+      const claimed = admitSessionSlot(plane, agents, {
+        key,
+        molStep,
+        workerEnv,
+      });
+      if (claimed !== undefined) {
+        out.push(claimed);
+      }
+    }
+  }
+}
+
+/** Raw-template session admission — the same quota the registry spawn
+ *  enforces: the lane's own kind via its quota lane, plus every other
+ *  session kind the spawned command starts. A refusal hands back every
+ *  cross-kind claim already taken; a success leaves the caller holding
+ *  the primary reservation + the cross-kind paths to release when the
+ *  spawn's verdict lands. */
+function admitLaneSessions(
+  ctx: Ctx,
+  lane: LoopLane,
+  spec: { molStep: string; prompt: string; repoRoot: string },
+  key: string
+): { reservation: string | undefined; crossKind: string[] } {
+  const workerEnv = { ...agentEnv(ctx, { BRO_AGENT_ID: key }), [BATCH_MARKER_ENV]: '1' };
+  const templateCommand = laneCommand(ctx, lane);
+  const templateQuota = sessionQuotaOf(
+    ctx.env,
+    'native',
+    {
+      beadsDir: ctx.beadsDir!,
+      molStep: spec.molStep,
+      prompt: spec.prompt,
+      repoRoot: spec.repoRoot,
+      env: workerEnv,
+      worker: lane.worker,
+      provider: lane.provider,
+      model: lane.model,
+      class: lane.class,
+    },
+    templateCommand
+  );
+  const crossKind: string[] = [];
+  try {
+    admitCrossKindSessions(
+      ctx.env.agents,
+      laneSpawnedCommand(lane, templateCommand),
+      templateQuota?.plane.kind,
+      key,
+      spec.molStep,
+      workerEnv,
+      crossKind
+    );
+    const reservation =
+      templateQuota === undefined
+        ? undefined
+        : admitSessionSlot(templateQuota.plane, templateQuota.agents, {
+            key,
+            molStep: spec.molStep,
+            workerEnv,
+          });
+    return { reservation, crossKind };
+  } catch (err) {
+    // every cross-kind claim this admission holds goes back — the
+    // caller never saw them
+    releaseSessionStart(crossKind);
+    throw err;
+  }
 }
 
 /** Collect unresolved thread text, write the fix prompt, respawn the
@@ -1299,40 +1644,25 @@ async function runFixRound(
     await spawnWorker(ctx, m, prompt, lane);
     return;
   }
-  let templateReservation: string | undefined;
-  const templateCommand = laneCommand(ctx, lane);
   const leadFix = m.beads[0]!;
   const fixKey = `loop-fix-${leadFix.id}`;
+  let templateReservation: string | undefined;
+  let crossKindReservations: string[] = [];
   try {
-    const templateQuota = sessionQuotaOf(
-      ctx.env,
-      'native',
-      {
-        beadsDir: ctx.beadsDir!,
-        molStep: leadFix.id,
-        prompt,
-        repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
-        worker: lane.worker,
-        provider: lane.provider,
-        model: lane.model,
-        class: lane.class,
-      },
-      templateCommand
+    const admission = admitLaneSessions(
+      ctx,
+      lane,
+      { molStep: leadFix.id, prompt, repoRoot: m.item.worktreeDir },
+      fixKey
     );
-    if (templateQuota !== undefined) {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: fixKey,
-        molStep: leadFix.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: fixKey }), [BATCH_MARKER_ENV]: '1' },
-      });
-    }
+    templateReservation = admission.reservation;
+    crossKindReservations = admission.crossKind;
   } catch (err) {
     console.error(
       `loop: fix round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
     );
-    // admitSessionSlot/sessionQuotaOf threw before assignment completed —
-    // templateReservation is still undefined, nothing to release
+    // admission threw before returning — every claim it held was
+    // already handed back inside admitLaneSessions
     // Let respawnRound handle cap (decrements rounds) and other failures
     throw err;
   }
@@ -1351,6 +1681,7 @@ async function runFixRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservations);
   }
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
@@ -1413,15 +1744,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
+  // operator-configured bootstrap; PATH lookup is the contract (same as git/bd)
+  const b = /* NOSONAR */ spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
   if (b.status === 0) {
     return true;
   }
@@ -1751,7 +2079,14 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     endLoopRun(ctx.root, loopSlug(lead.id));
     return { kind: 'done', result: 'failed' };
   }
-  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend);
+  const prompt = buildWorkPrompt(
+    beads,
+    item.branch,
+    slot?.base,
+    slot?.bottom,
+    ctx.backend,
+    ctx.cfg.autoMerge && !ctx.act.requireApproval
+  );
   ctx.stage = 'prompt write';
   try {
     writePrompt(item, prompt);
@@ -1798,40 +2133,21 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // raw-template arm: route through the same session-quota admission as
   // the registry spawn so the fleet/session planes agree on live workers
   // (spec bro-9h86l / bro-0fbdp)
-  let templateReservation: string | undefined;
   const templateReservationKey = `loop-${lead.id}`;
-  const templateCommand = laneCommand(ctx, lane);
+  let templateReservation: string | undefined;
+  let crossKindReservationsPush: string[] = [];
   try {
-    const templateQuota = sessionQuotaOf(
-      ctx.env,
-      'native',
-      {
-        beadsDir: ctx.beadsDir!,
-        molStep: lead.id,
-        prompt,
-        repoRoot: item.worktreeDir,
-        env: {
-          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
-          [BATCH_MARKER_ENV]: '1',
-        },
-        worker: lane.worker,
-        provider: lane.provider,
-        model: lane.model,
-        class: lane.class,
-      },
-      templateCommand
+    const admission = admitLaneSessions(
+      ctx,
+      lane,
+      { molStep: lead.id, prompt, repoRoot: item.worktreeDir },
+      templateReservationKey
     );
-    if (templateQuota !== undefined) {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: templateReservationKey,
-        molStep: lead.id,
-        workerEnv: {
-          ...agentEnv(ctx, { BRO_AGENT_ID: templateReservationKey }),
-          [BATCH_MARKER_ENV]: '1',
-        },
-      });
-    }
+    templateReservation = admission.reservation;
+    crossKindReservationsPush = admission.crossKind;
   } catch (err) {
+    // admission threw before returning — every claim it held was
+    // already handed back inside admitLaneSessions
     endLoopRun(ctx.root, loopSlug(lead.id));
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof SpawnError && err.kind === 'cap') {
@@ -1864,11 +2180,13 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservationsPush);
     throw err;
   }
   if (templateReservation !== undefined) {
     releaseSessionSlot(templateReservation);
   }
+  releaseSessionStart(crossKindReservationsPush);
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt;
@@ -2050,6 +2368,16 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    if (exit.code === 0 && !superseded) {
+      // If the fix worker exited cleanly but did not resolve threads,
+      // we must not let the cycle loop forever. Do not auto-retry here;
+      // let the gate re-poll and the memberAction decide. However, ensure
+      // we don't re-trigger without budget pressure - the gate will see
+      // current thread state. Also log to make the behavior explicit.
+      console.error(
+        `loop ${prRef(ctx, m.pr)}: fix worker exited 0 without obvious thread resolution — gate will re-poll`
+      );
+    }
     return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
@@ -2228,6 +2556,34 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
   });
+  // loop.autoMerge — GitHub owns the merge once the worker armed
+  // `gh pr merge --auto`: no supervisor merge call, no fix/rebase
+  // rounds — threads never gate a landing the merge bot drives.
+  // 'update' survives: a strict up-to-date repo would stall the
+  // merge bot on a behind-base PR otherwise. 'land' keeps the
+  // post-merge bookkeeping, 'closed'/'park' settle as usual — and
+  // the member still parks on the mergeTimeoutMin clock: a PR GitHub
+  // never lands (auto-merge unarmed, checks never green) must not
+  // wait forever. pushItem withholds the arm order when
+  // act.requireApproval is set — mirror that predicate here so the
+  // gate keeps supervisor semantics (merge stays approval-gated)
+  // instead of waiting on an auto-merge that was never armed.
+  const autoMergeArmed = ctx.cfg.autoMerge && !ctx.act.requireApproval;
+  const autoMergeTimedOut = Date.now() - m.since >= ctx.cfg.mergeTimeoutMin * 60_000;
+  const kind =
+    autoMergeArmed && act.kind !== 'land' && act.kind !== 'closed' && act.kind !== 'park'
+      ? autoMergeTimedOut
+        ? 'park'
+        : act.kind === 'merge' || act.kind === 'fix' || act.kind === 'rebase'
+          ? 'wait'
+          : act.kind
+      : act.kind;
+  const parkWhy =
+    act.kind === 'park'
+      ? act.why
+      : autoMergeTimedOut
+        ? `auto-merge did not land after ${Math.round(ctx.cfg.mergeTimeoutMin)}m`
+        : 'parked';
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
@@ -2246,7 +2602,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       },
     });
   };
-  switch (act.kind) {
+  switch (kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
       gateRow('green', { action: 'land' });
@@ -2254,14 +2610,39 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'merge':
       gateRow('green', { action: 'merge' });
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr));
-    case 'closed':
+    case 'closed': {
       gateRow('closed', { action: 'closed' });
+      // closePr cleanup: delete remote branch + reap worktree/branch
+      deleteRemoteBranch(ctx, m.item.branch, 'on PR close');
+      try {
+        const rooted = processesRootedIn(m.item.worktreeDir);
+        // a live process or uncommitted work keeps the checkout —
+        // --force removes dirty trees, and those files have no other
+        // copy (the base behavior kept the worktree on close)
+        const st =
+          rooted.length === 0
+            ? gitTry(['-C', m.item.worktreeDir, 'status', '--porcelain'])
+            : { code: 1, out: '', err: '' };
+        if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+          gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
+          gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
+          gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
+        } else if (rooted.length === 0) {
+          ctx.tails.push(
+            `worktree ${m.item.worktreeDir} kept on PR close — has uncommitted changes or status unreadable; branch ${m.item.branch} kept with it`
+          );
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      } catch {
+        /* best effort */
+      }
       parkBeads(
         ctx,
         m.beads,
         `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
+    }
     case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers });
       const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane));
@@ -2313,11 +2694,11 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'wait':
       return 'kept';
     case 'park':
-      gateRow('parked', { action: 'park', why: act.why });
+      gateRow('parked', { action: 'park', why: parkWhy });
       parkBeads(
         ctx,
         m.beads,
-        `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`
+        `loop: PR ${prRef(ctx, pr)} ${parkWhy} — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
   }
@@ -2407,35 +2788,22 @@ async function runRebaseRound(
     await spawnWorker(ctx, m, prompt, lane);
     return;
   }
-  let templateReservation: string | undefined;
-  const templateCommand = laneCommand(ctx, lane);
   const leadRb = m.beads[0]!;
   const rebaseKey = `loop-rebase-${leadRb.id}`;
+  let templateReservation: string | undefined;
+  let crossKindReservationsRb: string[] = [];
   try {
-    const templateQuota = sessionQuotaOf(
-      ctx.env,
-      'native',
-      {
-        beadsDir: ctx.beadsDir!,
-        molStep: leadRb.id,
-        prompt,
-        repoRoot: m.item.worktreeDir,
-        env: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
-        worker: lane.worker,
-        provider: lane.provider,
-        model: lane.model,
-        class: lane.class,
-      },
-      templateCommand
+    const admission = admitLaneSessions(
+      ctx,
+      lane,
+      { molStep: leadRb.id, prompt, repoRoot: m.item.worktreeDir },
+      rebaseKey
     );
-    if (templateQuota !== undefined) {
-      templateReservation = admitSessionSlot(templateQuota.plane, templateQuota.agents, {
-        key: rebaseKey,
-        molStep: leadRb.id,
-        workerEnv: { ...agentEnv(ctx, { BRO_AGENT_ID: rebaseKey }), [BATCH_MARKER_ENV]: '1' },
-      });
-    }
+    templateReservation = admission.reservation;
+    crossKindReservationsRb = admission.crossKind;
   } catch (err) {
+    // admission threw before returning — every claim it held was
+    // already handed back inside admitLaneSessions
     console.error(
       `loop: rebase round session quota admission failed — ${err instanceof Error ? err.message : String(err)}`
     );
@@ -2456,6 +2824,7 @@ async function runRebaseRound(
     if (templateReservation !== undefined) {
       releaseSessionSlot(templateReservation);
     }
+    releaseSessionStart(crossKindReservationsRb);
   }
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
@@ -2498,9 +2867,13 @@ const LOOP_VALUE_FLAGS = new Set([
   '--parked-wake',
   '--max',
   '--max-open',
+  '--max-open-total',
+  '--worktree-warn',
   '--disk-min-slots',
   '--batch',
+  '--batch-min-priority',
   '--interval',
+  '--every',
   '--label',
   '--stack',
   '--provider',
@@ -2508,23 +2881,130 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print', '--explain']);
+
+function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
+  // install arms and uninstall disarms — both are the orchestrator's
+  // own authority over the supervisor cadence; a spawned worker owns
+  // neither side of it
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never own the supervisor; ' +
+        'the orchestrator session owns it'
+    );
+    process.exit(2);
+  }
+  // a typo'd flag (`--evry`) or a stray positional must not silently
+  // install the configured cadence — whitelist each verb's argv before
+  // any mutation
+  const installArgv = argv[0] === 'install';
+  const stray = positionals(argv.slice(1), installArgv ? new Set(['--every']) : new Set(), {
+    boolFlags: installArgv
+      ? new Set(['--print', '--dry-run', '--help'])
+      : new Set(['--dry-run', '--help']),
+    strict: true,
+  });
+  if (stray.length > 0) {
+    console.error(`error: unexpected argument '${stray[0]}'`);
+    process.exit(2);
+  }
+  if (argv[0] === 'uninstall') {
+    if (argv.includes('--dry-run')) {
+      const marker = readLoopMarker(dir);
+      console.log(
+        marker === null
+          ? 'loop uninstall — no install marker; nothing would be disarmed'
+          : `loop uninstall — would disarm the marker (every ${marker.everySec}s) and SIGTERM the loop supervisor`
+      );
+      return;
+    }
+    const r = uninstallLoop(dir);
+    console.log(r.detail);
+    if (r.state === 'error') {
+      process.exit(1);
+    }
+    return;
+  }
+  const everyRaw = flag(argv, '--every');
+  const everySec = everyRaw === undefined ? loopCfg.everySec : Number(everyRaw);
+  // the marker cadence bounds are the want-marker's — the same
+  // MIN/MAX_INTERVAL_SEC every supervised entrypoint validates against
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    );
+    process.exit(2);
+  }
+  // --dry-run is the preview verb here just like --print: plan, don't arm
+  const print = argv.includes('--print') || argv.includes('--dry-run');
+  const r = installLoop(dir, { everySec, print });
+  console.log(r.detail);
+  if (r.state === 'error') {
+    process.exit(1);
+  }
+}
+
+/** Supervised mode — `daemon run --loop` and `loop install` reach
+ *  `runLoopCommand` through the marker; `--every` is the outer re-scan
+ *  cadence (the queue drains, the pass sleeps, the next pass rescans),
+ *  while `--interval` stays the in-run gate poll. The same arming guard
+ *  as `bro drive --every` applies — spawned workers never own a
+ *  supervisor cadence; the orchestrator session does. */
+function everySecArg(argv: string[]): number | undefined {
+  const everyRaw = flag(argv, '--every');
+  if (everyRaw === undefined) {
+    return undefined;
+  }
+  const everySec = Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+    );
+    process.exit(2);
+  }
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+        'the orchestrator session owns the cadence'
+    );
+    process.exit(2);
+  }
+  return everySec;
+}
+
+
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  rejectStrayArgs(argv);
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim();
   if (!root) {
     console.error('bro loop: not inside a git worktree');
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
+  const loopCfg = broCfg.loop as LoopConfig;
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // install validates the configured tasks backend — a github-tasks
+    // rig has no beads to check; previews (--print/--dry-run) stay pure
+    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+      ensureTasksBackend(root, broCfg.connectors);
+    }
+    runLoopSched(argv, root, loopCfg);
+    return;
+  }
+  rejectStrayArgs(argv);
+  const everySec = everySecArg(argv);
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
   const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
+  const leaseStore = localLeaseStore(projectId(root));
+  ctx.leaseStore = leaseStore;
+  // the explain slices ride the run — the spawn path prints them when the
+  // operator asked for the routing story
+  ctx.explain = explainSlicesOrExit(argv);
   if (argv.includes('--dry-run')) {
     await dryRunPlan(ctx);
     return;
@@ -2532,22 +3012,61 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   // One loop supervisor per repo: a respawn wrapper's duplicate stands
   // by behind the incumbent's hold and resumes once it exits — the
   // same single-instance contract `bro drive` takes (spec bro-2duu9).
-  const loopLock = gitCommonDir(root);
-  const releaseSupervisor =
-    loopLock === null
-      ? () => {}
-      : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
-          label: 'loop supervisor lock',
-          onStandby: pid =>
-            say(
-              ctx,
-              `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
-        });
-  try {
-    await guardedRun(ctx);
-  } finally {
+  const abort = new AbortController();
+  let roleLease: { release: () => void } | undefined;
+  let releaseSupervisor = () => {};
+  const releaseAll = (): void => {
     releaseSupervisor();
+    roleLease?.release();
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort();
+    releaseAll();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.kill(process.pid, signal);
+  };
+  const onInt = (): void => onSignal('SIGINT');
+  const onTerm = (): void => onSignal('SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
+  try {
+    roleLease = await holdRoleLease(
+      leaseStore,
+      'loop',
+      { host: hostname(), pid: process.pid, rig: basename(root) },
+      (ctx.env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    );
+    const loopLock = loopLockPath(root);
+    if (loopLock !== null) {
+      releaseSupervisor = await awaitFileLock(loopLock, {
+        label: 'loop supervisor lock',
+        onStandby: pid => {
+          const by = pid === null ? '' : ` by pid ${pid}`;
+          say(ctx, `loop: already supervised${by} — standing by`);
+        },
+      });
+    }
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    if (everySec === undefined) {
+      await guardedRun(ctx, releaseAll);
+    } else {
+      // supervised passes are strictly sequential — a pass drains the
+      // queue, then the supervisor sleeps until the next re-scan; the
+      // awaits must stay inside the loop, not fan out
+      for (;;) {
+        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
+      }
+    }
+  } finally {
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    releaseSupervisor();
+    roleLease?.release();
   }
 }
 
@@ -2737,8 +3256,13 @@ function buildCtx(
       parkedWakeMin: num(flag(argv, '--parked-wake'), cfg.parkedWakeMin, 0),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      maxOpenTotal: num(flag(argv, '--max-open-total'), cfg.maxOpenTotal, 0),
+      worktreeWarn: num(flag(argv, '--worktree-warn'), cfg.worktreeWarn, 0),
       diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
+      batchMinPriority: flag(argv, '--batch-min-priority')
+        ? Number(flag(argv, '--batch-min-priority'))
+        : cfg.batchMinPriority,
     },
     act: broCfg.act,
     // the feed dedup's freshness contract is "at most one poll window
@@ -2948,7 +3472,7 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
   const argvLine =
     w?.kind === 'argv'
       ? [...w.argv, item.promptFile].map(shRender).join(' ')
-      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile);
+      : expandAgentCmd(laneCommand(ctx, lane));
   console.log(`  agent: ${argvLine}`);
 }
 
@@ -3031,6 +3555,19 @@ interface RefTails {
   worktreeBranches: string[];
   branches: string[];
   errors: string[];
+}
+
+/** Every linked worktree this clone holds — the spec's `worktreeWarn`
+ *  mark counts checkouts, and disk/coordination pressure doesn't care
+ *  which branch a checkout sits on. The main worktree heads `worktree
+ *  list`, so linked = rows − 1. undefined when the listing fails —
+ *  an unreadable count warns nothing. */
+function linkedWorktreeCount(root: string): number | undefined {
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
+  if (wt.code !== 0) {
+    return undefined;
+  }
+  return Math.max(0, parseWorktreePorcelain(wt.out).length - 1);
 }
 
 /** loop/* worktrees still checked out + loop/* branches with no
@@ -3183,6 +3720,13 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
     );
+    const linked = linkedWorktreeCount(ctx.root);
+    if (ctx.cfg.worktreeWarn > 0 && linked !== undefined && linked > ctx.cfg.worktreeWarn) {
+      say(
+        ctx,
+        `loop: linked worktrees ${linked} > ${ctx.cfg.worktreeWarn} (disk/coordination pressure)`
+      );
+    }
     const claimed = claimedTails(ctx.tasks, seen);
     sayLoopAudit(ctx, reap, [
       // PRs live on branches — worktree'd ones (a parked bead keeps both)
@@ -3212,7 +3756,42 @@ function clumpCandidates(
 ): { candidates: ReadyBead[]; foreign: number } {
   const ready = readyBeads(ctx.root);
   const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root));
-  return { candidates: c.queue.filter(b => !seen.has(b.id)), foreign: c.foreign };
+  const candidates = c.queue.filter(b => !seen.has(b.id));
+  return {
+    candidates:
+      ctx.leaseStore === undefined
+        ? candidates
+        : skipLeasedBeads(
+            candidates,
+            key => ctx.leaseStore?.read(key),
+            line => say(ctx, line)
+          ),
+    foreign: c.foreign,
+  };
+}
+
+export function skipLeasedBeads<T extends { id: string }>(
+  candidates: T[],
+  read: (key: string) => Lease | undefined,
+  log: (line: string) => void = line => console.error(line),
+  host = hostname(),
+  pid = process.pid
+): T[] {
+  const picked: T[] = [];
+  for (const bead of candidates) {
+    const lease = read(`bead/${bead.id}`);
+    if (lease === undefined) {
+      picked.push(bead);
+      continue;
+    }
+    if (lease.holder.host === host && lease.holder.pid === pid) {
+      picked.push(bead);
+      continue;
+    }
+    const holder = lease.holder;
+    log(`loop: skipping ${bead.id} — leased by ${holder.rig}@${holder.host} pid ${holder.pid}`);
+  }
+  return picked;
 }
 
 /** Read-only drain check for the disk hold — clumpCandidates' pipeline
@@ -3439,14 +4018,328 @@ interface QueueState {
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
+  /** Fleet PRs whose host can't close — reported once per run, not
+   *  once per pass (the reconcile retries every tick). */
+  unclosableNoted: Set<number>;
+  /** Branch → ceiling reservation file — released when the member
+   *  leaves the stack; an open PR on the branch consumes it earlier
+   *  via the fleet listing. */
+  ceilingRes: Map<string, string>;
 }
 
-/** One service pass over the stack, oldest-first — a snapshot copy
- *  because leave() splices members out mid-iteration. True when any
- *  member moved (action, merge, park): the next tick polls immediately
- *  instead of paying the interval. */
+/** The widest listing cap a TaskStore backend can silently impose —
+ *  the github task store stops at QUERY_CAP (packages/github/
+ *  src/tasks.ts) and returns the truncated page as a complete
+ *  snapshot. A full page is indistinguishable from a huge store, and
+ *  either way a reconcile on it can bury PRs whose live beads fell
+ *  past the cap — so a capped read answers 'unknown', not 'complete'.
+ *  The reconcile is an optimization; skipping it closes nothing. */
+const TASK_LIST_SNAPSHOT_CAP = 1000;
+
+/** Build slug -> bead map for reconcile. Returns null if the listing is unknown. */
+function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> | null {
+  const out = new Map<string, ReconcileBead>();
+  try {
+    const rows = ctx.tasks.list({ all: true });
+    if (rows.length >= TASK_LIST_SNAPSHOT_CAP) {
+      return null;
+    }
+    for (const r of rows) {
+      if (!r?.id) continue;
+      const slug = loopSlug(r.id);
+      if (!out.has(slug)) {
+        out.set(slug, { id: r.id, status: r.status });
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Get all open fleet PRs (headRef + pr). Returns null if listing is unknown/incomplete. */
+function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
+  const rows: FleetPrRow[] = [];
+  try {
+    if (typeof ctx.rev.openPrs === 'function') {
+      const list = ctx.rev.openPrs(ctx.repo);
+      for (const p of list ?? []) {
+        if (p?.headRef && isFleetHead(p.headRef)) {
+          rows.push({ pr: p.pr, headRef: p.headRef });
+        }
+      }
+      return rows;
+    }
+  } catch {
+    // PR listing failed — cannot produce complete listing
+    return null;
+  }
+  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
+  // LOCAL refs alone undercount: a pushed head whose local branch was already
+  // deleted (land cleanup, another clone's push) is still a live fleet PR, so
+  // remote heads join the scan — `ls-remote` answers the authoritative set.
+  const prefixes = FLEET_HEAD_PREFIXES;
+  try {
+    const tails = loopRefTails(ctx.root, prefixes);
+    if (tails.errors.length > 0) {
+      return null;
+    }
+    const remote: string[] = [];
+    for (const prefix of prefixes) {
+      const ls = gitTry(['-C', ctx.root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
+      if (ls.code !== 0) {
+        // no origin at all is a complete answer (the fleet is local-only);
+        // an unreachable remote is 'unknown'
+        if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
+          continue;
+        }
+        return null;
+      }
+      remote.push(
+        ...ls.out
+          .split('\n')
+          .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
+          .filter(Boolean)
+      );
+    }
+    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
+    for (const b of branches) {
+      try {
+        for (const pr of ctx.rev.prsForBranch(b)) {
+          if (isFleetHead(b)) {
+            rows.push({ pr, headRef: b });
+          }
+        }
+      } catch {
+        // failed to check a branch - listing incomplete
+        return null;
+      }
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
+/** `push origin --delete <branch>` as a tails verdict — a remote that
+ *  already dropped the ref answers "does not exist", which IS the
+ *  end state we want (the host's own merge-time deleteBranch beat us
+ *  to it), never a leftover. Every other failure leaves a remote
+ *  branch the report should name. */
+function deleteRemoteBranch(ctx: Ctx, branch: string, why: string): void {
+  const del = gitTry(['-C', ctx.root, 'push', 'origin', '--delete', branch]);
+  if (del.code === 0 || /remote ref does not exist|Couldn't find remote ref/i.test(del.err)) {
+    return;
+  }
+  ctx.tails.push(
+    `remote branch ${branch} not deleted${why === '' ? '' : ` ${why}`} — ${del.err.trim()}`
+  );
+  console.error(`loop: ${ctx.tails.at(-1)}`);
+}
+
+/** The member ids a `loop/` PR's provenance trailer stamps — `bead:
+ *  "id1,id2"` written by stampLoopPr when the clump pushed. null when
+ *  the list can't be proven: no prBody capability on the host, a fetch
+ *  error, or a batch head with no trailer. An unenumerated batch is
+ *  never a burial order. */
+function fleetPrMemberIds(ctx: Ctx, row: FleetPrRow): string[] | null {
+  if (typeof ctx.rev.prBody !== 'function') {
+    return null;
+  }
+  let meta: Record<string, unknown>;
+  try {
+    meta = bodyMeta(ctx.rev.prBody({ repo: ctx.repo, pr: row.pr }));
+  } catch {
+    return null;
+  }
+  const raw = meta.bead;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return null;
+  }
+  const ids = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return ids.length === 0 ? null : ids;
+}
+
+/** Member ids → bead rows against a listing — a member the listing
+ *  can't find reads 'unknown', and 'unknown' is never dead. */
+function memberBeads(
+  ids: readonly string[],
+  beadsById: ReadonlyMap<string, ReconcileBead>
+): ReconcileBead[] {
+  return ids.map(id => beadsById.get(id) ?? { id, status: 'unknown' });
+}
+
+/** Reconcile orphaned fleet PRs not on the current stack. */
+async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
+  try {
+    const fleet = listOpenFleetPrs(ctx);
+    if (fleet === null || fleet.length === 0) return;
+    const stackPrs = new Set<number>();
+    const stackBranches = new Set<string>();
+    for (const m of q.stack) {
+      if (m.pr !== undefined) stackPrs.add(m.pr);
+      // a worker-pending member has no PR number until its .exit lands
+      // — its about-to-open PR protects by branch, not by number
+      stackBranches.add(m.item.branch);
+    }
+    const beadsBySlug = buildBeadsBySlug(ctx);
+    if (beadsBySlug === null) {
+      // Bead listing unknown — skip reconciliation to avoid false closures
+      return;
+    }
+    const beadsById = new Map([...beadsBySlug.values()].map(b => [b.id, b] as const));
+    for (const row of fleet) {
+      if (stackPrs.has(row.pr) || stackBranches.has(row.headRef)) continue;
+      const bead = beadForHead(row, beadsBySlug);
+      let verdict = orphanVerdict(row, bead);
+      if (verdict.kind === 'close') {
+        // a batch head shares its branch across members — the lead's
+        // status is not the clump's. Any member not positively closed
+        // (open, in_progress, deferred, unreadable) keeps the PR. A
+        // `bead:` trailer overrides the single-bead read on ANY head;
+        // a `loop/` head is stamped at open, so a missing trailer
+        // there is 'unknown' — and unknown never buries a batch.
+        const ids = fleetPrMemberIds(ctx, row);
+        if (ids !== null) {
+          verdict = orphanVerdict(row, bead, memberBeads(ids, beadsById));
+        } else if (row.headRef.startsWith('loop/')) {
+          verdict = { kind: 'keep' };
+        }
+      }
+      if (verdict.kind !== 'close') {
+        continue;
+      }
+      // the verdict rode a snapshot a whole pass old — reread before
+      // burying: a bead reopened since must not close its live work
+      const fresh = buildBeadsBySlug(ctx);
+      if (fresh === null) {
+        continue;
+      }
+      const freshBead = beadForHead(row, fresh);
+      const freshById = new Map([...fresh.values()].map(b => [b.id, b] as const));
+      const freshIds = fleetPrMemberIds(ctx, row);
+      const recheck =
+        freshIds === null && row.headRef.startsWith('loop/')
+          ? { kind: 'keep' as const }
+          : orphanVerdict(
+              row,
+              freshBead,
+              freshIds === null ? undefined : memberBeads(freshIds, freshById)
+            );
+      if (recheck.kind !== 'close') {
+        continue;
+      }
+      try {
+        let closed = false;
+        if (typeof ctx.rev.closePr === 'function') {
+          try {
+            ctx.rev.closePr({ repo: ctx.repo, pr: row.pr });
+            closed = true;
+          } catch {
+            closed = false;
+          }
+        }
+        if (!closed && typeof ctx.rev.closePr !== 'function') {
+          // a host with no closePr keeps the PR — name why once per
+          // run, then let the next pass check silently again
+          if (!q.unclosableNoted.has(row.pr)) {
+            q.unclosableNoted.add(row.pr);
+            say(
+              ctx,
+              `loop: reconcile keeps ${prRef(ctx, row.pr)} (${row.headRef}) — host has no closePr; ${verdict.why}`
+            );
+          }
+          continue;
+        }
+        if (!closed) {
+          // closePr exists but failed; avoid reporting a close and retrying aggressively
+          continue;
+        }
+        say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
+        deleteRemoteBranch(ctx, row.headRef, 'after reconcile close');
+        try {
+          // try to remove local worktree/branch if any
+          try {
+            const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt.code === 0) {
+              const trees = parseWorktreePorcelain(wt.out);
+              for (const t of trees) {
+                if (t.branch === row.headRef && t.path) {
+                  const rooted = processesRootedIn(t.path);
+                  // a live process or uncommitted work keeps the
+                  // checkout — --force removes dirty trees, and those
+                  // files have no other copy
+                  const st =
+                    rooted.length === 0
+                      ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                      : { code: 1, out: '', err: '' };
+                  if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+                    gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+                    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+                    if (rm.code !== 0) {
+                      ctx.tails?.push(
+                        `worktree ${t.path} not removed (orphan reconcile) — ${rm.err.trim()}`
+                      );
+                    }
+                  } else {
+                    ctx.tails?.push(
+                      rooted.length > 0
+                        ? `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                        : `worktree ${t.path} kept (orphan reconcile) — has uncommitted changes or status unreadable; branch ${row.headRef} kept with it`
+                    );
+                  }
+                  break;
+                }
+              }
+            }
+          } catch {
+            /* best effort */
+          }
+          // Only delete branch if no worktree is still using it
+          try {
+            const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt2.code === 0) {
+              const trees2 = parseWorktreePorcelain(wt2.out);
+              const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
+              if (!stillCheckedOut) {
+                const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+                if (br.code !== 0) {
+                  ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+                }
+              } else {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
+              }
+            } else {
+              const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+              if (br.code !== 0) {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+              }
+            }
+          } catch {
+            const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+            if (br.code !== 0) {
+              ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+            }
+          }
+        } catch {
+          /* best effort */
+        }
+      } catch (err) {
+        console.error(`loop: reconcile failed for ${prRef(ctx, row.pr)} — ${String(err)}`);
+      }
+    }
+  } catch (err) {
+    console.error(`loop: reconcile error — ${String(err)}`);
+  }
+}
+
+/** One service pass over the stack, oldest-first — closure-first order. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
+  // (a)/(b) service gate stack first
   for (const m of [...q.stack]) {
     const verdict = await serviceMember(ctx, m);
     if (verdict === 'kept') {
@@ -3457,6 +4350,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       continue;
     }
     q.stack.splice(q.stack.indexOf(m), 1);
+    // the member's ceiling reservation dies with its tenure — landed
+    // or failed, no PR of its own keeps arriving to consume it
+    releaseMemberReservation(q, m);
     q.tally[verdict] += 1;
     if (verdict === 'parked') {
       for (const b of m.beads) {
@@ -3472,6 +4368,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       );
     }
   }
+  // (c) reconcile orphaned fleet PRs
+  await reconcileFleet(ctx, q);
+  // (d) ceiling check handled by tryClaim
   return busy;
 }
 
@@ -3549,6 +4448,127 @@ function settleOutcome(
   }
 }
 
+/** One admitted-but-PR-less claim, as a file other loop processes can
+ *  count. The ceiling lock only spans the check; the claim→spawn→open
+ *  window sits outside it, and two loops that each read n<max in that
+ *  window both admit — the listing can't see a PR that doesn't exist
+ *  yet. A reservation file closes the window: written under the lock
+ *  at admission, re-stamped with the branch once the member exists,
+ *  consumed when the branch's PR lists, released on every
+ *  non-member outcome and on member splice, and swept when the
+ *  owning pid is dead. Lives in the COMMON git dir so linked
+ *  worktrees of this clone coordinate (separate clones share only
+ *  the remote listing — a remote reservation ref is follow-up work).
+ */
+interface CeilingRes {
+  pid: number;
+  pidStart?: string;
+  branch?: string;
+  ts: number;
+}
+
+const CEILING_RES_PREFIX = 'res-';
+
+/** Count admitted-but-PR-less claims across loops sharing this common
+ *  dir — and collect the ones already discharged. Consumed: the
+ *  branch's PR now lists (the listing counts it). Released: the owner
+ *  pid is dead (its claim can never spawn). Anything else — alive
+ *  owner, branch not yet listed, unreadable file — counts: an
+ *  unverifiable reservation is a held slot, never a free one. */
+function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const heads = new Set(fleet.map(r => r.headRef));
+  let live = 0;
+  for (const name of names) {
+    if (!name.startsWith(CEILING_RES_PREFIX) || !name.endsWith('.json')) {
+      continue;
+    }
+    const p = join(dir, name);
+    let res: CeilingRes | undefined;
+    try {
+      res = JSON.parse(readFileSync(p, 'utf8')) as CeilingRes;
+    } catch {
+      res = undefined;
+    }
+    if (res !== undefined && res.branch !== undefined && heads.has(res.branch)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    if (res !== undefined && typeof res.pid === 'number' && !pidAlive(res.pid, res.pidStart)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    live += 1;
+  }
+  return live;
+}
+
+/** Write one reservation under the caller's lock — null when the file
+ *  can't be proven to exist (the slot then counts as held, not free). */
+function reserveCeilingSlot(dir: string): string | null {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, `${CEILING_RES_PREFIX}${process.pid}-${Date.now()}.json`);
+    const res: CeilingRes = {
+      pid: process.pid,
+      pidStart: procStat(process.pid)?.start,
+      ts: Date.now(),
+    };
+    writeFileSync(p, JSON.stringify(res), 'utf8');
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** The member's branch joined the reservation — the file now names
+ *  the head its future PR will list under, so the next sweep can tell
+ *  'worker still spawning' from 'listing already counts this slot'. */
+function stampCeilingReservation(file: string, branch: string): void {
+  try {
+    const res = JSON.parse(readFileSync(file, 'utf8')) as CeilingRes;
+    res.branch = branch;
+    writeFileSync(file, JSON.stringify(res), 'utf8');
+  } catch {
+    /* the file stays counted either way — a branchless reservation is the same held slot */
+  }
+}
+
+function releaseCeilingFile(file: string | null): void {
+  if (file === null) {
+    return;
+  }
+  try {
+    unlinkSync(file);
+  } catch {
+    /* already gone */
+  }
+}
+
+/** A member left the stack — its reservation (if the PR never listed
+ *  it away) dies with the tenure. */
+function releaseMemberReservation(q: QueueState, member: GateMember): void {
+  const file = q.ceilingRes.get(member.item.branch);
+  if (file === undefined) {
+    return;
+  }
+  q.ceilingRes.delete(member.item.branch);
+  releaseCeilingFile(file);
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -3562,6 +4582,91 @@ async function tryClaim(
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false;
   }
+  // Hard ceiling on TOTAL open fleet PRs — plus every admitted-but-
+  // PR-less claim a sibling loop holds a reservation for. The
+  // reservation is what makes the bound atomic: without it two loops
+  // sharing this common dir can both read n<max in the claim→spawn→open
+  // window and each admit a clump.
+  let ceilingRes: string | null = null;
+  if (ctx.cfg.maxOpenTotal > 0) {
+    try {
+      const fleetCommon = gitCommonDir(ctx.root);
+      const resDir = fleetCommon === null ? null : join(fleetCommon, 'bro', 'ceiling.reserved');
+      let held = false;
+      const doCeilCheck = (): boolean => {
+        const fleet = listOpenFleetPrs(ctx);
+        if (fleet === null) {
+          // a listing that can't be produced holds too (fail closed)
+          if (!ctx.claimsHeld) {
+            ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+            say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+          }
+          return true;
+        }
+        const pending = resDir === null ? 0 : sweepCeilingReservations(resDir, fleet);
+        const open = fleet.length + pending;
+        if (ceilingHeld(open, ctx.cfg.maxOpenTotal)) {
+          if (
+            !ctx.claimsHeld ||
+            ctx.claimsHeld.open !== open ||
+            ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
+          ) {
+            ctx.claimsHeld = { open, max: ctx.cfg.maxOpenTotal };
+            say(
+              ctx,
+              `loop: claims held — ceiling ${fleet.length} open + ${pending} reserved/${ctx.cfg.maxOpenTotal}`
+            );
+          }
+          return true;
+        }
+        ctx.claimsHeld = undefined;
+        // admit = reserve, still under the lock — the claim→spawn→open
+        // window is then visible to the next loop's count
+        if (resDir !== null) {
+          ceilingRes = reserveCeilingSlot(resDir);
+          if (ceilingRes === null) {
+            if (!ctx.claimsHeld) {
+              ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+              say(
+                ctx,
+                `loop: claims held — ceiling reservation unwritable/${ctx.cfg.maxOpenTotal}`
+              );
+            }
+            return true;
+          }
+        }
+        return false;
+      };
+      if (fleetCommon !== null) {
+        try {
+          withFileLock(join(fleetCommon, 'bro', 'loop.ceiling.lock'), () => {
+            held = doCeilCheck();
+          });
+        } catch {
+          held = doCeilCheck();
+        }
+      } else {
+        held = doCeilCheck();
+      }
+      if (held) {
+        // drain beats the hold — an empty queue behind the ceiling has
+        // nothing to wait for (same rule as the disk floor)
+        if (queueDrained(ctx, scope, q.seen)) {
+          q.drained = true;
+        }
+        return false;
+      }
+    } catch {
+      // a listing that can't be produced holds too (fail closed)
+      if (!ctx.claimsHeld) {
+        ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+        say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+      }
+      return false;
+    }
+  } else {
+    ctx.claimsHeld = undefined;
+  }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
   // parked, gate service continues while merges free the disk (spec
@@ -3569,6 +4674,7 @@ async function tryClaim(
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
+    releaseCeilingFile(ceilingRes);
     return holdForDisk(ctx, scope, q, breach);
   }
   if (q.diskHeld) {
@@ -3590,12 +4696,14 @@ async function tryClaim(
   try {
     clump = claimClump(ctx, scope, q.seen, budget);
   } catch (err) {
+    releaseCeilingFile(ceilingRes);
     const msg = err instanceof Error ? err.message : String(err);
     say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
     return false;
   }
   if (clump === undefined) {
+    releaseCeilingFile(ceilingRes);
     q.drained = true;
     return false;
   }
@@ -3605,13 +4713,35 @@ async function tryClaim(
   }
   q.claimed += clump.length;
   ctx.bead = clump[0]!.id;
-  const out = await pushItem(ctx, clump);
+  let out: PushOutcome;
+  try {
+    out = await pushItem(ctx, clump);
+  } catch (err) {
+    // an uncaught push failure is still an admission that never
+    // produced a member — the slot goes back, not into a leak that
+    // only a dead-pid sweep would find
+    releaseCeilingFile(ceilingRes);
+    throw err;
+  }
   if (out.kind === 'hold') {
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
+    releaseCeilingFile(ceilingRes);
     unseeClump(ctx, q, clump);
     return false;
+  }
+  if (out.kind === 'member') {
+    if (ceilingRes !== null) {
+      // the reservation lives until the member's PR lists (swept then)
+      // or the member leaves the stack without one
+      stampCeilingReservation(ceilingRes, out.member.item.branch);
+      q.ceilingRes.set(out.member.item.branch, ceilingRes);
+      ceilingRes = null;
+    }
+  } else {
+    // parked/failed — no PR will ever list for this admission
+    releaseCeilingFile(ceilingRes);
   }
   recordClaimOutcome(ctx, q, ids, out);
   return true;
@@ -3697,6 +4827,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
     pushHoldUntil: 0,
     diskHeld: false,
     diskProbeWarned: new Set(),
+    unclosableNoted: new Set(),
+    ceilingRes: new Map(),
   };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -3770,7 +4902,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
  *  only write guaranteed to outlive the process — and signals, which
  *  never emit 'exit' and need handlers that audit then re-raise so
  *  the parent still sees the true signal death. */
-async function guardedRun(ctx: Ctx): Promise<void> {
+async function guardedRun(ctx: Ctx, release: () => void = () => {}): Promise<void> {
   let open = true;
   const heartbeat = setInterval(
     () => {
@@ -3796,11 +4928,13 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     if (open) {
       auditDeath(`exit code ${code}`);
     }
+    release();
   };
   const onSigint = (): void => {
     if (open) {
       auditDeath('signal SIGINT');
     }
+    release();
     // restore the default disposition, then re-raise — the parent sees
     // a real signal death, not a clean exit code
     process.removeListener('SIGINT', onSigint);
@@ -3810,6 +4944,7 @@ async function guardedRun(ctx: Ctx): Promise<void> {
     if (open) {
       auditDeath('signal SIGTERM');
     }
+    release();
     process.removeListener('SIGTERM', onSigterm);
     process.kill(process.pid, 'SIGTERM');
   };
