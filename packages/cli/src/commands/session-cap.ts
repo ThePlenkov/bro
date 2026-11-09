@@ -175,8 +175,37 @@ function verdictUnlocked(
     // the count could not be established — a hook fails OPEN
     return [];
   }
-  // claim every kind's slots before counting — the recount then holds
-  // this call's claims AND every claim a racer landed first
+  const claims = claimAllViews(views, bags, key, legacyKey);
+  let counted: SessionCapView[];
+  try {
+    counted = sessionCapViews(command, bags);
+  } catch {
+    for (const c of claims) {
+      releaseSessionStart(c.paths);
+    }
+    return [];
+  }
+  const refusal = firstUnlockedRefusal(counted, claims);
+  if (refusal !== undefined) {
+    for (const c of claims) {
+      releaseSessionStart(c.paths);
+    }
+    return [{ block: refusal }];
+  }
+  return [];
+}
+
+/** Claim every kind's slots before counting — the recount then holds
+ *  this call's claims AND every claim a racer landed first. A claim
+ *  that cannot be written rolls the whole set back: the recount still
+ *  judges the call (a claim that cannot be taken must not open a
+ *  session the budget does not know about). */
+function claimAllViews(
+  views: SessionCapView[],
+  bags: Record<string, Record<string, unknown>>,
+  key: string,
+  legacyKey?: string
+): { kind: string; paths: string[] }[] {
   const claims: { kind: string; paths: string[] }[] = [];
   try {
     for (const view of views) {
@@ -195,30 +224,25 @@ function verdictUnlocked(
         releaseSessionStart(legacyClaims(view, bags, legacyKey));
       }
     }
-  } catch {
-    // a claim could not be written — keep none of them; the recount
-    // still judges the call (a claim that cannot be taken must not
-    // open a session the budget does not know about)
-    for (const c of claims) {
-      releaseSessionStart(c.paths);
-    }
-    claims.length = 0;
-  }
-  let counted: SessionCapView[];
-  try {
-    counted = sessionCapViews(command, bags);
+    return claims;
   } catch {
     for (const c of claims) {
       releaseSessionStart(c.paths);
     }
     return [];
   }
+}
+
+/** The recount's first refusal — this call's claims are already inside
+ *  `live`, so subtract them and pass them back as `starts`:
+ *  `live - own + own` judges whether live alone broke the cap (a fresh
+ *  claim on a full kind still refuses); the kind whose claim failed is
+ *  judged on its own starts (the slot it could not take). */
+function firstUnlockedRefusal(
+  counted: SessionCapView[],
+  claims: { kind: string; paths: string[] }[]
+): string | undefined {
   for (const view of counted) {
-    // this call's claims are already inside `live` — subtract them and
-    // pass them back as `starts`, so `live - own + own` judges whether
-    // live alone broke the cap (a fresh claim on a full kind still
-    // refuses); the kind whose claim failed is judged on its own
-    // starts (the slot it could not take)
     const claimed = claims.find(c => c.kind === view.kind);
     const refusal = sessionCapRefusal(
       claimed !== undefined
@@ -226,13 +250,10 @@ function verdictUnlocked(
         : view
     );
     if (refusal !== undefined) {
-      for (const c of claims) {
-        releaseSessionStart(c.paths);
-      }
-      return [{ block: refusal }];
+      return refusal;
     }
   }
-  return [];
+  return undefined;
 }
 
 /** The claim's key for one call — the tool-use id when the client
