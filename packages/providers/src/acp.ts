@@ -48,6 +48,7 @@ import { otelEvent, otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
+import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
 import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
@@ -449,8 +450,12 @@ async function acpSessionOpen(
   opts: ProviderWireOpts,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
-  sessionRequest?: NewSessionRequest
+  sessionRequest?: NewSessionRequest,
+  gc?: AcpGuardCtx
 ) {
+  // the dead-loop guard speaks BEFORE the session opens: a refused
+  // scope costs no session and no quota (spec bro-b961a)
+  gc?.guard.open(gc.scope, gc.peer);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
@@ -788,6 +793,60 @@ export const promptText = (prompt: string | ContentBlock[]): string => {
     .join('\n');
 };
 
+/** The guard's accounting for a completed turn — the progress that resets
+ *  the scope's churn (spec bro-b961a). */
+function guardDone(gc: AcpGuardCtx | undefined): void {
+  gc?.guard.done(gc.scope, gc.peer);
+}
+
+/** A failed turn — the peer's own churn may now be systemic: the loop
+ *  can live inside the child, and a fresh child is the only cure for a
+ *  loop that survived in the old one. The peer is killed (the child with
+ *  it) and the failure is named. A healthy peer is left alone. */
+function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
+  if (gc?.peer === undefined) {
+    return;
+  }
+  const trip = gc.guard.peerTrip(gc.peer);
+  if (trip === undefined) {
+    return;
+  }
+  try {
+    peer.close();
+  } catch {
+    // the kill is the point — one stubborn peer can't block the rest
+  }
+  throw trip;
+}
+
+/** The stall bound — a turn that produces no `session/update` for this
+ *  long is ended (spec bro-b961a). The promise rejects; the caller
+ *  cancels the turn. */
+function stallWatchdog(ms: number, by: string): { promise: Promise<never>; cancel: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new JudgeUnavailable(
+            `acp ${by} unavailable — turn stalled: no session/update for ${ms}ms`
+          )
+        ),
+      ms
+    );
+    // the watchdog must not hold the event loop open
+    timer.unref?.();
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -798,7 +857,8 @@ export async function pumpTurn(
   by: string,
   parent?: OtelCtx,
   cwd?: string,
-  drainTimeoutMs?: number
+  drainTimeoutMs?: number,
+  stallMs?: number
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
@@ -820,12 +880,25 @@ export async function pumpTurn(
   let text = '';
   try {
     for (;;) {
-      const msg: ActiveSessionMessage = await Promise.race([
+      // the silence bound — a turn that reports nothing for stallMs is
+      // ended (spec bro-b961a). The window resets on every update, so a
+      // long tool call that reports itself is untouched.
+      const watchdog = stallMs === undefined || stallMs <= 0 ? undefined : stallWatchdog(stallMs, by);
+      const race: Array<Promise<ActiveSessionMessage>> = [
         // prompt failures surface on the queue itself — classify the
         // rejection through asAuthError the same as a direct throw
         session.nextUpdate().catch(asAuthError),
         aborted,
-      ]);
+      ];
+      if (watchdog !== undefined) {
+        race.push(watchdog.promise);
+      }
+      let msg: ActiveSessionMessage;
+      try {
+        msg = await Promise.race(race);
+      } finally {
+        watchdog?.cancel();
+      }
       if (msg.kind === 'stop') {
         traced.flush('ok');
         plane.stop(msg.stopReason, { replyLen: text.length });
@@ -1235,6 +1308,13 @@ export interface PooledTurnOpts {
    *  (spec bro-ymbq1) passes the downstream client's cwd/mcpServers/
    *  _meta through instead of the synthesized {cwd, mcpServers:[]}. */
   sessionRequest?: NewSessionRequest;
+  /** The dead-loop guard (spec bro-b961a) — the conversation scope this
+   *  session belongs to and the peer behind it. Absent = the caller
+   *  does not attribute its sessions (a one-shot flow opens one). */
+  guard?: AcpGuardCtx;
+  /** The silence bound for the turn, ms — a turn that produces no
+   *  `session/update` for this long is ended (spec bro-b961a). 0 = off. */
+  stallMs?: number;
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1263,7 +1343,14 @@ export async function acpPooledTurn(
   };
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const session = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
       sessSpan.end({ 'acp.session_id': session.sessionId, ...a });
     try {
@@ -1289,8 +1376,10 @@ export async function acpPooledTurn(
         by,
         sessSpan.ctx,
         opts.acp?.cwd,
-        3_000
+        3_000,
+        turn.stallMs
       );
+      guardDone(turn.guard);
       endSession();
       end({
         'acp.session_id': session.sessionId,
@@ -1313,6 +1402,13 @@ export async function acpPooledTurn(
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
+    if (err instanceof AcpDeadLoopError) {
+      // the scope's own refusal — it already cost no session
+      throw err;
+    }
+    // the peer's churn may now be systemic: the loop can live inside the
+    // child, and a fresh child is the only cure (spec bro-b961a)
+    guardFail(turn.guard, peer);
     const tail = peer.tail();
     throw new JudgeUnavailable(
       `acp ${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`,
@@ -1366,7 +1462,14 @@ export async function acpSessionRetain(
     { parent: turn.parent }
   );
   try {
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const session = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const configOptions = session.newSessionResponse.configOptions ?? [];
     const base = opts.model ?? entry.model;
     // the RAW requested id (possibly a composite like 'swe-2-max') —
@@ -1415,7 +1518,11 @@ export async function acpSessionRetain(
      *  JudgeUnavailable naming the backend and the last transport
      *  lines. */
     const classifyWire = (err: unknown): Error => {
-      if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      if (
+        err instanceof JudgeUnavailable ||
+        err instanceof AcpConfigError ||
+        err instanceof AcpDeadLoopError
+      ) {
         return err;
       }
       const tail = peer.tail();
@@ -1470,8 +1577,12 @@ export async function acpSessionRetain(
             r2,
             t.signal,
             by,
-            t.parent
+            t.parent,
+            undefined,
+            undefined,
+            t.stallMs ?? turn.stallMs
           );
+          guardDone(turn.guard);
           return { ...r, model: effective };
         } catch (err) {
           // a failed turn leaves the session's context in doubt — the
@@ -1481,6 +1592,10 @@ export async function acpSessionRetain(
             dispose();
           } catch {
             // already gone — the drop is the point
+          }
+          if (!(err instanceof AcpDeadLoopError)) {
+            // the peer's churn may now be systemic — kill it and name it
+            guardFail(turn.guard, peer);
           }
           throw classifyWire(err);
         }
@@ -1494,6 +1609,11 @@ export async function acpSessionRetain(
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
+    if (err instanceof AcpDeadLoopError) {
+      // the scope's own refusal — it already cost no session
+      throw err;
+    }
+    guardFail(turn.guard, peer);
     const tail = peer.tail();
     const detail = tail === '' ? '' : ` (${tail})`;
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {

@@ -201,6 +201,44 @@ describe('conductorConfig', () => {
       assert.equal(cfg?.timeoutMs, 120_000, raw);
     }
   });
+  test('the provider windows read the config, and the env pins win', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: {
+          backend: 'dv-acp',
+          idleReleaseMs: 60_000,
+          acpMaxOpens: 4,
+          acpMaxAbandoned: 16,
+          acpStallMs: 120_000,
+        },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.idleReleaseMs, 60_000);
+    assert.equal(cfg?.acpMaxOpens, 4);
+    assert.equal(cfg?.acpMaxAbandoned, 16);
+    assert.equal(cfg?.acpStallMs, 120_000);
+    // the env pins are the operator's explicit knob — they win
+    const pinned = conductorConfig(
+      {
+        BRO_PROVIDER_IDLE_RELEASE_MS: '0',
+        BRO_PROVIDER_ACP_MAX_OPENS: '2',
+        BRO_PROVIDER_ACP_MAX_ABANDONED: '8',
+        BRO_PROVIDER_ACP_STALL_MS: '30000',
+      },
+      dir
+    );
+    assert.equal(pinned?.idleReleaseMs, 0);
+    assert.equal(pinned?.acpMaxOpens, 2);
+    assert.equal(pinned?.acpMaxAbandoned, 8);
+    assert.equal(pinned?.acpStallMs, 30_000);
+    // a garbage pin falls back to the file's value
+    const garbage = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: 'abc' }, dir);
+    assert.equal(garbage?.acpStallMs, 120_000);
+  });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
       () => conductorConfig({ BRO_PROVIDER_BACKEND: 'nope' }, '/r', providers),

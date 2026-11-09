@@ -193,6 +193,35 @@ describe('loadConfig serve.providers', () => {
   });
 });
 
+describe('loadConfig serve — the provider windows', () => {
+  test('the idle window is read as-is', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 60_000 } }).serve.idleReleaseMs, 60_000);
+  });
+
+  test('an idle window of 0 disables the release — it is a value, not an absence', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 0 } }).serve.idleReleaseMs, 0);
+  });
+
+  test('a fractional or negative idle window is dropped — it is not a window', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 1.5 } }).serve.idleReleaseMs, undefined);
+    assert.equal(load({ serve: { idleReleaseMs: -1 } }).serve.idleReleaseMs, undefined);
+  });
+
+  test('the churn budgets are counts — 0 and the fractions are dropped', () => {
+    assert.equal(load({ serve: { acpMaxOpens: 4 } }).serve.acpMaxOpens, 4);
+    assert.equal(load({ serve: { acpMaxOpens: 0 } }).serve.acpMaxOpens, undefined);
+    assert.equal(load({ serve: { acpMaxOpens: 2.5 } }).serve.acpMaxOpens, undefined);
+    assert.equal(load({ serve: { acpMaxAbandoned: 16 } }).serve.acpMaxAbandoned, 16);
+    assert.equal(load({ serve: { acpMaxAbandoned: 0 } }).serve.acpMaxAbandoned, undefined);
+  });
+
+  test('the stall window reads as a window — 0 disables the watchdog', () => {
+    assert.equal(load({ serve: { acpStallMs: 120_000 } }).serve.acpStallMs, 120_000);
+    assert.equal(load({ serve: { acpStallMs: 0 } }).serve.acpStallMs, 0);
+    assert.equal(load({ serve: { acpStallMs: -5 } }).serve.acpStallMs, undefined);
+  });
+});
+
 describe('loadConfig serve.upstream / serve.apiKeyEnv', () => {
   test('upstream trims and strips trailing slashes', () => {
     const cfg = load({ serve: { upstream: '  http://proxy.local///  ' } });

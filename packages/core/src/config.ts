@@ -999,6 +999,13 @@ export const serveSection: ConfigSection<{
   client?: ServeClients;
   fastModel?: string;
   fastLane?: boolean;
+  idleReleaseMs?: number;
+  /** The dead-loop budgets (spec bro-b961a) — sessions opened without a
+   *  completed turn, per conversation and per peer. */
+  acpMaxOpens?: number;
+  acpMaxAbandoned?: number;
+  /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
+  acpStallMs?: number;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1008,6 +1015,10 @@ export const serveSection: ConfigSection<{
     client?: unknown;
     fastModel?: unknown;
     fastLane?: unknown;
+    idleReleaseMs?: unknown;
+    acpMaxOpens?: unknown;
+    acpMaxAbandoned?: unknown;
+    acpStallMs?: unknown;
   };
   const out: {
     backend?: string;
@@ -1017,6 +1028,10 @@ export const serveSection: ConfigSection<{
     client?: ServeClients;
     fastModel?: string;
     fastLane?: boolean;
+    idleReleaseMs?: number;
+    acpMaxOpens?: number;
+    acpMaxAbandoned?: number;
+    acpStallMs?: number;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1032,6 +1047,23 @@ export const serveSection: ConfigSection<{
   const fastModel = trimmedField(obj.fastModel);
   if (fastModel !== undefined) out.fastModel = fastModel;
   if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
+  // the idle window — 0 disables the release, a negative or fractional
+  // value is not a window at all (the loader drops it, the default wins)
+  if (typeof obj.idleReleaseMs === 'number' && Number.isInteger(obj.idleReleaseMs)) {
+    if (obj.idleReleaseMs >= 0) out.idleReleaseMs = obj.idleReleaseMs;
+  }
+  // the churn budgets — a budget is a COUNT, so a fractional or
+  // non-positive value is not a budget (the loader drops it, the
+  // default wins); the silence bound is a window and 0 disables it
+  if (typeof obj.acpMaxOpens === 'number' && Number.isInteger(obj.acpMaxOpens)) {
+    if (obj.acpMaxOpens > 0) out.acpMaxOpens = obj.acpMaxOpens;
+  }
+  if (typeof obj.acpMaxAbandoned === 'number' && Number.isInteger(obj.acpMaxAbandoned)) {
+    if (obj.acpMaxAbandoned > 0) out.acpMaxAbandoned = obj.acpMaxAbandoned;
+  }
+  if (typeof obj.acpStallMs === 'number' && Number.isInteger(obj.acpStallMs)) {
+    if (obj.acpStallMs >= 0) out.acpStallMs = obj.acpStallMs;
+  }
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1058,6 +1090,14 @@ serveSection.jsonSchema = js.obj({
   ),
   fastModel: js.str,
   fastLane: js.bool,
+  // the idle window — 0 disables the release; a negative window is not
+  // a window at all
+  idleReleaseMs: js.int(0),
+  // the churn budgets (spec bro-b961a) — counts, so the floor is 1
+  acpMaxOpens: js.int(1),
+  acpMaxAbandoned: js.int(1),
+  // the silence bound — 0 disables the watchdog
+  acpStallMs: js.int(0),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1591,6 +1631,16 @@ export interface BroConfig {
     apiKeyEnv?: string;
     fastModel?: string;
     fastLane?: boolean;
+    /** The idle window — the pooled peer is released after it (spec
+     *  bro-7ira8). 0 disables the release. */
+    idleReleaseMs?: number;
+    /** The dead-loop budgets (spec bro-b961a) — sessions opened and not
+     *  completed, per conversation (acpMaxOpens) and per peer
+     *  (acpMaxAbandoned). */
+    acpMaxOpens?: number;
+    acpMaxAbandoned?: number;
+    /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
+    acpStallMs?: number;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
