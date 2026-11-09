@@ -368,10 +368,14 @@ function procRepoCommon(pid: number): string | null {
     }
     if (process.platform === 'darwin') {
       try {
-        const out = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-          encoding: 'utf8',
-          timeout: 500,
-        });
+        const out = execFileSync(
+          'lsof', // NOSONAR — PATH lookup is the contract
+          ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+          {
+            encoding: 'utf8',
+            timeout: 500,
+          }
+        );
         const cline = out.split('\n').find(l => l.startsWith('n'));
         if (cline) {
           const cwd = cline.slice(1);

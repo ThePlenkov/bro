@@ -7,6 +7,40 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
+/** one `ps -p <pid> -o <fields>` row, trimmed — undefined when ps
+ *  fails or prints nothing. env pins TZ/LC so lstart spellings stay
+ *  environment-independent. */
+function psStatRow(pid: number, fields: string, env: NodeJS.ProcessEnv): string | undefined {
+  try {
+    const out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(pid), '-o', fields],
+      { encoding: 'utf8', timeout: 1000, env }
+    );
+    return out.trim().split('\n').filter(Boolean)[0]?.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** a `ps` stat row → {state, start} — whitespace-split so no
+ *  backtracking regex ever sees the freeform lstart tail; `hasPid`
+ *  skips a leading pid column when the spelling emitted one. Null
+ *  when either field is absent. */
+function statRowToProc(line: string, hasPid: boolean): { state: string; start: string } | null {
+  const tokens = line.split(/\s+/);
+  const off = hasPid && /^\d+$/.test(tokens[0] ?? '') ? 1 : 0;
+  const stateTok = tokens[off] ?? '';
+  const start = tokens
+    .slice(off + 1)
+    .join(' ')
+    .trim();
+  if (stateTok === '' || start === '') {
+    return null;
+  }
+  return { state: stateTok[0] ?? '', start };
+}
+
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
  *  unreaped zombie) and starttime (field 22). Post-comm fields split
  *  from index 0 = field 3. Null where /proc is absent or unreadable. */
@@ -31,78 +65,26 @@ export function procStat(pid: number): { state: string; start: string } | null {
     // Pinning TZ/LC makes the identity environment-independent while
     // staying a lstart Date.parse can still epoch-convert for doctor.
     const env = { ...process.env, TZ: 'UTC', LC_ALL: 'C', LC_TIME: 'C' };
-    try {
-      // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
-      const out = execFileSync(
-        'ps', // NOSONAR — PATH lookup is the contract
-        ['-p', String(pid), '-o', 'state=,lstart='],
-        {
-          encoding: 'utf8',
-          timeout: 1000,
-          env,
-        }
-      );
-      const lines = out.trim().split('\n').filter(Boolean);
-      if (lines.length === 0) return null;
-      const line = lines[0];
-      const trimmed = line.trim();
-      // Strip the whole state token (may include modifiers like +, L, s) before parsing lstart
-      const startMatch = trimmed.match(/^\S+\s+(.+)$/s);
-      const start = startMatch ? startMatch[1].trim() : '';
-      if (start !== '') {
-        const st = trimmed.match(/^(\S+)/)?.[1] ?? '';
-        // Return just lstart as start; pid is already tracked separately by the caller
-        return { state: st[0] ?? st ?? '', start };
-      }
-      // Try with pid in output format
-      try {
-        const out2 = execFileSync(
-          'ps', // NOSONAR — PATH lookup is the contract
-          ['-p', String(pid), '-o', 'pid=,state=,lstart='],
-          {
-            encoding: 'utf8',
-            timeout: 1000,
-            env,
-          }
-        );
-        const lines2 = out2.trim().split('\n').filter(Boolean);
-        if (lines2.length === 0) return null;
-        const line2 = lines2[0];
-        const trimmed2 = line2.trim();
-        const m = trimmed2.match(/^(\d+)\s+(\S+)\s+(.+)$/s);
-        if (m) {
-          const st = m[2];
-          const sstart = trimmed2.replace(/^\d+\s+\S+\s+/, '').trim();
-          return { state: st[0] ?? st ?? '', start: sstart };
-        }
-        const m2 = trimmed2.match(/^(\S+)\s+(.+)$/s);
-        if (m2) {
-          const st = m2[1];
-          const sstart = trimmed2.replace(/^\S+\s+/, '').trim();
-          return { state: st[0] ?? st ?? '', start: sstart };
-        }
-      } catch {
-        // fall through
-      }
-      // Fallback to just state
-      try {
-        const out2 = execFileSync(
-          'ps', // NOSONAR — PATH lookup is the contract
-          ['-p', String(pid), '-o', 'state='],
-          {
-            encoding: 'utf8',
-            timeout: 1000,
-          }
-        );
-        const st = out2.trim()[0] ?? '';
-        return { state: st, start: '' };
-      } catch {
-        const st = trimmed.match(/^(\S)/)?.[1] ?? trimmed[0] ?? '';
-        return { state: st, start: '' };
-      }
-    } catch {
+    const first = psStatRow(pid, 'state=,lstart=', env);
+    if (first === undefined) {
       return null;
     }
+    const parsed = statRowToProc(first, false);
+    if (parsed !== null) {
+      return parsed;
+    }
+    // lstart didn't parse — retry with the pid column so the fields
+    // disambiguate on a reused-pid row
+    const second = psStatRow(pid, 'pid=,state=,lstart=', env);
+    const retried = second === undefined ? null : statRowToProc(second, true);
+    if (retried !== null) {
+      return retried;
+    }
+    // last resort — a bare state byte still attests the owner lives;
+    // the `state=` read outlives lstart parse failures
+    const bare = psStatRow(pid, 'state=', env);
+    const state = bare?.[0] ?? first[0] ?? '';
+    return { state, start: '' };
   }
   return null;
 }

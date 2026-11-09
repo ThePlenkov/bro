@@ -422,9 +422,14 @@ function psArgsMap(pids: number[]): Map<number, string> {
         }
       );
       for (const l of coutAll.split('\n')) {
-        const m = l.match(/^\s*(\d+)\s+(.*)$/s);
-        if (m) {
-          cmdMap.set(Number(m[1]), m[2] ?? '');
+        // whitespace-split, not a backtracking regex — argv text
+        // after the pid column can carry any shape
+        const t = l.trim();
+        const sp = t.indexOf(' ');
+        if (sp === -1) continue;
+        const rowPid = Number(t.slice(0, sp));
+        if (Number.isInteger(rowPid)) {
+          cmdMap.set(rowPid, t.slice(sp + 1));
         }
       }
     } catch {

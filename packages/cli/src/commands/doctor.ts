@@ -631,16 +631,24 @@ function procArgv(pid: number): string[] | undefined {
 function darwinArgv(pid: number): string[] | undefined {
   let out: string;
   try {
-    out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: 500,
-    });
-  } catch {
-    try {
-      out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+    out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-ww', '-o', 'args=', '-p', String(pid)],
+      {
         encoding: 'utf8',
         timeout: 500,
-      });
+      }
+    );
+  } catch {
+    try {
+      out = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-ww', '-o', 'command=', '-p', String(pid)],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
     } catch {
       return undefined;
     }
@@ -664,10 +672,14 @@ function procCwd(pid: number): string | null {
   }
   if (process.platform === 'darwin') {
     try {
-      const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-        encoding: 'utf8',
-        timeout: 500,
-      });
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
       const cline = lout.split('\n').find(l => l.startsWith('n'));
       return cline ? cline.slice(1) : process.cwd();
     } catch {
@@ -771,7 +783,7 @@ function procStartMs(pid: number): number | null {
       // procStat on darwin may prefix with pid; try to parse as date
       const startStr = st.start.replace(/^\d+\s+/, '');
       const ms = Date.parse(startStr);
-      if (!isNaN(ms) && ms > 0) {
+      if (!Number.isNaN(ms) && ms > 0) {
         return ms;
       }
       return null;
