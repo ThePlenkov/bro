@@ -84,4 +84,3 @@ exclude_paths:
   # computed path as uncontrolled data; the same shapes ship on main
   # unflagged.
   - 'scripts/claude-code-live-check.ts'
->>>>>>> origin/main

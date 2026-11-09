@@ -128,7 +128,9 @@ interface RunLimits {
 }
 
 function percentile(sorted: number[], p: number): number {
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
+  // an empty input indexes -1 → undefined — fold to 0 like min/max do,
+  // a fatal row reports zeros, never NaN in the CI artifact
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] ?? 0;
 }
 
 function argValue(argv: string[], flag: string): string | undefined {
