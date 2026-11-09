@@ -422,9 +422,11 @@ function landedPhrase(state: PrActState): string | undefined {
     : `was already merged by ${state.mergedBy}`;
 }
 
-/** The verdict line a caller reads — the PR link and the landing. */
+/** The verdict line a caller reads — the PR link and the landing.
+ *  The fallback names the state instead of claiming a merge: a
+ *  non-merged state must never read as "was already merged". */
 function landedLine(rev: ReviewFacade, t: PrTarget, state: PrActState): string {
-  return `act: ${rev.prLink(t.repo, t.pr)} ${landedPhrase(state) ?? 'was already merged'}`;
+  return `act: ${rev.prLink(t.repo, t.pr)} ${landedPhrase(state) ?? `is ${state.state}`}`;
 }
 
 /** The settled label for the verdict event — 'MERGED', 'MERGED by
