@@ -38,7 +38,6 @@ import {
   followLog,
   promptSimilar,
   runAgentsCommand,
-  SpawnInputError,
   spawnStepAgent,
   tailLines,
 } from './agents.ts';
@@ -341,13 +340,27 @@ describe('bro agents up|down — supervisor verb', () => {
 describe('bro agents up <step>', () => {
   test('an empty prompt is bad input, not a silent spawn', async () => {
     // the HTTP API can send prompt:"" — the CLI flag parser can't — so
-    // the guard lives in spawnStepAgent, not in either front door
-    const env = { agents: {}, connectors: {} } as AgentConnectorEnv;
-    for (const prompt of ['', '   ']) {
-      assert.throws(
-        () => spawnStepAgent('/nonexistent', env, { lane: 'interactive', molStep: 'fx-1', prompt }),
-        SpawnInputError
-      );
+    // the guard lives in spawnStepAgent, not in either front door. A
+    // VALID worktree pins the throw to the prompt guard itself — with
+    // '/nonexistent' a dropped guard still throws on the worktree and
+    // the test would pass blind.
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const env = { agents: {}, connectors: {} } as AgentConnectorEnv;
+      for (const prompt of ['', '   ']) {
+        assert.throws(
+          () =>
+            spawnStepAgent(fx.main, env, {
+              lane: 'interactive',
+              molStep: 'fx-1',
+              worktree: fx.main,
+              prompt,
+            }),
+          /prompt must not be empty/
+        );
+      }
+    } finally {
+      fx.restore();
     }
   });
 

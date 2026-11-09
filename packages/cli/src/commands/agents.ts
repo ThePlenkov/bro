@@ -60,6 +60,7 @@ import {
   countSessionReservations,
   gitCommonDir,
   hasHelpFlag,
+  isBatchSpawn,
   localLeaseStore,
   printUsage,
   projectId,
@@ -681,12 +682,16 @@ export function spawnStepAgent(
   if (req.prompt?.trim() === '') {
     throw new SpawnInputError('prompt must not be empty');
   }
-  const lane: 'batch' | 'interactive' = req.lane ?? 'interactive';
-  if (
-    lane === 'interactive' &&
-    req.env !== undefined &&
-    Object.prototype.hasOwnProperty.call(req.env, BATCH_MARKER_ENV)
-  ) {
+  // lane is required by the type — this guard is for untyped callers
+  // (deserialized bodies, JS) where "required" is a convention: an
+  // omitted lane must fail loud, not silently classify the spawn
+  const lane = req.lane;
+  if (lane !== 'batch' && lane !== 'interactive') {
+    throw new SpawnInputError('lane must be "batch" or "interactive"');
+  }
+  // BRO_BATCH:'' reads as unset (isBatchSpawn's contract) — the env
+  // merge below scrubs it; only a LIVE marker contradicts interactive
+  if (lane === 'interactive' && isBatchSpawn(req.env)) {
     throw new SpawnInputError(
       `lane "interactive" conflicts with caller-set env[${BATCH_MARKER_ENV}]`
     );
