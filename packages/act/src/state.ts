@@ -30,10 +30,12 @@ import type { PrActState } from './types.ts';
 const AI_REVIEWER_RE =
   /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i;
 
-/** Static-scanner check-name stems — the must-fix set. A check matching
- *  one of these can NEVER be advisory-ignored: a scanner's failed job
- *  or error annotation is a real project finding, not reviewer flake —
- *  the proof-of-life model does not apply to it. */
+/** Static-scanner check-name stems — the must-fix set BY DEFAULT. A
+ *  scanner's failed job or error annotation is a real project finding,
+ *  not reviewer flake — the proof-of-life model does not apply to it.
+ *  An explicit act.ignoreChecks entry overrides this default (the
+ *  operator named the scanner advisory; advisoryFilter's rule lookup
+ *  runs first for exactly that reason). */
 const SAST_NAMES = [
   'sonarcloud',
   'sonarqube',
@@ -58,6 +60,14 @@ const SAST_NAMES = [
 export function isSast(name: string): boolean {
   const lower = name.toLowerCase().replace(/[^a-z0-9]/g, '');
   return SAST_NAMES.some(s => lower.includes(s));
+}
+
+/** A check name, normalized for matching: case-folded, every run of
+ *  non-alphanumerics collapsed to one space. 'act-gate', 'Act Gate' and
+ *  'act_gate' are the same name — a self-check setting that missed its
+ *  own check would restore the deadlock it exists to prevent. */
+function normalizeCheckName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 // SKIPPED means the run never produced output — every other conclusion
@@ -115,9 +125,10 @@ function countFindings(
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
- *  annotations endpoint stays infra noise). Static scanners are never
- *  advisory-ignored (advisoryFilter returns them gated), so the counts
- *  below are the whole story — findings here are must-fix. */
+ *  annotations endpoint stays infra noise). The input set here is
+ *  already advisory-filtered — a scanner survives into these counts
+ *  unless the operator explicitly named it in act.ignoreChecks —
+ *  findings on surviving checks are must-fix. */
 async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
@@ -214,14 +225,14 @@ function advisoryFilter(
   headSha: string,
   alerts: string[]
 ): boolean {
-  // a static scanner is must-fix, never advisory: a failed job or an
-  // error annotation IS the finding — the flaky-reviewer proof-of-life
-  // model (streak + fresh threads) does not apply to it
-  if (isSast(c.name)) {
-    return true;
-  }
   const rule = rules.find(r => c.name.toLowerCase().includes(r.name.toLowerCase()));
   if (rule === undefined) {
+    // a static scanner is must-fix BY DEFAULT: a failed job or an error
+    // annotation IS the finding, not reviewer flake — so a SAST-named
+    // check gates unless an explicit act.ignoreChecks entry overrides.
+    // The override is deliberate operator policy: naming a scanner is
+    // never a silent no-op, and a failing one still surfaces as an
+    // alert until proven flaky and alive (below).
     return true;
   }
   history?.record({
@@ -263,6 +274,11 @@ const orSync = <T, A extends unknown[]>(
 
 export interface FetchPrActStateOpts {
   ignoreChecks?: IgnoreCheckEntry[];
+  /** The check that IS the gate (act.selfCheck) — a name substring. The
+   *  gate never counts itself: a gate published as a required check is
+   *  pending while it runs, and a gate that waits for its own check can
+   *  never go green. */
+  selfCheck?: string;
   checkHistory?: CheckHistory | null;
   maxRounds?: number;
   docsPaths?: string[];
@@ -416,8 +432,32 @@ async function fetchState(
   const rules = ignoreRules(opts?.ignoreChecks ?? []);
   const alerts: string[] = [];
   const history = opts?.checkHistory ?? null;
-  const checks = checksAll.filter(c =>
-    advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+  // The gate's own check is not part of the gate's input — a gate that
+  // publishes itself as a required check is pending while it runs, and
+  // waiting for it means the gate can never settle green. Matched by
+  // NAME (act.selfCheck): the normalized name must BE the gate's name,
+  // or end with it as the job segment of a composite 'workflow / job'
+  // name. A substring match would drop unrelated checks from the gate —
+  // the one thing the gate must never do (Kody rule: no substring
+  // checks as semantic tests).
+  const selfName = opts?.selfCheck;
+  const isSelf = (c: CheckInfo): boolean => {
+    // absent is not the same as empty: a missing setting means "this
+    // project has no gate check", an empty one means "the gate names
+    // nothing" — neither excludes a check, and neither is a sentinel
+    // for the other (Kody rule: discriminate on presence).
+    if (selfName === undefined) {
+      return false;
+    }
+    const self = normalizeCheckName(selfName);
+    if (self === '') {
+      return false;
+    }
+    const name = normalizeCheckName(c.name);
+    return name === self || name.endsWith(` ${self}`);
+  };
+  const checks = checksAll.filter(
+    c => !isSelf(c) && advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
   );
 
   // "CI green" means every check — an optional check that fails is still
