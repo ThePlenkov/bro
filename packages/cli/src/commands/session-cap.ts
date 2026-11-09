@@ -21,6 +21,8 @@
  * is the wiring — which config, which call site, which failure mode.
  */
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   SESSION_SLOT_TTL_MS,
   releaseSessionStart,
@@ -28,6 +30,7 @@ import {
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
+  sessionReservationsDir,
   type Connector,
   type ConnectorCtx,
   type PreToolVerdict,
@@ -79,7 +82,12 @@ export function sessionCapVerdict(
   // call claim ONE slot, and two separate calls with the same command
   // claim their own.
   const key = `guard-${keyPart(ctx.sessionId ?? 'nosession')}-${callKey(command, ctx)}`;
-  return judgeViews(views, bags, key);
+  // The key shape changed once (raw segments → sanitized+digested): a
+  // hook event of the SAME call that ran before the update claimed
+  // under the old name. That file is this call's slot — probing for it
+  // keeps an in-flight call from being counted (and refused) twice.
+  const legacy = legacyKey(command, ctx);
+  return judgeViews(views, bags, key, legacy !== key ? legacy : undefined);
 }
 
 /** Judge the kinds a command would start — claim the slot, then hold
@@ -87,10 +95,11 @@ export function sessionCapVerdict(
 function judgeViews(
   views: SessionCapView[],
   bags: Record<string, Record<string, unknown>>,
-  key: string
+  key: string,
+  legacyKey?: string
 ): PreToolVerdict[] {
   for (const view of views) {
-    const verdict = judgeView(view, bags, key);
+    const verdict = judgeView(view, bags, key, legacyKey);
     if (verdict !== undefined) {
       return [verdict];
     }
@@ -102,7 +111,8 @@ function judgeViews(
 function judgeView(
   view: SessionCapView,
   bags: Record<string, Record<string, unknown>>,
-  key: string
+  key: string,
+  legacyKey?: string
 ): PreToolVerdict | undefined {
   let claimed: { paths: string[]; fresh: boolean };
   try {
@@ -112,6 +122,17 @@ function judgeView(
       key,
       count: view.starts,
     });
+    if (claimed.fresh && legacyKey !== undefined) {
+      // A pre-update event of this call may already hold a slot under
+      // the old key: the claim is this call's, so the fresh files must
+      // not add a SECOND count on top of it. The new files stay (the
+      // next event dedups on them); the legacy files retire early.
+      const held = legacyClaims(view, bags, legacyKey);
+      if (held.length > 0) {
+        releaseSessionStart(held);
+        claimed = { paths: claimed.paths, fresh: false };
+      }
+    }
   } catch {
     // the claim could not be written — the count IS established, so
     // the cap still judges this call (a claim that cannot be taken
@@ -142,6 +163,38 @@ function callKey(command: string, ctx: ConnectorCtx): string {
   return `id-${keyPart(id)}`;
 }
 
+/** The PRE-SANITATION claim key this call would have used — raw
+ *  session id and raw tool-use id, as written before `keyPart`
+ *  existed. Only an existing file is ever touched, and only inside
+ *  the kind's reservations dir; a raw segment that cannot be a plain
+ *  file name (`/` or `..` — the very thing `keyPart` now sanitizes)
+ *  can never have been claimed, so there is nothing to recognize. */
+function legacyKey(command: string, ctx: ConnectorCtx): string | undefined {
+  const session = ctx.sessionId ?? 'nosession';
+  const id = ctx.toolUseId;
+  const call = id === undefined || id === '' ? commandKey(command) : `id-${id}`;
+  const legacy = `guard-${session}-${call}`;
+  return /[/\\]|\.\./.test(legacy) ? undefined : legacy;
+}
+
+/** The legacy-key claim files this call still holds in the kind's
+ *  reservations dir — the same `key-i.slot` naming the claim wrote. */
+function legacyClaims(
+  view: SessionCapView,
+  bags: Record<string, Record<string, unknown>>,
+  legacyKey: string
+): string[] {
+  const dir = sessionReservationsDir(view.kind, bags);
+  const paths: string[] = [];
+  for (let i = 0; i < view.starts; i++) {
+    const path = join(dir, `${legacyKey}-${i}.slot`);
+    if (existsSync(path)) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
 /** A raw client string into a reservation-key segment — filename-safe
  *  (no traversal, bounded length) AND lossless: the digest keeps two
  *  raws that sanitize alike (`a/b` vs `a?b`) from sharing a claim. */
@@ -151,8 +204,12 @@ function keyPart(raw: string): string {
     .replace(/\.{2,}/g, '_')
     .slice(0, 48);
   // sha256 — the repo's digest convention; CodeQL reads session_id in a
-  // sha1 as weak-crypto-on-sensitive-data even though the key is not crypto
-  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 12);
+  // sha1 as weak-crypto-on-sensitive-data even though the key is not
+  // crypto. utf16le keeps lone surrogates distinct (utf8 folds every
+  // unpaired half into U+FFFD, so 'x/\ud800' and 'x/\ud801' hashed
+  // alike — same claim, cap bypassed); 96 bits keeps two raws that
+  // share the 48-char safe prefix from colliding either.
+  const digest = createHash('sha256').update(raw, 'utf16le').digest('hex').slice(0, 24);
   return `${safe}-${digest}`;
 }
 
