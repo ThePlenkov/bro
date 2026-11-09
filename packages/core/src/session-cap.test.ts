@@ -9,7 +9,8 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { SpawnError } from './agents.ts'
 import { LockTimeout } from './filelock.ts'
 import {
@@ -17,6 +18,7 @@ import {
   countSessionReservations,
   registerSessionPlane,
   reserveSessionSlot,
+  sessionAdmissionLock,
   type SessionPlane,
 } from './session-planes.ts'
 import {
@@ -26,6 +28,10 @@ import {
   sessionCapRefusalFor,
   sessionCapViews,
 } from './session-cap.ts'
+
+/** The dir this file runs from — the child's tsx script imports the
+ *  same sources by absolute path. */
+const here = dirname(fileURLToPath(import.meta.url));
 
 /** A plane that claims a command by a marker word and counts a
  *  scripted number of live sessions. */
@@ -364,21 +370,29 @@ describe('admitSessionStart', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-cap-mutex-'))
     try {
       const plane = testPlane('alpha', { live: 0 })
-      // a child plants the admission mutex with its own live pid and
-      // holds it ~600ms — the cap's admit must wait, then succeed
-      const mutex = join(dir, 'admission.mutex')
-      const child = spawn(
-        process.execPath,
-        [
-          '-e',
-          `const fs=require('fs');fs.writeFileSync(${JSON.stringify(mutex)},String(process.pid),{flag:'wx'});setTimeout(()=>process.exit(0),600)`,
-        ],
-        { stdio: 'ignore' }
+      // a child takes the kind's admission mutex by the REAL lock —
+      // `admitSessionSlot` acquires `sessionAdmissionLock(kind, dir)`,
+      // so the child asks the same function for the path rather than
+      // hard-coding a file name: move the mutex and this test still
+      // proves both serialize on it. The hold is ~600ms — the cap's
+      // admit must wait, then succeed.
+      const ready = join(dir, 'child.ready')
+      const mutex = sessionAdmissionLock('alpha', dir)
+      const childScript = join(dir, 'holder.ts')
+      writeFileSync(
+        childScript,
+        `import { writeFileSync } from 'node:fs'\n` +
+          `import { acquireFileLock } from ${JSON.stringify(join(here, 'filelock.ts'))}\n` +
+          `import { sessionAdmissionLock } from ${JSON.stringify(join(here, 'session-planes.ts'))}\n` +
+          `const release = acquireFileLock(sessionAdmissionLock('alpha', ${JSON.stringify(dir)}))\n` +
+          `writeFileSync(${JSON.stringify(ready)}, String(process.pid))\n` +
+          `setTimeout(() => { release(); process.exit(0) }, 600)\n`
       )
+      const child = spawn('npx', ['tsx', childScript], { stdio: 'ignore' })
       await new Promise<void>((res) => {
         const t0 = Date.now()
         const tick = (): void => {
-          if (existsSync(mutex) || Date.now() - t0 > 3000) {
+          if ((existsSync(ready) && existsSync(mutex)) || Date.now() - t0 > 10_000) {
             res()
           } else {
             setTimeout(tick, 20)
@@ -386,6 +400,8 @@ describe('admitSessionStart', () => {
         }
         tick()
       })
+      assert.ok(existsSync(ready), 'the child never took the admission mutex')
+      assert.ok(existsSync(mutex), 'the admission mutex was never held')
       const started = Date.now()
       clearSessionPlanes()
       try {

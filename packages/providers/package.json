@@ -1,11 +1,11 @@
 {
   "name": "@broject/providers",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.7.0",
-    "@broject/core": "^0.2.0",
-    "zod": "^4.6.5"
+    "@broject/core": "^0.3.0",
+    "zod": "^4.6.6"
   },
   "exports": {
     ".": {
@@ -24,7 +24,8 @@
   "devDependencies": {
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@broject/acp-session": "^0.3.0"
   },
   "files": [
     "dist"
@@ -41,7 +42,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Provider bindings for bro — the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
+  "description": "Provider bindings for bro \u2014 the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
   "keywords": [
     "providers",
     "judge",
