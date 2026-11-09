@@ -2512,6 +2512,25 @@ function servePlanes(dir: string): {
   return { conductorCfg, providerCfg };
 }
 
+/** The one startup line naming which plane answers /v1 — the
+ *  conductor's lanes, plus the fast lane's upstream when armed (the
+ *  only /v1 surface that bypasses session/new, spec bro-6asnu), else
+ *  the byte proxy's upstream. */
+function logServePlanes(planes: {
+  conductorCfg: ConductorConfig | undefined;
+  providerCfg: ProviderConfig | undefined;
+}): void {
+  const { conductorCfg, providerCfg } = planes;
+  if (conductorCfg !== undefined) {
+    const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
+    console.log(
+      `provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`
+    );
+  } else if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
+  }
+}
+
 export async function runServeCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'ensure') {
     await cmdEnsure(argv.slice(1));
@@ -2557,12 +2576,9 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const meta: ServeMeta = { dir, startedAt: '' };
   // the conductor answers /v1 from a configured acp provider — the byte
   // proxy's upstream+key pair stays the plain-HTTP fallback
-  const { conductorCfg, providerCfg } = servePlanes(dir);
-  if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})`);
-  } else if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
-  }
+  const planes = servePlanes(dir);
+  const { conductorCfg, providerCfg } = planes;
+  logServePlanes(planes);
   // the session token — the "local session context" made concrete.
   // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
   // (crash recovery keeps the credential clients already hold), else

@@ -168,51 +168,125 @@ function sendUpstreamError(res: ServerResponse, status: number, message: string)
 export function providerProxy(
   cfg: ProviderConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    const method = req.method ?? 'GET';
-    const target = `${cfg.upstream}${req.url ?? '/'}`;
-    // the client going away must stop the upstream work — an SSE
-    // generation otherwise runs to completion billing tokens against
-    // nobody's session
-    const abort = new AbortController();
-    res.on('close', () => abort.abort());
-    let upstream: Response;
-    try {
-      upstream = await fetch(target, {
-        method,
-        headers: forwardHeaders(req, cfg.apiKey),
-        signal: abort.signal,
-        // never auto-follow — a cross-origin redirect would carry the
-        // swapped x-api-key to a host it was never minted for
-        redirect: 'manual',
-        ...(HAS_BODY.has(method)
-          ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const }
-          : {}),
-      });
-    } catch (err) {
-      sendUpstreamError(
-        res,
-        502,
-        `bro provider: upstream unreachable — ${err instanceof Error ? err.message : String(err)}`
-      );
-      return;
-    }
+  return (req, res) => forwardUpstream(req, res, cfg);
+}
 
-    const headers: Record<string, string> = {};
-    upstream.headers.forEach((value, name) => {
-      if (!DROP_RESPONSE.has(name.toLowerCase())) {
-        headers[name] = value;
-      }
-    });
-    res.writeHead(upstream.status, headers);
-    if (upstream.body === null) {
-      res.end();
-      return;
+/** The extra lanes a forward can ride — `payload` overrides the
+ *  request body (the conductor's fast lane buffers the client's JSON
+ *  to rewrite `model` before forwarding); `timeoutMs` is the caller's
+ *  deadline on the upstream fetch. */
+export interface ForwardOptions {
+  payload?: string;
+  timeoutMs?: number;
+}
+
+/** Client-close and caller-deadline both cancel the upstream fetch —
+ *  an SSE generation otherwise runs to completion billing tokens
+ *  against nobody's session, and a stalled upstream must not hold the
+ *  request open past the turn budget it answers under. `drop` clears
+ *  the deadline. */
+function laneAbort(
+  res: ServerResponse,
+  timeoutMs?: number
+): { signal: AbortSignal; drop: () => void } {
+  const abort = new AbortController();
+  res.on('close', () => abort.abort());
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort.abort(), timeoutMs);
+  timer?.unref();
+  const drop = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
     }
-    const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
-    // mid-stream failures can't re-send the status — destroy is the
-    // honest end: the client's transport reports a truncated response
-    body.on('error', () => res.destroy());
-    body.pipe(res);
   };
+  res.on('close', drop);
+  return { signal: abort.signal, drop };
+}
+
+/** The request-body piece of the upstream fetch — a buffered payload
+ *  wins outright; absent, a body-method streams the raw request. */
+function upstreamBody(req: IncomingMessage, method: string, payload?: string): RequestInit {
+  if (payload !== undefined) {
+    return { body: payload };
+  }
+  if (HAS_BODY.has(method)) {
+    return { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } as RequestInit;
+  }
+  return {};
+}
+
+/** Response headers minus the hop-by-hop set — everything else pipes
+ *  through verbatim. */
+function upstreamHeaders(upstream: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  upstream.headers.forEach((value, name) => {
+    if (!DROP_RESPONSE.has(name.toLowerCase())) {
+      headers[name] = value;
+    }
+  });
+  return headers;
+}
+
+/** Pipe an established upstream response to the client — mid-stream
+ *  failures can't re-send the status, so destroy is the honest end:
+ *  the client's transport reports a truncated response. */
+function pipeUpstream(upstream: Response, res: ServerResponse, drop: () => void): void {
+  res.writeHead(upstream.status, upstreamHeaders(upstream));
+  if (upstream.body === null) {
+    res.end();
+    return;
+  }
+  const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
+  body.on('error', () => res.destroy());
+  body.on('end', drop);
+  body.pipe(res);
+}
+
+/** The upstream fetch + response-pipe both proxy paths share —
+ *  `opts.payload` overrides the request body (see ForwardOptions);
+ *  absent, the request streams through like the plain proxy. */
+async function forwardUpstream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ProviderConfig,
+  opts: ForwardOptions = {}
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const target = `${cfg.upstream}${req.url ?? '/'}`;
+  const lane = laneAbort(res, opts.timeoutMs);
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers: forwardHeaders(req, cfg.apiKey),
+      signal: lane.signal,
+      // never auto-follow — a cross-origin redirect would carry the
+      // swapped x-api-key to a host it was never minted for
+      redirect: 'manual',
+      ...upstreamBody(req, method, opts.payload),
+    });
+  } catch (err) {
+    lane.drop();
+    sendUpstreamError(
+      res,
+      502,
+      `bro provider: upstream unreachable — ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+  pipeUpstream(upstream, res, lane.drop);
+}
+
+/** `(req, res)` forward for a request whose body is already buffered —
+ *  the conductor's fast lane (spec bro-6asnu) parsed the client's JSON
+ *  to classify it, so the raw stream is spent; the serialized body
+ *  rides instead. Headers and the credential swap are providerProxy's
+ *  own; a string body lets the transport re-frame `content-length`
+ *  for the (possibly rewritten) payload. */
+export function forwardBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ProviderConfig,
+  opts: ForwardOptions & { payload: string }
+): Promise<void> {
+  return forwardUpstream(req, res, cfg, opts);
 }

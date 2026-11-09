@@ -151,6 +151,15 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
     'ANTHROPIC_DEFAULT_OPUS_MODEL',
     'BRO_PROVIDER_BACKEND',
+    // fast-lane evidence (bro-6asnu) — an ambient upstream key must not
+    // downgrade the warn; the /proc leg reads the test's own environ
+    'BRO_PROVIDER_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'BRO_PROVIDER_UPSTREAM',
+    'BRO_PROVIDER_FAST_LANE',
+    'BRO_PROVIDER_FAST_MODEL',
+    'BRO_PROVIDER_FAST_MAX_TOKENS',
   ].filter(k => opts.env === undefined || !(k in opts.env))) {
     saved[k] = process.env[k];
     delete process.env[k];
@@ -1778,6 +1787,107 @@ describe('bro doctor', () => {
       dir => {
         const c = byName(runDoctorChecks(dir), 'conductor');
         assert.equal(c.status, 'ok', JSON.stringify(c));
+      }
+    ));
+
+  test('conductor: an armed fast lane downgrades the endpoint warn to ok (bro-6asnu)', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp', BRO_PROVIDER_API_KEY: 'k' },
+      },
+      dir => {
+        liveServeClient(dir, 'http://127.0.0.1:44927');
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'ok', JSON.stringify(c));
+        assert.match(c.detail, /fast lane armed/);
+      }
+    ));
+
+  test('conductor: FAST_LANE=off keeps the warn even with a key present', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: {
+          BRO_PROVIDER_BACKEND: 'devin-acp',
+          BRO_PROVIDER_API_KEY: 'k',
+          BRO_PROVIDER_FAST_LANE: 'off',
+        },
+      },
+      dir => {
+        liveServeClient(dir, 'http://127.0.0.1:44927');
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      }
+    ));
+
+  test('conductor: serve.fastLane:false keeps the warn even with a key (bro-6asnu)', () =>
+    withEnv(
+      {
+        config: {
+          serve: { fastLane: false },
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp', BRO_PROVIDER_API_KEY: 'k' },
+      },
+      dir => {
+        liveServeClient(dir, 'http://127.0.0.1:44927');
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      }
+    ));
+
+  test('conductor: a classifier pin on the acp wire reads ok once the lane is armed', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: {
+          BRO_PROVIDER_BACKEND: 'devin-acp',
+          ANTHROPIC_SMALL_FAST_MODEL: 'devin-acp/swe-2-max',
+          ANTHROPIC_AUTH_TOKEN: 'tok',
+          // the pin names conductor vocabulary — the rewrite must exist
+          // for the upstream to answer it
+          BRO_PROVIDER_FAST_MODEL: 'claude-haiku-4-5',
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'ok', JSON.stringify(c));
+        assert.match(c.detail, /fast lane routes/);
+      }
+    ));
+
+  test('conductor: a conductor-only pin on an un-pinned lane still warns', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: {
+          BRO_PROVIDER_BACKEND: 'devin-acp',
+          ANTHROPIC_SMALL_FAST_MODEL: 'devin-acp/swe-2-max',
+          ANTHROPIC_AUTH_TOKEN: 'tok',
+        },
+      },
+      dir => {
+        // armed but no fastModel — devin-acp/swe-2-max forwards verbatim
+        // and no upstream serves that id
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.hint ?? '', /BRO_PROVIDER_FAST_MODEL/);
       }
     ));
 
