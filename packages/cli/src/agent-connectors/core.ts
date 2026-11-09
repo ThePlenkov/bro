@@ -112,6 +112,7 @@ import {
   sessionQuotaConfig,
   sessionSlotsDir,
   stepParent,
+  taskStoreAt,
   UnknownProviderError,
   walkChain,
   wallText,
@@ -391,8 +392,14 @@ export function fleetCapOf(env: AgentConnectorEnv): number {
  *  no-silent-fallthrough rule). */
 export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfile {
   const profiles = env.fleet?.profiles;
-  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  // hasOwn pins the lookup to configured keys — 'constructor'/'__proto__' must not
   // resolve to an inherited member and skip the missing-profile error
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input'
+    );
+  }
   const profile =
     profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
   if (profile === undefined) {
@@ -1791,7 +1798,14 @@ function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+): {
+  claimed: boolean;
+  actor: string | undefined;
+  phantom: boolean;
+  /** the assignee the step carried BEFORE our rebind — the rollback
+   *  target when a later spawn write fails */
+  previousAssignee?: string;
+} {
   const step = probeStep(spec.beadsDir, spec.molStep);
   if (isPhantomAdhoc(spec, step)) {
     return { claimed: false, actor: undefined, phantom: true };
@@ -1810,7 +1824,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     );
   }
-  return { claimed: true, actor, phantom: false };
+  return { claimed: true, actor, phantom: false, previousAssignee: step.assignee };
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -2173,7 +2187,11 @@ function prepareSpawn(
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
-  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
+  const { claimed, actor, phantom, previousAssignee } = guardClaim(
+    spec,
+    existing !== undefined,
+    opts.claimAs
+  );
   const now = Date.now();
   const candidates =
     spec.route?.candidates ??
@@ -2294,6 +2312,7 @@ function prepareSpawn(
           claimed,
           actor,
           phantom,
+          previousAssignee,
           existing,
           lease: workLease.lease,
         }
@@ -2317,7 +2336,90 @@ function prepareSpawn(
     // and the lease: a spawn that never committed must not hold the
     // cross-repo claim either
     releaseSpawnLease(dir, workLease.lease);
+    // and the half-committed write facts: the claim rebind and the
+    // registry row both roll back to the state this spawn found —
+    // compare-and-set, so an entry a parallel actor rewrote is never
+    // clobbered
+    rollbackSpawnWrite(dir, spec, {
+      agentId,
+      claimed,
+      actor,
+      phantom,
+      previousAssignee,
+      existing,
+      claimAs: opts.claimAs,
+    });
     throw err;
+  }
+}
+
+/** Undo the write facts a failed commitSpawn may have left — the beads
+ *  claim AND the registry row. Both rollbacks are compare-and-set: the
+ *  claim is only rewritten while it still carries an assignee this
+ *  spawn wrote (a claim another actor moved meanwhile is theirs, not
+ *  ours to unbind), and the registry row is only restored/removed while
+ *  it still names this spawn's agentId. Every step is best-effort — a
+ *  rollback that fails leaves the 'lost' registry entry the ordering
+ *  comment above promises, never a second thrown error masking the
+ *  first. */
+function rollbackSpawnWrite(
+  dir: string,
+  spec: SpawnSpec,
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee: string | undefined;
+    existing: AgentRegistryEntry | undefined;
+    claimAs: string | undefined;
+  }
+): void {
+  // the claim — a phantom step carries none, so there is nothing to unbind
+  if (!run.phantom) {
+    try {
+      const now = probeStep(spec.beadsDir, spec.molStep);
+      const store = taskStoreAt(spec.beadsDir);
+      if (run.claimed && run.previousAssignee !== undefined) {
+        // rebind: the bookkeeping wrote `actor`, then `claimAs` when the
+        // caller pinned one — restore the pre-spawn assignee only while
+        // the step still carries a name this spawn wrote (a claim another
+        // actor moved meanwhile is theirs, not ours to unbind)
+        if (now?.assignee === run.actor || now?.assignee === run.claimAs) {
+          store.update(spec.molStep, { assignee: run.previousAssignee });
+        }
+      } else if (!run.claimed) {
+        // fresh claim: reopen only while the step still sits in the
+        // in_progress/our-actor state this spawn's claimStep produced
+        if (now?.status === 'in_progress' && now.assignee === bdActor(spec.beadsDir)) {
+          store.reopen(spec.molStep);
+        }
+      }
+    } catch {
+      // best-effort — the 'lost' entry below still names the failed run
+    }
+  }
+  // the registry row this spawn wrote over `existing` — restore the row
+  // it replaced (a respawn keeps its predecessor's facts), or drop the
+  // fresh row so no dead spawn entry lingers. Only while the row still
+  // names OUR agentId — a respawn that already landed owns it now.
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[spec.molStep];
+      if (cur === undefined || cur.agentId !== run.agentId) {
+        return;
+      }
+      if (run.existing !== undefined) {
+        reg[spec.molStep] = run.existing;
+      } else {
+        delete reg[spec.molStep];
+      }
+      writeAgentRegistry(dir, reg);
+    });
+  } catch {
+    // best-effort — a row we cannot roll back is the same 'lost' entry
+    // the ordering already tolerates
   }
 }
 
@@ -2384,6 +2486,7 @@ function commitSpawn(
     claimed: boolean;
     actor: string | undefined;
     phantom: boolean;
+    previousAssignee?: string;
     existing: AgentRegistryEntry | undefined;
     lease: Lease;
   }
@@ -2987,24 +3090,31 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
  *  pid+starttime identity is what keeps a recycled pid from faking
  *  death. Empty where /proc is absent (non-Linux). */
 function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  return unitSnapshot(root).members;
+}
+
+/** The pre-signal unit snapshot — the wrapper's process tree plus
+ *  every process GROUP the tree spans, off one /proc scan. A payload
+ *  that leads its own session or process group escapes
+ *  kill(-wrapperPgid): a fork-style `systemd-run --scope` gives the
+ *  scoped child its own pid (spec bro-ybo8z — exec-style systemd-run
+ *  keeps the wrapper's pid and needs nothing extra), and a setsid'd
+ *  descendant was already unreachable. `down` signals each distinct
+ *  pgid a live member belongs to — `{root group} ∪ {member groups}` —
+ *  which for the common single-group tree is the group it always was.
+ *  Members keep the same {pid,start} shape descendantsOf reports;
+ *  zombies claim no group. */
+function unitSnapshot(root: number): {
+  members: Array<{ pid: number; start?: string }>;
+  groups: Set<number>;
+} {
   const scan = scanProc();
+  const members: Array<{ pid: number; start?: string }> = [];
+  const groups = new Set<number>();
   if (scan === null) {
-    return [];
+    return { members, groups };
   }
-  const children = new Map<number, number[]>();
-  const starts = new Map<number, string>();
-  for (const e of scan.entries) {
-    const list = children.get(e.ppid);
-    if (list === undefined) {
-      children.set(e.ppid, [e.pid]);
-    } else {
-      list.push(e.pid);
-    }
-    if (e.start !== '') {
-      starts.set(e.pid, e.start);
-    }
-  }
-  const out: Array<{ pid: number; start?: string }> = [];
+  const { byPid, children } = procTreeIndex(scan.entries);
   const seen = new Set<number>([root]);
   const queue = [root];
   for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
@@ -3013,11 +3123,30 @@ function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
         continue;
       }
       seen.add(c);
-      out.push({ pid: c, start: starts.get(c) });
       queue.push(c);
+      const e = byPid.get(c);
+      members.push({ pid: c, start: e?.start === '' ? undefined : e?.start });
+      if (e !== undefined && e.state !== 'Z' && e.pgrp > 0) {
+        groups.add(e.pgrp);
+      }
     }
   }
-  return out;
+  return { members, groups };
+}
+
+/** ppid → children index plus pid → row, built over one /proc scan —
+ *  the tree walk's lookup tables. */
+function procTreeIndex(entries: ProcEntry[]): {
+  byPid: Map<number, ProcEntry>;
+  children: Map<number, number[]>;
+} {
+  const byPid = new Map<number, ProcEntry>();
+  const children = new Map<number, number[]>();
+  for (const e of entries) {
+    byPid.set(e.pid, e);
+    children.set(e.ppid, [...(children.get(e.ppid) ?? []), e.pid]);
+  }
+  return { byPid, children };
 }
 
 /** Live state for a registry entry under this backend. */
@@ -3296,27 +3425,28 @@ function attemptHandles(
   };
 }
 
-/** Adopt a survivor: the entry's pid patch never landed, but the
- *  worker published its own handle before the launcher died. A live
- *  handle stamps pid+pidStart into the entry — under the same
- *  generation guard the exit harvest uses, so a respawned entry is
- *  never adopted into — and returns the pid so status/down reach the
- *  worker and dedup keeps refusing beside it. */
-function isSafeAgentIdForAdopt(agentId: string): boolean {
-  return basename(agentId) === agentId;
-}
-
-function isSameGenerationRun(
-  cur: AgentRegistryEntry | undefined,
-  entry: AgentRegistryEntry
-): boolean {
-  if (cur === undefined) return false;
-  if (cur.agentId !== entry.agentId) return false;
-  if (cur.spawnedAt !== entry.spawnedAt) return false;
-  if (cur.runId !== entry.runId) return false;
+/** The handle's published starttime is the pid's identity — a recycled
+ *  pid whose /proc starttime no longer matches is a stranger, never
+ *  the worker that published the handle. */
+function handleIdentity(pid: number, published: string | undefined, agentId: string): boolean {
+  const current = procStat(pid)?.start ?? null;
+  if (published !== undefined && current !== null && current !== '' && current !== published) {
+    console.error(
+      `bro: refusing handle for ${agentId} — pid ${pid} now starts at ${current}, ` +
+        `not the published ${published} (recycled pid)`
+    );
+    return false;
+  }
   return true;
 }
 
+/** Adopt a survivor: the entry's pid patch never landed, but the
+ *  worker published its own handle before the launcher died. A live
+ *  handle whose pid still carries the published starttime stamps
+ *  pid+pidStart into the entry — under the same generation guard the
+ *  exit harvest uses, so a respawned entry is never adopted into — and
+ *  returns the pid so status/down reach the worker and dedup keeps
+ *  refusing beside it. A recycled pid never adopts (handleIdentity). */
 function adoptNativeHandle(
   dir: string,
   home: string | null,
@@ -3328,39 +3458,53 @@ function adoptNativeHandle(
     home === null ||
     runId === undefined ||
     entry.backend !== 'native' ||
-    !isSafeAgentIdForAdopt(entry.agentId)
+    basename(entry.agentId) !== entry.agentId // '../' must never escape the agents home
   ) {
     return undefined;
   }
-  let pid: number;
+  let owner: { pid: number; start?: string } | null;
   try {
-    pid = Number(
-      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8').trim()
+    owner = handleOwner(
+      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8')
     );
   } catch {
     return undefined;
   }
-  if (!Number.isInteger(pid) || pid <= 0) {
+  if (owner === null) {
     return undefined;
   }
-  const start = procStat(pid)?.start ?? null;
-  if (!pidAlive(pid, start ?? undefined)) {
+  const { pid, start: published } = owner;
+  // identity before liveness: the handle's pid may have been recycled
+  // since the worker published it, and adopting the stranger would
+  // stamp it into the entry and hand `down` its process tree
+  if (!handleIdentity(pid, published, entry.agentId) || !pidAlive(pid, published)) {
     return undefined;
   }
+  const start = published ?? procStat(pid)?.start ?? null;
+  // the handle file is runId-scoped and identity-checked above — its pid
+  // IS this attempt's, so the in-memory row adopts it unconditionally
+  // (the AgentInfo built from it carries the pid to status/down)
   entry.pid = pid;
   entry.pidStart = start;
   try {
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (!isSameGenerationRun(cur, entry)) {
+      // a respawn owns the entry now — the handle belongs to a dead
+      // generation and must not stamp the new run's fields
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
-      reg[molStep] = { ...cur!, pid, pidStart: start };
+      reg[molStep] = { ...cur, pid, pidStart: start };
       writeAgentRegistry(dir, reg);
     });
   } catch {
-    // best effort
+    // the registry stamp is advisory — the handle still proves liveness
   }
   return { pid, start };
 }
@@ -3668,14 +3812,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const [molStep, entry] = hit;
       // a crashed launcher's survivor self-published its handle — adopt
       // it here too so `down` reaches the worker the registry never got
-      // a pid for (spec bro-l8c4f.5)
+      // a pid for (spec bro-l8c4f.5). The consultation now also fires
+      // when the recorded pid is simply DEAD: a fork-style
+      // `systemd-run --scope` (bro-ybo8z) leaves the payload alive in
+      // another cgroup under a pid the registry never recorded, and
+      // stamping `stopped` over that live orphan would free a respawn
+      // beside a live writer.
+      const home = agentsHome(dir);
+      const entryPid = typeof entry.pid === 'number' ? entry.pid : undefined;
       const adopted =
-        typeof entry.pid === 'number'
+        entryPid !== undefined &&
+        (pidAlive(entryPid, entryPidStart(entry)) ||
+          groupMemberAlive(entryPid, entryPidStart(entry)))
           ? undefined
-          : adoptNativeHandle(dir, agentsHome(dir), molStep, entry);
-      const pid = typeof entry.pid === 'number' ? entry.pid : adopted?.pid;
-      const start =
-        typeof entry.pid === 'number' ? entryPidStart(entry) : (adopted?.start ?? undefined);
+          : adoptNativeHandle(dir, home, molStep, entry);
+      const pid = adopted?.pid ?? entryPid;
+      const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
       // The unit check lives outside the signal block: a repeated `down`
       // can find the wrapper already dead while a descendant still holds
       // the group — the lock guard below must see it even when no signal
@@ -3688,19 +3840,33 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         (pidAlive(pid, start) ||
           groupMemberAlive(pid, start) ||
           unit.some(d => pidAlive(d.pid, d.start)));
-      if (pid !== undefined && pidAlive(pid, start)) {
+      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
         // the tree snapshot rides BEFORE the signal: a descendant that
-        // escaped the group (setsid) is invisible to groupMemberAlive,
-        // and once the wrapper dies it reparents to init — the
-        // pre-signal pid+starttime pin is the only handle left on it
-        unit = descendantsOf(pid);
-        try {
-          process.kill(-pid, 'SIGTERM'); // detached → own process group
-        } catch {
-          // No fallback to kill(pid): a native child is always its own
-          // group leader, so a failed group signal means the pid was
-          // recycled by a non-leader — signaling it would hit an
-          // unrelated process.
+        // escaped the group (setsid — or a scope payload a fork-style
+        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
+        // groupMemberAlive, and once the wrapper dies it reparents to
+        // init — the pre-signal pid+starttime pin is the only handle
+        // left on it. The signal goes to every group the tree spans:
+        // a scoped payload's own pgid gets SIGTERM too.
+        const snap = unitSnapshot(pid);
+        unit = snap.members;
+        const groups = new Set<number>([pid, ...snap.groups]);
+        for (const g of groups) {
+          try {
+            // a lane-paused group (spec bro-y3jvd) pends every signal —
+            // SIGCONT first or the TERM below waits on a stopped process
+            process.kill(-g, 'SIGCONT');
+          } catch {
+            // not stopped, or already gone — the TERM below decides
+          }
+          try {
+            process.kill(-g, 'SIGTERM'); // detached → own process group
+          } catch {
+            // No fallback to kill(pid): a native child is always its own
+            // group leader, so a failed group signal means the group was
+            // emptied or recycled — signaling a bare pid could hit an
+            // unrelated process.
+          }
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
