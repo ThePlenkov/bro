@@ -913,6 +913,65 @@ function serveApiKeyEnv(raw: unknown): string | undefined {
  *  / `ANTHROPIC_*` override). `fastModel` pins the upstream model the
  *  conductor's fast lane rewrites, and `fastLane:false` returns every
  *  call to the session lane (spec bro-6asnu). */
+/** One thin client's own knobs — where `bro router client` writes the
+ *  model block, and which binary the launch stage execs.
+ *
+ *  The client reads its settings at START, so the order matters: the
+ *  router must be up (the catalog is the truth) and the settings must
+ *  carry the block BEFORE the client starts. This config says where
+ *  that block lands — the machine-local path, not a committed one. */
+export interface ServeClientConfig {
+  /** the settings FILE the model block is merged into */
+  settingsPath?: string;
+  /** the client binary the launch stage execs */
+  command?: string;
+}
+
+/** The client configs, keyed by client name (`claude-code`). */
+export type ServeClients = Record<string, ServeClientConfig>;
+
+/** A string field, trimmed — undefined when it is absent or blank. */
+function trimmedField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** One client's config — its fields, trimmed. Undefined when the entry is
+ *  malformed or carries nothing to configure. */
+function serveClientConfig(raw: unknown, name: string): ServeClientConfig | undefined {
+  if (!isPlainObject(raw)) {
+    console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
+    return undefined;
+  }
+  const settingsPath = trimmedField(raw.settingsPath);
+  const command = trimmedField(raw.command);
+  const cfg: ServeClientConfig = {
+    ...(settingsPath === undefined ? {} : { settingsPath }),
+    ...(command === undefined ? {} : { command }),
+  };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+/** The client configs — a malformed entry drops ITS OWN fields, never
+ *  the whole section (same discipline as the lane limits). */
+function serveClients(raw: unknown): ServeClients | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    console.error(
+      'bro.config: serve.client must be an object of client → config — section dropped'
+    );
+    return undefined;
+  }
+  const out: ServeClients = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (name === '__proto__') continue;
+    const cfg = serveClientConfig(value, name);
+    if (cfg !== undefined) out[name] = cfg;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;

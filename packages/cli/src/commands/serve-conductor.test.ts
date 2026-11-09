@@ -3,6 +3,8 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -529,6 +531,7 @@ describe('conductorConfig', () => {
         ?.model,
       'env-m'
     );
+  });
 });
 
 describe('parseReply', () => {
