@@ -1,17 +1,17 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { initRepo, inside, runCli, tmpDir } from './testrepo.ts'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { initRepo, inside, runCli, tmpDir } from './testrepo.ts';
 
 /** The stream+code contract (spec bro-1znlu): the exit code picks the
  *  stream — explicit help exits 0 so its text lands on stdout; usage
  *  errors exit non-zero and their text stays on stderr. Shipped
  *  watcher verdicts (bro wait) keep their frozen meanings. */
-const dir = tmpDir('bro-help-contract-')
+const dir = tmpDir('bro-help-contract-');
 
 function cli(args: string[]) {
-  return runCli(args, { cwd: dir })
+  return runCli(args, { cwd: dir });
 }
 
 describe('help → stdout + 0', () => {
@@ -44,6 +44,7 @@ describe('help → stdout + 0', () => {
     ['agents', '--help'],
     ['bus', '--help'],
     ['loop', '--help'],
+    ['watchdog', '--help'],
     ['drive', '--help'],
     ['next', '--help'],
     ['retrospect', '--help'],
@@ -85,13 +86,13 @@ describe('help → stdout + 0', () => {
     ['help', 'act', '--', 'payload'],
   ]) {
     test(`bro ${args.join(' ')}`, () => {
-      const r = cli(args)
-      assert.equal(r.code, 0, `stderr: ${r.stderr}`)
-      assert.ok(r.stdout.length > 0, 'help text must land on stdout')
-      assert.equal(r.stderr, '', 'no stderr noise on the help path')
-    })
+      const r = cli(args);
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.ok(r.stdout.length > 0, 'help text must land on stdout');
+      assert.equal(r.stderr, '', 'no stderr noise on the help path');
+    });
   }
-})
+});
 
 describe('usage errors → stderr + non-zero', () => {
   for (const [args, code] of [
@@ -103,43 +104,43 @@ describe('usage errors → stderr + non-zero', () => {
     [['stack'], 2],
   ] as const) {
     test(`bro ${args.join(' ')} → ${code}`, () => {
-      const r = cli([...args])
-      assert.equal(r.code, code, `stdout: ${r.stdout} stderr: ${r.stderr}`)
-      assert.equal(r.stdout, '', 'usage errors never write stdout')
-      assert.ok(r.stderr.length > 0, 'usage text lands on stderr')
-    })
+      const r = cli([...args]);
+      assert.equal(r.code, code, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.equal(r.stdout, '', 'usage errors never write stdout');
+      assert.ok(r.stderr.length > 0, 'usage text lands on stderr');
+    });
   }
-})
+});
 
 describe('watch sched dispatch', () => {
   test('bro watch uninstall never falls through to install', () => {
-    const { root, main } = initRepo('bro-watch-uninstall-')
+    const { root, main } = initRepo('bro-watch-uninstall-');
     inside(main, root, () => {
-      const r = runCli(['watch', 'uninstall'], { cwd: main })
-      assert.equal(r.code, 0, `stderr: ${r.stderr}`)
+      const r = runCli(['watch', 'uninstall'], { cwd: main });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
       // the buggy dispatch fed runWatchSched an empty argv — installWatch
       // armed the pulse instead of reporting the disarm path
-      assert.match(r.stdout, /no pulse marker|pulse disarmed/)
+      assert.match(r.stdout, /no pulse marker|pulse disarmed/);
       assert.ok(
         !existsSync(join(main, '.git', 'bro', 'pulse.json')),
         'uninstall must not write the pulse marker'
-      )
-    })
-  })
-})
+      );
+    });
+  });
+});
 
 describe('frozen verdict meanings', () => {
   test('bro wait with no refs → usage error on stderr', () => {
-    const r = cli(['wait'])
-    assert.equal(r.code, 2)
-    assert.equal(r.stdout, '')
-    assert.match(r.stderr, /Usage: bro wait/)
-  })
+    const r = cli(['wait']);
+    assert.equal(r.code, 2);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /Usage: bro wait/);
+  });
 
   test('bare bro → generic error 1, usage on stderr', () => {
-    const r = cli([])
-    assert.equal(r.code, 1)
-    assert.equal(r.stdout, '')
-    assert.ok(r.stderr.length > 0)
-  })
-})
+    const r = cli([]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, '');
+    assert.ok(r.stderr.length > 0);
+  });
+});

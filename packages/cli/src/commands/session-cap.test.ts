@@ -2,7 +2,7 @@
  *  bro-bww9v): the guard plane's veto and the ACP surface's refusal. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -136,11 +136,82 @@ describe('sessionCapVerdict', () => {
     withReservations(dir => {
       withPlane(testPlane('twice', { live: 0 }), () => {
         const bags = { twice: { maxSessions: 1, reservationsDir: dir } };
+        // a call's identity is its toolUseId — the two hook events of
+        // one call share it; without one each event is a DISTINCT call
+        // and must claim its own slot
+        const callCtx = { dir: process.cwd(), sessionId: 'sess-1', toolUseId: 'tw-1' } as never;
+        const call = () =>
+          sessionCapVerdict(callCtx, { tool: 'bash', input: { command: 'twice-run --now' } }, bags);
         // the pre-tool event claims the slot...
-        assert.deepEqual(verdictFor('twice-run --now', bags), []);
+        assert.deepEqual(call(), []);
         // ...and the permission event for the SAME call must not count
         // its start twice (the claim is already in the live count)
-        assert.deepEqual(verdictFor('twice-run --now', bags), []);
+        assert.deepEqual(call(), []);
+      });
+    });
+  });
+
+  test('a contended admission mutex degrades to the un-locked path — the hook never stalls', () => {
+    withReservations(dir => {
+      withPlane(testPlane('fake', { live: 3 }), () => {
+        // a live holder (this pid) parks on the kind's admission mutex —
+        // the verdict must still arrive, and the cap still applies
+        writeFileSync(join(dir, 'admission.mutex'), String(process.pid), { flag: 'wx' });
+        try {
+          const verdicts = sessionCapVerdict(
+            ctx,
+            { tool: 'bash', input: { command: 'fake-run --now' } },
+            { fake: { maxSessions: 3, reservationsDir: dir } },
+            150
+          );
+          assert.equal(verdicts.length, 1);
+          assert.match(verdicts[0]!.block ?? '', /fake session quota reached/);
+        } finally {
+          rmSync(join(dir, 'admission.mutex'), { force: true });
+        }
+      });
+    });
+  });
+
+  test('a pre-update claim under the raw key is recognized — the call is not counted twice', () => {
+    withReservations(dir => {
+      withPlane(testPlane('upg', { live: 0 }), () => {
+        const bags = { upg: { maxSessions: 1, reservationsDir: dir } };
+        // the pre-sanitization key format claimed this call's slot —
+        // `guard-<raw session>-id-<raw toolUseId>-0.slot`
+        writeFileSync(join(dir, 'guard-sess-1-id-call-9-0.slot'), String(Date.now()));
+        // the updated binary's event for the SAME call must see the
+        // held slot, not take a second one and refuse itself at cap 1
+        const verdicts = sessionCapVerdict(
+          { dir: process.cwd(), sessionId: 'sess-1', toolUseId: 'call-9' } as never,
+          { tool: 'bash', input: { command: 'upg-run --now' } },
+          bags
+        );
+        assert.deepEqual(verdicts, []);
+        // the claim migrated to the new key — one file, not two
+        const files = readdirSync(dir).filter(n => n.endsWith('.slot'));
+        assert.equal(files.length, 1);
+        assert.ok(files[0]!.startsWith('guard-sess-1-'));
+      });
+    });
+  });
+
+  test('lone-surrogate tool-use ids do not share a claim', () => {
+    withReservations(dir => {
+      withPlane(testPlane('surr', { live: 0 }), () => {
+        const bags = { surr: { maxSessions: 2, reservationsDir: dir } };
+        const call = (id: string) =>
+          sessionCapVerdict(
+            { dir: process.cwd(), sessionId: 'sess-1', toolUseId: id } as never,
+            { tool: 'bash', input: { command: 'surr-run --now' } },
+            bags
+          );
+        assert.deepEqual(call('x/\ud800'), []);
+        // utf8 folds every unpaired surrogate into U+FFFD — the second
+        // id hashed IDENTICALLY, reused the first claim, and the cap
+        // read two starts as one. utf16le keeps them distinct.
+        assert.deepEqual(call('x/\ud801'), []);
+        assert.equal(readdirSync(dir).filter(n => n.endsWith('.slot')).length, 2);
       });
     });
   });
