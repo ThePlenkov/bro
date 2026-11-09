@@ -28,6 +28,14 @@
  *   lives at `pumpTurn`, the chokepoint every ACP turn passes through.
  */
 
+/** What the guard measures — a conversation and the peer behind it. */
+export interface AcpTarget {
+  /** The conversation scope — a key, never a guess. */
+  scope: string;
+  /** The peer key — the spawn label (`conductor:<entry>`). */
+  peer?: string;
+}
+
 /** A scope (or a peer) is in a dead loop — the churn is refused. */
 export class AcpDeadLoopError extends Error {
   override name = 'AcpDeadLoopError';
@@ -40,17 +48,18 @@ export class AcpDeadLoopError extends Error {
   /** Which measure tripped — the conversation's own churn, or the peer's. */
   readonly kind: 'scope' | 'peer';
 
-  constructor(scope: string, opens: number, budget: number, kind: 'scope' | 'peer' = 'scope') {
+  constructor(detail: { scope: string; opens: number; budget: number; kind?: 'scope' | 'peer' }) {
+    const kind = detail.kind ?? 'scope';
     super(
       kind === 'scope'
-        ? `acp dead loop: scope '${scope}' opened ${opens} sessions without a completed turn ` +
-            `(budget ${budget}) — the churn is refused, no session was opened`
-        : `acp dead loop: peer '${scope}' opened ${opens} sessions without a completed turn ` +
-            `(budget ${budget}) — the peer was killed, the next request respawns it`
+        ? `acp dead loop: scope '${detail.scope}' opened ${detail.opens} sessions without a ` +
+            `completed turn (budget ${detail.budget}) — the churn is refused, no session was opened`
+        : `acp dead loop: peer '${detail.scope}' opened ${detail.opens} sessions without a ` +
+            `completed turn (budget ${detail.budget}) — the peer was killed, the next request respawns it`
     );
-    this.scope = scope;
-    this.opens = opens;
-    this.budget = budget;
+    this.scope = detail.scope;
+    this.opens = detail.opens;
+    this.budget = detail.budget;
     this.kind = kind;
   }
 }
@@ -69,14 +78,10 @@ export interface AcpDeadLoopOptions {
   cooldownMs?: number;
 }
 
-/** What a caller hands the guard: the guard itself, the conversation the
- *  session belongs to, and the peer (spawn label) behind it. */
-export interface AcpGuardCtx {
+/** What a caller hands the guard: the guard itself and the target it
+ *  measures. The ctx IS the target — one shape, one meaning. */
+export interface AcpGuardCtx extends AcpTarget {
   guard: AcpDeadLoopGuard;
-  /** The conversation scope — a key, never a guess. */
-  scope: string;
-  /** The peer key — the spawn label (`conductor:<entry>`). */
-  peer?: string;
 }
 
 /** One counter set — the window's pending sessions. */
@@ -113,14 +118,14 @@ export class AcpDeadLoopGuard {
     this.cooldownMs = opts.cooldownMs ?? DEFAULTS.cooldownMs;
   }
 
-  /** A session is about to open in `scope` — throws when the scope is in
-   *  a dead loop. The refusal happens BEFORE the session opens, so a
-   *  tripped scope costs no quota at all. */
-  open(scope: string, peer?: string): void {
+  /** A session is about to open in the target's scope — throws when the
+   *  scope is in a dead loop. The refusal happens BEFORE the session
+   *  opens, so a tripped scope costs no quota at all. */
+  open(target: AcpTarget): void {
     const now = Date.now();
-    const tally = this.tally(this.scopes, scope, now);
+    const tally = this.tally(this.scopes, target.scope, now);
     if (tally.trippedUntil > now) {
-      throw new AcpDeadLoopError(scope, tally.pending, this.maxOpens);
+      throw new AcpDeadLoopError({ scope: target.scope, opens: tally.pending, budget: this.maxOpens });
     }
     if (tally.trippedUntil > 0) {
       // the cooldown expired — the burst that tripped the scope is stale.
@@ -135,26 +140,30 @@ export class AcpDeadLoopGuard {
       // tripped until the cooldown ends — a probe is allowed then, and a
       // completed turn clears the trip outright
       tally.trippedUntil = now + this.cooldownMs;
-      throw new AcpDeadLoopError(scope, tally.pending + 1, this.maxOpens);
+      throw new AcpDeadLoopError({
+        scope: target.scope,
+        opens: tally.pending + 1,
+        budget: this.maxOpens,
+      });
     }
     tally.pending += 1;
-    if (peer !== undefined) {
-      this.tally(this.peers, peer, now).pending += 1;
+    if (target.peer !== undefined) {
+      this.tally(this.peers, target.peer, now).pending += 1;
     }
   }
 
   /** The scope's turn completed — the session it opened is resolved and
    *  leaves the churn measure. A completed turn also clears the trip: a
    *  working conversation is never stuck behind a stale refusal. */
-  done(scope: string, peer?: string): void {
+  done(target: AcpTarget): void {
     const now = Date.now();
-    const tally = this.tally(this.scopes, scope, now);
+    const tally = this.tally(this.scopes, target.scope, now);
     if (tally.pending > 0) {
       tally.pending -= 1;
     }
     tally.trippedUntil = 0;
-    if (peer !== undefined) {
-      const peerTally = this.tally(this.peers, peer, now);
+    if (target.peer !== undefined) {
+      const peerTally = this.tally(this.peers, target.peer, now);
       if (peerTally.pending > 0) {
         peerTally.pending -= 1;
       }
@@ -163,31 +172,39 @@ export class AcpDeadLoopGuard {
 
   /** The peer churned past its budget — the caller breaks the peer (the
    *  loop may live inside the child). False while the peer is healthy. */
-  peerChurn(peer: string): boolean {
-    return this.peerTrip(peer) !== undefined;
+  peerChurn(target: AcpTarget): boolean {
+    return this.peerTrip(target) !== undefined;
   }
 
   /** The peer's churn — sessions opened and not completed. */
-  peerChurnCount(peer: string): number {
-    const tally = this.tally(this.peers, peer, Date.now());
-    return tally.pending;
+  peerChurnCount(target: AcpTarget): number {
+    if (target.peer === undefined) {
+      return 0;
+    }
+    return this.tally(this.peers, target.peer, Date.now()).pending;
   }
 
   /** The peer's break — the error the caller throws after killing it.
    *  Undefined while the peer is healthy. */
-  peerTrip(peer: string): AcpDeadLoopError | undefined {
-    const now = Date.now();
-    const tally = this.tally(this.peers, peer, now);
+  peerTrip(target: AcpTarget): AcpDeadLoopError | undefined {
+    if (target.peer === undefined) {
+      return undefined;
+    }
+    const tally = this.tally(this.peers, target.peer, Date.now());
     return tally.pending > this.maxAbandoned
-      ? new AcpDeadLoopError(peer, tally.pending, this.maxAbandoned, 'peer')
+      ? new AcpDeadLoopError({
+          scope: target.peer,
+          opens: tally.pending,
+          budget: this.maxAbandoned,
+          kind: 'peer',
+        })
       : undefined;
   }
 
   /** The scope's current churn — the sessions opened and not completed.
    *  For the error line and the operator's reading of the journal. */
-  churn(scope: string): number {
-    const tally = this.tally(this.scopes, scope, Date.now());
-    return tally.pending;
+  churn(target: AcpTarget): number {
+    return this.tally(this.scopes, target.scope, Date.now()).pending;
   }
 
   /** The tally for a key, created on first use — a window that expired

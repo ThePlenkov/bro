@@ -741,6 +741,10 @@ interface ConvSession {
   lastReply: ReplyView;
   busy: boolean;
   lastSeen: number;
+  /** The session-cap claim this session holds — released when the
+   *  session is disposed (spec bro-b961a): a claim that outlived its
+   *  session ate the cap's budget until the TTL expired it. */
+  releaseCap?: () => void;
 }
 
 /** One settled reply as the wire renders it — buffered, streamed, or
@@ -825,6 +829,7 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
     if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
       sessions.delete(k);
       disposeQuiet(s.live);
+      releaseClaim(s);
     }
   }
 }
@@ -834,8 +839,16 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
 function dropSessions(sessions: Map<string, ConvSession>): void {
   for (const s of sessions.values()) {
     disposeQuiet(s.live);
+    releaseClaim(s);
   }
   sessions.clear();
+}
+
+/** The session-cap claim of a disposed session — the slot it held goes
+ *  back to the cap (spec bro-b961a). The release is idempotent, so a
+ *  session that dies twice never releases twice. */
+function releaseClaim(conv: ConvSession): void {
+  conv.releaseCap?.();
 }
 
 /** Drop a session handle without surfacing transport noise — the
@@ -1835,6 +1848,7 @@ function evict(
     sessions.delete(key);
   }
   disposeQuiet(conv.live);
+  releaseClaim(conv);
 }
 
 type PooledReply = Awaited<ReturnType<typeof acpPooledTurn>>;
@@ -2205,6 +2219,8 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
       busy: false,
       lastSeen: Date.now(),
+      // the session holds the cap's slot until it is disposed
+      releaseCap,
     };
     return { reply, reused: false, inputTokens, replay: false, conv };
   } catch (err) {

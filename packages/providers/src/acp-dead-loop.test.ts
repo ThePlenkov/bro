@@ -60,7 +60,7 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
         });
         assert.equal(r.text, 'ok');
       }
-      assert.equal(guard.churn('conv-1'), 0);
+      assert.equal(guard.churn({ scope: 'conv-1' }), 0);
     } finally {
       peer.close();
     }

@@ -455,7 +455,7 @@ async function acpSessionOpen(
 ) {
   // the dead-loop guard speaks BEFORE the session opens: a refused
   // scope costs no session and no quota (spec bro-b961a)
-  gc?.guard.open(gc.scope, gc.peer);
+  gc?.guard.open(gc);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
@@ -796,7 +796,7 @@ export const promptText = (prompt: string | ContentBlock[]): string => {
 /** The guard's accounting for a completed turn — the progress that resets
  *  the scope's churn (spec bro-b961a). */
 function guardDone(gc: AcpGuardCtx | undefined): void {
-  gc?.guard.done(gc.scope, gc.peer);
+  gc?.guard.done(gc);
 }
 
 /** A failed turn — the peer's own churn may now be systemic: the loop
@@ -807,7 +807,7 @@ function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
   if (gc?.peer === undefined) {
     return;
   }
-  const trip = gc.guard.peerTrip(gc.peer);
+  const trip = gc.guard.peerTrip(gc);
   if (trip === undefined) {
     return;
   }
