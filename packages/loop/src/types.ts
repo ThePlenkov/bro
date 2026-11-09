@@ -119,7 +119,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   fixRounds: 3,
   autoMerge: false,
   maxItems: 0,
-  maxOpen: 3,
+  maxOpen: 1,
   maxOpenTotal: 10,
   worktreeWarn: 40,
   worktreeMb: 400,
