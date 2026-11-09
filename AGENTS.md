@@ -79,8 +79,11 @@ Developing bro itself: see CONTRIBUTING.md.
   is pure infra — its findings arrive as threads, which block on their
   own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
-  currently `"github-advanced-security"`, `"kilo"` (rate limits;
-  advisory, may still be read — `check:docs` fails if this quote rots).
+  currently `"github-advanced-security"`, `"kilo"`, `"sonarcloud"`,
+  `"codescene"` (rate limits / structural deltas; advisory, may still
+  be read — `check:docs` fails if this quote rots; naming a static
+  scanner overrides its must-fix default: findings still read,
+  verdicts don't gate).
   The
   ignore is conditional: a failing ignored check is dropped quietly
   only after `consecutiveFailures` failing heads in a row _with_

@@ -11,6 +11,7 @@
       "**",
       "!**/schemas/**",
       "!commands/bro.md",
+      "!.opencode/commands/bro.md",
       "!site/content/docs/reference/**",
       "!specs/**/*.md",
       "!**/vendor/**",

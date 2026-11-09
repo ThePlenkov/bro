@@ -23,6 +23,8 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
       | 'fixRounds'
       | 'maxItems'
       | 'maxOpen'
+      | 'maxOpenTotal'
+      | 'worktreeWarn'
       | 'worktreeMb'
       | 'diskMinSlots'
       | 'batch'
@@ -61,6 +63,8 @@ export const loopSection: ConfigSection<LoopConfig> = raw => {
     autoMerge: obj.autoMerge === true,
     maxItems: num('maxItems', 0, Number.POSITIVE_INFINITY, true),
     maxOpen: num('maxOpen', 1, Number.POSITIVE_INFINITY, true),
+    maxOpenTotal: num('maxOpenTotal', 0, Number.POSITIVE_INFINITY, true),
+    worktreeWarn: num('worktreeWarn', 0, Number.POSITIVE_INFINITY, true),
     // a 0 price would silence the floor entirely — the honest
     // "disable" is diskMinSlots: 0, not worktreeMb: 0
     worktreeMb: num('worktreeMb', 1),
@@ -87,6 +91,8 @@ loopSection.jsonSchema = js.obj({
   autoMerge: js.bool,
   maxItems: js.num(0),
   maxOpen: js.num(1),
+  maxOpenTotal: js.num(0),
+  worktreeWarn: js.num(0),
   worktreeMb: js.num(1),
   diskMinSlots: js.num(0),
   batch: js.num(1),

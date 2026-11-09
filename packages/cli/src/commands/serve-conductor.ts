@@ -21,11 +21,35 @@
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { gitCommonDir, isIntegerIndexKey, loadConfig } from '@broject/core';
+import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
+import {
+  admitSessionStartAsync,
+  estimateTokens,
+  gitCommonDir,
+  isIntegerIndexKey,
+  loadConfig,
+  LockTimeout,
+  planesStartingSessions,
+  releaseSessionStart,
+  reserveSessionStart,
+  sessionCapViews,
+  SpawnError,
+  type SessionStartAdmission,
+} from '@broject/core';
+import type {
+  AcpContentBlock,
+  AcpPeer,
+  AcpRetainedSession,
+  AcpTerminals,
+  OtelCtx,
+  PooledTurnOpts,
+  ProviderWireOpts,
+  Toolish,
+} from '@broject/providers';
 import {
   acpOpen,
   acpPooledTurn,
@@ -36,21 +60,12 @@ import {
   otelSpan,
   toolPayload,
 } from '@broject/providers';
-import { randomUUID } from 'node:crypto';
-import { reserveSessionStart, sessionCapViews } from '@broject/core';
 import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
-import type { AcpTerminals, Toolish } from '@broject/providers';
-import type {
-  AcpContentBlock,
-  AcpPeer,
-  AcpRetainedSession,
-  OtelCtx,
-  PooledTurnOpts,
-  ProviderWireOpts,
-} from '@broject/providers';
 import { peerAttrs } from './peer.ts';
-import { catalogModels, type CatalogModel } from './providers.ts';
-import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
+import { type CatalogModel, catalogModels } from './providers.ts';
+import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
+import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
+import { forwardBody, providerConfig, type ProviderConfig } from './serve-provider.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -92,10 +107,28 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number;
+  /** The fast lane (spec bro-6asnu) — classifier-shaped calls
+   *  byte-forward to the direct upstream instead of paying
+   *  session/new. Absent when the lane is disabled or no upstream
+   *  key is configured. */
+  fast?: FastLane;
+  /** Set when FAST_LANE=off|0|false or serve.fastLane:false killed the
+   *  lane — a disabled lane is intentional routing, not a missing
+   *  upstream key, so `unrouted` must not claim one. */
+  fastDisabled?: boolean;
   /** The `agents.<kind>` bags — the session cap's knobs (spec
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+}
+
+/** The fast lane — the byte proxy's upstream pair plus the routing
+ *  knobs: `model` rewrites the forwarded body when the client names
+ *  a conductor-only id (devin/swe-2-max), `maxTokens` is the
+ *  classifier shape's output cap. */
+export interface FastLane extends ProviderConfig {
+  model?: string;
+  maxTokens: number;
 }
 
 /** The routes a config answers to — the config's own table, or the
@@ -206,6 +239,41 @@ function resolveCatalog(
 /** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
  *  no registry knows is a loud startup error naming what IS configured,
  *  never a silent fall back to the byte proxy. */
+/** The fast-lane resolution (spec bro-6asnu) — the direct upstream is
+ *  the byte proxy's own pair: the conductor intercepts `/v1/*` ahead of
+ *  it, so the same env that would have proxied becomes the lane.
+ *  `BRO_PROVIDER_FAST_LANE=off|0|false` or `serve.fastLane:false`
+ *  returns every call to the session lane; no upstream key leaves the
+ *  lane unarmed (fast-shaped calls still conduct). */
+/** The disable half of the lane's arming — kept apart so `unrouted`
+ *  means "no upstream key", never "operator turned it off". */
+function fastLaneDisabled(env: NodeJS.ProcessEnv, serve: { fastLane?: boolean }): boolean {
+  const flag = env.BRO_PROVIDER_FAST_LANE?.trim().toLowerCase();
+  return flag === 'off' || flag === '0' || flag === 'false' || serve.fastLane === false;
+}
+
+function resolveFastLane(
+  env: NodeJS.ProcessEnv,
+  serve: { upstream?: string; apiKeyEnv?: string; fastModel?: string; fastLane?: boolean }
+): FastLane | undefined {
+  if (fastLaneDisabled(env, serve)) {
+    return undefined;
+  }
+  // the file layer's upstream/apiKeyEnv resolves exactly like the byte
+  // proxy's — a config-only upstream must steer the lane, never send
+  // credentials to the default host instead
+  const pair = providerConfig(env, serve);
+  if (pair === undefined) {
+    return undefined;
+  }
+  const model = env.BRO_PROVIDER_FAST_MODEL?.trim();
+  return {
+    ...pair,
+    model: model === undefined || model === '' ? serve.fastModel : model,
+    maxTokens: positiveEnvInt(env, 'BRO_PROVIDER_FAST_MAX_TOKENS', FAST_MAX_TOKENS),
+  };
+}
+
 export function conductorConfig(
   env: NodeJS.ProcessEnv,
   dir: string,
@@ -293,6 +361,8 @@ export function conductorConfig(
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
+    fast: resolveFastLane(env, cfg.serve),
+    fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
@@ -337,6 +407,9 @@ interface MessagesRequest {
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
   stream?: boolean;
+  /** API-required output cap — the fast lane's shape signal (spec
+   *  bro-6asnu): internal calls cap ≤ ~1k, session turns ask 32k. */
+  max_tokens?: number;
 }
 
 // --- translation -----------------------------------------------------
@@ -379,6 +452,17 @@ function toolContract(
     ...(must !== undefined ? [must] : []),
     '</tools>',
   ].join('\n');
+}
+
+/** The request's tool choice → the contract the BRIDGE honours: may a
+ *  call be bridged at all, and which tool did the request name? The
+ *  contract TEXT above is the agent's half; this is the client's. */
+function clientToolContract(choice: MessagesRequest['tool_choice']): ToolContract {
+  if (choice?.type === 'none') return { allowed: false };
+  if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    return { allowed: true, name: choice.name };
+  }
+  return { allowed: true };
 }
 
 /** tool_choice → the MUST clause of the injected contract — the one
@@ -944,11 +1028,6 @@ function canonicalStopReason(raw: string | undefined): string {
 /** chars/4 underestimates CJK several-fold — count wide codepoints
  *  (~1 token each) against the ascii quarter-rate. Estimate only —
  *  never billing, never compaction. */
-function estTokens(s: string): number {
-  let units = 0;
-  for (const ch of s) units += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 4 : 1;
-  return Math.max(1, Math.ceil(units / 4));
-}
 
 function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -977,7 +1056,7 @@ function messageStartEvent(model: string, inputTokens: number): object {
  *  resend answers from conv.lastReply, never a fresh pump. */
 function emitBlocks(res: ServerResponse, view: ReplyView): void {
   const { blocks, model, stopReason, inputTokens, stopSequence } = view;
-  const outTokens = estTokens(JSON.stringify(blocks));
+  const outTokens = estimateTokens(JSON.stringify(blocks));
   sse(res, 'message_start', messageStartEvent(model, inputTokens));
   blocks.forEach((b, i) => {
     if (b.type === 'tool_use') {
@@ -1016,6 +1095,13 @@ function emitBlocks(res: ServerResponse, view: ReplyView): void {
 const OPEN_TAG = '<tool_call>';
 const CLOSE_TAG = '</tool_call>';
 
+/** The markup's payload — `<` escaped, so a value that carries the tag
+ *  cannot close the call early and truncate the JSON the parser reads.
+ *  JSON's own escape keeps the payload valid. */
+function callPayload(name: string, input: Record<string, unknown>): string {
+  return JSON.stringify({ name, input }).replaceAll('<', '\\u003c');
+}
+
 /** Narration label — a tool_call title can carry a whole command
  *  string; first line only, capped. */
 function shortLabel(s: string): string {
@@ -1039,14 +1125,27 @@ function tagSuffix(s: string, tag: string): number {
  *  is swallowed (generation stops — the wire's own semantics). */
 class StopFilter {
   private tail = '';
-  private out = '';
+  /** The turn's text and its tool calls, in the order they arrived — the
+   *  buffered leg's answer reads them like the agent's (bro-sy4q3), and a
+   *  call keeps its place between the words. */
+  private readonly chunks: string[] = [];
+  /** the turn's text landed — the settle path does not feed it twice */
+  sawText = false;
   hit: string | undefined;
 
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
+    // the input ARRIVED — the turn's text landed, even when the cut holds
+    // it back as a stop-sequence prefix. The settle path must not feed it
+    // a second time: the text is already in the filter, held or emitted.
+    if (s !== '') {
+      this.sawText = true;
+    }
     const o = this.cut(s);
-    this.out += o;
+    if (o !== '') {
+      this.chunks.push(o);
+    }
     return o;
   }
 
@@ -1085,15 +1184,30 @@ class StopFilter {
   flush(): string {
     const t = this.hit === undefined ? this.tail : '';
     this.tail = '';
-    this.out += t;
+    if (t !== '') {
+      this.chunks.push(t);
+      this.sawText = true;
+    }
     return t;
+  }
+
+  /** The agent's own markup for a call the bridge made — it rides the
+   *  same order the text does. The text held back as a stop-sequence
+   *  prefix belongs BEFORE the call: it was the agent's, and the call
+   *  interrupted it. */
+  addCall(markup: string): void {
+    if (this.tail !== '') {
+      this.chunks.push(this.tail);
+      this.tail = '';
+    }
+    this.chunks.push(markup);
   }
 
   /** Everything the filter let through — byte-identical to what the
    *  client saw, whatever the delta boundaries were. The recorded
    *  reply comes from this, never from a re-run of the raw text. */
   get emitted(): string {
-    return this.out;
+    return this.chunks.join('');
   }
 }
 
@@ -1203,6 +1317,9 @@ class LiveTurn extends TagPump {
    *  text: a narration landing inside a held <tool_call> corrupts the
    *  flat markup and the replay loses the call (bro-cfwc1). */
   private readonly emittedBlocks: OutBlock[] = [];
+  /** The client's tools — the bridge's vocabulary. Empty when the client
+   *  offered none: then the agent's tools stay narrated edges. */
+  private readonly clientTools: ClientTool[];
   stopReason = 'end_turn';
 
   private ping?: NodeJS.Timeout;
@@ -1213,9 +1330,12 @@ class LiveTurn extends TagPump {
     inputTokens: number,
     private readonly stops: StopFilter | undefined,
     pingMs?: number,
-    tools = true
+    tools = true,
+    clientTools: ClientTool[] = [],
+    private readonly contract: ToolContract = OPEN_CONTRACT
   ) {
     super(tools);
+    this.clientTools = clientTools;
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => {
         if (res.writableEnded || res.destroyed) {
@@ -1245,6 +1365,30 @@ class LiveTurn extends TagPump {
       this.feed(this.stops?.feed(u.content.text) ?? u.content.text);
       return;
     }
+    // the agent's tool call, in the CLIENT's vocabulary: the client
+    // executes it, the wire stops at tool_use (bro-sy4q3)
+    // a stop_sequence hit ends the turn: a call that arrives after the cut
+    // is not bridged — the client must not run what the cut withheld
+    const bridged =
+      this.stops?.hit === undefined ? clientCall(u, this.clientTools, this.contract) : undefined;
+    if (bridged !== undefined) {
+      if (bridged.toolCallId !== undefined) {
+        // a repeated tool_call must not reach the client twice — the
+        // client would run the call again
+        if (this.bridged.has(bridged.toolCallId)) {
+          return;
+        }
+        this.bridged.add(bridged.toolCallId);
+        // the call is DONE from the client's view — the agent's own
+        // terminal edge must not narrate it a second time
+        this.toolDone.add(bridged.toolCallId);
+      }
+      // the text that came before it drains first — a call never lands
+      // inside a held tag
+      this.drain(false);
+      this.call(bridged.name, bridged.input);
+      return;
+    }
     const line = this.narrateTool(u);
     if (line !== undefined) {
       // pending may hold a held-back partial-tag tail — flush what
@@ -1265,6 +1409,9 @@ class LiveTurn extends TagPump {
 
   private readonly toolStarted = new Set<string>();
   private readonly toolDone = new Set<string>();
+  /** The calls the bridge already sent to the client — a repeated
+   *  tool_call must not become a second tool_use the client runs again. */
+  private readonly bridged = new Set<string>();
   private readonly toolLabels = new Map<string, string>();
 
   /** Structured twin of the narration edges (bro-btccj): a named
@@ -1447,9 +1594,9 @@ class LiveTurn extends TagPump {
   }
 
   outputTokens(): number {
-    // estTokens floors at 1 — a genuinely silent turn reports 0, not
+    // estimateTokens floors at 1 — a genuinely silent turn reports 0, not
     // a phantom token (amazon-q #566)
-    return this.acc === '' ? 0 : estTokens(this.acc);
+    return this.acc === '' ? 0 : estimateTokens(this.acc);
   }
 }
 
@@ -1523,7 +1670,7 @@ const RATE = /rate.?limit|too many|quota|429/i;
  *  (amazon-q #558). */
 function inputTokensOf(prompt: AcpContentBlock[]): number {
   return (
-    estTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
+    estimateTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
     prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
   );
 }
@@ -1551,7 +1698,7 @@ function respond(
         model,
         stop_reason: stopReason,
         stop_sequence: stopSequence ?? null,
-        usage: { input_tokens: inputTokens, output_tokens: estTokens(JSON.stringify(blocks)) },
+        usage: { input_tokens: inputTokens, output_tokens: estimateTokens(JSON.stringify(blocks)) },
       })
     );
     return;
@@ -1628,6 +1775,26 @@ interface TurnEnv {
   openStream?: (inputTokens: number) => PooledTurnOpts['onUpdate'];
 }
 
+/** A resend pinning a DIFFERENT model — the session re-pins and the
+ *  recorded answer stays honest (it was generated under the old pin
+ *  either way). */
+async function repinModel(env: TurnEnv, cand: ConvSession): Promise<void> {
+  if (env.requestModel === undefined || env.requestModel === cand.requestModel) return;
+  try {
+    await cand.live.repin(env.requestModel, env.deadline);
+    cand.requestModel = env.requestModel;
+  } catch (err) {
+    evict(env.sessions, env.key, cand);
+    throw err;
+  }
+}
+
+/** The answer carries a tool call — the client would execute it a
+ *  second time (bro-sy4q3). */
+function toolAnswer(blocks: OutBlock[]): boolean {
+  return blocks.some(b => b.type === 'tool_use');
+}
+
 /** A proven continuation — the delta turns only; an empty tail is a
  *  replay (with a repin if the resend pins a different model). */
 async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
@@ -1642,19 +1809,23 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     tail = [{ role: 'user', content: env.prefix }, ...tail];
   }
   if (tail.length === 0) {
+    // a tool answer is NEVER replayed — the client would execute the
+    // call a second time; the retry asks the agent afresh (bro-sy4q3)
+    if (toolAnswer(cand.lastReply.blocks)) {
+      // a CHAINED retry cannot be answered afresh: evicting the
+      // predecessor would break the chain the client's next request rides
+      // on — it would find the predecessor gone. Fail loudly instead.
+      if (env.chained === true) {
+        throw new ChainBroken('previous_response_id carries a tool answer — the retry is empty');
+      }
+      evict(env.sessions, env.key, cand);
+      return freshTurn(env, false);
+    }
     // a pure retry — nothing new for the session; the caller replays
     // the recorded reply. A resend pinning a DIFFERENT model is not a
     // replay — the session re-pins and the recorded answer stays
     // honest (it was generated under the old pin either way).
-    if (env.requestModel !== undefined && env.requestModel !== cand.requestModel) {
-      try {
-        await cand.live.repin(env.requestModel, env.deadline);
-        cand.requestModel = env.requestModel;
-      } catch (err) {
-        evict(env.sessions, env.key, cand);
-        throw err;
-      }
-    }
+    await repinModel(env, cand);
     cand.lastSeen = Date.now();
     return { reused: true, inputTokens: 0, replay: true, conv: cand };
   }
@@ -1711,7 +1882,78 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  Fails CLOSED: a cap that cannot be established is not walked past.
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
-function assertSessionCap(env: TurnEnv, claimKey: string): void {
+async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<void> {
+  const command = env.cfg.entry.command;
+  // the serialized check+claim — under the kind's OWN admission mutex,
+  // the same lock the spawn's admission takes, so a request burst and
+  // a fleet spawn share ONE budget. The wait is the yielding form —
+  // the sync admission's Atomics.wait would park the conductor's one
+  // event loop for the whole contention, stalling every request,
+  // timer, and stream behind it.
+  // EVERY capped plane claiming the command is judged: a refusal on a
+  // later plane still refuses the request, and the claims earlier
+  // planes already took are released — a refused request opens
+  // nothing, so it may hold no slot (the guard's sessionCapVerdict
+  // takes the same shape).
+  const admissions: SessionStartAdmission[] = [];
+  let refusal: string | undefined;
+  try {
+    for (const plane of planesStartingSessions(command)) {
+      const admission = await admitSessionStartAsync({
+        plane,
+        command,
+        agents: env.cfg.agents,
+        key: claimKey,
+        // the retained conversations the plane cannot see — they ride
+        // one shared peer — count with the host's inside the lock
+        extraLive: env.sessions.size,
+        waitMs: CAP_LOCK_WAIT_MS,
+      });
+      if (admission === undefined) {
+        continue;
+      }
+      if (admission.refusal !== undefined) {
+        refusal = admission.refusal;
+        break;
+      }
+      admissions.push(admission);
+    }
+  } catch (err) {
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    if (err instanceof LockTimeout) {
+      // the mutex outlived the wait — contention is not a reason to
+      // refuse a request; the un-locked check+claim still enforces
+      return assertSessionCapUnlocked(env, claimKey);
+    }
+    if (err instanceof SpawnError) {
+      // the count could not be established — fail closed, with the
+      // reason the operator needs (a quota that cannot be verified is
+      // not walked past)
+      throw new Error(
+        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+      );
+    }
+    // a slot the ACP surface cannot claim refuses the request too — a
+    // session whose claim the budget never saw is exactly the
+    // unbudgeted session this change exists to stop
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    );
+  }
+  if (refusal !== undefined) {
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    throw new Error(refusal);
+  }
+}
+
+/** The conductor's lock wait on the admission mutex — a request stalled
+ *  past this degrades to the un-locked check+claim rather than hang on
+ *  a wedged holder. */
+const CAP_LOCK_WAIT_MS = 5_000;
+
+/** The un-locked check+claim — the path the conductor ran before the
+ *  admission mutex serialized it, kept as the contention fallback. */
+function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): void {
   let views;
   try {
     views = sessionCapViews(env.cfg.entry.command, env.cfg.agents);
@@ -1736,10 +1978,6 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
   if (refusal !== undefined) {
     throw new Error(refusal);
   }
-  // the slot is claimed, not just counted: a burst of parallel requests
-  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
-  // surface fails CLOSED here — a request that cannot record its claim
-  // must not open a session the budget does not know about.
   if (view !== undefined) {
     try {
       reserveSessionStart({
@@ -1782,7 +2020,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   // the cap before a session is opened — both paths open one
   // each request opens its own session — the claim is per request, not
   // per backend (one shared claim would let every request reuse it)
-  assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`);
+  await assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`);
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
@@ -2111,10 +2349,12 @@ function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
 async function parseMessagesBody(
   req: IncomingMessage,
   res: ServerResponse
-): Promise<MessagesRequest | undefined> {
+): Promise<{ body: MessagesRequest; raw: string } | undefined> {
   let body: MessagesRequest;
+  let raw: string;
   try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest;
+    raw = await readBody(req);
+    body = JSON.parse(raw) as MessagesRequest;
   } catch (err) {
     if (err instanceof Error && err.message === 'request body too large') {
       tooLarge(req, res);
@@ -2146,7 +2386,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return canonical;
+  return { body: canonical, raw };
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
@@ -2217,7 +2457,34 @@ function messagesStreamOpener(
   stops: StopFilter,
   set: (live: LiveTurn) => void
 ): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
-  if (body.stream === false) return undefined;
+  const tools = clientTools(body.tools);
+  if (body.stream === false) {
+    // the buffered leg writes no stream — it collects the calls the
+    // bridge made, in the agent's own markup, so the answer parses
+    // them like the agent's (bro-sy4q3)
+    const contract = clientToolContract(body.tool_choice);
+    // the bridged ids — a repeated tool_call must not reach the client
+    // twice: the client would run the call again
+    const bridged = new Set<string>();
+    return () => u => {
+      if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+        // the text lands WITH the calls, in the order they arrived — a
+        // call keeps its place between the words
+        stops.feed(u.content.text);
+        return;
+      }
+      // a stop_sequence hit ends the turn: a call that arrives after the
+      // cut is not part of the answer
+      if (stops.hit !== undefined) return;
+      const call = clientCall(u, tools, contract);
+      if (call === undefined) return;
+      if (call.toolCallId !== undefined) {
+        if (bridged.has(call.toolCallId)) return;
+        bridged.add(call.toolCallId);
+      }
+      stops.addCall(`${OPEN_TAG}${callPayload(call.name, call.input)}${CLOSE_TAG}`);
+    };
+  }
   return inputTokens => {
     res.writeHead(200, {
       'content-type': 'text/event-stream',
@@ -2234,11 +2501,53 @@ function messagesStreamOpener(
       inputTokens,
       stops,
       lane.cfg.keepaliveMs ?? 10_000,
-      body.tool_choice?.type !== 'none'
+      body.tool_choice?.type !== 'none',
+      tools,
+      clientToolContract(body.tool_choice)
     );
     set(live);
     return live.onUpdate;
   };
+}
+
+/** The default classifier cap — the env pin rides resolveFastLane;
+ *  this is the fallback the shape test uses when the lane is unarmed
+ *  (the unrouted marker still needs a boundary). */
+const FAST_MAX_TOKENS = 2048;
+
+/** The client-internal shape (spec bro-6asnu) — both signals must
+ *  hold: `tools` absent or empty (a claude-code main turn always
+ *  carries the catalog, internal calls never do) AND `max_tokens`
+ *  within the cap (the field is API-required so it is always present;
+ *  internal calls cap ≤ ~1k where session turns ask 32k). Ambiguity
+ *  always resolves to the session lane — a false fast-lane hit would
+ *  answer a real turn with the wrong model, a false session hit only
+ *  costs latency the client already budgets. */
+function fastShaped(body: MessagesRequest, maxTokens: number): boolean {
+  if (body.tools !== undefined && body.tools.length > 0) {
+    return false;
+  }
+  const cap = body.max_tokens;
+  return typeof cap === 'number' && Number.isFinite(cap) && cap > 0 && cap <= maxTokens;
+}
+
+/** The fast-lane decision once per /v1/messages — `fast` forwards
+ *  upstream, `session` conducts. `unrouted` marks a fast-shaped call
+ *  the session lane still answers for lack of an upstream key — the
+ *  observability for "wire a fast upstream". */
+function fastLaneOf(
+  body: MessagesRequest,
+  cfg: ConductorConfig
+): { lane: 'fast' | 'session'; unrouted?: true } {
+  if (!fastShaped(body, cfg.fast?.maxTokens ?? FAST_MAX_TOKENS)) {
+    return { lane: 'session' };
+  }
+  if (cfg.fast !== undefined) {
+    return { lane: 'fast' };
+  }
+  // a disabled lane is the operator's intent — only a missing upstream
+  // key earns the unrouted observability marker
+  return cfg.fastDisabled === true ? { lane: 'session' } : { lane: 'session', unrouted: true };
 }
 
 async function messages(
@@ -2247,9 +2556,36 @@ async function messages(
   wire: WireCtx,
   parent: OtelCtx | undefined
 ): Promise<void> {
-  const body = await parseMessagesBody(req, res);
-  if (body === undefined) return;
+  const parsed = await parseMessagesBody(req, res);
+  if (parsed === undefined) return;
+  const { body, raw } = parsed;
   const t0 = Date.now();
+  // the fast lane (spec bro-6asnu) — a classifier-shaped call byte-
+  // forwards to the direct upstream instead of paying session/new
+  const fl = fastLaneOf(body, wire.cfg);
+  otelEvent('conductor.lane', {
+    backend: wire.cfg.backend,
+    lane: fl.lane,
+    ...(fl.unrouted === true ? { unrouted: true } : {}),
+    ...(typeof body.model === 'string' ? { model: body.model.slice(0, 120) } : {}),
+  });
+  if (fl.lane === 'fast') {
+    const fast = wire.cfg.fast as FastLane; // fastLaneOf proved the lane armed
+    // the upstream answers the id the client sent — the model pin
+    // exists for the inherited-lane case (devin/swe-2-max names a
+    // conductor-only wire no upstream serves)
+    // the upstream gets the client's own bytes — the canonicalized body
+    // carries lifted `systemTurns` a strict Messages upstream rejects.
+    // The model pin rewrites the RAW json so no other field changes
+    // shape (the pin exists for the inherited-lane case: devin/swe-2-max
+    // names a conductor-only wire no upstream serves).
+    const payload =
+      fast.model === undefined
+        ? raw
+        : JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: fast.model });
+    await forwardBody(req, res, fast, { payload, timeoutMs: wire.cfg.timeoutMs });
+    return;
+  }
   const key = conversationKey(req, body);
   const stopSeqs = stopSeqsOf(body) ?? [];
   const stopKey = stopKeyOf(stopSeqs);
@@ -2300,8 +2636,9 @@ async function messages(
   // let through — byte-identical to the client's own view
   live?.finish(canonicalStopReason(reply.stopReason));
   if (live === undefined) {
-    // the buffered leg's cut lands post-hoc through the same filter
-    stops.feed(reply.text);
+    // the buffered leg's cut lands post-hoc through the same filter —
+    // unless its text already landed with the calls, in order
+    if (!stops.sawText) stops.feed(reply.text);
     stops.flush();
   }
   const view: ReplyView = {
@@ -2340,7 +2677,7 @@ async function messages(
     stream: body.stream !== false,
     session_reused: out.reused,
     input_tokens: inputTokens,
-    output_tokens: live?.outputTokens() ?? estTokens(reply.text),
+    output_tokens: live?.outputTokens() ?? estimateTokens(reply.text),
     duration_ms: Date.now() - t0,
   });
   if (live !== undefined) {
@@ -2911,7 +3248,9 @@ function sseHead(res: ServerResponse): void {
 
 /** Estimated tokens over recorded blocks — replay output accounting. */
 const blocksTokens = (blocks: OutBlock[]): number =>
-  estTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
+  estimateTokens(
+    blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join('')
+  );
 
 /** Chain ids a listener can afford to remember — LRU-trimmed like
  *  the sessions map; entries pointing at dead sessions prune away. */
@@ -2996,7 +3335,7 @@ const respError = (status: string, reason?: string): unknown =>
     : null;
 
 /** A caller's output-token budget expressed in chars — the inverse of
- *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
+ *  estimateTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
 const capCharsOf = (tokens: number | undefined): number | undefined =>
   typeof tokens === 'number' && tokens > 0 ? tokens * 4 : undefined;
 
@@ -3300,7 +3639,7 @@ function responsesDeliver(
   // canonicalize before precedence applies — an unmapped backend reason
   // overridden by a cap or a tool_use still earns its otel breadcrumb
   const backendReason = canonicalStopReason(reply.stopReason);
-  const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text);
+  const outTokens = capped.capped ? blocksTokens(outBlocks) : estimateTokens(reply.text);
   const wireReason = finalRespReason(capped.capped, outBlocks, backendReason);
   const status = respStatus(wireReason);
   if (d.out.conv !== undefined && d.key !== undefined) {
@@ -3774,7 +4113,7 @@ function chatOutcome(
   const reply = replay ? undefined : (out.reply as PooledReply);
   const inputTokens = replay ? (lr?.inputTokens ?? 0) : out.inputTokens;
   const blocks = replay ? (lr?.blocks ?? []) : parseReply(reply?.text ?? '', tools);
-  const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '');
+  const outTokens = replay ? blocksTokens(blocks) : estimateTokens(reply?.text ?? '');
   const stopReason = chatStopReason(replay, lr, blocks, reply);
   const finish =
     ownKey(CHAT_FINISH, stopReason) ??
@@ -3903,7 +4242,7 @@ function chatDeliver(
   const outTokens = capped.capped
     ? blocksTokens(blocks)
     : settled !== undefined
-      ? estTokens(settled)
+      ? estimateTokens(settled)
       : o.outTokens;
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
@@ -4082,6 +4421,22 @@ function firstSegment(id: string): string {
   return cut <= 0 ? id : id.slice(0, cut);
 }
 
+/** One served row — the anthropic /v1/models shape.
+ *
+ *  The LANE rides the row as its own field: the reader must not have
+ *  to guess it back out of the id, whose head is a formatted string and
+ *  the model's own name may carry a slash of its own. */
+function servedRow(m: RoutedModel): Record<string, unknown> {
+  return {
+    type: 'model',
+    id: m.id,
+    display_name: displayName(m),
+    description: providerPath(m),
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
+    created_at: '2025-01-01T00:00:00Z',
+  };
+}
+
 /** The row's SECOND line — the path that serves it: the lane's prefix and
  *  the agent's own provider chain, without the model leaf. A client picker
  *  renders it as the row's origin ("devin-acp", "opencode-acp/vercel/anthropic")
@@ -4120,13 +4475,7 @@ async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
     apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
     return;
   }
-  const data = rows.map(m => ({
-    type: 'model',
-    id: m.id,
-    display_name: displayName(m),
-    description: providerPath(m),
-    created_at: '2025-01-01T00:00:00Z',
-  }));
+  const data = rows.map(servedRow);
   // a lane that FAILED is not silently absent from the union: the
   // degradation rides the response, so a client reading a shorter
   // catalog can tell it apart from the whole truth. A lane that merely
@@ -4408,5 +4757,5 @@ async function countTokens(req: IncomingMessage, res: ServerResponse): Promise<v
 
 function apiErrorCountTokens(res: ServerResponse, raw: string): void {
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ input_tokens: estTokens(raw) }));
+  res.end(JSON.stringify({ input_tokens: estimateTokens(raw) }));
 }

@@ -53,10 +53,11 @@ the stack is empty — pending members wait out their own budget, so a
 drained queue with open gates drains the stack too (the tail wait
 today's last item already pays).
 
-**Bound — `loop.maxOpen`** (config + `--max-open`, default 3, ≥1).
-At cap pushes stop and only gate service runs until a merge frees a
-slot. `maxOpen: 1` is the near-serial shape — one PR in flight, the
-scheduler services it between claims.
+**Bound — `loop.maxOpen`** (config + `--max-open`, ≥1 — default 1
+since bro-jis0c, which made serial the default shape; this spec's
+original default was 3). At cap pushes stop and only gate service
+runs until a merge frees a slot. `maxOpen: 1` is the near-serial
+shape — one PR in flight, the scheduler services it between claims.
 
 **Gate budget** — per member per gate entry: `since` resets on each
 fix/rebase round (the member re-entered the gate, same as a new

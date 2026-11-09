@@ -93,7 +93,14 @@ export {
   sweepSection,
   syncSection,
 } from './config.ts';
-export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts';
+export type {
+  IgnoreCheckEntry,
+  IgnoreCheckRule,
+  ServeClientConfig,
+  ServeClients,
+  SinkDef,
+  SinkType,
+} from './config.ts';
 export {
   API_WIRES,
   cliCommandModel,
@@ -175,6 +182,21 @@ export type {
   BrouterRoute,
   ModelRoute,
 } from './brouter.ts';
+export { healthKey } from './router-health.ts';
+export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
+export {
+  EXPLAIN_SLICES,
+  explainFlag,
+  explainSlicesOrExit,
+  parseExplainSlices,
+  renderExplanation,
+  sliceFacts,
+  sliceNames,
+  unknownFact,
+  withSlice,
+} from './router-explain.ts';
+export type { ExplainFact, ExplainSlice, Explanation } from './router-explain.ts';
+export { estimateTokens } from './tokens.ts';
 export {
   DATA_REF,
   dataRefCommit,
@@ -504,6 +526,7 @@ export {
   reserveSessionSlot,
   reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
@@ -528,7 +551,10 @@ export type {
   ExternalProbeCtx,
 } from './external-planes.ts';
 export {
+  admitSessionStart,
+  admitSessionStartAsync,
   planeStartingSessions,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -536,7 +562,11 @@ export {
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts';
-export type { SessionCapView } from './session-cap.ts';
+export type {
+  SessionCapView,
+  SessionStartAdmission,
+  SessionStartAdmissionArgs,
+} from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -565,6 +595,7 @@ export type {
 } from './planes.ts';
 export {
   acquireFileLock,
+  acquireFileLockYielding,
   awaitFileLock,
   holdFileLock,
   lockHolderPid,
@@ -593,6 +624,7 @@ export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './j
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
 export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export { deprecatedFlag, flag, flagAll, flagValue, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
 export {
   groupMemberAlive,

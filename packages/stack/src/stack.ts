@@ -10,17 +10,17 @@
  *  the 1-based position. The slug cannot start with another `<digits>-`
  *  without ambiguity, so bead slugs (which never do) are the contract.
  *  Slug stays inside one ref component — no `/`, no `..`, no `.lock`. */
-const STACK_BRANCH_RE = /^stack\/([\w.-]+)\/(\d+)-([\w.-]+)$/
+const STACK_BRANCH_RE = /^stack\/([\w.-]+)\/(\d+)-([\w.-]+)$/;
 
 export interface StackBranch {
   /** stack name */
-  name: string
+  name: string;
   /** 1-based position in the chain */
-  n: number
+  n: number;
   /** bead id / worktree slug */
-  slug: string
+  slug: string;
   /** full branch shortname */
-  branch: string
+  branch: string;
 }
 
 /** A git-ref-safe slug component — no `.`-leading component, no `..`,
@@ -28,19 +28,16 @@ export interface StackBranch {
  *  parseStackBranch's slug guard so a malformed `stack/…` ref never
  *  enters member ordering. */
 function isRefComponent(s: string): boolean {
-  return (
-    /^\w[\w-]*(?:\.\w[\w-]*)*$/.test(s) &&
-    !s.endsWith('.lock')
-  )
+  return /^\w[\w-]*(?:\.\w[\w-]*)*$/.test(s) && !s.endsWith('.lock');
 }
 
 export function isStackName(name: string): boolean {
-  return isRefComponent(name)
+  return isRefComponent(name);
 }
 
 export function parseStackBranch(branch: string): StackBranch | undefined {
-  const m = STACK_BRANCH_RE.exec(branch)
-  const n = m === null ? Number.NaN : Number(m[2])
+  const m = STACK_BRANCH_RE.exec(branch);
+  const n = m === null ? Number.NaN : Number(m[2]);
   if (
     m === null ||
     !isStackName(m[1]!) ||
@@ -48,13 +45,13 @@ export function parseStackBranch(branch: string): StackBranch | undefined {
     !Number.isSafeInteger(n) ||
     n < 1
   ) {
-    return undefined
+    return undefined;
   }
-  return { name: m[1]!, n, slug: m[3]!, branch }
+  return { name: m[1]!, n, slug: m[3]!, branch };
 }
 
 export function formatStackBranch(name: string, n: number, slug: string): string {
-  return `stack/${name}/${n}-${slug}`
+  return `stack/${name}/${n}-${slug}`;
 }
 
 /** Members of one stack, ordered bottom-up. Duplicate n values (two
@@ -64,25 +61,25 @@ export function stackMembers(branches: string[], name: string): StackBranch[] {
   return branches
     .map(parseStackBranch)
     .filter((b): b is StackBranch => b?.name === name)
-    .sort((a, b) => a.n - b.n || a.branch.localeCompare(b.branch))
+    .sort((a, b) => a.n - b.n || a.branch.localeCompare(b.branch));
 }
 
 /** Distinct stack names present in a branch list. */
 export function stackNames(branches: string[]): string[] {
-  const names = new Set<string>()
+  const names = new Set<string>();
   for (const b of branches) {
-    const p = parseStackBranch(b)
+    const p = parseStackBranch(b);
     if (p) {
-      names.add(p.name)
+      names.add(p.name);
     }
   }
-  return [...names].sort((a, b) => a.localeCompare(b))
+  return [...names].sort((a, b) => a.localeCompare(b));
 }
 
 /** Next position — always tip+1, never a gap fill: a missing middle
  *  member's slot must not be silently reused by a later push. */
 export function nextIndex(members: StackBranch[]): number {
-  return (members.at(-1)?.n ?? 0) + 1
+  return (members.at(-1)?.n ?? 0) + 1;
 }
 
 // --- sync planning -------------------------------------------------------------
@@ -91,38 +88,44 @@ export function nextIndex(members: StackBranch[]): number {
 export interface SyncMemberInput extends StackBranch {
   /** Recorded `.git/bro/stack/` edge — absent means "based on the
    *  default branch" (enter records no edge for a main base). */
-  edgeBase?: string
+  edgeBase?: string;
   /** Open PR's declared base — ground truth when the edge is missing. */
-  prBase?: string
+  prBase?: string;
   /** Normalized PR state; undefined = no PR (or host unreachable —
    *  callers must not pass undefined on lookup failure: an unknown
    *  merge state must keep the member alive, never mark it merged). */
-  prState?: string
+  prState?: string;
   /** Local rewrite is allowed — worktree present, clean, unlocked. */
-  rebaseable: boolean
+  rebaseable: boolean;
   /** Why rebaseable is false, for the skip report. */
-  blocked?: string
+  blocked?: string;
   /** The member's branch still carries the head of the branch it stands
    *  on — false when that head MOVED under the member (the base's name
    *  is the same, its commits are not). Undefined when the heads could
    *  not be read: an unknown truth never schedules a rewrite. */
-  containsBaseHead?: boolean
+  containsBaseHead?: boolean;
+  /** The base's tip as a SHA — the fork the member's replay starts
+   *  from, read in the PLAN phase, before the cascade moves any ref.
+   *  A branch name is not a fork point: by the time the rebase reads
+   *  it, the cascade has already moved it. Undefined when the base's
+   *  ref is gone: `forkPoint` answers that case. */
+  forkSha?: string;
 }
 
 export interface SyncPlanItem<T extends SyncMemberInput = SyncMemberInput> {
-  member: T
+  member: T;
   /** What the member's base should be after sync. */
-  desiredBase: string
+  desiredBase: string;
   /** The base the branch actually forked from — edge, else the PR's
    *  declared base, else desiredBase (nothing to undo). */
-  oldBase: string
-  rebase: boolean
-  retarget: boolean
+  oldBase: string;
+  rebase: boolean;
+  retarget: boolean;
   /** Set when the member needs a rebase but may not be touched — the
    *  PR is left untargeted too: retargeting onto the default branch
    *  while the branch still carries unmerged parent commits would
    *  inflate its diff. */
-  skip?: string
+  skip?: string;
 }
 
 /** Bottom-up retarget/rebase plan. A member whose PR merged drops out
@@ -133,16 +136,16 @@ export function planSync<T extends SyncMemberInput>(
   members: T[],
   defaultBase: string
 ): SyncPlanItem<T>[] {
-  const plan: SyncPlanItem<T>[] = []
-  let liveTip = defaultBase
+  const plan: SyncPlanItem<T>[] = [];
+  let liveTip = defaultBase;
   for (const m of members) {
-    const desiredBase = liveTip
-    const oldBase = m.edgeBase ?? m.prBase ?? desiredBase
-    const merged = m.prState === 'MERGED'
+    const desiredBase = liveTip;
+    const oldBase = m.edgeBase ?? m.prBase ?? desiredBase;
+    const merged = m.prState === 'MERGED';
     // the base's HEAD moved under the member: the name is the same, the
     // commits are not — a fix landed below, and the member has to ride it
-    const stale = m.containsBaseHead === false
-    const rebase = !merged && (oldBase !== desiredBase || stale)
+    const stale = m.containsBaseHead === false;
+    const rebase = !merged && (oldBase !== desiredBase || stale);
     const item: SyncPlanItem<T> = {
       member: m,
       desiredBase,
@@ -150,19 +153,19 @@ export function planSync<T extends SyncMemberInput>(
       rebase,
       retarget: !merged && m.prState === 'OPEN' && m.prBase !== desiredBase,
       skip: rebase && !m.rebaseable ? (m.blocked ?? 'not rebaseable') : undefined,
-    }
+    };
     // a skipped rebase vetoes the retarget — same diff-inflation rule
     if (item.skip) {
-      item.retarget = false
+      item.retarget = false;
     }
-    plan.push(item)
+    plan.push(item);
     // merged members leave the chain; everyone else — skipped or synced —
     // is still the branch children base on
     if (!merged) {
-      liveTip = m.branch
+      liveTip = m.branch;
     }
   }
-  return plan
+  return plan;
 }
 
 /** The live member's tip — the highest-n member not in `dead` (merged
@@ -175,12 +178,12 @@ export function stackTop(
 ): StackBranch | undefined {
   // lib is pre-ES2023 — walk back by hand instead of findLast
   for (let i = members.length - 1; i >= 0; i--) {
-    const m = members[i]!
+    const m = members[i]!;
     if (dead?.has(m.branch) !== true) {
-      return m
+      return m;
     }
   }
-  return undefined
+  return undefined;
 }
 
 /** Effective base for display: the PR's declared base is ground truth
@@ -190,5 +193,5 @@ export function displayBase(
   member: { prBase?: string; edgeBase?: string },
   defaultBase: string
 ): string {
-  return member.prBase ?? member.edgeBase ?? defaultBase
+  return member.prBase ?? member.edgeBase ?? defaultBase;
 }

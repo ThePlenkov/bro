@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { initRepo } from './testrepo.ts';
-import { lockHolderPid, pidAlive, scrubEnv, testGit } from '@broject/core';
+import { lockHolderPid, pidAlive, procStat, scrubEnv, testGit } from '@broject/core';
 import {
   armDrive,
   armLoop,
@@ -65,6 +65,7 @@ const writeRecord = (main: string, pid: number, extra: object = {}): void => {
       everySec: 300,
       spawnedAt: new Date().toISOString(),
       cmd: 'y',
+      pidStart: procStat(pid)?.start,
       ...extra,
     })
   );
@@ -90,6 +91,7 @@ const writeLoopRecord = (main: string, pid: number, extra: object = {}): void =>
       everySec: 300,
       spawnedAt: new Date().toISOString(),
       cmd: 'bro daemon run --loop --every 300',
+      pidStart: procStat(pid)?.start,
       ...extra,
     })
   );

@@ -17,9 +17,10 @@ export {
   acpPooledTurn,
   acpSessionRetain,
   acpWorkerArgv,
+  promptText,
   isSystemoneFamily,
 } from './acp.ts';
-export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts';
+export type { AcpPeer, AcpRetainedSession, AcpUsage, PooledTurnOpts } from './acp.ts';
 export { AcpTerminals } from './acp-terminal.ts';
 export type { TerminalFollow, TerminalFollower } from './acp-terminal.ts';
 export { AGENT_USAGE_THROTTLE_MS, agentTurnPlane, toolPayload } from './acp-events.ts';
