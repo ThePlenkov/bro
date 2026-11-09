@@ -53,7 +53,7 @@ const cli = defineCommand({
   commands: groupCommands(),
   usageLines: docUsageLines(),
   examples: EXAMPLES,
-  prepare: async (argv) => {
+  prepare: async argv => {
     // sink delivery policies — the plugin layer owns each type's wire
     // shape; core dispatches to whoever registered (bro-mq1t2)
     registerTelegramSink();
@@ -71,7 +71,7 @@ const cli = defineCommand({
       // so the completed span rides out on a detached node child.
       const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 });
       setAmbient(cmdSpan.ctx);
-      process.on('exit', (code) => {
+      process.on('exit', code => {
         journalCommand(cmd as string, Date.now() - t0, code ?? 0);
         cmdSpan.endDetached(
           { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },

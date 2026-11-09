@@ -106,13 +106,13 @@ explicitly.
 
 ### Facade → connector → capabilities (quick matrix)
 
-| Facade | Connectors | Selection | Notes |
-| --- | --- | --- | --- |
-| `reviews` | `github` (`gh`), `gitlab` (`glab`) | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations. |
-| `tasks` | `beads` (`bd`, default), `github`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default. | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
-| `queries` | `github`, `gitlab`, `atlassian`, `linear` | Configured via `connectors.queries` or per `bro query` step | Plan-driven fan-out across providers. |
-| `agents` | Native/tmux/Gas City backends | Configured via `connectors.agents` | Detached agents/workers. |
-| `specs` | Native + tool-layout matchers | Detected or explicitly configured | Spec-driven workflows. |
+| Facade    | Connectors                                                     | Selection                                                                              | Notes                                                                                                                     |
+| --------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `reviews` | `github` (`gh`), `gitlab` (`glab`)                             | Detected from origin remote (GitHub/GitLab.com) or configured via `connectors.reviews` | PR/MR state, threads, checks, merge operations.                                                                           |
+| `tasks`   | `beads` (`bd`, default), `github`, `linear`, `jira`, `jira-dc` | Configured via `connectors.tasks` (name-only opt-in). Beads is the default.            | Issue/task state, deps, claim/close where supported. Not all beads-specific projections are implemented on every backend. |
+| `queries` | `github`, `gitlab`, `atlassian`, `linear`                      | Configured via `connectors.queries` or per `bro query` step                            | Plan-driven fan-out across providers.                                                                                     |
+| `agents`  | Native/tmux/Gas City backends                                  | Configured via `connectors.agents`                                                     | Detached agents/workers.                                                                                                  |
+| `specs`   | Native + tool-layout matchers                                  | Detected or explicitly configured                                                      | Spec-driven workflows.                                                                                                    |
 
 ## Agent clients
 

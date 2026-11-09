@@ -67,7 +67,7 @@ export function registerExternal(
   if (reserved.has(entry.name)) {
     return { refusal: { spec, name: entry.name, reason: 'reserved' } };
   }
-  if (plugins.some((p) => p.name === entry.name)) {
+  if (plugins.some(p => p.name === entry.name)) {
     return { refusal: { spec, name: entry.name, reason: 'taken' } };
   }
   const plugin: CommandPlugin = { ...entry };

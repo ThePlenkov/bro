@@ -28,7 +28,7 @@ function member(over: Partial<SyncMemberInput> & { n: number; slug: string }): S
 /** The branches that still exist — everything else is a dead ref. */
 function alive(...branches: string[]): (branch: string) => boolean {
   const set = new Set(branches);
-  return (branch) => set.has(branch);
+  return branch => set.has(branch);
 }
 
 test('the root is the default branch when the first member merged', () => {
