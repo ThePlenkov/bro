@@ -23,7 +23,7 @@ The parser was written against the flat 0.2.5-era help and was never moved
 to the grouped shape. Against npm latest 0.3.0 (grouped) it finds **zero**
 commands, and the gate dies before it checks a single doc line:
 
-```
+```text
 @broject/bro@latest: no Commands: block parsed from `bro --help`
 ```
 
@@ -60,7 +60,7 @@ first blank line, so `Options:` and `Examples:` are never read as commands.
 The grouped top-level help pads the name into a column, and a name that
 fills the column exactly (`pipeline`) is followed by a **single** space:
 
-```
+```text
   review   PR review loop — gates, threads, debt
   pipeline pipeline customer surface — accept verdicts, intake answers
 ```
