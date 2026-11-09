@@ -47,18 +47,13 @@
  * non-bro repo yields no widget, no context, no gate — never an error
  * thrown into omp.
  */
-import {
-  BOARD_KEY,
-  createBroDriver,
-  sharedBinding,
-  type BroHostBinding,
-} from './host.ts'
-import { installModeBridges, type BoardSnapshot } from './omp-modes.ts'
-import type { OmpApi, OmpContext } from './omp-api.ts'
+import { BOARD_KEY, createBroDriver, sharedBinding, type BroHostBinding } from './host.ts';
+import { installModeBridges, type BoardSnapshot } from './omp-modes.ts';
+import type { OmpApi, OmpContext } from './omp-api.ts';
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.2.5'
+const NPX_PIN = '@broject/bro@0.3.0';
 
 /**
  * The omp binding: the host's own shape, nothing else. Every
@@ -72,39 +67,39 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
     ...sharedBinding<OmpContext>({
       stop: 'session_stop',
       on(event, handler) {
-        pi.on(event, handler)
+        pi.on(event, handler);
       },
       paint(ctx, lines, crumb) {
-        ctx.ui.setWidget(BOARD_KEY, lines)
-        ctx.ui.setStatus(BOARD_KEY, crumb)
+        ctx.ui.setWidget(BOARD_KEY, lines);
+        ctx.ui.setStatus(BOARD_KEY, crumb);
       },
       notify(ctx, text, level) {
-        ctx.ui.notify(text, level)
+        ctx.ui.notify(text, level);
       },
       refuseStop(reason) {
         // omp's native stop refusal: the reason is handed back to the
         // model, which continues the turn with the blocker in hand.
-        return { decision: 'block' as const, reason }
+        return { decision: 'block' as const, reason };
       },
       stopAlreadyRefused(event) {
-        const stop = event as { stop_hook_active?: boolean }
-        return stop.stop_hook_active === true
+        const stop = event as { stop_hook_active?: boolean };
+        return stop.stop_hook_active === true;
       },
     }),
     npxPin: NPX_PIN,
-  }
+  };
 }
 
 /** The extension entry point — omp calls this with its API. */
 export default function broExtension(pi: OmpApi): void {
-  const driver = createBroDriver(binding(pi), pi)
+  const driver = createBroDriver(binding(pi), pi);
 
   /** The mode bridges — bro's durable state handed to omp's native Plan,
    *  Goal and Vibe modes. See omp-modes.ts for why bro adds state
    *  rather than a second implementation of each mode. */
   installModeBridges(pi, {
     board: () => driver.board as BoardSnapshot | null,
-  })
+  });
 }
 
 /**
@@ -112,4 +107,4 @@ export default function broExtension(pi: OmpApi): void {
  * foreign file holding this slot; the marker survives generation into
  * plugins/omp/bro/bro.ts.
  */
-export const adapter = { id: 'bro', kind: 'omp-extension' } as const // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point
+export const adapter = { id: 'bro', kind: 'omp-extension' } as const; // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point

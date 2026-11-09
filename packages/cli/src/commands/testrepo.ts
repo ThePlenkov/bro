@@ -5,7 +5,7 @@
  *  duplication on new code. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { bdTry } from '@broject/core';
+import { bdTry, handleOwner, pidAlive } from '@broject/core';
 import {
   chmodSync,
   existsSync,
@@ -213,11 +213,19 @@ for (let i = 0; i < args.length; i++) {
   if (t === '--json') continue
   if (t.startsWith('--')) {
     const k = t.slice(2)
-    if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
+    const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
-  } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+  } else if (/^-\\w$/.test(t)) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (valueFlagsShort.has(k)) {
+      fail('create -' + k + ' requires a value')
+    } else {
+      flags[k] = true
+    }
   } else pos.push(t)
 }
 // real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
@@ -233,6 +241,22 @@ const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
 const cmd = pos[0]
+// one-shot claim-read failure injection (bro-etimout): a wedged store
+// past bd's 15s budget makes the throwing bd() ready call throw — a
+// non-zero exit throws identically for execFileSync callers. Scoped to
+// the claim read's own argv signature (exclude-label) so the startup
+// compat probe (ready -n 1, bdTry, non-throwing) never consumes the
+// injection. The counter lives beside the db so each fresh bd process
+// shares it.
+if (process.env.FAKE_BD_READY_FAILS && cmd === 'ready' && args.includes('--exclude-label')) {
+  const counter = DB + '.readyfails'
+  let left = Number(process.env.FAKE_BD_READY_FAILS)
+  try { left = Number(fs.readFileSync(counter, 'utf8')) } catch {}
+  if (left > 0) {
+    retry(() => fs.writeFileSync(counter, String(left - 1)))
+    fail('spawnSync timeout ETIMEDOUT')
+  }
+}
 switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case '--version':
     console.log('bd 0.0.0-fake')
@@ -265,7 +289,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       (r) => r.status === 'open' && !(r.labels || []).some((l) => ex.includes(l))
     )
     rows.sort((a, b) => (a.priority - b.priority) || String(a.created_at).localeCompare(String(b.created_at)))
-    jsonOut(rows)
+    // real bd truncates a deep queue to its page — tests can opt in
+    // with db.readyLimit to prove callers do not rely on membership
+    const lim = db.readyLimit
+    jsonOut(typeof lim === 'number' ? rows.slice(0, lim) : rows)
     break
   }
   case 'show': {
@@ -295,7 +322,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: flags.title || '',
+      title: typeof flags.title === 'string' ? flags.title : (flags.title === true ? fail('create --title requires a value') : (flags.title ? String(flags.title) : '')),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
@@ -311,7 +338,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
     }
     save(db)
-    jsonOut({ id })
+    // real bd answers create with the created row — callers read
+    // title/status back off it, not just the id
+    jsonOut(row(id))
     break
   }
   case 'update': {
@@ -413,8 +442,30 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       const r = row(pos[2])
       if (!r) fail('not found: ' + pos[2])
       db.deps = db.deps || []
-      db.deps.push({ from: pos[2], to: pos[3] })
+      // --type persists with the edge — a hydrated dep list filters
+      // on it, and bd's default is 'blocks'
+      db.deps.push({ from: pos[2], to: pos[3], type: flags.type || 'blocks' })
       save(db)
+      break
+    }
+    if (pos[1] === 'list' && pos.length === 3) {
+      // real bd answers a single-id dep list with hydrated neighbor
+      // rows carrying dependency_type; bare and multi-id queries keep
+      // the raw edge records (wiring asserts read those)
+      const want = pos[2]
+      const rels = flags.t === undefined ? undefined : [].concat(flags.t)
+      const up = Object.keys(flags).includes('direction=up')
+      const out = []
+      for (const e of db.deps || []) {
+        const from = e.issue_id !== undefined ? e.issue_id : e.from
+        const to = e.depends_on_id !== undefined ? e.depends_on_id : e.to
+        const other = up ? (to === want ? from : undefined) : (from === want ? to : undefined)
+        if (other === undefined) continue
+        if (rels !== undefined && !rels.includes(e.type)) continue
+        const r = row(other)
+        if (r !== undefined) out.push({ ...r, dependency_type: e.type })
+      }
+      jsonOut(out)
       break
     }
     jsonOut(db.deps || [])
@@ -538,16 +589,30 @@ echo "Error: No such object" >&2; exit 1
  *  `t.skip` should print. `undefined` means bd fully works. */
 export function bdStoreBlocker(): string | undefined {
   const dir = tmpDir('bro-bd-probe-');
-  if (bdTry(['--version'], 10_000, dir).code !== 0) {
-    return 'bd not installed';
+  try {
+    if (bdTry(['--version'], 10_000, dir).code !== 0) {
+      return 'bd not installed';
+    }
+    // a checkout-shaped scratch: a bd build that insists on a git
+    // worktree for init must probe "store works", never "dir had no git"
+    git(['init', '-q'], dir);
+    const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
+    return r.code === 0
+      ? undefined
+      : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
+  } finally {
+    // bd/dolt can spawn a background daemon on init; rmSync the probe dir
+    // must retry and not rely on the process-exit sweep (which races the
+    // still-starting daemon). Remove from the exit sweep to avoid double
+    // cleanup.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      const idx = tmpDirs.indexOf(dir);
+      if (idx >= 0) tmpDirs.splice(idx, 1);
+    } catch {
+      // keep the directory registered so the exit sweep still sees it
+    }
   }
-  // a checkout-shaped scratch: a bd build that insists on a git
-  // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q'], dir);
-  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
-  return r.code === 0
-    ? undefined
-    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
 }
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
@@ -615,12 +680,187 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
   return readBeads(db).find(r => r.id === id);
 }
 
+/** /proc proof the pid still runs OUR wrapper — the wrapper's argv
+ *  carries the handle path as a positional arg, so the run token
+ *  matches verbatim. This is what makes the group kill safe: a stale
+ *  handle or registry row can name a pid the OS has since recycled,
+ *  and a blind kill(-p) would land on a stranger's whole process
+ *  group. Unreadable /proc (raced exit, non-Linux) is never a target —
+ *  a leaked fixture process beats a killed foreign one. */
+function pidRunsToken(pid: number, token: string): boolean {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(token);
+  } catch {
+    return false;
+  }
+}
+
+/** The run's process tree — pid, group and starttime off one /proc
+ *  scan, taken BEFORE the first signal: a setsid'd descendant leads its
+ *  own session and group, so kill(-wrapperPgid) never reaches it, and
+ *  the moment the wrapper dies it reparents to init — the parentage is
+ *  the only way left to find it (spec bro-ybo8z; the same pre-signal
+ *  snapshot the production `down` takes). pid+starttime keeps a
+ *  recycled pid out of the kill list. Empty where /proc is absent
+ *  (non-Linux). */
+function descendantTree(root: number): Array<{ pid: number; pgrp: number; start: string }> {
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const children = new Map<number, Array<{ pid: number; pgrp: number; start: string }>>();
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const row = { pid, pgrp: Number(rest[2]), start: rest[19] ?? '' };
+      children.set(Number(rest[1]), [...(children.get(Number(rest[1])) ?? []), row]);
+    } catch {
+      // a process vanishing mid-scan belongs to no tree
+    }
+  }
+  const tree: Array<{ pid: number; pgrp: number; start: string }> = [];
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const row of children.get(cur) ?? []) {
+      if (seen.has(row.pid)) {
+        continue;
+      }
+      seen.add(row.pid);
+      queue.push(row.pid);
+      tree.push(row);
+    }
+  }
+  return tree;
+}
+
+/** SIGKILL a run pid's whole group — detached workers lead their own
+ *  group. Self/parent pids are never signaled: tests pin their own
+ *  pid into registries to fake 'running'. A needle-verified pid is
+ *  provably ours; without a needle the caller's own registry pid
+ *  keeps the old trust — a FILE-derived pid never gets here without
+ *  one. The tree snapshot rides BEFORE the signal: a setsid-escaped
+ *  descendant (the `setsid sleep` fixture shape) leaves the wrapper's
+ *  group, and after the wrapper dies it is unreachable — each snapshotted
+ *  member still alive with its recorded starttime then gets its OWN
+ *  group signaled, so an early assertion failure can never leak it. */
+function killVerifiedGroup(pid: number, needle: string | undefined): void {
+  if (
+    pid === process.pid ||
+    pid === process.ppid ||
+    (needle !== undefined && !pidRunsToken(pid, needle))
+  ) {
+    return;
+  }
+  const tree = descendantTree(pid);
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // already gone
+  }
+  for (const m of tree) {
+    // starttime-verified liveness: a recycled member pid (or the group
+    // it would name) is a stranger's — never signal it
+    if (m.pid === pid || m.start === '' || !pidAlive(m.pid, m.start)) {
+      continue;
+    }
+    try {
+      process.kill(-m.pgrp, 'SIGKILL');
+    } catch {
+      // already gone, or its group emptied with it
+    }
+  }
+}
+
+/** The pid a run-scoped handle names — absent file, absent run, or a
+ *  pre-handshake run all read as none. */
+function handlePid(main: string, token: string | undefined): number | undefined {
+  // truthiness, not `=== undefined`: an empty token is equally absent
+  // (the `.handle` file it would name never exists) and a string
+  // comparison guard here reads as a timing-attack pattern to static
+  // analysis without ever comparing secret bytes
+  if (!token) {
+    return undefined;
+  }
+  try {
+    const owner = handleOwner(
+      readFileSync(join(main, '.git', 'bro', 'agents', `${token}.handle`), 'utf8')
+    );
+    return owner?.pid;
+  } catch {
+    return undefined; // no handle — plain-shape run or pre-handshake
+  }
+}
+
+/** SIGKILL a spawned run's whole unit — the recorded pid's group plus
+ *  the run-scoped handle's group when the worker named a different
+ *  pid (exec-style `systemd-run --scope` keeps them equal; a
+ *  fork-style one would differ, bro-ybo8z). Pids are cmdline-verified
+ *  against the run token before the group signal — the wrapper's argv
+ *  carries the handle path, so `<id>.<runId>.` proves ownership and
+ *  the trailing dot keeps a shared prefix from aliasing another run. */
+export function killRun(
+  main: string,
+  run: { pid?: unknown; runId?: unknown; agentId?: unknown; id?: unknown }
+): void {
+  const agentId = [run.agentId, run.id].find((x): x is string => typeof x === 'string');
+  const token =
+    agentId !== undefined && typeof run.runId === 'string' ? `${agentId}.${run.runId}` : undefined;
+  const pids = new Set<number>();
+  if (typeof run.pid === 'number' && run.pid > 0) {
+    pids.add(run.pid);
+  }
+  const h = handlePid(main, token);
+  if (h !== undefined) {
+    pids.add(h);
+  }
+  const needle = token ? `${token}.` : undefined;
+  for (const p of pids) {
+    killVerifiedGroup(p, needle);
+  }
+}
+
+/** SIGKILL every live handle in the repo's agents dir — the reaper for
+ *  runs whose registry row is already gone (a worker self-published
+ *  before its launcher died, or the fixture only knows the log pid).
+ *  Every handle read is verified against its own filename token —
+ *  a leftover file outlives its run, and the pid it names may be a
+ *  recycled stranger's by the time cleanup sweeps. */
+export function killRunHandles(main: string): void {
+  let names: string[] = [];
+  try {
+    names = readdirSync(join(main, '.git', 'bro', 'agents'));
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!n.endsWith('.handle')) {
+      continue;
+    }
+    try {
+      const owner = handleOwner(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8'));
+      if (owner !== null) {
+        killVerifiedGroup(owner.pid, n);
+      }
+    } catch {
+      // unreadable handle — not a kill target
+    }
+  }
+}
+
 /** The landed-claim verdict every act settle path owes — the bead is
  *  closed with the merge link as its close reason; stderr (when the
  *  caller holds one) carries the `act: <id> closed` line. */
 export function assertLandedBead(db: string, id: string, stderr?: string): void {
   if (stderr !== undefined) {
-    assert.match(stderr, new RegExp(`${id} closed`));
+    assert.ok(stderr.includes(`${id} closed`));
   }
   const row = bead(db, id);
   assert.equal(row?.status, 'closed');
@@ -718,6 +958,18 @@ const facade = {
       return p.state === 'OPEN' ? [p.number] : []
     }
     return s.prOpened ? [s.pr ?? 7] : []
+  }),
+  // the fleet listing the ceiling + reconcile read — same projection
+  // rules as prsForBranch (prs map authoritative, flat flag legacy)
+  openPrs: () => withState((s) => {
+    if (s.prs) {
+      return Object.values(s.prs)
+        .filter((p) => (p.state ?? s.prState ?? 'OPEN') === 'OPEN')
+        .map((p) => ({ pr: p.number, headRef: p.headRef }))
+    }
+    return s.prOpened
+      ? [{ pr: s.pr ?? 7, headRef: s.openPrHead ?? s.headRef ?? 'loop/fx-a' }]
+      : []
   }),
   parsePrRef: () => null,
   prMeta: (t) => withState((s) => {
@@ -1069,6 +1321,7 @@ const markPrOpened = (s) => {
     }
   }
   s.prOpened = true
+  s.openPrHead = branch
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this
@@ -1518,8 +1771,10 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  constructor(public code: number) {
+  code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

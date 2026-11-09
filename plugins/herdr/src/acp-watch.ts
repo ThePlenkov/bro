@@ -17,15 +17,15 @@
  *   node src/acp-watch.ts [--cmd 'devin acp'] [--prompt '…'] [--cwd DIR]
  *   node src/acp-watch.ts --fixture test/fixtures/session.jsonl
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import {
   AcpRenderer,
-  safe,
   type PermissionRequestLike,
   type SessionUpdateLike,
-} from './acp-render.ts';
+  safe,
+} from '../../../packages/acp/session/src/index.ts';
 import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;

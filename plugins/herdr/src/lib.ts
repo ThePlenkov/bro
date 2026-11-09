@@ -10,13 +10,34 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
+import {
+  agentsJson as kitAgentsJson,
+  pidAlive,
+  type SessionRec,
+  workerLedState,
+} from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
-export const BRO = process.env.BRO_BIN_PATH ?? 'bro';
+export const PLUGIN_ID = process.env.HERDR_PLUGIN_ID ?? 'bro.fleet';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
+// The plugin and the CLI ship from one repo — prefer the checkout's own
+// build over a possibly stale `bro` on PATH (a linked dev worktree must
+// spawn status panes on its own dist, not the global install).
+const REPO_BRO = join(PLUGIN_ROOT, '..', '..', 'packages', 'cli', 'dist', 'index.js');
+export const BRO = process.env.BRO_BIN_PATH ?? (existsSync(REPO_BRO) ? REPO_BRO : 'bro');
 export const STATE_DIR =
   process.env.HERDR_PLUGIN_STATE_DIR ??
   join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin');
@@ -37,7 +58,9 @@ export function run(cmd: string, args: string[], cwd?: string): RunOut {
     env: process.env,
   });
   return {
-    code: r.status ?? (r.error !== undefined ? -1 : 0),
+    // no status is never success — a signal-killed child reports
+    // status=null, so does a spawn error; both are failure
+    code: r.status ?? -1,
     out: r.stdout ?? '',
     err: r.stderr ?? (r.error !== undefined ? String(r.error) : ''),
   };
@@ -59,6 +82,13 @@ export function herdrTry<T>(args: string[], cwd?: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** `herdr` verbs that answer exit-0-and-nothing on success (`pane run`
+ *  prints no envelope) — for those the exit code IS the answer; the
+ *  envelope parse in `herdr` would call an empty stdout a failure. */
+export function herdrOk(args: string[], cwd?: string): boolean {
+  return run(HERDR, args, cwd).code === 0;
 }
 
 export function bro(args: string[], cwd: string): string {
@@ -110,7 +140,7 @@ export function gitTop(dir: string): string | null {
   return r.code === 0 ? r.out.trim() : null;
 }
 
-function gitCommonDir(dir: string): string | null {
+export function gitCommonDir(dir: string): string | null {
   const r = run('git', ['-C', dir, 'rev-parse', '--git-common-dir'], dir);
   if (r.code !== 0) return null;
   const p = r.out.trim();
@@ -159,7 +189,7 @@ export interface StatusWorktree {
 export interface BroStatus {
   dir: string;
   worktrees: StatusWorktree[];
-  beads: { inProgress: Array<{ id: string; title: string }> };
+  beads: { inProgress: Array<{ id: string; title: string; link?: string }> };
   fleet: { maxConcurrent: number; agents: StatusAgent[] };
   loop: {
     stallMin: number;
@@ -208,15 +238,7 @@ export interface AgentEntry {
 
 export function agentsJson(repo: string): Record<string, AgentEntry> {
   const gd = gitCommonDir(repo);
-  if (gd === null) return {};
-  try {
-    const v = JSON.parse(readFileSync(join(gd, 'bro', 'agents.json'), 'utf8')) as unknown;
-    return typeof v === 'object' && v !== null && !Array.isArray(v)
-      ? (v as Record<string, AgentEntry>)
-      : {};
-  } catch {
-    return {};
-  }
+  return gd === null ? {} : kitAgentsJson(gd);
 }
 
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
@@ -224,26 +246,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-function procStart(pid: number): string | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const close = stat.lastIndexOf(')');
-    return stat.slice(close + 2).split(' ')[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function pidAlive(pid: number, start?: string): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-  if (start === undefined || start === '') return true;
-  const st = procStart(pid);
-  return st === null || st === start;
-}
+export { pidAlive, workerLedState };
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */
@@ -294,6 +297,28 @@ export function armedWorkDetails(repo: string, now = Date.now()): string[] {
   } catch {
     return [];
   }
+}
+
+/** "Gone" is a definitive absence — ENOENT/ENOTDIR only. Any other
+ *  stat failure (EACCES, transient fs errors) is NOT proof the
+ *  worktree vanished; same discipline `paneGone` encodes. */
+export function worktreeGone(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+}
+
+/** Silence bucketing shared by the diff key and the label token — a
+ *  token only moves when its bucket does, so rename churn is per-5min
+ *  under an hour, hourly above, never per-tick. */
+export function silentBucketMin(silentMs: number | null | undefined): number | null {
+  if (silentMs === null || silentMs === undefined || !Number.isFinite(silentMs)) return null;
+  const min = silentMs / 60_000;
+  return min >= 60 ? Math.floor(min / 60) * 60 : Math.max(0, Math.floor(min / 5) * 5);
 }
 
 // --- herdr planes ----------------------------------------------------------
@@ -365,6 +390,31 @@ export function paneExists(paneId: string): boolean {
   return !paneGone(paneId);
 }
 
+/** The pane labels each convergence role claims — a pane carrying one
+ *  role's label is never an idle-grab candidate for another, even
+ *  unbound: the label is an intent marker, not just a record key. */
+export const RENDER_LABEL = 'bro: events';
+export const STATUS_LABEL = 'bro: status';
+export const SESSION_LABEL = 'bro: session';
+
+/** Every bro-role label — a generic "any idle pane" grab skips all of
+ *  them; only the owning role adopts its own orphans. */
+export const BRO_LABELS: ReadonlySet<string> = new Set([RENDER_LABEL, STATUS_LABEL, SESSION_LABEL]);
+
+/** Pane ids bound to a bro-managed role (renderer, status, mirror) —
+ *  a generic "any idle pane" grab must never steal one out from under
+ *  its recorded owner: a dead status view re-arms through its own
+ *  record, not through the renderer's spare-pane path. */
+export function boundPaneIds(state: PluginState): Set<string> {
+  const ids = new Set<string>();
+  for (const r of Object.values(state.renderers)) ids.add(r.pane_id);
+  for (const r of Object.values(state.statuses)) ids.add(r.pane_id);
+  for (const r of Object.values(state.sessions)) ids.add(r.pane_id);
+  for (const r of Object.values(state.mirrors)) ids.add(r.pane_id);
+  for (const r of Object.values(state.liveViews ?? {})) ids.add(r.pane_id);
+  return ids;
+}
+
 /** Idle = everything in the foreground is the shell itself. Counting
  *  processes is wrong: a wrapper's `sleep`/builtin loop shows exactly
  *  one non-shell entry — one process is not one shell. */
@@ -393,8 +443,9 @@ export function notify(title: string, body?: string): void {
 export interface WorkspaceRec {
   ws: string;
   label: string;
-  /** true only for workspaces this plugin opened — drift renames never
-   *  touch workspaces a user named themselves. */
+  /** true only for workspaces this plugin opened — that's how the
+   *  daemon projector learns it owns the label; a workspace a user
+   *  named themselves is never relabeled (spec bro-u19mq). */
   managed?: boolean;
 }
 
@@ -412,11 +463,42 @@ export interface MirrorRec {
   marked?: boolean;
 }
 
+export interface RendererRec {
+  workspace: string;
+  /** the worktree path the workspace serves — the tail's cwd. */
+  worktree: string;
+  pane_id: string;
+}
+
+/** The `bro: status` pane record (spec bro-idsat) — one per managed
+ *  workspace, running `bro herdr status-view` as the LED's primary
+ *  self-reporter. The daemon projector reads this binding for its
+ *  backstop push. */
+export interface StatusPaneRec {
+  workspace: string;
+  worktree: string;
+  pane_id: string;
+}
+
 export interface PluginState {
-  /** worktree path → the workspace we opened (label drift is ours to fix). */
+  /** worktree path → the workspace we opened (the projector's
+   *  ownership ledger — it relabels only `managed` records). */
   workspaces: Record<string, WorkspaceRec>;
   /** molStep → mirror pane record. */
   mirrors: Record<string, MirrorRec>;
+  /** worktree path → the event-tail pane record (one per managed ws). */
+  renderers: Record<string, RendererRec>;
+  /** worktree path → the status-pane record (one per managed ws). */
+  statuses: Record<string, StatusPaneRec>;
+  /** worktree path → the session-pane record (one per managed ws —
+   *  spec bro-nwl5g's `bro herdr session-view` renderer; carries the
+   *  bound agent's id so a new worker rebinds the pane). */
+  sessions: Record<string, SessionRec>;
+  /** agentId → the plugin-owned live view (addendum 17) — an agent
+   *  outside armed worktrees gets its own `🤖 view:<id>` workspace. */
+  liveViews?: Record<string, { workspace: string; pane_id: string; owned?: boolean }>;
+  /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
+  gone: Record<string, number>;
 }
 
 /** One state file per repository — two repos sharing the plugin state
@@ -433,16 +515,100 @@ function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
 }
 
-export function loadState(scope: string): PluginState {
+/** The sync loop publishes its pid here so the startup/action path
+ *  probes liveness on a number it wrote itself — never argv matching:
+ *  a launcher that rewrites argv (absolute path, a non-node runtime)
+ *  slips a literal `pgrep` and a live pane would be re-opened every
+ *  pass. Scoped like the state file so repos never see each other's
+ *  loop pid. */
+export function syncPidPath(scope: string): string {
+  return join(STATE_DIR, `sync-${scope}.pid`);
+}
+
+const recOr = <T>(v: unknown): Record<string, T> =>
+  typeof v === 'object' && v !== null ? (v as Record<string, T>) : {};
+
+function emptyPluginState(): PluginState {
+  return {
+    workspaces: {},
+    mirrors: {},
+    renderers: {},
+    statuses: {},
+    sessions: {},
+    liveViews: {},
+    gone: {},
+  };
+}
+
+function loadStateFromPath(p: string): PluginState | null {
   try {
-    const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
+    const v = JSON.parse(readFileSync(p, 'utf8')) as Partial<PluginState>;
     return {
-      workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
-      mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
+      workspaces: recOr<WorkspaceRec>(v.workspaces),
+      mirrors: recOr<MirrorRec>(v.mirrors),
+      renderers: recOr<RendererRec>(v.renderers),
+      statuses: recOr<StatusPaneRec>(v.statuses),
+      sessions: recOr<SessionRec>(v.sessions),
+      liveViews: recOr(v.liveViews),
+      gone: recOr<number>(v.gone),
     };
   } catch {
-    return { workspaces: {}, mirrors: {} };
+    return null;
   }
+}
+
+/** Fill-missing merge — a legacy record only lands where the current
+ *  ledger has none (the workspaces map upgrades `managed` in place). */
+function mergeRecord<T>(dst: Record<string, T>, src: Record<string, T> | undefined): void {
+  for (const [k, v] of Object.entries(src ?? {})) {
+    if (dst[k] === undefined) dst[k] = v;
+  }
+}
+
+function mergeLegacyState(cur: PluginState, st: PluginState): void {
+  for (const [k, v] of Object.entries(st.workspaces ?? {})) {
+    if (cur.workspaces[k] === undefined) {
+      cur.workspaces[k] = v;
+    } else if (v.managed === true && cur.workspaces[k].managed !== true) {
+      cur.workspaces[k] = { ...cur.workspaces[k], managed: true };
+    }
+  }
+  mergeRecord(cur.mirrors, st.mirrors);
+  mergeRecord(cur.renderers, st.renderers);
+  mergeRecord(cur.statuses, st.statuses);
+  mergeRecord(cur.sessions, st.sessions);
+  if (cur.liveViews === undefined) cur.liveViews = {};
+  mergeRecord(cur.liveViews, st.liveViews);
+  mergeRecord(cur.gone, st.gone);
+}
+
+/** Every state dir this plugin has ever written — scoped file first,
+ *  then the unscoped `state.json` older builds used. Workspaces
+ *  recorded only in a legacy dir still count as managed, so the
+ *  reaper's ledger read must see them (issue #817). */
+function legacyStateFiles(scope: string, home: string): string[] {
+  const dirs = [
+    join(home, '.local', 'state', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'state', 'herdr', 'plugins'),
+    join(home, '.local', 'state', 'herdr'),
+    join(home, '.config', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.config', 'herdr', 'plugins'),
+    join(home, '.config', 'bro-herdr-plugin'),
+    join(home, '.local', 'share', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'share', 'herdr', 'plugins'),
+    join(home, '.local', 'share', 'herdr'),
+  ];
+  return dirs.flatMap(d => [join(d, `state-${scope}.json`), join(d, 'state.json')]);
+}
+
+export function loadState(scope: string): PluginState {
+  const cur = loadStateFromPath(stateFile(scope)) ?? emptyPluginState();
+  const home = process.env.HOME ?? homedir();
+  for (const f of legacyStateFiles(scope, home)) {
+    const st = loadStateFromPath(f);
+    if (st !== null) mergeLegacyState(cur, st);
+  }
+  return cur;
 }
 
 export function saveState(scope: string, s: PluginState): void {
@@ -451,6 +617,65 @@ export function saveState(scope: string, s: PluginState): void {
   const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
   renameSync(tmp, p);
+}
+
+/** A lock older than this is a dead holder's — a live converge never
+ *  takes minutes, so breaking it is safe. */
+const STALE_LOCK_MS = 180_000;
+/** How long a session waits on a live lock before running unlocked —
+ *  a wedged fs must never freeze the plugin. */
+const LOCK_WAIT_MS = 10_000;
+
+function lockStale(lock: string): boolean {
+  try {
+    return Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS;
+  } catch {
+    // vanished between our failed mkdir and this stat — breakable
+    return true;
+  }
+}
+
+const sleep = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+/** A mkdir mutex around a scope's load→converge→save span — mkdir is
+ *  the one atomic create-if-absent the fs gives. Without it two
+ *  sessions reconciling the same repo read-modify-write the same file
+ *  and the last save silently drops the other's workspace/mirror
+ *  records (review finding on bro-u19mq). A stale lock is broken and
+ *  retaken; a live one outlasting LOCK_WAIT_MS runs unlocked —
+ *  correctness degrades to the old race, never to a hang. */
+export function withStateLock<T>(scope: string, fn: () => T): T {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const lock = join(STATE_DIR, `state-${scope}.lock`);
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      if (lockStale(lock)) {
+        try {
+          rmSync(lock, { recursive: true, force: true });
+        } catch {
+          // raced another breaker — keep spinning
+        }
+        continue;
+      }
+      if (Date.now() >= until) return fn();
+      sleep(50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // a breaker already took it — nothing to release
+    }
+  }
 }
 
 /** Small config file under HERDR_PLUGIN_CONFIG_DIR — `key = value` TOML

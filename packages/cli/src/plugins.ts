@@ -15,7 +15,9 @@ import {
   configPolicyErrors,
   debtSection,
   definePlugin,
+  hasHelpFlag,
   loadConfig,
+  printUsage,
   busConnector,
   mailboxConnector,
   notifyConnector,
@@ -29,8 +31,10 @@ import {
   syncSection,
   type BroPlugin,
   type ConfigDiagnostic,
+  type ConfigLayerName,
   type ConfigSection,
   type DocType,
+  type FacadeMap,
 } from '@broject/core';
 import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
@@ -82,11 +86,13 @@ import {
   type NextPlan,
 } from './commands/next-plan.ts';
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts';
+import { runPipelineCommand } from './commands/pipeline.ts';
 import { runPluginsCommand } from './commands/plugins.ts';
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts';
 import { runDoctorCommand } from './commands/doctor.ts';
 import { driveSection } from './commands/drive-config.ts';
 import { driveConnector } from './commands/drive-pulse.ts';
+import { loopConnector } from './commands/loop-pulse.ts';
 import { runDaemonCommand } from './commands/daemon.ts';
 import { runResumeCommand } from './commands/resume.ts';
 import { runDriveCommand } from './commands/drive.ts';
@@ -94,19 +100,23 @@ import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
-import { runDogfoodCommand } from './commands/dogfood.ts';
+import { runDogfoodCommand, runBenchmarkCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
+import { runHerdrCommand } from './commands/herdr.ts';
 import { runHooksCommand } from './commands/hooks.ts';
 import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
 import { runQueueCommand } from './commands/queue.ts';
 import { runLearnCommand } from './commands/learn.ts';
+import { runSkillsCommand } from './commands/skills.ts';
+import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
 import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
+import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
 import { runStatusCommand } from './commands/status.ts';
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
@@ -117,8 +127,11 @@ import { runMeshCommand } from './commands/mesh.ts';
 import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
+import { runRouterCommand } from './commands/router.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
+import { runExecCommand } from './commands/exec.ts';
+import { herdrConnector } from './commands/herdr-connector.ts';
 import { runStackCommand } from './commands/stack.ts';
 import { runStampCommand } from './commands/buildstamp.ts';
 import { SPEC_CONNECTORS } from './spec-connectors.ts';
@@ -158,12 +171,16 @@ registerConnector(actConnector);
 registerConnector(watchConnector);
 // the installed merge path's rearm checkpoint — drive.json's owner
 registerConnector(driveConnector);
+registerConnector(loopConnector);
 registerConnector(rigConnector);
 registerConnector(debtConnector);
 registerConnector(sddConnector);
 // the host-wide session cap — refuses a session start at the cap
 registerConnector(sessionCapConnector);
 registerConnector(notifyConnector);
+// pane report-back — env-gated inside the connector; outside herdr
+// every probe is a no-op (spec bro-84zrj)
+registerConnector(herdrConnector);
 registerConnector(learnConnector);
 registerConnector(systemoneConnector);
 registerConnector(llmJudgeConnector);
@@ -181,6 +198,10 @@ registerConnector(busConnector);
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
+
+/** The telemetry plane's usage — the plane had no help of its own, and
+ *  `bro telemetry --help` ran the report. */
+const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -288,9 +309,70 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: loopSection,
   }),
   definePlugin({
+    // The loop's supervisor, not a second runner: this verb prints the
+    // launch brief + tick-0 baselines and points at the skill that owns
+    // the tick protocol — the loop itself stays model work.
+    name: 'watchdog',
+    group: 'flow',
+    summary: 'Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]',
+    run: runWatchdogCommand,
+    skill: 'watchdog',
+    contract: {
+      flags: {
+        '--json':
+          'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
+      },
+      json: 'schemas/cli/watchdog.json',
+      exits: {
+        0: 'brief printed (human or --json)',
+        2: 'unknown flag — usage on stderr',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'pipeline',
+    group: 'pipeline',
+    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    run: runPipelineCommand,
+    contract: {
+      subs: {
+        accept: {
+          flags: {
+            '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
+            '--by <id>': 'signer identity — default: $BRO_AGENT_ID, else the actor chain',
+            '--run <id>': 'the run to write to — default: the sole run parked at accept',
+          },
+          exits: {
+            0: 'verdict recorded on the run channel',
+            1: 'no run awaiting, an ambiguous target, or an unresolvable signer',
+            2: 'usage',
+          },
+        },
+        answer: {
+          flags: {
+            '-m <text>': 'answer text (short spelling)',
+            '--message <text>': 'answer text',
+            '--answers-file <path>': 'answers from a file (JSON parsed when it parses)',
+            '--by <id>': 'who answered — optional provenance',
+            '--run <id>': 'the run to write to — default: the sole run parked at intake',
+          },
+          exits: {
+            0: 'answers recorded on the run channel',
+            1: 'no run awaiting answers or an unreadable file',
+            2: 'usage',
+          },
+        },
+      },
+    },
+  }),
+  definePlugin({
     name: 'fleet',
     group: 'fleet',
-    summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
+    summary:
+      // no `a|b` alternation in this summary — gen-command-docs'
+      // signature() would extract it as subcommands; the arg lists use
+      // spaced pipes so the generated page prints the prose only
+      'Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]',
     run: runFleetCommand,
     contract: {
       flags: {
@@ -481,7 +563,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'cleanup',
     group: 'review',
-    summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
+    summary: 'Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]',
     run: runCleanupCommand,
   }),
   definePlugin({
@@ -554,6 +636,39 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: goalSection,
   }),
   definePlugin({
+    name: 'skills',
+    group: 'self',
+    summary:
+      'Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]',
+    run: runSkillsCommand,
+    skill: 'skills',
+    configKey: 'skills',
+    configSchema: skillsSection,
+    contract: {
+      subs: {
+        sync: {
+          flags: {
+            '--root <dir>': 'run root — its bro.config and .agents/skills apply',
+            '--json': 'per-source steps + reconcile rows + drift as JSON',
+          },
+          exits: {
+            0: 'all declared sources installed — lock verifies',
+            1: 'a source failed, or drift reported after sync',
+            2: 'usage',
+          },
+        },
+        list: {
+          flags: {
+            '--root <dir>': 'run root',
+            '--json': 'the reconcile rows as JSON',
+          },
+          json: 'schemas/cli/skills-list.schema.json',
+          exits: { 0: 'rows printed', 2: 'usage' },
+        },
+      },
+    },
+  }),
+  definePlugin({
     name: 'judge',
     group: 'self',
     summary: 'Calibrated decision judge — decide smoke test over systemone + llm-judge',
@@ -568,6 +683,13 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict',
     run: runDogfoodCommand,
+    skill: 'dogfood',
+  }),
+  definePlugin({
+    name: 'benchmark',
+    group: 'self',
+    summary: 'Paired native-vs-BRO workflow outcome benchmarks',
+    run: runBenchmarkCommand,
     skill: 'dogfood',
   }),
   definePlugin({
@@ -637,12 +759,21 @@ export const PLUGINS: BroPlugin[] = [
     group: 'fleet',
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
-    run: argv => runHooksCommand(['perf', ...argv]),
+    run: argv => {
+      // a help request never runs the report: the plane reads the perf
+      // journal, and the token that leads the argv says help, not run
+      if (hasHelpFlag(argv)) {
+        printUsage(TELEMETRY_USAGE, 0);
+        return;
+      }
+      return runHooksCommand(['perf', ...argv]);
+    },
   }),
   definePlugin({
     name: 'trace',
     group: 'fleet',
-    summary: 'OTLP export of the session trace journals — export [--session|--dry-run|--json]',
+    summary:
+      '<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals',
     run: runTraceCommand,
     skill: 'trace',
     configKey: 'telemetry',
@@ -667,8 +798,18 @@ export const PLUGINS: BroPlugin[] = [
           flags: { '--json': 'machine-readable report' },
           exits: { 0: 'would-be record printed', 2: 'missing hook name' },
         },
-        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
-        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
       },
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },
@@ -677,6 +818,12 @@ export const PLUGINS: BroPlugin[] = [
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'herdr',
+    summary: 'Herdr bridge — pane-facing helpers (status-view); spawned, never typed',
+    run: runHerdrCommand,
     hidden: true,
   }),
   definePlugin({
@@ -703,6 +850,13 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Provider registry — models catalog as <provider>/<model> [name…]',
     run: runProvidersCommand,
     skill: 'providers',
+  }),
+  definePlugin({
+    name: 'router',
+    summary:
+      'The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]',
+    run: runRouterCommand,
+    skill: 'brouter',
   }),
   definePlugin({
     name: 'setup',
@@ -813,6 +967,16 @@ export const PLUGINS: BroPlugin[] = [
     run: argv => runPlanFile(argv),
   }),
   definePlugin({
+    name: 'exec',
+    group: 'work',
+    summary:
+      'Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)',
+    run: runExecCommand,
+    contract: {
+      exits: { 2: 'usage', 130: 'child killed by SIGINT' },
+    },
+  }),
+  definePlugin({
     name: 'plan',
     group: 'plan',
     summary: 'Plan contract: list kinds + schema versions, validate a file',
@@ -846,6 +1010,7 @@ export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
   ['plan', 'versioned plans'],
   ['mesh', 'inter-rig federation'],
   ['spec', 'spec-driven development'],
+  ['pipeline', 'pipeline customer surface — accept verdicts, intake answers'],
 ];
 
 /** name → members, derived over the live registry each call so
@@ -892,9 +1057,11 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
   );
 }
 
-/** loadConfig + registered plugin sections — the CLI's config entrypoint. */
-export function loadBroConfig(cwd: string = process.cwd()) {
-  return loadConfig(cwd, pluginConfigSections());
+/** loadConfig + registered plugin sections — the CLI's config entrypoint.
+ *  `only` restricts the layer scan (['global'] for host-level planes a
+ *  checkout enclosing the state dir must not re-root). */
+export function loadBroConfig(cwd: string = process.cwd(), only?: readonly ConfigLayerName[]) {
+  return loadConfig(cwd, pluginConfigSections(), only);
 }
 
 /** configDiagnostics over the full registry — core sections merged with
@@ -911,25 +1078,73 @@ export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
 import { registerPolicySections } from './config-policy.ts';
 registerPolicySections(pluginConfigSections);
 
-function isPlugin(p: unknown): p is BroPlugin {
-  const o = p as BroPlugin;
-  if (
-    !o ||
-    typeof o !== 'object' ||
-    typeof o.name !== 'string' ||
-    o.name === '' ||
-    typeof o.summary !== 'string' ||
-    typeof o.run !== 'function'
-  ) {
+function hasPluginRequiredShape(o: unknown): boolean {
+  const p = o as BroPlugin;
+  if (!p || typeof p !== 'object') {
     return false;
   }
-  // optional fields must be the right type when present — a truthy
-  // non-function configSchema would crash config loading later
-  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]));
+  if (typeof p.name !== 'string' || p.name === '') {
+    return false;
+  }
+  if (typeof p.summary !== 'string') {
+    return false;
+  }
+  if (typeof p.run !== 'function') {
+    return false;
+  }
+  return true;
+}
+
+function hasPluginOptionalFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  for (const [key, ok] of PLUGIN_FIELD_CHECKS) {
+    const v = p[key as string];
+    if (v === undefined) {
+      continue;
+    }
+    if (!ok(v)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasPluginPairedFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  const hasConfigKey = p.configKey !== undefined;
+  const hasConfigSchema = p.configSchema !== undefined;
+  if (hasConfigKey !== hasConfigSchema) {
+    return false;
+  }
+  const hasPlanSchema = p.planSchema !== undefined;
+  const hasRunPlan = p.runPlan !== undefined;
+  if (hasPlanSchema !== hasRunPlan) {
+    return false;
+  }
+  return true;
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  return hasPluginRequiredShape(p) && hasPluginOptionalFields(p) && hasPluginPairedFields(p);
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
  *  the field is defined. Table form keeps isPlugin flat as fields grow. */
+function isDenseStringArray(v: unknown): boolean {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  if (Object.keys(v).length !== v.length) {
+    return false;
+  }
+  for (const item of v) {
+    if (typeof item !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
 const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
   ['configSchema', v => typeof v === 'function'],
   ['planSchema', v => typeof v === 'function'],
@@ -942,10 +1157,13 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boole
   ['deprecated', v => typeof v === 'string'],
   ['flatDeprecated', v => typeof v === 'string'],
   ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v)],
+  ['argvPrefix', isDenseStringArray],
   ['docs', v => Array.isArray(v) && v.every(isDocType)],
   ['connectors', v => Array.isArray(v) && v.every(isConnector)],
   ['contract', isCliContract],
+  ['group', v => typeof v === 'string'],
+  ['aliasOf', v => typeof v === 'string'],
+  ['hidden', v => typeof v === 'boolean'],
 ];
 
 /** `contract` must be the declared shape at every level — a malformed
@@ -971,16 +1189,87 @@ function isCliContract(v: unknown): boolean {
   );
 }
 
+const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+]);
+
+const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
+  'matchRemote',
+  'matchDir',
+  'auth',
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+  'hooks',
+  'guards',
+];
+
+const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o === 'object';
+
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
-function isConnector(c: unknown): boolean {
-  const o = c as { name?: unknown; matchRemote?: unknown };
+function isNonEmptyString(v: unknown): boolean {
+  return typeof v === 'string' && v !== '';
+}
+
+function hasValidConnectorName(c: unknown): boolean {
+  return isObject(c) && isNonEmptyString(c.name);
+}
+
+function hasValidConnectorFunctions(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isValidFacadeKey(f: unknown): boolean {
+  return typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap);
+}
+
+function hasValidConnectorFlags(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
+    return false;
+  }
+  if (c.optInFacades === undefined) {
+    return true;
+  }
   return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    (o.matchRemote === undefined || typeof o.matchRemote === 'function')
+    Array.isArray(c.optInFacades) &&
+    !c.optInFacades.includes(undefined) &&
+    c.optInFacades.every(f => isValidFacadeKey(f))
+  );
+}
+
+function isConnector(c: unknown): boolean {
+  return (
+    isObject(c) &&
+    hasValidConnectorName(c) &&
+    hasValidConnectorFunctions(c) &&
+    hasValidConnectorFlags(c)
   );
 }
 
