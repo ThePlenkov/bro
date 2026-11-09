@@ -56,6 +56,11 @@ export interface PrActState {
    *  can't say. Probed lazily via the facade's optional reviewDecision
    *  when meta doesn't carry it (GitLab approvals are a second call). */
   reviewDecision?: string
+  /** Who landed the PR — the host's merge record (GitHub's
+   *  `mergedBy.login`). undefined when the host can't say (or the PR
+   *  isn't merged): the landed verdict then names the landing without
+   *  naming an actor — never a guess. */
+  mergedBy?: string
   /** 'a trusted human's approving review stands on the current head' —
    *  the probe behind act.requireApproval. Latest decision review per
    *  reviewer: head-bound approval, bots excluded, standing

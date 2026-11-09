@@ -264,12 +264,25 @@ describe('act rearm', () => {
   test('act merge --bead on an already-merged PR still discharges the claim', () => {
     const { root, main, db, env } = beadFixture()
     inside(main, root, () => {
-      // landed between the wait's last green poll and merge's own fetch
-      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
+      // landed between the wait's last green poll and merge's own fetch —
+      // the merge goal is satisfied, so the merge reports the landing
+      // instead of a lifecycle error (spec: specs/bro-0i1lm.md)
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED', mergedBy: 'ThePlenkov' })
       const r = runCli(['act', 'merge', '7', '--bead', 'fx-a'], { cwd: main, env })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /was already merged by ThePlenkov/)
+      assertLandedBead(db, 'fx-a')
+    })
+  })
+
+  test('act merge on a closed PR refuses — nothing landed', () => {
+    const { root, main, env } = beadFixture()
+    inside(main, root, () => {
+      // closed is not merged: the PR was abandoned, no merge can happen
+      writeHostState(join(main, 'host.json'), { prState: 'CLOSED' })
+      const r = runCli(['act', 'merge', '7'], { cwd: main, env })
       assert.equal(r.code, 1)
       assert.match(r.stderr, /only OPEN PRs/)
-      assertLandedBead(db, 'fx-a')
     })
   })
 

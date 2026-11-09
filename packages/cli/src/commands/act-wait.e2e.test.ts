@@ -162,6 +162,88 @@ describe('act wait — a blocked settle is a finding (bro-q4iq0)', () => {
   })
 })
 
+describe('act wait — a landed PR is a verdict, not a failure (bro-0i1lm)', () => {
+  test('a merged settle names the landing and its actor', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      // somebody else landed it while the watcher was away — the merge
+      // goal is satisfied, so the wait says so instead of going quiet
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED', mergedBy: 'ThePlenkov' })
+      const r = runCli(
+        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge'],
+        { cwd: main }
+      )
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /was already merged by ThePlenkov/)
+      // the PR ref is a link, never a bare number
+      assert.match(r.stdout, /\[#7\]\(https:\/\/example\.test\/o\/r\/pull\/7\)/)
+      // the journal names the actor too — a dead watcher leaves this behind
+      const [ev] = drops(main)
+      assert.ok(ev)
+      assert.equal(ev.kind, 'result')
+      assert.match(String(ev.payload), /settled MERGED by ThePlenkov/)
+    })
+  })
+
+  test('a host that cannot name the actor still gets a verdict', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
+      const r = runCli(
+        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge'],
+        { cwd: main }
+      )
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /was already merged/)
+      assert.doesNotMatch(r.stdout, /was already merged by/)
+      const [ev] = drops(main)
+      assert.ok(ev)
+      assert.match(String(ev.payload), /settled MERGED$/)
+    })
+  })
+
+  test('a PR merged while the gate was still blocked is a landing, not a block', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      // the race: another actor landed the PR while the checks were red.
+      // The gate's state cannot demote a landed PR to a blocked one.
+      writeHostState(join(main, 'host.json'), {
+        prState: 'MERGED',
+        mergedBy: 'ThePlenkov',
+        threads: [THREAD],
+      })
+      const r = runCli(
+        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge'],
+        { cwd: main }
+      )
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /was already merged by ThePlenkov/)
+      // the verdict is the landing — no BLOCKED drop, no blocked marker
+      const evs = drops(main)
+      assert.equal(evs.length, 1)
+      const ev = evs[0]
+      assert.ok(ev)
+      assert.equal(ev.kind, 'result')
+      assert.match(String(ev.payload), /settled MERGED by ThePlenkov/)
+      assert.equal(verdicts(main).length, 0)
+    })
+  })
+
+  test('the json settle carries the verdict — the caller reads it', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED', mergedBy: 'ThePlenkov' })
+      const r = runCli(['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--json'], {
+        cwd: main,
+      })
+      assert.equal(r.code, 0, r.stderr)
+      const out = JSON.parse(r.stdout) as { verdict?: string; pr?: { mergedBy?: string } }
+      assert.equal(out.verdict, 'was already merged by ThePlenkov')
+      assert.equal(out.pr?.mergedBy, 'ThePlenkov')
+    })
+  })
+})
+
 describe('act wait --detach (bro-b16er)', () => {
   /** SIGKILL the detached child at teardown — the test leaks nothing. */
   const reaper = (t: TestContext, root: string, pid: { n: number }): void => {

@@ -995,6 +995,8 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      // who landed it — the host's merge record (GitHub's mergedBy.login)
+      mergedBy: per.mergedBy ?? s.mergedBy,
       ...over,
     }
   }),

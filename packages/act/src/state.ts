@@ -598,6 +598,7 @@ async function fetchState(
     docsOnly: isDocsOnly,
     alerts,
     reviewDecision,
+    mergedBy: meta.mergedBy,
     humanApproval,
     humanApprovalReason,
     humanApprovalApprovers,
