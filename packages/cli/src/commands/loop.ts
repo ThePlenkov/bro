@@ -108,7 +108,6 @@ import {
   type MirrorPolicy,
   mkdirPrivateSync,
   openPrivateAppendSync,
-  patchAgentRegistry,
   patchAgentRegistryIf,
   pidAlive,
   printUsage,
@@ -117,7 +116,6 @@ import {
   projectId,
   type ResolvedClass,
   type ReviewFacade,
-  readAgentRegistry,
   releaseSessionSlot,
   releaseSessionStart,
   reviewHost,
@@ -1102,62 +1100,7 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     return { kind: 'hold', why: msg };
   }
   if (err instanceof SpawnError && err.kind === 'unavailable') {
-    // a wedged task store under the spawn lock, a dead multiplexer, a
-    // claim bd killed mid-write — the store outage class, never a
-    // refusal. The registry pin can also predate the failure (it lands
-    // before claimStep): a pid-less entry reads as a remote worker in
-    // flight and walls the retry's re-pick — mark this push's own entry
-    // dead. A refusal thrown before the pin leaves none to kill.
-    //
-    // Ownership: a surviving row is this attempt's ONLY while it still
-    // carries the failure stamp the dying connector wrote onto its own
-    // row before throwing — commitSpawn clears spawnError/pid on every
-    // fresh row, so a pid-less entry whose stamp matches this error can
-    // only be our dead pin. A racing respawn's fresh row has neither
-    // and must never be stopped. The predicate and the write ride ONE
-    // registry lock — a separate read-then-patch could stop a live
-    // worker that slipped between the two.
-    patchAgentRegistryIf(
-      ctx.root,
-      m.beads[0]!.id,
-      { stopped: true, spawnError: msg },
-      cur =>
-        cur !== undefined &&
-        cur.stopped !== true &&
-        cur.pid === undefined &&
-        typeof cur.spawnError === 'string' &&
-        cur.spawnError !== '' &&
-        (msg.includes(cur.spawnError) || cur.spawnError.includes(msg))
-    );
-    // The lead's claim can survive a post-commit backend failure too
-    // (the connector's CAS rollback only covers commitSpawn's own
-    // writes): claimStep succeeded, then tmux/launch died, and the lead
-    // sits in_progress with no worker — ready skips it, the infra hold
-    // can't re-pick it. Reopen it ONLY while the claim still names an
-    // owner this spawn wrote: the attempt's actor (bdActor) or the
-    // claimAs identity (the step id itself). An assignee a foreign loop
-    // moved meanwhile is theirs — reopening would steal a live claim.
-    // Batch members were claimMembers'd by this push and release
-    // unconditionally below.
-    const leadClaim =
-      ctx.beadsDir !== undefined ? probeStep(ctx.beadsDir, m.beads[0]!.id) : undefined;
-    if (
-      leadClaim?.status === 'in_progress' &&
-      leadClaim.assignee !== undefined &&
-      leadClaim.assignee !== '' &&
-      (leadClaim.assignee === bdActor(ctx.beadsDir!) || leadClaim.assignee === m.beads[0]!.id)
-    ) {
-      reopenBead(ctx, m.beads[0]!.id);
-    }
-    // batch members claimed by claimMembers remain in_progress even if
-    // the lead spawn never landed; release them now so the retry can
-    // re-pick (the lead's claim is uncertain and the infra hold owns
-    // custody until recovered). The store may be wedged, but a failed
-    // reopen is best-effort — tryClaim still un-sees and holds an interval.
-    for (const b of openBeads(ctx, m.beads.slice(1))) {
-      reopenBead(ctx, b.id);
-    }
-    return { kind: 'infra', why: msg };
+    return settleUnavailableSpawn(ctx, m, msg);
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
@@ -1168,6 +1111,67 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
   }
   say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`);
   return { kind: 'done', result: 'parked' };
+}
+
+/** The 'unavailable' settle (bro-cu3q8): a wedged task store under the
+ *  spawn lock, a dead multiplexer, a claim bd killed mid-write — the
+ *  store outage class, never a refusal. The registry pin can also
+ *  predate the failure (it lands before claimStep): a pid-less entry
+ *  reads as a remote worker in flight and walls the retry's re-pick —
+ *  mark this push's own entry dead. A refusal thrown before the pin
+ *  leaves none to kill.
+ *
+ *  Ownership: a surviving row is this attempt's ONLY while it still
+ *  carries the failure stamp the dying connector wrote onto its own
+ *  row before throwing — commitSpawn clears spawnError/pid on every
+ *  fresh row, so a pid-less entry whose stamp matches this error can
+ *  only be our dead pin. A racing respawn's fresh row has neither and
+ *  must never be stopped. The predicate and the write ride ONE
+ *  registry lock — a separate read-then-patch could stop a live worker
+ *  that slipped between the two.
+ *
+ *  The lead's claim can survive a post-commit backend failure too (the
+ *  connector's CAS rollback only covers commitSpawn's own writes):
+ *  claimStep succeeded, then tmux/launch died, and the lead sits
+ *  in_progress with no worker — ready skips it, the infra hold can't
+ *  re-pick it. Reopen it ONLY while the claim still names an owner
+ *  this spawn wrote: the attempt's actor (bdActor) or the claimAs
+ *  identity (the step id itself). An assignee a foreign loop moved
+ *  meanwhile is theirs — reopening would steal a live claim. Batch
+ *  members were claimMembers'd by this push and release
+ *  unconditionally below. */
+function settleUnavailableSpawn(ctx: Ctx, m: GateMember, msg: string): PushOutcome {
+  patchAgentRegistryIf(
+    ctx.root,
+    m.beads[0]!.id,
+    { stopped: true, spawnError: msg },
+    cur =>
+      cur !== undefined &&
+      cur.stopped !== true &&
+      cur.pid === undefined &&
+      typeof cur.spawnError === 'string' &&
+      cur.spawnError !== '' &&
+      (msg.includes(cur.spawnError) || cur.spawnError.includes(msg))
+  );
+  const leadClaim =
+    ctx.beadsDir !== undefined ? probeStep(ctx.beadsDir, m.beads[0]!.id) : undefined;
+  if (
+    leadClaim?.status === 'in_progress' &&
+    leadClaim.assignee !== undefined &&
+    leadClaim.assignee !== '' &&
+    (leadClaim.assignee === bdActor(ctx.beadsDir!) || leadClaim.assignee === m.beads[0]!.id)
+  ) {
+    reopenBead(ctx, m.beads[0]!.id);
+  }
+  // batch members claimed by claimMembers remain in_progress even if
+  // the lead spawn never landed; release them now so the retry can
+  // re-pick (the lead's claim is uncertain and the infra hold owns
+  // custody until recovered). The store may be wedged, but a failed
+  // reopen is best-effort — tryClaim still un-sees and holds an interval.
+  for (const b of openBeads(ctx, m.beads.slice(1))) {
+    reopenBead(ctx, b.id);
+  }
+  return { kind: 'infra', why: msg };
 }
 
 /** PR number opened from this worktree's branch — null when none,
@@ -4440,6 +4444,32 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
   }
 }
 
+/** One member's thrown service failure → kept-with-backoff (undefined)
+ *  under the strike budget, or the parked verdict past it. A member's
+ *  settle can still throw on infra — the task store wedged mid-write,
+ *  a dead spawn, a failed projection call. That's a member failure,
+ *  never a dead supervisor (bro-cu3q8): it strikes the same budget the
+ *  fetch arms use — under 3 strikes and inside mergeTimeoutMin the
+ *  member is kept and its re-poll holds an interval (a wedged store
+ *  throws instantly, so without the pause every tick re-strikes); past
+ *  the budget it parks exactly like the fetch arm. */
+function failMemberService(ctx: Ctx, m: GateMember, err: unknown): ServiceVerdict | undefined {
+  m.fetchErrors += 1;
+  console.error(
+    `loop: member ${m.beads[0]!.id} service failed (${m.fetchErrors}) — ${String(err)}`
+  );
+  if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
+    m.nextPollAt = Date.now() + ctx.intervalS * 1000;
+    return undefined;
+  }
+  parkBeads(
+    ctx,
+    m.beads,
+    `loop: member service kept failing — ${String(err)} — worktree ${m.item.worktreeDir}`
+  );
+  return leave(m, 'parked');
+}
+
 /** One service pass over the stack, oldest-first — closure-first order. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
@@ -4447,35 +4477,19 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   for (const m of [...q.stack]) {
     let verdict: ServiceVerdict;
     try {
-      verdict = await serviceMember(ctx, m);
+      verdict = await serviceMember(ctx, m); // NOSONAR — members service serially, oldest-first: a parallel pass would race the registry and claims
       // a clean service pass clears the strike count — isolated
       // service failures between healthy polls must not accumulate
       // toward the park (the settle-failure counter is separate)
       m.fetchErrors = 0;
     } catch (err) {
-      // a member's settle can still throw on infra — the task store
-      // wedged mid-write, a dead spawn, a failed projection call. That's
-      // a member failure, never a dead supervisor (bro-cu3q8): it
-      // strikes the same budget the fetch arms use — under 3 strikes
-      // and inside mergeTimeoutMin the member is kept and its re-poll
-      // holds an interval (a wedged store throws instantly, so without
-      // the pause every tick re-strikes); past the budget it parks
-      // exactly like the fetch arm. The pass continues either way —
-      // one poison member must not starve the stack behind it.
-      m.fetchErrors += 1;
-      console.error(
-        `loop: member ${m.beads[0]!.id} service failed (${m.fetchErrors}) — ${String(err)}`
-      );
-      if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
-        m.nextPollAt = Date.now() + ctx.intervalS * 1000;
+      // the pass continues either way — one poison member must not
+      // starve the stack behind it
+      const failed = failMemberService(ctx, m, err);
+      if (failed === undefined) {
         continue;
       }
-      parkBeads(
-        ctx,
-        m.beads,
-        `loop: member service kept failing — ${String(err)} — worktree ${m.item.worktreeDir}`
-      );
-      verdict = leave(m, 'parked');
+      verdict = failed;
     }
     if (verdict === 'kept') {
       continue;

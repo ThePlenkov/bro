@@ -573,7 +573,8 @@ export function parseSlotAcquire(out: string): SlotAcquire {
 /** `merge-slot check` output → current holder or null. Exported for tests. */
 export function parseSlotCheck(out: string): string | null {
   const body = parseJson(out);
-  return body && body.available === false && typeof body.holder === 'string' ? body.holder : null;
+  const holder = body?.holder;
+  return body?.available === false && typeof holder === 'string' ? holder : null;
 }
 
 /** The exec triple the store is built over — cwd routing for
@@ -608,7 +609,7 @@ function dueSnoozes(out: string): string[] {
     if (typeof r?.id !== 'string') {
       continue;
     }
-    const t = typeof r.defer_until === 'string' ? Date.parse(r.defer_until) : NaN;
+    const t = typeof r.defer_until === 'string' ? Date.parse(r.defer_until) : Number.NaN;
     if (Number.isFinite(t) && t <= now) {
       due.push(r.id);
     }
@@ -798,7 +799,8 @@ function makeStore(x: StoreExec): TaskStore {
         if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
           return ''; // no bd, or no routed store — state simply doesn't move
         }
-        throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`);
+        const why = r.err || `bd exited ${r.code}`;
+        throw new Error(`task store sync failed — ${why}`);
       }
       for (const b of plan.bridges) {
         notes.push(...publishDoltBridge(b));
