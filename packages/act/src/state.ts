@@ -67,7 +67,10 @@ export function isSast(name: string): boolean {
  *  'act_gate' are the same name — a self-check setting that missed its
  *  own check would restore the deadlock it exists to prevent. */
 function normalizeCheckName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 // SKIPPED means the run never produced output — every other conclusion

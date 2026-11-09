@@ -46,7 +46,7 @@ import { loadAgentEnv } from '../agent-connectors.ts';
  *  the un-locked path — a hook must never stall the client. The locked
  *  section is a dir scan plus a file write, so a live holder yields in
  *  milliseconds; 2s only bites on a wedged one. */
-export const GUARD_LOCK_WAIT_MS = 2_000
+export const GUARD_LOCK_WAIT_MS = 2_000;
 
 /** The refusal for a command about to start sessions, or undefined when
  *  it fits. Throws when the count cannot be established — the CALLER

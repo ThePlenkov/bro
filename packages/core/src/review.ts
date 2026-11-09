@@ -30,6 +30,14 @@ export interface PrMeta {
    *  can't say — an approval gate treats absent as "not approved",
    *  never as a pass (bro-3vy93). */
   reviewDecision?: string;
+  /** Who landed the PR — the host's merge record. undefined when the
+   *  host can't say (or the PR isn't merged): the ledger then has no
+   *  actor to stand behind. */
+  mergedBy?: string;
+  /** The merge commit's sha — what actually landed on the base branch
+   *  (the squashed commit for a squash merge). undefined when the PR
+   *  isn't merged. */
+  mergeSha?: string;
 }
 
 /** One status check on the PR head — name + settled verdict. */
