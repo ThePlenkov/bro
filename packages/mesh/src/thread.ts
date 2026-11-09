@@ -73,10 +73,11 @@ const STAGE_RANK: Record<ThreadStage, number> = {
 
 function ownBeads(dir: string, timeoutMs?: number): { rows: BeadLike[]; error?: string } {
   try {
-    const store = taskStore(dir) as any;
-    if (typeof store.listWithTimeout === 'function' && timeoutMs !== undefined) {
+    const store = taskStore(dir);
+    const storeAny = store as any;
+    if (typeof storeAny.listWithTimeout === 'function' && timeoutMs !== undefined) {
       try {
-        const res = store.listWithTimeout({ labels: ['mesh:v:1'], all: true }, timeoutMs);
+        const res = storeAny.listWithTimeout({ labels: ['mesh:v:1'], all: true }, timeoutMs);
         const rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
         return { rows };
       } catch (err) {

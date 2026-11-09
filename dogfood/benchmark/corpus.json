@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "pinned": true,
+  "ci": {
+    "required": ["npm run build", "npm run typecheck", "npm test"]
+  },
+  "tasks": [
+    {
+      "taskId": "bench-smoke-001",
+      "revision": "ead0d27d",
+      "models": ["codex", "claude"],
+      "ci": {
+        "required": ["npm run build", "npm run typecheck", "npm test"]
+      },
+      "description": "Smoke: run repo CI expectations and record workflow outcomes.",
+      "successCriteria": ["build passes", "typecheck passes", "tests pass"],
+      "targets": {
+        "timeToGreenMs": 600000,
+        "humanInterventions": 0,
+        "controlPlaneCalls": 50,
+        "tokens": { "input": 100000, "output": 20000, "cacheRead": 0, "cacheWrite": 0 },
+        "duplicateWorkCount": 0,
+        "abandonedWorkCount": 0,
+        "mergedFindingsWithoutFollowup": 0
+      }
+    }
+  ]
+}

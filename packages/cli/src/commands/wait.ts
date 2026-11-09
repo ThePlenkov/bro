@@ -390,7 +390,7 @@ function shipped(w: Watch, read: DepRead, thread?: ReturnType<typeof meshThread>
   if (read.shipped !== true) {
     return false;
   }
-  if (thread && (thread as any).scanFailed === true) {
+  if (thread?.scanFailed === true) {
     return false;
   }
   w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs };
@@ -410,12 +410,9 @@ function settleFromPlanes(
   if (rejected(w, read, thread) || shipped(w, read, thread)) {
     return;
   }
-  if ((thread as any).scanFailed === true) {
-    // Do not settle free when a peer scan failed; keep waiting/retry
-    if (req.status === 'closed') {
-      // don't settle actionable as closed-unshipped if scan failed?
-      // but keep behavior: still may be actionable later; just don't free
-    }
+  if (thread.scanFailed === true) {
+    // a failed peer scan settles nothing — not free, not
+    // closed-unshipped; the watch stays unsettled and retries
     w.closedUnshipped = 0;
     console.error(
       `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
@@ -439,8 +436,6 @@ function settleFromPlanes(
 /** one poll of one unsettled watch — records a verdict or bumps the
  *  blip counter; the watch carries the state */
 function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
-  const now = performance.now();
-  const deadline = ctx as unknown as { deadline?: number };
   const readTimeoutBase = timeoutMs === undefined ? undefined : Math.max(1, Math.floor(timeoutMs));
   // budget reused before reading thread/replica — recompute a smaller
   // slice for any follow-up reads that must fit in the remaining window
@@ -461,11 +456,13 @@ function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
   }
   let threadTimeout =
     readTimeoutBase === undefined ? undefined : Math.max(1, Math.floor(readTimeoutBase * 0.5));
-  // recompute remaining budget immediately before calling thread/read paths that can run again
+  // recompute remaining budget immediately before calling thread/read
+  // paths that can run again — the dep read above already spent part
+  // of the slice, so measure against a fresh clock
   if (readTimeoutBase !== undefined) {
-    const d = (ctx as unknown as { deadline?: number }).deadline;
+    const d = ctx.deadline;
     if (d !== undefined) {
-      const rem = Math.max(0, d - now);
+      const rem = Math.max(0, d - performance.now());
       threadTimeout =
         rem < 1
           ? undefined

@@ -182,31 +182,32 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
   const out: DepRead = { errors: [] };
   const remaining = (ms?: number): number | undefined =>
     ms === undefined ? undefined : Math.max(1, Math.floor(ms));
+  // one budget across the posting-store get and the ship read — a
+  // slow first read shrinks what the second gets; never re-grant the
+  // full slice
+  const t0 = performance.now();
+  const left = (): number | undefined =>
+    timeoutMs === undefined ? undefined : remaining(timeoutMs - (performance.now() - t0));
 
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir);
-    const getTimeout = remaining(timeoutMs);
+    const getTimeout = left();
     const sAny = store as any;
+    // a get failure must reach the outer catch — swallowing it as
+    // `request = null` reports an unresolved ref instead of the
+    // unreadable-transient it is
     if (typeof sAny.getWithTimeout === 'function' && getTimeout !== undefined) {
-      try {
-        const res = sAny.getWithTimeout(id, getTimeout);
-        out.request = res?.value ?? res ?? null;
-      } catch (err) {
-        out.request = null;
-      }
+      const res = sAny.getWithTimeout(id, getTimeout);
+      out.request = res?.value ?? res ?? null;
     } else if (typeof sAny.get === 'function') {
-      try {
-        out.request =
-          store.get<{
-            id: string;
-            status?: string;
-            labels?: string[];
-            closed_at?: string;
-            updated_at?: string;
-          }>(id) ?? null;
-      } catch {
-        out.request = null;
-      }
+      out.request =
+        store.get<{
+          id: string;
+          status?: string;
+          labels?: string[];
+          closed_at?: string;
+          updated_at?: string;
+        }>(id) ?? null;
     } else {
       out.request = null;
     }
@@ -221,7 +222,7 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     // the replica answers its own presence — no manifest/.dolt/root
     // stamp means nothing materialized yet; `bro mesh pull` is the fix
     out.replicaAgeMs = replicaAgeMs(plane.peerDir);
-    let shipTimeout = remaining(timeoutMs);
+    const shipTimeout = left();
     const shipped =
       out.replicaAgeMs === undefined
         ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
@@ -233,7 +234,7 @@ export function readDepState(plane: WaitPlane, id: string, timeoutMs?: number): 
     }
     return out;
   }
-  let checkoutTimeout = remaining(timeoutMs);
+  const checkoutTimeout = left();
   const shipped = shippedOnCheckout(plane.peer, id, checkoutTimeout);
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`);

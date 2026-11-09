@@ -200,8 +200,14 @@ import {
   routeEventsStream,
   type EventsStreamBus,
 } from '../planes/stream.ts';
-import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
-import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts';
+import { fileProviderConfig, providerProxy, type ProviderConfig } from './serve-provider.ts';
+import {
+  conductorConfig,
+  conductorProxy,
+  routeBindings,
+  type ConductorConfig,
+  type TerminalRegistry,
+} from './serve-conductor.ts';
 import type { ExitCode } from '@broject/core';
 import type { AcpTerminals, TerminalFollow } from '@broject/providers';
 import { acpTransport } from './serve-acp.ts';
@@ -489,9 +495,10 @@ export interface ServeDeps {
     dispose?: () => void;
   };
   /** `/api/v1/terminals/<id>/output` — the conductor's live acp
-   *  terminal registry (bro-eua0d). Absent → the route 404s like any
-   *  unwired plane (no conductor, no agent shells to read). */
-  terminals?: () => AcpTerminals | undefined;
+   *  terminal registry (bro-eua0d), one registry or every lane's at
+   *  once under a multi-provider gateway. Absent → the route 404s
+   *  like any unwired plane (no conductor, no agent shells to read). */
+  terminals?: () => TerminalRegistry | undefined;
   /** `/api/v1/acp` native ACP transport (bro-ymbq1) — Streamable HTTP,
    *  raw-stream like /v1/*; absent means no acp backend wired. Sync:
    *  the SDK's node adapter owns its async internally. `dispose` is the
@@ -1537,7 +1544,7 @@ async function routeTerminalOutput(
  *  stays under the complexity cap. Headers precede `reg.follow()` so a
  *  synchronous `exit` can never end a headerless response; the snapshot
  *  then streams through the drain-fed queue at the reader's pace. */
-function followTerminalOutput(res: ServerResponse, reg: AcpTerminals, id: string): void {
+function followTerminalOutput(res: ServerResponse, reg: TerminalRegistry, id: string): void {
   let handle: TerminalFollow | undefined;
   const gone = (): boolean => res.writableEnded || res.destroyed;
   // Outbound frames park in `queue`, not the socket's own buffer — when
@@ -2455,6 +2462,53 @@ async function armBusBroker(dir: string, url: string): Promise<BusBroker | undef
   }
 }
 
+/** The lanes the gateway serves — the default backend plus every
+ *  exposed provider, each reachable by its own model prefix. */
+/** The routes the gateway answers to — the PUBLIC names a client asks
+ *  for, not the private entry keys. The default lane's own key comes
+ *  first, then the declared routes; a lane reached by two routes lists
+ *  both (spec bro-jxw7p). */
+function conductorLanes(cfg: ConductorConfig): string[] {
+  return routeBindings(cfg).map(binding => binding.name);
+}
+
+/** The /v1 provider planes for a repo-scoped serve — the conductor's
+ *  explicit backend (BRO_PROVIDER_BACKEND / serve.backend) beats the
+ *  byte proxy's upstream+key pair, which stays the plain-HTTP fallback.
+ *  The repo's own bro.config may own upstream/apiKeyEnv — the full
+ *  merge applies; env still overrides. Kept out of the command body:
+ *  the wiring is one decision, not the command's to narrate. */
+function servePlanes(dir: string): {
+  conductorCfg: ConductorConfig | undefined;
+  providerCfg: ProviderConfig | undefined;
+} {
+  const conductorCfg = conductorConfig(process.env, dir);
+  const providerCfg =
+    conductorCfg === undefined
+      ? fileProviderConfig(process.env, () => loadBroConfig(dir))
+      : undefined;
+  return { conductorCfg, providerCfg };
+}
+
+/** The one startup line naming which plane answers /v1 — the
+ *  conductor's lanes, plus the fast lane's upstream when armed (the
+ *  only /v1 surface that bypasses session/new, spec bro-6asnu), else
+ *  the byte proxy's upstream. */
+function logServePlanes(planes: {
+  conductorCfg: ConductorConfig | undefined;
+  providerCfg: ProviderConfig | undefined;
+}): void {
+  const { conductorCfg, providerCfg } = planes;
+  if (conductorCfg !== undefined) {
+    const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
+    console.log(
+      `provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`
+    );
+  } else if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
+  }
+}
+
 export async function runServeCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'ensure') {
     await cmdEnsure(argv.slice(1));
@@ -2498,16 +2552,11 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
-  // the conductor answers /v1 from a configured acp provider
-  // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
-  // proxy's upstream+key pair, which stays the plain-HTTP fallback
-  const conductorCfg = conductorConfig(process.env, dir);
-  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
-  if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`);
-  } else if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
-  }
+  // the conductor answers /v1 from a configured acp provider — the byte
+  // proxy's upstream+key pair stays the plain-HTTP fallback
+  const planes = servePlanes(dir);
+  const { conductorCfg, providerCfg } = planes;
+  logServePlanes(planes);
   // the session token — the "local session context" made concrete.
   // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
   // (crash recovery keeps the credential clients already hold), else
