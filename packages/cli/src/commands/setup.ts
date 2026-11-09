@@ -421,8 +421,8 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
     return;
   }
   try {
-    execFileSync( // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
-      'npx',
+    execFileSync(
+      'npx', // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
       { cwd: dir, stdio: 'pipe' }
     )
