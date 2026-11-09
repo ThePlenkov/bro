@@ -372,8 +372,12 @@ function* fencedJsonBodies(comment: { body: string }): Generator<string> {
       return;
     }
     if (body.slice(after, eol).trim() !== '') {
-      // ```json <junk> — not a record fence; keep scanning past it
-      i = after;
+      // ```json <junk> — not a record fence; keep scanning past it.
+      // Jump to the next marker on the line when one exists, else to
+      // the line end — restarting just past this marker rescans the
+      // same line's suffix per marker (quadratic on hostile input)
+      const next = body.indexOf('```json', after);
+      i = next !== -1 && next < eol ? next : eol + 1;
       continue;
     }
     const close = body.indexOf('```', eol + 1);
@@ -517,7 +521,12 @@ function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
 }
 
 function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
-  return rows.filter((i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number');
+  // typeof null === 'object' — a null element would pass the object
+  // check and throw on .number; Number.isInteger keeps 1.5/NaN/Infinity
+  // out of issue URLs and API paths (external data, kody integer rule)
+  return rows.filter(
+    (i): i is GhIssue => i !== null && typeof i === 'object' && Number.isInteger(i.number)
+  );
 }
 
 export function issueComments(
