@@ -1569,7 +1569,6 @@ interface GateMember {
   updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
   fetchErrors: number;
-  fetchErrors: number;
 }
 
 /** The registry handle a pending member polls — `spawnedAt` is the
