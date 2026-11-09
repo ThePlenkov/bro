@@ -41,12 +41,15 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
  *  null-config pins applied to whatever env the site passes. */
 export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string {
   // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
-  return execFileSync('git', args, {
-    // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    ...opts,
-    env: testGitEnv(opts.env ?? process.env),
-    encoding: 'utf8',
-  });
+  return execFileSync(
+    'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+    args,
+    {
+      ...opts,
+      env: testGitEnv(opts.env ?? process.env),
+      encoding: 'utf8',
+    }
+  );
 }
 
 /** A fixture repo shaped like a real one on ANY host git. `init` alone
@@ -78,12 +81,15 @@ export function testGitSpawn(
   opts: SpawnSyncOptions = {}
 ): SpawnSyncReturns<string> {
   // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
-  return spawnSync('git', args, {
-    // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    ...opts,
-    env: testGitEnv(opts.env ?? process.env),
-    encoding: 'utf8',
-  });
+  return spawnSync(
+    'git', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+    args,
+    {
+      ...opts,
+      env: testGitEnv(opts.env ?? process.env),
+      encoding: 'utf8',
+    }
+  );
 }
 
 /** Delete ambient repo/agent pins from process.env (git-location and
