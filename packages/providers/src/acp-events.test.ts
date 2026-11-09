@@ -13,7 +13,7 @@ import {
   type BusBroker,
 } from '@broject/core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { agentTurnPlane } from './acp-events.ts';
+import { agentEventRecord, agentTurnPlane, DRAIN_DEFAULT_MS } from './acp-events.ts';
 
 // in-process git + the BRO_* badge read must never inherit the OUTER
 // session's pins — same scrub rule every fixture suite carries
@@ -68,7 +68,7 @@ function readArchive(dir: string, agentId: string): Array<Record<string, unknown
 async function probeAgent(dir: string) {
   const res = await busProbe(busSocketPath(dir)!, {
     filter: { topics: ['agent'] },
-    windowMs: 50,
+    windowMs: 250,
   });
   return res.events;
 }
@@ -135,6 +135,12 @@ describe('agentTurnPlane', () => {
       const updates = rows.filter(r => r.kind === 'update');
       assert.equal(updates.length, 6); // chunk + tool open + tool done + sub + 2 usage
       assert.equal((updates[0]!.update as SessionUpdate).sessionUpdate, 'agent_message_chunk');
+      // the wire shape survives verbatim — the card renderer's
+      // content/rawInput/locations ride the row untouched
+      assert.deepEqual(
+        updates.map(r => r.update),
+        [chunk, toolOpen, toolDone, subagent, usage(100), usage(200)]
+      );
       const last = rows.at(-1)!;
       assert.equal(last.kind, 'turn');
       assert.equal(last.phase, 'stop');
@@ -171,6 +177,36 @@ describe('agentTurnPlane', () => {
     } finally {
       await broker.close();
     }
+  });
+
+  test('agentEventRecord lands an out-of-band row in the same archive (spec bro-l8wqu)', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-t1';
+    try {
+      agentEventRecord(dir, 'sess-1', "acp provider 'kilo'", {
+        kind: 'permission',
+        title: 'rm -rf /',
+        verdict: 'denied',
+      });
+      const rows = readArchive(dir, 'native-t1');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.kind, 'permission');
+      assert.equal(rows[0]!.title, 'rm -rf /');
+      assert.equal(rows[0]!.verdict, 'denied');
+      assert.equal(rows[0]!.session, 'sess-1');
+      assert.equal(rows[0]!.by, "acp provider 'kilo'");
+      assert.equal(rows[0]!.key, 'native-t1');
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('unbadged agentEventRecord writes nothing — the archive stays absent', () => {
+    const dir = repo();
+    delete process.env.BRO_AGENT_ID;
+    agentEventRecord(dir, 's', 'x', { kind: 'permission', verdict: 'denied' });
+    const common = gitCommonDir(dir)!;
+    assert.equal(existsSync(join(common, 'bro', 'agents')), false);
   });
 
   test('unbadged turns key acp:<sessionId> and never write an archive', async () => {
@@ -273,6 +309,50 @@ describe('agentTurnPlane', () => {
         usages.map(e => (e.payload as { used: number }).used),
         [1, 5]
       );
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() honors a finite timeout override', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.stop('end_turn');
+      await plane.drain(50);
+      assert.ok(true);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() clamps an above-max timeout without throwing', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+      plane.start();
+      plane.stop('end_turn');
+      await plane.drain(3_000_000_000);
+      assert.ok(true);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test('drain() falls back to the default for NaN/0/negative', async () => {
+    const dir = repo();
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    try {
+      for (const v of [NaN, 0, -1]) {
+        const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' });
+        plane.start();
+        plane.stop('end_turn');
+        await plane.drain(v);
+      }
+      assert.equal(DRAIN_DEFAULT_MS, 3_000);
     } finally {
       await broker.close();
     }

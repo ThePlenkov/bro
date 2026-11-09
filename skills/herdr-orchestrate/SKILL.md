@@ -55,6 +55,12 @@ exactly the split this rule exists to fix.
    command substitutions or backticks executes on the orchestrator.
    Quote every path expansion.
 3. Get its shell pane: `herdr pane list --workspace <ws>` → pane_id.
+   The pane MUST come from the worktree's own workspace — `herdr
+   worktree open`/`worktree create` binds cwd to the worktree at open
+   time, and the agent process inherits it. Never start the agent in a
+   generic pane and rely on it `cd`-ing later: a wrong spawn cwd leaves
+   the worker outside its checkout, and repeated `cd <worktree>` in
+   agent commands is a symptom of that wrong cwd, not normalcy.
 4. `herdr agent start {{TASK_ID}}-worker --kind {{AGENT_KIND}} --pane <pane_id>`
    → the pane must be at an interactive shell prompt; success means the
    agent was detected in that terminal and is ready for input.

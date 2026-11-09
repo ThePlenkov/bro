@@ -4,76 +4,87 @@
  * alone lies twice: it answers for zombies (nobody polling) and can't
  * tell a reused pid from the process that recorded it.
  */
-import { readFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { readFileSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
  *  unreaped zombie) and starttime (field 22). Post-comm fields split
  *  from index 0 = field 3. Null where /proc is absent or unreadable. */
-export function procStat(
-  pid: number
-): { state: string; start: string } | null {
+export function procStat(pid: number): { state: string; start: string } | null {
   if (process.platform === 'linux') {
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-      return { state: rest[0] ?? '', start: rest[19] ?? '' }
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return { state: rest[0] ?? '', start: rest[19] ?? '' };
     } catch {
-      return null
+      return null;
     }
   }
-  if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
+  if (
+    process.platform === 'darwin' ||
+    process.platform === 'freebsd' ||
+    process.platform === 'openbsd'
+  ) {
     try {
       // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
-      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], { encoding: 'utf8', timeout: 1000 })
-      const lines = out.trim().split('\n').filter(Boolean)
-      if (lines.length === 0) return null
-      const line = lines[0]
-      const trimmed = line.trim()
+      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], {
+        encoding: 'utf8',
+        timeout: 1000,
+      });
+      const lines = out.trim().split('\n').filter(Boolean);
+      if (lines.length === 0) return null;
+      const line = lines[0];
+      const trimmed = line.trim();
       // Strip the whole state token (may include modifiers like +, L, s) before parsing lstart
-      const startMatch = trimmed.match(/^\S+\s+(.+)$/s)
-      const start = startMatch ? startMatch[1].trim() : ''
+      const startMatch = trimmed.match(/^\S+\s+(.+)$/s);
+      const start = startMatch ? startMatch[1].trim() : '';
       if (start !== '') {
-        const st = trimmed.match(/^(\S+)/)?.[1] ?? ''
+        const st = trimmed.match(/^(\S+)/)?.[1] ?? '';
         // Return just lstart as start; pid is already tracked separately by the caller
-        return { state: st[0] ?? st ?? '', start }
+        return { state: st[0] ?? st ?? '', start };
       }
       // Try with pid in output format
       try {
-        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], { encoding: 'utf8', timeout: 1000 })
-        const lines2 = out2.trim().split('\n').filter(Boolean)
-        if (lines2.length === 0) return null
-        const line2 = lines2[0]
-        const trimmed2 = line2.trim()
-        const m = trimmed2.match(/^(\d+)\s+(\S+)\s+(.+)$/s)
+        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], {
+          encoding: 'utf8',
+          timeout: 1000,
+        });
+        const lines2 = out2.trim().split('\n').filter(Boolean);
+        if (lines2.length === 0) return null;
+        const line2 = lines2[0];
+        const trimmed2 = line2.trim();
+        const m = trimmed2.match(/^(\d+)\s+(\S+)\s+(.+)$/s);
         if (m) {
-          const st = m[2]
-          const sstart = trimmed2.replace(/^\d+\s+\S+\s+/, '').trim()
-          return { state: st[0] ?? st ?? '', start: sstart }
+          const st = m[2];
+          const sstart = trimmed2.replace(/^\d+\s+\S+\s+/, '').trim();
+          return { state: st[0] ?? st ?? '', start: sstart };
         }
-        const m2 = trimmed2.match(/^(\S+)\s+(.+)$/s)
+        const m2 = trimmed2.match(/^(\S+)\s+(.+)$/s);
         if (m2) {
-          const st = m2[1]
-          const sstart = trimmed2.replace(/^\S+\s+/, '').trim()
-          return { state: st[0] ?? st ?? '', start: sstart }
+          const st = m2[1];
+          const sstart = trimmed2.replace(/^\S+\s+/, '').trim();
+          return { state: st[0] ?? st ?? '', start: sstart };
         }
       } catch {
         // fall through
       }
       // Fallback to just state
       try {
-        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
-        const st = out2.trim()[0] ?? ''
-        return { state: st, start: '' }
+        const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
+          encoding: 'utf8',
+          timeout: 1000,
+        });
+        const st = out2.trim()[0] ?? '';
+        return { state: st, start: '' };
       } catch {
-        const st = trimmed.match(/^(\S)/)?.[1] ?? trimmed[0] ?? ''
-        return { state: st, start: '' }
+        const st = trimmed.match(/^(\S)/)?.[1] ?? trimmed[0] ?? '';
+        return { state: st, start: '' };
       }
     } catch {
-      return null
+      return null;
     }
   }
-  return null
+  return null;
 }
 
 /** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live
@@ -90,41 +101,135 @@ export function procStat(
  *  for process groups, so the signal cannot attest that pid. */
 export function pidAlive(pid: number, pidStart?: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
-    return false
+    return false;
   }
   try {
-    process.kill(pid, 0)
+    process.kill(pid, 0);
   } catch (e) {
     // EPERM = exists but owned by another uid — still subject to the
     // zombie and reuse checks below; /proc stat is world-readable, so
     // foreign ownership doesn't make identity unverifiable
     if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
-      return false
+      return false;
     }
   }
-  const st = procStat(pid)
+  const st = procStat(pid);
   if (st?.state === 'Z') {
-    return false
+    return false;
   }
   if (pidStart === undefined) {
-    return true
+    return true;
   }
   if (st === null || st.start === '') {
-    return true
+    return true;
   }
   // pidStart may be stored as "pid start" or just "start" for compatibility
   if (st.start === pidStart) {
-    return true
+    return true;
   }
   // If stored as "<pid> <start>" match suffix
-  const parts = pidStart.trim().split(/\s+/)
+  const parts = pidStart.trim().split(/\s+/);
   if (parts.length >= 2) {
-    const startOnly = pidStart.trim().replace(/^\S+\s+/, '')
+    const startOnly = pidStart.trim().replace(/^\S+\s+/, '');
     if (startOnly === st.start || st.start === startOnly) {
-      return true
+      return true;
     }
   }
-  return false
+  return false;
+}
+
+export interface ProcEntry {
+  pid: number;
+  state: string;
+  ppid: number;
+  pgrp: number;
+  start: string;
+}
+
+/** One shared scan of /proc for the group and tree probes — `null`
+ *  when /proc itself is unreadable; `unverified` marks at least one
+ *  non-ENOENT stat failure (a process we could not inspect). */
+export function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return null;
+  }
+  const entries: ProcEntry[] = [];
+  let unverified = false;
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    } catch (e) {
+      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
+      // else (EACCES under hidepid, …) is a process we could not inspect
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        unverified = true;
+      }
+      continue;
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    entries.push({
+      pid,
+      state: rest[0] ?? '',
+      ppid: Number(rest[1]),
+      pgrp: Number(rest[2]),
+      start: rest[19] ?? '',
+    });
+  }
+  return { entries, unverified };
+}
+
+/** A live member of process group `pgid`. kill(-pgid, 0) gates first —
+ *  ESRCH is a group that no longer exists (pidAlive's ESRCH-or-hard-
+ *  failure rule; EPERM is a live group we cannot signal) — but it also
+ *  counts an unreaped zombie member, so live members are read from
+ *  /proc the way procStat reads one process: state 'Z' is nobody.
+ *  `minStart` bounds a member's starttime from below — our members
+ *  forked after the group leader, so a member older than it belongs to
+ *  a pgid the kernel recycled after the group died, not to this group.
+ *
+ *  Two edges where the probe cannot answer, and the answer differs by
+ *  platform: on Linux a vanished /proc, or a member stat that fails
+ *  for any reason but ENOENT, stays fail-open (pidAlive's rule: never
+ *  a false "the group is dead"); off Linux /proc never exists at all,
+ *  so the probe cannot tell a zombie member from a live one — false. */
+export function groupMemberAlive(pgid: number, minStart?: string): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(-pgid, 0);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false;
+    }
+  }
+  const scan = scanProc();
+  if (scan === null) {
+    return process.platform === 'linux';
+  }
+  const min = minStart === undefined ? Number.NaN : Number(minStart);
+  for (const e of scan.entries) {
+    if (e.state === 'Z' || e.pgrp !== pgid) {
+      continue;
+    }
+    const start = Number(e.start);
+    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
+      return true;
+    }
+  }
+  // no confirmed member — but a process we could not inspect might be
+  // one: fail open, never a false "the group is dead"
+  return scan.unverified;
 }
 
 /** An attempt handle's identity — `<pid> [starttime]`: the worker
@@ -135,18 +240,18 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
  *  so callers stay fail-open the way pidAlive documents. Null when no
  *  positive integer pid is there at all. */
 export function handleOwner(text: string): { pid: number; start?: string } | null {
-  const s = text.trim()
-  const parts = s.split(/\s+/)
-  const pid = Number(parts[0])
+  const s = text.trim();
+  const parts = s.split(/\s+/);
+  const pid = Number(parts[0]);
   if (!Number.isInteger(pid) || pid <= 0) {
-    return null
+    return null;
   }
   if (parts.length < 2) {
-    return { pid }
+    return { pid };
   }
   // start may contain spaces (e.g. BSD/macOS lstart); slice after the pid token
-  const start = s.slice(parts[0].length).trim()
-  return start === '' ? { pid } : { pid, start }
+  const start = s.slice(parts[0].length).trim();
+  return start === '' ? { pid } : { pid, start };
 }
 
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
@@ -154,21 +259,19 @@ export function handleOwner(text: string): { pid: number; start?: string } | nul
  *  A pid without a start can't disambiguate, so it reads as ownerless:
  *  a reuse-blind owner would suppress the mtime fallback while still
  *  trusting a recycled pid — the worst of both planes. */
-export function markerOwner(
-  firstLine: string | undefined
-): { pid: number; start: string } | null {
-  const s = (firstLine ?? '').trim()
+export function markerOwner(firstLine: string | undefined): { pid: number; start: string } | null {
+  const s = (firstLine ?? '').trim();
   // Parse positionally to avoid regex backtracking (CodeQL polynomial regex).
   // Separators are any whitespace — a tab-spaced marker is still owned.
-  const firstSpace = s.search(/\s/)
-  if (firstSpace === -1) return null
-  const rest = s.slice(firstSpace + 1).trimStart()
-  const secondSpace = rest.search(/\s/)
-  if (secondSpace === -1) return null
-  const pidStr = rest.slice(0, secondSpace).trim()
-  const start = rest.slice(secondSpace + 1).trim()
-  const pid = Number(pidStr)
-  return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null
+  const firstSpace = s.search(/\s/);
+  if (firstSpace === -1) return null;
+  const rest = s.slice(firstSpace + 1).trimStart();
+  const secondSpace = rest.search(/\s/);
+  if (secondSpace === -1) return null;
+  const pidStr = rest.slice(0, secondSpace).trim();
+  const start = rest.slice(secondSpace + 1).trim();
+  const pid = Number(pidStr);
+  return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null;
 }
 
 /** Is this marker's owning session alive? A recorded owner decides by
@@ -181,8 +284,6 @@ export function markerLive(
   liveMs: number,
   now: number = Date.now()
 ): boolean {
-  const owner = markerOwner(firstLine)
-  return owner === null
-    ? mtimeMs >= now - liveMs
-    : pidAlive(owner.pid, owner.start || undefined)
+  const owner = markerOwner(firstLine);
+  return owner === null ? mtimeMs >= now - liveMs : pidAlive(owner.pid, owner.start || undefined);
 }
