@@ -80,12 +80,6 @@ for a tool-less backend that advertises nothing, and
 An unset backend falls back to the proxy; a misnamed or non-`acp`
 entry is a loud startup error, never a silent proxy.
 
-**The conductor path is session-grade.** Every `POST /v1/messages`
-opens a real agent session — `session/new` plus the client's own
-session-start hooks. A conversation turn can afford seconds; a
-client's _internal_ model calls cannot. An interactive client must
-point its internal models — the auto-mode permission/safety
-classifier and the small/fast background model (claude-code's
 **The conductor path is session-grade — unless the fast lane is
 armed.** Every `POST /v1/messages` that conducts opens a real agent
 session — `session/new` plus the client's own session-start hooks.

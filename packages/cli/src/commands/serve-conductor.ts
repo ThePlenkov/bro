@@ -106,6 +106,10 @@ export interface ConductorConfig {
    *  session/new. Absent when the lane is disabled or no upstream
    *  key is configured. */
   fast?: FastLane;
+  /** Set when FAST_LANE=off|0|false or serve.fastLane:false killed the
+   *  lane — a disabled lane is intentional routing, not a missing
+   *  upstream key, so `unrouted` must not claim one. */
+  fastDisabled?: boolean;
   /** The `agents.<kind>` bags — the session cap's knobs (spec
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
@@ -235,15 +239,24 @@ function resolveCatalog(
  *  `BRO_PROVIDER_FAST_LANE=off|0|false` or `serve.fastLane:false`
  *  returns every call to the session lane; no upstream key leaves the
  *  lane unarmed (fast-shaped calls still conduct). */
+/** The disable half of the lane's arming — kept apart so `unrouted`
+ *  means "no upstream key", never "operator turned it off". */
+function fastLaneDisabled(env: NodeJS.ProcessEnv, serve: { fastLane?: boolean }): boolean {
+  const flag = env.BRO_PROVIDER_FAST_LANE?.trim().toLowerCase();
+  return flag === 'off' || flag === '0' || flag === 'false' || serve.fastLane === false;
+}
+
 function resolveFastLane(
   env: NodeJS.ProcessEnv,
-  serve: { fastModel?: string; fastLane?: boolean }
+  serve: { upstream?: string; apiKeyEnv?: string; fastModel?: string; fastLane?: boolean }
 ): FastLane | undefined {
-  const flag = env.BRO_PROVIDER_FAST_LANE?.trim().toLowerCase();
-  if (flag === 'off' || flag === '0' || flag === 'false' || serve.fastLane === false) {
+  if (fastLaneDisabled(env, serve)) {
     return undefined;
   }
-  const pair = providerConfig(env);
+  // the file layer's upstream/apiKeyEnv resolves exactly like the byte
+  // proxy's — a config-only upstream must steer the lane, never send
+  // credentials to the default host instead
+  const pair = providerConfig(env, serve);
   if (pair === undefined) {
     return undefined;
   }
@@ -343,6 +356,7 @@ export function conductorConfig(
     model: resolveModel(env, entry),
     cwd: dir,
     fast: resolveFastLane(env, cfg.serve),
+    fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
@@ -2262,10 +2276,12 @@ function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
 async function parseMessagesBody(
   req: IncomingMessage,
   res: ServerResponse
-): Promise<MessagesRequest | undefined> {
+): Promise<{ body: MessagesRequest; raw: string } | undefined> {
   let body: MessagesRequest;
+  let raw: string;
   try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest;
+    raw = await readBody(req);
+    body = JSON.parse(raw) as MessagesRequest;
   } catch (err) {
     if (err instanceof Error && err.message === 'request body too large') {
       tooLarge(req, res);
@@ -2297,7 +2313,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return canonical;
+  return { body: canonical, raw };
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
@@ -2453,7 +2469,14 @@ function fastLaneOf(
   if (!fastShaped(body, cfg.fast?.maxTokens ?? FAST_MAX_TOKENS)) {
     return { lane: 'session' };
   }
-  return cfg.fast === undefined ? { lane: 'session', unrouted: true } : { lane: 'fast' };
+  if (cfg.fast !== undefined) {
+    return { lane: 'fast' };
+  }
+  // a disabled lane is the operator's intent — only a missing upstream
+  // key earns the unrouted observability marker
+  return cfg.fastDisabled === true
+    ? { lane: 'session' }
+    : { lane: 'session', unrouted: true };
 }
 
 async function messages(
@@ -2462,8 +2485,9 @@ async function messages(
   wire: WireCtx,
   parent: OtelCtx | undefined
 ): Promise<void> {
-  const body = await parseMessagesBody(req, res);
-  if (body === undefined) return;
+  const parsed = await parseMessagesBody(req, res);
+  if (parsed === undefined) return;
+  const { body, raw } = parsed;
   const t0 = Date.now();
   // the fast lane (spec bro-6asnu) — a classifier-shaped call byte-
   // forwards to the direct upstream instead of paying session/new
@@ -2479,10 +2503,16 @@ async function messages(
     // the upstream answers the id the client sent — the model pin
     // exists for the inherited-lane case (devin/swe-2-max names a
     // conductor-only wire no upstream serves)
-    const payload = JSON.stringify(
-      fast.model === undefined ? body : { ...body, model: fast.model }
-    );
-    await forwardBody(req, res, fast, payload);
+    // the upstream gets the client's own bytes — the canonicalized body
+    // carries lifted `systemTurns` a strict Messages upstream rejects.
+    // The model pin rewrites the RAW json so no other field changes
+    // shape (the pin exists for the inherited-lane case: devin/swe-2-max
+    // names a conductor-only wire no upstream serves).
+    const payload =
+      fast.model === undefined
+        ? raw
+        : JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: fast.model });
+    await forwardBody(req, res, fast, payload, wire.cfg.timeoutMs);
     return;
   }
   const key = conversationKey(req, body);

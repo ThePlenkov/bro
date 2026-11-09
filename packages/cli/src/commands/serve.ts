@@ -2550,7 +2550,11 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
-  logServePlanes(servePlanes(dir));
+  // the conductor answers /v1 from a configured acp provider — the byte
+  // proxy's upstream+key pair stays the plain-HTTP fallback
+  const planes = servePlanes(dir);
+  const { conductorCfg, providerCfg } = planes;
+  logServePlanes(planes);
   // the session token — the "local session context" made concrete.
   // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
   // (crash recovery keeps the credential clients already hold), else

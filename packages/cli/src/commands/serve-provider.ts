@@ -179,7 +179,8 @@ async function forwardUpstream(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ProviderConfig,
-  payload?: string
+  payload?: string,
+  timeoutMs?: number
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const target = `${cfg.upstream}${req.url ?? '/'}`;
@@ -188,6 +189,17 @@ async function forwardUpstream(
   // nobody's session
   const abort = new AbortController();
   res.on('close', () => abort.abort());
+  // the caller's deadline rides the lane too — a stalled upstream must
+  // not hold the request open past the turn budget it answers under
+  const timer =
+    timeoutMs === undefined ? undefined : setTimeout(() => abort.abort(), timeoutMs);
+  timer?.unref();
+  const dropTimer = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  };
+  res.on('close', dropTimer);
   let upstream: Response;
   try {
     upstream = await fetch(target, {
@@ -204,6 +216,7 @@ async function forwardUpstream(
           : {}),
     });
   } catch (err) {
+    dropTimer();
     sendUpstreamError(
       res,
       502,
@@ -227,6 +240,7 @@ async function forwardUpstream(
   // mid-stream failures can't re-send the status — destroy is the
   // honest end: the client's transport reports a truncated response
   body.on('error', () => res.destroy());
+  body.on('end', dropTimer);
   body.pipe(res);
 }
 
@@ -240,7 +254,8 @@ export function forwardBody(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ProviderConfig,
-  payload: string
+  payload: string,
+  timeoutMs?: number
 ): Promise<void> {
-  return forwardUpstream(req, res, cfg, payload);
+  return forwardUpstream(req, res, cfg, payload, timeoutMs);
 }

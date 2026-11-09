@@ -1685,14 +1685,18 @@ function serveEnviron(
   } catch {
     // unreadable — raced exit or a platform without /proc
   }
-  // in tests/same-process scenarios /proc won't reflect env set after start
+  // same-process serves: the CURRENT process.env is the truth — the
+  // /proc snapshot predates any env the caller set or deleted after
+  // start (test fixtures mutate process.env mid-run)
   if (serve.pid === process.pid) {
+    const own: Record<string, string> = {};
     for (const k of Object.keys(process.env)) {
       const v = process.env[k];
       if (typeof v === 'string') {
-        out[k] = v;
+        own[k] = v;
       }
     }
+    return Object.keys(own).length > 0 ? own : undefined;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -1731,7 +1735,8 @@ const UPSTREAM_KEY_ENVS = [
  *  presence/flag, never surfaced. */
 function fastLaneArmed(
   env: Record<string, string> | undefined,
-  serveLane?: boolean
+  serveLane?: boolean,
+  sameProcess?: boolean
 ): boolean {
   // the config escape hatch — serve.fastLane:false disables the lane
   // regardless of env evidence, exactly as resolveFastLane honors it
@@ -1743,21 +1748,21 @@ function fastLaneArmed(
     return f === 'off' || f === '0' || f === 'false';
   };
   const nonBlank = (v: string | undefined): boolean => v !== undefined && v.trim() !== '';
-  // server env wins when present, but also fall back to process.env
-  // for vars set after process start (e.g. in tests) so /proc's
-  // startup snapshot doesn't hide them
+  // server env wins when present; the process.env fallback exists only
+  // for legs doctor shares — a missing /proc read or OUR OWN process.
+  // A foreign server's env must never be padded with doctor's own:
+  // its missing key means the lane is unarmed there even if doctor's
+  // shell carries one.
+  const ownEnv = env === undefined || sameProcess === true;
   const get = (k: string): string | undefined => {
     const v = env?.[k];
     if (v !== undefined && v !== '') {
       return v;
     }
-    return (process.env as Record<string, string | undefined>)[k];
+    return ownEnv ? (process.env as Record<string, string | undefined>)[k] : undefined;
   };
   const hasKey = (): boolean => UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k)));
-  const fastLane =
-    env?.BRO_PROVIDER_FAST_LANE ??
-    (process.env as Record<string, string | undefined>).BRO_PROVIDER_FAST_LANE;
-  return hasKey() && !flagsOff(fastLane);
+  return hasKey() && !flagsOff(get('BRO_PROVIDER_FAST_LANE'));
 }
 
 /** The model ids an acp entry can serve: the pinned `model` field plus
@@ -1861,6 +1866,10 @@ interface ClassifierCtx {
   /** the serve's env proves the fast lane armed (bro-6asnu) — the
    *  conductor routes classifier calls upstream itself. */
   fastArmed?: boolean;
+  /** the resolved fast-model pin (BRO_PROVIDER_FAST_MODEL →
+   *  serve.fastModel) — without it a conductor-only classifier id
+   *  forwards verbatim and the upstream rejects it. */
+  fastModel?: string;
 }
 
 /** One client source → its warn row(s). A live-endpoint hit outranks
@@ -1882,7 +1891,11 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
   ) {
     // the serve's fast lane (bro-6asnu) already routes classifier calls
     // upstream — the warn only stands while no upstream key arms it
-    if (ctx.fastArmed === true) {
+    if (
+      ctx.fastArmed === true &&
+      (ctx.fastModel !== undefined ||
+        !classifierPins(src).some(([, v]) => v.includes('/')))
+    ) {
       return [
         check(
           'conductor',
@@ -1890,6 +1903,17 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
           `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
             (hits.length > 0 ? ` — ${hits.join('; ')}` : '') +
             ' — fast lane armed: classifier calls route to the direct upstream'
+        ),
+      ];
+    }
+    if (ctx.fastArmed === true) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            ` — ${hits.join('; ')} — the lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
         ),
       ];
     }
@@ -1906,12 +1930,30 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
     ];
   }
   if (hits.length > 0) {
-    if (ctx.fastArmed === true) {
+    // the ok needs evidence the client actually reaches an armed
+    // conductor — a bare pin plus an armed env elsewhere is no routing
+    const armedHere = ctx.fastArmed === true && ctx.conductor !== undefined;
+    // a `<name>/<id>` pin is conductor vocabulary no upstream serves —
+    // without the model pin it forwards verbatim and fails there
+    const needsModelPin =
+      ctx.fastModel === undefined &&
+      classifierPins(src).some(([, v]) => v.includes('/'));
+    if (armedHere && !needsModelPin) {
       return [
         check(
           'conductor',
           'ok',
           `${src.label}: ${hits.join('; ')} — on an armed conductor the fast lane routes them to the direct upstream`
+        ),
+      ];
+    }
+    if (armedHere) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ${hits.join('; ')} — the fast lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
         ),
       ];
     }
@@ -1941,6 +1983,8 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   const nonAcpNames = new Set(Object.keys(providers).filter(n => !acpNames.has(n)));
   const serve = liveServeEndpoint(dir);
   const env = serveEnviron(serve);
+  const sameProcess = serve?.pid === process.pid;
+  const fileServe = loadConfig(dir).serve;
   const backend = serveBackendName(serve, env);
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
   const ctx: ClassifierCtx = {
@@ -1949,7 +1993,11 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
-    fastArmed: fastLaneArmed(env, loadConfig(dir).serve.fastLane),
+    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess),
+    fastModel:
+      env?.BRO_PROVIDER_FAST_MODEL ??
+      (env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined) ??
+      fileServe.fastModel,
   };
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
   const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));
