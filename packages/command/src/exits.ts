@@ -68,7 +68,5 @@ export function printUsage(text: string, code: ExitCode): never {
 /** Warn about a deprecated spelling — the same one-shot discipline the
  *  bro-family CLIs use. */
 export function warnDeprecated(what: string, advice?: string): void {
-  console.error(
-    `warning: ${what} is deprecated${advice === undefined ? '' : ` — ${advice}`}`
-  );
+  console.error(`warning: ${what} is deprecated${advice === undefined ? '' : ` — ${advice}`}`);
 }

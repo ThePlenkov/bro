@@ -10,8 +10,10 @@ const FIXTURE = fileURLToPath(new URL('./fixtures/cli.ts', import.meta.url));
 /** Run the fixture CLI — a real process, so the exit codes are the
  *  real ones. */
 function run(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [FIXTURE, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, [FIXTURE, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => {
@@ -20,7 +22,7 @@ function run(args: string[]): Promise<{ code: number; stdout: string; stderr: st
     child.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
     });
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on('close', code => resolve({ code: code ?? -1, stdout, stderr }));
   });
 }
 
@@ -147,7 +149,10 @@ describe('the registry', () => {
       definePlugin({ name: 'b', summary: 'b', run: () => undefined }),
     ];
     const groups = pluginGroups(plugins);
-    assert.deepEqual(groups.get('g')?.map((p) => p.name), ['a']);
+    assert.deepEqual(
+      groups.get('g')?.map(p => p.name),
+      ['a']
+    );
   });
 
   test('an external plugin joins the registry', () => {
@@ -204,6 +209,9 @@ describe('the registry', () => {
         }),
       ],
     });
-    assert.deepEqual(membersOf(cmd).map((p) => p.name), ['shared', 'own']);
+    assert.deepEqual(
+      membersOf(cmd).map(p => p.name),
+      ['shared', 'own']
+    );
   });
 });

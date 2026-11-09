@@ -1168,7 +1168,7 @@ export function syncStack(
   const members = collectMembers(name, root, ctx.rev);
   // a branch that no longer exists cannot carry the chain — the git truth
   // decides, so the root falls back to the default branch
-  const chainRoot = chainRootBase(members, ctx.trunk, (b) => localBranch(root, b));
+  const chainRoot = chainRootBase(members, ctx.trunk, b => localBranch(root, b));
   if (chainRoot === undefined) {
     // not even the default branch exists locally: there is nothing to
     // stand on, and planning onto a dead ref is what this guard is for

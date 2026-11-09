@@ -41,7 +41,6 @@ const mergeRule = (autoMerge: boolean): string =>
   review gate. Your job ends once the PR exists.
 `;
 
-
 /** The work-order prompt written to the fresh worktree — the agent's
  *  whole world is the claimed bead (or the claimed clump, when the
  *  scheduler batched compatible beads — spec bro-nspj7). bro owns the

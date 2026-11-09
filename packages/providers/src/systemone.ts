@@ -14,8 +14,8 @@
  * `keyField` is the config path error messages name (never the env
  * var's NAME — an all-caps pasted key would echo the secret).
  */
-import { isEnvName, JudgeUnavailable } from '@broject/core'
-import type { DecideResult, ProviderEntry } from '@broject/core'
+import { isEnvName, JudgeUnavailable } from '@broject/core';
+import type { DecideResult, ProviderEntry } from '@broject/core';
 import {
   apiVersionedBase,
   mapUsage,
@@ -25,50 +25,50 @@ import {
   stripTrailingSlashes,
   type FetchFn,
   type HttpResult,
-} from './http.ts'
-import type { AcpSeam, ProviderCall } from './registry.ts'
-import { mapTypedAnswers } from './typed.ts'
+} from './http.ts';
+import type { AcpSeam, ProviderCall } from './registry.ts';
+import { mapTypedAnswers } from './typed.ts';
 
 /** A resolved api-model on the systemone wire — the registry hands the
  *  binding host + auth + the picked model; `type:'api'` itself never
  *  reaches here (the api entry is a host, the wire is per-model). */
 export interface ApiTarget {
-  baseUrl?: string
-  apiKeyEnv?: string
-  apiKeyCommand?: string
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  apiKeyCommand?: string;
   /** The key for THIS call — runtime-only: the config never holds a key
    *  value, it names a source. It travels with the entry, so two calls in
    *  one process cannot read each other's key. */
-  apiKey?: string
-  model: string
+  apiKey?: string;
+  model: string;
 }
 
 /** The hosted API default — the entry's baseUrl is optional for this
  *  wire (the api kind requires baseUrl, but the legacy synthesized
  *  path may omit it), so the binding owns the fallback. */
-const DEFAULT_BASE_URL = 'https://api.typesafe.ai'
+const DEFAULT_BASE_URL = 'https://api.typesafe.ai';
 
 export interface ProviderWireOpts {
   /** Test seam — injects a scripted transport. */
-  fetch?: FetchFn
+  fetch?: FetchFn;
   /** Per-call model override — wins over the entry's pinned model
    *  (`judge.model` in provider mode); provenance still reports the
    *  resolved model. */
-  model?: string
+  model?: string;
   /** The config FIELD path error messages name — never the env var's
    *  name, which could BE the pasted secret. */
-  keyField?: string
+  keyField?: string;
   /** acp-kind session seam (spec bro-ribc.1 §acp) — `peer` replaces the
    *  spawned `command` with an in-process AgentApp (tests), `cwd` is
    *  the session's working directory (default: process.cwd()). */
-  acp?: AcpSeam
+  acp?: AcpSeam;
 }
 
 /** The runtime key — an EMPTY string is no key: the request carried
  *  none, and an empty credential would go out instead of the configured
  *  one. */
 function runtimeKey(entry: ApiTarget): string | undefined {
-  return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey
+  return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey;
 }
 
 /** The key from the configured env var — the var must be NAMED (a
@@ -77,32 +77,32 @@ function runtimeKey(entry: ApiTarget): string | undefined {
  *  config FIELD, never the value). */
 function envKey(entry: ApiTarget, keyField: string): string {
   if (entry.apiKeyEnv === undefined) {
-    throw new Error(`${keyField} is not set — the provider has no key to authenticate with`)
+    throw new Error(`${keyField} is not set — the provider has no key to authenticate with`);
   }
   if (!isEnvName(entry.apiKeyEnv)) {
-    throw new Error(`${keyField} is not a valid environment variable name`)
+    throw new Error(`${keyField} is not a valid environment variable name`);
   }
-  const key = process.env[entry.apiKeyEnv]
+  const key = process.env[entry.apiKeyEnv];
   if (!key) {
     throw new JudgeUnavailable(
       `the env var named by ${keyField} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
-    )
+    );
   }
-  return key
+  return key;
 }
 
 /** The key this call authenticates with — the runtime key wins (it was
  *  handed to THIS call on purpose), then the secret-store command, then
  *  the configured env var. */
 function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
-  const runtime = runtimeKey(entry)
+  const runtime = runtimeKey(entry);
   if (runtime !== undefined) {
-    return runtime
+    return runtime;
   }
   if (entry.apiKeyCommand !== undefined) {
-    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
+    return runKeyCommand(entry.apiKeyCommand, keyField, deadline);
   }
-  return envKey(entry, keyField)
+  return envKey(entry, keyField);
 }
 
 /** System One's error contract → the throw the caller sees: 401/403 auth is
@@ -110,22 +110,22 @@ function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
  *  the caller's bug (a plain error, not fail-open), everything else is
  *  the service being down. */
 function throwForStatus(res: HttpResult): never {
-  const err = objOr(res.body).error
-  const errObj = objOr(err)
-  let detail = `HTTP ${res.status}`
+  const err = objOr(res.body).error;
+  const errObj = objOr(err);
+  let detail = `HTTP ${res.status}`;
   if (typeof err === 'string') {
-    detail = err
+    detail = err;
   } else if (typeof errObj.message === 'string') {
-    detail = errObj.message
+    detail = errObj.message;
   }
   if (res.status === 401 || res.status === 403) {
-    throw new JudgeUnavailable(`systemone auth failed — ${detail}`)
+    throw new JudgeUnavailable(`systemone auth failed — ${detail}`);
   }
   if (res.status === 422) {
     // validation — the caller's payload, not an outage
-    throw new Error(`systemone rejected the request — ${detail}`)
+    throw new Error(`systemone rejected the request — ${detail}`);
   }
-  throw new JudgeUnavailable(`systemone unavailable — ${detail}`)
+  throw new JudgeUnavailable(`systemone unavailable — ${detail}`);
 }
 
 /** The typed call surface for a `systemone` entry — one decide() over
@@ -135,38 +135,38 @@ export function systemoneCall(
   entry: ApiTarget,
   opts: ProviderWireOpts = {}
 ): ProviderCall {
-  const keyField = opts.keyField ?? 'apiKeyEnv'
-  const model = opts.model ?? entry.model
+  const keyField = opts.keyField ?? 'apiKeyEnv';
+  const model = opts.model ?? entry.model;
   // env redirects an IMPLICIT default only — a configured baseUrl is
   // the operator's choice even when it literally names the hosted API,
   // and a stray TYPESAFE_BASE_URL must never reroute a router's traffic
   // to TypeSafe (or vice versa). A set-but-empty env counts as unset:
   // '' would win over every configured value and yield a relative
   // endpoint that can only fail.
-  const envBase = process.env.TYPESAFE_BASE_URL?.trim() || undefined
-  const configured = entry.baseUrl?.trim() || undefined
-  const base = configured === undefined ? (envBase ?? DEFAULT_BASE_URL) : configured
-  const endpoint = `${apiVersionedBase(base)}/systemone`
+  const envBase = process.env.TYPESAFE_BASE_URL?.trim() || undefined;
+  const configured = entry.baseUrl?.trim() || undefined;
+  const base = configured === undefined ? (envBase ?? DEFAULT_BASE_URL) : configured;
+  const endpoint = `${apiVersionedBase(base)}/systemone`;
   return async (state, questions, deadline): Promise<DecideResult> => {
-    const key = apiKey(entry, keyField, deadline)
-    const started = Date.now()
+    const key = apiKey(entry, keyField, deadline);
+    const started = Date.now();
     const res = await postJson(
       endpoint,
       { model, state, questions },
       { authorization: `Bearer ${key}` },
       deadline,
       // the documented transient contract: rate-limited + every 5xx
-      (s) => s === 429 || s >= 500,
+      s => s === 429 || s >= 500,
       opts.fetch
-    )
+    );
     if (res.status !== 200) {
-      throwForStatus(res)
+      throwForStatus(res);
     }
-    const body = objOr(res.body)
+    const body = objOr(res.body);
     // map only asked questions — an unasked id in the reply is drift
     // we ignore, an asked-but-absent one is "no verdict" (the chain
     // marks it low), an asked-but-malformed one fails open
-    const answers = mapTypedAnswers(body.answers, questions, by, 'systemone')
+    const answers = mapTypedAnswers(body.answers, questions, by, 'systemone');
     return {
       answers,
       model: typeof body.model === 'string' ? body.model : model,
@@ -174,6 +174,6 @@ export function systemoneCall(
       usage: mapUsage(body, 'input_tokens'),
       // the chain owns thresholding — a raw backend reports none
       lowConfidence: [],
-    }
-  }
+    };
+  };
 }

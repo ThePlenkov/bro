@@ -200,8 +200,7 @@ for (const c of SPEC_CONNECTORS) {
 
 /** The telemetry plane's usage — the plane had no help of its own, and
  *  `bro telemetry --help` ran the report. */
-const TELEMETRY_USAGE =
-  'bro telemetry [--session <id>] [--json]   Hook + command latency report'
+const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -742,10 +741,10 @@ export const PLUGINS: BroPlugin[] = [
       // a help request never runs the report: the plane reads the perf
       // journal, and the token that leads the argv says help, not run
       if (hasHelpFlag(argv)) {
-        printUsage(TELEMETRY_USAGE, 0)
-        return
+        printUsage(TELEMETRY_USAGE, 0);
+        return;
       }
-      return runHooksCommand(['perf', ...argv])
+      return runHooksCommand(['perf', ...argv]);
     },
   }),
   definePlugin({
