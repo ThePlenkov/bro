@@ -1121,14 +1121,14 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
  *  mark this push's own entry dead. A refusal thrown before the pin
  *  leaves none to kill.
  *
- *  Ownership: a surviving row is this attempt's ONLY while it still
- *  carries the failure stamp the dying connector wrote onto its own
- *  row before throwing — commitSpawn clears spawnError/pid on every
- *  fresh row, so a pid-less entry whose stamp matches this error can
- *  only be our dead pin. A racing respawn's fresh row has neither and
- *  must never be stopped. The predicate and the write ride ONE
- *  registry lock — a separate read-then-patch could stop a live worker
- *  that slipped between the two.
+ *  Ownership: a surviving row is a dead pin ONLY while it still
+ *  carries a launch-failure stamp — commitSpawn clears spawnError/pid
+ *  on every fresh row and a live worker's handle lands the pid, so a
+ *  pid-less entry with a non-empty spawnError can only be a spawn that
+ *  stamped its own row and died before launch. A racing respawn's
+ *  fresh row has neither and must never be stopped. The predicate and
+ *  the write ride ONE registry lock — a separate read-then-patch could
+ *  stop a live worker that slipped between the two.
  *
  *  The lead's claim can survive a post-commit backend failure too (the
  *  connector's CAS rollback only covers commitSpawn's own writes):
@@ -1150,8 +1150,7 @@ function settleUnavailableSpawn(ctx: Ctx, m: GateMember, msg: string): PushOutco
       cur.stopped !== true &&
       cur.pid === undefined &&
       typeof cur.spawnError === 'string' &&
-      cur.spawnError !== '' &&
-      (msg.includes(cur.spawnError) || cur.spawnError.includes(msg))
+      cur.spawnError !== ''
   );
   const leadClaim =
     ctx.beadsDir !== undefined ? probeStep(ctx.beadsDir, m.beads[0]!.id) : undefined;
@@ -4498,29 +4497,35 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     if (verdict === 'active') {
       continue;
     }
-    q.stack.splice(q.stack.indexOf(m), 1);
-    // the member's ceiling reservation dies with its tenure — landed
-    // or failed, no PR of its own keeps arriving to consume it
-    releaseMemberReservation(q, m);
-    q.tally[verdict] += 1;
-    if (verdict === 'parked') {
-      for (const b of m.beads) {
-        q.parkedClaims.add(b.id);
-      }
-    }
-    if (verdict === 'landed') {
-      syncAfterLand(ctx);
-    }
-    if (ctx.json) {
-      console.log(
-        JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map(b => b.id), result: verdict })
-      );
-    }
+    retireMember(ctx, q, m, verdict);
   }
   // (c) reconcile orphaned fleet PRs
   await reconcileFleet(ctx, q);
   // (d) ceiling check handled by tryClaim
   return busy;
+}
+
+/** A settled member leaves the stack: splice, release its ceiling
+ *  reservation (landed or failed, no PR of its own keeps arriving to
+ *  consume it), tally the verdict, and stamp the parked-claim set /
+ *  post-merge sync / json row the verdict asks for. */
+function retireMember(ctx: Ctx, q: QueueState, m: GateMember, verdict: ServiceVerdict): void {
+  q.stack.splice(q.stack.indexOf(m), 1);
+  releaseMemberReservation(q, m);
+  q.tally[verdict] += 1;
+  if (verdict === 'parked') {
+    for (const b of m.beads) {
+      q.parkedClaims.add(b.id);
+    }
+  }
+  if (verdict === 'landed') {
+    syncAfterLand(ctx);
+  }
+  if (ctx.json) {
+    console.log(
+      JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map(b => b.id), result: verdict })
+    );
+  }
 }
 
 /** The filesystems a claim writes to — the worktree parent (sibling
