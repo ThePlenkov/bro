@@ -37,6 +37,12 @@ type = "merge-step"
 already use. `stepKind` keeps it agent-executable (an unknown type is an
 agent step).
 
+The registration is **verified**, not assumed: the pour reads
+`types.custom` back and fails when `merge-step` is not in it. A pour that
+cannot keep the merge step's kind would flatten it to `task` and the step
+would close on a claim instead of a verdict — so the pour refuses
+instead.
+
 bd's `mol pour` flattens an unregistered type to `task`, so the verifier
 does not rely on the poured issue's type alone: it also resolves the
 molecule's formula (`bd formula show <formula> --json`, the root issue's
@@ -59,8 +65,8 @@ formula, so the check survives the path that skips bro's pour.
 3. **Close or refuse.**
    - `MERGED` → the step closes. The close reason leads with the verdict
      and the actor:
-     `verified: PR #958 MERGED (merge d11788ce, by ThePlenkov)` — then the
-     agent's own sentence, kept as the claim it is.
+     `verified: [#958](https://github.com/owner/repo/pull/958) MERGED (merge d11788ce, by ThePlenkov)` —
+     then the agent's own sentence, kept as the claim it is.
    - anything else (`OPEN`, a closed-unmerged PR) → **refuse**. The gate
      holds: exit `3` (actionable — the caller can land the PR), with the
      host's state in the message.
@@ -68,7 +74,23 @@ formula, so the check survives the path that skips bro's pour.
 
 The verdict leads the close reason because the downstream steps read it as
 their input: the close-out step needs the PR that landed, and it gets it
-from the verdict line rather than from the agent's prose.
+from the verdict line rather than from the agent's prose. A PR the claim
+named by link reads as a link in the verdict too — the repository travels
+with the number, so the line says *which* PR landed.
+
+### One PR, one repository, one host
+
+The claim names a PR, not a PR number:
+
+- The **bare form** (`#958`) names the number; the **link form**
+  (`[#958](…/pull/958)`) names the number, the repository and the host.
+  A bare reference next to a link is the same PR — the link's repository
+  survives it.
+- One PR number in **two repositories** (or on two hosts) is ambiguity:
+  the verifier must not pick one, so the claim is refused.
+- A link that names **another host** is refused before the host is asked:
+  this connector reads one host, and a same-numbered PR there is not this
+  one. `--pr N` (which names no host) stays the way through.
 
 ### Who landed it
 
@@ -91,18 +113,24 @@ the host's account is the part the ledger can stand behind.
 | risk | what happens | mitigation |
 | --- | --- | --- |
 | the host is unreadable | the step cannot be verified | fail closed — refuse, never close on an unreadable answer |
+| the review connector has no credentials | the host cannot answer | the auth failure is a refusal (exit 3), not a crash — the step stays open |
 | the result names the wrong PR | the wrong PR is verified | the PR comes from the result, the handoff, or `--pr`; a claim naming two different PRs is ambiguous and refused |
+| the result names another repository's PR | the wrong PR is verified | one PR number in two repositories is ambiguous and refused |
+| the result names another host | the wrong PR is verified | a link on another host is refused before the host is asked |
 | a formula step is renamed | the title match stops resolving | the formula's declaration and the poured type are two independent signals; neither has to be the only one |
+| the pour cannot register the merge kind | the merge step flattens to `task` | the pour reads `types.custom` back and refuses when `merge-step` is missing |
 
 ## Plan
 
-- [ ] `PrMeta` carries the merge record (`mergedBy`, `mergeSha`) and the
+- [x] `PrMeta` carries the merge record (`mergedBy`, `mergeSha`) and the
       GitHub connector fills it
-- [ ] a PR-reference parser for free text (link form + bare form)
-- [ ] the convoy verifier: find the PR, ask the host, verdict or refusal
-- [ ] `bro convoy done` runs it on a `merge-step` and refuses with exit 3
-- [ ] `bro convoy pour` registers the `merge-step` type
-- [ ] the formula's merge step declares `type = "merge-step"` and tells the
+- [x] a PR-reference parser for free text (link form + bare form) — a
+      string walk, not a regex: the text is untrusted, and a regex over
+      it is super-linear (CodeQL)
+- [x] the convoy verifier: find the PR, ask the host, verdict or refusal
+- [x] `bro convoy done` runs it on a `merge-step` and refuses with exit 3
+- [x] `bro convoy pour` registers the `merge-step` type — and verifies it
+- [x] the formula's merge step declares `type = "merge-step"` and tells the
       agent to name the PR in its result
 
 ## Verify
@@ -112,4 +140,8 @@ the host's account is the part the ledger can stand behind.
 - A merge step whose PR is merged closes, and its close reason leads with
   the verdict and the actor.
 - A merge step with no PR named is refused — unverifiable is not verified.
+- A merge step whose claim names a PR on another host is refused before
+  the host is asked.
+- A merge step whose claim names one PR number in two repositories is
+  refused as ambiguous.
 - A non-merge step closes exactly as before.

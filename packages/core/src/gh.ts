@@ -209,6 +209,9 @@ export interface PrRef {
   /** `owner/repo` when the reference carried a link — the bare form
    *  names no repo, and the caller supplies the one it works in. */
   repo?: string;
+  /** the host the link named — `github.com`, or the GHES host. The
+   *  bare form names no host. */
+  host?: string;
 }
 
 /** A markdown link found in free text — where it sits, and the URL it
@@ -288,10 +291,9 @@ function markdownLinks(text: string): MarkdownLink[] {
   return links;
 }
 
-/** The PR a link names — `https://host/owner/repo/pull/N`. Null when the
- *  URL names no PR: an issue link (`/issues/N`) is a different object,
- *  and reading it as a PR would verify the wrong one. */
-function pullRef(url: string): { pr: number; repo: string } | null {
+/** The host and the path a URL names — null when the URL is not an
+ *  HTTP(S) URL with a host and a path. */
+function urlParts(url: string): { host: string; path: string } | null {
   const u = url.trimEnd();
   const schemeEnd = u.indexOf('://');
   if (schemeEnd < 0) return null;
@@ -299,15 +301,41 @@ function pullRef(url: string): { pr: number; repo: string } | null {
   if (scheme !== 'http' && scheme !== 'https') return null;
   const hostEnd = u.indexOf('/', schemeEnd + 3);
   if (hostEnd < 0 || hostEnd === schemeEnd + 3) return null;
-  const segments = u.slice(hostEnd + 1).split('/');
+  return { host: u.slice(schemeEnd + 3, hostEnd), path: u.slice(hostEnd + 1) };
+}
+
+/** Is this a path segment — not empty, no whitespace? */
+function isPathSegment(s: string): boolean {
+  return s !== '' && !/\s/.test(s);
+}
+
+/** Is this a run of digits? */
+function isDigits(s: string): boolean {
+  return s !== '' && /^\d+$/.test(s);
+}
+
+/** The `owner/repo/pull/N` a link's path names — null when the path
+ *  names no PR: an issue link (`/issues/N`) is a different object, and
+ *  reading it as a PR would verify the wrong one. */
+function pullPath(path: string): { owner: string; repo: string; num: string } | null {
+  const segments = path.split('/');
   if (segments.length !== 4) return null;
   const [owner, repo, kind, num] = segments;
   if (kind !== 'pull') return null;
-  if (owner === '' || repo === '' || /\s/.test(owner) || /\s/.test(repo)) return null;
-  if (num === '' || !/^\d+$/.test(num)) return null;
-  const pr = Number(num);
+  if (!isPathSegment(owner) || !isPathSegment(repo)) return null;
+  if (!isDigits(num)) return null;
+  return { owner, repo, num };
+}
+
+/** The PR a link names — `https://host/owner/repo/pull/N`. */
+function pullRef(url: string): { pr: number; repo: string; host: string } | null {
+  const parts = urlParts(url);
+  if (parts === null) return null;
+  const path = pullPath(parts.path);
+  if (path === null) return null;
+  const pr = Number(path.num);
   if (!Number.isInteger(pr) || pr <= 0) return null;
-  return { pr, repo: `${owner}/${repo}` };
+  return { pr, repo: `${path.owner}/${path.repo}`, host: parts.host };
 }
 
 /** The PRs the markdown links name — the link's own `#N` label is not a
@@ -317,7 +345,7 @@ function linkRefs(links: MarkdownLink[]): PrRef[] {
   for (const link of links) {
     const ref = pullRef(link.url);
     if (ref === null) continue;
-    out.push({ pr: ref.pr, repo: ref.repo });
+    out.push({ pr: ref.pr, repo: ref.repo, host: ref.host });
   }
   return out;
 }
@@ -344,6 +372,14 @@ function bareRefs(text: string, links: MarkdownLink[]): PrRef[] {
   return out;
 }
 
+/** The identity of a reference — the PR, with the host and the
+ *  repository that name it. The bare form names neither, so it keeps
+ *  its own key. */
+function refKey(ref: PrRef): string {
+  if (ref.repo === undefined) return `#${ref.pr}`;
+  return `${ref.host ?? ''}/${ref.repo}#${ref.pr}`;
+}
+
 /** The PR references in free text — the clickable `[#N](…/pull/N)` form
  *  (which carries the repo) and the bare `#N` (which does not). The two
  *  forms of the same PR are one reference: the link's own `#N` is not a
@@ -357,7 +393,7 @@ export function prRefs(text: string): PrRef[] {
   const out: PrRef[] = [];
   const seen = new Set<string>();
   for (const ref of [...linkRefs(links), ...bareRefs(text, links)]) {
-    const key = ref.repo === undefined ? `#${ref.pr}` : `${ref.repo}#${ref.pr}`;
+    const key = refKey(ref);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(ref);

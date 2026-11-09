@@ -87,6 +87,33 @@ interface Fixture {
   ) => Promise<void>;
 }
 
+/** The files the fake bd serves — the molecule, the formula, the task
+ *  rows and the close log. */
+interface BdFiles {
+  mol: string;
+  formula: string;
+  tasks: string;
+  log: string;
+}
+
+/** Point the environment at the fake bd and its files — the restore
+ *  comes back with it. */
+function fakeBdEnv(dir: string, files: BdFiles): () => void {
+  const keys = ['PATH', 'FAKE_BD_MOL', 'FAKE_BD_FORMULA', 'FAKE_BD_TASKS', 'FAKE_BD_LOG'];
+  const prev = new Map(keys.map((k) => [k, process.env[k]]));
+  process.env.PATH = `${dir}:${prev.get('PATH') ?? ''}`;
+  process.env.FAKE_BD_MOL = files.mol;
+  process.env.FAKE_BD_FORMULA = files.formula;
+  process.env.FAKE_BD_TASKS = files.tasks;
+  process.env.FAKE_BD_LOG = files.log;
+  return () => {
+    for (const [k, v] of prev) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
 /** A fake bd on PATH + the molecule/formula it serves. */
 function fixture(opts: {
   mergeType: string;
@@ -96,35 +123,23 @@ function fixture(opts: {
   const dir = mkdtempSync(join(tmpdir(), 'bro-convoy-merge-'));
   writeFileSync(join(dir, 'bd'), FAKE_BD);
   chmodSync(join(dir, 'bd'), 0o755);
-  const mol = join(dir, 'mol.json');
-  const formula = join(dir, 'formula.json');
-  const tasks = join(dir, 'tasks.json');
-  const log = join(dir, 'closes.log');
-  writeFileSync(mol, moleculeJson(opts.mergeType));
-  writeFileSync(formula, formulaJson(opts.formulaType));
+  const files: BdFiles = {
+    mol: join(dir, 'mol.json'),
+    formula: join(dir, 'formula.json'),
+    tasks: join(dir, 'tasks.json'),
+    log: join(dir, 'closes.log'),
+  };
+  writeFileSync(files.mol, moleculeJson(opts.mergeType));
+  writeFileSync(files.formula, formulaJson(opts.formulaType));
   writeFileSync(
-    tasks,
+    files.tasks,
     tasksJson(opts.upstreamReason ?? `Gate green on [#${PR}](https://github.com/o/r/pull/${PR})`)
   );
-  const prev = {
-    PATH: process.env.PATH,
-    FAKE_BD_MOL: process.env.FAKE_BD_MOL,
-    FAKE_BD_FORMULA: process.env.FAKE_BD_FORMULA,
-    FAKE_BD_TASKS: process.env.FAKE_BD_TASKS,
-    FAKE_BD_LOG: process.env.FAKE_BD_LOG,
-  };
-  process.env.PATH = `${dir}:${prev.PATH ?? ''}`;
-  process.env.FAKE_BD_MOL = mol;
-  process.env.FAKE_BD_FORMULA = formula;
-  process.env.FAKE_BD_TASKS = tasks;
-  process.env.FAKE_BD_LOG = log;
+  const restore = fakeBdEnv(dir, files);
   return {
-    closes: () => (existsSync(log) ? readFileSync(log, 'utf8') : ''),
+    closes: () => (existsSync(files.log) ? readFileSync(files.log, 'utf8') : ''),
     cleanup: () => {
-      for (const [k, v] of Object.entries(prev)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
+      restore();
       rmSync(dir, { recursive: true, force: true });
     },
     run: async (args, probe) => {
@@ -164,6 +179,18 @@ const MERGED: MergeProbe = {
   mergeSha: 'd11788ce1234',
 };
 
+/** What the command must have done — the exit code, the closes it
+ *  asked for, and the PRs the host was asked about. */
+function assertOutcome(s: Scenario, closes: string, asked: number[]): void {
+  assert.equal(process.exitCode, s.exit);
+  if (s.closed === undefined) {
+    assert.equal(closes, '');
+    return;
+  }
+  for (const want of s.closed) assert.match(closes, want);
+  if (s.asked !== undefined) assert.deepEqual(asked, s.asked);
+}
+
 /** Run one scenario against the fixture and assert what it must do. */
 async function runScenario(s: Scenario): Promise<void> {
   const f = fixture({
@@ -180,14 +207,7 @@ async function runScenario(s: Scenario): Promise<void> {
       if (answer === undefined) throw new Error('the host must not be asked');
       return answer(t);
     });
-    assert.equal(process.exitCode, s.exit);
-    const closes = f.closes();
-    if (s.closed === undefined) {
-      assert.equal(closes, '');
-    } else {
-      for (const want of s.closed) assert.match(closes, want);
-    }
-    if (s.asked !== undefined) assert.deepEqual(asked, s.asked);
+    assertOutcome(s, f.closes(), asked);
   } finally {
     process.exitCode = prev;
     f.cleanup();
@@ -231,6 +251,13 @@ const SCENARIOS: Scenario[] = [
     answer: async () => ({ state: 'OPEN' }),
     exit: 3,
     asked: [PR],
+  },
+  {
+    name: 'a link on another host is refused before the host is asked',
+    result: `merged [#${PR}](https://ghe.example.com/o/r/pull/${PR})`,
+    answer: async () => MERGED,
+    exit: 3,
+    asked: [],
   },
   {
     name: 'a step that is not a merge step closes as before',

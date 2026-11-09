@@ -12,7 +12,8 @@
  * caller (the CLI owns the connectors); nothing here touches the
  * network.
  */
-import { prRefs } from '@broject/core';
+import { ghHost, prLink, prRefs } from '@broject/core';
+import type { PrRef } from '@broject/core';
 
 /** The step kind a formula declares for the step that lands the PR. A
  *  bd custom type, registered by `bro convoy pour` next to `agent` and
@@ -34,6 +35,8 @@ export interface MergeTarget {
   pr: number;
   /** `owner/repo` — absent when the reference carried no link. */
   repo?: string;
+  /** the host the link named — absent for the bare form. */
+  host?: string;
 }
 
 /** A merge step's claim: what the agent said, and what came before. */
@@ -48,25 +51,100 @@ export interface MergeClaim {
 
 export type MergeVerdict = { ok: true; reason: string } | { ok: false; message: string };
 
-/** The one PR a set of references names — and the ambiguity verdict when
- *  they name more than one. */
-function pickTarget(
-  refs: { pr: number; repo?: string }[],
-  source: string
-): { target?: MergeTarget; message?: string } {
-  const distinct = new Map<number, string | undefined>();
-  for (const r of refs) distinct.set(r.pr, r.repo);
-  if (distinct.size === 0) return {};
-  if (distinct.size > 1) {
-    const named = [...distinct.keys()].map(n => `#${n}`).join(', ');
+/** Where a claim's PR may be named — the result's own words, then the
+ *  upstream handoff. */
+interface RefSource {
+  name: string;
+  refs: PrRef[];
+}
+
+/** The PRs a set of references names — one entry per PR number, with
+ *  the repository and host that name it, plus the numbers two
+ *  repositories disagree on. */
+interface Collected {
+  byNumber: Map<number, MergeTarget>;
+  conflicts: number[];
+}
+
+/** The explicit PR — `--pr N`. An unusable number is refused, not
+ *  guessed. */
+function explicitTarget(pr: number | undefined): { target?: MergeTarget; message?: string } | undefined {
+  if (pr === undefined) return undefined;
+  if (!Number.isInteger(pr) || pr <= 0) {
+    return { message: `invalid PR number "${pr}"` };
+  }
+  return { target: { pr } };
+}
+
+/** Where the PR may be named — the result's own text, then the
+ *  upstream handoff's close reasons. */
+function claimSources(claim: MergeClaim): RefSource[] {
+  return [
+    { name: 'result', refs: prRefs(claim.result) },
+    { name: 'handoff', refs: (claim.inputs ?? []).flatMap((input) => prRefs(input.reason)) },
+  ];
+}
+
+/** A target that carries only what is known — no empty repository, no
+ *  empty host. */
+function targetOf(pr: number, repo: string | undefined, host: string | undefined): MergeTarget {
+  const target: MergeTarget = { pr };
+  if (repo !== undefined) target.repo = repo;
+  if (host !== undefined) target.host = host;
+  return target;
+}
+
+/** Fold a second reference into the first — the link's repository and
+ *  host survive a bare reference, and two repositories (or two hosts)
+ *  for one PR number are a conflict the verifier cannot settle. */
+function mergeRefs(known: MergeTarget, ref: PrRef): { target: MergeTarget; conflict: boolean } {
+  const repo = known.repo ?? ref.repo;
+  const host = known.host ?? ref.host;
+  const conflict =
+    (known.repo !== undefined && ref.repo !== undefined && known.repo !== ref.repo) ||
+    (known.host !== undefined && ref.host !== undefined && known.host !== ref.host);
+  return { target: targetOf(known.pr, repo, host), conflict };
+}
+
+/** The PRs a set of references names. */
+function collectTargets(refs: PrRef[]): Collected {
+  const byNumber = new Map<number, MergeTarget>();
+  const conflicts = new Set<number>();
+  for (const ref of refs) {
+    const known = byNumber.get(ref.pr);
+    if (known === undefined) {
+      byNumber.set(ref.pr, targetOf(ref.pr, ref.repo, ref.host));
+      continue;
+    }
+    const merged = mergeRefs(known, ref);
+    byNumber.set(ref.pr, merged.target);
+    if (merged.conflict) conflicts.add(ref.pr);
+  }
+  return { byNumber, conflicts: [...conflicts] };
+}
+
+/** The PR numbers, as they read in a message. */
+function numbered(prs: number[]): string {
+  return prs.map((n) => `#${n}`).join(', ');
+}
+
+/** The one PR a set of references names — and the ambiguity verdict
+ *  when they name more than one. */
+function pickTarget(refs: PrRef[], source: string): { target?: MergeTarget; message?: string } {
+  const collected = collectTargets(refs);
+  if (collected.conflicts.length > 0) {
     return {
-      message: `the ${source} names ${distinct.size} different PRs (${named}) — the verifier cannot pick one; name the merged PR`,
+      message: `the ${source} names ${numbered(collected.conflicts)} in two repositories — the verifier cannot pick one; name the merged PR`,
     };
   }
-  const first = distinct.entries().next();
-  if (first.done) return {};
-  const [pr, repo] = first.value;
-  return { target: repo === undefined ? { pr } : { pr, repo } };
+  if (collected.byNumber.size > 1) {
+    return {
+      message: `the ${source} names ${collected.byNumber.size} different PRs (${numbered([...collected.byNumber.keys()])}) — the verifier cannot pick one; name the merged PR`,
+    };
+  }
+  const target = [...collected.byNumber.values()][0];
+  if (target === undefined) return {};
+  return { target };
 }
 
 /** The PR the claim is about.
@@ -75,25 +153,32 @@ function pickTarget(
  *  the upstream handoff's. Two different PRs in one source is ambiguity
  *  — the verifier must not pick one for the agent. */
 export function mergeClaimTarget(claim: MergeClaim): { target?: MergeTarget; message?: string } {
-  if (claim.pr !== undefined) {
-    if (!Number.isInteger(claim.pr) || claim.pr <= 0) {
-      return { message: `invalid PR number "${claim.pr}"` };
-    }
-    return { target: { pr: claim.pr } };
+  const explicit = explicitTarget(claim.pr);
+  if (explicit !== undefined) return explicit;
+  for (const source of claimSources(claim)) {
+    const picked = pickTarget(source.refs, source.name);
+    if (picked.target !== undefined) return picked;
+    if (picked.message !== undefined) return picked;
   }
-  const own = pickTarget(prRefs(claim.result), 'result');
-  if (own.target !== undefined) return own;
-  if (own.message !== undefined) return own;
-  const upstream = pickTarget(
-    (claim.inputs ?? []).flatMap(input => prRefs(input.reason)),
-    'handoff'
-  );
-  if (upstream.target !== undefined) return upstream;
-  if (upstream.message !== undefined) return upstream;
   return {
     message:
       'the merge step names no PR — the claim cannot be verified; name the merged PR (--pr N, or a PR reference in the result)',
   };
+}
+
+/** How the PR reads in the verdict — the clickable link when the claim
+ *  named the repository, the bare number when it did not. */
+function prRefText(target: MergeTarget): string {
+  if (target.repo === undefined) return `PR #${target.pr}`;
+  return prLink(target.repo, target.pr);
+}
+
+/** The merge record — the sha that landed, and who landed it. */
+function mergeDetail(probe: MergeProbe): string {
+  const parts: string[] = [];
+  if (probe.mergeSha !== undefined) parts.push(`merge ${probe.mergeSha.slice(0, 8)}`);
+  if (probe.mergedBy !== undefined) parts.push(`by ${probe.mergedBy}`);
+  return parts.length > 0 ? ` (${parts.join(', ')})` : '';
 }
 
 /** The close reason: the verdict leads, the agent's claim follows it as
@@ -105,12 +190,49 @@ export function mergeCloseReason(
   probe: MergeProbe,
   claim: MergeClaim
 ): string {
-  const parts: string[] = [];
-  if (probe.mergeSha !== undefined) parts.push(`merge ${probe.mergeSha.slice(0, 8)}`);
-  if (probe.mergedBy !== undefined) parts.push(`by ${probe.mergedBy}`);
-  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-  const head = `verified: PR #${target.pr} MERGED${detail}`;
-  return claim.result.trim() === '' ? head : `${head}\n\n${claim.result.trim()}`;
+  const head = `verified: ${prRefText(target)} MERGED${mergeDetail(probe)}`;
+  const said = claim.result.trim();
+  return said === '' ? head : `${head}\n\n${said}`;
+}
+
+/** The host the connector reads — a claim that names another host names
+ *  another PR, and this host cannot vouch for it. */
+function hostMismatch(target: MergeTarget): string | undefined {
+  if (target.host === undefined) return undefined;
+  if (target.host === ghHost()) return undefined;
+  return `the claim names PR #${target.pr} on ${target.host}, but this connector reads ${ghHost()}`;
+}
+
+/** The host's answer — the probe's own words when it failed. */
+async function askHost(
+  target: MergeTarget,
+  probe: (t: MergeTarget) => Promise<MergeProbe>
+): Promise<{ state: MergeProbe } | { error: string }> {
+  try {
+    return { state: await probe(target) };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** The verdict for a target the claim names — the host's answer decides
+ *  it: only `MERGED` closes the step. */
+async function verdictFor(
+  target: MergeTarget,
+  claim: MergeClaim,
+  probe: (t: MergeTarget) => Promise<MergeProbe>
+): Promise<MergeVerdict> {
+  const answered = await askHost(target, probe);
+  if ('error' in answered) {
+    return { ok: false, message: `the host could not answer for PR #${target.pr}: ${answered.error}` };
+  }
+  if (answered.state.state !== 'MERGED') {
+    return {
+      ok: false,
+      message: `PR #${target.pr} is ${answered.state.state || 'UNKNOWN'} — the gate holds; the merge step closes only on a merged PR`,
+    };
+  }
+  return { ok: true, reason: mergeCloseReason(target, answered.state, claim) };
 }
 
 /** Verify a merge claim against the host.
@@ -126,98 +248,7 @@ export async function verifyMergeClose(
   if (target === undefined) {
     return { ok: false, message: message ?? 'the merge claim names no PR' };
   }
-  let state: MergeProbe;
-  try {
-    state = await probe(target);
-  } catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
-    return { ok: false, message: `the host could not answer for PR #${target.pr}: ${why}` };
-  }
-  if (state.state !== 'MERGED') {
-    return {
-      ok: false,
-      message: `PR #${target.pr} is ${state.state || 'UNKNOWN'} — the gate holds; the merge step closes only on a merged PR`,
-    };
-  }
-  return { ok: true, reason: mergeCloseReason(target, state, claim) };
-}
-
-/** A formula title pattern, split into its literal parts and its
- *  `{{var}}` wildcards. */
-type TitleSegment = { kind: 'literal'; text: string } | { kind: 'wildcard' };
-
-/** The pattern's segments — a string walk, not a regex: a regex over
- *  the pattern is super-linear on hostile input (CodeQL), and the
- *  pattern is read on every merge step the convoy verifies. */
-function titleSegments(pattern: string): TitleSegment[] {
-  const segments: TitleSegment[] = [];
-  let literal = '';
-  let i = 0;
-  while (i < pattern.length) {
-    const end = pattern.startsWith('{{', i) ? pattern.indexOf('}}', i + 2) : -1;
-    // the variable's name holds no `}` — a `{{a}b}}` is no variable
-    const variable = end >= 0 && !pattern.slice(i + 2, end).includes('}');
-    if (variable) {
-      if (literal !== '') {
-        segments.push({ kind: 'literal', text: literal });
-        literal = '';
-      }
-      segments.push({ kind: 'wildcard' });
-      i = end + 2;
-      continue;
-    }
-    literal += pattern[i];
-    i += 1;
-  }
-  if (literal !== '') segments.push({ kind: 'literal', text: literal });
-  return segments;
-}
-
-/** Do the remaining segments all match the empty tail of a title? A
- *  trailing wildcard does — it is the pattern's `.*`. */
-function restAreWildcards(segments: TitleSegment[], from: number): boolean {
-  for (let i = from; i < segments.length; i += 1) {
-    const seg = segments[i];
-    if (seg !== undefined && seg.kind !== 'wildcard') return false;
-  }
-  return true;
-}
-
-/** Does the title match the pattern's segments — the `{{var}}` parts
- *  match any text, the literal parts match themselves. */
-function segmentsMatch(segments: TitleSegment[], title: string): boolean {
-  let si = 0;
-  let ti = 0;
-  let star = -1;
-  let mark = 0;
-  while (ti < title.length) {
-    const seg = segments[si];
-    if (seg !== undefined && seg.kind === 'literal') {
-      if (title.startsWith(seg.text, ti)) {
-        ti += seg.text.length;
-        si += 1;
-        continue;
-      }
-    } else if (seg !== undefined) {
-      // a wildcard takes nothing yet — it grows only if the rest fails
-      star = si;
-      mark = ti;
-      si += 1;
-      continue;
-    }
-    if (star < 0) return false;
-    si = star + 1;
-    mark += 1;
-    ti = mark;
-  }
-  return si === segments.length || restAreWildcards(segments, si);
-}
-
-/** A formula step's title against a poured step's title.
- *
- *  bd copies the formula's title into the issue, with the formula's
- *  `{{var}}`s interpolated — so the formula's pattern is matched with
- *  each variable as a wildcard. */
-export function titleMatches(pattern: string, title: string): boolean {
-  return segmentsMatch(titleSegments(pattern), title.trim());
+  const mismatch = hostMismatch(target);
+  if (mismatch !== undefined) return { ok: false, message: mismatch };
+  return verdictFor(target, claim, probe);
 }

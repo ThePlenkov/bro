@@ -12,9 +12,9 @@ describe('prLink', () => {
 });
 
 describe('prRefs', () => {
-  test('the link form carries the PR and the repo', () => {
+  test('the link form carries the PR, the repo and the host', () => {
     assert.deepEqual(prRefs('merged [#958](https://github.com/ThePlenkov/bro/pull/958) today'), [
-      { pr: 958, repo: 'ThePlenkov/bro' },
+      { pr: 958, repo: 'ThePlenkov/bro', host: 'github.com' },
     ]);
   });
 

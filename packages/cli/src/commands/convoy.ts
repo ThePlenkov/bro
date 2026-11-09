@@ -23,8 +23,8 @@ import { join } from 'node:path'
 import { stringify } from 'smol-toml'
 import {
   checkBeads,
-  ensureAuth,
   EXIT,
+  facadeAuth,
   hasHelpFlag,
   printUsage,
   reviewHost,
@@ -147,7 +147,10 @@ function mergeClaimFor(
 async function probePr(target: MergeTarget): Promise<MergeProbe> {
   // one read of the config: auth and the host must agree on the connectors
   const broConfig = loadBroConfig()
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: broConfig.connectors })
+  // the auth failure is a refusal, not a crash: the verifier turns it
+  // into the actionable exit the caller reads (bro-4cxnd)
+  const auth = facadeAuth('reviews', { dir: process.cwd() }, { prefer: broConfig.connectors })
+  if (auth !== null) throw new Error(auth)
   const rev = reviewHost(undefined, broConfig.connectors)
   const repo = target.repo ?? rev.resolveRepo([])
   const t = { repo, pr: target.pr }

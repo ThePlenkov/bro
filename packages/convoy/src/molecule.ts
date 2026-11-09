@@ -185,36 +185,52 @@ export function formulaSteps(formula: string): MolIssue[] {
   }))
 }
 
+/** Register the custom step types — `agent`, `human`, and the merge
+ *  step's own kind. bd flattens an unregistered type to `task`, and a
+ *  flattened merge step loses the declaration its close verifies on. */
+function registerStepTypes(): void {
+  try {
+    const current = bd(['config', 'get', 'types.custom']).trim()
+    const types = new Set(current ? current.split(/[\s,]+/) : [])
+    types.add('agent').add('human')
+    types.add(MERGE_STEP_TYPE)
+    // bd parses types.custom as a comma-separated list — a space-joined
+    // value reads back as one bogus type and the pour still flattens
+    bd(['config', 'set', 'types.custom', [...types].join(',')])
+  } catch {
+    // old bd without types.custom — the registration check below fails
+  }
+}
+
+/** The types bd actually registered — the pour's own witness. */
+function registeredTypes(): string[] {
+  try {
+    return bd(['config', 'get', 'types.custom']).trim().split(/[\s,]+/)
+  } catch {
+    // registration unverifiable is a failure too
+    return []
+  }
+}
+
 /**
  * `bro convoy pour` — register custom step types once so formulas keep
  * agent/human instead of flattening to task, then pour the formula.
  * Returns the new molecule root id.
  */
 export function pourFormula(formula: string, vars: Record<string, string> = {}): string {
-  try {
-    const current = bd(['config', 'get', 'types.custom']).trim()
-    const types = new Set(current ? current.split(/[\s,]+/) : [])
-    types.add('agent').add('human')
-    // the merge step keeps its kind too — an unregistered type flattens
-    // to task, and the step then loses the declaration the close
-    // verifies on (the formula keeps it, so the fallback still holds)
-    types.add(MERGE_STEP_TYPE)
-    // bd parses types.custom as a comma-separated list — a space-joined
-    // value reads back as one bogus type and the pour still flattens
-    bd(['config', 'set', 'types.custom', [...types].join(',')])
-  } catch {
-    // old bd without types.custom — gates would flatten to task
-  }
-  let registered: string[] = []
-  try {
-    registered = bd(['config', 'get', 'types.custom']).trim().split(/[\s,]+/)
-  } catch {
-    // fall through — registration unverifiable is a failure too
-  }
+  registerStepTypes()
+  const registered = registeredTypes()
   if (!registered.includes('agent') || !registered.includes('human')) {
     throw new Error(
       'types.custom could not register agent/human — pouring would flatten declared gates to task. ' +
         'Upgrade bd or register the types manually: bd config set types.custom "agent human"',
+    )
+  }
+  if (!registered.includes(MERGE_STEP_TYPE)) {
+    throw new Error(
+      `types.custom could not register ${MERGE_STEP_TYPE} — pouring would flatten the merge step to task, ` +
+        'and the step would close without a host verdict. ' +
+        `Register it manually: bd config set types.custom "agent human ${MERGE_STEP_TYPE}"`,
     )
   }
   const args = ['mol', 'pour', formula]

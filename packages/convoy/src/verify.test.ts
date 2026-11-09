@@ -3,7 +3,6 @@ import { describe, test } from 'node:test';
 import {
   mergeClaimTarget,
   mergeCloseReason,
-  titleMatches,
   verifyMergeClose,
   type MergeProbe,
   type MergeTarget,
@@ -31,7 +30,7 @@ describe('mergeClaimTarget', () => {
     const { target } = mergeClaimTarget({
       result: 'merged [#958](https://github.com/ThePlenkov/bro/pull/958)',
     });
-    assert.deepEqual(target, { pr: 958, repo: 'ThePlenkov/bro' });
+    assert.deepEqual(target, { pr: 958, repo: 'ThePlenkov/bro', host: 'github.com' });
   });
 
   test('the handoff names the PR when the result does not', () => {
@@ -60,6 +59,29 @@ describe('mergeClaimTarget', () => {
     const { target, message } = mergeClaimTarget({ result: 'merged', pr: Number.NaN });
     assert.equal(target, undefined);
     assert.match(message ?? '', /invalid PR number/);
+  });
+
+  test('the linked repository survives a bare reference to the same PR', () => {
+    const { target } = mergeClaimTarget({
+      result: 'merged [#958](https://github.com/o/r/pull/958) — PR #958 landed',
+    });
+    assert.deepEqual(target, { pr: 958, repo: 'o/r', host: 'github.com' });
+  });
+
+  test('the link names the host the PR lives on', () => {
+    const { target } = mergeClaimTarget({
+      result: 'merged [#958](https://ghe.example.com/o/r/pull/958)',
+    });
+    assert.equal(target?.host, 'ghe.example.com');
+  });
+
+  test('one PR number in two repositories is ambiguous, not a guess', () => {
+    const { target, message } = mergeClaimTarget({
+      result:
+        'merged [#958](https://github.com/o/r/pull/958) and [#958](https://github.com/o/other/pull/958)',
+    });
+    assert.equal(target, undefined);
+    assert.match(message ?? '', /two repositories/);
   });
 });
 
@@ -123,39 +145,16 @@ describe('mergeCloseReason', () => {
     const reason = mergeCloseReason({ pr: 958 }, { state: 'MERGED' }, { result: '' });
     assert.equal(reason, 'verified: PR #958 MERGED');
   });
-});
 
-describe('titleMatches', () => {
-  test('an exact title matches', () => {
-    assert.equal(
-      titleMatches('Merge — bro act wait --merge', 'Merge — bro act wait --merge'),
-      true
+  test('a repository-qualified PR reads as a link — the verdict names the repo', () => {
+    const reason = mergeCloseReason(
+      { pr: 958, repo: 'o/r', host: 'github.com' },
+      { state: 'MERGED', mergedBy: 'ThePlenkov', mergeSha: 'd11788ce1234' },
+      { result: '' }
     );
-  });
-
-  test('a formula variable is a wildcard', () => {
-    assert.equal(
-      titleMatches('Implement {{bead}} per its spec', 'Implement bro-4cxnd per its spec'),
-      true
+    assert.match(
+      reason,
+      /verified: \[#958\]\(https:\/\/github\.com\/o\/r\/pull\/958\) MERGED \(merge d11788ce, by ThePlenkov\)/
     );
-    assert.equal(titleMatches('Implement {{bead}} per its spec', 'Implement per its spec'), false);
-  });
-
-  test('a different title does not match', () => {
-    assert.equal(titleMatches('Merge — bro act wait --merge', 'Close out — worktree'), false);
-  });
-
-  test('regex metacharacters in the title are literal', () => {
-    assert.equal(titleMatches('a.b', 'a.b'), true);
-    assert.equal(titleMatches('a.b', 'axb'), false);
-  });
-
-  test('an unclosed variable is literal text', () => {
-    assert.equal(titleMatches('a {{b', 'a {{b'), true);
-    assert.equal(titleMatches('a {{b', 'a xb'), false);
-  });
-
-  test('a variable name holding a brace is literal text', () => {
-    assert.equal(titleMatches('a {{b}c}}', 'a {{b}c}}'), true);
   });
 });
