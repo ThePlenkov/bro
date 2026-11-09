@@ -3,9 +3,10 @@
  *
  *   planes in → armed worktrees get workspaces (plain bead-title
  *   labels) → running native agents get read-only mirror panes tailing
- *   their logs (mirrors.ts) → exited agents get their mirror renamed
- *   as an exit marker → every managed workspace gets its `bro: status`
- *   pane (statuses.ts, spec bro-idsat).
+ *   their logs (mirrors.ts — the acp lane excepted: the session pane
+ *   is its one pane, spec bro-l8wqu) → exited agents get their mirror
+ *   renamed as an exit marker → every managed workspace gets its
+ *   `bro: status` pane (statuses.ts, spec bro-idsat).
  *
  * Fleet status (`[state·#PR]` prefixes, `status` tokens, fleet-state
  * files) is the bro daemon's fleet projector, not this file (spec
@@ -18,39 +19,50 @@
  * the snapshot it produced. bro state is never written — the only
  * mutations are herdr CLI calls and the plugin's own state file.
  */
-import { existsSync } from 'node:fs';
-import { basename, isAbsolute, resolve } from 'node:path';
+
 import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, resolve } from 'node:path';
+import { handleOwner } from '../../../packages/core/src/proc.ts';
+import { type Lane, laneOf } from './lanes.ts';
 import {
+  type AgentEntry,
   agentsJson,
   armedWorkDetails,
   ctxJson,
+  gitCommonDir,
+  type HerdrPane,
   type HerdrWorkspace,
+  type HerdrWorktree,
   herdrTry,
   loadState,
   notify,
+  PLUGIN_ID,
+  PLUGIN_ROOT,
   type PluginState,
+  paneIdle,
+  paneList,
+  pidAlive,
   repoDir,
   run,
+  STATE_DIR,
+  type StatusAgent,
   type StatusWorktree,
   saveState,
   stateScope,
+  syncPidPath,
+  type WorkspaceRec,
   withStateLock,
   worktreeGone,
-  type WorkspaceRec,
-  paneList,
-  pidAlive,
 } from './lib.ts';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { convergeLiveViews, liveAgents } from './live-views.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
-import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
-import { dropOrphanSessions, ensureSession } from './sessions.ts';
+import { dropOrphanRenderers, ensureRenderer, retireEvents } from './renderers.ts';
+import { dropOrphanSessions, ensureSession, retireSession } from './sessions.ts';
 import { agentTreePath } from './status.ts';
-import { dropOrphanStatuses, ensureStatus } from './statuses.ts';
+import { dropOrphanStatuses, ensureStatus, retireStatus } from './statuses.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
@@ -137,10 +149,12 @@ function armedSet(p: Planes): Map<string, ArmedTree> {
 }
 
 /** The open-time label matches the daemon projector's contract —
- * `🤖 <worktree-name>` — so a fresh workspace never flashes a bead
- * title or raw slug the next pass would overwrite anyway. */
-function desiredLabel(tree: ArmedTree): string {
-  return `🤖 ${basename(tree.path)}`;
+ * `<lane-icon> <worktree-name>`: 🤖 on the acp lane (a headless robot
+ * owns the session pane), ⚙️ on every other managed lane (spec
+ * bro-l8wqu, operator decision) — so a fresh workspace never flashes
+ * a bead title or raw slug the next pass would overwrite anyway. */
+function desiredLabel(tree: ArmedTree, lane: Lane | undefined): string {
+  return `${lane === 'acp' ? '🤖' : '⚙️'} ${basename(tree.path)}`;
 }
 
 interface WsCtx {
@@ -229,7 +243,7 @@ function convergeWorkspaces(
 ): Map<string, string> {
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
-    const ws = ensureWorkspace(t, desiredLabel(t), ctx);
+    const ws = ensureWorkspace(t, desiredLabel(t, laneOf(p.lanes, t.path)), ctx);
     if (ws !== undefined) wsForPath.set(t.path, ws);
   }
   return wsForPath;
@@ -239,11 +253,19 @@ function convergeWorkspaces(
  *  live mirror retires the fallback tail in the same pass. The
  *  recorded ws id must match the live one — a stale `managed` record
  *  left by a user reopen must not put our pane on their workspace. */
-function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeRenderers(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  sessionArmed: Set<string>
+): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureRenderer({ path, ws, state: ctx.state });
+      // an armed session pane shows exactly one pane — the view folds
+      // the bus tail in (spec bro-l8wqu)
+      const rctx = { path, ws, state: ctx.state };
+      if (sessionArmed.has(path)) retireEvents(rctx);
+      else ensureRenderer(rctx);
     }
   }
   // wsById predates this pass's opens — a just-created workspace is
@@ -255,24 +277,124 @@ function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
  *  renderers so the pane-order decision sees the settled set. Same
  *  managed-record guard as the renderer: a stale `managed` record
  *  must not put our pane on a user's workspace. */
-function convergeStatuses(wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeStatuses(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  sessionArmed: Set<string>
+): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureStatus({ path, ws, state: ctx.state });
+      // an armed session pane folds the status strip into the view
+      // (spec bro-l8wqu)
+      const rctx = { path, ws, state: ctx.state };
+      if (sessionArmed.has(path)) retireStatus(rctx);
+      else ensureStatus(rctx);
     }
   }
   dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
-/** Exactly one session pane per managed workspace — alongside `bro:
- *  status` so the readonly conversation view rides the same managed
- *  set (spec bro-nwl5g). Same managed-record guard as the renderer. */
-function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
+/** The session pane arms BEFORE the retire phases on every viewable
+ *  worktree (spec bro-l8wqu): it is the one human-readable pane — the
+ *  acp lane's session attach OR any managed worktree with a live
+ *  journal — and a workspace whose last pane closes mid-pass is
+ *  auto-reaped under the retiring surfaces, so the flip order must
+ *  leave a live pane behind at every step or the whole workspace
+ *  vanishes (dogfood finding). Same managed-record guard as the
+ *  renderer. */
+function convergeSessionPanes(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  bindByTree: Map<string, { id: string; events: string }>,
+  sessionArmed: Set<string>
+): Set<string> {
+  // pane-live paths — fallback surfaces fold only where the human
+  // pane actually ended up live: eligibility alone must not retire
+  // the mirror into an empty workspace (a failed arm, an unmanaged
+  // record, a stale ws all leave eligibility without a pane)
+  const live = new Set<string>();
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
-    if (rec?.managed === true && rec.ws === ws) {
-      ensureSession({ path, ws, state: ctx.state });
+    if (rec?.managed !== true || rec.ws !== ws) continue;
+    // the binding is the worktree's LATEST journal record — dead
+    // included: a crashed worker's archive is still the pane's feed
+    // and its registry entry is what lets the worker floor read
+    // 'blocked' instead of a blind idle
+    const agent = bindByTree.get(path);
+    if (sessionArmed.has(path)) {
+      if (
+        ensureSession({ path, ws, state: ctx.state, ...(agent !== undefined ? { agent } : {}) })
+      ) {
+        live.add(path);
+      }
+    }
+  }
+  return live;
+}
+
+/** The archive binding per worktree — the LATEST registry record,
+ *  dead included: a crashed agent's journal is still the pane's
+ *  archive, and its record is what lets the pane's worker floor
+ *  read 'blocked' instead of a blind worktree-bound idle. Live
+ *  handle-file agents may have no registry record — they overlay. */
+function archiveBinds(
+  base: string,
+  main: string,
+  liveByTree: Map<string, { id: string; events: string }>
+): Map<string, { id: string; events: string; at: string }> {
+  const bindByTree = new Map<string, { id: string; events: string; at: string }>();
+  for (const e of Object.values(agentsJson(base))) {
+    if (e.worktree === undefined || typeof e.log !== 'string') continue;
+    const events = e.log.replace(/\.log$/, '.events.jsonl');
+    if (!existsSync(events)) continue;
+    const key = isAbsolute(e.worktree) ? e.worktree : resolve(main, e.worktree);
+    const at = typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+    const cur = bindByTree.get(key);
+    if (cur === undefined || at >= cur.at) {
+      bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
+    }
+  }
+  for (const [key, a] of liveByTree) bindByTree.set(key, { ...a, at: '\uffff' });
+  return bindByTree;
+}
+
+/** Where a session pane SHOULD live — the acp lane's attach OR any
+ *  worktree whose agent journal resolves; every other surface (mirror
+ *  tail, events renderer, status strip) folds on this eligibility.
+ *  Managed trees only: a path outside wsForPath can never arm, so
+ *  letting it mark the set retires its mirror into a gap. A live pid
+ *  whose journal is not written yet is likewise not eligible — the
+ *  lane becomes viewable once the archive exists on disk. */
+function sessionEligibility(
+  p: Planes,
+  wsForPath: Map<string, string>,
+  liveByTree: Map<string, { id: string; events: string }>
+): Set<string> {
+  const armed = new Set<string>();
+  for (const [path, lane] of Object.entries(p.lanes)) {
+    if (lane === 'acp' && wsForPath.has(path)) armed.add(path);
+  }
+  for (const [key, a] of liveByTree) {
+    if (wsForPath.has(key) && existsSync(a.events)) armed.add(key);
+  }
+  return armed;
+}
+
+/** Every lane with nothing viewable retires the session pane — a
+ *  worker-less arm has nothing to show. The arming already ran
+ *  (convergeSessionPanes); retiring last is the safe direction: on a
+ *  viewable→empty flip the fallback set armed first, so closing the
+ *  session pane never empties the workspace. */
+function convergeSessions(
+  wsForPath: Map<string, string>,
+  ctx: WsCtx,
+  sessionArmed: Set<string>
+): void {
+  for (const [path, ws] of wsForPath) {
+    const rec = ctx.state.workspaces[path];
+    if (rec?.managed === true && rec.ws === ws && !sessionArmed.has(path)) {
+      retireSession({ path, ws, state: ctx.state });
     }
   }
   dropOrphanSessions(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
@@ -284,9 +406,9 @@ function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
  *  time decide — a vanished checkout is never "transient" twice. */
 const GONE_GRACE_MS = 60_000;
 
-function resolveAgentWorktreePath(a: { worktree?: string }, p: Planes): string | undefined {
+function resolveAgentWorktreePath(a: StatusAgent, p: Planes): string | undefined {
   // Try agentTreePath first (handles registry + name resolution)
-  const fromAgentTreePath = agentTreePath(a as any, p);
+  const fromAgentTreePath = agentTreePath(a, p);
   if (fromAgentTreePath) return fromAgentTreePath;
   // Fallback: if worktree is absolute path
   if (a.worktree && isAbsolute(a.worktree)) {
@@ -302,90 +424,106 @@ function resolveAgentWorktreePath(a: { worktree?: string }, p: Planes): string |
   return undefined;
 }
 
-function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
-  // check agents from status
+/** Prefix-containment counts — a process parked in a subdirectory of
+ *  the tree (or in a parent that owns it) still occupies it. */
+function pathRelated(a: string, treePath: string): boolean {
+  return a === treePath || a.startsWith(`${treePath}/`) || treePath.startsWith(`${a}/`);
+}
+
+/** A running fleet agent whose resolved worktree covers this tree —
+ *  names resolve through `agentTreePath` so a registry-name sighting
+ *  still matches the status plane's absolute paths. */
+function fleetAgentLive(p: Planes, treePath: string): boolean {
   for (const a of p.status.fleet.agents) {
-    if (a.state === 'running') {
-      const ap = resolveAgentWorktreePath(a, p) ?? (a.worktree && isAbsolute(a.worktree) ? a.worktree : undefined);
-      if (ap === treePath) return true;
-      if (ap && (ap.startsWith(treePath + '/') || treePath.startsWith(ap + '/'))) return true;
-    }
+    if (a.state !== 'running') continue;
+    const ap =
+      resolveAgentWorktreePath(a, p) ??
+      (a.worktree !== undefined && isAbsolute(a.worktree) ? a.worktree : undefined);
+    if (ap !== undefined && pathRelated(ap, treePath)) return true;
   }
-  // check loop runs
+  return false;
+}
+
+function loopRunLive(p: Planes, treePath: string): boolean {
   for (const r of p.status.loop.runs) {
-    if (r.state === 'running' && r.worktree) {
-      if (r.worktree === treePath || r.worktree.startsWith(treePath + '/')) return true;
-    }
-  }
-  // check agents.json for live entries pointing to this worktree
-  const reg = agentsJson(p.repo);
-  for (const entry of Object.values(reg)) {
-    if (entry.worktree) {
-      const ew = entry.worktree;
-      const matches =
-        ew === treePath ||
-        ew.startsWith(treePath + '/') ||
-        treePath.startsWith(ew + '/');
-      if (matches) {
-        if (entry.pid === undefined || entry.pid === null) {
-          continue;
-        }
-        const pidStart = (entry as any).pidStart as string | undefined;
-        if (!pidAlive(entry.pid, pidStart)) {
-          continue;
-        }
-        // must correspond to a still-running agent in fleet status
-        const eid = (entry as any).agentId ?? (entry as any).id ?? (entry as any).molStep;
-        let running = false;
-        let found = false;
-        for (const a of p.status.fleet.agents || []) {
-          const aid = (a as any).agentId ?? a.id;
-          if (eid && aid && eid === aid) {
-            found = true;
-            if (a.state === 'running') {
-              running = true;
-              break;
-            }
-            break;
-          }
-        }
-        if (!found) {
-          continue;
-        }
-        if (!running) {
-          continue;
-        }
-        return true;
-      }
-    }
-  }
-  // check workspace panes for live foreign agents (exclude bro-status)
-  for (const ws of p.workspaces) {
-    const wpath = ws.worktree?.checkout_path;
-    const isRelated =
-      wpath === treePath ||
-      (wpath && (wpath.startsWith(treePath + '/') || treePath.startsWith(wpath + '/'))) ||
-      p.worktrees.worktrees.some(
-        w =>
-          w.open_workspace_id === ws.workspace_id &&
-          (w.path === treePath || w.path.startsWith(treePath + '/') || treePath.startsWith(w.path + '/'))
-      );
-    if (!isRelated) continue;
-    try {
-      const panes = paneList(ws.workspace_id);
-      for (const pane of panes) {
-        if (pane.agent && pane.agent !== '' && pane.agent !== 'bro-status') {
-          return true;
-        }
-      }
-    } catch {
-      // best effort
+    if (r.state === 'running' && r.worktree !== undefined) {
+      if (r.worktree === treePath || r.worktree.startsWith(`${treePath}/`)) return true;
     }
   }
   return false;
 }
 
-function quickRun(cmd: string, args: string[], cwd?: string, timeoutMs = 2000): { code: number; out: string; err: string } {
+/** One registry entry is live only with a pid that is actually alive
+ *  AND a fleet record still reporting `running` — a pid-less, dead, or
+ *  exited entry must not pin a workspace forever. */
+function registryEntryLive(p: Planes, entry: AgentEntry): boolean {
+  if (entry.pid === undefined || entry.pid === null) return false;
+  const pidStart = entry.pidStart as string | undefined;
+  if (!pidAlive(entry.pid, pidStart)) return false;
+  const eid = entry.agentId ?? entry.id ?? entry.molStep;
+  if (eid === undefined) return false;
+  const a = (p.status.fleet.agents ?? []).find(
+    x => ((x as { agentId?: string }).agentId ?? x.id) === eid
+  );
+  return a?.state === 'running';
+}
+
+function registryLive(p: Planes, treePath: string): boolean {
+  for (const entry of Object.values(agentsJson(p.repo))) {
+    const ew = entry.worktree;
+    if (ew !== undefined && pathRelated(ew, treePath) && registryEntryLive(p, entry)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function paneWorkspaceRelated(p: Planes, ws: HerdrWorkspace, treePath: string): boolean {
+  const wpath = ws.worktree?.checkout_path;
+  if (wpath !== undefined && pathRelated(wpath, treePath)) return true;
+  return p.worktrees.worktrees.some(
+    w => w.open_workspace_id === ws.workspace_id && pathRelated(w.path, treePath)
+  );
+}
+
+/** Pane-level agents — any non-`bro-status` agent value on a related
+ *  workspace's pane means live. A pane list that can't be read is an
+ *  unknown, and unknown fails CLOSED: the workspace stays open. */
+function paneAgentLive(p: Planes, treePath: string): boolean {
+  for (const ws of p.workspaces) {
+    if (!paneWorkspaceRelated(p, ws, treePath)) continue;
+    try {
+      const panes = paneList(ws.workspace_id);
+      if (
+        panes.some(
+          pane => pane.agent !== undefined && pane.agent !== '' && pane.agent !== 'bro-status'
+        )
+      ) {
+        return true;
+      }
+    } catch {
+      log(`pane list failed for ${ws.workspace_id} — keeping ${basename(treePath)} (fail closed)`);
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
+  return (
+    fleetAgentLive(p, treePath) ||
+    loopRunLive(p, treePath) ||
+    registryLive(p, treePath) ||
+    paneAgentLive(p, treePath)
+  );
+}
+
+function quickRun(
+  cmd: string,
+  args: string[],
+  cwd?: string,
+  timeoutMs = 2000
+): { code: number; out: string; err: string } {
   try {
     const r = spawnSync(cmd, args, {
       cwd,
@@ -404,78 +542,80 @@ function quickRun(cmd: string, args: string[], cwd?: string, timeoutMs = 2000): 
   }
 }
 
-function isBranchPushedToRemote(wt: string): boolean {
-  // branch remote existence - must be origin
+/** The upstream ref verbatim — `undefined` when unset. Callers decide
+ *  whether a non-origin upstream proves anything (it doesn't — issue
+ *  #817's remote is `origin`). */
+function upstreamRef(wt: string): string | undefined {
   const r = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-  if (r.code === 0 && r.out.trim()) {
-    const up = r.out.trim();
-    if (up.startsWith('origin/')) return true;
-    // upstream exists but not origin - not considered remote-preserved per requirement
-    // fall through to other checks
+  const up = r.code === 0 ? r.out.trim() : '';
+  return up === '' ? undefined : up;
+}
+
+/** `undefined` for a detached HEAD — the branch-name callers then know
+ *  commit reachability is the only vocabulary left. */
+function currentBranch(wt: string): string | undefined {
+  const b = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']).out.trim();
+  return b !== '' && b !== 'HEAD' ? b : undefined;
+}
+
+/** A same-named branch exists on origin — local remote-tracking ref,
+ *  origin-tracked branch config, or a bounded ls-remote probe. */
+function branchExistsOnOrigin(wt: string, branch: string): boolean {
+  if (
+    run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
+      .code === 0
+  ) {
+    return true;
   }
-  // try to see if branch exists on origin
-  const br = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
-  const branch = br.out.trim();
-  if (branch && branch !== 'HEAD') {
-    const lr2 = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
-    if (lr2.code === 0) return true;
-    const lr3 = run('git', ['-C', wt, 'branch', '-r', '--list', `origin/${branch}`]);
-    if (lr3.code === 0 && lr3.out.trim()) return true;
-    // also check if local branch tracks origin
-    const tr = run('git', ['-C', wt, 'config', `branch.${branch}.remote`]);
-    if (tr.code === 0 && tr.out.trim() === 'origin') return true;
-    const mr = run('git', ['-C', wt, 'config', `branch.${branch}.merge`]);
-    if (tr.code === 0 && mr.code === 0 && mr.out.trim().includes(`refs/heads/${branch}`)) {
-      return true;
-    }
-    // avoid unbounded network probe in reconcile; do a quick local-only check if possible with short timeout
-    const lr = quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 2000);
-    if (lr.code === 0) return true;
-  } else if (branch === 'HEAD') {
-    // detached HEAD - check if current commit exists on origin
-    const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
-    if (head.code === 0) {
-      const sha = head.out.trim();
-      // check if this commit is on any origin ref
-      const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', sha], undefined, 2000);
-      if (lr.code === 0 && lr.out.includes('origin/')) return true;
-    }
-  }
-  // If commits are merged into a verified remote base, treat as preserved
-  // even if original branch ref deleted/pruned
-  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
-  let anyBaseOk = false;
-  for (const base of bases) {
-    const rbase = run('git', ['-C', wt, 'rev-parse', '--verify', base]);
-    if (rbase.code === 0) {
-      anyBaseOk = true;
-      const rlog = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
-      if (rlog.code === 0 && rlog.out.trim() === '') {
-        return true;
-      }
-    }
-  }
-  // if no bases exist, try to see if current branch has upstream on origin or commit is reachable from origin
-  if (!anyBaseOk) {
-    const br2 = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-    if (br2.code === 0 && br2.out.trim().startsWith('origin/')) {
-      return true;
-    }
-    const brn = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
-    const b = brn.out.trim();
-    if (b && b !== 'HEAD') {
-      if (run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b}`]).code === 0) return true;
-      if (run('git', ['-C', wt, 'config', `branch.${b}.remote`]).code === 0 && run('git', ['-C', wt, 'config', `branch.${b}.remote`]).out.trim() === 'origin') return true;
-    } else {
-      const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
-      if (head.code === 0) {
-        const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', head.out.trim()], undefined, 2000);
-        if (lr.code === 0 && lr.out.includes('origin/')) return true;
-      }
-    }
-    return false;
+  const listed = run('git', ['-C', wt, 'branch', '-r', '--list', `origin/${branch}`]);
+  if (listed.code === 0 && listed.out.trim() !== '') return true;
+  const tr = run('git', ['-C', wt, 'config', `branch.${branch}.remote`]);
+  if (tr.code === 0 && tr.out.trim() === 'origin') return true;
+  return (
+    quickRun(
+      'git',
+      ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch],
+      undefined,
+      2000
+    ).code === 0
+  );
+}
+
+/** Detached HEAD — preserved when the checked-out commit is reachable
+ *  from an origin remote-tracking ref (there is no branch to compare,
+ *  only the commit). */
+function detachedHeadPreserved(wt: string): boolean {
+  const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
+  if (head.code !== 0) return false;
+  const lr = quickRun(
+    'git',
+    ['-C', wt, 'branch', '-r', '--contains', head.out.trim()],
+    undefined,
+    2000
+  );
+  return lr.code === 0 && lr.out.includes('origin/');
+}
+
+/** Commits merged into a verified remote base are preserved even when
+ *  the original branch ref was deleted and pruned. */
+function mergedIntoBase(wt: string): boolean {
+  for (const base of ['origin/main', 'origin/master', 'origin/HEAD']) {
+    if (run('git', ['-C', wt, 'rev-parse', '--verify', base]).code !== 0) continue;
+    const rlog = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
+    if (rlog.code === 0 && rlog.out.trim() === '') return true;
   }
   return false;
+}
+
+function isBranchPushedToRemote(wt: string): boolean {
+  // an origin upstream names preservation directly; a non-origin
+  // upstream falls through — only origin counts (issue #817)
+  if (upstreamRef(wt)?.startsWith('origin/') === true) return true;
+  const branch = currentBranch(wt);
+  if (branch === undefined) {
+    return detachedHeadPreserved(wt) || mergedIntoBase(wt);
+  }
+  return branchExistsOnOrigin(wt, branch) || mergedIntoBase(wt);
 }
 
 function isTreeClean(wt: string): boolean {
@@ -483,251 +623,184 @@ function isTreeClean(wt: string): boolean {
   return r.code === 0 && r.out.trim() === '';
 }
 
-function hasUnpushedCommits(wt: string): boolean {
-  const br = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
-  const branch = br.out.trim();
-  // Check if all commits are pushed to the branch's remote ref
-  if (branch && branch !== 'HEAD') {
-    // try upstream
-    const up = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-    if (up.code === 0 && up.out.trim()) {
-      const upRef = up.out.trim();
-      // only trust origin upstream
-      if (upRef.startsWith('origin/')) {
-        const ur = run('git', ['-C', wt, 'log', `${upRef}..HEAD`, '--oneline']);
-        if (ur.code === 0) {
-          if (ur.out.trim() === '') return false;
-          // has commits ahead of upstream remote ref - treat as unpushed
-          return true;
-        } else {
-          // can't compare against upstream, be conservative
-          return true;
-        }
-      }
-      // upstream not origin - be conservative about preservation
-    }
-    // no upstream configured or not origin - check if branch exists on origin
-    const lr = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
-    if (lr.code === 0) {
-      const ur2 = run('git', ['-C', wt, 'log', `origin/${branch}..HEAD`, '--oneline']);
-      if (ur2.code === 0) {
-        if (ur2.out.trim() === '') return false;
-        return true;
-      } else {
-        return true;
-      }
-    }
-    // branch pushed to origin but not tracked locally? also try ls-remote quickly
-    const lrr = quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 2000);
-    if (lrr.code === 0) {
-      const ur3 = run('git', ['-C', wt, 'log', `origin/${branch}..HEAD`, '--oneline']);
-      if (ur3.code === 0) {
-        if (ur3.out.trim() === '') return false;
-        return true;
-      }
-    }
-    // If pushed to origin branch exists, don't fall through to base-branch check
-    // which would incorrectly think unmerged commits mean "unpreserved"
-    const chkOriginBranch =
-      run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]).code === 0 ||
-      quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 1500).code === 0;
-    if (chkOriginBranch) {
-      // All commits pushed to origin branch - preserved even if not merged to main
-      return false;
-    }
-  } else if (branch === 'HEAD') {
-    // detached HEAD - if commit is on origin, treat as preserved
-    const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
-    if (head.code === 0) {
-      const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', head.out.trim()], undefined, 2000);
-      if (lr.code === 0 && lr.out.includes('origin/')) {
-        return false;
-      }
-    }
-  }
-  // Fall back to base branch comparison - if commits are in base (merged), that's fine
-  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
-  let anyOk = false;
-  for (const base of bases) {
-    const rbase = run('git', ['-C', wt, 'rev-parse', '--verify', base]);
-    if (rbase.code !== 0) continue;
-    anyOk = true;
-    const r = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
-    if (r.code === 0) {
-      if (r.out.trim() !== '') {
-        // commits ahead of base but maybe pushed to origin branch - check again
-        const br2 = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
-        const b2 = br2.out.trim();
-        if (b2 && b2 !== 'HEAD') {
-          const pushed =
-            run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b2}`]).code === 0 ||
-            quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', b2], undefined, 1500).code === 0;
-          if (pushed) return false;
-        }
-        return true;
-      }
-      // no commits ahead of base means all work is in base (merged) - good
-    } else {
-      // can't compare - be conservative
-      return true;
-    }
-  }
-  if (!anyOk) {
-    // can't verify base refs - unknown state, be conservative
-    return true;
-  }
-  return false;
+/** `log <ref>..HEAD` verdict — 'unknown' when the compare itself fails
+ *  so callers can fail closed instead of reading silence as clean. */
+type Ahead = 'ahead' | 'clean' | 'unknown';
+function aheadOf(wt: string, ref: string): Ahead {
+  const r = run('git', ['-C', wt, 'log', `${ref}..HEAD`, '--oneline']);
+  if (r.code !== 0) return 'unknown';
+  return r.out.trim() === '' ? 'clean' : 'ahead';
 }
 
+/** Remote head SHA of the origin branch via a bounded ls-remote —
+ *  `undefined` when the branch isn't on the remote or the probe died. */
+function remoteBranchHead(wt: string, branch: string): string | undefined {
+  const r = quickRun(
+    'git',
+    ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch],
+    undefined,
+    2000
+  );
+  const m = r.code === 0 ? /^([0-9a-f]{40})\t/m.exec(r.out) : null;
+  return m?.[1];
+}
+
+/** HEAD ⊆ sha — the object must exist locally AND be HEAD's descendant.
+ *  An object we don't have is unverifiable, and unverifiable fails
+ *  closed (never "pushed" on faith). */
+function headContainedIn(wt: string, sha: string): boolean {
+  if (run('git', ['-C', wt, 'cat-file', '-e', sha]).code !== 0) return false;
+  return run('git', ['-C', wt, 'merge-base', '--is-ancestor', 'HEAD', sha]).code === 0;
+}
+
+/** HEAD ⊆ the branch's origin counterpart — the local remote-tracking
+ *  ref first; when it's missing the remote head sha must carry the
+ *  proof. Branch EXISTENCE alone is not preservation (review thread:
+ *  a same-named remote branch could be behind local commits). */
+function pushedToOriginBranch(wt: string, branch: string): Ahead {
+  if (
+    run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
+      .code === 0
+  ) {
+    const a = aheadOf(wt, `origin/${branch}`);
+    return a === 'clean' ? 'clean' : 'ahead';
+  }
+  const sha = remoteBranchHead(wt, branch);
+  if (sha === undefined) return 'unknown';
+  return headContainedIn(wt, sha) ? 'clean' : 'ahead';
+}
+
+function hasUnpushedCommits(wt: string): boolean {
+  const branch = currentBranch(wt);
+  if (branch === undefined) {
+    // detached HEAD — preserved only when the commit rides an origin ref
+    return !detachedHeadPreserved(wt);
+  }
+  const up = upstreamRef(wt);
+  if (up?.startsWith('origin/') === true) {
+    const a = aheadOf(wt, up);
+    return a !== 'clean';
+  }
+  // no origin upstream — does an origin branch ref carry the commits?
+  const ob = pushedToOriginBranch(wt, branch);
+  if (ob !== 'unknown') return ob === 'ahead';
+  // no origin branch either — merged-into-base is the last proof;
+  // unverifiable bases mean unknown, and unknown fails closed.
+  return unpushedAgainstBases(wt, branch);
+}
+
+/** Base-branch fallback — commits ahead of a verified base are
+ *  unpreserved unless the branch's origin counterpart carries them;
+ *  a base that can't be read is an unknown, and unknown fails closed. */
+function unpushedAgainstBases(wt: string, branch: string): boolean {
+  let anyOk = false;
+  for (const base of ['origin/main', 'origin/master', 'origin/HEAD']) {
+    if (run('git', ['-C', wt, 'rev-parse', '--verify', base]).code !== 0) continue;
+    anyOk = true;
+    const a = aheadOf(wt, base);
+    if (a === 'unknown') return true;
+    if (a === 'ahead') {
+      // ahead of base but maybe pushed to the origin branch — ancestry,
+      // not branch existence, decides
+      return pushedToOriginBranch(wt, branch) !== 'clean';
+    }
+  }
+  return !anyOk;
+}
+
+/** Marker details naming a live session — the plane's own list plus a
+ *  fresh on-disk scan so a marker written mid-pass still counts. */
+function armedDetailsFresh(p: Planes): string[] {
+  try {
+    return [...(p.armedDetails ?? []), ...armedWorkDetails(p.repo)];
+  } catch {
+    return [...(p.armedDetails ?? [])];
+  }
+}
+
+/** A claimed or session-marked tree stays a desired workspace even
+ *  when nothing runs in it right now — closing it would just make the
+ *  next pass reopen and churn (codeant review thread). */
 function isArmedOrClaimed(p: Planes, treePath: string): boolean {
   const wt = p.status.worktrees.find(t => t.path === treePath);
-  if (wt?.claim) return true;
-  const armed = (p as any).armedDetails as string[] | undefined;
-  if (armed) {
-    for (const d of armed) {
-      const path = resolveDetail(d, p.main, p.status.worktrees);
-      if (path === treePath) return true;
-    }
+  if (wt?.claim !== undefined && wt.claim !== '') return true;
+  for (const d of armedDetailsFresh(p)) {
+    if (resolveDetail(d, p.main, p.status.worktrees) === treePath) return true;
   }
-  // also check live session markers directly
-  try {
-    const details = armedWorkDetails(p.repo);
-    for (const d of details) {
-      const path = resolveDetail(d, p.main, p.status.worktrees);
-      if (path === treePath) return true;
-    }
-  } catch {
-    try {
-      const details = (p as any).armedDetails as string[] | undefined;
-      if (details) {
-        for (const d of details) {
-          const path = resolveDetail(d, p.main, p.status.worktrees);
-          if (path === treePath) return true;
-        }
-      }
-    } catch {}
-  }
-  for (const a of (p.status.fleet.agents || [])) {
-    if (a.state === 'running' && a.worktree) {
-      const ap = resolveAgentWorktreePath(a, p) ?? (a.worktree && isAbsolute(a.worktree) ? a.worktree : undefined);
-      if (ap === treePath) return true;
-    }
-  }
-  for (const r of (p.status.loop.runs || [])) {
-    if (r.state === 'running' && r.worktree) {
-      const rw = r.worktree;
-      if (rw === treePath || (typeof rw === 'string' && (rw.startsWith(treePath + '/') || treePath.startsWith(rw + '/')))) return true;
-    }
-  }
-  return false;
+  return fleetAgentLive(p, treePath) || loopRunLive(p, treePath);
 }
 
+/** Structural gate — the cheap checks that skip without a git call or
+ *  a log line. Only a managed workspace record whose recorded id
+ *  matches the live workspace is reapable at all. */
+function reapableWorkspace(p: Planes, ctx: WsCtx, w: HerdrWorktree): boolean {
+  const ws = w.open_workspace_id;
+  if (ws === undefined || w.path === p.main) return false;
+  if (worktreeGone(w.path)) return false; // reapDead owns gone trees
+  if (ctx.wsById.get(ws) === undefined) return false;
+  const rec = ctx.state.workspaces[w.path];
+  return rec?.managed === true && rec.ws === ws;
+}
+
+/** Occupancy can flip between the snapshot and the close — re-read the
+ *  planes right before deciding so a just-armed claim or a just-started
+ *  agent always wins over the reaper. */
+function occupiedNow(path: string): boolean {
+  const fresh = readPlanes(repoDir(ctxJson()));
+  return (
+    isArmedOrClaimed(fresh, path) ||
+    armedSet(fresh).has(path) ||
+    hasLiveRunOrBoundAgent(fresh, path)
+  );
+}
+
+/** Close the workspace and drop every record keyed on the tree — the
+ *  same ledger sweep reapDead does, sessions included. */
+function closeAndForget(ctx: WsCtx, path: string, ws: string): boolean {
+  if (herdrTry(['workspace', 'close', ws]) === undefined) return false;
+  delete ctx.state.workspaces[path];
+  delete ctx.state.renderers[path];
+  delete ctx.state.statuses[path];
+  delete ctx.state.sessions[path];
+  delete ctx.state.gone[path];
+  return true;
+}
+
+/** The preserved-dead reaper — a managed workspace whose tree is
+ *  clean, whose work is verifiably on origin, and that nothing live
+ *  occupies gets closed instead of lingering forever (issue #817). */
 function reapPreservedDead(p: Planes, ctx: WsCtx): number {
   let reaped = 0;
   for (const w of p.worktrees.worktrees) {
     const ws = w.open_workspace_id;
-    if (ws === undefined || w.path === p.main) continue;
-    if (worktreeGone(w.path)) continue;
-    if (ctx.wsById.get(ws) === undefined) continue;
-    // only close managed workspaces with matching workspace id
-    const rec = ctx.state.workspaces[w.path];
-    if (rec?.managed !== true) {
-      continue;
-    }
-    if (rec.ws !== ws) {
-      continue;
-    }
-    if (isArmedOrClaimed(p, w.path)) {
-      log(`keep ${basename(w.path)} — armed/claimed`);
-      continue;
-    }
-    // double check fresh state before deciding
-    const pPre = readPlanes(repoDir(ctxJson()));
-    if (isArmedOrClaimed(pPre, w.path)) {
-      log(`keep ${basename(w.path)} — armed/claimed`);
-      continue;
-    }
-    if (armedSet(pPre).has(w.path)) {
-      log(`keep ${basename(w.path)} — armed/claimed`);
-      continue;
-    }
-    if (hasLiveRunOrBoundAgent(pPre, w.path)) {
-      log(`keep ${basename(w.path)} — live run/bound agent`);
-      continue;
-    }
-    if (hasLiveRunOrBoundAgent(p, w.path)) {
-      log(`keep ${basename(w.path)} — live run/bound agent`);
+    if (ws === undefined || !reapableWorkspace(p, ctx, w)) continue;
+    const name = basename(w.path);
+    if (
+      isArmedOrClaimed(p, w.path) ||
+      armedSet(p).has(w.path) ||
+      hasLiveRunOrBoundAgent(p, w.path) ||
+      occupiedNow(w.path)
+    ) {
+      log(`keep ${name} — occupied`);
       continue;
     }
     if (!isTreeClean(w.path)) {
-      log(`keep ${basename(w.path)} — dirty tree`);
+      log(`keep ${name} — dirty tree`);
       continue;
     }
-    if (hasUnpushedCommits(w.path)) {
-      log(`keep ${basename(w.path)} — unpushed commits`);
+    if (hasUnpushedCommits(w.path) || !isBranchPushedToRemote(w.path)) {
+      log(`keep ${name} — work not remote-preserved`);
       continue;
     }
-    // must verify work is pushed to origin / remote-preserved
-    if (!isBranchPushedToRemote(w.path)) {
-      // double-check: if branch has upstream origin or exists on origin, don't block
-      const br2 = run('git', ['-C', w.path, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-      if (br2.code === 0 && br2.out.trim().startsWith('origin/')) {
-        // fall through
-      } else {
-        const brn = run('git', ['-C', w.path, 'rev-parse', '--abbrev-ref', 'HEAD']);
-        const b = brn.out.trim();
-        if (b && b !== 'HEAD') {
-          const chk = run('git', ['-C', w.path, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b}`]);
-          const chk2 = run('git', ['-C', w.path, 'branch', '-r', '--list', `origin/${b}`]);
-          const tr = run('git', ['-C', w.path, 'config', `branch.${b}.remote`]);
-          if (chk.code !== 0 && chk2.code !== 0 && !(tr.code === 0 && tr.out.trim() === 'origin')) {
-            log(`keep ${basename(w.path)} — branch not remote-preserved`);
-            continue;
-          }
-        } else {
-          log(`keep ${basename(w.path)} — branch not remote-preserved`);
-          continue;
-        }
-      }
-    }
-    // recheck occupancy immediately before closing to avoid race
-    const pFresh1 = readPlanes(repoDir(ctxJson()));
-    if (
-      isArmedOrClaimed(pFresh1, w.path) ||
-      armedSet(pFresh1).has(w.path) ||
-      hasLiveRunOrBoundAgent(pFresh1, w.path)
-    ) {
-      log(`keep ${basename(w.path)} — occupied at close time`);
+    // last word before the irreversible call — the planes are re-read
+    // so a use that started during the git checks still wins the race
+    if (occupiedNow(w.path)) {
+      log(`keep ${name} — occupied at close time`);
       continue;
     }
-    // one more recheck immediately before close
-    const pFresh2 = readPlanes(repoDir(ctxJson()));
-    if (
-      isArmedOrClaimed(pFresh2, w.path) ||
-      armedSet(pFresh2).has(w.path) ||
-      hasLiveRunOrBoundAgent(pFresh2, w.path)
-    ) {
-      log(`keep ${basename(w.path)} — occupied at close time`);
-      continue;
-    }
-    // final recheck immediately before closing
-    const pFinal = readPlanes(repoDir(ctxJson()));
-    if (
-      isArmedOrClaimed(pFinal, w.path) ||
-      armedSet(pFinal).has(w.path) ||
-      hasLiveRunOrBoundAgent(pFinal, w.path)
-    ) {
-      log(`keep ${basename(w.path)} — occupied at close time`);
-      continue;
-    }
-    // all work remote-preserved
-    if (herdrTry(['workspace', 'close', ws]) !== undefined) {
-      delete ctx.state.workspaces[w.path];
-      delete ctx.state.renderers[w.path];
-      delete ctx.state.statuses[w.path];
-      delete ctx.state.gone[w.path];
+    if (closeAndForget(ctx, w.path, ws)) {
       reaped += 1;
-      log(`reaped preserved-dead ${ws} — ${basename(w.path)}`);
+      log(`reaped preserved-dead ${ws} — ${name}`);
     } else {
       log(`reap preserved-dead ${ws} failed — retry next pass`);
     }
@@ -800,11 +873,45 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
 
   const armed = armedSet(p);
   const wsForPath = convergeWorkspaces(p, armed, ctx);
-  convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
-  markExitedMirrors(p, ctx.state);
-  convergeRenderers(wsForPath, ctx);
-  convergeStatuses(wsForPath, ctx);
-  convergeSessions(wsForPath, ctx);
+  const base = gitCommonDir(p.main) ?? p.main;
+  // live agents by worktree — the session pane's viewable set AND its
+  // direct archive binding; one registry scan feeds both halves
+  const live = liveAgents(base);
+  // the status plane keys on absolute paths; a registry worktree may
+  // be relative — normalize the sightings ONCE so liveByTree AND the
+  // live-view coverage check compare the same vocabulary (field bug:
+  // a relative registry path never matched an absolute armed key, so
+  // the same agent got a session pane AND a second 🤖 view: workspace)
+  for (const a of live) {
+    if (a.worktree !== undefined && !isAbsolute(a.worktree)) {
+      a.worktree = resolve(p.main, a.worktree);
+    }
+  }
+  const liveByTree = new Map<string, { id: string; events: string }>();
+  for (const a of live) {
+    if (a.worktree === undefined) continue;
+    const cur = liveByTree.get(a.worktree);
+    // several live agents can share one worktree — keep the one whose
+    // journal exists: a warming-up agent that wins the slot leaves
+    // eligibility blind and can retire a live session pane
+    if (cur !== undefined && existsSync(cur.events) && !existsSync(a.events)) continue;
+    liveByTree.set(a.worktree, { id: a.id, events: a.events });
+  }
+  const bindByTree = archiveBinds(base, p.main, liveByTree);
+  const sessionArmed = sessionEligibility(p, wsForPath, liveByTree);
+  // the viewable lane's one pane arms before any retire — a workspace
+  // emptying mid-flip is auto-reaped under the closing panes. The
+  // retire set is pane-LIVE, not eligibility: an arm that never
+  // landed leaves the fallback panes in place
+  const sessionLive = convergeSessionPanes(wsForPath, ctx, bindByTree, sessionArmed);
+  convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionLive);
+  markExitedMirrors(p, ctx.state, sessionLive);
+  convergeRenderers(wsForPath, ctx, sessionLive);
+  convergeStatuses(wsForPath, ctx, sessionLive);
+  convergeSessions(wsForPath, ctx, sessionArmed);
+  // live agents with no armed worktree get a plugin-owned view
+  // workspace+pane; armed trees are covered by their own panes
+  convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()), live);
   const reapedGone = reapDead(p, ctx);
   const reapedPreserved = reapPreservedDead(p, ctx);
   const reaped = reapedGone + reapedPreserved;
@@ -826,8 +933,118 @@ export function reconcile(): ConvergeResult {
   return converge(readPlanes(repoDir(ctxJson())));
 }
 
+/** The label the sync pane carries — `pane open` replaces nothing, so
+ *  a dead loop's husk is swept before its successor opens or every
+ *  recovery accumulates another bare-shell pane. */
+const SYNC_LABEL = 'bro sync';
+
+/** A fresh pid file with no live pid means another ensure already
+ *  fired `pane open` and the spawn is still landing — check→open is
+ *  never atomic, so the file doubles as the in-flight marker that
+ *  keeps overlapping ensures (startup hook + manual action) from each
+ *  opening a pane. */
+const OPEN_GRACE_MS = 60_000;
+
+/** The probe — a live pinned pid IS the loop (the start token pins
+ *  identity against reuse; EPERM/zombie verdicts ride inside
+ *  pidAlive), and a FRESH 'pending' is another ensure mid-open. A
+ *  dead pid, a stale pending, or an absent file means the slot is
+ *  free. */
+function syncPidLiveOrPending(pidFile: string): boolean {
+  try {
+    const text = readFileSync(pidFile, 'utf8').trim();
+    const owner = handleOwner(text);
+    if (owner !== null) return pidAlive(owner.pid, owner.start);
+    return text === 'pending' && Date.now() - statSync(pidFile).mtimeMs < OPEN_GRACE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** The 'wx' pending-marker claim — true when the slot is ours to open.
+ *  A non-EEXIST write failure degrades to an undeduplicated open (the
+ *  loop must not be stranded on a marker it cannot write); EEXIST
+ *  means a racer landed a marker — a live one owns the slot, a stale
+ *  'pending' is a crashed opener's residue broken once and retaken
+ *  (a racer winning that gap owns the open). */
+function claimSyncSlot(pidFile: string, live: () => boolean): boolean {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    if (live()) return false; // a live pid or a fresh pending owns the slot
+    try {
+      rmSync(pidFile, { force: true });
+      writeFileSync(pidFile, 'pending\n', { flag: 'wx' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Every 'bro sync' pane rooted at THIS plugin whose loop is dead is a
+ *  husk — close them or the successor piles up next to bare shells.
+ *  cwd scoping keeps another repository's sync pane (same label,
+ *  different checkout) out of the sweep. */
+function sweepSyncHusks(): void {
+  for (const p of herdrTry<{ panes?: HerdrPane[] }>(['pane', 'list'])?.panes ?? []) {
+    if (
+      p.label === SYNC_LABEL &&
+      p.pane_id !== undefined &&
+      p.cwd === PLUGIN_ROOT &&
+      paneIdle(p.pane_id)
+    ) {
+      herdrTry(['pane', 'close', p.pane_id]);
+    }
+  }
+}
+
+/** A failed open must not leave a fresh 'pending' suppressing the next
+ *  ensure for the whole grace window — but the pane may have spawned
+ *  anyway and already published its real pid; that marker is a live
+ *  loop's, not ours to erase. */
+function releasePending(pidFile: string): void {
+  try {
+    if (handleOwner(readFileSync(pidFile, 'utf8').trim()) === null) {
+      rmSync(pidFile, { force: true });
+    }
+  } catch {
+    // absent already — nothing to clean
+  }
+}
+
+/** The sync pane is the converge daemon, but the manifest's `[[panes]]`
+ *  entry is only a template — herdr materializes it solely via `plugin
+ *  pane open`, and nothing re-opens it after a server restart
+ *  (bro-m8hew: a reboot left every session pane on a bare shell with
+ *  no loop to re-arm them). The startup hook and the `sync` action
+ *  both land here, so both restore it. `plugin pane open` has no
+ *  dedup — the probe is the idempotence: sync.ts writes its own pid
+ *  to a scoped file at start, so a live loop proves itself regardless
+ *  of how its argv was launched; a dead pane's bare shell leaves a
+ *  stale pid that fails the liveness check and gets replaced. */
+export function ensureSyncLoop(): void {
+  const pidFile = syncPidPath(stateScope(repoDir(ctxJson())));
+  const live = (): boolean => syncPidLiveOrPending(pidFile);
+  if (live()) return;
+  // the in-flight marker IS the reservation — an exclusive 'wx' create
+  // loses to any marker that landed meanwhile (a live pinned pid or a
+  // fresh pending). It must land BEFORE the slow sweep/open: the state
+  // lock fails OPEN past its wait, so a racer probing inside the
+  // sweep's shadow would open a second pane under it
+  if (!claimSyncSlot(pidFile, live)) return;
+  sweepSyncHusks();
+  const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
+  if (out === undefined) releasePending(pidFile);
+  log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
+}
+
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
+    ensureSyncLoop();
     const r = reconcile();
     log(
       `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.statuses} statuses, ${r.reaped} reaped`

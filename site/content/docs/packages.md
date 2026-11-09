@@ -32,6 +32,8 @@ can build on the same primitives instead of forking them.
 | `@broject/convoy`   | Molecule runner — beads DAG workflows scheduled inside the agent                            |
 | `@broject/github`   | GitHub connector — the `reviews` facade over the `gh` CLI                                   |
 | `@broject/gitlab`   | GitLab connector — the `reviews` facade over the `glab` CLI                                 |
+| `@broject/linear`   | Linear connector — the `tasks` facade over Linear GraphQL API                               |
+| `@broject/jira`     | Jira connector — the `tasks` facade over the `atlassian` CLI (Cloud/Data Center)            |
 | `@broject/learn`    | Lesson store — schema and `bd kv` CRUD behind `bro self learn`                              |
 | `@broject/loop`     | Autonomous backlog loop — claim beads, spawn agents, drive the gate                         |
 | `@broject/bro-pack` | Default capability pack — skills and formulas installed by `bro setup --pack`               |
