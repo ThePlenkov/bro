@@ -1327,7 +1327,20 @@ export function buildRebaseFixerPrompt(opts: {
   base: string;
   baseSha?: string;
   worktree: string;
+  repo: string;
+  host: string;
 }): string {
+  // the merge-state read names the review host's own CLI — a GitLab
+  // repo gets the API call a fixer can actually run (the CI work order
+  // branches the same way).
+  const gitlab = opts.host === 'gitlab';
+  const encRepo = encodeURIComponent(opts.repo);
+  const mergeCmd = gitlab
+    ? `glab api projects/${encRepo}/merge_requests/${opts.pr}`
+    : `gh pr view ${opts.pr} --json mergeable`;
+  const mergeField = gitlab ? '`detailed_merge_status`' : '`mergeable`';
+  const dissolved = gitlab ? '`mergeable`' : 'MERGEABLE';
+  const conflicting = gitlab ? '`conflict`' : 'CONFLICTING';
   const target =
     opts.baseSha === undefined
       ? `bro could not fetch \`origin/${opts.base}\` here — fetch it yourself before the rebase.`
@@ -1339,9 +1352,9 @@ export function buildRebaseFixerPrompt(opts: {
           '',
           '  Fetch the base AGAIN, immediately before the rebase — `git rev-parse',
           `  origin/${opts.base}\` must still read \`${opts.baseSha}\`. If it moved, the base`,
-          '  advanced under you: re-check the PR (`gh pr view',
-          `  ${opts.pr} --json mergeable\`). MERGEABLE means the conflict dissolved — STOP`,
-          '  and report that; do not rebase. CONFLICTING means rebase onto the new tip.',
+          `  advanced under you: re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
+          `  ${dissolved} means the conflict dissolved — STOP`,
+          `  and report that; do not rebase. ${conflicting} means rebase onto the new tip.`,
         ].join('\n');
   return [
     `# Rebase fixer — ${opts.link}`,
@@ -1661,12 +1674,22 @@ async function spawnRebaseFixer(
     return lane;
   }
   const wt = lane.wt;
+  // a dir this pass added and nobody claimed is litter: every path that
+  // ends the pass without handing the worktree to a fixer retires it
+  // (the same obligation `spawnFixer` carries on an empty thread list)
+  const retireCreated = async (): Promise<void> => {
+    if (lane.created !== true) {
+      return;
+    }
+    await retireIfOrphaned(ctx, pr, wt, state.headRef, fixer, known);
+  };
   // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
   // as old as the last fetch anybody in the repo ran, and the drive lane
   // ran none. A fetch that failed for a real reason refuses the spawn:
   // a rebase onto a known-stale base is a round that ends CONFLICTING.
   const tip = fetchBaseTip(wt, meta.baseRef);
   if (tip.err !== undefined) {
+    await retireCreated();
     return { pr, link, verdict: 'rebase-base-unavailable', detail: tip.err };
   }
   // the PR, re-checked against the tip just fetched: the base may have
@@ -1677,13 +1700,16 @@ async function spawnRebaseFixer(
     try {
       after = await metaOf(ctx, pr);
     } catch (err) {
+      await retireCreated();
       return { pr, link, verdict: 'probe-failed', detail: errText(err) };
     }
     if (after.state !== 'OPEN') {
+      await retireCreated();
       ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
       return { pr, link, verdict: 'settled', detail: after.state.toLowerCase() };
     }
     if (after.mergeable === 'MERGEABLE') {
+      await retireCreated();
       ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
       return { pr, link, verdict: 'conflict-resolved', detail: `base ${meta.baseRef} moved — ${tip.sha.slice(0, 8)}` };
     }
@@ -1700,6 +1726,8 @@ async function spawnRebaseFixer(
       base: meta.baseRef,
       baseSha: tip.sha,
       worktree: wt,
+      repo: ctx.repo,
+      host: ctx.host,
     }),
     tag: 'rebase ',
     attempt: { head: meta.headSha, cls: 'rebase' },
@@ -1760,7 +1788,7 @@ function fixerLane(
   headSha: string,
   cls: string,
   known: AgentInfo[]
-): { wt: string } | PrVerdict {
+): { wt: string; created?: boolean } | PrVerdict {
   const spent = fixerSpent(ctx, pr, headSha, fixer, cls);
   if (spent !== undefined) {
     return spent;
@@ -1787,7 +1815,7 @@ function fixerLane(
   if (ensured.path === undefined) {
     return { pr, link, verdict: 'no-worktree', detail: ensured.err };
   }
-  return { wt: ensured.path };
+  return { wt: ensured.path, created: ensured.created === true };
 }
 
 // --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------

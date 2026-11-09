@@ -1107,6 +1107,8 @@ describe('buildRebaseFixerPrompt', () => {
       branch: 'work/bro-a',
       base: 'main',
       worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
     });
     assert.match(p, /#42.*pull\/42/);
     assert.match(p, /work\/bro-a/);
@@ -1131,6 +1133,8 @@ describe('buildRebaseFixerPrompt', () => {
       base: 'main',
       baseSha: 'abc1234',
       worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
     });
     assert.match(p, /abc1234/);
     assert.match(p, /must still read `abc1234`/);
@@ -1141,6 +1145,23 @@ describe('buildRebaseFixerPrompt', () => {
     assert.ok(p.indexOf('Fetch the base AGAIN') < p.indexOf('git rebase origin/main'));
   });
 
+  test('a gitlab reviews connector gets the glab api read — never gh', () => {
+    // the fixer must be able to RUN the re-check it is told to run
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseSha: 'abc1234',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+    });
+    assert.match(p, /glab api projects\/o%2Fr\/merge_requests\/42/);
+    assert.match(p, /detailed_merge_status/);
+    assert.doesNotMatch(p, /gh pr view/);
+  });
+
   test('a base bro could not fetch says so — no invented sha', () => {
     const p = buildRebaseFixerPrompt({
       pr: 42,
@@ -1148,6 +1169,8 @@ describe('buildRebaseFixerPrompt', () => {
       branch: 'work/bro-a',
       base: 'main',
       worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
     });
     assert.match(p, /could not fetch `origin\/main`/);
     assert.doesNotMatch(p, /must still read/);
@@ -1295,7 +1318,8 @@ describe('ensureFixerWorktree', () => {
     });
   });
 
-  test('a branch diverged from its remote is refused, never clobbered', () => {    const { root, main } = initRepo('bro-drive-wtd-');
+  test('a branch diverged from its remote is refused, never clobbered', () => {
+    const { root, main } = initRepo('bro-drive-wtd-');
     inside(main, root, () => {
       const dir = remoteBackedCheckout(root, main);
       // local tip one way, remote the other — the tracking ref is
