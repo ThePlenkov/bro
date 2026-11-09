@@ -231,7 +231,13 @@ function lstartComm(parts: string[]): { lstart: string; comm: string } | null {
     for (let len = 5; len >= 4 && start + len <= parts.length; len--) {
       const candidate = parts.slice(start, start + len).join(' ');
       if (!isNaN(Date.parse(candidate))) {
-        return { lstart: candidate, comm: parts.slice(start + len).join(' ').trim() };
+        return {
+          lstart: candidate,
+          comm: parts
+            .slice(start + len)
+            .join(' ')
+            .trim(),
+        };
       }
     }
   }
@@ -252,7 +258,10 @@ function lsofCwdMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], {
+        encoding: 'utf8',
+        timeout: 2000,
+      });
       let currentPid: number | null = null;
       for (const l of lout.split('\n')) {
         if (l.startsWith('p')) {
@@ -271,13 +280,26 @@ function lsofCwdMap(pids: number[]): Map<number, string> {
   return cwdMap;
 }
 
-/** One pid's cwd — batched answer first, then a per-pid lsof;
- *  null when neither names a directory. */
-function darwinCwd(pid: number, cwdMap: Map<number, string>): string | null {
+/** Whole-scan budget for the darwin readers — each pid missing from
+ *  the batched lsof answer otherwise gets its own timeout, so a slow
+ *  batch can stack hundreds of 500ms fallbacks into a ~100s stall that
+ *  delays watch heartbeats or holds an occupancy lock. Past the
+ *  deadline a pid keeps its batched answer (or none — a null cwd reads
+ *  as a raced pid, the same contract the sweep already handles). */
+export const DARWIN_SCAN_BUDGET_MS = 4000;
+
+/** One pid's cwd — batched answer first, then a per-pid lsof bounded
+ *  by the scan deadline; null when neither names a directory. */
+function darwinCwd(pid: number, cwdMap: Map<number, string>, deadline: number): string | null {
   const batched = cwdMap.get(pid);
   if (batched !== undefined && batched !== '') return batched;
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
   try {
-    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 });
+    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+      encoding: 'utf8',
+      timeout: Math.min(500, left),
+    });
     const cline = lout.split('\n').find(l => l.startsWith('n'));
     return cline === undefined ? null : cline.slice(1);
   } catch {
@@ -290,7 +312,10 @@ function batchParentComms(ppids: number[]): Map<number, string | null> {
   const parentComms = new Map<number, string | null>();
   if (ppids.length === 0) return parentComms;
   try {
-    const pout = execFileSync('ps', ['-p', ppids.join(','), '-o', 'pid=,comm='], { encoding: 'utf8', timeout: 1000 });
+    const pout = execFileSync('ps', ['-p', ppids.join(','), '-o', 'pid=,comm='], {
+      encoding: 'utf8',
+      timeout: 1000,
+    });
     for (const l of pout.split('\n').filter(Boolean)) {
       const t = l.trim().split(/\s+/);
       if (t.length >= 2) {
@@ -304,14 +329,24 @@ function batchParentComms(ppids: number[]): Map<number, string | null> {
 }
 
 /** A row's parent comm — 'launchd' for pid-1 children, the batched
- *  answer when ps had it, else a per-pid ps. */
-function darwinParentComm(ppid: number, parentComms: Map<number, string | null>): string | null {
+ *  answer when ps had it, else a per-pid ps bounded by the scan
+ *  deadline (same stall class as the lsof fallback). */
+function darwinParentComm(
+  ppid: number,
+  parentComms: Map<number, string | null>,
+  deadline: number
+): string | null {
   if (ppid === 1) return 'launchd';
   if (ppid <= 0) return null;
   const batched = parentComms.get(ppid);
   if (batched !== undefined && batched !== null) return batched;
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
   try {
-    const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 });
+    const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], {
+      encoding: 'utf8',
+      timeout: Math.min(500, left),
+    });
     return commBase(pout.trim()) || null;
   } catch {
     return null;
@@ -323,7 +358,8 @@ function darwinParentComm(ppid: number, parentComms: Map<number, string | null>)
 function darwinRow(
   line: string,
   cwdMap: Map<number, string>,
-  parentComms: Map<number, string | null>
+  parentComms: Map<number, string | null>,
+  deadline: number
 ): ProcRow | null {
   const lead = psPidPpid(line);
   if (lead === null) return null;
@@ -333,8 +369,8 @@ function darwinRow(
     pid: lead.pid,
     comm: commBase(parsed.comm),
     ppid: lead.ppid,
-    parentComm: darwinParentComm(lead.ppid, parentComms),
-    cwd: darwinCwd(lead.pid, cwdMap),
+    parentComm: darwinParentComm(lead.ppid, parentComms, deadline),
+    cwd: darwinCwd(lead.pid, cwdMap, deadline),
     startMs: Date.parse(parsed.lstart),
   };
 }
@@ -342,24 +378,23 @@ function darwinRow(
 function readProcRowsDarwin(): ProcRow[] {
   let lines: string[];
   try {
-    const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' } });
+    const out = execFileSync('ps', ['-axo', 'pid=,ppid=,lstart=,comm='], {
+      encoding: 'utf8',
+      timeout: 2000,
+      env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' },
+    });
     lines = out.split('\n').filter(Boolean);
   } catch {
     return [];
   }
+  const deadline = Date.now() + DARWIN_SCAN_BUDGET_MS;
   const leads = lines.map(psPidPpid).filter((l): l is NonNullable<typeof l> => l !== null);
   const cwdMap = lsofCwdMap(leads.map(l => l.pid));
-  const uniquePpids = new Set<number>();
-  for (const l of leads) {
-    if (l.ppid > 0 && l.ppid !== 1) uniquePpids.add(l.ppid);
-  }
+  const uniquePpids = new Set(leads.filter(l => l.ppid > 0 && l.ppid !== 1).map(l => l.ppid));
   const parentComms = batchParentComms(Array.from(uniquePpids));
-  const rows: ProcRow[] = [];
-  for (const line of lines) {
-    const row = darwinRow(line, cwdMap, parentComms);
-    if (row !== null) rows.push(row);
-  }
-  return rows;
+  return lines
+    .map(line => darwinRow(line, cwdMap, parentComms, deadline))
+    .filter((r): r is ProcRow => r !== null);
 }
 
 export interface OrphanSweepReport {

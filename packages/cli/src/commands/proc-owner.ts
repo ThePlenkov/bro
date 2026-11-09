@@ -17,12 +17,16 @@ import { execFileSync } from 'node:child_process';
 import {
   agentEntryBlocked,
   agentExitFileName,
+  DARWIN_SCAN_BUDGET_MS,
   entryRunId,
   gitTry,
   handleOwner,
   markerLive,
   pidAlive,
   procStat,
+  psEwwEnvTokens,
+  psRegroupPaths,
+  psTokenize,
   SESSION_SLOT_TTL_MS,
   type AgentRegistryEntry,
   type AgentState,
@@ -60,14 +64,22 @@ function procIsAgentCmd(dir: string): boolean {
  *  would only ever under-match, never fix one. */
 const AGENT_ENV_RE = /(?:^|\0)(?:BRO_AGENT_ID|AI_AGENT)=/;
 
+/** Platforms whose proc reads go through `ps`/`lsof` instead of /proc
+ *  — darwin plus the BSDs the owner walk routes through the same
+ *  helpers (a FreeBSD/OpenBSD entry without these legs reads '' for
+ *  every file and the walk stops at the first pid). */
+const PS_PLATFORMS = new Set(['darwin', 'freebsd', 'openbsd']);
+
 /** `ps <args> -p <pid>` output — the darwin stand-in for /proc reads.
  *  Throws like execFileSync does; callers own the fallback chain. */
 function psText(pid: string, args: string[], timeout = 500): string {
   return execFileSync('ps', [...args, '-p', pid], { encoding: 'utf8', timeout });
 }
 
-/** darwin cmdline — `args=` first, `command=` spellings after; the
- *  tokens NUL-join so the rest of the file parses one format. */
+/** darwin/BSD cmdline — `args=` first, `command=` spellings after;
+ *  fragments of a spaced absolute path are re-glued so the vector's
+ *  boundaries survive where `ps`'s join loses them; the tokens NUL-join
+ *  so the rest of the file parses one format. */
 function darwinCmdline(pid: string): string {
   let out: string;
   try {
@@ -83,38 +95,14 @@ function darwinCmdline(pid: string): string {
       }
     }
   }
-  const tokens = tokenizeCommandLine(out);
+  const tokens = psRegroupPaths(psTokenize(out));
   if (tokens.length === 0) return '';
   return tokens.join('\0') + '\0';
 }
 
-/** darwin environ — `ps eww` interleaves command and env tokens, so
- *  keep KEY=VALUE-looking ones: strict (identifier-shaped keys) first,
- *  any `=` token next, the raw newline-joined output last. */
-function environTokens(out: string): string {
-  const strict = out
-    .split(/\s+/)
-    .filter(t => t.includes('=') && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
-  if (strict.length > 0) {
-    return strict.join('\0') + '\0';
-  }
-  const loose = out.split(/\s+/).filter(t => t.includes('='));
-  if (loose.length > 0) {
-    return loose.join('\0') + '\0';
-  }
-  return out.replace(/\n/g, '\0') + '\0';
-}
-
 function darwinEnviron(pid: string): string {
-  try {
-    return environTokens(psText(pid, ['eww']));
-  } catch {
-    try {
-      return environTokens(psText(pid, ['e']));
-    } catch {
-      return '';
-    }
-  }
+  const tokens = psEwwEnvTokens(Number(pid));
+  return tokens.length === 0 ? '' : tokens.join('\0') + '\0';
 }
 
 function darwinStatus(pid: string): string {
@@ -127,7 +115,10 @@ function darwinStatus(pid: string): string {
 }
 
 function readProcText(dir: string, file: string): string {
-  if (process.platform === 'linux') {
+  // Injected trees are plain files — read them on every platform; only
+  // the real /proc root falls back to platform tools, so a fixture pid
+  // can never collide with the host's live process table.
+  if (process.platform === 'linux' || dirname(dir) !== '/proc') {
     try {
       return readFileSync(join(dir, file), 'utf8');
     } catch {
@@ -136,7 +127,7 @@ function readProcText(dir: string, file: string): string {
   }
   const pid = basename(dir);
   if (!/^\d+$/.test(pid)) return '';
-  if (process.platform === 'darwin') {
+  if (PS_PLATFORMS.has(process.platform)) {
     try {
       if (file === 'cmdline') return darwinCmdline(pid);
       if (file === 'environ') return darwinEnviron(pid);
@@ -151,13 +142,16 @@ function readProcText(dir: string, file: string): string {
 /** ppid of a /proc entry — the `PPid:` line of status; 0 when unreadable. */
 function procPpid(dir: string): number {
   const pid = basename(dir);
-  if (process.platform === 'linux') {
+  if (process.platform === 'linux' || dirname(dir) !== '/proc') {
     const m = /^PPid:[ \t]*(\d+)/m.exec(readProcText(dir, 'status'));
     return m === null ? 0 : Number(m[1]);
   }
-  if (process.platform === 'darwin' && /^\d+$/.test(pid)) {
+  if (PS_PLATFORMS.has(process.platform) && /^\d+$/.test(pid)) {
     try {
-      const out = execFileSync('ps', ['-o', 'ppid=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+      const out = execFileSync('ps', ['-o', 'ppid=', '-p', pid], {
+        encoding: 'utf8',
+        timeout: 500,
+      });
       const ppid = out.trim();
       return ppid === '' ? 0 : Number(ppid);
     } catch {
@@ -183,12 +177,10 @@ function procAgentPid(dir: string, depth = 0): number | null {
   }
   const ppid = procPpid(dir);
   if (ppid > 1) {
-    if (process.platform === 'linux') {
-      return procAgentPid(join(dirname(dir), String(ppid)), depth + 1);
-    } else {
-      // On macOS/BSD, walk by constructing a pid dir that readProcText can handle
-      return procAgentPid(join('/proc', String(ppid)), depth + 1);
-    }
+    // Stay under the current root — `/proc/<ppid>` spells the same
+    // dir for the real tree, and an injected fixture tree keeps its
+    // own files instead of escaping to the host's process table.
+    return procAgentPid(join(dirname(dir), String(ppid)), depth + 1);
   }
   return null;
 }
@@ -202,10 +194,7 @@ function procIsAgentProc(dir: string): boolean {
 
 function nextProcDir(cur: string, ppid: number): string | null {
   if (ppid <= 1) return null;
-  if (process.platform === 'linux') {
-    return join(dirname(cur), String(ppid));
-  }
-  return join('/proc', String(ppid));
+  return join(dirname(cur), String(ppid));
 }
 
 /** The topmost agent-shaped ancestor — the owner tag's pid. The env
@@ -260,17 +249,27 @@ function procIsMonitor(dir: string): boolean {
   return cmdTokens.some(t => MONITOR_VERBS.has(t));
 }
 
-function tokenizeCommandLine(s: string): string[] {
-  const trimmed = s.replace(/\r?\n$/, '');
-  if (trimmed === '') return [];
-  const m = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
-  if (m && m.length > 0) {
-    return m.map(t => t.replace(/^["']|["']$/g, ''));
+/** One argv token rooted in the tree — absolute tokens always test
+ *  against `inside` (a script the process executes from the tree roots
+ *  it even when its cwd can't be read); relative tokens need the
+ *  process cwd to resolve against, so they only apply when cwd read. */
+function tokenRooted(cwd: string | null, tok: string, inside: (p: string) => boolean): boolean {
+  if (tok === '') return false;
+  if (tok.startsWith('/')) {
+    try {
+      return inside(tok);
+    } catch {
+      return false;
+    }
   }
-  return trimmed.split(/\s+/).filter(Boolean);
+  return cwd !== null && cwd !== '' && inside(resolve(cwd, tok));
 }
 
-function processRootedInLinux(procDir: string, root: string, inside: (p: string) => boolean): ProcHit[] {
+function processRootedInLinux(
+  procDir: string,
+  root: string,
+  inside: (p: string) => boolean
+): ProcHit[] {
   const hits: ProcHit[] = [];
   let names: string[];
   try {
@@ -284,14 +283,15 @@ function processRootedInLinux(procDir: string, root: string, inside: (p: string)
     }
     const dir = join(procDir, name);
     const cmdline = readProcText(dir, 'cmdline');
-    let cwd: string;
+    let cwd: string | null;
     try {
       cwd = readlinkSync(join(dir, 'cwd'));
     } catch {
-      continue;
+      cwd = null;
     }
     const tokens = cmdline.split('\0').filter(Boolean);
-    let rooted = inside(cwd) || tokens.some(tok => tok !== '' && inside(resolve(cwd, tok)));
+    const rooted =
+      (cwd !== null && inside(cwd)) || tokens.some(tok => tokenRooted(cwd, tok, inside));
     if (rooted) {
       hits.push({ pid: Number(name), cmd: tokens.join(' ') });
     }
@@ -299,7 +299,11 @@ function processRootedInLinux(procDir: string, root: string, inside: (p: string)
   return hits;
 }
 
-function processRootedInProcOverride(procDir: string, root: string, inside: (p: string) => boolean): ProcHit[] {
+function processRootedInProcOverride(
+  procDir: string,
+  root: string,
+  inside: (p: string) => boolean
+): ProcHit[] {
   const hits: ProcHit[] = [];
   try {
     const names = readdirSync(procDir);
@@ -308,14 +312,15 @@ function processRootedInProcOverride(procDir: string, root: string, inside: (p: 
       const dir = join(procDir, name);
       try {
         const cmdline = readProcText(dir, 'cmdline');
-        let cwd: string;
+        let cwd: string | null;
         try {
           cwd = readlinkSync(join(dir, 'cwd'));
         } catch {
-          continue;
+          cwd = null;
         }
         const tokens = cmdline.split('\0').filter(Boolean);
-        let rooted = inside(cwd) || tokens.some(tok => tok !== '' && inside(resolve(cwd, tok)));
+        const rooted =
+          (cwd !== null && inside(cwd)) || tokens.some(tok => tokenRooted(cwd, tok, inside));
         if (rooted) {
           hits.push({ pid: Number(name), cmd: tokens.join(' ') });
         }
@@ -357,7 +362,10 @@ function lsofCwdMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+      const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], {
+        encoding: 'utf8',
+        timeout: 2000,
+      });
       let currentPid: number | null = null;
       for (const l of lout.split('\n')) {
         if (l.startsWith('p')) {
@@ -383,7 +391,10 @@ function psArgsMap(pids: number[]): Map<number, string> {
   for (let i = 0; i < pids.length; i += chunkSize) {
     const chunk = pids.slice(i, i + chunkSize);
     try {
-      const coutAll = execFileSync('ps', ['-ww', '-o', 'pid=,args=', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 });
+      const coutAll = execFileSync('ps', ['-ww', '-o', 'pid=,args=', '-p', chunk.join(',')], {
+        encoding: 'utf8',
+        timeout: 2000,
+      });
       for (const l of coutAll.split('\n')) {
         const m = l.match(/^\s*(\d+)\s+(.*)$/s);
         if (m) {
@@ -397,15 +408,26 @@ function psArgsMap(pids: number[]): Map<number, string> {
   return cmdMap;
 }
 
-/** A pid's cwd — the batched answer first, then per-pid lsof. null
- *  when lsof itself fails (callers skip the pid); '' when lsof ran
- *  but reported no cwd line. */
-function darwinProcCwd(pid: number, cwdMap: Map<number, string>): string | null {
+/** A pid's cwd — the batched answer first, then a per-pid lsof bounded
+ *  by the scan deadline (each missing pid consuming its own timeout
+ *  otherwise stacks a slow batch into a ~100s stall). null when lsof
+ *  can't name a directory — the argv leg still gets to decide below. */
+function darwinProcCwd(pid: number, cwdMap: Map<number, string>, deadline: number): string | null {
   const batched = cwdMap.get(pid);
   if (batched !== undefined && batched !== '') return batched;
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
   try {
-    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 });
-    return lout.split('\n').find(l => l.startsWith('n'))?.slice(1) ?? '';
+    const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+      encoding: 'utf8',
+      timeout: Math.min(500, left),
+    });
+    return (
+      lout
+        .split('\n')
+        .find(l => l.startsWith('n'))
+        ?.slice(1) ?? ''
+    );
   } catch {
     return null;
   }
@@ -415,46 +437,49 @@ function darwinProcCwd(pid: number, cwdMap: Map<number, string>): string | null 
  *  every ps spelling fails. */
 function darwinArgs(pid: number): string {
   try {
-    return execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+    return execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 500,
+    });
   } catch {
     try {
-      return execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 });
+      return execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 500,
+      });
     } catch {
       return '';
     }
   }
 }
 
-/** One argv token rooted in the tree — relative tokens resolve
- *  against the process cwd (doctor's own when the pid has none). */
-function tokenInside(cwd: string, tok: string, inside: (p: string) => boolean): boolean {
-  try {
-    const candidate = tok.startsWith('/') ? tok : resolve(cwd || process.cwd(), tok);
-    return inside(candidate);
-  } catch {
-    return false;
-  }
-}
-
 /** One pid → a ProcHit when it roots in the tree, else null. cwd
  *  inside qualifies outright; argv tokens catch services executing
- *  tree files from elsewhere. */
+ *  tree files from elsewhere — and still get their say when the cwd
+ *  read fails: a `node /wt/dist/index.js` run from anywhere roots the
+ *  tree whether or not lsof could name a cwd for the pid. */
 function rootedHit(
   pid: number,
   inside: (p: string) => boolean,
   cwdMap: Map<number, string>,
-  cmdMap: Map<number, string>
+  cmdMap: Map<number, string>,
+  deadline: number
 ): ProcHit | null {
-  const cwd = darwinProcCwd(pid, cwdMap);
-  if (cwd === null) return null;
+  const cwd = darwinProcCwd(pid, cwdMap, deadline);
   const cout = cmdMap.get(pid) || darwinArgs(pid);
   const line = cout.replace(/\r?\n$/, '');
-  const tokens = tokenizeCommandLine(line);
-  const rooted = (cwd !== '' && inside(cwd)) || tokens.some(tok => tokenInside(cwd, tok, inside));
+  const tokens = psRegroupPaths(psTokenize(line));
+  const rooted =
+    (cwd !== null && cwd !== '' && inside(cwd)) ||
+    tokens.some(tok => tokenRooted(cwd, tok, inside));
   return rooted ? { pid, cmd: line.trim() } : null;
 }
 
-function processesRootedInDarwin(root: string, inside: (p: string) => boolean, procDir = '/proc'): ProcHit[] {
+function processesRootedInDarwin(
+  root: string,
+  inside: (p: string) => boolean,
+  procDir = '/proc'
+): ProcHit[] {
   if (procOverrideActive(procDir)) {
     return processRootedInProcOverride(procDir, root, inside);
   }
@@ -465,11 +490,12 @@ function processesRootedInDarwin(root: string, inside: (p: string) => boolean, p
   try {
     const pids = darwinPids().filter(pid => pid !== process.pid);
     if (pids.length === 0) return hits;
+    const deadline = Date.now() + DARWIN_SCAN_BUDGET_MS;
     const cwdMap = lsofCwdMap(pids);
     const cmdMap = psArgsMap(pids);
     for (const pid of pids) {
       try {
-        const hit = rootedHit(pid, inside, cwdMap, cmdMap);
+        const hit = rootedHit(pid, inside, cwdMap, cmdMap, deadline);
         if (hit !== null) hits.push(hit);
       } catch {
         continue;
@@ -571,8 +597,13 @@ function agentProcessesInLinux(procDir: string, root: string): ProcHit[] {
  *  agent-shaped, else null. Unlike rootedHit there is no argv leg —
  *  occupancy requires the cwd inside, and a missing cwd drops the
  *  pid entirely. */
-function agentHit(pid: number, root: string, cwdMap: Map<number, string>): ProcHit | null {
-  const cwd = darwinProcCwd(pid, cwdMap);
+function agentHit(
+  pid: number,
+  root: string,
+  cwdMap: Map<number, string>,
+  deadline: number
+): ProcHit | null {
+  const cwd = darwinProcCwd(pid, cwdMap, deadline);
   if (!cwd || (cwd !== root && !cwd.startsWith(root + sep))) {
     return null;
   }
@@ -580,7 +611,12 @@ function agentHit(pid: number, root: string, cwdMap: Map<number, string>): ProcH
   if (procIsMonitor(dir) || !procIsAgent(dir)) {
     return null;
   }
-  return { pid, cmd: darwinArgs(pid).replace(/\r?\n$/, '').trim() };
+  return {
+    pid,
+    cmd: darwinArgs(pid)
+      .replace(/\r?\n$/, '')
+      .trim(),
+  };
 }
 
 function agentProcessesInDarwin(root: string, procDir = '/proc'): ProcHit[] {
@@ -594,11 +630,12 @@ function agentProcessesInDarwin(root: string, procDir = '/proc'): ProcHit[] {
   try {
     const pids = darwinPids();
     if (pids.length === 0) return hits;
+    const deadline = Date.now() + DARWIN_SCAN_BUDGET_MS;
     const cwdMap = lsofCwdMap(pids);
     for (const pid of pids) {
       if (pid === process.pid) continue;
       try {
-        const hit = agentHit(pid, root, cwdMap);
+        const hit = agentHit(pid, root, cwdMap, deadline);
         if (hit !== null) hits.push(hit);
       } catch {
         continue;
@@ -644,7 +681,11 @@ let cachedOwner: { pid: number; start: string } | null | undefined;
 export function agentOwner(): { pid: number; start: string } | null {
   if (cachedOwner === undefined) {
     let pid: number | null = null;
-    if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
+    if (
+      process.platform === 'darwin' ||
+      process.platform === 'freebsd' ||
+      process.platform === 'openbsd'
+    ) {
       // On macOS/BSD without /proc, walk using pid dirs the helpers can handle
       pid = procAgentRoot(join('/proc', String(process.ppid)));
     } else if (existsSyncProc()) {

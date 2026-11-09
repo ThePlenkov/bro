@@ -4,7 +4,7 @@
  * alone lies twice: it answers for zombies (nobody polling) and can't
  * tell a reused pid from the process that recorded it.
  */
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
@@ -25,11 +25,18 @@ export function procStat(pid: number): { state: string; start: string } | null {
     process.platform === 'freebsd' ||
     process.platform === 'openbsd'
   ) {
+    // lstart is formatted in the process's timezone+locale — a marker
+    // written and re-checked under different environments would print a
+    // different start string for the same live owner and read as dead.
+    // Pinning TZ/LC makes the identity environment-independent while
+    // staying a lstart Date.parse can still epoch-convert for doctor.
+    const env = { ...process.env, TZ: 'UTC', LC_ALL: 'C', LC_TIME: 'C' };
     try {
       // Get state and start time on BSD/macOS; include pid to disambiguate on reuse
       const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], {
         encoding: 'utf8',
         timeout: 1000,
+        env,
       });
       const lines = out.trim().split('\n').filter(Boolean);
       if (lines.length === 0) return null;
@@ -48,6 +55,7 @@ export function procStat(pid: number): { state: string; start: string } | null {
         const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'pid=,state=,lstart='], {
           encoding: 'utf8',
           timeout: 1000,
+          env,
         });
         const lines2 = out2.trim().split('\n').filter(Boolean);
         if (lines2.length === 0) return null;
@@ -136,6 +144,95 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
     }
   }
   return false;
+}
+
+/** Whitespace/quote tokenization of a `ps` args line — the vector
+ *  arrives space-joined on platforms without /proc, so quote runs are
+ *  honored to keep quoted fragments glued where ps does emit them. */
+export function psTokenize(s: string): string[] {
+  const trimmed = s.replace(/\r?\n$/, '');
+  if (trimmed === '') return [];
+  const m = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  if (m && m.length > 0) {
+    return m.map(t => t.replace(/^["']|["']$/g, ''));
+  }
+  return trimmed.split(/\s+/).filter(Boolean);
+}
+
+/** Tokens that only resolve joined — `ps` space-joins the arg vector,
+ *  so a path argument containing spaces (`/Users/x/My Tools/app.js`)
+ *  arrives pre-split and no fragment ever resolves on disk. Re-glue
+ *  consecutive absolute-path fragments until the join exists: an
+ *  executable or script arg must be on disk to run, so resolution is
+ *  the boundary oracle. A fragment that never resolves (raced delete,
+ *  a relative spelling) keeps its original split — never worse than
+ *  the raw tokenize. Bounded so a bad guess can't swallow the line. */
+export function psRegroupPaths(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('/') && !existsSync(t)) {
+      let merged = '';
+      for (let j = i + 1; j < tokens.length && j - i <= 8 && !tokens[j]!.startsWith('-'); j++) {
+        const acc = tokens.slice(i, j + 1).join(' ');
+        if (existsSync(acc)) {
+          merged = acc;
+          i = j;
+          break;
+        }
+      }
+      out.push(merged === '' ? t : merged);
+    } else {
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/** `ps <args> -p <pid>` — the darwin/BSD stand-in for /proc reads.
+ *  Throws like execFileSync does; callers own the fallback chain. */
+function psOut(pid: number, args: string[]): string {
+  return execFileSync('ps', [...args, '-p', String(pid)], {
+    encoding: 'utf8',
+    timeout: 1000,
+  });
+}
+
+/** Environment entries out of `ps eww` on darwin/BSD — the eww row is
+ *  `PID TT STAT TIME <args> <env>`: args and env ride one space-joined
+ *  column with no marker between them, so any `KEY=VAL` shape filter
+ *  alone lets an ARGUMENT like `AI_AGENT=1` impersonate an env badge.
+ *  Both halves come from the same kernel buffer under the same join
+ *  rule: tokenize `ps -o args=` identically, consume that exact token
+ *  run off the row's head, and everything past it is genuinely the
+ *  environment. When the prefix can't be proven — a raced exit, a
+ *  truncated row — nothing is env; an argument can never masquerade
+ *  upward (a truncated env only under-reports, which fails closed for
+ *  badge detection). */
+export function psEwwEnvTokens(pid: number): string[] {
+  for (const ewwArgs of [['eww'], ['e']]) {
+    try {
+      const argTokens = psTokenize(psOut(pid, ['-ww', '-o', 'args=']));
+      const eww = psOut(pid, ewwArgs);
+      const row = eww.split('\n').find(l => l.trim().split(/\s+/)[0] === String(pid)) ?? '';
+      const rowTokens = psTokenize(row);
+      // row = PID TT STAT TIME <argTokens> <envTokens>
+      const head = 4 + argTokens.length;
+      if (rowTokens.length < head) continue;
+      let prefix = true;
+      for (let i = 0; i < argTokens.length; i++) {
+        if (rowTokens[4 + i] !== argTokens[i]) {
+          prefix = false;
+          break;
+        }
+      }
+      if (!prefix) continue;
+      return rowTokens.slice(head).filter(t => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
+    } catch {
+      // ps spelling failed — try the next one
+    }
+  }
+  return [];
 }
 
 export interface ProcEntry {
