@@ -483,4 +483,20 @@ describe('fetchPrActState — the gate never counts itself', () => {
     });
     assert.equal(s.ciPending, 1);
   });
+
+  test('a check that merely contains the name is not the gate', async () => {
+    // a substring match would drop an unrelated check from the gate —
+    // the one thing the gate must never do
+    const s = await fetchPrActState(fakeRev([check('my act gate wrapper', 'fail')], []), target, {
+      selfCheck: 'act-gate',
+    });
+    assert.equal(s.ciFailing, 1);
+  });
+
+  test('a composite workflow / job name is the gate', async () => {
+    const s = await fetchPrActState(fakeRev([check('Act gate / act-gate', 'pending')], []), target, {
+      selfCheck: 'act-gate',
+    });
+    assert.equal(s.ciPending, 0);
+  });
 });

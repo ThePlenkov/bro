@@ -432,12 +432,19 @@ async function fetchState(
   // The gate's own check is not part of the gate's input — a gate that
   // publishes itself as a required check is pending while it runs, and
   // waiting for it means the gate can never settle green. Matched by
-  // name substring (act.selfCheck); separators normalize so 'act-gate'
-  // matches 'Act gate' too — a name that matches nothing would silently
-  // restore the deadlock the setting exists to prevent.
+  // NAME (act.selfCheck): the normalized name must BE the gate's name,
+  // or end with it as the job segment of a composite 'workflow / job'
+  // name. A substring match would drop unrelated checks from the gate —
+  // the one thing the gate must never do (Kody rule: no substring
+  // checks as semantic tests).
   const self = normalizeCheckName(opts?.selfCheck ?? '');
-  const isSelf = (c: CheckInfo): boolean =>
-    self !== '' && normalizeCheckName(c.name).includes(self);
+  const isSelf = (c: CheckInfo): boolean => {
+    if (self === '') {
+      return false;
+    }
+    const name = normalizeCheckName(c.name);
+    return name === self || name.endsWith(` ${self}`);
+  };
   const checks = checksAll.filter(
     c => !isSelf(c) && advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
   );

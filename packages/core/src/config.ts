@@ -273,6 +273,47 @@ function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
   };
 }
 
+/** Optional text — a trimmed non-empty string, or ''. */
+function textOr(v: unknown): string {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : '';
+}
+
+/** Optional counter — a non-negative integer, or the fallback. */
+function countOr(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
+}
+
+/** The merge-queue section — both fields are optional text. */
+function parseMergeQueue(raw: unknown): { label?: string; comment?: string } {
+  const queue = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    label?: unknown;
+    comment?: unknown;
+  };
+  const out: { label?: string; comment?: string } = {};
+  const label = textOr(queue.label);
+  if (label !== '') {
+    out.label = label;
+  }
+  const comment = textOr(queue.comment);
+  if (comment !== '') {
+    out.comment = comment;
+  }
+  return out;
+}
+
+/** The trusted-reviewer allowlist — absent/empty means any human
+ *  account's current-head approval counts. A CONFIGURED list that yields
+ *  zero usable logins is the opposite intent — 'trust nobody', not 'trust
+ *  anybody': one entry no host login can ever equal keeps the allowlist
+ *  non-empty and the gate fails closed (PR #636 review). */
+function parseApprovers(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const valid = raw.map(v => (typeof v === 'string' ? v.trim() : '')).filter(v => v !== '');
+  return raw.length > 0 && valid.length === 0 ? ['!'] : valid;
+}
+
 export const actSection: ConfigSection<{
   ignoreChecks: IgnoreCheckRule[];
   /** The check that IS the gate — the gate never counts itself. A
@@ -298,16 +339,6 @@ export const actSection: ConfigSection<{
     approvers?: unknown;
     mergeQueue?: unknown;
   };
-  const queue = (
-    typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null ? obj.mergeQueue : {}
-  ) as { label?: unknown; comment?: unknown };
-  const mergeQueue: { label?: string; comment?: string } = {};
-  if (typeof queue.label === 'string' && queue.label.trim() !== '') {
-    mergeQueue.label = queue.label.trim();
-  }
-  if (typeof queue.comment === 'string' && queue.comment.trim() !== '') {
-    mergeQueue.comment = queue.comment.trim();
-  }
   return {
     // only name substrings (bare or rule objects) may reach the check
     // filter — anything else falls back to the default
@@ -315,45 +346,20 @@ export const actSection: ConfigSection<{
       ? obj.ignoreChecks.map(normalizeIgnoreEntry).filter((r): r is IgnoreCheckRule => r !== null)
       : [],
     // the gate's own context — an empty string means "no self check"
-    selfCheck:
-      typeof obj.selfCheck === 'string' && obj.selfCheck.trim() !== ''
-        ? obj.selfCheck.trim()
-        : '',
-    maxRounds:
-      typeof obj.maxRounds === 'number' && Number.isInteger(obj.maxRounds) && obj.maxRounds >= 0
-        ? obj.maxRounds
-        : DEFAULT_CONFIG.act.maxRounds,
+    selfCheck: textOr(obj.selfCheck),
+    maxRounds: countOr(obj.maxRounds, DEFAULT_CONFIG.act.maxRounds),
     docsPaths: Array.isArray(obj.docsPaths)
       ? obj.docsPaths.filter(
           // an empty pattern would match EVERY path
           (v): v is string => typeof v === 'string' && v.trim() !== ''
         )
       : [...DEFAULT_CONFIG.act.docsPaths],
-    docsMaxRounds:
-      typeof obj.docsMaxRounds === 'number' &&
-      Number.isInteger(obj.docsMaxRounds) &&
-      obj.docsMaxRounds >= 0
-        ? obj.docsMaxRounds
-        : DEFAULT_CONFIG.act.docsMaxRounds,
+    docsMaxRounds: countOr(obj.docsMaxRounds, DEFAULT_CONFIG.act.docsMaxRounds),
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
-    // trusted-reviewer allowlist for the same gate — absent/empty
-    // means any human account's current-head approval counts. A
-    // CONFIGURED list that yields zero usable logins is the opposite
-    // intent — 'trust nobody', not 'trust anybody': one entry no host
-    // login can ever equal keeps the allowlist non-empty and the gate
-    // fails closed (PR #636 review).
-    approvers: (() => {
-      if (!Array.isArray(obj.approvers)) {
-        return [];
-      }
-      const valid = obj.approvers
-        .map(v => (typeof v === 'string' ? v.trim() : ''))
-        .filter(v => v !== '');
-      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid;
-    })(),
-    mergeQueue,
+    approvers: parseApprovers(obj.approvers),
+    mergeQueue: parseMergeQueue(obj.mergeQueue),
   };
 };
 

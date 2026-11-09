@@ -65,18 +65,20 @@ jobs:
 
       - run: npm run build
 
-      # A draft cannot merge — and no reviewer has reported on it yet, so
-      # the gate would wait for nothing. It passes; the `ready_for_review`
-      # event runs the real gate on the same head.
-      - name: Skip the gate for a draft
-        if: ${{ github.event.pull_request.draft }}
-        run: echo "draft — the gate does not apply yet"
-
       - name: Evaluate the act gate
-        if: ${{ !github.event.pull_request.draft }}
         env:
           PR: ${{ github.event.inputs.pr || github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
+        # A draft cannot merge — and no reviewer has reported on it yet, so
+        # the gate would wait for nothing. It passes; the `ready_for_review`
+        # event runs the real gate on the same head. The draft state is read
+        # from the host, not from `github.event.pull_request` — that object
+        # does not exist on a workflow_dispatch event.
         # exit 1 = the gate is blocked or the wait timed out; the blockers
         # are printed, so the job log names what is missing
-        run: node packages/cli/dist/index.js review act wait "$PR" --timeout 20
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .draft)" = "true" ]; then
+            echo "draft — the gate does not apply yet"
+            exit 0
+          fi
+          node packages/cli/dist/index.js review act wait "$PR" --timeout 20

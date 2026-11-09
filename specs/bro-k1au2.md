@@ -64,13 +64,15 @@ jobs:
           ref: main          # the rules of the game — not the PR's code
       - run: npm ci --no-audit --no-fund --ignore-scripts
       - run: npm run build
-      - name: Skip the gate for a draft
-        if: ${{ github.event.pull_request.draft }}
-        run: echo "draft — the gate does not apply yet"
-      - run: node packages/cli/dist/index.js review act wait "$PR" --timeout 20
+      - name: Evaluate the act gate
         env:
           PR: ${{ github.event.inputs.pr || github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .draft)" = "true" ]; then
+            echo "draft — the gate does not apply yet"; exit 0
+          fi
+          node packages/cli/dist/index.js review act wait "$PR" --timeout 20
 ```
 
 The job's check lands on the PR's **head SHA** and is refreshed on every
@@ -93,13 +95,15 @@ input — never from anyone else's.
 { "act": { "selfCheck": "act-gate" } }
 ```
 
-The name match is case- and separator-insensitive (`act-gate` matches
-`Act gate`): a setting that silently matched nothing would restore the
-very deadlock it exists to prevent. The connector stays
-provider-agnostic — no gate name is hardcoded in shared code, and the
-exclusion is not `act.ignoreChecks` (that path reports a "reviewer may be
-down" alert for a failing check without thread activity — noise the gate
-would raise on itself).
+The name match is a **name** match, not a substring: the normalized
+check name must BE the gate's name (or end with it as the job segment
+of a composite `workflow / job` name). A substring match would drop
+unrelated checks from the gate — the one thing the gate must never do.
+Separators and case normalize, so `act-gate` matches `Act gate`. The
+connector stays provider-agnostic — no gate name is hardcoded in shared
+code, and the exclusion is not `act.ignoreChecks` (that path reports a
+"reviewer may be down" alert for a failing check without thread
+activity — noise the gate would raise on itself).
 
 ### Why the workflow polls instead of publishing a check
 
