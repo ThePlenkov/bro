@@ -325,8 +325,18 @@ async function cmdWait(argv: string[]): Promise<void> {
     },
   });
   if (argv.includes('--json')) {
+    const verdict = landedPhrase(res.state);
     console.log(
-      JSON.stringify({ pr: res.state, exit_gate: res.gate, timed_out: res.timedOut }, null, 2)
+      JSON.stringify(
+        {
+          pr: res.state,
+          exit_gate: res.gate,
+          timed_out: res.timedOut,
+          ...(verdict === undefined ? {} : { verdict }),
+        },
+        null,
+        2
+      )
     );
   } else {
     printStatus(res.state, res.gate);
@@ -402,6 +412,30 @@ function waitOpts(
   };
 }
 
+/** The landed phrase — "was already merged", with the actor when the
+ *  host names it (the host's merge record). undefined for a PR that is
+ *  not merged (spec: specs/bro-0i1lm.md). */
+function landedPhrase(state: PrActState): string | undefined {
+  if (state.state !== 'MERGED') return undefined;
+  return state.mergedBy === undefined
+    ? 'was already merged'
+    : `was already merged by ${state.mergedBy}`;
+}
+
+/** The verdict line a caller reads — the PR link and the landing. */
+function landedLine(rev: ReviewFacade, t: PrTarget, state: PrActState): string {
+  return `act: ${rev.prLink(t.repo, t.pr)} ${landedPhrase(state) ?? 'was already merged'}`;
+}
+
+/** The settled label for the verdict event — 'MERGED', 'MERGED by
+ *  <actor>', or 'CLOSED'. */
+function settledLabel(state: PrActState): string {
+  if (state.state === 'MERGED' && state.mergedBy !== undefined) {
+    return `MERGED by ${state.mergedBy}`;
+  }
+  return state.state.toUpperCase();
+}
+
 /** The settled tail — verdict events, the loop-claimed bead's discharge
  *  on external settle, and the green path's optional merge. An external
  *  merge settles the wait before mergeIfAsked ever runs — watchEnd
@@ -414,13 +448,19 @@ async function settleWait(
   res: GateWaitResult,
   timeout: number
 ): Promise<void> {
+  const json = argv.includes('--json');
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
     if (!res.timedOut && !res.gate.ok) {
       await recordBlockedVerdict(rev, t, res, timeout);
     } else if (!res.timedOut && res.state.state !== 'OPEN') {
       // externally settled (merged/closed between polls) — the "wait
       // finished" moment a sink is for (spec: specs/bro-huy5o.8.md)
-      await recordSettledVerdict(rev, t, res.state.url, res.state.state.toLowerCase());
+      if (!json && res.state.state === 'MERGED') {
+        // a landed PR is a verdict, not a lifecycle failure — the caller
+        // gets the landing and its actor (spec: specs/bro-0i1lm.md)
+        console.log(landedLine(rev, t, res.state));
+      }
+      await recordSettledVerdict(rev, t, res.state.url, settledLabel(res.state));
     }
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state);
@@ -430,11 +470,11 @@ async function settleWait(
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0;
     return;
   }
-  await mergeIfAsked(argv, t.pr);
+  const landed = await mergeIfAsked(argv, t.pr);
   // mergeIfAsked reports merge failures on exitCode — a clean return
   // means the wait ended at a green gate (and --merge landed or queued)
   if (process.exitCode === undefined || process.exitCode === 0) {
-    await recordSettledVerdict(rev, t, res.state.url, 'green');
+    await recordSettledVerdict(rev, t, res.state.url, landed ?? 'GREEN');
   }
 }
 
@@ -533,7 +573,7 @@ async function recordSettledVerdict(
       key: `act-wait-${t.pr}`,
       source: 'act-wait',
       ref: url,
-      payload: `act wait on ${link} settled ${outcome.toUpperCase()}`,
+      payload: `act wait on ${link} settled ${outcome}`,
     });
   } catch {
     // fail-open — same rule as the blocked verdict
@@ -864,8 +904,9 @@ function reportRearm(
 
 /** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
  *  and `--bead` forwarded); `--cleanup` alone is an error — nothing was
- *  merged. */
-async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
+ *  merged. Returns the settled label when the PR was already merged by
+ *  somebody else — the wait journals the landing, not a green gate. */
+async function mergeIfAsked(argv: string[], pr: number): Promise<string | undefined> {
   if (argv.includes('--merge')) {
     const mergeArgs = argv.filter(a =>
       ['--squash', '--rebase', '--admin', '--cleanup'].includes(a)
@@ -874,11 +915,12 @@ async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
     if (bead !== undefined) {
       mergeArgs.push('--bead', bead);
     }
-    await cmdMerge([String(pr), ...mergeArgs]);
+    return cmdMerge([String(pr), ...mergeArgs]);
   } else if (argv.includes('--cleanup')) {
     console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean');
     process.exitCode = 2;
   }
+  return undefined;
 }
 
 /**
@@ -1025,7 +1067,7 @@ function warnHumanOwned(rev: ReviewFacade, t: PrTarget): void {
   }
 }
 
-async function cmdMerge(argv: string[]): Promise<void> {
+async function cmdMerge(argv: string[]): Promise<string | undefined> {
   const cfg = loadBroConfig();
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors });
   const rev = reviewHost(undefined, cfg.connectors);
@@ -1081,11 +1123,17 @@ async function cmdMerge(argv: string[]): Promise<void> {
       // PR merged between the wait's last green poll and this fetch
       closeBeadIfLanded(argv, rev, t, state.state);
       await harvestClosedPr(rev, t, state.state);
+      if (state.state === 'MERGED') {
+        // the merge goal is satisfied — a landed PR is a verdict, not a
+        // lifecycle error (spec: specs/bro-0i1lm.md)
+        console.log(landedLine(rev, t, state));
+        return settledLabel(state);
+      }
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       );
       process.exitCode = 1;
-      return;
+      return undefined;
     }
 
     const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
