@@ -1,0 +1,66 @@
+name: Act gate
+
+# The act gate, evaluated on the PROJECT side.
+#
+# The gate (every reviewer reported, no thread open, CI green) used to
+# live only in an agent's session — `bro act wait` inside the loop that
+# owns the PR. Auto-merge is a project config: it lands a PR once the
+# required checks are green, and it sees only what the project makes
+# required. A reviewer still running at that moment left its finding
+# AFTER the merge, as review debt.
+#
+# So the gate becomes a required check. This job's conclusion IS the
+# verdict: the check lands on the PR's head SHA and is refreshed on every
+# push, and it turns green only once the reviewers have reported.
+# Auto-merge then does the landing — the agent's job shrinks to fixing
+# the findings.
+#
+# The job checks out `main`, not the PR: the rules of the game must not
+# depend on the code under review.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: act-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  act-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "lts/*"
+          check-latest: true
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - run: npm run build
+
+      # A draft cannot merge — and no reviewer has reported on it yet, so
+      # the gate would wait for nothing. It passes; the `ready_for_review`
+      # event runs the real gate on the same head.
+      - name: Skip the gate for a draft
+        if: github.event.pull_request.draft
+        run: echo "draft — the gate does not apply yet"
+
+      - name: Evaluate the act gate
+        if: ${{ !github.event.pull_request.draft }}
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        # exit 1 = the gate is blocked or the wait timed out; the blockers
+        # are printed, so the job log names what is missing
+        run: node packages/cli/dist/index.js review act wait "$PR" --timeout 20
