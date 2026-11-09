@@ -51,7 +51,7 @@ function titleSegments(pattern: string): TitleSegment[] {
       i = end;
       continue;
     }
-    literal += pattern.charAt(i);
+    literal += pattern.slice(i, i + 1);
     i += 1;
   }
   segments.push({ kind: 'literal', text: literal });
