@@ -16,7 +16,7 @@ probes, judge veto), the fired-set budget, and the verdict journal.
 npm i @broject/guard
 ```
 
-Requires Node ≥ 22.18. ESM only.
+Requires Node ≥ 26.13. ESM only.
 
 ## Surface
 

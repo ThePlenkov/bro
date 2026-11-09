@@ -35,7 +35,7 @@ import {
   sessionCapViews,
 } from './session-cap.ts';
 
-/** The dir this file runs from — the child's tsx script imports the
+/** The dir this file runs from — the child's .ts script imports the
  *  same sources by absolute path. */
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -420,7 +420,7 @@ describe('admitSessionStart', () => {
           `writeFileSync(${JSON.stringify(ready)}, String(process.pid))\n` +
           `setTimeout(() => { release(); process.exit(0) }, 600)\n`
       );
-      const child = spawn('npx', ['tsx', childScript], { stdio: 'ignore' });
+      const child = spawn(process.execPath, [childScript], { stdio: 'ignore' });
       await new Promise<void>(res => {
         const t0 = Date.now();
         const tick = (): void => {

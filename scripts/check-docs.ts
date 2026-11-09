@@ -12,7 +12,7 @@
  *  - the Node floor: every `Node ≥ x` / `node >= x` / `node-%3E%3Dx`
  *    badge claim in the doc set must equal the workspace `engines.node`
  *    floor — onboarding once promised `≥ 22` while engines require
- *    `>=22.18`
+ *    `>=26.13`
  *  - the setup contract: docs must name `bro.config.local.json` as what
  *    `bro setup` writes, and never present the committed
  *    `bro.config.json` as setup-written or gitignored — the local

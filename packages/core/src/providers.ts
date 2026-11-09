@@ -200,12 +200,10 @@ export class UnknownProviderError extends Error {
 /** A consumer asked an entry for a surface its kind doesn't have —
  *  a config error naming kind + surface, not a runtime surprise. */
 export class ProviderSurfaceError extends Error {
-  constructor(
-    public providerName: string,
-    entry: ProviderEntry,
-    surface: ProviderSurface
-  ) {
+  providerName: string;
+  constructor(providerName: string, entry: ProviderEntry, surface: ProviderSurface) {
     super(`providers.${providerName} (type '${entry.type}') has no ${surface} surface`);
+    this.providerName = providerName;
     this.name = 'ProviderSurfaceError';
   }
 }

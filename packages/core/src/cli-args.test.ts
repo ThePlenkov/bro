@@ -4,8 +4,10 @@ import { CommandError } from './errors.ts';
 import { deprecatedFlag, flag, flagAll, positionals } from './cli-args.ts';
 
 class Exit extends Error {
-  constructor(public code: number) {
+  public code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

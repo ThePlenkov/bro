@@ -15,7 +15,7 @@ plans can fan out to Linear's GraphQL API next to github/gitlab/atlassian.
 npm i @broject/linear
 ```
 
-Requires Node ≥ 22.18 and `curl` on PATH for the sync task surface. ESM only.
+Requires Node ≥ 26.13 and `curl` on PATH for the sync task surface. ESM only.
 
 ## Configuration
 
@@ -47,18 +47,18 @@ query { team(id: "ENG") { issues(first: 5, filter: { state: { type: { nin: ["com
 
 ## Mapping
 
-| bro            | Linear                                                        |
-| -------------- | ------------------------------------------------------------- |
-| `id`           | identifier `ENG-123` (bare `123`, URLs and UUIDs resolve too)   |
-| `open`         | backlog/unstarted, no assignee, unblocked                       |
-| `in_progress`  | started state, or any assignee                                  |
-| `blocked`      | triage, open `blocks` blocker, open sub-issue, `blocked` label  |
-| `closed`       | completed/canceled/archived                                   |
-| `claim`        | assign the API key's `viewer` (read → assign → verify)          |
-| `deps`         | `blocks` relations — `inverseRelations` up, `relations` down    |
-| `children`     | sub-issues                                                    |
-| `priority`     | native priority name-mapped (urgent→0 … none→4)                 |
-| metadata       | `<!-- bro: {...} -->` trailer — last element of the description   |
+| bro           | Linear                                                          |
+| ------------- | --------------------------------------------------------------- |
+| `id`          | identifier `ENG-123` (bare `123`, URLs and UUIDs resolve too)   |
+| `open`        | backlog/unstarted, no assignee, unblocked                       |
+| `in_progress` | started state, or any assignee                                  |
+| `blocked`     | triage, open `blocks` blocker, open sub-issue, `blocked` label  |
+| `closed`      | completed/canceled/archived                                     |
+| `claim`       | assign the API key's `viewer` (read → assign → verify)          |
+| `deps`        | `blocks` relations — `inverseRelations` up, `relations` down    |
+| `children`    | sub-issues                                                      |
+| `priority`    | native priority name-mapped (urgent→0 … none→4)                 |
+| metadata      | `<!-- bro: {...} -->` trailer — last element of the description |
 
 ## Links
 

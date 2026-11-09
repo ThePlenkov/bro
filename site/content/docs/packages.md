@@ -46,5 +46,5 @@ is a quick guide, not the complete catalog.
 | `@broject/brotocol` | Filetree protocol — CRUD/search/graph/lint over a configured doc tree + the spec preset     |
 | `@broject/spec`     | Bro plugin — `SpecStore` facade over Brotocol+Brose; the `brose` specs connector            |
 
-All packages are ESM-only and require Node ≥ 22.18. Versions release in
+All packages are ESM-only and require Node ≥ 26.13. Versions release in
 lockstep; each package page on npm carries its own README.
