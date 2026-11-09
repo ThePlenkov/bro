@@ -280,3 +280,43 @@ describe('github e2e (gated)', () => {
     assert.deepEqual(read().map((e) => e.kind), ['request', 'claim', 'result', 'accept'])
   })
 })
+
+
+describe('github value objects', () => {
+  test('GitHubRepo normalizes case and compares', async () => {
+    const { GitHubRepo } = await import('./github.ts')
+    const a = new GitHubRepo('ACME', 'Rig')
+    const b = GitHubRepo.from({ owner: 'acme', repo: 'RIG' })
+    assert.equal(a.toString(), 'acme/rig')
+    assert.ok(a.equals(b))
+    assert.ok(a.equals({ owner: 'ACME', repo: 'rig' }))
+  })
+
+  test('GitHubLogin normalizes and compares case-insensitively', async () => {
+    const { GitHubLogin } = await import('./github.ts')
+    const l = GitHubLogin.from('  Alice  ')
+    assert.ok(l !== null)
+    assert.equal(l?.toString(), 'Alice')
+    assert.ok(l.equals('alice'))
+    assert.ok(l.equals(new GitHubLogin('ALICE')))
+  })
+
+  test('GitHubIssueThread.parse tolerates trailing slash and rejects unsafe numbers', async () => {
+    const { GitHubIssueThread } = await import('./github.ts')
+    const t = GitHubIssueThread.parse('https://github.com/acme/rig/issues/42/')
+    assert.equal(t.isIssue, true)
+    assert.equal(t.number, 42)
+    assert.equal(t.url, 'https://github.com/acme/rig/issues/42')
+    const bad = GitHubIssueThread.parse('https://github.com/acme/rig/issues/Infinity')
+    assert.equal(bad.isIssue, false)
+    assert.equal(bad.number, null)
+  })
+
+  test('toGitHubRepo returns instances and rejects empty', async () => {
+    const { GitHubRepo, toGitHubRepo } = await import('./github.ts')
+    const r = toGitHubRepo({ owner: 'Acme', repo: 'Rig' })
+    assert.ok(r instanceof GitHubRepo)
+    assert.equal(toGitHubRepo({ owner: '', repo: 'x' }), null)
+    assert.equal(toGitHubRepo('https://github.com/acme/rig.git') instanceof GitHubRepo, true)
+  })
+})

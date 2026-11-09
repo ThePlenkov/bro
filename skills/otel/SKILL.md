@@ -1,4 +1,5 @@
 ---
+
 name: otel
 description: "Use when enabling, inspecting, or debugging bro's hook-first telemetry — 'which hooks fire in this repo', 'send hook events to an OTLP collector', per-hook payload allowlists, sampling, or reading the file sink. Thin wrapper over the bro CLI: `bro otel status|test|on|off` — mechanics live in @broject/otel emitHook on the `bro hooks` dispatch path (spec specs/bro-xgejl.md). Requires `bro` (npx -y @broject/bro@0)."
 ---
@@ -25,11 +26,11 @@ before any payload work: one memoized config read and a boolean per
 hook. `BRO_TELEMETRY=0` kills emission outright, same switch as the
 command journal.
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro otel status [--json]` | enabled? resolved exporter (file path / otlp endpoint), `*` + per-hook policies, event counts from the file sink |
-| `bro otel test <hook>` | fire a synthetic payload through the facade — prints the exact exported record, the policy, and the payload fields the allowlist dropped |
-| `bro otel on` / `bro otel off` | flip `otel.enabled` in `bro.config.local.json` — the local layer, never the committed config |
+| Command                        | What it does                                                                                                                             |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro otel status [--json]`     | enabled? resolved exporter (file path / otlp endpoint), `*` + per-hook policies, event counts from the file sink                         |
+| `bro otel test <hook>`         | fire a synthetic payload through the facade — prints the exact exported record, the policy, and the payload fields the allowlist dropped |
+| `bro otel on` / `bro otel off` | flip `otel.enabled` in `bro.config.local.json` — the local layer, never the committed config                                             |
 
 ## Enable
 
@@ -78,7 +79,7 @@ always explicit opt-in via `collect`.
 `collect` allowlist are read from operator-owned layers only: the
 global config plus any project/local config file `git ls-files` reports
 **untracked** — the file `bro otel on` writes in a real checkout. A
-*committed* `otel` block is repo-controlled, so the facade ignores it
+_committed_ `otel` block is repo-controlled, so the facade ignores it
 for everything except narrowing: it can turn telemetry off, drop a
 hook, or lower a sample, but never arm, redirect, or collect. A
 committed `bro.config.local.json` is still committed — the git index,
@@ -89,17 +90,17 @@ that is the opt-in step, not a bug.
 
 ## Hook catalog
 
-| bro event | host events | payload fields worth collecting |
-| --------- | ----------- | ------------------------------- |
-| `session-start` | SessionStart | `session_id`, `hook_event_name` |
-| `post-compaction` | PostCompaction | `session_id` |
-| `pre-compact` | PreCompact | `session_id` |
-| `prompt-submit` | UserPromptSubmit | `session_id`, `prompt` ⚠ content |
-| `pre-tool` | PreToolUse | `tool_name`, `tool_use_id`, `tool_input.command`, `tool_input.file_path` |
-| `post-tool` | PostToolUse, PostToolUseFailure | `tool_name`, `tool_input.command`, `tool_response.success` |
-| `stop` | Stop | `session_id`, `stop_hook_active` |
-| `permission` | PermissionRequest | `tool_name`, `tool_input.command` |
-| `prepare-commit-msg`, `reference-transaction`, `post-merge` | git hooks | — (meta rows only) |
+| bro event                                                   | host events                     | payload fields worth collecting                                          |
+| ----------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------ |
+| `session-start`                                             | SessionStart                    | `session_id`, `hook_event_name`                                          |
+| `post-compaction`                                           | PostCompaction                  | `session_id`                                                             |
+| `pre-compact`                                               | PreCompact                      | `session_id`                                                             |
+| `prompt-submit`                                             | UserPromptSubmit                | `session_id`, `prompt` ⚠ content                                         |
+| `pre-tool`                                                  | PreToolUse                      | `tool_name`, `tool_use_id`, `tool_input.command`, `tool_input.file_path` |
+| `post-tool`                                                 | PostToolUse, PostToolUseFailure | `tool_name`, `tool_input.command`, `tool_response.success`               |
+| `stop`                                                      | Stop                            | `session_id`, `stop_hook_active`                                         |
+| `permission`                                                | PermissionRequest               | `tool_name`, `tool_input.command`                                        |
+| `prepare-commit-msg`, `reference-transaction`, `post-merge` | git hooks                       | — (meta rows only)                                                       |
 
 Meta fields (`session`, `client`, `ms`, `ok`, `error`) ride every row
 for free — the allowlist only governs `payload.*`.
@@ -120,7 +121,7 @@ For a collector: `exporter.type=otlp` posts OTLP/HTTP-JSON log records
 poster — a dead collector loses the row, never stalls the hook. Point
 `exporter.endpoint` or rely on `OTEL_EXPORTER_OTLP_ENDPOINT`; Grafana
 dashboards under `observability/grafana/` read the same `bro.*` event
-shape the `lane.devin.*` events already use.
+shape the `lane.<provider>.*` events already use.
 
 `exporter.type=stdout` writes rows to **stderr** — hook stdout is the
 host's control channel; live debugging only.
@@ -131,7 +132,7 @@ collected` list — check allowlists before enabling.
 
 ## Migration note
 
-`bro fleet telemetry` (the perf journals) and `lane.devin.*` otel
+`bro fleet telemetry` (the perf journals) and `lane.<provider>.*` otel
 events keep working — they are session evidence and lane telemetry,
 not hook telemetry. The facade is the aggregation layer for hook
 events: use `bro otel` to answer "which hooks fire, how fast, with

@@ -712,7 +712,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 //#region packages/cli/src/adapter/pi.ts
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = "@broject/bro@0.2.5";
+const NPX_PIN = "@broject/bro@0.3.0";
 /**
 * The pi binding: the host's own shape, nothing else. Every behavioral
 * decision lives in the shared driver, so this file is the whole of
