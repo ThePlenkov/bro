@@ -18,6 +18,7 @@ import { otelJournal, type AcpTerminals } from '@broject/providers';
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
+import { scrubEnv } from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -147,6 +148,7 @@ describe('conductorConfig', () => {
   // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
   // in ~/.config/bro would leak a backend into the 'unset env' assertions;
   // this suite reads an empty global config dir instead
+  after(scrubEnv());
   const prevXdg = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'));
   after(() => {

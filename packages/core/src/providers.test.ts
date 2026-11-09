@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,16 +21,11 @@ import {
   type ProviderEntry,
 } from './providers.ts';
 
+import { scrubEnv } from './testkit.ts';
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
 // (config.test.ts runs the same guard)
-const XDG = tmpDir('bro-xdg-');
-const prevXdg = process.env.XDG_CONFIG_HOME;
-process.env.XDG_CONFIG_HOME = XDG;
-process.on('exit', () => {
-  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-  else process.env.XDG_CONFIG_HOME = prevXdg;
-});
+after(scrubEnv());
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = tmpDir('bro-providers-');
