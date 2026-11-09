@@ -32,7 +32,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "The command primitive \u2014 a command is a CLI: it holds commands and plugins, and any command can be mounted as a bin",
+  "description": "The command primitive — a command is a CLI: it holds commands and plugins, and any command can be mounted as a bin",
   "keywords": [
     "cli",
     "command",
@@ -40,5 +40,9 @@
     "dispatch",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "core",
+    "status": "beta"
+  }
 }

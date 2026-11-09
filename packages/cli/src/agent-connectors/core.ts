@@ -62,6 +62,7 @@ import {
   groupMemberAlive,
   handleOwner,
   isAgentCause,
+  rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
   JudgeUnavailable,
@@ -2801,7 +2802,9 @@ function isCurrentExitGeneration(dir: string, molStep: string, entry: AgentRegis
   const current = readAgentRegistry(dir)[molStep];
   return (
     current === undefined ||
-    (current.agentId === entry.agentId && current.spawnedAt === entry.spawnedAt)
+    (current.agentId === entry.agentId &&
+      current.spawnedAt === entry.spawnedAt &&
+      current.runId === entry.runId)
   );
 }
 
@@ -2902,7 +2905,8 @@ function persistClassifiedExit(
       if (
         current === undefined ||
         current.agentId !== entry.agentId ||
-        current.spawnedAt !== entry.spawnedAt
+        current.spawnedAt !== entry.spawnedAt ||
+        current.runId !== entry.runId
       ) {
         return;
       }
@@ -2912,6 +2916,7 @@ function persistClassifiedExit(
         exitStatus,
         cause,
         resetAt,
+        rateStreak: entry.rateStreak,
         ...(entry.observedAt === undefined ? {} : { observedAt: entry.observedAt }),
       };
       writeAgentRegistry(dir, reg);
@@ -2957,6 +2962,18 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return;
   }
+  // the .exit file's mtime is the honest death stamp — the harvest's own
+  // clock can land a poll late (specs/telemetry/bro-ub91h.md), and a lazy
+  // read can land HOURS late: the message's "in 54 minutes" / "at 19:01"
+  // anchors to the death, never to whenever this read happened (bro-9eeld)
+  let exitAt: number | undefined;
+  if (home !== null) {
+    try {
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
+    } catch {
+      // the file rotated between read and stat — fall back to now
+    }
+  }
   // classification input = this run's .log tail + .stderr tail (spec
   // bro-e2ec0) — provider walls the child prints on stderr classify from
   // the capture, the event stream no longer carries them. The tails
@@ -2966,7 +2983,8 @@ function ensureExitCause(
   // tail, the same verdict an unwritten file gets
   const c = classifyExitCauseParts(
     [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus
+    entry.exitStatus,
+    exitAt ?? Date.now()
   );
   // the tails were read off-lock — a respawn stamping the entry between
   // the two reads feeds the old run new-run bytes; a DIFFERENT
@@ -2977,11 +2995,16 @@ function ensureExitCause(
     return;
   }
   entry.cause = c.cause;
-  entry.resetAt = c.resetAt;
-  emitProviderWall(entry, molStep, c.cause, c.resetAt);
-  recordClassifiedWall(dir, molStep, entry, c.cause, c.resetAt, wallTtls);
+  // instant-death backoff (spec bro-9eeld): a rate wall hit inside the
+  // first minute proves the last mark undershot — the recorded hold
+  // escalates per consecutive fast death instead of re-trusting it
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt ?? Date.now());
+  entry.resetAt = back.resetAt;
+  entry.rateStreak = back.streak > 0 ? back.streak : undefined;
+  emitProviderWall(entry, molStep, c.cause, back.resetAt);
+  recordClassifiedWall(dir, molStep, entry, c.cause, back.resetAt, wallTtls);
   emitClassifiedExitLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
-  persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, c.resetAt);
+  persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, back.resetAt);
 }
 
 /** The recorded-death ladder both backends walk once liveness fails —
@@ -6307,7 +6330,12 @@ function copilotPatch(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
       reg[molStep] = { ...cur, ...patch };
@@ -6325,22 +6353,50 @@ function copilotPatch(
  *  death. The terminal half lives in copilotTerminalPatch. */
 /** The terminal-state half of the absorb patch — cancelled reads
  *  stopped, completed the ok exit record, failed/timed_out the
- *  classified one. */
-function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
+ *  classified one. The classified death runs the same instant-death
+ *  backoff ensureExitCause applies (spec bro-9eeld) — a preclassified
+ *  cause bypasses ensureExitCause's escalation, so the streak and the
+ *  escalated hold are computed here: the session's updated_at is the
+ *  honest remote death stamp, and any outcome that isn't a fast
+ *  rate-limit death clears the streak. */
+function copilotTerminalPatch(
+  state: string,
+  task: CopilotTask,
+  entry: AgentRegistryEntry
+): Record<string, unknown> {
   if (state === 'cancelled') {
-    return { stopped: true };
+    return { stopped: true, rateStreak: undefined };
   }
   if (state === 'completed') {
-    return { exitStatus: 0, cause: 'ok' };
+    return { exitStatus: 0, cause: 'ok', rateStreak: undefined };
   }
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
   }
+  // terminal verdicts are idempotent — a repeated harvest of the same
+  // classified death must not stack another backoff streak, or one
+  // failure escalates 30s→60s→120s on nothing but status reads
+  if (entry.cause !== undefined && entry.cause !== 'ok') {
+    return {
+      exitStatus: typeof entry.exitStatus === 'number' ? entry.exitStatus : 1,
+      cause: entry.cause,
+      resetAt: entry.resetAt,
+      rateStreak: entry.rateStreak,
+    };
+  }
+  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
+  const exitAt = Number.isNaN(stamp) ? Date.now() : stamp;
   const c =
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
-      : classifyExitCause(copilotSessionError(task), 1);
-  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt };
+      : classifyExitCause(copilotSessionError(task), 1, exitAt);
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt);
+  return {
+    exitStatus: 1,
+    cause: c.cause,
+    resetAt: back.resetAt,
+    rateStreak: back.streak > 0 ? back.streak : undefined,
+  };
 }
 
 function copilotAbsorb(
@@ -6388,7 +6444,7 @@ function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl;
   }
-  Object.assign(patch, copilotTerminalPatch(state, task));
+  Object.assign(patch, copilotTerminalPatch(state, task, entry));
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch);
   }
