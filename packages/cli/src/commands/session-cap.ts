@@ -78,7 +78,7 @@ export function sessionCapVerdict(
   // sends one, the command otherwise), so the two hook events of one
   // call claim ONE slot, and two separate calls with the same command
   // claim their own.
-  const key = `guard-${ctx.sessionId ?? 'nosession'}-${callKey(command, ctx)}`;
+  const key = `guard-${keyPart(ctx.sessionId ?? 'nosession')}-${callKey(command, ctx)}`;
   return judgeViews(views, bags, key);
 }
 
@@ -139,9 +139,19 @@ function callKey(command: string, ctx: ConnectorCtx): string {
   if (id === undefined || id === '') {
     return commandKey(command);
   }
-  // reservation keys become filenames — strip traversal/unsafe segments
-  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_');
-  return `id-${safe}`;
+  return `id-${keyPart(id)}`;
+}
+
+/** A raw client string into a reservation-key segment — filename-safe
+ *  (no traversal, bounded length) AND lossless: the digest keeps two
+ *  raws that sanitize alike (`a/b` vs `a?b`) from sharing a claim. */
+function keyPart(raw: string): string {
+  const safe = raw
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .slice(0, 48);
+  const digest = createHash('sha1').update(raw).digest('hex').slice(0, 12);
+  return `${safe}-${digest}`;
 }
 
 /** A short digest of a command — the claim's key half. The same
