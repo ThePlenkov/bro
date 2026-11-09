@@ -5,6 +5,13 @@ records: see [bro-y1jtm](sdd/bro-y1jtm.md). That design introduces KEY-N
 identity, lifecycle and conformance; its dogfood migration replaces the
 legacy conventions below. Product specs are never archived on bead closure.
 
+## Legacy layout (superseded policy)
+
+The following records the pre-migration convention, not current product
+policy. Do not archive specs on bead closure; existing archive entries are
+migration sources. Bead-based paths remain supported until the dogfood
+migration in bro-y1jtm.8 installs KEY-N identities and aliases.
+
 Specs are **per-bead design artifacts**: written before code, merged
 with the PR, and left as the decision record. They are not
 documentation — the site (`site/content/docs/`) is for readers; these
