@@ -44,6 +44,11 @@
             ]
           }
         },
+        "selfCheck": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
         "maxRounds": {
           "type": "integer",
           "minimum": 0
@@ -1606,6 +1611,14 @@
             },
             "additionalProperties": false
           }
+        },
+        "fastModel": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "fastLane": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

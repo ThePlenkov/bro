@@ -1,6 +1,7 @@
 import { dirname } from 'node:path'
 import { bd, bdJson, getTasks, taskStore } from '@broject/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
+import { MERGE_STEP_TYPE } from './verify.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
 export function loadMolecule(id: string): Molecule {
@@ -184,32 +185,65 @@ export function formulaSteps(formula: string): MolIssue[] {
   }))
 }
 
+/** Register the custom step types — `agent`, `human`, and the merge
+ *  step's own kind. bd flattens an unregistered type to `task`, and a
+ *  flattened merge step loses the declaration its close verifies on. */
+function registerStepTypes(): void {
+  try {
+    const current = bd(['config', 'get', 'types.custom']).trim()
+    // the existing value is read leniently — an operator's hand-written
+    // "agent human" must survive the rewrite as two types, not as one
+    // bogus name
+    const types = new Set(current ? current.split(/[\s,]+/) : [])
+    types.add('agent').add('human')
+    types.add(MERGE_STEP_TYPE)
+    // bd parses types.custom as a comma-separated list — a space-joined
+    // value reads back as one bogus type and the pour still flattens
+    bd(['config', 'set', 'types.custom', [...types].join(',')])
+  } catch {
+    // old bd without types.custom — the registration check below fails
+  }
+}
+
+/** The types bd actually registered — the pour's own witness. The
+ *  read-back is parsed the way bd parses it: a COMMA-separated list. A
+ *  space-joined value is one type to bd, so reading it as three would
+ *  report a registration that never happened — and the pour would
+ *  flatten the merge step to task. */
+function registeredTypes(): string[] {
+  try {
+    return bd(['config', 'get', 'types.custom'])
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t !== '')
+  } catch {
+    // registration unverifiable is a failure too
+    return []
+  }
+}
+
 /**
  * `bro convoy pour` — register custom step types once so formulas keep
  * agent/human instead of flattening to task, then pour the formula.
  * Returns the new molecule root id.
  */
 export function pourFormula(formula: string, vars: Record<string, string> = {}): string {
-  try {
-    const current = bd(['config', 'get', 'types.custom']).trim()
-    const types = new Set(current ? current.split(/[\s,]+/) : [])
-    types.add('agent').add('human')
-    // bd parses types.custom as a comma-separated list — a space-joined
-    // value reads back as one bogus type and the pour still flattens
-    bd(['config', 'set', 'types.custom', [...types].join(',')])
-  } catch {
-    // old bd without types.custom — gates would flatten to task
-  }
-  let registered: string[] = []
-  try {
-    registered = bd(['config', 'get', 'types.custom']).trim().split(/[\s,]+/)
-  } catch {
-    // fall through — registration unverifiable is a failure too
-  }
+  registerStepTypes()
+  const registered = registeredTypes()
   if (!registered.includes('agent') || !registered.includes('human')) {
     throw new Error(
       'types.custom could not register agent/human — pouring would flatten declared gates to task. ' +
-        'Upgrade bd or register the types manually: bd config set types.custom "agent human"',
+        'Upgrade bd, or register the types by hand — bd reads a comma-separated list, ' +
+        'so keep the types you already have: ' +
+        'bd config set types.custom "agent,human"',
+    )
+  }
+  if (!registered.includes(MERGE_STEP_TYPE)) {
+    throw new Error(
+      `types.custom could not register ${MERGE_STEP_TYPE} — pouring would flatten the merge step to task, ` +
+        'and the step would close without a host verdict. ' +
+        'Register it by hand — bd reads a comma-separated list, so keep the types you ' +
+        `already have: bd config set types.custom "agent,human,${MERGE_STEP_TYPE}"`,
     )
   }
   const args = ['mol', 'pour', formula]

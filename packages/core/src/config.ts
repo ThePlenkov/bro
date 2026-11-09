@@ -25,7 +25,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
@@ -273,8 +273,55 @@ function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
   };
 }
 
+/** Optional text — a trimmed non-empty string, or ''. */
+function textOr(v: unknown): string {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : '';
+}
+
+/** Optional counter — a non-negative integer, or the fallback. */
+function countOr(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : fallback;
+}
+
+/** The merge-queue section — both fields are optional text. */
+function parseMergeQueue(raw: unknown): { label?: string; comment?: string } {
+  const queue = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    label?: unknown;
+    comment?: unknown;
+  };
+  const out: { label?: string; comment?: string } = {};
+  const label = textOr(queue.label);
+  if (label !== '') {
+    out.label = label;
+  }
+  const comment = textOr(queue.comment);
+  if (comment !== '') {
+    out.comment = comment;
+  }
+  return out;
+}
+
+/** The trusted-reviewer allowlist — absent/empty means any human
+ *  account's current-head approval counts. A CONFIGURED list that yields
+ *  zero usable logins is the opposite intent — 'trust nobody', not 'trust
+ *  anybody': one entry no host login can ever equal keeps the allowlist
+ *  non-empty and the gate fails closed (PR #636 review). */
+function parseApprovers(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const valid = raw.map(v => (typeof v === 'string' ? v.trim() : '')).filter(v => v !== '');
+  return raw.length > 0 && valid.length === 0 ? ['!'] : valid;
+}
+
 export const actSection: ConfigSection<{
   ignoreChecks: IgnoreCheckRule[];
+  /** The check that IS the gate — the gate never counts itself. A
+   *  project that publishes the gate as a required check (the workflow
+   *  `.github/workflows/act-gate.yml`) would otherwise wait for its own
+   *  pending check forever: the gate could never go green, and the
+   *  required context could never report success. */
+  selfCheck: string;
   maxRounds: number;
   docsPaths: string[];
   docsMaxRounds: number;
@@ -284,6 +331,7 @@ export const actSection: ConfigSection<{
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     ignoreChecks?: unknown;
+    selfCheck?: unknown;
     maxRounds?: unknown;
     docsPaths?: unknown;
     docsMaxRounds?: unknown;
@@ -291,57 +339,27 @@ export const actSection: ConfigSection<{
     approvers?: unknown;
     mergeQueue?: unknown;
   };
-  const queue = (
-    typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null ? obj.mergeQueue : {}
-  ) as { label?: unknown; comment?: unknown };
-  const mergeQueue: { label?: string; comment?: string } = {};
-  if (typeof queue.label === 'string' && queue.label.trim() !== '') {
-    mergeQueue.label = queue.label.trim();
-  }
-  if (typeof queue.comment === 'string' && queue.comment.trim() !== '') {
-    mergeQueue.comment = queue.comment.trim();
-  }
   return {
     // only name substrings (bare or rule objects) may reach the check
     // filter — anything else falls back to the default
     ignoreChecks: Array.isArray(obj.ignoreChecks)
       ? obj.ignoreChecks.map(normalizeIgnoreEntry).filter((r): r is IgnoreCheckRule => r !== null)
       : [],
-    maxRounds:
-      typeof obj.maxRounds === 'number' && Number.isInteger(obj.maxRounds) && obj.maxRounds >= 0
-        ? obj.maxRounds
-        : DEFAULT_CONFIG.act.maxRounds,
+    // the gate's own context — an empty string means "no self check"
+    selfCheck: textOr(obj.selfCheck),
+    maxRounds: countOr(obj.maxRounds, DEFAULT_CONFIG.act.maxRounds),
     docsPaths: Array.isArray(obj.docsPaths)
       ? obj.docsPaths.filter(
           // an empty pattern would match EVERY path
           (v): v is string => typeof v === 'string' && v.trim() !== ''
         )
       : [...DEFAULT_CONFIG.act.docsPaths],
-    docsMaxRounds:
-      typeof obj.docsMaxRounds === 'number' &&
-      Number.isInteger(obj.docsMaxRounds) &&
-      obj.docsMaxRounds >= 0
-        ? obj.docsMaxRounds
-        : DEFAULT_CONFIG.act.docsMaxRounds,
+    docsMaxRounds: countOr(obj.docsMaxRounds, DEFAULT_CONFIG.act.docsMaxRounds),
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
-    // trusted-reviewer allowlist for the same gate — absent/empty
-    // means any human account's current-head approval counts. A
-    // CONFIGURED list that yields zero usable logins is the opposite
-    // intent — 'trust nobody', not 'trust anybody': one entry no host
-    // login can ever equal keeps the allowlist non-empty and the gate
-    // fails closed (PR #636 review).
-    approvers: (() => {
-      if (!Array.isArray(obj.approvers)) {
-        return [];
-      }
-      const valid = obj.approvers
-        .map(v => (typeof v === 'string' ? v.trim() : ''))
-        .filter(v => v !== '');
-      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid;
-    })(),
-    mergeQueue,
+    approvers: parseApprovers(obj.approvers),
+    mergeQueue: parseMergeQueue(obj.mergeQueue),
   };
 };
 
@@ -362,6 +380,7 @@ actSection.jsonSchema = js.obj({
       ],
     },
   },
+  selfCheck: js.str,
   maxRounds: js.int(),
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
@@ -910,7 +929,9 @@ function serveApiKeyEnv(raw: unknown): string | undefined {
  *  `upstream` is the Messages-API base for the byte proxy (owned by
  *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
  *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
- *  / `ANTHROPIC_*` override). */
+ *  / `ANTHROPIC_*` override). `fastModel` pins the upstream model the
+ *  conductor's fast lane rewrites, and `fastLane:false` returns every
+ *  call to the session lane (spec bro-6asnu). */
 /** One thin client's own knobs — where `bro router client` writes the
  *  model block, and which binary the launch stage execs.
  *
@@ -976,6 +997,8 @@ export const serveSection: ConfigSection<{
   upstream?: string;
   apiKeyEnv?: string;
   client?: ServeClients;
+  fastModel?: string;
+  fastLane?: boolean;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -983,6 +1006,8 @@ export const serveSection: ConfigSection<{
     upstream?: unknown;
     apiKeyEnv?: unknown;
     client?: unknown;
+    fastModel?: unknown;
+    fastLane?: unknown;
   };
   const out: {
     backend?: string;
@@ -990,6 +1015,8 @@ export const serveSection: ConfigSection<{
     upstream?: string;
     apiKeyEnv?: string;
     client?: ServeClients;
+    fastModel?: string;
+    fastLane?: boolean;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1002,6 +1029,9 @@ export const serveSection: ConfigSection<{
   if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
   const client = serveClients(obj.client);
   if (client !== undefined) out.client = client;
+  const fastModel = trimmedField(obj.fastModel);
+  if (fastModel !== undefined) out.fastModel = fastModel;
+  if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1026,6 +1056,8 @@ serveSection.jsonSchema = js.obj({
       command: js.str,
     })
   ),
+  fastModel: js.str,
+  fastLane: js.bool,
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1124,8 +1156,11 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
     console.error('bro.config: fleet.profiles must be an object — section dropped');
     return {};
   }
-  const out: Record<string, FleetProfile> = {};
+  const out: Record<string, FleetProfile> = Object.create(null);
   for (const [name, v] of Object.entries(raw)) {
+    if (name === 'constructor' || name === 'prototype' || name === '__proto__') {
+      continue;
+    }
     const prof = fleetProfile(name, v);
     if (prof !== null) {
       out[name] = prof;
@@ -1317,16 +1352,23 @@ export const meshSection: ConfigSection<{
   };
   const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> =
     {};
-  if (typeof obj.peers === 'object' && obj.peers !== null) {
+  if (Array.isArray(obj.peers)) {
+    // ignore arrays to avoid treating numeric indices as peer aliases
+  } else if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
-      if (alias === '__proto__') {
+      if (alias === '__proto__' || alias === 'constructor' || alias === 'prototype') {
         continue;
       }
       const p = meshPeerEntry(entry);
       if (p !== null) {
-        peers[alias] = p;
+        Object.defineProperty(peers, alias, {
+          value: p,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
       }
     }
   }
@@ -1452,6 +1494,8 @@ export interface BroConfig {
      *  activity inside `threadWindowDays` — otherwise it surfaces as a
      *  silent-reviewer alert (still non-blocking). */
     ignoreChecks: IgnoreCheckRule[];
+    /** The check that IS the gate — never counted by the gate itself. */
+    selfCheck: string;
     /** Inline fix-round cap — past it, remaining threads must defer to
      *  debt beads instead of another push. 0 disables the cap. */
     maxRounds: number;
@@ -1536,12 +1580,17 @@ export interface BroConfig {
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. `providers` lists the
    *  other acp entries the gateway routes to. `upstream`/`apiKeyEnv`
-   *  configure the byte proxy (env overrides and supplies the secret). */
+   *  configure the byte proxy (env overrides and supplies the secret).
+   *  `fastModel` pins the upstream model the conductor's fast lane
+   *  rewrites classifier calls to (spec bro-6asnu); `fastLane:false`
+   *  returns every call to the session lane. */
   serve: {
     backend?: string;
     providers?: ServeProviders;
     upstream?: string;
     apiKeyEnv?: string;
+    fastModel?: string;
+    fastLane?: boolean;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
@@ -1573,6 +1622,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },
   act: {
     ignoreChecks: [],
+    selfCheck: '',
     maxRounds: 3,
     // no '*.txt' — requirements.txt and test fixtures are not docs
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],

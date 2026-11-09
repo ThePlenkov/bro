@@ -1685,9 +1685,10 @@ function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
   if (rules.length === 0) {
     return checks;
   }
-  return checks.filter(
-    c => isSast(c.name) || !rules.some(r => c.name.toLowerCase().includes(r.name.toLowerCase()))
-  );
+  // An explicit rule excludes ANY matching check — SAST names included,
+  // matching advisoryFilter's precedence (the fixer must never be sent
+  // to repair a scanner the operator declared advisory).
+  return checks.filter(c => !rules.some(r => c.name.toLowerCase().includes(r.name.toLowerCase())));
 }
 
 /** The ci-fail fixer's work order — the failing check list at spawn

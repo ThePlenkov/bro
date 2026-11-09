@@ -144,12 +144,13 @@ function claimerError(row: WantedRow, claimer: string | null): string[] {
 }
 
 function makeBoardBase(row: WantedRow): BoardBase {
+  const { body, refs } = splitEmbeddedRefs(row.description);
   return {
     v: MESH_VERSION,
     thread: row.id,
     title: row.title,
-    body: row.description ?? '',
-    refs: [] as MeshRef[],
+    body,
+    refs,
     evidence: [] as MeshRef[],
   };
 }
@@ -331,6 +332,65 @@ export interface WlTarget {
   id: string;
 }
 
+const REFS_SENTINEL = '<!-- mesh/1 refs -->';
+
+function embedRefs(body: string | undefined, refs: MeshRef[] | undefined): string | undefined {
+  const parts: string[] = [];
+  if (body !== undefined && body !== '') {
+    parts.push(body);
+  }
+  // one marker line per ref — a ref carrying a line break would split
+  // into extra marker lines and come back as different refs, so an
+  // unembeddable value is rejected rather than serialized
+  const safe = (refs ?? []).filter(r => r.ref !== '' && !/[\r\n]/.test(r.ref));
+  if (safe.length > 0) {
+    parts.push('');
+    parts.push(REFS_SENTINEL);
+    for (const r of safe) {
+      parts.push(`mesh:ref:${r.kind}:${r.ref}`);
+    }
+  }
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join('\n');
+}
+
+/** A board description splits at the refs sentinel — only `mesh:ref:`
+ *  lines under `<!-- mesh/1 refs -->` are transport metadata; a
+ *  marker-looking line in ordinary prose stays content. Returns the
+ *  prose body with the whole trailer lifted back out, so the envelope
+ *  round-trips the posted body instead of leaking the markers. */
+function splitEmbeddedRefs(text: string | undefined): { body: string; refs: MeshRef[] } {
+  if (typeof text !== 'string' || text === '') {
+    return { body: text ?? '', refs: [] };
+  }
+  const idx = text.indexOf(REFS_SENTINEL);
+  if (idx === -1) {
+    return { body: text, refs: [] };
+  }
+  const refs: MeshRef[] = [];
+  for (const line of text.slice(idx + REFS_SENTINEL.length).split('\n')) {
+    // trimEnd eats the CR a CRLF-stored row leaves on the marker —
+    // a bare capture would keep it and the ref would never match
+    const l = line.trimEnd();
+    if (l === '') {
+      continue;
+    }
+    const m = /^mesh:ref:(bead|url|pr):(.*)$/.exec(l);
+    if (m === null) {
+      break; // the first non-marker line ends the metadata block
+    }
+    if ((m[2] ?? '') !== '') {
+      refs.push({ kind: m[1] as MeshRef['kind'], ref: m[2] as string });
+    }
+  }
+  // the emitter pads exactly one blank line before the sentinel — lift
+  // the separator back out so the body round-trips verbatim
+  const body = text.slice(0, idx).replace(/(?:\r?\n){1,2}$/, '');
+  return { body, refs };
+}
+
 /** Post a wanted item — `wl post` goes to the fork and proposes
  *  (PR mode); the returned `w-<hash>` is the thread id. */
 function addPostDescription(args: string[], body: string | undefined): void {
@@ -357,9 +417,10 @@ export function postWanted(input: {
   title: string;
   body?: string;
   priority?: number;
+  refs?: MeshRef[];
 }): { id?: string; error?: string } {
   const args = [...remoteArgs(input.remote), 'post', '--title', input.title];
-  addPostDescription(args, input.body);
+  addPostDescription(args, embedRefs(input.body, input.refs));
   addPostPriority(args, input.priority);
   args.push('--json');
   const r = wlJson<{ id?: string }>({ args });
