@@ -13,6 +13,14 @@ bro is a plugin system on top of beads and `gh`. Every built-in command
 is a plugin in one registry; external plugins load from config and get
 the same contract — command, skill, config section, plan schema.
 
+There are three distinct seams: CLI extensions add commands, connectors
+bind external systems behind facades, and **agent plugins** install bro
+into clients. The portable Agent Plugin is one root `plugin.json` plus
+`skills/`; client-specific manifests and hooks package it for each client.
+See [agent plugins](/plugins) and the [connector marketplace](/marketplace).
+The separate “Claude Code on other agents” plugin is **planned**; today's
+client-catalog adapters still live in brouter, not that future plugin.
+
 ## Client adapters
 
 `bro plugins` also installs bro _into_ agent clients — the native-plugin

@@ -44,5 +44,10 @@
     "agent",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "connector",
+    "facade": "tools",
+    "status": "beta"
+  }
 }

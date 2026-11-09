@@ -1,13 +1,13 @@
-import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared'
+import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 
 export function baseOptions(): BaseLayoutProps {
-  const baseUrl = import.meta.env.BASE_URL
+  const baseUrl = import.meta.env.BASE_URL;
 
   return {
     nav: {
-      title: (props) => (
+      title: props => (
         <a {...props} href={baseUrl}>
-          bro <span aria-hidden="true">🤝</span>
+          docs
         </a>
       ),
       url: baseUrl,
@@ -15,5 +15,5 @@ export function baseOptions(): BaseLayoutProps {
     githubUrl: 'https://github.com/ThePlenkov/bro',
     links: [{ text: 'npm', url: 'https://www.npmjs.com/package/@broject/bro', external: true }],
     themeSwitch: { enabled: false },
-  }
+  };
 }

@@ -119,5 +119,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "bro": {
+    "kind": "core",
+    "status": "beta"
   }
 }

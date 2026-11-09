@@ -1,11 +1,13 @@
-import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
-import type { ReactNode } from 'react'
-import { RootProvider } from 'fumadocs-ui/provider/tanstack'
-import DefaultSearchDialog from '../components/search'
+import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router';
+import type { ReactNode } from 'react';
+import { RootProvider } from 'fumadocs-ui/provider/tanstack';
+import DefaultSearchDialog from '../components/search';
+import { SiteNav } from '../components/SiteNav';
+import shellCss from '../styles/shell.css?url';
 
-const title = 'bro — every agent needs a bro'
+const title = 'bro — toolkit for agent workflows';
 const description =
-  'One CLI, a plugin for every agent, hooks that gate, skills that teach, connectors to everything you run. Plan, delegate, review, reflect — your agent gets a bro.'
+  'bro stays the core. Connect your agents, carry the policy, close the lifecycle. CLI, skills, portable agent plugins and brouter.';
 
 export const Route = createRootRoute({
   head: () => ({
@@ -18,10 +20,13 @@ export const Route = createRootRoute({
       { property: 'og:description', content: description },
       { name: 'theme-color', content: '#0a0c0b' },
     ],
-    links: [{ rel: 'icon', href: `${import.meta.env.BASE_URL}favicon.svg`, type: 'image/svg+xml' }],
+    links: [
+      { rel: 'icon', href: `${import.meta.env.BASE_URL}favicon.svg`, type: 'image/svg+xml' },
+      { rel: 'stylesheet', href: shellCss },
+    ],
   }),
   shellComponent: RootDocument,
-})
+});
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (
@@ -30,6 +35,13 @@ function RootDocument({ children }: { children: ReactNode }) {
         <HeadContent />
       </head>
       <body>
+        <div className="toolkit-shell">
+          <aside className="wip-banner" aria-label="Project status">
+            <strong>Work in progress</strong>
+            <span>Interfaces evolve. Planned means not shipped.</span>
+          </aside>
+          <SiteNav />
+        </div>
         <RootProvider
           theme={{ forcedTheme: 'dark', enableSystem: false }}
           search={{ SearchDialog: DefaultSearchDialog }}
@@ -39,5 +51,5 @@ function RootDocument({ children }: { children: ReactNode }) {
         <Scripts />
       </body>
     </html>
-  )
+  );
 }
