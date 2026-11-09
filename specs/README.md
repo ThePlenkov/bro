@@ -1,5 +1,10 @@
 # specs/ — convention
 
+The model is changing to enduring **product specs**, not per-bead decision
+records: see [bro-y1jtm](sdd/bro-y1jtm.md). That design introduces KEY-N
+identity, lifecycle and conformance; its dogfood migration replaces the
+legacy conventions below. Product specs are never archived on bead closure.
+
 Specs are **per-bead design artifacts**: written before code, merged
 with the PR, and left as the decision record. They are not
 documentation — the site (`site/content/docs/`) is for readers; these
