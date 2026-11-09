@@ -106,8 +106,9 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
         ),
         true
       )
-      const pf = readdirSync(agentsDir).find((n) => n.endsWith('.prompt.md'))!
-      const prompt = readFileSync(join(agentsDir, pf), 'utf8')
+      const pf = readdirSync(agentsDir).find((n) => n.endsWith('.prompt.md'));
+      assert.ok(pf !== undefined, 'the spawned fixer left no work order behind');
+      const prompt = readFileSync(join(agentsDir, pf), 'utf8');
       assert.match(prompt, new RegExp(tip))
       assert.match(prompt, /Fetch the base AGAIN, immediately before the rebase/)
     })
@@ -174,7 +175,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
         ),
         true
       )
-      const pf = readdirSync(agentsDir).find((n) => n.endsWith('.prompt.md'))!
+      const pf = readdirSync(agentsDir).find((n) => n.endsWith('.prompt.md'))!;
       const prompt = readFileSync(join(agentsDir, pf), 'utf8')
       assert.match(prompt, /unresolved review thread/)
       assert.doesNotMatch(prompt, /merge conflicts with its base branch/)

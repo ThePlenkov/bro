@@ -704,39 +704,72 @@ function addFixerWorktree(
   return { err: retry.err || add.err };
 }
 
-/** The base ref's tip, fetched NOW (bro-by8d3). The rebase target is a
+/** The base the rebase must land on — the ref, its tip, and what the
+ *  fixer has to do about it (bro-by8d3). */
+export interface BaseTip {
+  /** The ref the fixer rebases onto — `origin/main` for a
+   *  remote-tracking ref, `main` for the local branch. */
+  ref: string;
+  /** Its tip, read after the fetch. */
+  sha: string;
+  /** The ref lives on a remote: the fixer must fetch it again right
+   *  before the rebase. */
+  remote: boolean;
+  /** The repo has an `origin` remote at all — the PR branch can be
+   *  fetched from it. */
+  origin: boolean;
+}
+
+/** The base's tip, fetched NOW (bro-by8d3). The rebase target is a
  *  fact, not a guess: the repo's remote-tracking refs are as old as the
  *  last fetch anybody in the repo ran, and the drive lane ran none — a
  *  rebase onto that ref lands on a base that has already moved, and the
  *  PR stays CONFLICTING after a whole fixer round (the 2026-11-07
  *  incident: rebased onto 780fc295 while main was at 96fca6d1).
  *
- *  `skipped` is the honest answer for a repo with no `origin` remote (or
- *  a base that lives only locally): there is nothing to fetch, and the
- *  work order says so instead of naming a sha. `err` is a fetch that
- *  failed for any other reason — the caller refuses the spawn, because
- *  a rebase onto a known-stale base is worse than no rebase. */
-export function fetchBaseTip(
-  dir: string,
-  base: string
-): { sha?: string; skipped?: boolean; err?: string } {
-  const remote = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
-  if (remote.code !== 0) {
-    return { skipped: true };
-  }
-  const fetch = gitTry(['-C', dir, 'fetch', 'origin', base, '--quiet']);
-  if (fetch.code !== 0) {
-    // the remote has no such branch — nothing to fetch, not a failure
-    if (/couldn't find remote ref|remote ref does not exist|no such ref/i.test(fetch.err)) {
-      return { skipped: true };
+ *  The base is resolved the way git can actually read it: `origin/<base>`
+ *  (fetched first), then another remote's tracking ref, then the local
+ *  branch. A base that exists nowhere is an error — the caller refuses
+ *  the spawn, because a rebase without a target is not a rebase. */
+export function fetchBaseTip(dir: string, base: string): { tip?: BaseTip; err?: string } {
+  const remotes = remoteList(dir);
+  const origin = remotes.includes('origin');
+  if (origin) {
+    const fetch = gitTry(['-C', dir, 'fetch', 'origin', base, '--quiet']);
+    if (
+      fetch.code !== 0 &&
+      !/couldn't find remote ref|remote ref does not exist|no such ref/i.test(fetch.err)
+    ) {
+      return { err: fetch.err.trim() || `git fetch origin ${base} failed` };
     }
-    return { err: fetch.err.trim() || `git fetch origin ${base} failed` };
+    const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `origin/${base}`]);
+    if (tip.code === 0) {
+      return { tip: { ref: `origin/${base}`, sha: tip.out.trim(), remote: true, origin: true } };
+    }
   }
-  const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `origin/${base}`]);
-  if (tip.code !== 0) {
-    return { skipped: true };
+  for (const remote of remotes) {
+    if (remote === 'origin') {
+      continue;
+    }
+    const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `refs/remotes/${remote}/${base}`]);
+    if (tip.code === 0) {
+      return { tip: { ref: `${remote}/${base}`, sha: tip.out.trim(), remote: true, origin } };
+    }
   }
-  return { sha: tip.out.trim() };
+  const local = gitTry(['-C', dir, 'rev-parse', '--verify', `refs/heads/${base}`]);
+  if (local.code === 0) {
+    return { tip: { ref: base, sha: local.out.trim(), remote: false, origin } };
+  }
+  return { err: `no branch or remote-tracking ref named ${base}` };
+}
+
+/** The configured remotes, `origin` first. */
+function remoteList(dir: string): string[] {
+  const names = gitTry(['-C', dir, 'remote'])
+    .out.split('\n')
+    .map(r => r.trim())
+    .filter(r => r !== '');
+  return [...names.filter(r => r === 'origin'), ...names.filter(r => r !== 'origin')];
 }
 
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
@@ -757,7 +790,15 @@ export function fetchBaseTip(
 export function ensureFixerWorktree(
   mainRoot: string,
   branch: string,
-  guard?: (dir: string) => string | undefined
+  opts?: {
+    /** The occupancy answer for a candidate checkout — asked UNDER the
+     *  occupancy locks, right before the refresh (bro-by8d3). */
+    guard?: (dir: string) => string | undefined;
+    /** The occupancy locks — held across the guard AND the refresh, so
+     *  a claim cannot land between them (a claimant writes its registry
+     *  entry + .work marker under the same locks). */
+    lock?: (dir: string) => () => void;
+  }
 ): { path?: string; created?: boolean; err?: string; occupied?: string } {
   // fetch first — an orphaned PR's remote head may be newer than ours;
   // a branch diverged from it is refused outright: no checkout of it
@@ -769,13 +810,34 @@ export function ensureFixerWorktree(
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name);
     if (existsSync(dir)) {
-      const owner = guard?.(dir);
-      if (owner !== undefined) {
-        return { occupied: owner };
+      // a dir standing on ANOTHER branch is not this branch's checkout:
+      // it is never clobbered, and it must not consume the occupancy
+      // guard either — the namespaced fallback still has to be tried
+      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
+      if (on !== branch) {
+        continue;
       }
-      const r = reuseFixerWorktree(dir, branch);
-      if (r !== undefined) {
-        return r;
+      // the guard and the refresh share the occupancy locks: a session
+      // that claims this checkout after the guard would have its branch
+      // moved under it
+      let release: () => void = () => {};
+      try {
+        release = opts?.lock?.(dir) ?? (() => {});
+      } catch (err) {
+        // a lock we can't take is indistinguishable from an active claimer
+        return { occupied: `occupancy re-check failed — ${errText(err)}` };
+      }
+      try {
+        const owner = opts?.guard?.(dir);
+        if (owner !== undefined) {
+          return { occupied: owner };
+        }
+        const r = reuseFixerWorktree(dir, branch);
+        if (r !== undefined) {
+          return r;
+        }
+      } finally {
+        release();
       }
       continue;
     }
@@ -1237,18 +1299,20 @@ async function spawnFixer(
   let created = false;
   if (wt === undefined) {
     const fresh = freshOccupancy(ctx.mainRoot, known);
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef, dir =>
-      occupied({
-        agents: fresh.agents,
-        fixerBead: fixer?.id,
-        branch: state.headRef,
-        worktree: dir,
-        workDetails: fresh.workDetails,
-        scanProc: agentProcessesIn,
-        pr,
-        watches: fresh.watches,
-      })
-    );
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef, {
+      guard: dir =>
+        occupied({
+          agents: fresh.agents,
+          fixerBead: fixer?.id,
+          branch: state.headRef,
+          worktree: dir,
+          workDetails: fresh.workDetails,
+          scanProc: agentProcessesIn,
+          pr,
+          watches: fresh.watches,
+        }),
+      lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
+    });
     if (ensured.occupied !== undefined) {
       return { pr, link, verdict: 'occupied', detail: ensured.occupied };
     }
@@ -1325,10 +1389,12 @@ export function buildRebaseFixerPrompt(opts: {
   link: string;
   branch: string;
   base: string;
-  baseSha?: string;
   worktree: string;
   repo: string;
   host: string;
+  /** The base bro resolved right before the spawn — the ref, its tip,
+   *  and whether it lives on a remote. */
+  baseTip: BaseTip;
 }): string {
   // the merge-state read names the review host's own CLI — a GitLab
   // repo gets the API call a fixer can actually run (the CI work order
@@ -1341,21 +1407,39 @@ export function buildRebaseFixerPrompt(opts: {
   const mergeField = gitlab ? '`detailed_merge_status`' : '`mergeable`';
   const dissolved = gitlab ? '`mergeable`' : 'MERGEABLE';
   const conflicting = gitlab ? '`conflict`' : 'CONFLICTING';
-  const target =
-    opts.baseSha === undefined
-      ? `bro could not fetch \`origin/${opts.base}\` here — fetch it yourself before the rebase.`
-      : `bro fetched \`origin/${opts.base}\` and it read \`${opts.baseSha}\`. That is the base tip you rebase onto: a rebase onto a stale base is a rebase that stays conflicting.`;
-  const moved =
-    opts.baseSha === undefined
-      ? ''
-      : [
-          '',
-          '  Fetch the base AGAIN, immediately before the rebase — `git rev-parse',
-          `  origin/${opts.base}\` must still read \`${opts.baseSha}\`. If it moved, the base`,
-          `  advanced under you: re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
-          `  ${dissolved} means the conflict dissolved — STOP`,
-          `  and report that; do not rebase. ${conflicting} means rebase onto the new tip.`,
-        ].join('\n');
+  const { ref, sha, remote } = opts.baseTip;
+  const target = `bro resolved the base to \`${ref}\` and it read \`${sha}\`. That is the base tip you rebase onto: a rebase onto a stale base is a rebase that stays conflicting.`;
+  // the remote-tracking ref must be re-read right before the rebase; a
+  // local branch cannot move under the fetch, but it can be rewritten by
+  // someone else — the same check, the same order
+  const verify = remote
+    ? [
+        '',
+        '  Fetch the base AGAIN, immediately before the rebase — `git rev-parse',
+        `  ${ref}\` must still read \`${sha}\`. If it moved, the base`,
+        `  advanced under you: re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
+        `  ${dissolved} means the conflict dissolved — STOP`,
+        `  and report that; do not rebase. ${conflicting} means rebase onto the new tip.`,
+      ].join('\n')
+    : [
+        '',
+        '  This base is a LOCAL branch (there is no remote ref to fetch).',
+        `  Before the rebase, \`git rev-parse ${ref}\` must still read \`${sha}\`.`,
+        `  If it moved, re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
+        `  ${dissolved} means the conflict dissolved — STOP and report that;`,
+        `  do not rebase. ${conflicting} means rebase onto the new tip.`,
+      ].join('\n');
+  // the PR branch's own tip — a fetch, when there is a remote to fetch
+  // from: commits pushed since this checkout was made are invisible to a
+  // stale tip, and the base rebase drops them on the lease push
+  const branchFetch = opts.baseTip.origin
+    ? [
+        `- \`git fetch origin ${opts.branch}\` — the PR branch too:`,
+        '  commits pushed since this checkout was made are invisible to a stale',
+        `  tip. Fold them in first (\`git rebase origin/${opts.branch}\`) or the`,
+        '  base rebase drops them on the lease push.',
+      ]
+    : [];
   return [
     `# Rebase fixer — ${opts.link}`,
     '',
@@ -1365,13 +1449,10 @@ export function buildRebaseFixerPrompt(opts: {
     `This PR has merge conflicts with its base branch \`${opts.base}\`. The rebase`,
     'IS the work — no review-thread fixing is owed on this spawn.',
     '',
-    target + moved,
+    target + verify,
     '',
-    `- \`git fetch origin ${opts.branch} ${opts.base}\` — the PR branch too:`,
-    '  commits pushed since this checkout was made are invisible to a stale',
-    `  tip. Fold them in first (\`git rebase origin/${opts.branch}\`) or the`,
-    '  base rebase drops them on the lease push.',
-    `- \`git rebase origin/${opts.base}\` —`,
+    ...branchFetch,
+    `- \`git rebase ${ref}\` —`,
     '  if a rebase is already in progress here, resolve it instead',
     '  (`git rebase --continue` / `--abort` and restart if the state is too',
     '  tangled).',
@@ -1687,32 +1768,49 @@ async function spawnRebaseFixer(
   // as old as the last fetch anybody in the repo ran, and the drive lane
   // ran none. A fetch that failed for a real reason refuses the spawn:
   // a rebase onto a known-stale base is a round that ends CONFLICTING.
-  const tip = fetchBaseTip(wt, meta.baseRef);
-  if (tip.err !== undefined) {
+  const fetched = fetchBaseTip(wt, meta.baseRef);
+  if (fetched.tip === undefined) {
     await retireCreated();
-    return { pr, link, verdict: 'rebase-base-unavailable', detail: tip.err };
+    return { pr, link, verdict: 'rebase-base-unavailable', detail: fetched.err };
   }
+  let base = meta.baseRef;
+  let baseTip = fetched.tip;
   // the PR, re-checked against the tip just fetched: the base may have
   // moved under the fetch, and a conflict that dissolved with it is not
   // work — the pass ends green and drive merges it.
-  if (tip.sha !== undefined) {
-    let after: PrMeta;
-    try {
-      after = await metaOf(ctx, pr);
-    } catch (err) {
+  let after: PrMeta;
+  try {
+    after = await metaOf(ctx, pr);
+  } catch (err) {
+    await retireCreated();
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) };
+  }
+  if (after.state !== 'OPEN') {
+    await retireCreated();
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+    return { pr, link, verdict: 'settled', detail: after.state.toLowerCase() };
+  }
+  if (after.mergeable === 'MERGEABLE') {
+    await retireCreated();
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+    return {
+      pr,
+      link,
+      verdict: 'conflict-resolved',
+      detail: `base ${meta.baseRef} moved — ${baseTip.sha.slice(0, 8)}`,
+    };
+  }
+  // the PR was RETARGETED while we fetched: the base we resolved is not
+  // the base the PR wants — resolve the new one instead of pairing the
+  // old tip with the new name
+  if (after.baseRef !== meta.baseRef) {
+    const moved = fetchBaseTip(wt, after.baseRef);
+    if (moved.tip === undefined) {
       await retireCreated();
-      return { pr, link, verdict: 'probe-failed', detail: errText(err) };
+      return { pr, link, verdict: 'rebase-base-unavailable', detail: moved.err };
     }
-    if (after.state !== 'OPEN') {
-      await retireCreated();
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
-      return { pr, link, verdict: 'settled', detail: after.state.toLowerCase() };
-    }
-    if (after.mergeable === 'MERGEABLE') {
-      await retireCreated();
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
-      return { pr, link, verdict: 'conflict-resolved', detail: `base ${meta.baseRef} moved — ${tip.sha.slice(0, 8)}` };
-    }
+    base = after.baseRef;
+    baseTip = moved.tip;
   }
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
@@ -1723,8 +1821,8 @@ async function spawnRebaseFixer(
       pr,
       link,
       branch: state.headRef,
-      base: meta.baseRef,
-      baseSha: tip.sha,
+      base,
+      baseTip,
       worktree: wt,
       repo: ctx.repo,
       host: ctx.host,
@@ -1797,18 +1895,20 @@ function fixerLane(
     return { wt: worktree };
   }
   const fresh = freshOccupancy(ctx.mainRoot, known);
-  const ensured = ensureFixerWorktree(ctx.mainRoot, branch, dir =>
-    occupied({
-      agents: fresh.agents,
-      fixerBead: fixer?.id,
-      branch,
-      worktree: dir,
-      workDetails: fresh.workDetails,
-      scanProc: agentProcessesIn,
-      pr,
-      watches: fresh.watches,
-    })
-  );
+  const ensured = ensureFixerWorktree(ctx.mainRoot, branch, {
+    guard: dir =>
+      occupied({
+        agents: fresh.agents,
+        fixerBead: fixer?.id,
+        branch,
+        worktree: dir,
+        workDetails: fresh.workDetails,
+        scanProc: agentProcessesIn,
+        pr,
+        watches: fresh.watches,
+      }),
+    lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
+  });
   if (ensured.occupied !== undefined) {
     return { pr, link, verdict: 'occupied', detail: ensured.occupied };
   }

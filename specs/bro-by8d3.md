@@ -40,23 +40,24 @@ what to do when the base moves under it.
 
 ### The base is fetched by bro, at the last moment, and named
 
-The rebase target is a fact, not a guess. Before the spawn, bro fetches
-the PR's base ref in the fixer worktree and reads the tip:
+The rebase target is a fact, not a guess. Before the spawn, bro resolves
+the PR's base in the fixer worktree and reads its tip:
 
 - `git fetch origin <base>` — the base's remote-tracking ref is refreshed
   from the remote, in the common git dir, so every worktree sees it;
 - `git rev-parse --verify origin/<base>` — the tip the fixer must rebase
   onto.
 
-The spawn is **refused** when the fetch fails for a reason that is not
-"this repo has no such remote" (a network error, a broken remote): a
-rebase onto a known-stale base is worse than no rebase, and the next
-drive pass retries the fetch. A repo with no `origin` remote (or a base
-that lives only locally) is not a failure — there is nothing to fetch,
-and the work order says so.
+The base is resolved the way git can actually read it: `origin/<base>`
+(fetched first), then another remote's tracking ref, then the **local
+branch**. A base that exists nowhere is an **error**: the spawn is
+refused, because a rebase without a target is not a rebase. (A repo with
+no remote at all is not an error — the local branch is the base, and the
+work order says so instead of sending the fixer after a remote ref that
+does not exist.)
 
 The tip travels into the work order, which is where the agent can act on
-it: "rebase onto exactly `<sha>`; if `origin/<base>` no longer reads
+it: "rebase onto exactly `<ref>` at `<sha>`; if `<ref>` no longer reads
 that sha, the base moved under you — re-check the PR's mergeable state,
 and if it reads `MERGEABLE` the conflict dissolved: stop, do not rebase."
 
@@ -72,6 +73,10 @@ therefore probes the PR twice around the fetch:
    dissolved with it, the pass ends as `conflict-resolved` and no agent
    is spawned at all. A conflict that evaporated is not work.
 
+A PR **retargeted** while the fetch ran is caught by the same probe: the
+base bro resolved is not the base the PR wants, so the new base is
+resolved too — a tip is never paired with a name it does not belong to.
+
 ### No branch of a live session is ever moved
 
 The occupancy ladder already knows who is where (a live agent, a
@@ -84,6 +89,14 @@ worktree, not only after:
   `occupied` instead of fast-forwarding that checkout's branch. The
   branch of a live session is never moved — not by a reset (already
   gone), not by a fast-forward either.
+- the guard applies to the checkout that would actually be refreshed: a
+  dir standing on **another** branch is not this branch's checkout, and
+  it must not consume the guard — the namespaced fallback still has to
+  be tried.
+- the guard and the refresh share the **occupancy locks** (the registry
+  lock every claimant serializes on, plus the worktree's claim lock): a
+  session that claims the checkout after the guard would otherwise have
+  its branch moved under it.
 
 The locked re-check in `spawnFixerAgent` stays: the guard closes the
 window *before* the mutation, the locked re-check closes the window
@@ -91,21 +104,25 @@ window *before* the mutation, the locked re-check closes the window
 
 ## Plan
 
-- [ ] `fetchBaseTip(dir, base)` — fetch the base ref, read its tip;
-      `skipped` for a repo with no remote (nothing to fetch), `err` for a
-      fetch that failed.
-- [ ] `spawnRebaseFixer` — fetch the base tip in the fixer worktree
+- [x] `fetchBaseTip(dir, base)` — resolve the base the way git can read
+      it (`origin/<base>` fetched, another remote's tracking ref, the
+      local branch) and read its tip; an unresolvable base is an error.
+- [x] `spawnRebaseFixer` — resolve the base in the fixer worktree
       before the spawn; refuse the spawn on a failed fetch
       (`rebase-base-unavailable`); re-probe the PR after the fetch and
-      end the pass as `conflict-resolved` when the conflict dissolved.
-- [ ] `buildRebaseFixerPrompt` — carry the fetched tip; order the work
-      as fetch → verify the tip → re-check the PR → rebase; forbid
-      rebasing onto a tip that moved.
-- [ ] `ensureFixerWorktree` — a guard callback; an occupied candidate
+      end the pass as `conflict-resolved` when the conflict dissolved;
+      re-resolve the base when the PR was retargeted mid-fetch.
+- [x] `buildRebaseFixerPrompt` — carry the resolved ref + tip; order
+      the work as fetch → verify the tip → re-check the PR → rebase;
+      name the review host's own CLI for the merge-state read.
+- [x] `ensureFixerWorktree` — a guard and a lock; an occupied candidate
       checkout is never refreshed, and the verdict is `occupied`.
-- [ ] `fixerLane` — the guard is the occupancy ladder read for that
+- [x] `fixerLane` — the guard is the occupancy ladder read for that
       checkout; every fixer class (rebase, ci, sast) inherits it.
-- [ ] tests: the base tip is fetched before the spawn and named in the
-      work order; a failed fetch refuses the spawn; a conflict that
-      dissolved after the fetch ends the pass; an occupied checkout is
-      never refreshed.
+- [x] a dir the pass added and nobody claimed is retired when the pass
+      ends without a fixer.
+- [x] tests: the base tip is fetched before the spawn and named in the
+      work order; a local base is rebase-able; a failed fetch refuses
+      the spawn; a conflict that dissolved after the fetch ends the
+      pass; an occupied checkout is never refreshed; the GitLab work
+      order names `glab`, never `gh`.

@@ -21,6 +21,7 @@ import {
   buildCiFixerPrompt,
   buildFixerPrompt,
   buildRebaseFixerPrompt,
+  type BaseTip,
   buildSastFixerPrompt,
   candidateBranches,
   detailMatches,
@@ -1100,12 +1101,20 @@ describe('buildFixerPrompt', () => {
 });
 
 describe('buildRebaseFixerPrompt', () => {
+  const remoteTip = (sha = 'abc1234'): BaseTip => ({
+    ref: 'origin/main',
+    sha,
+    remote: true,
+    origin: true,
+  });
+
   test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
     const p = buildRebaseFixerPrompt({
       pr: 42,
       link: '[#42](https://github.com/o/r/pull/42)',
       branch: 'work/bro-a',
       base: 'main',
+      baseTip: remoteTip(),
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
       host: 'github',
@@ -1116,7 +1125,7 @@ describe('buildRebaseFixerPrompt', () => {
     assert.match(p, /merge conflicts with its base branch `main`/);
     // the work order fetches the PR branch too — a stale local tip would
     // rebase without the remote's newer commits and drop them on push
-    assert.match(p, /fetch origin work\/bro-a main/);
+    assert.match(p, /fetch origin work\/bro-a/);
     assert.match(p, /rebase origin\/work\/bro-a/);
     assert.match(p, /git rebase origin\/main/);
     assert.match(p, /--force-with-lease/);
@@ -1131,7 +1140,7 @@ describe('buildRebaseFixerPrompt', () => {
       link: '[#42](https://github.com/o/r/pull/42)',
       branch: 'work/bro-a',
       base: 'main',
-      baseSha: 'abc1234',
+      baseTip: remoteTip(),
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
       host: 'github',
@@ -1152,7 +1161,7 @@ describe('buildRebaseFixerPrompt', () => {
       link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
       branch: 'work/bro-a',
       base: 'main',
-      baseSha: 'abc1234',
+      baseTip: remoteTip(),
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
       host: 'gitlab',
@@ -1162,18 +1171,25 @@ describe('buildRebaseFixerPrompt', () => {
     assert.doesNotMatch(p, /gh pr view/);
   });
 
-  test('a base bro could not fetch says so — no invented sha', () => {
+  test('a LOCAL base is rebase-able: no remote fetch, no invented remote ref', () => {
+    // the base lives only locally — the work order must not send the
+    // fixer after a remote ref that does not exist
     const p = buildRebaseFixerPrompt({
       pr: 42,
       link: '[#42](https://github.com/o/r/pull/42)',
       branch: 'work/bro-a',
       base: 'main',
+      baseTip: { ref: 'main', sha: 'abc1234', remote: false, origin: false },
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
       host: 'github',
     });
-    assert.match(p, /could not fetch `origin\/main`/);
-    assert.doesNotMatch(p, /must still read/);
+    assert.match(p, /resolved the base to `main`/);
+    assert.match(p, /git rebase main/);
+    assert.match(p, /This base is a LOCAL branch/);
+    assert.doesNotMatch(p, /git rebase origin\/main/);
+    // no remote at all — there is nothing to fetch, and the order says so
+    assert.doesNotMatch(p, /git fetch origin/);
   });
 });
 
@@ -1191,36 +1207,43 @@ describe('fetchBaseTip', () => {
       git(['update-ref', '-d', 'refs/remotes/origin/main'], main);
 
       const r = fetchBaseTip(main, 'main');
-      assert.equal(r.sha, tip);
+      assert.equal(r.tip?.sha, tip);
+      assert.equal(r.tip?.ref, 'origin/main');
+      assert.equal(r.tip?.remote, true);
       assert.equal(r.err, undefined);
       assert.equal(git(['-C', main, 'rev-parse', 'origin/main'], main).trim(), tip);
     });
   });
 
-  test('a repo with no origin remote skips — there is nothing to fetch', () => {
+  test('a repo with no origin remote resolves the LOCAL base', () => {
     const { root, main } = initRepo('bro-drive-basen-');
     inside(main, root, () => {
       const r = fetchBaseTip(main, 'main');
-      assert.equal(r.skipped, true);
-      assert.equal(r.sha, undefined);
+      assert.equal(r.tip?.ref, 'main');
+      assert.equal(r.tip?.remote, false);
+      assert.equal(r.tip?.origin, false);
       assert.equal(r.err, undefined);
     });
   });
 
-  test('a base the remote does not have skips; a broken remote is an error', () => {
+  test('a base that exists nowhere is an error — the spawn is refused', () => {
     const { root, main } = initRepo('bro-drive-basex-');
     inside(main, root, () => {
       git(['init', '-q', '--bare', join(root, 'origin.git')], root);
       git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
-      assert.equal(fetchBaseTip(main, 'main').skipped, true);
+      const r = fetchBaseTip(main, 'nope');
+      assert.equal(r.tip, undefined);
+      assert.match(r.err ?? '', /no branch or remote-tracking ref named nope/);
+    });
+  });
 
-      // a remote that is not a repository — the fetch fails for a real
-      // reason: the spawn must be refused, not the base guessed
-      git(['remote', 'set-url', 'origin', join(root, 'nope.git')], main);
+  test('a broken remote is an error — not a silently skipped base', () => {
+    const { root, main } = initRepo('bro-drive-baseb-');
+    inside(main, root, () => {
+      git(['remote', 'add', 'origin', join(root, 'nope.git')], main);
       const r = fetchBaseTip(main, 'main');
-      assert.equal(r.sha, undefined);
-      assert.equal(r.skipped, undefined);
-      assert.ok(r.err !== undefined && r.err.length > 0);
+      assert.equal(r.tip, undefined);
+      assert.ok((r.err ?? '').length > 0);
     });
   });
 });
@@ -1311,7 +1334,9 @@ describe('ensureFixerWorktree', () => {
       git(['push', '-q', 'origin', 'main:work/bro-a'], main);
       git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main);
       const before = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
-      const r = ensureFixerWorktree(main, 'work/bro-a', () => 'session armed work on work/bro-a');
+      const r = ensureFixerWorktree(main, 'work/bro-a', {
+        guard: () => 'session armed work on work/bro-a',
+      });
       assert.equal(r.path, undefined);
       assert.equal(r.occupied, 'session armed work on work/bro-a');
       assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), before);
