@@ -29,15 +29,20 @@ import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
+  isEnvName,
   parseProviderEntry,
   type FleetProfile,
   type ProviderEntry,
 } from './providers.ts';
 import {
+  fleetLeases,
   fleetRouter,
   fleetRouting,
   ON_WALL,
+  fleetWalls,
+  type FleetLeaseTtls,
   type FleetRouter,
+  type FleetWallTtls,
   type RoutingTable,
 } from './routing.ts';
 
@@ -381,6 +386,13 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = ra
     if (trimmed === '') {
       continue;
     }
+    // '__proto__' is a setter on Object.prototype, not an own-property
+    // write — a provider named that would mutate the map instead of
+    // naming an entry (the mesh section refuses it the same way)
+    if (trimmed === '__proto__') {
+      console.error('bro.config: providers.__proto__ is a reserved key — entry dropped');
+      continue;
+    }
     const entry = parseProviderEntry(trimmed, v);
     if (entry !== null) {
       out[trimmed] = entry;
@@ -396,6 +408,7 @@ const providerApiSchema = js.obj(
     model: js.str,
     apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
     apiKeyCommand: js.str,
+    account: js.str,
     // model → wire: a wire name, {wire}, or null (wire inferred).
     // minProperties: an empty map parses to a dropped provider —
     // "models": {} must not read as valid config
@@ -418,7 +431,9 @@ const providerAcpSchema = js.obj(
     model: js.str,
     apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
     sessionRm: js.str,
+    account: js.str,
     autoApprove: js.bool,
+    wallPause: js.bool,
   },
   { required: ['type', 'command'] }
 );
@@ -430,13 +445,23 @@ const providerCliSchema = js.obj(
     model: js.str,
     // a model-catalog command, not a map — one id per line on stdout
     models: js.str,
+    account: js.str,
+    wallPause: js.bool,
   },
   { required: ['type', 'command'] }
 );
 
-providersSection.jsonSchema = js.map(
-  js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema)
-);
+providersSection.jsonSchema = {
+  type: 'object',
+  // '__proto__' is a reserved key — the loader drops it, so the schema
+  // must not accept it either (a config that passes the diagnostics
+  // must survive the load)
+  patternProperties: {
+    '^(?!__proto__$)': js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema),
+  },
+  additionalProperties: false,
+};
+
 /** bro.config.json `brouter` section — the model-centric routing
  *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
  *  model id to its route — a provider name, {provider, model?}, or an
@@ -453,6 +478,13 @@ const brouterRouteSchema = js.oneOf(
 brouterSection.jsonSchema = js.obj({
   models: js.map(
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
+  ),
+  routes: js.str,
+  // the decision model — the judge that picks the route. The same shape
+  // the fleet's router keeps: a provider and a mode.
+  router: js.obj(
+    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    { required: ['provider', 'mode'] }
   ),
 });
 
@@ -736,40 +768,278 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => 
 
 sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
+/** The exposed providers — the ROUTES the gateway answers to. Two
+ *  spellings: an array of entry names (route ≡ entry, today's form) or a
+ *  map of route → entry name (the public name is chosen; the entry keeps
+ *  its own). */
+export type ServeProviders = string[] | Record<string, string>;
+
+/** The exposed provider names — a list of non-blank strings, else
+ *  undefined (the section carries no list). A value that is not a
+ *  list, or an entry that is not a name, is a diagnostic — the lane
+ *  it names would silently disappear otherwise. */
+function providerNames(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.error(
+      'bro.config: serve.providers must be an array of provider names — section dropped'
+    );
+    return undefined;
+  }
+  const names: string[] = [];
+  for (const n of raw) {
+    if (typeof n !== 'string' || n.trim() === '') {
+      console.error(
+        'bro.config: serve.providers entries must be non-empty strings — entry dropped'
+      );
+      continue;
+    }
+    names.push(n.trim());
+  }
+  return names;
+}
+
+/** An object key that JavaScript orders FIRST — the integer indexes.
+ *  A route named like one cannot keep its declared position: the JSON
+ *  object's own iteration puts it ahead of its siblings, so "the first
+ *  declared route" would name a different lane than the operator
+ *  wrote. */
+export function isIntegerIndexKey(name: string): boolean {
+  const n = Number(name);
+  return Number.isInteger(n) && n >= 0 && n < 4_294_967_295 && String(n) === name;
+}
+
+/** One declared route — its name and the entry it reaches. A malformed
+ *  one is a diagnostic, not a silent drop: a lane that vanished leaves
+ *  the operator with a gateway that answers fewer models than they
+ *  declared. */
+function declareRoute(route: string, entry: unknown, routes: Record<string, string>): void {
+  const name = route.trim();
+  if (name === '') {
+    console.error('bro.config: serve.providers route names must be non-empty — entry dropped');
+    return;
+  }
+  if (isIntegerIndexKey(name)) {
+    console.error(
+      `bro.config: serve.providers route '${name}' is a numeric index — it would lose its declared order — entry dropped`
+    );
+    return;
+  }
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    console.error(
+      `bro.config: serve.providers route '${route}' must name a provider entry — entry dropped`
+    );
+    return;
+  }
+  if (Object.hasOwn(routes, name)) {
+    console.error(
+      `bro.config: serve.providers route '${route}' duplicates an earlier route after trimming — entry dropped`
+    );
+    return;
+  }
+  if (name === '__proto__') {
+    // '__proto__' is a setter on Object.prototype, not a mergeable key —
+    // the config layer refuses it everywhere else (the layer merge skips
+    // it, a mesh alias skips it), so a route named that could not survive
+    // a layered merge anyway
+    console.error(`bro.config: serve.providers route '${name}' is a reserved key — entry dropped`);
+    return;
+  }
+  routes[name] = entry.trim();
+}
+
+/** The exposed providers, in either spelling — the array of entry names
+ *  (route ≡ entry) or the map of route → entry (the public name is
+ *  chosen). */
+function providerRoutes(raw: unknown): ServeProviders | undefined {
+  if (raw === undefined) return undefined;
+  if (Array.isArray(raw)) return providerNames(raw);
+  if (typeof raw !== 'object' || raw === null) {
+    console.error(
+      'bro.config: serve.providers must be an array of provider names or a route→entry map — section dropped'
+    );
+    return undefined;
+  }
+  const routes: Record<string, string> = {};
+  for (const [route, entry] of Object.entries(raw as Record<string, unknown>)) {
+    declareRoute(route, entry, routes);
+  }
+  return routes;
+}
+
+function serveUpstream(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  // a slash-only value strips to '' — that must read as unset, not as
+  // a configured base the proxy resolves every request against
+  let upstream = raw.trim();
+  while (upstream.endsWith('/')) upstream = upstream.slice(0, -1);
+  return upstream === '' ? undefined : upstream;
+}
+
+function serveApiKeyEnv(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  const name = raw.trim();
+  // the value NAMES an env var — an invalid name silently misses at
+  // resolution time, so an unparsable one drops loud like providers.*
+  // (the bad value stays out of the message — CodeQL reads anything
+  // named *key* as sensitive, and a name is all the diagnostic needs)
+  if (!isEnvName(name)) {
+    console.error(
+      'bro.config: serve.apiKeyEnv must name an env var (SCREAMING_SNAKE) — entry dropped'
+    );
+    return undefined;
+  }
+  return name;
+}
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
- *  (apiKeyHelper children do not inherit settings.env). `fastModel`
- *  pins the upstream model the conductor's fast lane rewrites, and
- *  `fastLane:false` returns every call to the session lane (spec
- *  bro-6asnu). */
+ *  (apiKeyHelper children do not inherit settings.env).
+ *  `providers` names the OTHER acp entries the gateway exposes: a
+ *  request whose model carries one of their names routes there, so one
+ *  listener serves every provider's models. It accepts two spellings —
+ *  an array of entry names (the route IS the entry) or a map of route →
+ *  entry, so the public name can be chosen independently of the
+ *  entry's own name (spec bro-jxw7p).
+ *  `upstream` is the Messages-API base for the byte proxy (owned by
+ *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
+ *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
+ *  / `ANTHROPIC_*` override). `fastModel` pins the upstream model the
+ *  conductor's fast lane rewrites, and `fastLane:false` returns every
+ *  call to the session lane (spec bro-6asnu). */
+/** One thin client's own knobs — where `bro router client` writes the
+ *  model block, and which binary the launch stage execs.
+ *
+ *  The client reads its settings at START, so the order matters: the
+ *  router must be up (the catalog is the truth) and the settings must
+ *  carry the block BEFORE the client starts. This config says where
+ *  that block lands — the machine-local path, not a committed one. */
+export interface ServeClientConfig {
+  /** the settings FILE the model block is merged into */
+  settingsPath?: string;
+  /** the client binary the launch stage execs */
+  command?: string;
+}
+
+/** The client configs, keyed by client name (`claude-code`). */
+export type ServeClients = Record<string, ServeClientConfig>;
+
+/** A string field, trimmed — undefined when it is absent or blank. */
+function trimmedField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** One client's config — its fields, trimmed. Undefined when the entry is
+ *  malformed or carries nothing to configure. */
+function serveClientConfig(raw: unknown, name: string): ServeClientConfig | undefined {
+  if (!isPlainObject(raw)) {
+    console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
+    return undefined;
+  }
+  const settingsPath = trimmedField(raw.settingsPath);
+  const command = trimmedField(raw.command);
+  const cfg: ServeClientConfig = {
+    ...(settingsPath === undefined ? {} : { settingsPath }),
+    ...(command === undefined ? {} : { command }),
+  };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+/** The client configs — a malformed entry drops ITS OWN fields, never
+ *  the whole section (same discipline as the lane limits). */
+function serveClients(raw: unknown): ServeClients | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    console.error(
+      'bro.config: serve.client must be an object of client → config — section dropped'
+    );
+    return undefined;
+  }
+  const out: ServeClients = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (name === '__proto__') continue;
+    const cfg = serveClientConfig(value, name);
+    if (cfg !== undefined) out[name] = cfg;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export const serveSection: ConfigSection<{
   backend?: string;
+  providers?: ServeProviders;
+  upstream?: string;
+  apiKeyEnv?: string;
+  client?: ServeClients;
   fastModel?: string;
   fastLane?: boolean;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
+    providers?: unknown;
+    upstream?: unknown;
+    apiKeyEnv?: unknown;
+    client?: unknown;
     fastModel?: unknown;
     fastLane?: unknown;
   };
-  const backend =
-    typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
-  const fastModel =
-    typeof obj.fastModel === 'string' && obj.fastModel.trim() !== ''
-      ? obj.fastModel.trim()
-      : undefined;
-  const fastLane = typeof obj.fastLane === 'boolean' ? obj.fastLane : undefined;
-  // unset reads as an empty bag — same shape as providers:{}
-  const out: { backend?: string; fastModel?: string; fastLane?: boolean } = {};
-  if (backend !== undefined) out.backend = backend;
+  const out: {
+    backend?: string;
+    providers?: ServeProviders;
+    upstream?: string;
+    apiKeyEnv?: string;
+    client?: ServeClients;
+    fastModel?: string;
+    fastLane?: boolean;
+  } = {};
+  if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
+    out.backend = obj.backend.trim();
+  }
+  const providers = providerRoutes(obj.providers);
+  if (providers !== undefined) out.providers = providers;
+  const upstream = serveUpstream(obj.upstream);
+  if (upstream !== undefined) out.upstream = upstream;
+  const apiKeyEnv = serveApiKeyEnv(obj.apiKeyEnv);
+  if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
+  const client = serveClients(obj.client);
+  if (client !== undefined) out.client = client;
+  const fastModel = trimmedField(obj.fastModel);
   if (fastModel !== undefined) out.fastModel = fastModel;
-  if (fastLane !== undefined) out.fastLane = fastLane;
+  if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
+  // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
 
-serveSection.jsonSchema = js.obj({ backend: js.str, fastModel: js.str, fastLane: js.bool });
+serveSection.jsonSchema = js.obj({
+  backend: js.str,
+  providers: js.oneOf(js.strList, {
+    // the KEY is a ROUTE name — it must carry a non-blank character (or
+    // the loader drops it) and no '/' (a route is a model prefix: the
+    // router reads the first segment, so a slash makes it unreachable).
+    // The array form's names are ENTRY keys, which may carry a slash —
+    // only the map's keys are routes.
+    type: 'object',
+    patternProperties: { [String.raw`^(?!__proto__$)[^\/]*[^\s\/][^\/]*$`]: js.str },
+    additionalProperties: false,
+  }),
+  upstream: js.str,
+  apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+  client: js.map(
+    js.obj({
+      settingsPath: js.str,
+      command: js.str,
+    })
+  ),
+  fastModel: js.str,
+  fastLane: js.bool,
+});
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -880,24 +1150,53 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   return out;
 }
 
+function fleetProviderCaps(raw: unknown): Record<string, number> {
+  if (raw === undefined) {
+    return {};
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: fleet.providerCaps must be an object — section dropped');
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [name, v] of Object.entries(raw)) {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+      console.error(
+        `bro.config: fleet.providerCaps.${name} must be a non-negative integer — entry dropped`
+      );
+      continue;
+    }
+    out[name] = v;
+  }
+  return out;
+}
+
 /** bro.config.json `fleet` section — the live-agent ceiling the spawn
  *  prologue enforces, the named spawn presets (`profiles`, spec
  *  bro-5hx1.1), and the dispatch routing table (`routing`, spec
  *  bro-1x7p: task class → ordered provider chain; absent = today's
  *  static resolution). `maxConcurrent` counts registry agents across
  *  ALL backends (the budget wall is per-account, not per-runtime); 0
- *  disables the cap, matching act.maxRounds' convention. */
+ *  disables the cap, matching act.maxRounds' convention. `providerCaps`
+ *  sets per-provider session caps (global operator policy) — counted
+ *  machine-wide across all repos and all session sources. */
 export const fleetSection: ConfigSection<{
   maxConcurrent: number;
   profiles: Record<string, FleetProfile>;
   routing: RoutingTable;
+  walls: FleetWallTtls;
+  leases: FleetLeaseTtls;
   router?: FleetRouter;
+  providerCaps: Record<string, number>;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown;
     profiles?: unknown;
     routing?: unknown;
+    walls?: unknown;
+    leases?: unknown;
     router?: unknown;
+    providerCaps?: unknown;
   };
   const router = fleetRouter(obj.router);
   return {
@@ -909,6 +1208,9 @@ export const fleetSection: ConfigSection<{
         : DEFAULT_CONFIG.fleet.maxConcurrent,
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
+    providerCaps: fleetProviderCaps(obj.providerCaps),
+    walls: fleetWalls(obj.walls),
+    leases: fleetLeases(obj.leases),
     ...(router === undefined ? {} : { router }),
   };
 };
@@ -938,6 +1240,15 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
+  providerCaps: js.map(js.int()),
+  walls: js.obj({
+    rateTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+    quotaTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
+  leases: js.obj({
+    roleTtlSeconds: { type: 'number', exclusiveMinimum: 0 },
+    workTtlMinutes: { type: 'number', exclusiveMinimum: 0 },
+  }),
 });
 
 /** bro.config.json `query` section — `query`-plan defaults (spec
@@ -1028,7 +1339,7 @@ export const meshSection: ConfigSection<{
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
-      if (alias === '__proto__') {
+      if (alias === '__proto__' || alias === 'constructor' || alias === 'prototype') {
         continue;
       }
       const p = meshPeerEntry(entry);
@@ -1215,12 +1526,16 @@ export interface BroConfig {
    *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1).
    *  `routing` maps a task class to an ordered provider chain (spec
    *  bro-1x7p) — absent/empty = today's static resolution; `router`
-   *  names the optional judge classifier (M7). */
+   *  names the optional judge classifier (M7). `providerCaps` sets
+   *  per-provider session caps from the global config layer. */
   fleet: {
     maxConcurrent: number;
     profiles: Record<string, FleetProfile>;
     routing: RoutingTable;
+    walls: FleetWallTtls;
+    leases: FleetLeaseTtls;
     router?: FleetRouter;
+    providerCaps: Record<string, number>;
   };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
    *  own field overrides (default 4); `env` is the global literal
@@ -1242,11 +1557,20 @@ export interface BroConfig {
   /** `bro serve` — the facade host's own knobs. `backend` names the acp
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
-   *  relying on env reaching every spawn path. `fastModel` pins the
-   *  upstream model the conductor's fast lane rewrites classifier calls
-   *  to (spec bro-6asnu); `fastLane:false` returns every call to the
-   *  session lane. */
-  serve: { backend?: string; fastModel?: string; fastLane?: boolean };
+   *  relying on env reaching every spawn path. `providers` lists the
+   *  other acp entries the gateway routes to. `upstream`/`apiKeyEnv`
+   *  configure the byte proxy (env overrides and supplies the secret).
+   *  `fastModel` pins the upstream model the conductor's fast lane
+   *  rewrites classifier calls to (spec bro-6asnu); `fastLane:false`
+   *  returns every call to the session lane. */
+  serve: {
+    backend?: string;
+    providers?: ServeProviders;
+    upstream?: string;
+    apiKeyEnv?: string;
+    fastModel?: string;
+    fastLane?: boolean;
+  };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;
@@ -1289,7 +1613,14 @@ export const DEFAULT_CONFIG: BroConfig = {
   providers: {},
   brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
-  fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
+  fleet: {
+    maxConcurrent: 3,
+    profiles: {},
+    routing: {},
+    providerCaps: {},
+    walls: { rateTtlMinutes: 15, quotaTtlMinutes: 360 },
+    leases: { roleTtlSeconds: 60, workTtlMinutes: 360 },
+  },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   mcp: {},
@@ -1779,6 +2110,26 @@ export function loadConfig(
       : [],
   };
   applySections(config, merged, sections);
+  // fleet.providerCaps is machine-wide operator policy — the caps are
+  // counted across every repo and every session source, so only the
+  // global layer may set them. A repo-layer entry (committed policy or
+  // a checkout's local file) would let one repo raise its own ceiling;
+  // warn and pin the global-layer value over whatever the merge made.
+  const repoCaps = layers.some(
+    l => l.layer !== 'global' && isPlainObject(l.raw.fleet) && 'providerCaps' in l.raw.fleet
+  );
+  if (repoCaps) {
+    console.error(
+      'bro.config: fleet.providerCaps is global-only operator policy — repo-layer value ignored (set it in the global config)'
+    );
+  }
+  const globalFleet = layers.find(l => l.layer === 'global')?.raw.fleet;
+  config.fleet = {
+    ...config.fleet,
+    providerCaps: fleetProviderCaps(
+      isPlainObject(globalFleet) ? globalFleet.providerCaps : undefined
+    ),
+  };
   return config;
 }
 

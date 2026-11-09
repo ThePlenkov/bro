@@ -7,12 +7,17 @@
  * the protocol — SSE frames, tool_use blocks, and beta surface all
  * pass through untouched, so the wire contract is the upstream's.
  *
- * Config (server-side env, never the client's):
- *   BRO_PROVIDER_UPSTREAM  default https://api.anthropic.com — any
- *                          Messages-API endpoint (Z.AI, DashScope,
- *                          a local model gateway)
- *   BRO_PROVIDER_API_KEY   the real credential — falls back to the
- *                          operator's ANTHROPIC_API_KEY / AUTH_TOKEN
+ * Config:
+ *   serve.upstream / BRO_PROVIDER_UPSTREAM  Messages-API base
+ *                                          (config owns the URL; env
+ *                                          overrides). Default
+ *                                          https://api.anthropic.com
+ *   serve.apiKeyEnv                         env var name holding the
+ *                                          real credential (config owns
+ *                                          the name; secret lives in env).
+ *                                          BRO_PROVIDER_API_KEY /
+ *                                          ANTHROPIC_API_KEY /
+ *                                          ANTHROPIC_AUTH_TOKEN override.
  *
  * Client-side wiring (documented, not enforced):
  *   env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
@@ -32,24 +37,71 @@ export interface ProviderConfig {
 
 const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 
-/** Provider config from the server's own environment — the upstream
- *  credential lives here, never in the client request. No key means
- *  the dep stays unwired and `/v1/*` 404s like any unknown path:
- *  a half-configured provider is a miss, not a degraded proxy. */
-export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefined {
-  // a set-but-blank override must not starve the fallbacks — scan in
-  // precedence order and take the first non-blank
-  const apiKey = [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN].find(
-    v => v !== undefined && v.trim() !== ''
-  );
+/** The first defined-and-non-blank value, trimmed — a set-but-blank env
+ *  override must not starve the fallbacks behind it. */
+function nonBlank(...values: Array<string | undefined>): string | undefined {
+  for (const v of values) {
+    if (v !== undefined && v.trim() !== '') {
+      return v.trim();
+    }
+  }
+  return undefined;
+}
+
+/** Credential resolution — env overrides (BRO_PROVIDER_API_KEY /
+ *  ANTHROPIC_*) beat the config-named var, which resolves last. The
+ *  secret channel stays env either way: config only picks its NAME. */
+function providerApiKey(
+  env: NodeJS.ProcessEnv,
+  serve?: { apiKeyEnv?: string }
+): string | undefined {
+  // env is a plain object — hasOwn keeps a magic name ('__proto__' &
+  // friends) from reaching outside the process's own variables
+  const named =
+    serve?.apiKeyEnv !== undefined && Object.hasOwn(env, serve.apiKeyEnv)
+      ? env[serve.apiKeyEnv]
+      : undefined;
+  return nonBlank(env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN, named);
+}
+
+/** Provider config: config owns upstream and the apiKey env-name; env is
+ *  the override+secret channel. No key means the dep stays unwired and
+ *  `/v1/*` 404s like any unknown path: a half-configured provider is a
+ *  miss, not a degraded proxy. */
+export function providerConfig(
+  env: NodeJS.ProcessEnv,
+  serve?: { upstream?: string; apiKeyEnv?: string }
+): ProviderConfig | undefined {
+  const apiKey = providerApiKey(env, serve);
   if (apiKey === undefined) {
     return undefined;
   }
-  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM;
+  let upstream = nonBlank(env.BRO_PROVIDER_UPSTREAM, serve?.upstream) ?? DEFAULT_UPSTREAM;
   while (upstream.endsWith('/')) {
     upstream = upstream.slice(0, -1);
   }
-  return { upstream, apiKey };
+  // a slash-only override normalizes to '' — that is unset, not a base
+  return { upstream: upstream === '' ? DEFAULT_UPSTREAM : upstream, apiKey };
+}
+
+/** The file-layer half of providerConfig — `load` carries the caller's
+ *  layer scope (the host listener passes a global-only scan, `bro serve`
+ *  the full merge). A throwing config load degrades to env-only WITH a
+ *  warning — a user who pinned the credential name in bro.config must
+ *  see why the provider unwired, never silently lose it. */
+export function fileProviderConfig(
+  env: NodeJS.ProcessEnv,
+  load: () => { serve?: { upstream?: string; apiKeyEnv?: string } }
+): ProviderConfig | undefined {
+  try {
+    return providerConfig(env, load().serve);
+  } catch (err) {
+    console.error(
+      `warning: bro.config failed to load — serve.upstream/apiKeyEnv ignored ` +
+        `(${err instanceof Error ? err.message : String(err)})`
+    );
+    return providerConfig(env);
+  }
 }
 
 /** Headers that must not ride the proxy — hop-by-hop framing, the
@@ -119,39 +171,101 @@ export function providerProxy(
   return (req, res) => forwardUpstream(req, res, cfg);
 }
 
+/** The extra lanes a forward can ride — `payload` overrides the
+ *  request body (the conductor's fast lane buffers the client's JSON
+ *  to rewrite `model` before forwarding); `timeoutMs` is the caller's
+ *  deadline on the upstream fetch. */
+export interface ForwardOptions {
+  payload?: string;
+  timeoutMs?: number;
+}
+
+/** Client-close and caller-deadline both cancel the upstream fetch —
+ *  an SSE generation otherwise runs to completion billing tokens
+ *  against nobody's session, and a stalled upstream must not hold the
+ *  request open past the turn budget it answers under. `drop` clears
+ *  the deadline. */
+function laneAbort(
+  res: ServerResponse,
+  timeoutMs?: number
+): { signal: AbortSignal; drop: () => void } {
+  const abort = new AbortController();
+  res.on('close', () => abort.abort());
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort.abort(), timeoutMs);
+  timer?.unref();
+  const drop = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  };
+  res.on('close', drop);
+  return { signal: abort.signal, drop };
+}
+
+/** The request-body piece of the upstream fetch — a buffered payload
+ *  wins outright; absent, a body-method streams the raw request. */
+function upstreamBody(req: IncomingMessage, method: string, payload?: string): RequestInit {
+  if (payload !== undefined) {
+    return { body: payload };
+  }
+  if (HAS_BODY.has(method)) {
+    return { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } as RequestInit;
+  }
+  return {};
+}
+
+/** Response headers minus the hop-by-hop set — everything else pipes
+ *  through verbatim. */
+function upstreamHeaders(upstream: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  upstream.headers.forEach((value, name) => {
+    if (!DROP_RESPONSE.has(name.toLowerCase())) {
+      headers[name] = value;
+    }
+  });
+  return headers;
+}
+
+/** Pipe an established upstream response to the client — mid-stream
+ *  failures can't re-send the status, so destroy is the honest end:
+ *  the client's transport reports a truncated response. */
+function pipeUpstream(upstream: Response, res: ServerResponse, drop: () => void): void {
+  res.writeHead(upstream.status, upstreamHeaders(upstream));
+  if (upstream.body === null) {
+    res.end();
+    return;
+  }
+  const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
+  body.on('error', () => res.destroy());
+  body.on('end', drop);
+  body.pipe(res);
+}
+
 /** The upstream fetch + response-pipe both proxy paths share —
- *  `payload` overrides the request body (the conductor's fast lane
- *  buffers the client's JSON to rewrite `model` before forwarding);
+ *  `opts.payload` overrides the request body (see ForwardOptions);
  *  absent, the request streams through like the plain proxy. */
 async function forwardUpstream(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ProviderConfig,
-  payload?: string
+  opts: ForwardOptions = {}
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const target = `${cfg.upstream}${req.url ?? '/'}`;
-  // the client going away must stop the upstream work — an SSE
-  // generation otherwise runs to completion billing tokens against
-  // nobody's session
-  const abort = new AbortController();
-  res.on('close', () => abort.abort());
+  const lane = laneAbort(res, opts.timeoutMs);
   let upstream: Response;
   try {
     upstream = await fetch(target, {
       method,
       headers: forwardHeaders(req, cfg.apiKey),
-      signal: abort.signal,
+      signal: lane.signal,
       // never auto-follow — a cross-origin redirect would carry the
       // swapped x-api-key to a host it was never minted for
       redirect: 'manual',
-      ...(payload !== undefined
-        ? { body: payload }
-        : HAS_BODY.has(method)
-          ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const }
-          : {}),
+      ...upstreamBody(req, method, opts.payload),
     });
   } catch (err) {
+    lane.drop();
     sendUpstreamError(
       res,
       502,
@@ -159,23 +273,7 @@ async function forwardUpstream(
     );
     return;
   }
-
-  const headers: Record<string, string> = {};
-  upstream.headers.forEach((value, name) => {
-    if (!DROP_RESPONSE.has(name.toLowerCase())) {
-      headers[name] = value;
-    }
-  });
-  res.writeHead(upstream.status, headers);
-  if (upstream.body === null) {
-    res.end();
-    return;
-  }
-  const body = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
-  // mid-stream failures can't re-send the status — destroy is the
-  // honest end: the client's transport reports a truncated response
-  body.on('error', () => res.destroy());
-  body.pipe(res);
+  pipeUpstream(upstream, res, lane.drop);
 }
 
 /** `(req, res)` forward for a request whose body is already buffered —
@@ -188,7 +286,7 @@ export function forwardBody(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ProviderConfig,
-  payload: string
+  opts: ForwardOptions & { payload: string }
 ): Promise<void> {
-  return forwardUpstream(req, res, cfg, payload);
+  return forwardUpstream(req, res, cfg, opts);
 }

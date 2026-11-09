@@ -167,6 +167,13 @@ export function fakeAcpAgent(
      *  real gate for an agent whose advertised authMethods are not
      *  covered by stored credentials. */
     failNew?: 'auth';
+    /** session/new fails with THIS message — a long agent diagnostic
+     *  (a stack trace, a banner) that a caller must survive in a
+     *  response header. */
+    failNewMessage?: string;
+    /** session/new answers only after this many ms — a slow agent, for
+     *  a caller whose budget must bound the wait (the catalog read). */
+    delayNewMs?: number;
     /** Mint a distinct `sess-N` per session/new instead of always
      *  'sess-1' — multi-session tests need real distinct ids. */
     uniqueSessions?: boolean;
@@ -211,9 +218,15 @@ export function fakeAcpAgent(
         },
       };
     })
-    .onRequest('session/new', ctx => {
+    .onRequest('session/new', async ctx => {
       if (opts.failNew === 'auth') {
         throw RequestError.authRequired();
+      }
+      if (opts.failNewMessage !== undefined) {
+        throw RequestError.internalError(undefined, opts.failNewMessage);
+      }
+      if (opts.delayNewMs !== undefined) {
+        await new Promise<void>(resolve => setTimeout(resolve, opts.delayNewMs));
       }
       seen.sessions.push({ cwd: ctx.params.cwd });
       seen.sessionRequests.push(ctx.params);

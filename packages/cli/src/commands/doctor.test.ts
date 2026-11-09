@@ -225,7 +225,7 @@ const CONDUCTOR_ACP: EnvOpts = {
   },
   bins: ['gh'],
 };
-  checks.find(c => c.name === name)!;
+
 /** A fixture dolt store — a git repo holding `refs/dolt/data` whose head
  *  tree is manifest + table files. `missing` names tables the manifest
  *  claims but the tree never gets (the bro-orcdv corruption). */
@@ -371,7 +371,6 @@ describe('bro doctor', () => {
             'bd-store',
             'hooks',
             'hooks-wiring',
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
             'config',
             'git-remote',
             'dolt-remote',
@@ -405,7 +404,6 @@ describe('bro doctor', () => {
       assert.equal(byName(checks, 'bd').status, 'warn');
       assert.equal(doctorExitCode(checks), 0);
     }));
-<<<<<<< HEAD
 
   test('env-scope — an allowlist without strictEnv is an inert warn, never an enabled scope', () =>
     withEnv(
@@ -436,7 +434,7 @@ describe('bro doctor', () => {
         assert.ok(c?.detail.includes('native') && c?.detail.includes('docker'), c?.detail);
       }
     ));
-=======
+
   test('tasks row names the serving backend — beads by default', () =>
     withEnv(
       {
@@ -866,7 +864,6 @@ describe('bro doctor', () => {
       assert.equal(c.status, 'ok');
       assert.match(c.detail, /no bro hooks/);
     }));
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
 
   test('bro-dist: PATH-bro into a dev checkout warns when dist predates HEAD', () =>
     withEnv({ bins: ['gh'] }, dir => {
@@ -931,7 +928,6 @@ describe('bro doctor', () => {
       assert.match(c.detail, /predates @\{u\}/);
       assert.match(c.hint ?? '', /npm run build/);
     }));
-<<<<<<< HEAD
 
   test('daemon: down is ordinary — no supervisor, recorded dead', () =>
     withEnv({ bins: ['gh'] }, dir => {
@@ -1190,7 +1186,7 @@ describe('bro doctor', () => {
         });
       })
   );
-=======
+
   test('providers: configured entries are listed as name (kind, model)', () =>
     withEnv(
       {
@@ -1449,6 +1445,71 @@ describe('bro doctor', () => {
         assert.equal(byName(runDoctorChecks(dir), 'mesh-peers').status, 'warn');
       }
     );
+    // github-derived peer without login warns
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              badlogin: { rig: 'mesh://acme/other', remote: 'https://github.com/acme/other.git' },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
+      }
+    );
+    // github-derived peer with login set is ok
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              goodlogin: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: 'bot',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'ok');
+        assert.match(c.detail ?? '', /1 peer\(s\)/);
+      }
+    );
+    // whitespace-only login is treated as missing
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              ws: {
+                rig: 'mesh://acme/other',
+                remote: 'https://github.com/acme/other.git',
+                login: '   ',
+              },
+            },
+          },
+        },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'mesh-peers');
+        assert.equal(c.status, 'warn');
+        assert.match(c.detail ?? '', /github-derived without login/);
+      }
+    );
   });
 
   test('debt-sonarcloud: absent when the source is unconfigured', () =>
@@ -1655,38 +1716,6 @@ describe('bro doctor', () => {
       assert.equal(c.status, 'ok', JSON.stringify(c));
     }));
 
-  test('conductor: a live acp-backed endpoint + client base url warns with no pin at all', () =>
-    withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
-      liveServeClient(dir, 'http://127.0.0.1:44927');
-      const c = byName(runDoctorChecks(dir), 'conductor');
-      assert.equal(c.status, 'warn', JSON.stringify(c));
-      assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
-      assert.match(c.detail, /classifier rides it too/);
-    }));
-
-  test('conductor: a live serve with no acp backend stays ok — the byte proxy forwards classifiers fine', () =>
-    withEnv(CONDUCTOR_ACP, dir => {
-      const url = 'http://127.0.0.1:44927';
-      liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' });
-      const c = byName(runDoctorChecks(dir), 'conductor');
-      assert.equal(c.status, 'ok', JSON.stringify(c));
-    }));
-
-  test('conductor: a clean dedicated classifier lane wins — the main-model pin is not evaluated', () =>
-    withEnv(CONDUCTOR_ACP, dir => {
-      mkdirSync(join(dir, '.claude'), { recursive: true });
-      writeFileSync(
-        join(dir, '.claude', 'settings.local.json'),
-        JSON.stringify({
-          env: {
-            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-            ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
-          },
-        })
-      );
-      const c = byName(runDoctorChecks(dir), 'conductor');
-      assert.equal(c.status, 'ok', JSON.stringify(c));
-    }));
   test('conductor: process-env pins count — <acp-name>/<id> is conductor vocabulary', () =>
     withEnv(
       {
@@ -1718,37 +1747,7 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'conductor');
       assert.equal(c.status, 'ok', JSON.stringify(c));
     }));
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://127.0.0.1:44927', 'http://localhost:44927/');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
-      }
-    ));
 
-  test('conductor: a serve.json pointing off-loopback is not live-endpoint evidence', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://203.0.113.9:44927');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
   test('conductor: two acp entries claiming one bare id are both named in the warn', () =>
     withEnv(
       {
@@ -1768,8 +1767,28 @@ describe('bro doctor', () => {
         assert.match(c.detail, /providers\.acp-b/);
       }
     ));
-<<<<<<< HEAD
-=======
+
+  test('conductor: a pin prefixed by a configured non-acp provider is the client’s own route', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' },
+            openrouter: {
+              type: 'api',
+              baseUrl: 'https://x',
+              models: { 'swe-2-max': 'openai-compat' },
+            },
+          },
+        },
+        bins: ['gh'],
+        env: { ANTHROPIC_SMALL_FAST_MODEL: 'openrouter/swe-2-max' },
+      },
+      dir => {
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'ok', JSON.stringify(c));
+      }
+    ));
 
   test('conductor: an armed fast lane downgrades the endpoint warn to ok (bro-6asnu)', () =>
     withEnv(
@@ -1809,6 +1828,24 @@ describe('bro doctor', () => {
       }
     ));
 
+  test('conductor: serve.fastLane:false keeps the warn even with a key (bro-6asnu)', () =>
+    withEnv(
+      {
+        config: {
+          serve: { fastLane: false },
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp', BRO_PROVIDER_API_KEY: 'k' },
+      },
+      dir => {
+        liveServeClient(dir, 'http://127.0.0.1:44927');
+        const c = byName(runDoctorChecks(dir), 'conductor');
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      }
+    ));
+
   test('conductor: a classifier pin on the acp wire reads ok once the lane is armed', () =>
     withEnv(
       {
@@ -1817,8 +1854,12 @@ describe('bro doctor', () => {
         },
         bins: ['gh'],
         env: {
+          BRO_PROVIDER_BACKEND: 'devin-acp',
           ANTHROPIC_SMALL_FAST_MODEL: 'devin-acp/swe-2-max',
           ANTHROPIC_AUTH_TOKEN: 'tok',
+          // the pin names conductor vocabulary — the rewrite must exist
+          // for the upstream to answer it
+          BRO_PROVIDER_FAST_MODEL: 'claude-haiku-4-5',
         },
       },
       dir => {
@@ -1827,27 +1868,26 @@ describe('bro doctor', () => {
         assert.match(c.detail, /fast lane routes/);
       }
     ));
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
 
-  test('conductor: a pin prefixed by a configured non-acp provider is the client’s own route', () =>
+  test('conductor: a conductor-only pin on an un-pinned lane still warns', () =>
     withEnv(
       {
         config: {
-          providers: {
-            'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' },
-            openrouter: {
-              type: 'api',
-              baseUrl: 'https://x',
-              models: { 'swe-2-max': 'openai-compat' },
-            },
-          },
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
         },
         bins: ['gh'],
-        env: { ANTHROPIC_SMALL_FAST_MODEL: 'openrouter/swe-2-max' },
+        env: {
+          BRO_PROVIDER_BACKEND: 'devin-acp',
+          ANTHROPIC_SMALL_FAST_MODEL: 'devin-acp/swe-2-max',
+          ANTHROPIC_AUTH_TOKEN: 'tok',
+        },
       },
       dir => {
+        // armed but no fastModel — devin-acp/swe-2-max forwards verbatim
+        // and no upstream serves that id
         const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
+        assert.equal(c.status, 'warn', JSON.stringify(c));
+        assert.match(c.hint ?? '', /BRO_PROVIDER_FAST_MODEL/);
       }
     ));
 

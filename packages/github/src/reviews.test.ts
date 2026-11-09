@@ -1,15 +1,15 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { facade, registerConnector, type ApprovalVerdict } from '@broject/core'
-import { githubConnector, githubReview } from './index.ts'
-import { headApprovalVerdict, mergeAsync, type PrReviewNode } from './reviews.ts'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { facade, registerConnector, type ApprovalVerdict } from '@broject/core';
+import { githubConnector, githubReview } from './index.ts';
+import { headApprovalVerdict, mergeAsync, type PrReviewNode } from './reviews.ts';
 
-const WIN32 = process.platform === 'win32'
+const WIN32 = process.platform === 'win32';
 
-const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z","mergeCommit":{"oid":"abc123"},"labels":{"nodes":[{"name":"bug"}]},"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}`
+const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z","mergeCommit":{"oid":"abc123"},"labels":{"nodes":[{"name":"bug"}]},"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}`;
 
 /** Scripted gh on PATH — records argv to $FAKE_GH_LOG, answers by $1 $2.
  *  The merge-async family is env-driven: FAKE_GH_PULL (the PR read that
@@ -62,6 +62,7 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac; fi ;;
   "api repos/"* ) case "$2" in
+      *pulls\\?*) echo '[{"number":9,"head":"work/x"},{"number":11,"head":"loop/y"}]' ;;
       *check-runs\\?*) if [ -n "$FAKE_GH_RUNS" ]; then echo "$FAKE_GH_RUNS";
           else echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}'; fi ;;
       *merge-async/*) if [ -n "$FAKE_GH_POLL_ERR" ]; then echo "$FAKE_GH_POLL_ERR" >&2; exit 1; fi
@@ -79,6 +80,7 @@ case "$1 $2" in
   "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $4" >> "$FAKE_GH_LOG"; fi
       if [ -n "$FAKE_GH_ANN_SLEEP" ]; then sleep "$FAKE_GH_ANN_SLEEP"; fi
       case "$4" in
+      *pulls\\?*) echo '[{"number":9,"head":"work/x"},{"number":11,"head":"loop/y"}]' ;;
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
@@ -93,265 +95,289 @@ case "$1 $2" in
         printf %s "$FAKE_GH_EDIT_CLOBBER" > "$FAKE_GH_BODY_FILE"; touch "$FAKE_GH_BODY_FILE.clob"; fi
       fi ;;
 esac
-`
+`;
 
 /** Arms the fake gh + env, returns the log path and the teardown. The
  *  async probes' spawned child must still find the script on PATH when
  *  it settles, so callers awaiting a promise hold the fixture open. */
 function armFakeGh(env: Record<string, string>): { log: string; restore: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
-  const log = join(dir, 'gh.log')
-  writeFileSync(log, '')
-  writeFileSync(join(dir, 'gh'), FAKE_GH)
-  chmodSync(join(dir, 'gh'), 0o755)
-  const { FAKE_GH_BODY, ...vars } = env
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'));
+  const log = join(dir, 'gh.log');
+  writeFileSync(log, '');
+  writeFileSync(join(dir, 'gh'), FAKE_GH);
+  chmodSync(join(dir, 'gh'), 0o755);
+  const { FAKE_GH_BODY, ...vars } = env;
   if (FAKE_GH_BODY !== undefined) {
-    vars.FAKE_GH_BODY_FILE = join(dir, 'pr.body')
-    writeFileSync(vars.FAKE_GH_BODY_FILE, FAKE_GH_BODY)
+    vars.FAKE_GH_BODY_FILE = join(dir, 'pr.body');
+    writeFileSync(vars.FAKE_GH_BODY_FILE, FAKE_GH_BODY);
   }
-  const prevPath = process.env.PATH
-  process.env.PATH = `${dir}:${prevPath}`
-  const prevEnv = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_GH_LOG: log, ...vars })
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${dir}:${prevPath}`;
+  const prevEnv = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]));
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...vars });
   return {
     log,
     restore: () => {
-      process.env.PATH = prevPath
+      process.env.PATH = prevPath;
       for (const [k, v] of Object.entries(prevEnv)) {
-        if (v === undefined) delete process.env[k]
-        else process.env[k] = v
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
       }
-      delete process.env.FAKE_GH_LOG
-      rmSync(dir, { recursive: true, force: true })
+      delete process.env.FAKE_GH_LOG;
+      rmSync(dir, { recursive: true, force: true });
     },
-  }
+  };
 }
 
 function withFakeGh(env: Record<string, string>, fn: (log: string) => void): void {
-  const { log, restore } = armFakeGh(env)
+  const { log, restore } = armFakeGh(env);
   try {
-    fn(log)
+    fn(log);
   } finally {
-    restore()
+    restore();
   }
 }
 
-const target = { repo: 'acme/widgets', pr: 42 }
+const target = { repo: 'acme/widgets', pr: 42 };
 
 describe('github connector', () => {
   test('matchRemote claims github hosts only', () => {
-    assert.equal(githubConnector.matchRemote?.('git@github.com:acme/widgets.git'), true)
-    assert.equal(githubConnector.matchRemote?.('https://github.com/acme/widgets.git'), true)
-    assert.equal(githubConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), false)
-    assert.equal(githubConnector.matchRemote?.('git@evilgithub.com:acme/widgets.git'), false)
-    assert.equal(githubConnector.matchRemote?.('git@api.github.com:acme/w.git'), true)
+    assert.equal(githubConnector.matchRemote?.('git@github.com:acme/widgets.git'), true);
+    assert.equal(githubConnector.matchRemote?.('https://github.com/acme/widgets.git'), true);
+    assert.equal(githubConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), false);
+    assert.equal(githubConnector.matchRemote?.('git@evilgithub.com:acme/widgets.git'), false);
+    assert.equal(githubConnector.matchRemote?.('git@api.github.com:acme/w.git'), true);
     // right-edge lookalikes — a `github` label off the github.com edge is
     // indistinguishable from phishing, so GHES goes through config instead
-    assert.equal(githubConnector.matchRemote?.('git@github.com.evil.com:acme/w.git'), false)
-    assert.equal(githubConnector.matchRemote?.('git@foo.github.attacker.tld:a/w.git'), false)
-    assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), false)
-  })
+    assert.equal(githubConnector.matchRemote?.('git@github.com.evil.com:acme/w.git'), false);
+    assert.equal(githubConnector.matchRemote?.('git@foo.github.attacker.tld:a/w.git'), false);
+    assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), false);
+  });
 
   test('parsePrRef extracts repo/pr from a GitHub pull URL only', () => {
-    const rev = githubReview()
+    const rev = githubReview();
     assert.deepEqual(rev.parsePrRef('see https://github.com/acme/widgets/pull/42 please'), {
       repo: 'acme/widgets',
       pr: 42,
-    })
-    assert.equal(rev.parsePrRef('fix the thing'), null)
-    assert.equal(rev.parsePrRef('github.com/acme/widgets/issues/9'), null)
-    assert.equal(rev.parsePrRef('https://gitlab.com/acme/widgets/-/merge_requests/42'), null)
-  })
-})
+    });
+    assert.equal(rev.parsePrRef('fix the thing'), null);
+    assert.equal(rev.parsePrRef('github.com/acme/widgets/issues/9'), null);
+    assert.equal(rev.parsePrRef('https://gitlab.com/acme/widgets/-/merge_requests/42'), null);
+  });
+});
 
 describe('githubReview', { skip: WIN32 }, () => {
   test('checks parses the JSON gh pr checks emits', () => {
-    withFakeGh({}, (log) => {
-      const got = githubReview().checks(target)
+    withFakeGh({}, log => {
+      const got = githubReview().checks(target);
       assert.deepEqual(
-        got.map((c) => c.name),
+        got.map(c => c.name),
         ['build', 'kilo']
-      )
-      assert.match(readFileSync(log, 'utf8'), /pr checks 42 --repo acme\/widgets --json name,state,bucket/)
-    })
-  })
+      );
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr checks 42 --repo acme\/widgets --json name,state,bucket/
+      );
+    });
+  });
 
   test('checks returns [] when the host reports no checks', () => {
     withFakeGh({ FAKE_GH_NO_CHECKS: '1' }, () => {
-      assert.deepEqual(githubReview().checks(target), [])
-    })
-  })
+      assert.deepEqual(githubReview().checks(target), []);
+    });
+  });
+
+  test('openPrs reads the NARROW listing gh projects', () => {
+    withFakeGh({}, log => {
+      const rows = githubReview().openPrs?.('acme/widgets');
+      assert.deepEqual(rows, [
+        { pr: 9, headRef: 'work/x' },
+        { pr: 11, headRef: 'loop/y' },
+      ]);
+      // the projection IS the contract — the full REST pull objects carry
+      // every body, and one busy page of them crosses Node's spawnSync
+      // buffer, which killed the child and read as a bare 'gh api failed'.
+      // --paginate --slurp folds every page into one doc before the
+      // projection runs: the ceiling counts this listing as complete.
+      const args = readFileSync(log, 'utf8');
+      assert.ok(args.includes('--paginate'), 'openPrs must page the full listing');
+      assert.ok(
+        args.includes('--jq [.[][]|{number,head:.head.ref}]'),
+        'openPrs must ask gh for the projected listing'
+      );
+    });
+  });
 
   test('checkAnnotations accumulates failure counts across re-run attempts', () => {
     withFakeGh({}, () => {
-      const got = githubReview().checkAnnotations('acme/widgets', 'abc123')
+      const got = githubReview().checkAnnotations('acme/widgets', 'abc123');
       // build ran twice (ids 1+3) — 1 failure each; kilo once — 1 failure;
       // lint's endpoint answered a non-array error body, which counts as
       // unknown rather than throwing.
-      assert.deepEqual(Object.fromEntries(got), { build: 2, kilo: 1, lint: null })
-    })
-  })
+      assert.deepEqual(Object.fromEntries(got), { build: 2, kilo: 1, lint: null });
+    });
+  });
 
   test('checkAnnotations marks only the failed run unknown — other counts survive', () => {
     withFakeGh({ FAKE_GH_ANN_FAIL: '1' }, () => {
-      const got = githubReview().checkAnnotations('acme/widgets', 'abc123')
-      assert.equal(got.get('build'), 2)
-      assert.equal(got.get('kilo'), null)
-      assert.equal(got.get('lint'), null)
-      assert.equal(got.size, 3)
-    })
-  })
+      const got = githubReview().checkAnnotations('acme/widgets', 'abc123');
+      assert.equal(got.get('build'), 2);
+      assert.equal(got.get('kilo'), null);
+      assert.equal(got.get('lint'), null);
+      assert.equal(got.size, 3);
+    });
+  });
 
   test('checkAnnotations fetches only the check names the caller reads', () => {
-    withFakeGh({}, (log) => {
-      const got = githubReview().checkAnnotations(
-        'acme/widgets',
-        'abc123',
-        new Set(['build'])
-      )
-      assert.deepEqual(Object.fromEntries(got), { build: 2 })
-      const lines = readFileSync(log, 'utf8')
+    withFakeGh({}, log => {
+      const got = githubReview().checkAnnotations('acme/widgets', 'abc123', new Set(['build']));
+      assert.deepEqual(Object.fromEntries(got), { build: 2 });
+      const lines = readFileSync(log, 'utf8');
       // build's two run ids were fetched; kilo/lint's never left the gate
-      assert.match(lines, /check-runs\/1\/annotations/)
-      assert.match(lines, /check-runs\/3\/annotations/)
-      assert.doesNotMatch(lines, /check-runs\/2\/annotations/)
-      assert.doesNotMatch(lines, /check-runs\/4\/annotations/)
-    })
-  })
+      assert.match(lines, /check-runs\/1\/annotations/);
+      assert.match(lines, /check-runs\/3\/annotations/);
+      assert.doesNotMatch(lines, /check-runs\/2\/annotations/);
+      assert.doesNotMatch(lines, /check-runs\/4\/annotations/);
+    });
+  });
 
   test('checkAnnotationsAsync fetches only the check names the caller reads', async () => {
-    await withFakeGhAsync(async (log) => {
+    await withFakeGhAsync(async log => {
       const got = await githubReview().checkAnnotationsAsync!(
         'acme/widgets',
         'abc123',
         new Set(['kilo'])
-      )
-      assert.deepEqual(Object.fromEntries(got), { kilo: 1 })
-      const lines = readFileSync(log, 'utf8')
-      assert.match(lines, /check-runs\/2\/annotations/)
-      assert.doesNotMatch(lines, /check-runs\/1\/annotations/)
-      assert.doesNotMatch(lines, /check-runs\/3\/annotations/)
-    })
-  })
+      );
+      assert.deepEqual(Object.fromEntries(got), { kilo: 1 });
+      const lines = readFileSync(log, 'utf8');
+      assert.match(lines, /check-runs\/2\/annotations/);
+      assert.doesNotMatch(lines, /check-runs\/1\/annotations/);
+      assert.doesNotMatch(lines, /check-runs\/3\/annotations/);
+    });
+  });
 
   // bro-2l7r9: an unbounded Promise.all spawned one gh child per check-run —
   // a 40-run CI suite was a ~2GB transient inside the caller's cgroup
   test('checkAnnotationsAsync bounds its in-flight annotation fetches', async () => {
     const runs = {
       check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
-    }
+    };
     await withFakeGhAsync(
-      async (log) => {
-        await githubReview().checkAnnotationsAsync!('acme/widgets', 'abc123')
-        let inFlight = 0
-        let max = 0
+      async log => {
+        await githubReview().checkAnnotationsAsync!('acme/widgets', 'abc123');
+        let inFlight = 0;
+        let max = 0;
         for (const l of readFileSync(log, 'utf8').split('\n')) {
           if (l.startsWith('ANN-BEGIN')) {
-            inFlight += 1
-            max = Math.max(max, inFlight)
+            inFlight += 1;
+            max = Math.max(max, inFlight);
           } else if (l.startsWith('ANN-END')) {
-            inFlight -= 1
+            inFlight -= 1;
           }
         }
-        assert.ok(max > 1, `expected overlapped fetches, saw max ${max}`)
-        assert.ok(max <= 4, `expected fan-out ≤4, saw ${max}`)
+        assert.ok(max > 1, `expected overlapped fetches, saw max ${max}`);
+        assert.ok(max <= 4, `expected fan-out ≤4, saw ${max}`);
       },
       {
         FAKE_GH_RUNS: JSON.stringify(runs),
         FAKE_GH_MARK: '1',
         FAKE_GH_ANN_SLEEP: '0.2',
       }
-    )
-  })
+    );
+  });
 
   // the per-call pool alone lets N overlapping probes fan 4N gh children
   // into one cgroup — the global budget in gh.ts caps the real total
   test('concurrent checkAnnotationsAsync calls share one gh child budget', async () => {
     const runs = {
       check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
-    }
+    };
     await withFakeGhAsync(
-      async (log) => {
+      async log => {
         await Promise.all([
           githubReview().checkAnnotationsAsync!('acme/widgets', 'aaa111'),
           githubReview().checkAnnotationsAsync!('acme/widgets', 'bbb222'),
           githubReview().checkAnnotationsAsync!('acme/widgets', 'ccc333'),
-        ])
-        let inFlight = 0
-        let max = 0
+        ]);
+        let inFlight = 0;
+        let max = 0;
         for (const l of readFileSync(log, 'utf8').split('\n')) {
           if (l.startsWith('ANN-BEGIN')) {
-            inFlight += 1
-            max = Math.max(max, inFlight)
+            inFlight += 1;
+            max = Math.max(max, inFlight);
           } else if (l.startsWith('ANN-END')) {
-            inFlight -= 1
+            inFlight -= 1;
           }
         }
-        assert.ok(max > 4, `expected overlap across calls, saw max ${max}`)
-        assert.ok(max <= 8, `expected shared fan-out ≤8, saw ${max}`)
+        assert.ok(max > 4, `expected overlap across calls, saw max ${max}`);
+        assert.ok(max <= 8, `expected shared fan-out ≤8, saw ${max}`);
       },
       {
         FAKE_GH_RUNS: JSON.stringify(runs),
         FAKE_GH_MARK: '1',
         FAKE_GH_ANN_SLEEP: '0.2',
       }
-    )
-  })
+    );
+  });
 
   test('reviewThreads normalizes the graphql shape onto domain types', async () => {
     await withFakeGhAsync(async () => {
-      const threads = await githubReview().reviewThreads(target)
-      assert.equal(threads.length, 1)
-      const [t] = threads
+      const threads = await githubReview().reviewThreads(target);
+      assert.equal(threads.length, 1);
+      const [t] = threads;
       assert.deepEqual(
         { id: t!.id, resolved: t!.resolved, outdated: t!.outdated },
         { id: 'THR_1', resolved: false, outdated: false }
-      )
+      );
       assert.deepEqual(
-        { author: t!.comment!.author, bot: t!.comment!.bot, path: t!.comment!.path, line: t!.comment!.line },
+        {
+          author: t!.comment!.author,
+          bot: t!.comment!.bot,
+          path: t!.comment!.path,
+          line: t!.comment!.line,
+        },
         { author: 'reviewer-bot', bot: true, path: 'a.ts', line: 3 }
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('scanMergedPrs folds a chunk of PRs into one aliased query', async () => {
-    await withFakeGhAsync(async (log) => {
+    await withFakeGhAsync(async log => {
       const scans = await githubReview().scanMergedPrs!([
         { repo: 'acme/widgets', pr: 7 },
         { repo: 'acme/widgets', pr: 8 },
-      ])
-      assert.equal(scans.size, 2)
-      const s = scans.get(7)!
-      assert.equal(s.info.mergeSha, 'abc123')
-      assert.equal(s.info.mergedAt, '2026-01-02T00:00:00Z')
-      assert.equal(s.updatedAt, '2026-01-03T00:00:00Z')
-      assert.deepEqual(s.labels, ['bug'])
-      assert.equal(s.threads.length, 1)
-      assert.equal(s.threads[0]!.id, 'THR_1')
-      assert.equal(s.threads[0]!.comment!.author, 'reviewer-bot')
+      ]);
+      assert.equal(scans.size, 2);
+      const s = scans.get(7)!;
+      assert.equal(s.info.mergeSha, 'abc123');
+      assert.equal(s.info.mergedAt, '2026-01-02T00:00:00Z');
+      assert.equal(s.updatedAt, '2026-01-03T00:00:00Z');
+      assert.deepEqual(s.labels, ['bug']);
+      assert.equal(s.threads.length, 1);
+      assert.equal(s.threads[0]!.id, 'THR_1');
+      assert.equal(s.threads[0]!.comment!.author, 'reviewer-bot');
       // both PRs ride ONE graphql call — the per-PR serial probes are
       // what made a wide collect crawl (the logged query is multi-line,
       // so assertions match the whole log)
-      const calls = readFileSync(log, 'utf8').trim().split('\n')
-      assert.equal(calls.filter((l) => l.startsWith('api graphql')).length, 1)
-      assert.match(readFileSync(log, 'utf8'), /s0: pullRequest\(number: 7\)/)
-      assert.match(readFileSync(log, 'utf8'), /s1: pullRequest\(number: 8\)/)
-    })
-  })
+      const calls = readFileSync(log, 'utf8').trim().split('\n');
+      assert.equal(calls.filter(l => l.startsWith('api graphql')).length, 1);
+      assert.match(readFileSync(log, 'utf8'), /s0: pullRequest\(number: 7\)/);
+      assert.match(readFileSync(log, 'utf8'), /s1: pullRequest\(number: 8\)/);
+    });
+  });
 
   test('scanMergedPrs reports progress per chunk', async () => {
     await withFakeGhAsync(async () => {
-      const marks: Array<[number, number]> = []
-      await githubReview().scanMergedPrs!(
-        [{ repo: 'acme/widgets', pr: 7 }],
-        { onProgress: (d, t) => marks.push([d, t]) }
-      )
-      assert.deepEqual(marks, [[1, 1]])
-    })
-  })
+      const marks: Array<[number, number]> = [];
+      await githubReview().scanMergedPrs!([{ repo: 'acme/widgets', pr: 7 }], {
+        onProgress: (d, t) => marks.push([d, t]),
+      });
+      assert.deepEqual(marks, [[1, 1]]);
+    });
+  });
 
   test('labelPrs writes add+remove in one pr edit and re-queries updatedAt', async () => {
-    await withFakeGhAsync(async (log) => {
+    await withFakeGhAsync(async log => {
       const out = await githubReview().labelPrs!([
         {
           t: { repo: 'acme/widgets', pr: 7 },
@@ -363,111 +389,124 @@ describe('githubReview', { skip: WIN32 }, () => {
           add: ['debt:clean'],
           remove: [],
         },
-      ])
-      assert.deepEqual(
-        [...out.entries()].sort(),
-        [
-          [7, '2026-02-02T00:00:00Z'],
-          [8, '2026-02-02T00:00:00Z'],
-        ]
-      )
-      const lines = readFileSync(log, 'utf8')
+      ]);
+      assert.deepEqual([...out.entries()].sort(), [
+        [7, '2026-02-02T00:00:00Z'],
+        [8, '2026-02-02T00:00:00Z'],
+      ]);
+      const lines = readFileSync(log, 'utf8');
       assert.match(
         lines,
         /pr edit 7 --repo acme\/widgets --add-label debt:collected --remove-label debt:clean/
-      )
-      assert.match(lines, /pr edit 8 --repo acme\/widgets --add-label debt:clean/)
-      assert.doesNotMatch(lines, /--remove-label $|--remove-label\n/m)
+      );
+      assert.match(lines, /pr edit 8 --repo acme\/widgets --add-label debt:clean/);
+      assert.doesNotMatch(lines, /--remove-label $|--remove-label\n/m);
       // one batched updatedAt re-query — no per-PR `pr view`
-      assert.match(lines, /u0: pullRequest\(number: \d+\) \{ updatedAt \}/)
-      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view')).length, 0)
-    })
-  })
+      assert.match(lines, /u0: pullRequest\(number: \d+\) \{ updatedAt \}/);
+      assert.equal(lines.split('\n').filter(l => l.startsWith('pr view')).length, 0);
+    });
+  });
 
   test('resolveThread picks the mutation by the unresolve flag', () => {
-    withFakeGh({}, (log) => {
-      githubReview().resolveThread('THR_1')
-      githubReview().resolveThread('THR_2', true)
-      const lines = readFileSync(log, 'utf8')
-      assert.match(lines, /resolveReviewThread/)
-      assert.match(lines, /unresolveReviewThread/)
-    })
-  })
+    withFakeGh({}, log => {
+      githubReview().resolveThread('THR_1');
+      githubReview().resolveThread('THR_2', true);
+      const lines = readFileSync(log, 'utf8');
+      assert.match(lines, /resolveReviewThread/);
+      assert.match(lines, /unresolveReviewThread/);
+    });
+  });
 
   test('mergedPrInfo returns the mergedAt the API reports', () => {
     withFakeGh({}, () => {
-      const info = githubReview().mergedPrInfo(target)
-      assert.equal(info.mergedAt, '2026-01-02T00:00:00Z')
-      assert.equal(info.mergeSha, 'abc123')
-    })
-  })
+      const info = githubReview().mergedPrInfo(target);
+      assert.equal(info.mergedAt, '2026-01-02T00:00:00Z');
+      assert.equal(info.mergeSha, 'abc123');
+    });
+  });
 
   test('mergedPrInfo throws when a MERGED PR reports no mergedAt', () => {
     withFakeGh({ FAKE_GH_NO_MERGED_AT: '1' }, () => {
-      assert.throws(() => githubReview().mergedPrInfo(target), /no mergedAt/)
-    })
-  })
+      assert.throws(() => githubReview().mergedPrInfo(target), /no mergedAt/);
+    });
+  });
 
   test('mergedPrs explicit ids throws when every fetch fails — an outage, not N unmerged PRs', () => {
     withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '7,8' }, () => {
       assert.throws(
         () => githubReview().mergedPrs('acme/widgets', { ids: [7, 8] }),
         /authentication required/
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('mergedPrs explicit ids deduplicates — one fetch, one row per id', () => {
-    withFakeGh({}, (log) => {
-      const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 7, 8, 7] })
-      assert.equal(prs.length, 2)
-      const lines = readFileSync(log, 'utf8')
-      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 7 ')).length, 1)
-      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 8 ')).length, 1)
-    })
-  })
+    withFakeGh({}, log => {
+      const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 7, 8, 7] });
+      assert.equal(prs.length, 2);
+      const lines = readFileSync(log, 'utf8');
+      assert.equal(lines.split('\n').filter(l => l.startsWith('pr view 7 ')).length, 1);
+      assert.equal(lines.split('\n').filter(l => l.startsWith('pr view 8 ')).length, 1);
+    });
+  });
 
   test('mergedPrs mergedSince goes into the search query — the cap cannot crowd the window out', () => {
-    withFakeGh({}, (log) => {
+    withFakeGh({}, log => {
       const prs = githubReview().mergedPrs('acme/widgets', {
         limit: 10,
         mergedSince: '2026-01-01T00:00:00Z',
-      })
-      assert.equal(prs.length, 1)
-      assert.match(readFileSync(log, 'utf8'), /pr list .*--search merged:>=2026-01-01\n/)
-    })
-  })
+      });
+      assert.equal(prs.length, 1);
+      assert.match(readFileSync(log, 'utf8'), /pr list .*--search merged:>=2026-01-01\n/);
+    });
+  });
+
+  test('mergedPrs state=closed adds is:unmerged — merged rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'closed' });
+      const lines = readFileSync(log, 'utf8');
+      assert.match(lines, /pr list .*--state closed/);
+      assert.match(lines, /--search is:unmerged\n/);
+    });
+  });
+
+  test('mergedPrs state=all adds is:closed — open rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'all' });
+      assert.match(readFileSync(log, 'utf8'), /--search is:closed\n/);
+    });
+  });
 
   test('mergedPrs explicit ids keeps partial results and warns with the gh error', () => {
     withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '8' }, () => {
-      const errs: string[] = []
-      const origError = console.error
-      console.error = (msg: unknown) => errs.push(String(msg))
+      const errs: string[] = [];
+      const origError = console.error;
+      console.error = (msg: unknown) => errs.push(String(msg));
       try {
-        const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 8] })
-        assert.equal(prs.length, 1)
-        assert.equal(prs[0]!.mergedAt, '2026-01-02T00:00:00Z')
+        const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 8] });
+        assert.equal(prs.length, 1);
+        assert.equal(prs[0]!.mergedAt, '2026-01-02T00:00:00Z');
       } finally {
-        console.error = origError
+        console.error = origError;
       }
-      assert.match(errs.join('\n'), /fetch failed — .*authentication required/)
-    })
-  })
+      assert.match(errs.join('\n'), /fetch failed — .*authentication required/);
+    });
+  });
 
   test('mergePr pins the head and returns the post-merge state', () => {
-    withFakeGh({}, (log) => {
+    withFakeGh({}, log => {
       const state = githubReview().mergePr(target, {
         method: 'squash',
         expectedHeadSha: 'abc123',
         deleteBranch: true,
-      })
-      assert.equal(state, 'MERGED')
+      });
+      assert.equal(state, 'MERGED');
       assert.match(
         readFileSync(log, 'utf8'),
         /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123 --delete-branch/
-      )
-    })
-  })
+      );
+    });
+  });
 
   // --- stacks: the async merge endpoint is the only way in ----------------------
   //
@@ -475,27 +514,28 @@ describe('githubReview', { skip: WIN32 }, () => {
   // sync REST merge for a stack member. Both detection signals are covered:
   // the `.stack` field on the PR read, and the rejection itself.
 
-  const STACK_PULL = '{"base":{"ref":"stack/s/1-a"},"stack":{"base":{"ref":"main"},"id":9,"number":3,"position":2,"size":4}}'
+  const STACK_PULL =
+    '{"base":{"ref":"stack/s/1-a"},"stack":{"base":{"ref":"main"},"id":9,"number":3,"position":2,"size":4}}';
 
   test('mergePr sends a stack member to merge-async, never `gh pr merge`', () => {
-    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, (log) => {
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, log => {
       const state = githubReview().mergePr(target, {
         method: 'squash',
         expectedHeadSha: 'abc123',
         // a lower layer's deletion closes every PR stacked on it — the
         // async path must not carry the flag
         deleteBranch: true,
-      })
-      assert.equal(state, 'MERGED')
-      const calls = readFileSync(log, 'utf8')
-      assert.doesNotMatch(calls, /pr merge 42/)
-      assert.doesNotMatch(calls, /delete-branch/)
+      });
+      assert.equal(state, 'MERGED');
+      const calls = readFileSync(log, 'utf8');
+      assert.doesNotMatch(calls, /pr merge 42/);
+      assert.doesNotMatch(calls, /delete-branch/);
       assert.match(
         calls,
         /api -X PUT repos\/acme\/widgets\/pulls\/42\/merge-async -f sha=abc123 -f merge_action=direct_merge -f merge_method=squash/
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('mergePr reports an enqueued stack merge as the state the PR is really in', () => {
     withFakeGh(
@@ -511,27 +551,36 @@ describe('githubReview', { skip: WIN32 }, () => {
         assert.equal(
           githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
           'OPEN'
-        )
+        );
       }
-    )
-  })
+    );
+  });
 
   test('mergeAsync waits out a pending request by polling its uuid', () => {
     withFakeGh(
       {
-        FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-1","merge_action":"direct_merge"}}',
+        FAKE_GH_ASYNC:
+          '{"status":"pending","details":{"uuid":"u-1","merge_action":"direct_merge"}}',
         FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
       },
-      (log) => {
-        const naps: number[] = []
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
-          sleep: (ms) => naps.push(ms),
-        })
-        assert.deepEqual(naps, [2_000])
-        assert.match(readFileSync(log, 'utf8'), /api repos\/acme\/widgets\/pulls\/42\/merge-async\/u-1/)
+      log => {
+        const naps: number[] = [];
+        mergeAsync(
+          target,
+          { method: 'squash', expectedHeadSha: 'abc123' },
+          { base: 'main' },
+          {
+            sleep: ms => naps.push(ms),
+          }
+        );
+        assert.deepEqual(naps, [2_000]);
+        assert.match(
+          readFileSync(log, 'utf8'),
+          /api repos\/acme\/widgets\/pulls\/42\/merge-async\/u-1/
+        );
       }
-    )
-  })
+    );
+  });
 
   test('mergeAsync never naps past the watch deadline', () => {
     // a 1s budget with the default 2s gap: an unclamped sleep carries the
@@ -542,43 +591,48 @@ describe('githubReview', { skip: WIN32 }, () => {
         FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
       },
       () => {
-        const naps: number[] = []
+        const naps: number[] = [];
         // pin the clock: `started` reads T, every later read T+600 — the
         // nap must be the 400ms left, not the full 1s budget nor the 2s
         // gap (the only in-process Date.now calls on this path are
         // pollAsyncMerge's started/elapsed reads)
-        const realNow = Date.now
-        let clockReads = 0
-        Date.now = () => (clockReads++ === 0 ? 1_000_000 : 1_000_600)
+        const realNow = Date.now;
+        let clockReads = 0;
+        Date.now = () => (clockReads++ === 0 ? 1_000_000 : 1_000_600);
         try {
-          mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
-            sleep: (ms) => naps.push(ms),
-            deadlineMs: 1_000,
-          })
+          mergeAsync(
+            target,
+            { method: 'squash', expectedHeadSha: 'abc123' },
+            { base: 'main' },
+            {
+              sleep: ms => naps.push(ms),
+              deadlineMs: 1_000,
+            }
+          );
         } finally {
-          Date.now = realNow
+          Date.now = realNow;
         }
-        assert.deepEqual(naps, [400])
+        assert.deepEqual(naps, [400]);
       }
-    )
-  })
+    );
+  });
 
   test('mergePr asks for the merge queue when the base branch requires one', () => {
-    withFakeGh({ FAKE_GH_PULL: STACK_PULL, FAKE_GH_QUEUE: '1' }, (log) => {
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL, FAKE_GH_QUEUE: '1' }, log => {
       githubReview().mergePr(target, {
         method: 'rebase',
         expectedHeadSha: 'abc123',
         admin: true,
-      })
+      });
       const call = readFileSync(log, 'utf8')
         .split('\n')
-        .find((l) => l.includes('merge-async'))
-      assert.match(call ?? '', /-f merge_action=merge_queue/)
+        .find(l => l.includes('merge-async'));
+      assert.match(call ?? '', /-f merge_action=merge_queue/);
       // the queue owns the strategy — a custom merge_method is rejected
-      assert.doesNotMatch(call ?? '', /merge_method/)
-      assert.match(call ?? '', /-F bypass_rules=true/)
-    })
-  })
+      assert.doesNotMatch(call ?? '', /merge_method/);
+      assert.match(call ?? '', /-F bypass_rules=true/);
+    });
+  });
 
   test('the queue is asked about the PR base, not the stack target', () => {
     // STACK_PULL is position 2 of 4: it merges INTO stack/s/1-a while the
@@ -586,18 +640,18 @@ describe('githubReview', { skip: WIN32 }, () => {
     // the branch it lands on, so the query names stack/s/1-a. Asking about
     // main instead would push the PR at a queue that does not govern its
     // own base -- and miss one that does, if stack/s/1-a ever requires it.
-    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, (log) => {
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, log => {
       githubReview().mergePr(target, {
         method: 'squash',
         expectedHeadSha: 'abc123',
-      })
+      });
       const query = readFileSync(log, 'utf8')
         .split('\n')
-        .find((l) => l.includes('mergeQueue(branch:'))
-      assert.match(query ?? '', /b=stack\/s\/1-a/)
-      assert.doesNotMatch(query ?? '', /b=main/)
-    })
-  })
+        .find(l => l.includes('mergeQueue(branch:'));
+      assert.match(query ?? '', /b=stack\/s\/1-a/);
+      assert.doesNotMatch(query ?? '', /b=main/);
+    });
+  });
 
   test('a merge rejected as stack-only falls back to merge-async (no `.stack` field seen)', () => {
     withFakeGh(
@@ -606,40 +660,49 @@ describe('githubReview', { skip: WIN32 }, () => {
           'GraphQL: This pull request must be merged using the asynchronous merge REST API.',
         FAKE_GH_ASYNC: '{"status":"merged","details":{"sha":"abc123"}}',
       },
-      (log) => {
+      log => {
         assert.equal(
           githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
           'MERGED'
-        )
-        assert.match(readFileSync(log, 'utf8'), /api -X PUT repos\/acme\/widgets\/pulls\/42\/merge-async/)
+        );
+        assert.match(
+          readFileSync(log, 'utf8'),
+          /api -X PUT repos\/acme\/widgets\/pulls\/42\/merge-async/
+        );
       }
-    )
-  })
+    );
+  });
 
   test('an ordinary merge failure propagates — no async retry behind a red gate', () => {
-    withFakeGh({ FAKE_GH_PR_MERGE_ERR: 'Base branch is missing required checks' }, (log) => {
+    withFakeGh({ FAKE_GH_PR_MERGE_ERR: 'Base branch is missing required checks' }, log => {
       assert.throws(
         () => githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
         /missing required checks/
-      )
-      assert.doesNotMatch(readFileSync(log, 'utf8'), /merge-async/)
-    })
-  })
+      );
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /merge-async/);
+    });
+  });
 
   test('mergeAsync resolves a 409 by polling the uuid the rejection carries', () => {
     withFakeGh(
       {
-        FAKE_GH_ASYNC_ERR: '{"status":"pending","details":{"uuid":"u-9","merge_action":"direct_merge"}}',
+        FAKE_GH_ASYNC_ERR:
+          '{"status":"pending","details":{"uuid":"u-9","merge_action":"direct_merge"}}',
         FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
       },
-      (log) => {
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
-          sleep: () => {},
-        })
-        assert.match(readFileSync(log, 'utf8'), /merge-async\/u-9/)
+      log => {
+        mergeAsync(
+          target,
+          { method: 'squash', expectedHeadSha: 'abc123' },
+          { base: 'main' },
+          {
+            sleep: () => {},
+          }
+        );
+        assert.match(readFileSync(log, 'utf8'), /merge-async\/u-9/);
       }
-    )
-  })
+    );
+  });
 
   test('mergeAsync throws the API reason on a failed request', () => {
     withFakeGh(
@@ -649,99 +712,115 @@ describe('githubReview', { skip: WIN32 }, () => {
       () => {
         assert.throws(
           () =>
-            mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
-              sleep: () => {},
-            }),
+            mergeAsync(
+              target,
+              { method: 'squash', expectedHeadSha: 'abc123' },
+              { base: 'main' },
+              {
+                sleep: () => {},
+              }
+            ),
           /failed — Base branch is protected/
-        )
+        );
       }
-    )
-  })
+    );
+  });
 
   test('mergeAsync never reports an unsettled merge as landed', () => {
-    const opts = { method: 'squash' as const, expectedHeadSha: 'abc123' }
+    const opts = { method: 'squash' as const, expectedHeadSha: 'abc123' };
     // pending with no uuid — nothing to poll
     withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{}}' }, () => {
       assert.throws(
         () => mergeAsync(target, opts, { base: 'main' }, { sleep: () => {} }),
         /pending with no uuid/
-      )
-    })
+      );
+    });
     // a result GET that 404s (the record is gone) is unobservable, not merged
     withFakeGh(
-      { FAKE_GH_ASYNC_ERR: '', FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-2"}}', FAKE_GH_POLL_ERR: 'gh: Not Found (HTTP 404)' },
+      {
+        FAKE_GH_ASYNC_ERR: '',
+        FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-2"}}',
+        FAKE_GH_POLL_ERR: 'gh: Not Found (HTTP 404)',
+      },
       () => {
         assert.throws(
           () => mergeAsync(target, opts, { base: 'main' }, { sleep: () => {} }),
           /no observable status/
-        )
+        );
       }
-    )
+    );
     // the watch gives up rather than blocking forever; the merge itself
     // keeps running on GitHub's side
     withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-3"}}' }, () => {
       assert.throws(
         () =>
-          mergeAsync(target, opts, { base: 'main' }, {
-            sleep: () => {},
-            deadlineMs: 0,
-          }),
+          mergeAsync(
+            target,
+            opts,
+            { base: 'main' },
+            {
+              sleep: () => {},
+              deadlineMs: 0,
+            }
+          ),
         /still pending/
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('an unreadable PR read falls back to the sync merge, not a blind async one', () => {
-    withFakeGh({ FAKE_GH_PULL_ERR: '1' }, (log) => {
+    withFakeGh({ FAKE_GH_PULL_ERR: '1' }, log => {
       assert.equal(
         githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
         'MERGED'
-      )
-      const calls = readFileSync(log, 'utf8')
-      assert.match(calls, /pr merge 42 --squash/)
-      assert.doesNotMatch(calls, /merge-async/)
-    })
-  })
+      );
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /pr merge 42 --squash/);
+      assert.doesNotMatch(calls, /merge-async/);
+    });
+  });
 
   // --- queues on unstacked PRs (spec bro-huy5o.6) ---------------------------
 
   test('mergePr enqueues a NON-stack PR whose base requires the queue', () => {
-    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, (log) => {
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, log => {
       githubReview().mergePr(target, {
         method: 'rebase',
         expectedHeadSha: 'abc123',
-      })
-      const calls = readFileSync(log, 'utf8')
-      assert.doesNotMatch(calls, /pr merge 42/)
-      assert.doesNotMatch(calls, /delete-branch/)
-      const call = calls.split('\n').find((l) => l.includes('merge-async -f'))
-      assert.match(call ?? '', /-f sha=abc123 -f merge_action=merge_queue/)
+      });
+      const calls = readFileSync(log, 'utf8');
+      assert.doesNotMatch(calls, /pr merge 42/);
+      assert.doesNotMatch(calls, /delete-branch/);
+      const call = calls.split('\n').find(l => l.includes('merge-async -f'));
+      assert.match(call ?? '', /-f sha=abc123 -f merge_action=merge_queue/);
       // the queue owns the strategy — merge_method is rejected with it
-      assert.doesNotMatch(call ?? '', /merge_method/)
-    })
-  })
+      assert.doesNotMatch(call ?? '', /merge_method/);
+    });
+  });
 
   test('a non-stack PR on a queue-less base still merges directly — and pays one probe', () => {
-    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}' }, (log) => {
-      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' })
-      const calls = readFileSync(log, 'utf8')
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}' }, log => {
+      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' });
+      const calls = readFileSync(log, 'utf8');
       // detection costs exactly one GraphQL probe, then the sync path
       // keeps the caller's requested strategy
-      assert.equal(calls.split('\n').filter((l) => l.includes('mergeQueue(branch:')).length, 1)
-      assert.match(calls, /pr merge 42 --squash/)
-      assert.doesNotMatch(calls, /merge-async/)
-    })
-  })
+      assert.equal(calls.split('\n').filter(l => l.includes('mergeQueue(branch:')).length, 1);
+      assert.match(calls, /pr merge 42 --squash/);
+      assert.doesNotMatch(calls, /merge-async/);
+    });
+  });
 
   test('the queue verdict the caller computed reaches mergeAsync — no second probe', () => {
-    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, (log) => {
-      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' })
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, log => {
+      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' });
       assert.equal(
-        readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('mergeQueue(branch:')).length,
+        readFileSync(log, 'utf8')
+          .split('\n')
+          .filter(l => l.includes('mergeQueue(branch:')).length,
         1
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('a sync refusal naming the merge queue enqueues without re-probing', () => {
     withFakeGh(
@@ -752,86 +831,86 @@ describe('githubReview', { skip: WIN32 }, () => {
         FAKE_GH_ASYNC: '{"status":"enqueued","details":{"message":"added to queue"}}',
         FAKE_GH_PR_STATE: 'OPEN',
       },
-      (log) => {
+      log => {
         assert.equal(
           githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
           'OPEN'
-        )
-        const calls = readFileSync(log, 'utf8')
-        const call = calls.split('\n').find((l) => l.includes('merge-async -f'))
-        assert.match(call ?? '', /-f merge_action=merge_queue/)
-        assert.doesNotMatch(call ?? '', /merge_method/)
+        );
+        const calls = readFileSync(log, 'utf8');
+        const call = calls.split('\n').find(l => l.includes('merge-async -f'));
+        assert.match(call ?? '', /-f merge_action=merge_queue/);
+        assert.doesNotMatch(call ?? '', /merge_method/);
         // GitHub just gave the queue verdict — the proactive probe ran
         // once up front, and the refusal doesn't pay a second one
-        assert.equal(calls.split('\n').filter((l) => l.includes('mergeQueue(branch:')).length, 1)
+        assert.equal(calls.split('\n').filter(l => l.includes('mergeQueue(branch:')).length, 1);
       }
-    )
-  })
+    );
+  });
 
   test('mergeAsync honors a precomputed queue verdict with no base to probe', () => {
-    withFakeGh({ FAKE_GH_ASYNC: '{"status":"enqueued","details":{}}' }, (log) => {
-      mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { queued: true })
-      const calls = readFileSync(log, 'utf8')
-      assert.match(calls, /merge_action=merge_queue/)
-      assert.doesNotMatch(calls, /mergeQueue\(branch:/)
-    })
-  })
+    withFakeGh({ FAKE_GH_ASYNC: '{"status":"enqueued","details":{}}' }, log => {
+      mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { queued: true });
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /merge_action=merge_queue/);
+      assert.doesNotMatch(calls, /mergeQueue\(branch:/);
+    });
+  });
 
   test('facade resolution picks github via connectors.reviews config', () => {
-    registerConnector(githubConnector)
-    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-facade-'))
+    registerConnector(githubConnector);
+    const dir = mkdtempSync(join(tmpdir(), 'bro-gh-facade-'));
     try {
-      const f = facade('reviews', { dir }, { prefer: { reviews: 'github' } })
-      assert.equal(typeof f.prMeta, 'function')
-      assert.equal(f.prLink('acme/widgets', 7), '[#7](https://github.com/acme/widgets/pull/7)')
+      const f = facade('reviews', { dir }, { prefer: { reviews: 'github' } });
+      assert.equal(typeof f.prMeta, 'function');
+      assert.equal(f.prLink('acme/widgets', 7), '[#7](https://github.com/acme/widgets/pull/7)');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   // --- the projection's Fixes wiring (spec bro-z2z7f) -------------------------
 
   test('linkCloses stamps Fixes refs ahead of the bro trailer, which stays last', () => {
-    withFakeGh({ FAKE_GH_BODY: 'the work\n\n<!-- bro: {"type":"feature"} -->' }, (log) => {
-      githubReview().linkCloses!(target, ['7', '9'])
-      const calls = readFileSync(log, 'utf8')
+    withFakeGh({ FAKE_GH_BODY: 'the work\n\n<!-- bro: {"type":"feature"} -->' }, log => {
+      githubReview().linkCloses!(target, ['7', '9']);
+      const calls = readFileSync(log, 'utf8');
       assert.match(
         calls,
         /pr edit 42 --repo acme\/widgets --body the work\n\nFixes #7\nFixes #9\n\n<!-- bro: \{"type":"feature"\} -->/
-      )
-      assert.equal(calls.split('pr edit').length - 1, 1)
-    })
-  })
+      );
+      assert.equal(calls.split('pr edit').length - 1, 1);
+    });
+  });
 
   test('linkCloses is idempotent — an already-wired ref is not re-stamped', () => {
-    withFakeGh({ FAKE_GH_BODY: 'closes #7 — done deal\n\nmore prose' }, (log) => {
-      githubReview().linkCloses!(target, ['7', '8'])
-      const calls = readFileSync(log, 'utf8')
-      assert.match(calls, /--body closes #7 — done deal\n\nmore prose\n\nFixes #8/)
-      assert.equal(calls.split('Fixes #7').length - 1, 0)
-    })
-  })
+    withFakeGh({ FAKE_GH_BODY: 'closes #7 — done deal\n\nmore prose' }, log => {
+      githubReview().linkCloses!(target, ['7', '8']);
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /--body closes #7 — done deal\n\nmore prose\n\nFixes #8/);
+      assert.equal(calls.split('Fixes #7').length - 1, 0);
+    });
+  });
 
   test('linkCloses on a fully-wired body edits nothing', () => {
-    withFakeGh({ FAKE_GH_BODY: 'fixes #7 and resolves #8' }, (log) => {
-      githubReview().linkCloses!(target, ['7', '8'])
-      const calls = readFileSync(log, 'utf8')
-      assert.match(calls, /pr view 42 --repo acme\/widgets --json body/)
-      assert.doesNotMatch(calls, /pr edit/)
-    })
-  })
+    withFakeGh({ FAKE_GH_BODY: 'fixes #7 and resolves #8' }, log => {
+      githubReview().linkCloses!(target, ['7', '8']);
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /pr view 42 --repo acme\/widgets --json body/);
+      assert.doesNotMatch(calls, /pr edit/);
+    });
+  });
 
   test('a keyword embedded in a longer word does not count as wired', () => {
     // 'unresolved #7' must not satisfy the closer check — without the
     // word boundary 'resolved' inside 'unresolved' would match
-    withFakeGh({ FAKE_GH_BODY: 'unresolved #7 and prefixes #9' }, (log) => {
-      githubReview().linkCloses!(target, ['7', '9'])
+    withFakeGh({ FAKE_GH_BODY: 'unresolved #7 and prefixes #9' }, log => {
+      githubReview().linkCloses!(target, ['7', '9']);
       assert.match(
         readFileSync(log, 'utf8'),
         /pr edit 42 --repo acme\/widgets --body unresolved #7 and prefixes #9\n\nFixes #7\nFixes #9/
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('linkCloses remerges onto a body that moved under the stamp', () => {
     // the author's edit lands between the merge read and the guard
@@ -839,77 +918,77 @@ describe('githubReview', { skip: WIN32 }, () => {
     // with the stale snapshot (bro-g29ww)
     withFakeGh(
       { FAKE_GH_BODY: 'v1', FAKE_GH_SWAP_VIEW: '2', FAKE_GH_SWAP_BODY: 'author edit' },
-      (log) => {
-        githubReview().linkCloses!(target, ['7'])
-        const calls = readFileSync(log, 'utf8')
-        assert.equal(calls.split('pr edit').length - 1, 1)
-        assert.match(calls, /--body author edit\n\nFixes #7/)
-        assert.doesNotMatch(calls, /--body v1/)
+      log => {
+        githubReview().linkCloses!(target, ['7']);
+        const calls = readFileSync(log, 'utf8');
+        assert.equal(calls.split('pr edit').length - 1, 1);
+        assert.match(calls, /--body author edit\n\nFixes #7/);
+        assert.doesNotMatch(calls, /--body v1/);
       }
-    )
-  })
+    );
+  });
 
   test('linkCloses re-stamps a stamp a racing write clobbered', () => {
     // the concurrent write lands behind our edit on a stale snapshot —
     // the post-write read sees our refs missing and remerges into the
     // fresher body, preserving their content (bro-g29ww)
-    withFakeGh({ FAKE_GH_BODY: 'orig', FAKE_GH_EDIT_CLOBBER: 'concurrent rewrite' }, (log) => {
-      githubReview().linkCloses!(target, ['7'])
-      const calls = readFileSync(log, 'utf8')
-      assert.equal(calls.split('pr edit').length - 1, 2)
-      assert.match(calls, /--body orig\n\nFixes #7/)
-      assert.match(calls, /--body concurrent rewrite\n\nFixes #7/)
-    })
-  })
+    withFakeGh({ FAKE_GH_BODY: 'orig', FAKE_GH_EDIT_CLOBBER: 'concurrent rewrite' }, log => {
+      githubReview().linkCloses!(target, ['7']);
+      const calls = readFileSync(log, 'utf8');
+      assert.equal(calls.split('pr edit').length - 1, 2);
+      assert.match(calls, /--body orig\n\nFixes #7/);
+      assert.match(calls, /--body concurrent rewrite\n\nFixes #7/);
+    });
+  });
 
   test('linkCloses gives up bounded when the body churns under it', () => {
-    withFakeGh({ FAKE_GH_BODY: 'x', FAKE_GH_CHURN: '1' }, (log) => {
-      assert.throws(() => githubReview().linkCloses!(target, ['7']), /kept changing/)
-      assert.doesNotMatch(readFileSync(log, 'utf8'), /pr edit/)
-    })
-  })
+    withFakeGh({ FAKE_GH_BODY: 'x', FAKE_GH_CHURN: '1' }, log => {
+      assert.throws(() => githubReview().linkCloses!(target, ['7']), /kept changing/);
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /pr edit/);
+    });
+  });
 
   test('linkCloses on an empty body stamps bare Fixes lines', () => {
-    withFakeGh({ FAKE_GH_BODY: '' }, (log) => {
-      githubReview().linkCloses!(target, ['7', '9'])
+    withFakeGh({ FAKE_GH_BODY: '' }, log => {
+      githubReview().linkCloses!(target, ['7', '9']);
       assert.match(
         readFileSync(log, 'utf8'),
         /pr edit 42 --repo acme\/widgets --body Fixes #7\nFixes #9/
-      )
-    })
-  })
+      );
+    });
+  });
 
   test('linkCloses with no refs never touches the host', () => {
-    withFakeGh({}, (log) => {
-      githubReview().linkCloses!(target, [])
-      assert.equal(readFileSync(log, 'utf8').trim(), '')
-    })
-  })
-})
+    withFakeGh({}, log => {
+      githubReview().linkCloses!(target, []);
+      assert.equal(readFileSync(log, 'utf8').trim(), '');
+    });
+  });
+});
 
 async function withFakeGhAsync(
   fn: (log: string) => Promise<void>,
   env: Record<string, string> = {}
 ): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
-  const log = join(dir, 'gh.log')
-  writeFileSync(log, '')
-  writeFileSync(join(dir, 'gh'), FAKE_GH)
-  chmodSync(join(dir, 'gh'), 0o755)
-  const prevPath = process.env.PATH
-  process.env.PATH = `${dir}:${prevPath}`
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'));
+  const log = join(dir, 'gh.log');
+  writeFileSync(log, '');
+  writeFileSync(join(dir, 'gh'), FAKE_GH);
+  chmodSync(join(dir, 'gh'), 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${dir}:${prevPath}`;
+  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...env });
   try {
-    await fn(log)
+    await fn(log);
   } finally {
-    process.env.PATH = prevPath
+    process.env.PATH = prevPath;
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-    delete process.env.FAKE_GH_LOG
-    rmSync(dir, { recursive: true, force: true })
+    delete process.env.FAKE_GH_LOG;
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -918,9 +997,9 @@ async function withFakeGhAsync(
 // head being merged, bots never count, a standing objection vetoes, and the
 // approvers allowlist narrows "trusted" to named logins.
 
-const HEAD_SHA = 'b'.repeat(40)
-const STALE_SHA = 'a'.repeat(40)
-const T = (d: string): string => `2026-01-${d}T00:00:00Z`
+const HEAD_SHA = 'b'.repeat(40);
+const STALE_SHA = 'a'.repeat(40);
+const T = (d: string): string => `2026-01-${d}T00:00:00Z`;
 
 const review = (
   login: string | null,
@@ -933,49 +1012,49 @@ const review = (
   submittedAt,
   commit: { oid: sha },
   author: login === null ? null : { __typename: typename, login },
-})
+});
 
 describe('headApprovalVerdict', () => {
   test('a human approval on the current head passes', () => {
     const v = headApprovalVerdict(
       [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))],
       HEAD_SHA
-    )
-    assert.deepEqual(v, { approved: true })
-  })
+    );
+    assert.deepEqual(v, { approved: true });
+  });
 
   test('a human approval on a superseded head is stale — not a sign-off', () => {
     const v = headApprovalVerdict(
       [review('alice', 'User', 'APPROVED', STALE_SHA, T('02'))],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-    assert.match(v.reason!, /predates the current head/)
-  })
+    );
+    assert.equal(v.approved, false);
+    assert.match(v.reason!, /predates the current head/);
+  });
 
-  test('an approval overridden by the same reviewer\'s newer objection blocks', () => {
+  test("an approval overridden by the same reviewer's newer objection blocks", () => {
     const v = headApprovalVerdict(
       [
         review('alice', 'User', 'APPROVED', STALE_SHA, T('01')),
         review('alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-    assert.match(v.reason!, /changes requested by alice/)
-  })
+    );
+    assert.equal(v.approved, false);
+    assert.match(v.reason!, /changes requested by alice/);
+  });
 
-  test('another reviewer\'s standing objection vetoes a current-head approval', () => {
+  test("another reviewer's standing objection vetoes a current-head approval", () => {
     const v = headApprovalVerdict(
       [
         review('bob', 'User', 'CHANGES_REQUESTED', STALE_SHA, T('01')),
         review('alice', 'User', 'APPROVED', HEAD_SHA, T('02')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-    assert.match(v.reason!, /changes requested by bob/)
-  })
+    );
+    assert.equal(v.approved, false);
+    assert.match(v.reason!, /changes requested by bob/);
+  });
 
   test('re-approval on the current head clears the veto', () => {
     const v = headApprovalVerdict(
@@ -984,34 +1063,28 @@ describe('headApprovalVerdict', () => {
         review('bob', 'User', 'APPROVED', HEAD_SHA, T('02')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, true)
-  })
+    );
+    assert.equal(v.approved, true);
+  });
 
   test('bot-only approvals never satisfy the gate', () => {
     const v = headApprovalVerdict(
       [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('02'))],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-    assert.match(v.reason!, /bot approvals/)
-  })
+    );
+    assert.equal(v.approved, false);
+    assert.match(v.reason!, /bot approvals/);
+  });
 
   test('the approvers allowlist narrows which humans count', () => {
-    const reviews = [review('bob', 'User', 'APPROVED', HEAD_SHA, T('02'))]
-    const denied = headApprovalVerdict(reviews, HEAD_SHA, ['alice'])
-    assert.equal(denied.approved, false)
-    assert.match(denied.reason!, /outside act\.approvers/)
-    assert.equal(
-      headApprovalVerdict(reviews, HEAD_SHA, ['bob']).approved,
-      true
-    )
+    const reviews = [review('bob', 'User', 'APPROVED', HEAD_SHA, T('02'))];
+    const denied = headApprovalVerdict(reviews, HEAD_SHA, ['alice']);
+    assert.equal(denied.approved, false);
+    assert.match(denied.reason!, /outside act\.approvers/);
+    assert.equal(headApprovalVerdict(reviews, HEAD_SHA, ['bob']).approved, true);
     // host logins are case-insensitive
-    assert.equal(
-      headApprovalVerdict(reviews, HEAD_SHA, ['BOB']).approved,
-      true
-    )
-  })
+    assert.equal(headApprovalVerdict(reviews, HEAD_SHA, ['BOB']).approved, true);
+  });
 
   test('a stale approval from an untrusted login names the allowlist, not the head', () => {
     // telling the operator "re-approve" would be wrong — bob's
@@ -1020,17 +1093,17 @@ describe('headApprovalVerdict', () => {
       [review('bob', 'User', 'APPROVED', STALE_SHA, T('02'))],
       HEAD_SHA,
       ['alice']
-    )
-    assert.equal(v.approved, false)
-    assert.match(v.reason!, /outside act\.approvers/)
+    );
+    assert.equal(v.approved, false);
+    assert.match(v.reason!, /outside act\.approvers/);
     // but a stale approval from a TRUSTED login still names the head
     const t = headApprovalVerdict(
       [review('alice', 'User', 'APPROVED', STALE_SHA, T('02'))],
       HEAD_SHA,
       ['alice']
-    )
-    assert.match(t.reason!, /predates the current head/)
-  })
+    );
+    assert.match(t.reason!, /predates the current head/);
+  });
 
   test('unattributable and non-decision reviews are ignored', () => {
     const v = headApprovalVerdict(
@@ -1040,10 +1113,10 @@ describe('headApprovalVerdict', () => {
         review('alice', 'User', 'DISMISSED', HEAD_SHA, T('04')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-    assert.equal(v.reason, 'no approving reviews')
-  })
+    );
+    assert.equal(v.approved, false);
+    assert.equal(v.reason, 'no approving reviews');
+  });
 
   test('a later comment never disturbs a standing approval', () => {
     const v = headApprovalVerdict(
@@ -1052,9 +1125,9 @@ describe('headApprovalVerdict', () => {
         review('alice', 'User', 'COMMENTED', HEAD_SHA, T('02')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, true)
-  })
+    );
+    assert.equal(v.approved, true);
+  });
 
   test('a dismissed latest review suppresses that reviewer — an older approval cannot resurface', () => {
     const v = headApprovalVerdict(
@@ -1064,9 +1137,9 @@ describe('headApprovalVerdict', () => {
         review('alice', 'User', 'DISMISSED', HEAD_SHA, T('03')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, false)
-  })
+    );
+    assert.equal(v.approved, false);
+  });
 
   test('a re-approval after a dismissal stands again', () => {
     const v = headApprovalVerdict(
@@ -1076,16 +1149,16 @@ describe('headApprovalVerdict', () => {
         review('alice', 'User', 'APPROVED', HEAD_SHA, T('03')),
       ],
       HEAD_SHA
-    )
-    assert.equal(v.approved, true)
-  })
+    );
+    assert.equal(v.approved, true);
+  });
 
   test('no reviews is not approved', () => {
-    const v = headApprovalVerdict([], HEAD_SHA)
-    assert.equal(v.approved, false)
-    assert.equal(v.reason, 'no approving reviews')
-  })
-})
+    const v = headApprovalVerdict([], HEAD_SHA);
+    assert.equal(v.approved, false);
+    assert.equal(v.reason, 'no approving reviews');
+  });
+});
 
 describe('githubReview humanApproved', { skip: WIN32 }, () => {
   const page = (headSha: string, nodes: PrReviewNode[], next: string | null) =>
@@ -1101,43 +1174,43 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
           },
         },
       },
-    })
+    });
 
   test('paginates the reviews connection to the verdict', () => {
     // the qualifying human approval sits on the SECOND page — a
     // first-page-only read is the regression this guards (audit r2)
-    const p1 = page(HEAD_SHA, [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('01'))], 'cur2')
-    const p2 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))], null)
-    withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, (log) => {
-      const v = githubReview().humanApproved!(target) as ApprovalVerdict
-      assert.equal(v.approved, true)
-      const calls = readFileSync(log, 'utf8')
-      assert.match(calls, /after: "cur2"/)
-    })
-  })
+    const p1 = page(HEAD_SHA, [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('01'))], 'cur2');
+    const p2 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))], null);
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, log => {
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict;
+      assert.equal(v.approved, true);
+      const calls = readFileSync(log, 'utf8');
+      assert.match(calls, /after: "cur2"/);
+    });
+  });
 
   test('binds the approval to the live headSha — a stale approval refuses', () => {
-    const p1 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', STALE_SHA, T('01'))], null)
+    const p1 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', STALE_SHA, T('01'))], null);
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
-      const v = githubReview().humanApproved!(target) as ApprovalVerdict
-      assert.equal(v.approved, false)
-      assert.match(v.reason!, /predates the current head/)
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict;
+      assert.equal(v.approved, false);
+      assert.match(v.reason!, /predates the current head/);
       // and the bound head rides the verdict so the fetch can prove the
       // approval named the head being merged
-      assert.equal(v.headSha, HEAD_SHA)
-    })
-  })
+      assert.equal(v.headSha, HEAD_SHA);
+    });
+  });
 
   test('a page without the reviews connection throws — incomplete, not complete', () => {
     // a missing `reviews` field used to read as "history complete" —
     // a CHANGES_REQUESTED sitting on the unread connection would pass
     const p1 = JSON.stringify({
       data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
-    })
+    });
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
-      assert.throws(() => githubReview().humanApproved!(target), /reviews page incomplete/)
-    })
-  })
+      assert.throws(() => githubReview().humanApproved!(target), /reviews page incomplete/);
+    });
+  });
 
   test('hasNextPage with no endCursor throws — it cannot read the rest', () => {
     const p1 = JSON.stringify({
@@ -1149,41 +1222,35 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
           },
         },
       },
-    })
+    });
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
-      assert.throws(
-        () => githubReview().humanApproved!(target),
-        /pagination did not advance/
-      )
-    })
-  })
+      assert.throws(() => githubReview().humanApproved!(target), /pagination did not advance/);
+    });
+  });
 
   test('a cursor that repeats the one just consumed throws instead of spinning', () => {
     // p2 claims another page but hands back the same cursor — the loop
     // would otherwise request page 2 forever (the sync probe blocking
     // the event loop on a hostile/stuck host)
-    const p1 = page(HEAD_SHA, [], 'cur2')
-    const p2 = page(HEAD_SHA, [], 'cur2')
+    const p1 = page(HEAD_SHA, [], 'cur2');
+    const p2 = page(HEAD_SHA, [], 'cur2');
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, () => {
-      assert.throws(
-        () => githubReview().humanApproved!(target),
-        /pagination did not advance/
-      )
-    })
-  })
+      assert.throws(() => githubReview().humanApproved!(target), /pagination did not advance/);
+    });
+  });
 
   test('the async loop fails closed the same way — one shared page step', async () => {
     const p1 = JSON.stringify({
       data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
-    })
-    const fake = armFakeGh({ FAKE_GH_REVIEWS_P1: p1 })
+    });
+    const fake = armFakeGh({ FAKE_GH_REVIEWS_P1: p1 });
     try {
       await assert.rejects(
         githubReview().humanApprovedAsync!(target) as Promise<unknown>,
         /reviews page incomplete/
-      )
+      );
     } finally {
-      fake.restore()
+      fake.restore();
     }
-  })
-})
+  });
+});

@@ -71,7 +71,9 @@ function jsonFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
-      return jsonFiles(path);
+      // dependency trees are not manifests — a locally installed
+      // plugin node_modules carries comment-laden tsconfig.json files
+      return entry.name === 'node_modules' ? [] : jsonFiles(path);
     }
     return entry.name.endsWith('.json') ? [path] : [];
   });
