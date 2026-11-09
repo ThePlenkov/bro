@@ -35,118 +35,125 @@ export interface GithubRepo {
  *  Instances satisfy the structural {@link GithubRepo} shape; use the
  *  class when normalization/equality semantics are wanted. */
 export class GitHubRepo {
-  readonly owner: string
-  readonly repo: string
+  readonly owner: string;
+  readonly repo: string;
   constructor(owner: string, repo: string) {
-    this.owner = owner.trim().toLowerCase()
-    this.repo = repo.trim().toLowerCase()
+    this.owner = owner.trim().toLowerCase();
+    this.repo = repo.trim().toLowerCase();
   }
 
   static from(input: { owner: string; repo: string }): GitHubRepo {
-    return new GitHubRepo(input.owner, input.repo)
+    return new GitHubRepo(input.owner, input.repo);
   }
 
   equals(other: GitHubRepo | { owner: string; repo: string } | null | undefined): boolean {
-    if (other === null || other === undefined) return false
-    return this.owner === other.owner.trim().toLowerCase() && this.repo === other.repo.trim().toLowerCase()
+    if (other === null || other === undefined) return false;
+    return (
+      this.owner === other.owner.trim().toLowerCase() &&
+      this.repo === other.repo.trim().toLowerCase()
+    );
   }
 
   toString(): string {
-    return `${this.owner}/${this.repo}`
+    return `${this.owner}/${this.repo}`;
   }
 }
 
 /** A github issue thread — the issue URL is the thread anchor. */
 export class GitHubIssueThread {
-  readonly repo: GitHubRepo | null
-  readonly number: number | null
+  readonly repo: GitHubRepo | null;
+  readonly number: number | null;
   constructor(repo: GitHubRepo | null, number: number | null) {
-    this.repo = repo
+    this.repo = repo;
     // issue numbers are GitHub's own — a 1-based safe integer;
     // anything else (0, negative, NaN, Infinity) is no issue
-    this.number =
-      number !== null && Number.isSafeInteger(number) && number > 0 ? number : null
+    this.number = number !== null && Number.isSafeInteger(number) && number > 0 ? number : null;
   }
 
   static parse(input: string): GitHubIssueThread {
-    let t = input.trim()
+    let t = input.trim();
     while (t.endsWith('/')) {
-      t = t.slice(0, -1)
+      t = t.slice(0, -1);
     }
-    const m = /\/issues\/(\d+)$/.exec(t)
+    const m = /\/issues\/(\d+)$/.exec(t);
     if (m === null) {
-      const repo = parseGithubRemote({ remote: t })
+      const repo = parseGithubRemote({ remote: t });
       if (repo === null) {
-        return new GitHubIssueThread(null, null)
+        return new GitHubIssueThread(null, null);
       }
-      return new GitHubIssueThread(GitHubRepo.from(repo), null)
+      return new GitHubIssueThread(GitHubRepo.from(repo), null);
     }
-    const base = t.replace(/\/issues\/\d+$/, '')
-    const repo = parseGithubRemote({ remote: base })
-    const n = Number(m[1])
+    const base = t.replace(/\/issues\/\d+$/, '');
+    const repo = parseGithubRemote({ remote: base });
+    const n = Number(m[1]);
     if (repo === null || !Number.isSafeInteger(n)) {
-      return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), null)
+      return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), null);
     }
-    return new GitHubIssueThread(GitHubRepo.from(repo), n)
+    return new GitHubIssueThread(GitHubRepo.from(repo), n);
   }
 
-  static fromIssue(repo: GitHubRepo | { owner: string; repo: string }, n: number): GitHubIssueThread {
-    const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo)
+  static fromIssue(
+    repo: GitHubRepo | { owner: string; repo: string },
+    n: number
+  ): GitHubIssueThread {
+    const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo);
     if (!Number.isSafeInteger(n) || n < 0) {
-      return new GitHubIssueThread(r, null)
+      return new GitHubIssueThread(r, null);
     }
-    return new GitHubIssueThread(r, n)
+    return new GitHubIssueThread(r, n);
   }
 
   get url(): string | null {
     if (this.repo === null || this.number === null) {
-      return null
+      return null;
     }
-    return issueUrl({ repo: this.repo, n: this.number })
+    return issueUrl({ repo: this.repo, n: this.number });
   }
 
   get isIssue(): boolean {
-    return this.repo !== null && this.number !== null
+    return this.repo !== null && this.number !== null;
   }
 
   toString(): string {
-    return this.url ?? ''
+    return this.url ?? '';
   }
 }
 
 /** A github login/name — normalized to lowercase for comparison. */
 export class GitHubLogin {
-  readonly value: string
+  readonly value: string;
   constructor(value: string) {
-    this.value = value.trim()
+    this.value = value.trim();
   }
 
   static from(input: string | undefined | null): GitHubLogin | null {
-    if (typeof input !== 'string' || input.trim() === '') return null
-    return new GitHubLogin(input)
+    if (typeof input !== 'string' || input.trim() === '') return null;
+    return new GitHubLogin(input);
   }
 
   equals(other: GitHubLogin | string | undefined | null): boolean {
-    if (other === null || other === undefined) return false
-    const otherVal = other instanceof GitHubLogin ? other.value : other
-    if (typeof otherVal !== 'string') return false
-    return this.value.toLowerCase() === otherVal.trim().toLowerCase()
+    if (other === null || other === undefined) return false;
+    const otherVal = other instanceof GitHubLogin ? other.value : other;
+    if (typeof otherVal !== 'string') return false;
+    return this.value.toLowerCase() === otherVal.trim().toLowerCase();
   }
 
   toString(): string {
-    return this.value
+    return this.value;
   }
 }
 
 /** Normalize a repo/remote input to GitHubRepo. */
-export function toGitHubRepo(input: { remote: string } | { owner: string; repo: string } | string): GitHubRepo | null {
+export function toGitHubRepo(
+  input: { remote: string } | { owner: string; repo: string } | string
+): GitHubRepo | null {
   if (typeof input === 'string') {
-    const parsed = parseGithubRemote({ remote: input })
-    return parsed === null ? null : GitHubRepo.from(parsed)
+    const parsed = parseGithubRemote({ remote: input });
+    return parsed === null ? null : GitHubRepo.from(parsed);
   }
   if ('remote' in input) {
-    const parsed = parseGithubRemote(input)
-    return parsed === null ? null : GitHubRepo.from(parsed)
+    const parsed = parseGithubRemote(input);
+    return parsed === null ? null : GitHubRepo.from(parsed);
   }
   if (
     typeof input.owner !== 'string' ||
@@ -154,9 +161,9 @@ export function toGitHubRepo(input: { remote: string } | { owner: string; repo: 
     input.owner.trim() === '' ||
     input.repo.trim() === ''
   ) {
-    return null
+    return null;
   }
-  return GitHubRepo.from({ owner: input.owner.trim(), repo: input.repo.trim() })
+  return GitHubRepo.from({ owner: input.owner.trim(), repo: input.repo.trim() });
 }
 
 /** remote → {owner, repo} when it names a github.com repository —
@@ -245,16 +252,16 @@ function scpHostPath(input: { rest: string }): { host: string; path: string } | 
 export function issueKey(input: { thread: string }): { repo: GithubRepo | null; n: number | null } {
   // one parser for the thread shape — the returned repo is the plain
   // structural GithubRepo, not the value object (deep-equality callers)
-  const t = GitHubIssueThread.parse(input.thread)
+  const t = GitHubIssueThread.parse(input.thread);
   return {
     repo: t.repo === null ? null : { owner: t.repo.owner, repo: t.repo.repo },
     n: t.number,
-  }
+  };
 }
 
 /** A github thread's issue coordinate (object form). */
 export function parseIssueThread(input: { thread: string }): GitHubIssueThread {
-  return GitHubIssueThread.parse(input.thread)
+  return GitHubIssueThread.parse(input.thread);
 }
 
 export interface GhResult {
@@ -263,12 +270,12 @@ export interface GhResult {
   err: string;
 }
 
-function gh(call: { args: string[]; input?: string }): GhResult {
+function gh(call: { args: string[]; input?: string; timeoutMs?: number }): GhResult {
   const opts: SpawnSyncOptions = {
     stdio: [call.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     input: call.input,
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: call.timeoutMs ?? 120_000,
     maxBuffer: 32 * 1024 * 1024,
   };
   // PATH lookup is the contract (same as pull.ts's dolt)
@@ -288,7 +295,10 @@ function gh(call: { args: string[]; input?: string }): GhResult {
   };
 }
 
-function ghJson<T>(call: { args: string[]; input?: string }): { data?: T; error?: string } {
+function ghJson<T>(call: { args: string[]; input?: string; timeoutMs?: number }): {
+  data?: T;
+  error?: string;
+} {
   const r = gh(call);
   if (r.code !== 0) {
     return { error: r.err || r.out };
@@ -440,7 +450,7 @@ function apiPath(call: { repo: GithubRepo; suffix: string }): string {
  *  error line. `--paginate --slurp` wraps every page in its own array
  *  — the wire shape is pages-of-rows, so the read flattens before
  *  iterating. */
-function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
+function listIssues(repo: GithubRepo, timeoutMs?: number): { issues: GhIssue[]; error?: string } {
   const r = ghJson<(GhIssueRow | GhIssueRow[])[]>({
     args: [
       'api',
@@ -448,6 +458,7 @@ function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
       '--paginate',
       '--slurp',
     ],
+    timeoutMs,
   });
   if (r.error !== undefined) {
     return { issues: [], error: `${repo.owner}/${repo.repo}: issue list failed — ${r.error}` };
@@ -511,7 +522,8 @@ function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
 
 export function issueComments(
   repo: GithubRepo,
-  issue: GhIssue
+  issue: GhIssue,
+  timeoutMs?: number
 ): { records: GhRecord[]; errors: string[] } {
   const r = ghJson<(GhCommentRow | GhCommentRow[])[]>({
     args: [
@@ -520,6 +532,7 @@ export function issueComments(
       '--paginate',
       '--slurp',
     ],
+    timeoutMs,
   });
   if (r.error !== undefined) {
     return {
@@ -532,12 +545,19 @@ export function issueComments(
 
 function scanIssues(
   repo: GithubRepo,
-  issues: GhIssue[]
+  issues: GhIssue[],
+  deadline?: number
 ): { records: GhRecord[]; errors: string[] } {
   const records: GhRecord[] = [];
   const errors: string[] = [];
   for (const issue of issues) {
-    const cs = issueComments(repo, issue);
+    const left =
+      deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+    if (left !== undefined && left < 1) {
+      errors.push(`${repo.owner}/${repo.repo}: comment scan budget exhausted`);
+      break;
+    }
+    const cs = issueComments(repo, issue, left);
     records.push(...cs.records);
     errors.push(...cs.errors);
   }
@@ -546,16 +566,25 @@ function scanIssues(
 
 /** The label-narrowed, comment-verified scan: every mesh record across
  *  every request-labelled issue on the peer's repo. */
-export function scanGithub(input: { remote: string }): { records: GhRecord[]; errors: string[] } {
+export function scanGithub(input: { remote: string; timeoutMs?: number }): {
+  records: GhRecord[];
+  errors: string[];
+} {
   const repo = parseGithubRemote(input);
   if (repo === null) {
     return { records: [], errors: [`remote "${input.remote}" is not a github url`] };
   }
-  const listed = listIssues(repo);
+  // the budget is one deadline across the issue list plus every
+  // comment read — a hung gh call cannot re-grant the full 120s
+  const deadline = input.timeoutMs === undefined ? undefined : performance.now() + input.timeoutMs;
+  const listed = listIssues(
+    repo,
+    deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()))
+  );
   if (listed.error !== undefined) {
     return { records: [], errors: [listed.error] };
   }
-  return scanIssues(repo, listed.issues);
+  return scanIssues(repo, listed.issues, deadline);
 }
 
 /** The wire envelope for a posted request — id/thread are filled by
@@ -662,27 +691,30 @@ export function githubProvenance(rec: {
   selfLogin: string | undefined;
   ownRig: string | null;
 }): { provenance?: string; error?: string } {
-  const author = GitHubLogin.from(rec.author)
+  const author = GitHubLogin.from(rec.author);
   if (rec.peer !== undefined) {
     if (rec.peer.login === undefined) {
       return {
         error: `github binding has no login — records on this plane can't be authenticated`,
       };
     }
-    const peerLogin = GitHubLogin.from(rec.peer.login)
+    const peerLogin = GitHubLogin.from(rec.peer.login);
     if (peerLogin !== null && author !== null && author.equals(peerLogin)) {
-      return { provenance: rec.peer.rig }
+      return { provenance: rec.peer.rig };
     }
     if (peerLogin !== null && rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
-      return { provenance: rec.peer.rig }
+      return { provenance: rec.peer.rig };
     }
   }
   if (rec.selfLogin !== undefined) {
-    const self = GitHubLogin.from(rec.selfLogin)
-    if ((self !== null && author !== null && author.equals(self)) || rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
+    const self = GitHubLogin.from(rec.selfLogin);
+    if (
+      (self !== null && author !== null && author.equals(self)) ||
+      rec.author.toLowerCase() === rec.selfLogin.toLowerCase()
+    ) {
       return rec.ownRig === null
         ? { error: `own record, but this rig's identity doesn't resolve` }
-        : { provenance: rec.ownRig }
+        : { provenance: rec.ownRig };
     }
   }
   return {

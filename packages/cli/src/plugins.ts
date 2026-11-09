@@ -116,6 +116,7 @@ import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
 import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
+import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
 import { runStatusCommand } from './commands/status.ts';
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
@@ -200,8 +201,7 @@ for (const c of SPEC_CONNECTORS) {
 
 /** The telemetry plane's usage — the plane had no help of its own, and
  *  `bro telemetry --help` ran the report. */
-const TELEMETRY_USAGE =
-  'bro telemetry [--session <id>] [--json]   Hook + command latency report'
+const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -307,6 +307,27 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    // The loop's supervisor, not a second runner: this verb prints the
+    // launch brief + tick-0 baselines and points at the skill that owns
+    // the tick protocol — the loop itself stays model work.
+    name: 'watchdog',
+    group: 'flow',
+    summary: 'Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]',
+    run: runWatchdogCommand,
+    skill: 'watchdog',
+    contract: {
+      flags: {
+        '--json':
+          'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
+      },
+      json: 'schemas/cli/watchdog.json',
+      exits: {
+        0: 'brief printed (human or --json)',
+        2: 'unknown flag — usage on stderr',
+      },
+    },
   }),
   definePlugin({
     name: 'pipeline',
@@ -742,10 +763,10 @@ export const PLUGINS: BroPlugin[] = [
       // a help request never runs the report: the plane reads the perf
       // journal, and the token that leads the argv says help, not run
       if (hasHelpFlag(argv)) {
-        printUsage(TELEMETRY_USAGE, 0)
-        return
+        printUsage(TELEMETRY_USAGE, 0);
+        return;
       }
-      return runHooksCommand(['perf', ...argv])
+      return runHooksCommand(['perf', ...argv]);
     },
   }),
   definePlugin({

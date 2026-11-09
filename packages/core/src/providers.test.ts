@@ -450,13 +450,13 @@ describe('parseProviderEntry', () => {
       baseUrl: 'https://api.example',
       models: { m: 'openai-compat' },
       apiKey: 'sk-pasted',
-    })
-    assert.equal(e, null)
-  })
+    });
+    assert.equal(e, null);
+  });
 
   test('the schema refuses a key too — the config file cannot hold one', () => {
-    const schema = providersSection.jsonSchema
-    assert.notEqual(schema, undefined)
+    const schema = providersSection.jsonSchema;
+    assert.notEqual(schema, undefined);
     const errors = validateSchemaValue(
       {
         p: {
@@ -468,9 +468,9 @@ describe('parseProviderEntry', () => {
       },
       schema!,
       'providers'
-    )
-    assert.ok(errors.length > 0)
-  })
+    );
+    assert.ok(errors.length > 0);
+  });
 
   test('returns null on non-object and bad type', () => {
     assert.equal(parseProviderEntry('p', 'cli'), null);

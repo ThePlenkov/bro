@@ -20,11 +20,14 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 import {
   agentsJson as kitAgentsJson,
+  pidAlive,
   type SessionRec,
+  workerLedState,
 } from '../../../packages/herdr-kit/src/index.ts';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
@@ -243,7 +246,7 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
  *  within the 24h live window; detail-less markers are residue. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
-export { pidAlive, workerLedState } from '../../../packages/herdr-kit/src/index.ts';
+export { pidAlive, workerLedState };
 
 /** `owner <pid> <start>` on marker line 1 — both parts or there is no
  *  owner pin at all. */
@@ -522,29 +525,90 @@ export function syncPidPath(scope: string): string {
   return join(STATE_DIR, `sync-${scope}.pid`);
 }
 
-export function loadState(scope: string): PluginState {
+const recOr = <T>(v: unknown): Record<string, T> =>
+  typeof v === 'object' && v !== null ? (v as Record<string, T>) : {};
+
+function emptyPluginState(): PluginState {
+  return {
+    workspaces: {},
+    mirrors: {},
+    renderers: {},
+    statuses: {},
+    sessions: {},
+    liveViews: {},
+    gone: {},
+  };
+}
+
+function loadStateFromPath(p: string): PluginState | null {
   try {
-    const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
+    const v = JSON.parse(readFileSync(p, 'utf8')) as Partial<PluginState>;
     return {
-      workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
-      mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
-      renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
-      statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
-      sessions: typeof v.sessions === 'object' && v.sessions !== null ? v.sessions : {},
-      liveViews: typeof v.liveViews === 'object' && v.liveViews !== null ? v.liveViews : {},
-      gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
+      workspaces: recOr<WorkspaceRec>(v.workspaces),
+      mirrors: recOr<MirrorRec>(v.mirrors),
+      renderers: recOr<RendererRec>(v.renderers),
+      statuses: recOr<StatusPaneRec>(v.statuses),
+      sessions: recOr<SessionRec>(v.sessions),
+      liveViews: recOr(v.liveViews),
+      gone: recOr<number>(v.gone),
     };
   } catch {
-    return {
-      workspaces: {},
-      mirrors: {},
-      renderers: {},
-      statuses: {},
-      sessions: {},
-      liveViews: {},
-      gone: {},
-    };
+    return null;
   }
+}
+
+/** Fill-missing merge — a legacy record only lands where the current
+ *  ledger has none (the workspaces map upgrades `managed` in place). */
+function mergeRecord<T>(dst: Record<string, T>, src: Record<string, T> | undefined): void {
+  for (const [k, v] of Object.entries(src ?? {})) {
+    if (dst[k] === undefined) dst[k] = v;
+  }
+}
+
+function mergeLegacyState(cur: PluginState, st: PluginState): void {
+  for (const [k, v] of Object.entries(st.workspaces ?? {})) {
+    if (cur.workspaces[k] === undefined) {
+      cur.workspaces[k] = v;
+    } else if (v.managed === true && cur.workspaces[k].managed !== true) {
+      cur.workspaces[k] = { ...cur.workspaces[k], managed: true };
+    }
+  }
+  mergeRecord(cur.mirrors, st.mirrors);
+  mergeRecord(cur.renderers, st.renderers);
+  mergeRecord(cur.statuses, st.statuses);
+  mergeRecord(cur.sessions, st.sessions);
+  if (cur.liveViews === undefined) cur.liveViews = {};
+  mergeRecord(cur.liveViews, st.liveViews);
+  mergeRecord(cur.gone, st.gone);
+}
+
+/** Every state dir this plugin has ever written — scoped file first,
+ *  then the unscoped `state.json` older builds used. Workspaces
+ *  recorded only in a legacy dir still count as managed, so the
+ *  reaper's ledger read must see them (issue #817). */
+function legacyStateFiles(scope: string, home: string): string[] {
+  const dirs = [
+    join(home, '.local', 'state', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'state', 'herdr', 'plugins'),
+    join(home, '.local', 'state', 'herdr'),
+    join(home, '.config', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.config', 'herdr', 'plugins'),
+    join(home, '.config', 'bro-herdr-plugin'),
+    join(home, '.local', 'share', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'share', 'herdr', 'plugins'),
+    join(home, '.local', 'share', 'herdr'),
+  ];
+  return dirs.flatMap(d => [join(d, `state-${scope}.json`), join(d, 'state.json')]);
+}
+
+export function loadState(scope: string): PluginState {
+  const cur = loadStateFromPath(stateFile(scope)) ?? emptyPluginState();
+  const home = process.env.HOME ?? homedir();
+  for (const f of legacyStateFiles(scope, home)) {
+    const st = loadStateFromPath(f);
+    if (st !== null) mergeLegacyState(cur, st);
+  }
+  return cur;
 }
 
 export function saveState(scope: string, s: PluginState): void {
