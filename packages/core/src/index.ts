@@ -8,9 +8,11 @@ export {
   ghTryAsync,
   issueLink,
   prLink,
+  prRefs,
   resolveRepo,
   resolveRepoAsync,
 } from './gh.ts';
+export type { PrRef } from './gh.ts';
 export {
   git,
   gitTry,

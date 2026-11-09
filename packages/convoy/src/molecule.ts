@@ -1,6 +1,7 @@
 import { dirname } from 'node:path'
 import { bd, bdJson, getTasks, taskStore } from '@broject/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
+import { MERGE_STEP_TYPE } from './verify.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
 export function loadMolecule(id: string): Molecule {
@@ -194,6 +195,10 @@ export function pourFormula(formula: string, vars: Record<string, string> = {}):
     const current = bd(['config', 'get', 'types.custom']).trim()
     const types = new Set(current ? current.split(/[\s,]+/) : [])
     types.add('agent').add('human')
+    // the merge step keeps its kind too — an unregistered type flattens
+    // to task, and the step then loses the declaration the close
+    // verifies on (the formula keeps it, so the fallback still holds)
+    types.add(MERGE_STEP_TYPE)
     // bd parses types.custom as a comma-separated list — a space-joined
     // value reads back as one bogus type and the pour still flattens
     bd(['config', 'set', 'types.custom', [...types].join(',')])

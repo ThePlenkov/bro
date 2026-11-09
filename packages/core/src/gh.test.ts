@@ -3,11 +3,49 @@ import { describe, test } from 'node:test';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gh, ghTry, issueLink, prLink } from './gh.ts';
+import { gh, ghTry, issueLink, prLink, prRefs } from './gh.ts';
 
 describe('prLink', () => {
   test('renders a clickable markdown link', () => {
     assert.equal(prLink('ThePlenkov/bro', 95), '[#95](https://github.com/ThePlenkov/bro/pull/95)');
+  });
+});
+
+describe('prRefs', () => {
+  test('the link form carries the PR and the repo', () => {
+    assert.deepEqual(prRefs('merged [#958](https://github.com/ThePlenkov/bro/pull/958) today'), [
+      { pr: 958, repo: 'ThePlenkov/bro' },
+    ]);
+  });
+
+  test('the link form is one reference — its own #N is not a second hit', () => {
+    const refs = prRefs('see [#958](https://github.com/o/r/pull/958)');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0]?.pr, 958);
+  });
+
+  test('the bare form carries the PR and no repo', () => {
+    assert.deepEqual(prRefs('PR #958 merged (squash d11788ce)'), [{ pr: 958 }]);
+  });
+
+  test('an issue link is not a PR', () => {
+    assert.deepEqual(prRefs('[#12](https://github.com/o/r/issues/12)'), []);
+  });
+
+  test('two different PRs are two references', () => {
+    const refs = prRefs('#958 and #959');
+    assert.deepEqual(
+      refs.map(r => r.pr),
+      [958, 959]
+    );
+  });
+
+  test('the same PR twice is one reference', () => {
+    assert.equal(prRefs('#958 … #958').length, 1);
+  });
+
+  test('a zero or negative number is not a PR', () => {
+    assert.deepEqual(prRefs('#0 and #-3'), []);
   });
 });
 

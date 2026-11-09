@@ -202,3 +202,54 @@ export function prLink(ownerRepo: string, pr: number): string {
 export function issueLink(ownerRepo: string, issue: number): string {
   return `[#${issue}](https://${ghHost()}/${ownerRepo}/issues/${issue})`;
 }
+
+/** A PR reference found in free text. */
+export interface PrRef {
+  pr: number;
+  /** `owner/repo` when the reference carried a link — the bare form
+   *  names no repo, and the caller supplies the one it works in. */
+  repo?: string;
+}
+
+/** The PR references in free text — the clickable `[#N](…/pull/N)` form
+ *  (which carries the repo) and the bare `#N` (which does not). The two
+ *  forms of the same PR are one reference: the link's own `#N` is not a
+ *  second, bare hit.
+ *
+ *  Only the `/pull/N` path counts — an issue link (`/issues/N`) is a
+ *  different thing, and reading it as a PR would verify the wrong
+ *  object. */
+export function prRefs(text: string): PrRef[] {
+  const out: PrRef[] = [];
+  const seen = new Set<string>();
+  // Every markdown link first: a `#N` inside one belongs to that link,
+  // and only a `/pull/` link names a PR — an issue link (`/issues/N`) is
+  // a different thing, and reading it as a PR would verify the wrong
+  // object.
+  const link = /\[[^\]]*\]\(([^)]*)\)/g;
+  const spans: [number, number][] = [];
+  for (const m of text.matchAll(link)) {
+    const at = m.index ?? -1;
+    spans.push([at, at + m[0].length]);
+    const pull = /^https?:\/\/[^/\s)]+\/([^/\s)]+)\/([^/\s)]+)\/pull\/(\d+)\s*$/.exec(m[1] ?? '');
+    if (!pull) continue;
+    const pr = Number(pull[3]);
+    if (!Number.isInteger(pr) || pr <= 0) continue;
+    const key = `${pull[1]}/${pull[2]}#${pr}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ pr, repo: `${pull[1]}/${pull[2]}` });
+  }
+  const bare = /#(\d+)/g;
+  for (const m of text.matchAll(bare)) {
+    const at = m.index ?? -1;
+    if (spans.some(([from, to]) => at >= from && at < to)) continue;
+    const pr = Number(m[1]);
+    if (!Number.isInteger(pr) || pr <= 0) continue;
+    const key = `#${pr}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ pr });
+  }
+  return out;
+}
