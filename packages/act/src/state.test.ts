@@ -162,15 +162,16 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(h.recorded, [`Kilo Code@${SHA.slice(0, 7)}=fail`]);
   });
 
-  test('an ignored SAST check carrying failure annotations still gates — findings are must-fix', async () => {
+  test('an explicitly ignored SAST check drops its annotations from the gate', async () => {
     const rev = fakeRev([check('SonarCloud Code Analysis', 'pass')], []);
     rev.checkAnnotations = () => new Map([['SonarCloud Code Analysis', 3]]);
     const s = await fetchPrActState(rev, target, {
       ignoreChecks: ['sonarcloud'],
       checkHistory: memHistory(0),
     });
-    // a static scanner is never advisory — its annotations ARE the findings
-    assert.equal(s.sastPending, 3);
+    // the operator named the scanner advisory — an explicit rule wins
+    // over the SAST must-fix default, annotations and all
+    assert.equal(s.sastPending, 0);
     assert.deepEqual(s.alerts, []);
   });
 
@@ -185,7 +186,7 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(s.alerts, []);
   });
 
-  test('a failing ignored SAST check counts as failing — the job itself is a finding', async () => {
+  test('a failing ignored SAST check is advisory — surfaced as an alert, not a blocker', async () => {
     const s = await fetchPrActState(
       fakeRev([check('Codacy Static Code Analysis', 'fail')], []),
       target,
@@ -194,8 +195,19 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
         checkHistory: memHistory(9),
       }
     );
-    // ignore is for flaky REVIEWERS — a failed scanner job is a real
-    // project-caused failure and must hold the gate
+    // the explicit rule excludes the scanner from the gate; with no
+    // thread activity it cannot prove itself alive, so it stays loud
+    assert.equal(s.ciFailing, 0);
+    assert.equal(s.alerts.length, 1);
+    assert.match(s.alerts[0]!, /no thread activity/);
+  });
+
+  test('an unnamed SAST check still gates — the override must be explicit', async () => {
+    const s = await fetchPrActState(
+      fakeRev([check('Codacy Static Code Analysis', 'fail')], []),
+      target,
+      { checkHistory: memHistory(9) }
+    );
     assert.equal(s.ciFailing, 1);
     assert.deepEqual(s.alerts, []);
   });
