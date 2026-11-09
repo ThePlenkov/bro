@@ -220,22 +220,6 @@ function prCreateHook(f: Fixture, cwd: string): CliResult {
   });
 }
 
-/** The post-tool hook's own event — a worker's `gh pr create` landing in
- *  the worktree that created it. */
-function prCreateHook(f: Fixture, cwd: string): CliResult {
-  return runCli(['hooks', 'post-tool'], {
-    cwd,
-    input: JSON.stringify({
-      session_id: 's1',
-      cwd,
-      tool_name: 'Bash',
-      tool_input: { command: 'gh pr create --fill' },
-      tool_response: { success: true },
-    }),
-    env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
-  });
-}
-
 describe('bro stack e2e', () => {
   test('push creates stack/<name>/<n>-<slug> worktrees off the tip and claims beads', () => {
     const f = stackFixture([
