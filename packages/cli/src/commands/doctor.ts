@@ -605,53 +605,83 @@ function selfDistChecks(): DoctorCheck[] {
 // running daemon's resolved entry — /proc cmdline — against this repo's
 // dist and, outside a bro checkout, the entry `bro` resolves to.
 
+/** A foreign process's argv — /proc cmdline on linux, `ps args`/
+ *  `command` spellings on darwin. undefined when the platform can't
+ *  name it (raced exit, `node -e`, no /proc). */
+function procArgv(pid: number): string[] | undefined {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        .split('\0')
+        .filter(t => t !== '');
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === 'darwin') {
+    return darwinArgv(pid);
+  }
+  return undefined;
+}
+
+function darwinArgv(pid: number): string[] | undefined {
+  let out: string;
+  try {
+    out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 500,
+    });
+  } catch {
+    try {
+      out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 500,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+  const s = out.replace(/\r?\n$/, '');
+  const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  if (tokens && tokens.length > 0) {
+    return tokens.map(t => t.replace(/^["']|["']$/g, ''));
+  }
+  return s.split(/\s+/).filter(t => t !== '');
+}
+
+/** The process's cwd — /proc link on linux, lsof on darwin (doctor's
+ *  own cwd when the pid reports none). null when unreadable. */
+function procCwd(pid: number): string | null {
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+        encoding: 'utf8',
+        timeout: 500,
+      });
+      const cline = lout.split('\n').find(l => l.startsWith('n'));
+      return cline ? cline.slice(1) : process.cwd();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** The daemon process's resolved entry script — argv[1] under a
  *  node-ish runtime, argv[0] when the process IS the program. Relative
  *  spellings resolve against the process's own cwd, never doctor's.
  *  null when /proc can't name a file (non-/proc platform, raced exit,
  *  `node -e`). */
 function daemonEntry(pid: number): string | null {
-  let argv: string[] | undefined;
-  if (process.platform === 'linux') {
-    try {
-      argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-        .split('\0')
-        .filter(t => t !== '');
-    } catch {
-      return null;
-    }
-  } else if (process.platform === 'darwin') {
-    try {
-      let out: string;
-      try {
-        out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], {
-          encoding: 'utf8',
-          timeout: 500,
-        });
-      } catch {
-        try {
-          out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
-            encoding: 'utf8',
-            timeout: 500,
-          });
-        } catch {
-          return null;
-        }
-      }
-      const s = out.replace(/\r?\n$/, '');
-      const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
-      if (tokens && tokens.length > 0) {
-        argv = tokens.map(t => t.replace(/^["']|["']$/g, ''));
-      } else {
-        argv = s.split(/\s+/).filter(t => t !== '');
-      }
-    } catch {
-      return null;
-    }
-  } else {
-    return null;
-  }
-  if (!argv || argv.length === 0) {
+  const argv = procArgv(pid);
+  if (argv === undefined || argv.length === 0) {
     return null;
   }
   const runtime = basename(argv[0]!);
@@ -663,22 +693,8 @@ function daemonEntry(pid: number): string | null {
     if (candidate.startsWith('/')) {
       return realpathSync(candidate);
     }
-    if (process.platform === 'linux') {
-      return realpathSync(join(readlinkSync(`/proc/${pid}/cwd`), candidate));
-    } else if (process.platform === 'darwin') {
-      try {
-        const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-          encoding: 'utf8',
-          timeout: 500,
-        });
-        const cline = lout.split('\n').find(l => l.startsWith('n'));
-        const cwd = cline ? cline.slice(1) : process.cwd();
-        return realpathSync(join(cwd, candidate));
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    const cwd = procCwd(pid);
+    return cwd === null ? null : realpathSync(join(cwd, candidate));
   } catch {
     return null;
   }
@@ -1731,6 +1747,39 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
   return undefined;
 }
 
+/** BRO_PROVIDER_BACKEND out of a foreign environ — /proc/<pid>/environ
+ *  on linux. undefined when unset or unreadable. */
+function backendFromProcEnviron(pid: number): string | undefined {
+  const environ = readFileSync(`/proc/${pid}/environ`).toString('latin1');
+  for (const kv of environ.split('\0')) {
+    const eq = kv.indexOf('=');
+    if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
+      const v = kv.slice(eq + 1).trim();
+      return v === '' ? undefined : v;
+    }
+  }
+  return undefined;
+}
+
+/** BRO_PROVIDER_BACKEND out of `ps eww` on darwin — the env travels as
+ *  whitespace-delimited tokens after the command text. */
+function backendFromPsEww(pid: number): string | undefined {
+  try {
+    const out = execFileSync('ps', ['eww', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1000,
+    });
+    const m = out.match(/(?:^|\s|[\r\n])BRO_PROVIDER_BACKEND=([^\s]+)/);
+    if (m) {
+      const v = m[1].trim();
+      return v === '' ? undefined : v;
+    }
+  } catch {
+    // ps failed — raced exit
+  }
+  return undefined;
+}
+
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
  *  the same env hosts the serve), else the running server's /proc
  *  environ. Non-/proc platforms can't read a foreign env — the
@@ -1745,28 +1794,10 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
   }
   try {
     if (process.platform === 'linux') {
-      const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-      for (const kv of environ.split('\0')) {
-        const eq = kv.indexOf('=');
-        if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-          const v = kv.slice(eq + 1).trim();
-          return v === '' ? undefined : v;
-        }
-      }
-    } else if (process.platform === 'darwin') {
-      try {
-        const out = execFileSync('ps', ['eww', '-p', String(serve.pid)], {
-          encoding: 'utf8',
-          timeout: 1000,
-        });
-        const m = out.match(/(?:^|\s|[\r\n])BRO_PROVIDER_BACKEND=([^\s]+)/);
-        if (m) {
-          const v = m[1].trim();
-          return v === '' ? undefined : v;
-        }
-      } catch {
-        // ignore
-      }
+      return backendFromProcEnviron(serve.pid);
+    }
+    if (process.platform === 'darwin') {
+      return backendFromPsEww(serve.pid);
     }
   } catch {
     // unreadable — raced exit or a platform without /proc

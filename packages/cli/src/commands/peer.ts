@@ -49,6 +49,12 @@ function readTcpTableLinux(table: string, remotePort: number, localPort: number)
   return undefined
 }
 
+/** The port field of an lsof endpoint — everything after the last
+ *  ':', so v4, bracketed v6 and hostnames all compare the same. */
+function endpointPort(endpoint: string): string {
+  return endpoint.slice(endpoint.lastIndexOf(':') + 1)
+}
+
 function peerInodeDarwin(remotePort: number, localPort: number): string | undefined {
   try {
     const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
@@ -61,9 +67,10 @@ function peerInodeDarwin(remotePort: number, localPort: number): string | undefi
       const left = afterTcp.slice(0, arrowIdx).trim()
       const right = afterTcp.slice(arrowIdx + 2).replace(/\s*\(.*\)\s*$/, '').trim()
       // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
-      // Anchor ports to word boundaries to avoid substring matches
-      const leftEndsWithRemote = new RegExp(`:${remotePort}$|[^0-9]${remotePort}$`).test(left) || left.endsWith(`:${remotePort}`)
-      const rightEndsWithLocal = new RegExp(`:${localPort}$|[^0-9]${localPort}$`).test(right) || right.endsWith(`:${localPort}`)
+      // lsof prints host:port — comparing the field after the last ':'
+      // needs no substring anchor and never misreads adjacent digits
+      const leftEndsWithRemote = endpointPort(left) === String(remotePort)
+      const rightEndsWithLocal = endpointPort(right) === String(localPort)
       if (!leftEndsWithRemote) continue
       if (!rightEndsWithLocal) continue
       const parts = line.trim().split(/\s+/)
@@ -97,29 +104,39 @@ function peerInode(remotePort: number, localPort: number): string | undefined {
 /** socket inode → owning pid (scan fd symlinks under /proc/<pid>). */
 function inodePid(inode: string): number | undefined {
   if (process.platform === 'linux') {
-    for (const p of readdirSync('/proc')) {
-      if (!/^\d+$/.test(p)) continue
-      const fdDir = `/proc/${p}/fd`
-      let fds: string[]
-      try {
-        fds = readdirSync(fdDir)
-      } catch {
-        continue
-      }
-      for (const fd of fds) {
-        try {
-          if (readlinkSync(`${fdDir}/${fd}`) === `socket:[${inode}]`) return Number(p)
-        } catch {
-          // fd vanished mid-scan — keep walking
-        }
-      }
-    }
-    return undefined
+    return inodePidLinux(inode)
   }
   if (process.platform === 'darwin' && inode.startsWith('mac:')) {
     return Number(inode.slice(4))
   }
   return undefined
+}
+
+function inodePidLinux(inode: string): number | undefined {
+  for (const p of readdirSync('/proc')) {
+    if (!/^\d+$/.test(p)) continue
+    if (fdDirHasSocket(`/proc/${p}/fd`, inode)) return Number(p)
+  }
+  return undefined
+}
+
+/** Any fd symlink under fdDir resolving to `socket:[inode]`. */
+function fdDirHasSocket(fdDir: string, inode: string): boolean {
+  let fds: string[]
+  try {
+    fds = readdirSync(fdDir)
+  } catch {
+    return false
+  }
+  const target = `socket:[${inode}]`
+  for (const fd of fds) {
+    try {
+      if (readlinkSync(`${fdDir}/${fd}`) === target) return true
+    } catch {
+      // fd vanished mid-scan — keep walking
+    }
+  }
+  return false
 }
 
 interface ProcRow {
