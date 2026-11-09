@@ -20,14 +20,14 @@ Provide cross-platform process inspection with injectable roots/probes (tests us
 
 1. **core/src/proc.ts**: Make procStat/pidAlive work on macOS.
 
-   - On macOS, use `ps -p `<pid>` -o stat=,lstart=` or parse `ps` output to get state and a start identifier. Also need starttime/start token for reuse detection (pidAlive compares start).
+   - On macOS, use `ps -p <pid> -o stat=,lstart=` or parse `ps` output to get state and a start identifier. Also need starttime/start token for reuse detection (pidAlive compares start).
    - Alternatively use `sysctl` (KERN_PROC_PID) or shell out to ps. Keep same API shape `{ state: string, start: string } | null`. For zombies on macOS, state may be indicated differently; need to detect Z/zombie.
    - On non-Linux, try macOS path; if neither works, return null/fail-open as before.
    - Ensure injectable procDir not directly used here, but be compatible with patterns.
 
 2. **core/src/live-procs.ts**: readProcRows currently returns [] if not linux. Need macOS implementation using ps/sysctl/lsof to build ProcRow equivalents (pid, comm, ppid, parentComm, cwd, startMs). Orphan sweep logic can remain similar if we can produce ProcRow objects. Also need to compute startMs (epoch ms).
 
-   - For cwd on macOS, can use `lsof -a -p `<pid>` -d cwd -Fn` or `pwdx` not always available; or use `proc_pidinfo` via node-ffi? No native deps. Better use `lsof` or `ps` + `pwdx`? Or read /proc equivalent doesn't exist - use `lsof -p `<pid>` | grep cwd` or `lsof -Fn -p `<pid>` -a -d cwd`. Also `ps` can give cwd on some systems? Maybe use `lsof` (common on macOS).
+   - For cwd on macOS, can use `lsof -a -p <pid> -d cwd -Fn` or `pwdx` not always available; or use `proc_pidinfo` via node-ffi? No native deps. Better use `lsof` or `ps` + `pwdx`? Or read /proc equivalent doesn't exist - use `lsof -p <pid> | grep cwd` or `lsof -Fn -p <pid> -a -d cwd`. Also `ps` can give cwd on some systems? Maybe use `lsof` (common on macOS).
    - For parent comm, need to read parent process info.
    - This needs to be robust and testable (allow injecting command runners).
 
@@ -44,7 +44,7 @@ Provide cross-platform process inspection with injectable roots/probes (tests us
    - procPpid via /proc/*/status PPid -> use `ps -o ppid= -p <pid>`
    - procIsAgentCmd reads cmdline -> use `ps -o command= -p <pid>` or `ps -ww -o args= -p <pid>`
    - AGENT_ENV_RE checks environ -> on macOS, getting environ of another process is possible via `ps eww -p <pid>` or `sysctl` on some systems? Or use `xargs -0` style from procfs not available. Getting another process's environment on macOS is restricted; may need to use `ps e -p <pid>` (but format varies). Also sometimes need to use `sysctl` KERN_PROCARGS or other methods. This can be tricky. But need best effort parity.
-   - proc cwd via /proc/*/cwd -> use `lsof -a -p `<pid>` -d cwd -Fn | tail -1 | cut -c2-` or `pwdx <pid>` (not always present). Alternatively `lsof` is common.
+   - proc cwd via /proc/*/cwd -> use `lsof -a -p <pid> -d cwd -Fn | tail -1 | cut -c2-` or `pwdx <pid>` (not always present). Alternatively `lsof` is common.
    - For processesRootedIn/agentProcessesIn, need to enumerate all processes on macOS - `ps -axo pid=`, get cwd/cmdline for each. This is more expensive than /proc readdir but doable.
 
 5. **packages/cli/src/commands/daemon.ts, refguard.ts, doctor.ts**: Similar adaptations - check for /proc existence, provide macOS alternatives.
