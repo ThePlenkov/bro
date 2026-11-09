@@ -42,6 +42,7 @@ jobs:
       - run: npm ci --no-audit --no-fund --ignore-scripts
       - run: npm run build
       - run: npm test
+      - run: npm run test:e2e
 
       # The package set is derived, not listed — scripts/publish-set.ts
       # emits every non-private @broject/* under packages/ in dep order.

@@ -24,6 +24,7 @@ import { Readable, Writable } from 'node:stream';
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
   ActiveSession,
+  ClientApp,
   ClientCapabilities,
   ClientContext,
   ClientRequestHandler,
@@ -41,8 +42,9 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
 import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
-import { otelSpan } from './otel.ts';
+import { otelEvent, otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
@@ -136,22 +138,76 @@ function stderrTail(child: ChildProcess): () => string {
   return () => tail.trim();
 }
 
+/** A denied/unserved agent→client call announces itself — one stderr
+ *  line for whoever tails the process, plus an `acp.denied_call`
+ *  journal/OTLP row for the store-side evidence trail (spec bro-mfruo).
+ *  Silent denial is the trap, and the why differs per case: a
+ *  permission prompt means the agent's env dropped its non-interactive
+ *  pin, while an unserved method was never advertised — method-not-found
+ *  is the honest answer, and blaming the pin there sends the operator
+ *  to the wrong config. */
+function deniedCall(by: string, method: string, what: string): void {
+  const why =
+    method === 'session/request_permission'
+      ? 'the agent is prompting, so its non-interactive pin is missing from the provider command/env'
+      : 'never advertised by this client — method-not-found by design';
+  process.stderr.write(`${by}: ${method} (${what}) denied — ${why}\n`);
+  otelEvent('acp.denied_call', { by, method, what });
+}
+
 /** A judge call has no user to ask — default-deny: take a reject
- *  option when the agent offers one, else cancel the request. */
-const denyPermission: ClientRequestHandler<
-  RequestPermissionRequest,
-  RequestPermissionResponse
-> = ctx => {
-  const reject = ctx.params.options.find(
-    o => o.kind === 'reject_once' || o.kind === 'reject_always'
-  );
-  return {
-    outcome:
-      reject === undefined
-        ? { outcome: 'cancelled' }
-        : { outcome: 'selected', optionId: reject.optionId },
+ *  option when the agent offers one, else cancel the request. Loud,
+ *  not silent: the denial line is what turns "the agent stalled" into
+ *  "the agent's permission mode is prompting" (spec bro-mfruo). */
+const denyPermission =
+  (by: string): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> =>
+  ctx => {
+    const what =
+      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'unspecified tool';
+    deniedCall(by, 'session/request_permission', String(what));
+    const reject = ctx.params.options.find(
+      o => o.kind === 'reject_once' || o.kind === 'reject_always'
+    );
+    return {
+      outcome:
+        reject === undefined
+          ? { outcome: 'cancelled' }
+          : { outcome: 'selected', optionId: reject.optionId },
+    };
   };
-};
+
+/** Agent→client methods an unbridged client never serves — fs is
+ *  advertised false at initialize, elicitation and the mcp relay are
+ *  never negotiated. (`terminal/*` IS served — `AcpTerminals` registers
+ *  real handlers.) Same rule as acp-worker's UNADVERTISED_METHODS: a
+ *  registered logger announces the attempt, then answers
+ *  method-not-found — capability honesty beats partial emulation. */
+const UNSERVED_METHODS = [
+  'fs/read_text_file',
+  'fs/write_text_file',
+  'elicitation/create',
+  'mcp/message',
+] as const;
+
+/** The shared unbridged client registration for one-shot (`withAcp`)
+ *  and pooled (`acpOpen`) ACP links — one handler set, so the two
+ *  paths can never drift apart on what they deny or how loudly they
+ *  say it. A bridged link never gets this: every client-bound call
+ *  forwards to the real client, whose answer is the honest one. */
+function wiredClient(terminals: AcpTerminals, by: string): ClientApp {
+  const app = client({ name: 'bro' }).onRequest('session/request_permission', denyPermission(by));
+  for (const m of UNSERVED_METHODS) {
+    app.onRequest<unknown, never>(
+      m,
+      p => p,
+      (): never => {
+        deniedCall(by, m, 'unadvertised capability');
+        throw RequestError.methodNotFound(m);
+      }
+    );
+  }
+  return terminals.register(app);
+}
 
 /** The whole call under the caller's budget — a peer that outlives it
  *  is fail-open, and the process kill in the caller's finally is the
@@ -437,6 +493,18 @@ async function acpOp(
   }
 }
 
+/** The in-process agent this op talks to — the seam names it outright
+ *  or resolves it per spawn label, so a multi-provider gateway hands
+ *  each lane its own agent. */
+function seamPeer(
+  opts: ProviderWireOpts,
+  by: string
+): import('@agentclientprotocol/sdk').AgentApp | undefined {
+  const peer = opts.acp?.peer;
+  if (peer === undefined) return undefined;
+  return typeof peer === 'function' ? peer(by) : peer;
+}
+
 /** One connected ACP operation — `opts.acp.peer` is the in-process
  *  test seam; production execs the tokenized `entry.command` argv
  *  (profile as a separate arg — no shell) and kills the child when
@@ -449,10 +517,8 @@ async function withAcp<T>(
   op: (ctx: ClientContext) => Promise<T>
 ): Promise<T> {
   const terminals = new AcpTerminals();
-  const app = terminals.register(
-    client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
-  );
-  const peer = opts.acp?.peer;
+  const app = wiredClient(terminals, by);
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   let spawnError: string | undefined;
@@ -581,7 +647,8 @@ export async function acpConverse(
         signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
@@ -673,6 +740,28 @@ function tracedUpdates(
  *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
  *  so the plane observer is attached once, not per transport. `cwd`
  *  anchors the bus socket + the per-agent .events.jsonl archive. */
+/** `string | ContentBlock[]` → the journaled prompt text. Text blocks
+ *  carry their text, links and embedded resources their URI, media a
+ *  `[type]` marker — the archive row says what was asked, it is not a
+ *  byte-exact request echo. */
+export const promptText = (prompt: string | ContentBlock[]): string => {
+  if (typeof prompt === 'string') return prompt;
+  return prompt
+    .map(b => {
+      switch (b.type) {
+        case 'text':
+          return b.text;
+        case 'resource_link':
+          return b.uri;
+        case 'resource':
+          return b.resource.uri;
+        default:
+          return `[${b.type}]`;
+      }
+    })
+    .join('\n');
+};
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -687,7 +776,7 @@ export async function pumpTurn(
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
-  plane.start();
+  plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
@@ -782,15 +871,16 @@ const BRIDGED_METHODS = [
 ] as const;
 
 /** The client app for a pooled link — deny-permission posture by
- *  default (bro-5hx1.1 §7); `opts.acp.bridge` flips it to passthrough,
+ *  default (bro-5hx1.1 §7), announced loudly (bro-mfruo);
+ *  `opts.acp.bridge` flips it to passthrough,
  *  forwarding every client-bound call to the delegate. Unbridged links
  *  also register the local terminal registry — a bridged link forwards
  *  terminal/* to the real client instead, so it must not shadow it. */
-function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
+function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals, by: string) {
   const bridge = opts.acp?.bridge;
   const app = client({ name: 'bro' });
   if (bridge === undefined) {
-    return terminals.register(app.onRequest('session/request_permission', denyPermission));
+    return wiredClient(terminals, by);
   }
   for (const m of BRIDGED_METHODS) {
     app.onRequest<Record<string, unknown>, unknown>(
@@ -909,8 +999,8 @@ export async function acpOpen(
     return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`);
   }
   const terminals = new AcpTerminals();
-  const app = pooledClientApp(opts, terminals);
-  const peer = opts.acp?.peer;
+  const app = pooledClientApp(opts, terminals, by);
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   // spawn's 'error' event is async — the getter reads it whenever the
@@ -1172,7 +1262,8 @@ export async function acpPooledTurn(
         turn.signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       endSession();
       end({
@@ -1411,7 +1502,7 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
  *  even ran tools in dogfooding). The preamble states the shapes
  *  mapAnswer validates — field names are the wire's, not aliases. */
 const TYPED_PREAMBLE = [
-  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  `You are a ${JUDGE_PROMPT_MARK}. The user message below is a JSON body {state, questions}.`,
   'Reply with STRICT JSON only — no prose, no markdown fences:',
   '{"answers": {"<question-id>": <answer>, ...}}',
   'Answer shape per question type — copy the question\'s "type":',
