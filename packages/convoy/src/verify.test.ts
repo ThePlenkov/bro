@@ -149,4 +149,13 @@ describe('titleMatches', () => {
     assert.equal(titleMatches('a.b', 'a.b'), true);
     assert.equal(titleMatches('a.b', 'axb'), false);
   });
+
+  test('an unclosed variable is literal text', () => {
+    assert.equal(titleMatches('a {{b', 'a {{b'), true);
+    assert.equal(titleMatches('a {{b', 'a xb'), false);
+  });
+
+  test('a variable name holding a brace is literal text', () => {
+    assert.equal(titleMatches('a {{b}c}}', 'a {{b}c}}'), true);
+  });
 });

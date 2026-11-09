@@ -145,8 +145,10 @@ function mergeClaimFor(
  *  The host is asked only when a merge step closes: a plain step must
  *  not pay for the call. */
 async function probePr(target: MergeTarget): Promise<MergeProbe> {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  // one read of the config: auth and the host must agree on the connectors
+  const broConfig = loadBroConfig()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: broConfig.connectors })
+  const rev = reviewHost(undefined, broConfig.connectors)
   const repo = target.repo ?? rev.resolveRepo([])
   const t = { repo, pr: target.pr }
   const meta = rev.prMetaAsync ? await rev.prMetaAsync(t) : rev.prMeta(t)

@@ -211,6 +211,139 @@ export interface PrRef {
   repo?: string;
 }
 
+/** A markdown link found in free text — where it sits, and the URL it
+ *  carries. */
+interface MarkdownLink {
+  url: string;
+  /** the offset of the link's `[` */
+  start: number;
+  /** the offset just past the link's `)` */
+  end: number;
+}
+
+/** Is this an ASCII digit? */
+function isDigit(ch: string): boolean {
+  return ch >= '0' && ch <= '9';
+}
+
+/** The run of ASCII digits starting at `from` — how many, zero when the
+ *  text there is not a digit. */
+function digitRun(text: string, from: number): number {
+  let n = 0;
+  while (from + n < text.length && isDigit(text[from + n])) n += 1;
+  return n;
+}
+
+/** The next markdown link at or after `from` — a string walk, not a
+ *  regex: a regex over untrusted text is super-linear on hostile input
+ *  (CodeQL), and this text is whatever an agent wrote. The label holds
+ *  no `]` and the URL holds no `)` — markdown's own rule. */
+function nextLink(text: string, from: number): MarkdownLink | null {
+  let bracket = -1;
+  let i = from;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '[') {
+      // the leftmost `[` wins — the label may hold more of them
+      if (bracket < 0) bracket = i;
+      i += 1;
+      continue;
+    }
+    if (ch !== ']') {
+      i += 1;
+      continue;
+    }
+    // a `]` ends the label — a link needs `(` right after it, and a
+    // `]` without one kills every `[` before it
+    if (text[i + 1] !== '(') {
+      bracket = -1;
+      i += 1;
+      continue;
+    }
+    if (bracket < 0) {
+      i += 1;
+      continue;
+    }
+    const urlEnd = text.indexOf(')', i + 2);
+    if (urlEnd < 0) {
+      bracket = -1;
+      i += 1;
+      continue;
+    }
+    return { url: text.slice(i + 2, urlEnd), start: bracket, end: urlEnd + 1 };
+  }
+  return null;
+}
+
+/** Every markdown link in free text. */
+function markdownLinks(text: string): MarkdownLink[] {
+  const links: MarkdownLink[] = [];
+  let from = 0;
+  for (;;) {
+    const link = nextLink(text, from);
+    if (link === null) break;
+    links.push(link);
+    from = link.end;
+  }
+  return links;
+}
+
+/** The PR a link names — `https://host/owner/repo/pull/N`. Null when the
+ *  URL names no PR: an issue link (`/issues/N`) is a different object,
+ *  and reading it as a PR would verify the wrong one. */
+function pullRef(url: string): { pr: number; repo: string } | null {
+  const u = url.trimEnd();
+  const schemeEnd = u.indexOf('://');
+  if (schemeEnd < 0) return null;
+  const scheme = u.slice(0, schemeEnd);
+  if (scheme !== 'http' && scheme !== 'https') return null;
+  const hostEnd = u.indexOf('/', schemeEnd + 3);
+  if (hostEnd < 0 || hostEnd === schemeEnd + 3) return null;
+  const segments = u.slice(hostEnd + 1).split('/');
+  if (segments.length !== 4) return null;
+  const [owner, repo, kind, num] = segments;
+  if (kind !== 'pull') return null;
+  if (owner === '' || repo === '' || /\s/.test(owner) || /\s/.test(repo)) return null;
+  if (num === '' || !/^\d+$/.test(num)) return null;
+  const pr = Number(num);
+  if (!Number.isInteger(pr) || pr <= 0) return null;
+  return { pr, repo: `${owner}/${repo}` };
+}
+
+/** The PRs the markdown links name — the link's own `#N` label is not a
+ *  second reference. */
+function linkRefs(links: MarkdownLink[]): PrRef[] {
+  const out: PrRef[] = [];
+  for (const link of links) {
+    const ref = pullRef(link.url);
+    if (ref === null) continue;
+    out.push({ pr: ref.pr, repo: ref.repo });
+  }
+  return out;
+}
+
+/** The bare `#N` references — outside the markdown links, where the
+ *  link's own label already carries the number. */
+function bareRefs(text: string, links: MarkdownLink[]): PrRef[] {
+  const out: PrRef[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '#') {
+      i += 1;
+      continue;
+    }
+    const at = i;
+    const digits = digitRun(text, i + 1);
+    i += 1 + digits;
+    if (digits === 0) continue;
+    const pr = Number(text.slice(at + 1, at + 1 + digits));
+    if (!Number.isInteger(pr) || pr <= 0) continue;
+    if (links.some((l) => at >= l.start && at < l.end)) continue;
+    out.push({ pr });
+  }
+  return out;
+}
+
 /** The PR references in free text — the clickable `[#N](…/pull/N)` form
  *  (which carries the repo) and the bare `#N` (which does not). The two
  *  forms of the same PR are one reference: the link's own `#N` is not a
@@ -220,36 +353,14 @@ export interface PrRef {
  *  different thing, and reading it as a PR would verify the wrong
  *  object. */
 export function prRefs(text: string): PrRef[] {
+  const links = markdownLinks(text);
   const out: PrRef[] = [];
   const seen = new Set<string>();
-  // Every markdown link first: a `#N` inside one belongs to that link,
-  // and only a `/pull/` link names a PR — an issue link (`/issues/N`) is
-  // a different thing, and reading it as a PR would verify the wrong
-  // object.
-  const link = /\[[^\]]*\]\(([^)]*)\)/g;
-  const spans: [number, number][] = [];
-  for (const m of text.matchAll(link)) {
-    const at = m.index ?? -1;
-    spans.push([at, at + m[0].length]);
-    const pull = /^https?:\/\/[^/\s)]+\/([^/\s)]+)\/([^/\s)]+)\/pull\/(\d+)\s*$/.exec(m[1] ?? '');
-    if (!pull) continue;
-    const pr = Number(pull[3]);
-    if (!Number.isInteger(pr) || pr <= 0) continue;
-    const key = `${pull[1]}/${pull[2]}#${pr}`;
+  for (const ref of [...linkRefs(links), ...bareRefs(text, links)]) {
+    const key = ref.repo === undefined ? `#${ref.pr}` : `${ref.repo}#${ref.pr}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ pr, repo: `${pull[1]}/${pull[2]}` });
-  }
-  const bare = /#(\d+)/g;
-  for (const m of text.matchAll(bare)) {
-    const at = m.index ?? -1;
-    if (spans.some(([from, to]) => at >= from && at < to)) continue;
-    const pr = Number(m[1]);
-    if (!Number.isInteger(pr) || pr <= 0) continue;
-    const key = `#${pr}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ pr });
+    out.push(ref);
   }
   return out;
 }

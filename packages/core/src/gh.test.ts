@@ -47,6 +47,16 @@ describe('prRefs', () => {
   test('a zero or negative number is not a PR', () => {
     assert.deepEqual(prRefs('#0 and #-3'), []);
   });
+
+  test('hostile text is parsed, not hung on', () => {
+    // a long run of `[` is what a regex scan chokes on — the parser is
+    // a string walk, so the answer is the same, and fast
+    assert.deepEqual(prRefs(`${'['.repeat(20000)}#958`), [{ pr: 958 }]);
+  });
+
+  test('a link whose label holds a bracket is not a link', () => {
+    assert.deepEqual(prRefs('[[a]](https://github.com/o/r/pull/12)'), []);
+  });
 });
 
 describe('issueLink', () => {

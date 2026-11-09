@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import type { MergeProbe, MergeTarget } from '@broject/convoy';
 import { runConvoyCommand } from './convoy.ts';
 
 /** A scripted `bd` — the molecule, the formula and the task rows the
@@ -80,7 +81,10 @@ function tasksJson(reason: string): string {
 interface Fixture {
   closes: () => string;
   cleanup: () => void;
-  run: (args: string[], probe?: Parameters<typeof runConvoyCommand>[1]) => Promise<void>;
+  run: (
+    args: string[],
+    probe?: (target: MergeTarget) => Promise<MergeProbe>
+  ) => Promise<void>;
 }
 
 /** A fake bd on PATH + the molecule/formula it serves. */
@@ -129,109 +133,119 @@ function fixture(opts: {
   };
 }
 
-describe('convoy done — the merge step closes on a verdict', () => {
-  test('a merged PR closes the step and the verdict leads the close reason', async () => {
-    const f = fixture({ mergeType: 'merge-step', formulaType: 'merge-step' });
-    const prev = process.exitCode;
-    try {
-      await f.run(
-        ['done', 's-1', '--result', `PR #${PR} merged by the watcher`, '--mol', 'm-1'],
-        async () => ({ state: 'MERGED', mergedBy: 'ThePlenkov', mergeSha: 'd11788ce1234' })
-      );
-      const closed = f.closes();
-      assert.match(closed, /close s-1 --reason/);
-      assert.match(closed, /verified: PR #958 MERGED \(merge d11788ce, by ThePlenkov\)/);
-      assert.equal(process.exitCode, undefined);
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
-    }
-  });
+/** One scenario: what the fixture serves, what the host answers, what
+ *  the convoy must do. The table keeps the cases side by side — one
+ *  shape of setup, one shape of assertion. */
+interface Scenario {
+  name: string;
+  /** the poured step's type — bd flattens an unregistered type */
+  mergeType?: string;
+  /** the type the formula declares */
+  formulaType?: string;
+  /** the upstream step's close reason */
+  upstreamReason?: string;
+  /** the agent's own sentence */
+  result: string;
+  /** the host's answer — absent when the host must not be asked */
+  answer?: (target: MergeTarget) => Promise<MergeProbe>;
+  /** the exit code the command must leave */
+  exit?: number;
+  /** the closes the command must have asked for */
+  closed?: RegExp[];
+  /** the PRs the host was asked about */
+  asked?: number[];
+}
 
-  test('an open PR refuses — the gate holds and the step stays open', async () => {
-    const f = fixture({ mergeType: 'merge-step', formulaType: 'merge-step' });
-    const prev = process.exitCode;
-    try {
-      await f.run(['done', 's-1', '--result', `PR #${PR} merged`, '--mol', 'm-1'], async () => ({
-        state: 'OPEN',
-      }));
-      assert.equal(process.exitCode, 3);
-      assert.equal(f.closes(), '');
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
-    }
-  });
+/** The host's answer for a merged PR — one record, shared by the cases
+ *  that need it. */
+const MERGED: MergeProbe = {
+  state: 'MERGED',
+  mergedBy: 'ThePlenkov',
+  mergeSha: 'd11788ce1234',
+};
 
-  test('the handoff names the PR when the result does not', async () => {
-    const f = fixture({ mergeType: 'merge-step', formulaType: 'merge-step' });
-    const prev = process.exitCode;
-    const asked: number[] = [];
-    try {
-      await f.run(['done', 's-1', '--result', 'merged it', '--mol', 'm-1'], async t => {
-        asked.push(t.pr);
-        return { state: 'OPEN' };
-      });
-      assert.deepEqual(asked, [PR]);
-      assert.equal(process.exitCode, 3);
-      assert.equal(f.closes(), '');
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
-    }
+/** Run one scenario against the fixture and assert what it must do. */
+async function runScenario(s: Scenario): Promise<void> {
+  const f = fixture({
+    mergeType: s.mergeType ?? 'merge-step',
+    formulaType: s.formulaType ?? 'merge-step',
+    upstreamReason: s.upstreamReason,
   });
-
-  test('a claim with no PR anywhere is refused before the host is asked', async () => {
-    const f = fixture({
-      mergeType: 'merge-step',
-      formulaType: 'merge-step',
-      upstreamReason: 'Gate green.',
+  const asked: number[] = [];
+  const answer = s.answer;
+  const prev = process.exitCode;
+  try {
+    await f.run(['done', 's-1', '--result', s.result, '--mol', 'm-1'], async t => {
+      asked.push(t.pr);
+      if (answer === undefined) throw new Error('the host must not be asked');
+      return answer(t);
     });
-    const prev = process.exitCode;
-    let asked = false;
-    try {
-      await f.run(['done', 's-1', '--result', 'merged it', '--mol', 'm-1'], async () => {
-        asked = true;
-        return { state: 'MERGED' };
-      });
-      assert.equal(asked, false);
-      assert.equal(process.exitCode, 3);
-      assert.equal(f.closes(), '');
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
+    assert.equal(process.exitCode, s.exit);
+    const closes = f.closes();
+    if (s.closed === undefined) {
+      assert.equal(closes, '');
+    } else {
+      for (const want of s.closed) assert.match(closes, want);
     }
-  });
+    if (s.asked !== undefined) assert.deepEqual(asked, s.asked);
+  } finally {
+    process.exitCode = prev;
+    f.cleanup();
+  }
+}
 
-  test('the formula declares the merge step even when bd flattened the type', async () => {
-    // bd flattens an unregistered custom type to `task` — the formula
-    // keeps the declaration, and the step is still verified
-    const f = fixture({ mergeType: 'task', formulaType: 'merge-step' });
-    const prev = process.exitCode;
-    try {
-      await f.run(['done', 's-1', '--result', `PR #${PR} merged`, '--mol', 'm-1'], async () => ({
-        state: 'OPEN',
-      }));
-      assert.equal(process.exitCode, 3);
-      assert.equal(f.closes(), '');
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
-    }
-  });
+const SCENARIOS: Scenario[] = [
+  {
+    name: 'a merged PR closes the step and the verdict leads the close reason',
+    result: `PR #${PR} merged by the watcher`,
+    answer: async () => MERGED,
+    closed: [/close s-1 --reason/, /verified: PR #958 MERGED \(merge d11788ce, by ThePlenkov\)/],
+    asked: [PR],
+  },
+  {
+    name: 'an open PR refuses — the gate holds and the step stays open',
+    result: `PR #${PR} merged`,
+    answer: async () => ({ state: 'OPEN' }),
+    exit: 3,
+    asked: [PR],
+  },
+  {
+    name: 'the handoff names the PR when the result does not',
+    result: 'merged it',
+    answer: async () => ({ state: 'OPEN' }),
+    exit: 3,
+    asked: [PR],
+  },
+  {
+    name: 'a claim with no PR anywhere is refused before the host is asked',
+    upstreamReason: 'Gate green.',
+    result: 'merged it',
+    answer: async () => MERGED,
+    exit: 3,
+    asked: [],
+  },
+  {
+    name: 'the formula declares the merge step even when bd flattened the type',
+    mergeType: 'task',
+    result: `PR #${PR} merged`,
+    answer: async () => ({ state: 'OPEN' }),
+    exit: 3,
+    asked: [PR],
+  },
+  {
+    name: 'a step that is not a merge step closes as before',
+    mergeType: 'agent',
+    formulaType: 'agent',
+    result: 'done',
+    closed: [/close s-1 --reason done/],
+    asked: [],
+  },
+];
 
-  test('a step that is not a merge step closes as before', async () => {
-    const f = fixture({ mergeType: 'agent', formulaType: 'agent' });
-    const prev = process.exitCode;
-    try {
-      await f.run(['done', 's-1', '--result', 'done', '--mol', 'm-1'], async () => {
-        throw new Error('the host must not be asked for a plain step');
-      });
-      assert.equal(process.exitCode, undefined);
-      assert.match(f.closes(), /close s-1 --reason done/);
-    } finally {
-      process.exitCode = prev;
-      f.cleanup();
-    }
-  });
+describe('convoy done — the merge step closes on a verdict', () => {
+  for (const s of SCENARIOS) {
+    test(s.name, async () => {
+      await runScenario(s);
+    });
+  }
 });
