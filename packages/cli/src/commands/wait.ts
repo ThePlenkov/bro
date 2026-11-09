@@ -215,7 +215,8 @@ function detailLine(w: Watch, v: Verdict): string {
       ? ` — replica ${w.plane.peer.alias}` +
         (v.replicaAgeMs !== undefined ? `, synced ${fmtAge(v.replicaAgeMs)} ago` : ', never synced')
       : '';
-  return `${w.arg}: ${v.verdict}${v.reason !== undefined ? ` (${v.reason})` : ''}${src}`;
+  const reason = v.reason !== undefined ? ` (${v.reason})` : '';
+  return `${w.arg}: ${v.verdict}${reason}${src}`;
 }
 
 interface EmitOpts {
@@ -454,25 +455,27 @@ function pollWatch(w: Watch, ctx: WaitCtx, timeoutMs?: number): void {
     }
     return;
   }
-  let threadTimeout =
-    readTimeoutBase === undefined ? undefined : Math.max(1, Math.floor(readTimeoutBase * 0.5));
-  // recompute remaining budget immediately before calling thread/read
-  // paths that can run again — the dep read above already spent part
-  // of the slice, so measure against a fresh clock
-  if (readTimeoutBase !== undefined) {
-    const d = ctx.deadline;
-    if (d !== undefined) {
-      const rem = Math.max(0, d - performance.now());
-      threadTimeout =
-        rem < 1
-          ? undefined
-          : Math.min(threadTimeout ?? readTimeoutBase, Math.max(1, Math.floor(rem * 0.5)));
-      if (threadTimeout !== undefined && threadTimeout < 1) {
-        threadTimeout = undefined;
-      }
-    }
+  settleFromPlanes(w, ctx, read, req, threadReadSlice(readTimeoutBase, ctx));
+}
+
+/** the thread read's share — half the read slice, capped by what the
+ *  deadline still leaves after the dep read already spent (measured
+ *  on a fresh clock, not the poll's entry time) */
+function threadReadSlice(readTimeoutBase: number | undefined, ctx: WaitCtx): number | undefined {
+  if (readTimeoutBase === undefined) {
+    return undefined;
   }
-  settleFromPlanes(w, ctx, read, req, threadTimeout);
+  const half = Math.max(1, Math.floor(readTimeoutBase * 0.5));
+  const d = ctx.deadline;
+  if (d === undefined) {
+    return half;
+  }
+  const rem = Math.max(0, d - performance.now());
+  if (rem < 1) {
+    return undefined;
+  }
+  const slice = Math.min(half, Math.max(1, Math.floor(rem * 0.5)));
+  return slice < 1 ? undefined : slice;
 }
 
 /** terminal verdicts by precedence — a bad ref (2) outranks a dead
@@ -493,6 +496,28 @@ function aggregate(watches: Watch[]): { code: number; verdict: string } | undefi
   return watches.every(w => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined;
 }
 
+/** this watch's share of the remaining window — recomputed per poll
+ *  so N unsettled watches split the budget instead of multiplying it.
+ *  'exhausted' ends the turn: nothing fits. */
+function watchPollSlice(
+  watches: Watch[],
+  o: { deadline: number; timeout: number }
+): number | undefined | 'exhausted' {
+  const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
+  if (remainingMs === undefined) {
+    return undefined;
+  }
+  const unsettledCount = watches.filter(x => x.settled === undefined).length;
+  if (unsettledCount === 0) {
+    return undefined;
+  }
+  if (remainingMs < unsettledCount) {
+    return 'exhausted';
+  }
+  const slice = Math.min(120_000, Math.floor(remainingMs / unsettledCount));
+  return slice < 1 ? 'exhausted' : slice;
+}
+
 /** one turn of the loop — poll every unsettled watch. A throw is a
  *  read failure, not a crash — a long-lived watcher spends it against
  *  the same blip budget */
@@ -505,20 +530,12 @@ function pollUnsettled(
     if (w.settled !== undefined) {
       continue;
     }
-    const remainingMs = o.timeout > 0 ? Math.max(0, o.deadline - performance.now()) : undefined;
-    const unsettledCount = watches.filter(x => x.settled === undefined).length;
-    if (remainingMs !== undefined && unsettledCount > 0 && remainingMs < unsettledCount) {
-      return;
-    }
-    const doltTimeoutMs =
-      remainingMs === undefined || unsettledCount === 0
-        ? undefined
-        : Math.min(120_000, Math.floor(remainingMs / unsettledCount));
-    if (doltTimeoutMs !== undefined && doltTimeoutMs < 1) {
+    const slice = watchPollSlice(watches, o);
+    if (slice === 'exhausted') {
       return;
     }
     try {
-      pollWatch(w, ctx, doltTimeoutMs);
+      pollWatch(w, ctx, slice);
     } catch (err) {
       noteReadErrors(w, [
         `unexpected poll failure — ${err instanceof Error ? err.message : String(err)}`,
@@ -552,7 +569,7 @@ async function watchLoop(
     // cap the poll sleep at the remaining budget — a short --timeout
     // exits on its boundary, not one full interval late
     try {
-      await sleep(Math.min(o.every * 1000, deadline - performance.now()));
+      await sleep(Math.min(o.every * 1000, deadline - performance.now())); // NOSONAR — the bounded poll's tick sleeps between turns by design, never spins
     } catch {
       // a rejected timer is not a verdict — the next turn re-reads
       // the stores and the deadline either way

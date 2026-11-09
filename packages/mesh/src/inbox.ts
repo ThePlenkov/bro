@@ -159,6 +159,36 @@ function scanRemote(
   scanReplica(synced.path, peer, out, errors, left);
 }
 
+/** store responses land as a bare array or a `{rows}` envelope —
+ *  both unwrap to the same list */
+function rowsOf(res: unknown): (BeadLike & { status?: string })[] {
+  if (Array.isArray(res)) {
+    return res;
+  }
+  const rows = (res as { rows?: unknown } | null | undefined)?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** the local store read — bounded via `listWithTimeout` when the
+ *  backend offers it. `all`/`limit:0` keep closed rows and a
+ *  configured page from hiding envelopes before the caller filters. */
+function localRows(
+  store: ReturnType<typeof storeFor>,
+  closedLocal: boolean,
+  timeoutMs?: number
+): (BeadLike & { status?: string })[] {
+  const storeAny = store as {
+    listWithTimeout?(opts: unknown, timeoutMs: number): unknown;
+  };
+  if (typeof storeAny.listWithTimeout === 'function' && timeoutMs !== undefined) {
+    return rowsOf(storeAny.listWithTimeout({ all: closedLocal || undefined, limit: 0 }, timeoutMs));
+  }
+  return store.list<BeadLike & { status?: string }>({
+    all: closedLocal || undefined,
+    limit: 0,
+  });
+}
+
 /** local: read the peer's live store read-only — `bd -C <checkout>
  *  list --json` carries labels inline. A `local` peer needs no publish
  *  step — its working store is the source. `closedLocal` admits
@@ -179,33 +209,7 @@ function scanLocal(
   }
   let rows: (BeadLike & { status?: string })[];
   try {
-    const store = storeFor(dir);
-    const storeAny = store as any;
-    if (typeof storeAny.listWithTimeout === 'function' && timeoutMs !== undefined) {
-      try {
-        const res = storeAny.listWithTimeout(
-          {
-            all: closedLocal || undefined,
-            limit: 0,
-          },
-          timeoutMs
-        );
-        rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
-      } catch (err) {
-        errors.push(
-          `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
-        );
-        return;
-      }
-    } else {
-      // closedLocal needs the store's own all-filter off too — the
-      // backend drops closed rows before this loop ever sees them.
-      // limit:0 likewise — a configured page must not hide envelopes
-      rows = store.list<BeadLike & { status?: string }>({
-        all: closedLocal || undefined,
-        limit: 0,
-      });
-    }
+    rows = localRows(storeFor(dir), closedLocal, timeoutMs);
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
@@ -291,9 +295,7 @@ function admitOwnGithubRecord(
   ctx: { peers: MeshPeer[]; selfRig: string; selfLogin: string | undefined },
   out: PeerRecord[]
 ): void {
-  const bound = ctx.peers.find(
-    p => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase()
-  );
+  const bound = ctx.peers.find(p => p.login?.toLowerCase() === r.author.toLowerCase());
   // verdicts land as comments on the request's own issue — they count
   // only from an authenticated bound author, and they feed the
   // terminal set so a verdicted github request leaves the inbox

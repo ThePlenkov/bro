@@ -71,15 +71,26 @@ const STAGE_RANK: Record<ThreadStage, number> = {
   accepted: 3,
 };
 
+/** store responses land as a bare array or a `{rows}` envelope —
+ *  both unwrap to the same list */
+function rowsOf(res: unknown): BeadLike[] {
+  if (Array.isArray(res)) {
+    return res;
+  }
+  const rows = (res as { rows?: unknown } | null | undefined)?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
 function ownBeads(dir: string, timeoutMs?: number): { rows: BeadLike[]; error?: string } {
   try {
     const store = taskStore(dir);
-    const storeAny = store as any;
+    const storeAny = store as {
+      listWithTimeout?(opts: unknown, timeoutMs: number): unknown;
+    };
     if (typeof storeAny.listWithTimeout === 'function' && timeoutMs !== undefined) {
       try {
         const res = storeAny.listWithTimeout({ labels: ['mesh:v:1'], all: true }, timeoutMs);
-        const rows = Array.isArray(res) ? res : Array.isArray(res?.rows) ? res.rows : [];
-        return { rows };
+        return { rows: rowsOf(res) };
       } catch (err) {
         return {
           rows: [],
@@ -301,9 +312,7 @@ function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
   if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
     return;
   }
-  const bound = ctx.peers.find(
-    p => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase()
-  );
+  const bound = ctx.peers.find(p => p.login?.toLowerCase() === r.author.toLowerCase());
   const v = githubProvenance({
     author: r.author,
     peer: bound,

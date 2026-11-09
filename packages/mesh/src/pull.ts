@@ -17,26 +17,28 @@ export interface DoltResult {
 }
 
 function dolt(args: string[], cwd?: string, timeoutMs = 120_000): DoltResult {
-  const p = spawnSync('dolt', args, {
-    // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  const p = spawnSync(
+    'dolt', // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+    args,
+    {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+    }
+  );
   const stderr = (p.stderr ?? '').trim();
   const msg = (p.error?.message ?? '').trim();
-  const err =
-    stderr !== ''
-      ? stderr
-      : msg !== ''
-        ? msg
-        : p.signal
-          ? `dolt killed by signal ${p.signal}`
-          : 'dolt failed';
+  let err = stderr;
+  if (err === '') {
+    err = msg;
+  }
+  if (err === '') {
+    err = p.signal ? `dolt killed by signal ${p.signal}` : 'dolt failed';
+  }
   return {
-    code: p.status ?? (p.error ? 1 : 1),
+    code: p.status ?? 1,
     out: p.stdout ?? '',
     err,
   };
