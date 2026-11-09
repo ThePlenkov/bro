@@ -294,7 +294,14 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
             const parsed = Date.parse(candidate)
             if (!isNaN(parsed)) {
               lstart = candidate
-              const match = new RegExp(parts.slice(start, start + len).join('\\s+')).exec(trimmed)
+              // raw ps tokens can carry regex metacharacters (comm is free
+              // text) — escape before they become a pattern
+              const match = new RegExp(
+                parts
+                  .slice(start, start + len)
+                  .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                  .join('\\s+')
+              ).exec(trimmed)
               comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
               break
             }
@@ -308,7 +315,12 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
             const parsed = Date.parse(candidate)
             if (!isNaN(parsed)) {
               lstart = candidate
-              const match = new RegExp(parts.slice(2, 2 + len).join('\\s+')).exec(trimmed)
+              const match = new RegExp(
+                parts
+                  .slice(2, 2 + len)
+                  .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                  .join('\\s+')
+              ).exec(trimmed)
               comm = match ? trimmed.slice(match.index + match[0].length).trim() : ''
               break
             }

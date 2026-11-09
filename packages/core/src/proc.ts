@@ -159,10 +159,11 @@ export function markerOwner(
 ): { pid: number; start: string } | null {
   const s = (firstLine ?? '').trim()
   // Parse positionally to avoid regex backtracking (CodeQL polynomial regex).
-  const firstSpace = s.indexOf(' ')
+  // Separators are any whitespace — a tab-spaced marker is still owned.
+  const firstSpace = s.search(/\s/)
   if (firstSpace === -1) return null
   const rest = s.slice(firstSpace + 1).trimStart()
-  const secondSpace = rest.indexOf(' ')
+  const secondSpace = rest.search(/\s/)
   if (secondSpace === -1) return null
   const pidStr = rest.slice(0, secondSpace).trim()
   const start = rest.slice(secondSpace + 1).trim()

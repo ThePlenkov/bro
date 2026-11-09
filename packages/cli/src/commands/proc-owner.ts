@@ -55,8 +55,9 @@ function procIsAgentCmd(dir: string): boolean {
 
 /** Env badges agent runtimes pin on themselves — every descendant
  *  inherits them, so a detached tool shell counts even after a setsid
- *  broke the ancestry chain. NUL-anchored for /proc; on macOS ps output
- *  is whitespace-delimited, so also allow whitespace boundaries. */
+ *  broke the ancestry chain. NUL-anchored — /proc environ and the darwin
+ *  `environ` path both NUL-join their tokens, so a whitespace boundary
+ *  would only ever under-match, never fix one. */
 const AGENT_ENV_RE = /(?:^|\0)(?:BRO_AGENT_ID|AI_AGENT)=/;
 
 function readProcText(dir: string, file: string): string {
