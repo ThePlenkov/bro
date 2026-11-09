@@ -201,8 +201,10 @@ const writeSpecs = (dir: string, files: Record<string, string>): void => {
 /** process.exit stubbed into a throw — usage-error paths exit 2 and an
  *  in-process command run must not take the test runner with it. */
 class ExitSignal extends Error {
-  constructor(readonly code: number) {
+  readonly code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

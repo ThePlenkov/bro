@@ -107,7 +107,7 @@ sibling module.
 
 ## Setup
 
-Prereqs: `node >= 22.18` (native TS type-stripping) and `gh` authenticated.
+Prereqs: `node >= 26.13` (native TS type-stripping) and `gh` authenticated.
 
 Nx plugins are regular npm deps (`@nx-devkit/*`); `npm install` is all it
 takes — no submodule, no patch step:
@@ -121,7 +121,7 @@ npm install
 ```bash
 npm run build      # gen-plugins + nx run-many -t build (packages only;
                    # skills-* excluded — skill build needs skills-compiler)
-npm test           # node:test via tsx
+npm test           # node --test, native type stripping
 npm run lint       # includes skill lint/validate targets
 npx nx show projects
 ```
@@ -135,11 +135,11 @@ the capability, absence is honest.
 
 ```ts
 interface Connector {
-  name: string                      // 'beads' | 'github' | …
-  matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
-  tasks?(ctx): TaskStore            // work items — `bro task` doc surface + `bro spec` reads
-  reviews?(ctx): ReviewFacade       // PR review loop — `bro review act`, `debt`
-  hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
+  name: string; // 'beads' | 'github' | …
+  matchRemote?(url): boolean; // claims hosts it can serve (auto-detect)
+  tasks?(ctx): TaskStore; // work items — `bro task` doc surface + `bro spec` reads
+  reviews?(ctx): ReviewFacade; // PR review loop — `bro review act`, `debt`
+  hooks?(ctx): ConnectorHooks; // lifecycle probes — see below
 }
 ```
 
@@ -168,7 +168,7 @@ skipped: a plugin cannot shadow a built-in.
 
 ## Conventions
 
-- **Node-native only.** The published CLI runs on `node >= 22.18` — no
+- **Node-native only.** The published CLI runs on `node >= 26.13` — no
   `Bun.*` APIs anywhere in `packages/`.
 - **The review host's CLI is a runtime dep of that connector** — GitHub
   shells out to `gh`, GitLab to `glab`. Domain code and skills call the
@@ -200,11 +200,11 @@ silently. Two rules:
 
 The seams:
 
-| surface | mechanism |
-| --- | --- |
-| whole command | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
-| flag / subcommand | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts) |
-| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site |
+| surface                 | mechanism                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------ |
+| whole command           | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
+| flag / subcommand       | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts)                          |
+| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site             |
 
 All emit `warning: <what> is deprecated — <advice>`. One line, on
 stderr, and the old path keeps working — that's the whole contract.

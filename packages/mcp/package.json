@@ -4,7 +4,7 @@
   "type": "module",
   "dependencies": {
     "@broject/core": "^0.3.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "ip-address": "^10.7.4"
   },
   "exports": {
@@ -14,19 +14,18 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -37,7 +36,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "MCP server binding for bro's plane catalog — stdio tools generated from plane descriptors (specs/bro-9rls.1.md)",
+  "description": "MCP server binding for bro's plane catalog \u2014 stdio tools generated from plane descriptors (specs/bro-9rls.1.md)",
   "keywords": [
     "mcp",
     "planes",

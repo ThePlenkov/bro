@@ -6,7 +6,7 @@
  * `agents.json`, `.exit` records — those come from the work itself,
  * never from us (spec bro-762eh).
  *
- * Runs under `node` ≥22.18 native TS (the floor bro itself requires).
+ * Runs under `node` ≥26.13 native TS (the floor bro itself requires).
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

@@ -176,7 +176,7 @@ const MAX_OUTPUT = 1 << 20;
  *  own plugin process `process.execPath` IS opencode — spawning it with
  *  `hooks <event>` starts a TUI instead of running the hook, and the plugin
  *  fails open into silence. `node` on PATH is the right ask anyway: it is what
- *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
+ *  bro itself requires (`engines.node >= 26.13`), it is what hooks/run.sh
  *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
 export function jsRuntime(): string {
   return process.platform === 'win32' ? 'node.exe' : 'node';

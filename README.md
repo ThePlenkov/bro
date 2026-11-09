@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@broject/bro)](https://www.npmjs.com/package/@broject/bro)
 [![CI](https://github.com/ThePlenkov/bro/actions/workflows/ci.yml/badge.svg)](https://github.com/ThePlenkov/bro/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D26.13-brightgreen)](https://nodejs.org)
 
 > Your agent's sidekick. Skills are instructions — **bro is the brain.**
 >
@@ -62,7 +62,7 @@ published CLI dispatches (`bro debt status`). The grouped surface
 (`bro review debt status`) lands in **0.3.0**; flat names stay
 permanent aliases, and upcoming commands are marked `0.3.0`.
 
-Requires: `node >= 22.18`, `gh` authenticated, `bd`
+Requires: `node >= 26.13`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so
 it's required unless you opt out. That's it. No tokens to babysit, no
 config files to confess to. (Zero-beads fallback: `"stores": ["jsonl"]`

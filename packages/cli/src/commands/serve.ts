@@ -360,14 +360,14 @@ export function acquireServeLock(
  *  without a second decode of the failure. */
 export class HttpError extends Error {
   override name = 'HttpError';
-  constructor(
-    public status: number,
-    message: string,
-    /** close the connection after the response is sent — the terminal
-     *  verdict for an over-bound upload: status out, socket behind it */
-    public close = false
-  ) {
+  status: number;
+  /** close the connection after the response is sent — the terminal
+   *  verdict for an over-bound upload: status out, socket behind it */
+  close: boolean;
+  constructor(status: number, message: string, close = false) {
     super(message);
+    this.status = status;
+    this.close = close;
   }
 }
 

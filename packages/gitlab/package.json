@@ -9,7 +9,7 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -17,15 +17,14 @@
   },
   "devDependencies": {
     "@broject/github": "^0.3.0",
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "GitLab connector for bro — reviews facade over the glab CLI",
+  "description": "GitLab connector for bro \u2014 reviews facade over the glab CLI",
   "keywords": [
     "gitlab",
     "connector",

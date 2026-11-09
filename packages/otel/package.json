@@ -13,19 +13,18 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Hook-first telemetry for bro — emitHook facade: config-gated sampling + field allowlist over every dispatched hook event, exported to file/OTLP/stdout sinks",
+  "description": "Hook-first telemetry for bro \u2014 emitHook facade: config-gated sampling + field allowlist over every dispatched hook event, exported to file/OTLP/stdout sinks",
   "keywords": [
     "otel",
     "telemetry",

@@ -3,8 +3,40 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-
-//#region packages/cli/src/adapter/core.ts
+// packages/cli/src/adapter/core.ts
+/**
+* bro's host-agnostic adapter core.
+*
+* Every bro client adapter (pi, omp, opencode, kilo) answers the same
+* three questions: where is the bro CLI, how do I ask it something, and
+* what did it say. That is this module — and only this module. The
+* per-client files carry the *host* half: which events exist, how a
+* context string reaches the model, how a stop is refused, which tool
+* and command to register.
+*
+* The split exists so the duplication cannot come back. The CLI ladder,
+* the spawn-and-parse protocol and the board rendering were three
+* near-verbatim copies of the same 120 lines; they live here once.
+*
+* Two constraints shape the code:
+*
+*   - **Self-contained.** A shipped adapter is loaded by its host as a
+*     plain file (pi's jiti reads the raw .ts; omp resolves relative
+*     imports inside a plugin package). Nothing here may import from
+*     @broject/*: a bundler would drag a package's worth of unrelated
+*     code into a two-hundred-line artifact, and the artifact has to
+*     keep working when the host loads it from a directory nobody
+*     installed a node_modules tree into. `broEnabled` therefore
+*     re-implements core's `repoOptedIn` — one duplication, in one
+*     place, instead of one per client. Keep the marker list in sync
+*     with CONFIG_LAYER_FILES in @broject/core.
+*
+*   - **Fail-open.** A missing CLI, a hung child, a broken pipe, a
+*     non-JSON line, a non-zero exit — every one of them resolves to
+*     "no opinion" (null), never to a thrown error. A hook that throws
+*     takes the host's session down with it, and bro's policy is
+*     advisory everywhere except the stop gate.
+*/
 /** How long a normal hook probe may take. */
 const HOOK_TIMEOUT_MS = 15e3;
 /** session-start/post-compaction list `bd ready` and scan worktrees —
@@ -303,21 +335,11 @@ function boardLines(s) {
 function statusCrumb(s) {
 	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
 }
-
-//#endregion
-//#region packages/cli/src/adapter/host.ts
-/** The board's widget key — one slot, owned by bro. */
-const BOARD_KEY = "bro";
 /** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
 *  board refresh are interactive reads, and a wedged dolt lock can
 *  stall them forever. The kill takes the detached process group
 *  down, so a dolt child dies with its parent. */
 const RUN_TIMEOUT_MS = 6e4;
-/** How long a failed CLI resolution stays cached before a retry —
-*  PATH, a local install or npx can appear mid-session, but
-*  re-probing the npx rung on every keystroke would be worse than
-*  the outage. */
-const RESOLVE_RETRY_MS = 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -356,8 +378,8 @@ function sharedBinding(host) {
 		},
 		paint: host.paint,
 		clear(ctx) {
-			ctx.ui.setWidget(BOARD_KEY, void 0);
-			ctx.ui.setStatus(BOARD_KEY, void 0);
+			ctx.ui.setWidget("bro", void 0);
+			ctx.ui.setStatus("bro", void 0);
 		},
 		notify: host.notify,
 		argumentCompletions: void 0,
@@ -421,7 +443,7 @@ function createBroDriver(host, api) {
 	let resolved;
 	let resolvedFailedAt;
 	const command = () => {
-		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
+		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < 6e4)) return resolved;
 		resolvedFailedAt = void 0;
 		resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
 			if (cmd === null) resolvedFailedAt = Date.now();
@@ -513,9 +535,10 @@ function createBroDriver(host, api) {
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
 		const sessionId = host.sessionId(ctx);
+		const prompt = host.promptOf(event);
 		const nudge = probe("prompt-submit", {
 			session_id: sessionId,
-			prompt: host.promptOf(event)
+			prompt
 		}, cwd).then(contextOf);
 		const parts = [];
 		const pending = hydration;
@@ -543,9 +566,10 @@ function createBroDriver(host, api) {
 	});
 	const stopGate = async (event, ctx, sessionId) => {
 		if (host.stopAborted?.(event) === true) return;
+		const already = gatedSession === sessionId || host.stopAlreadyRefused(event);
 		const control = await probe("stop", {
 			session_id: sessionId,
-			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
+			stop_hook_active: already
 		}, host.cwd(ctx));
 		if (control?.decision !== "block") {
 			const hint = contextOf(control);
@@ -566,11 +590,11 @@ function createBroDriver(host, api) {
 		const sessionId = host.sessionId(ctx);
 		const inFlight = stopsInFlight.get(sessionId);
 		if (inFlight !== void 0) return inFlight;
-		const run$1 = stopGate(event, ctx, sessionId).finally(() => {
+		const run = stopGate(event, ctx, sessionId).finally(() => {
 			stopsInFlight.delete(sessionId);
 		});
-		stopsInFlight.set(sessionId, run$1);
-		return run$1;
+		stopsInFlight.set(sessionId, run);
+		return run;
 	});
 	bind(host.events.turnEnd, (_event, ctx) => {
 		refreshBoard(ctx).catch(() => {});
@@ -707,9 +731,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 	}));
 	return promise;
 }
-
-//#endregion
-//#region packages/cli/src/adapter/omp-modes.ts
+// packages/cli/src/adapter/omp-modes.ts
 /**
 * Install the bridges. Every handler is fail-open: a missing board, an
 * empty claim list, or a fact bro does not have means the bridge
@@ -762,9 +784,56 @@ function installModeBridges(pi, source) {
 		return { additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(", ")}) — claim a bead before editing, so two workers never touch one unit of work.` };
 	});
 }
-
-//#endregion
-//#region packages/cli/src/adapter/omp.ts
+// packages/cli/src/adapter/omp.ts
+/**
+* bro as an omp extension — the board on omp's TUI, plus the same
+* lifecycle mechanics the shell adapters carry, over omp's in-process
+* extension API.
+*
+* ## Why omp gets its own adapter
+*
+* omp is not pi. The extension *shape* is the same (`pi.on`,
+* `registerCommand`, `registerTool`), but the vocabulary is not, and
+* the differences are the interesting part:
+*
+*   - **omp has a native stop gate.** `session_stop` accepts
+*     `{ decision: "block", reason }` and re-fires with
+*     `stop_hook_active: true` — exactly bro's one-shot gate contract,
+*     with the host enforcing it. pi had to fake it with
+*     `agent_before_settle` plus a hand-rolled continuation, and
+*     opencode had to re-prompt as a synthetic turn. Here bro's
+*     `decision: "block"` maps straight onto the host's own slot, and
+*     the host's `stop_hook_active` flag goes straight back into bro's
+*     hook payload.
+*
+*   - **omp's modes are native.** Plan, Goal, Vibe, Prewalk and Advisor
+*     all exist in omp already. bro does not reimplement them — bro is
+*     the *state plane* they run over, not a second set of modes. The
+*     wiring below is deliberately thin: bro's durable state (beads,
+*     claims, PR gates) is injected into the session, and the modes
+*     keep their own semantics.
+*
+*   - **omp's widget slot takes plain strings.** `ctx.ui.setWidget`
+*     accepts `string[]`, which is all the board needs.
+*
+* ## The bro surfaces
+*
+*   board     `bro status --json` → ctx.ui.setWidget + setStatus,
+*             refreshed on session start, turn end and after a gate.
+*   hooks     omp lifecycle events → `bro hooks <event>` with the
+*             payload on stdin — the same contract hooks/run.sh and the
+*             other adapters speak. The control object on stdout is
+*             translated into omp's own result slots.
+*   /bro      the CLI without leaving the editor.
+*   bro_* tools  the board and the PR gate as model-callable reads.
+*
+* ## Fail-open
+*
+* The whole contract: the CLI resolves lazily (sibling dist → checkout
+* → PATH → npx pin), every spawn is async, and a missing bro or a
+* non-bro repo yields no widget, no context, no gate — never an error
+* thrown into omp.
+*/
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.3.0";
@@ -783,8 +852,8 @@ function binding(pi) {
 				pi.on(event, handler);
 			},
 			paint(ctx, lines, crumb) {
-				ctx.ui.setWidget(BOARD_KEY, lines);
-				ctx.ui.setStatus(BOARD_KEY, crumb);
+				ctx.ui.setWidget("bro", lines);
+				ctx.ui.setStatus("bro", crumb);
 			},
 			notify(ctx, text, level) {
 				ctx.ui.notify(text, level);
@@ -819,6 +888,4 @@ const adapter = {
 	id: "bro",
 	kind: "omp-extension"
 };
-
-//#endregion
 export { adapter, broExtension as default };

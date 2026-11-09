@@ -9,19 +9,18 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "license": "MIT",
   "repository": {
@@ -32,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Stacked bead→worktree→PR chains for bro — stack/<name>/<n>-<slug> branch namespace over worktree stack edges",
+  "description": "Stacked bead\u2192worktree\u2192PR chains for bro \u2014 stack/<name>/<n>-<slug> branch namespace over worktree stack edges",
   "keywords": [
     "beads",
     "stacked-prs",

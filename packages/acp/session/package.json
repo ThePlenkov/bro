@@ -11,22 +11,21 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "test": "node --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@broject/acp-model": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "repository": {
     "type": "git",
@@ -36,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Renderer-independent ACP session package — wire decode, archive contract + tail, session model, segment/card view language",
+  "description": "Renderer-independent ACP session package \u2014 wire decode, archive contract + tail, session model, segment/card view language",
   "bro": {
     "kind": "capability",
     "status": "beta"

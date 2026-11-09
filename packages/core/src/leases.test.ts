@@ -163,14 +163,10 @@ describe('local lease store', () => {
       `process.stdout.write(r.ok?'yes':'no');`;
     const run = (): Promise<string> =>
       new Promise((resolve, reject) => {
-        const child = spawn(
-          process.execPath,
-          ['--import', 'tsx', '--input-type=module', '-e', script],
-          {
-            env: { ...process.env, PROJECT: project, STATE: root },
-            stdio: ['ignore', 'pipe', 'inherit'],
-          }
-        );
+        const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+          env: { ...process.env, PROJECT: project, STATE: root },
+          stdio: ['ignore', 'pipe', 'inherit'],
+        });
         let output = '';
         child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
         child.once('error', reject);

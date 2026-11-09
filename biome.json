@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.6/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -15,6 +15,9 @@
       "!site/content/docs/reference/**",
       "!specs/**/*.md",
       "!**/vendor/**",
+      "!plugins/*/bro/README.md",
+      "!plugins/pi/bro/bro.ts",
+      "!plugins/omp/bro/bro.ts",
       "!packages/acp/model/src/content.ts",
       "!packages/acp/model/src/index.ts",
       "!packages/acp/model/src/reducer.ts",

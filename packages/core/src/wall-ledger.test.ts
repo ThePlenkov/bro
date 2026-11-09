@@ -249,18 +249,14 @@ describe('host wall ledger', () => {
         `recordWall(JSON.parse(process.env.WALL_OBS), { path: process.env.WALL_PATH, now: ${base} });`;
       const run = (account: string): Promise<void> =>
         new Promise((resolve, reject) => {
-          const child = spawn(
-            process.execPath,
-            ['--import', 'tsx', '--input-type=module', '-e', script],
-            {
-              env: {
-                ...process.env,
-                WALL_PATH: t.path,
-                WALL_OBS: JSON.stringify(observation(account, 'quota')),
-              },
-              stdio: 'ignore',
-            }
-          );
+          const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+            env: {
+              ...process.env,
+              WALL_PATH: t.path,
+              WALL_OBS: JSON.stringify(observation(account, 'quota')),
+            },
+            stdio: 'ignore',
+          });
           child.once('error', reject);
           child.once('exit', code =>
             code === 0 ? resolve() : reject(new Error(`child exited ${code}`))

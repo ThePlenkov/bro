@@ -1,7 +1,7 @@
 {
   "name": "@broject/bro",
   "version": "0.3.0",
-  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
+  "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
   "keywords": [
     "agent-rig",
     "orchestration",
@@ -53,7 +53,7 @@
     "schemas"
   ],
   "engines": {
-    "node": ">=22.18"
+    "node": ">=26.13.0"
   },
   "scripts": {
     "test": "node scripts/run-tests.ts 'src/**/*.test.ts'",
@@ -94,17 +94,16 @@
     "@broject/mcp": "^0.3.0",
     "@broject/router-routes": "^0.3.0",
     "@broject/router-store": "^0.3.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "ip-address": "^10.7.4",
-    "smol-toml": "^1.9.0",
+    "smol-toml": "^1.9.1",
     "sverka": "^0.2.10"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@kilocode/plugin": "^7.8.3",
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
+    "tsdown": "^0.23.7",
+    "typescript": "^5.9.3",
     "@broject/acp-session": "^0.3.0",
     "@broject/herdr-kit": "^0.3.0"
   },
