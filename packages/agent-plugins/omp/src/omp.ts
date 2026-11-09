@@ -47,7 +47,12 @@
  * non-bro repo yields no widget, no context, no gate — never an error
  * thrown into omp.
  */
-import { BOARD_KEY, createBroDriver, sharedBinding, type BroHostBinding } from './host.ts';
+import {
+  BOARD_KEY,
+  createBroDriver,
+  sharedBinding,
+  type BroHostBinding,
+} from '@broject/adapter-core/host';
 import { installModeBridges, type BoardSnapshot } from './omp-modes.ts';
 import type { OmpApi, OmpContext } from './omp-api.ts';
 

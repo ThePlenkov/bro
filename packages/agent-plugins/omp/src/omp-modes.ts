@@ -43,32 +43,32 @@
  * that is bro's exit gate as code, and it belongs to the adapter's
  * `session_stop` handler, not here.
  */
-import type { OmpApi } from './omp-api.ts'
+import type { OmpApi } from './omp-api.ts';
 
 /** The structural shape of the goal event this bridge reads. */
 interface GoalUpdatedEvent {
-  goal: { objective?: string; text?: string } | null
+  goal: { objective?: string; text?: string } | null;
 }
 
 /** The board read — one aggregated call, never N shell-outs. */
 export interface BoardSnapshot {
-  branch?: string
-  dirty?: number
+  branch?: string;
+  dirty?: number;
   beads?: {
-    inProgress?: Array<{ id?: string; title?: string }>
-    readyTotal?: number
-  }
+    inProgress?: Array<{ id?: string; title?: string }>;
+    readyTotal?: number;
+  };
   fleet?: {
-    maxConcurrent?: number
-    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>
-  }
-  drill?: { frame?: { id?: string; title?: string; depth?: number } | null }
+    maxConcurrent?: number;
+    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>;
+  };
+  drill?: { frame?: { id?: string; title?: string; depth?: number } | null };
 }
 
 /** What the bridge needs from the adapter. */
 export interface ModeBridgeSource {
   /** The last board snapshot, or null when bro is not installed. */
-  board(): BoardSnapshot | null
+  board(): BoardSnapshot | null;
 }
 
 /**
@@ -87,21 +87,21 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
    * review surface stays omp's, and the user still chooses.
    */
   pi.on('plan_review_requested', () => {
-    const board = source.board()
+    const board = source.board();
     if (board === null) {
-      return undefined
+      return undefined;
     }
-    const claims = board.beads?.inProgress ?? []
+    const claims = board.beads?.inProgress ?? [];
     if (claims.length === 0) {
-      return undefined
+      return undefined;
     }
     const named = claims
-      .map((b) => (b.title ? `${b.id ?? '?'} (${b.title})` : (b.id ?? '?')))
-      .join(', ')
+      .map(b => (b.title ? `${b.id ?? '?'} (${b.title})` : (b.id ?? '?')))
+      .join(', ');
     return {
       additionalContext: `bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`,
-    }
-  })
+    };
+  });
 
   /**
    * **Goal mode.** bro's goal is a *judged* condition; omp's is a
@@ -110,24 +110,24 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
    * it when the objective claims to be met.
    */
   pi.on('goal_updated', (event: unknown) => {
-    const update = event as GoalUpdatedEvent
+    const update = event as GoalUpdatedEvent;
     if (update.goal === null) {
-      return undefined
+      return undefined;
     }
-    const objective = update.goal.objective ?? update.goal.text ?? ''
+    const objective = update.goal.objective ?? update.goal.text ?? '';
     if (objective === '') {
-      return undefined
+      return undefined;
     }
-    const board = source.board()
-    const drill = board?.drill?.frame
-    let scope = ''
+    const board = source.board();
+    const drill = board?.drill?.frame;
+    let scope = '';
     if (drill !== undefined && drill !== null) {
-      scope = `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ?? '(untitled)'}. `
+      scope = `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ?? '(untitled)'}. `;
     }
     return {
       additionalContext: `${scope}bro: claim a bead for this objective (\`bro flow next\`) so the exit gate can judge it; \`bro work goal\` carries the condition across sessions.`,
-    }
-  })
+    };
+  });
 
   /**
    * **Vibe mode / subagents.** Two workers must never edit one unit of
@@ -135,17 +135,17 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
    * claim list before a worker starts.
    */
   pi.on('before_subagent_spawn', () => {
-    const board = source.board()
+    const board = source.board();
     if (board === null) {
-      return undefined
+      return undefined;
     }
-    const running = (board.fleet?.agents ?? []).filter((a) => a.state === 'running')
+    const running = (board.fleet?.agents ?? []).filter(a => a.state === 'running');
     if (running.length === 0) {
-      return undefined
+      return undefined;
     }
-    const ids = running.map((a) => a.id ?? '?')
+    const ids = running.map(a => a.id ?? '?');
     return {
       additionalContext: `bro: ${running.length} worker(s) already running (${ids.join(', ')}) — claim a bead before editing, so two workers never touch one unit of work.`,
-    }
-  })
+    };
+  });
 }

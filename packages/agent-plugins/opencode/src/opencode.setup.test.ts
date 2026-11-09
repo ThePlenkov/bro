@@ -5,13 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin from './opencode.ts';
 
-// The V2 loader contract: a default export with a stable `id` and a
-// `setup(ctx)` — plus `server` so the same module serves V1.
-describe('v2 loader shape', () => {
-  test('default export declares id, setup, and the V1 server', () => {
-    assert.equal(plugin.id, 'bro');
-    assert.equal(typeof plugin.setup, 'function');
-    assert.equal(typeof plugin.server, 'function');
+// OpenCode server plugin: `Plugin.define({ id, setup })`.
+describe('plugin shape', () => {
+  test('default export declares id and setup', () => {
+    assert.equal((plugin as { id?: string }).id, 'bro');
+    assert.equal(typeof (plugin as { setup?: unknown }).setup, 'function');
+    assert.equal((plugin as { server?: unknown }).server, undefined);
   });
 });
 
@@ -22,7 +21,7 @@ const dir = mkdtempSync(join(tmpdir(), 'bro-oc2-'));
 let logFile = join(dir, 'calls-0.log');
 let logSeq = 0;
 
-// The same `bro hooks <event>` stand-in the V1 suite drives — records the
+// Stand-in for `bro hooks <event>`: records payload, replays canned answers.
 // payload, replays a canned answer, exits env-controlled.
 const stub = join(dir, 'stub.mjs');
 writeFileSync(
@@ -83,7 +82,7 @@ interface Logged {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCb = (event: any) => any;
 
-/** A structural V2 ctx: hook domains record callbacks, transforms record
+/** A structural plugin ctx: hook domains record callbacks, transforms record
  *  the editors' edits, `event.subscribe` serves a test-driven queue, and
  *  storage is a Map — the shape opencode hands `setup`, nothing more. */
 async function makeSetup(
@@ -242,7 +241,7 @@ afterEach(() => {
   delete process.env.BRO_STUB_STATUS;
 });
 
-describe('v2 session hooks', () => {
+describe('session hooks', () => {
   test('context pushes the hydrated text as a system part', async () => {
     respond({ 'session-start': JSON.stringify(ctx('bro state — ready queue')) });
     const { sessionHooks } = await makeSetup();
@@ -301,7 +300,7 @@ describe('v2 session hooks', () => {
   });
 });
 
-describe('v2 tool guard', () => {
+describe('tool guard', () => {
   test('a block verdict throws and vetoes the call', async () => {
     respond({ 'pre-tool': JSON.stringify({ decision: 'block', reason: 'act gate is red' }) });
     const { toolHooks } = await makeSetup();
@@ -343,7 +342,7 @@ describe('v2 tool guard', () => {
   });
 });
 
-describe('v2 tool enrichment', () => {
+describe('tool enrichment', () => {
   test('context lands on the result output', async () => {
     respond({ 'post-tool': JSON.stringify(ctx('armed act gate')) });
     const { toolHooks } = await makeSetup();
@@ -383,7 +382,7 @@ describe('v2 tool enrichment', () => {
   });
 });
 
-describe('v2 permission', () => {
+describe('permission', () => {
   test('approve maps to allow, deny/block to deny + message', async () => {
     respond({ permission: JSON.stringify({ decision: 'approve' }) });
     const { permissionHooks } = await makeSetup();
@@ -424,7 +423,7 @@ describe('v2 permission', () => {
   });
 });
 
-describe('v2 shell env', () => {
+describe('shell env', () => {
   test('provenance lands without clobbering operator values', async () => {
     const { shellHooks } = await makeSetup();
     const fresh = { command: 'ls', env: {} as Record<string, string | undefined> };
@@ -437,7 +436,7 @@ describe('v2 shell env', () => {
   });
 });
 
-describe('v2 transforms', () => {
+describe('transforms', () => {
   test('the bro namespace registers its read tools', async () => {
     const { toolsAdded } = await makeSetup();
     const names = toolsAdded.map(t => t.name);
@@ -496,7 +495,7 @@ describe('v2 transforms', () => {
   });
 });
 
-describe('v2 event stream', () => {
+describe('event stream', () => {
   test('a clean turn followed by a blocked stop re-prompts once', async () => {
     respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty worktree' }) });
     const { emit, prompts } = await makeSetup();
@@ -579,7 +578,7 @@ describe('v2 event stream', () => {
   });
 });
 
-describe('v2 fail-open', () => {
+describe('fail-open', () => {
   test('a bare ctx wires nothing and never throws', async () => {
     const teardown = await plugin.setup({});
     assert.equal(typeof teardown, 'function');

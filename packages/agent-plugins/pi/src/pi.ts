@@ -59,7 +59,7 @@ import {
   sharedBinding,
   type BroContext,
   type BroHostBinding,
-} from './host.ts';
+} from '@broject/adapter-core/host';
 
 // --- structural pi surface ----------------------------------------------
 // Declared, never imported — pi loads this module at runtime and nobody

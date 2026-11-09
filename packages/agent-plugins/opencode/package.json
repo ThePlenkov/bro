@@ -1,0 +1,46 @@
+{
+  "name": "@broject/opencode",
+  "version": "0.3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/opencode.d.ts",
+      "default": "./dist/opencode.js"
+    },
+    "./tui": {
+      "types": "./dist/opencode-tui.d.ts",
+      "default": "./dist/opencode-tui.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown src/index.ts src/opencode.ts src/opencode-tui.ts --format esm --dts --clean"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.2.6",
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/opencode"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "bro's OpenCode plugin adapters (server + TUI)"
+}

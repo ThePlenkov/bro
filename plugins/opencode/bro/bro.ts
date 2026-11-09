@@ -1,77 +1,23 @@
 // bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 /**
- * bro as an OpenCode plugin — bro mechanics on opencode's native hook bus.
+ * bro — OpenCode server plugin (modern API).
  *
- * OpenCode ships no shell-hook manifest (the Claude/Devin/Codex adapters
- * ship hooks.json + run.sh). It loads JS/TS modules and calls the `Hooks`
- * object they return, so this file is the whole adapter: every hook is one
- * `bro hooks <event>` call with the payload on stdin, and the hook control
- * JSON that comes back on stdout is translated into whatever that hook's
- * output slot is called. No bro policy lives here — arming, rehydration, the
- * stop gate and permission auto-approve stay in the CLI, which is the same
- * contract the other three adapters speak.
+ * Follows https://opencode.ai/docs/build/plugins/server/
+ * `import { Plugin } from "@opencode/plugin"` + `Plugin.define({ id, setup })`.
  *
- * The default export serves BOTH majors — the documented dual entrypoint:
- * V1's loader calls `server()` and uses the returned hooks, V2's loader
- * reads `id` + `setup(ctx)` and ignores `server`. Each side maps the same
- * bro events onto its own surface:
+ * Rehydrates bro state into sessions, gates premature stops (re-prompt once),
+ * approves safe bro self-tool commands, exposes bro read tools and `/bro`,
+ * and mounts `bro serve` as MCP when opted in.
  *
- *   V1                            V2                            → bro event
- *   system.transform              session.hook("context")       → session-start       (cached per session)
- *   session.compacted event       event.subscribe()             → post-compaction     (re-primes the cache)
- *   session.compacting hook       session.hook("compaction")    → pre-compact
- *   chat.message                  session.hook("prompt")        → prompt-submit
- *   tool.execute.after            tool.hook("execute.after")    → post-tool
- *   tool.execute.before           tool.hook("execute.before")   → pre-tool (V2 only — V1 has no such slot)
- *   session.idle event            event.subscribe()             → stop                (see below)
- *   permission.ask                permission.hook("evaluate")   → permission
- *   shell.env                     shell.hook("create.before")   → env provenance (no probe)
- *
- * Two deliberate deviations from the shell adapters:
- *
- * - **The stop gate re-prompts instead of blocking.** opencode has no pre-stop
- *   hook — `session.idle` arrives after the turn is over, and nothing can
- *   refuse the stop. The nearest equivalent is feeding the blocker back as a
- *   synthetic turn, ONCE per session: the first block re-prompts, every later
- *   one is logged and let through. That is bro's own "gates, not loops" rule,
- *   and Claude's `stop_hook_active` retry flag is emulated by the same
- *   in-memory set, so bro skips its own re-evaluation on the second pass.
- * - **Only a cleanly finished turn gates.** `session.idle` also fires when the
- *   user aborts or the provider errors. Re-prompting a user who hit ESC is
- *   hostile, so the gate needs an assistant message carrying `time.completed`
- *   and no `error` — tracked from `message.updated`, which opencode delivers
- *   before the matching idle.
- *
- * Fail-open is the whole contract. Every hook is wrapped, a missing bro binary
- * is not an error, and a spawn that throws, times out, exits nonzero or prints
- * garbage yields no context, no permission and no re-prompt. Nothing in this
- * file may throw into opencode.
- *
- * Every spawn is ASYNC on purpose. Plugin hooks run on opencode's server event
- * loop, so a synchronous child would freeze the session — and bro's probes are
- * not cheap: `hooks session-start` measures 20-40s in a loaded repo (it lists
- * the `bd ready` queue and walks the sibling worktrees). That budget is why
- * rehydration is primed on `session.created` instead of on the first turn.
- *
- * The CLI is spawned with `node` from PATH, never `process.execPath` — see
- * `jsRuntime()` below for why that distinction is load-bearing.
- *
- * Upstream hook shapes mirror `@opencode-ai/plugin` 1.18.x and the v2
- * `@opencode/plugin` ctx, declared structurally rather than imported:
- * opencode loads this module at runtime and nobody typechecks it against
- * the real package, so a devDependency would buy type fidelity at the
- * cost of dragging its sdk/effect/zod trees into the repo for types
- * alone. (`Plugin.define` itself is also skipped — it is a marker, and a
- * plain `{id, setup}` object literal satisfies the same schema.) Field
- * names are verbatim; upstream is the only place they should change.
- * Every V2 domain is optional in these declarations — a drifted runtime
- * missing one degrades to "not wired", never a setup throw that would
- * take the whole plugin down with it.
+ * Fail-open: every hook is wrapped; a missing bro binary, timeout, nonzero
+ * exit, or bad output degrades to no context / no gate / no re-prompt.
+ * Nothing here throws into opencode. Spawns are async (server event loop).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Plugin } from '@opencode/plugin';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
@@ -79,72 +25,14 @@ interface LogInput {
   body: { service: string; level: Level; message: string; extra?: unknown };
 }
 
-interface PermissionAsk {
-  id?: string;
-  type?: string;
-  permission?: string;
-  pattern?: string | string[];
-  patterns?: string[];
-  sessionID?: string;
-  metadata?: Record<string, unknown>;
-}
-
-interface EventEnvelope {
-  type: string;
-  properties?: Record<string, unknown>;
-}
-
-interface PluginInput {
-  directory: string;
-  client?: {
-    app?: { log(input: LogInput): Promise<unknown> };
-    session?: {
-      promptAsync(input: {
-        path: { id: string };
-        body: { parts: { type: 'text'; text: string }[] };
-      }): Promise<unknown>;
-    };
-  };
-}
-
-/** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. The
- *  override is a real escape hatch (pin a specific bro build) and the seam
- *  the tests drive; unresolvable options degrade to the default ladder. */
+/** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. */
 interface PluginOptions {
   command?: string | { cmd: string; args?: string[] };
-  /** V2 only: mount `bro serve` as a remote MCP server on this loopback
-   *  port — opt-in; unset registers nothing (a dead URL must not appear
-   *  in every config). */
+  /** Mount `bro serve` as a remote MCP server on this loopback port (opt-in). */
   mcpPort?: number;
 }
 
-interface Hooks {
-  event?(input: { event: EventEnvelope }): Promise<void>;
-  'chat.message'?(
-    input: { sessionID: string },
-    output: { parts: { type: string; text?: string }[] }
-  ): Promise<void>;
-  'permission.ask'?(
-    input: PermissionAsk,
-    output: { status: 'ask' | 'deny' | 'allow' }
-  ): Promise<void>;
-  'tool.execute.after'?(
-    input: { tool: string; sessionID: string; args?: unknown },
-    output: { output: string; metadata?: unknown }
-  ): Promise<void>;
-  'experimental.chat.system.transform'?(
-    input: { sessionID?: string },
-    output: { system: string[] }
-  ): Promise<void>;
-  'experimental.session.compacting'?(
-    input: { sessionID: string },
-    output: { context: string[] }
-  ): Promise<void>;
-}
-
-/** The one control object `bro hooks <event>` prints. `decision`/`reason`
- *  carry the stop gate and permission answers; `additionalContext` carries
- *  everything the probes want the agent to read. */
+/** Control object from `bro hooks <event>`. */
 interface HookControl {
   hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown };
   decision?: string;
@@ -424,31 +312,6 @@ function contextOf(control: HookControl | null): string {
   return typeof text === 'string' ? text.trim() : '';
 }
 
-/** opencode describes a bash ask by `patterns` — one entry per command
- *  segment — while the older `Permission` shape used `pattern`, and other
- *  tools carry the command in metadata. Joining keeps the whole ask visible
- *  to the classifier: `bd ready` approves, `bd ready && rm -rf x` must not.
- *  Either way bro's classifier wants the raw command string in the slot
- *  Claude puts it. */
-function permissionCommand(input: PermissionAsk): string {
-  if (Array.isArray(input.patterns) && input.patterns.length > 0) {
-    return input.patterns.join(' && ');
-  }
-  if (typeof input.pattern === 'string') {
-    return input.pattern;
-  }
-  if (Array.isArray(input.pattern) && input.pattern.length === 1) {
-    return input.pattern[0] ?? '';
-  }
-  for (const key of ['command', 'cmd', 'pattern']) {
-    const value = input.metadata?.[key];
-    if (typeof value === 'string') {
-      return value;
-    }
-  }
-  return '';
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -475,8 +338,8 @@ export function toolSucceeded(metadata: Record<string, unknown> | null): boolean
 
 /** Everything both majors share: lazy command resolution, the probe, the
  *  per-session rehydration cache, the stop-gate state, and the bus-event
- *  handlers. `log` and `reprompt` are the only client-shaped seams — V1
- *  injects `client.app.log` + `session.promptAsync`, V2 `ctx.app.log` +
+ *  handlers. `log` and `reprompt` are the client-shaped seams
+ *  (`ctx.app.log` + `ctx.session.prompt`).
  *  `session.prompt`. */
 interface BroCoreInput {
   directory: string;
@@ -485,7 +348,7 @@ interface BroCoreInput {
   /** Feed the blocker back as a fresh turn. The core catches and logs a
    *  reprompt failure — implementations only supply the call. */
   reprompt(sessionID: string, text: string): Promise<unknown>;
-  /** Optional durable store for the one-shot gate set — V2 hands it
+  /** Optional durable store for the one-shot gate set —
    *  `ctx.storage` so a plugin reload doesn't re-prompt a session that
    *  already blocked once. A load that settles after a `session.deleted`
    *  must not resurrect that id's gate — deletes landing during the
@@ -758,8 +621,7 @@ function makeCore(input: BroCoreInput) {
     }
   };
 
-  /** One dispatch for both event sources — the V1 `event` hook and the
-   *  V2 `ctx.event.subscribe()` stream feed the same switch. */
+  /** Dispatches the event stream into core handlers. */
   const onEvent = async (type: string, props: Record<string, unknown>): Promise<void> => {
     switch (type) {
       case 'session.created':
@@ -783,129 +645,28 @@ function makeCore(input: BroCoreInput) {
   return { probe, hydrate, onEvent, exec };
 }
 
-export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<Hooks> => {
-  const { probe, hydrate, onEvent } = makeCore({
-    directory: input.directory,
-    options,
-    log: (level, message) => {
-      try {
-        return Promise.resolve(
-          input.client?.app?.log({ body: { service: 'bro', level, message } })
-        ).catch(() => undefined);
-      } catch {
-        return Promise.resolve(undefined);
-      }
-    },
-    reprompt: (sessionID, text) =>
-      Promise.resolve(
-        input.client?.session?.promptAsync({
-          path: { id: sessionID },
-          body: { parts: [{ type: 'text', text }] },
-        })
-      ),
-  });
-
-  const pendingPromptContext = new Map<string, string>();
-
-  return Promise.resolve({
-    async 'experimental.chat.system.transform'(hookInput, output) {
-      const sessionID = hookInput.sessionID;
-      if (!sessionID) {
-        return;
-      }
-      const text = await hydrate(sessionID, 'session-start');
-      if (text) {
-        output.system.push(text);
-      }
-      const pending = pendingPromptContext.get(sessionID);
-      if (pending) {
-        output.system.push(pending);
-        pendingPromptContext.delete(sessionID);
-      }
-    },
-
-    async 'experimental.session.compacting'(hookInput, output) {
-      const text = contextOf(
-        await probe('pre-compact', { session_id: hookInput.sessionID }, REHYDRATION_TIMEOUT_MS)
-      );
-      if (text) {
-        output.context.push(text);
-      }
-    },
-
-    async 'chat.message'(hookInput, output) {
-      const prompt = output.parts
-        .filter(part => part.type === 'text')
-        .map(part => part.text ?? '')
-        .join('\n');
-      const text = contextOf(
-        await probe('prompt-submit', { session_id: hookInput.sessionID, prompt })
-      );
-      if (text && hookInput.sessionID) {
-        // keep the injected context out of the visible message parts —
-        // it rides the system prompt instead (see system.transform above)
-        pendingPromptContext.set(hookInput.sessionID, text);
-      }
-    },
-
-    async 'tool.execute.after'(hookInput, output) {
-      const metadata = asRecord(output.metadata);
-      const text = contextOf(
-        await probe('post-tool', {
-          session_id: hookInput.sessionID,
-          tool_name: hookInput.tool,
-          tool_input: asRecord(hookInput.args) ?? {},
-          tool_response: { success: toolSucceeded(metadata) },
-        })
-      );
-      if (text) {
-        output.output = `${output.output}\n\n${text}`;
-      }
-    },
-
-    async 'permission.ask'(hookInput, output) {
-      const command = permissionCommand(hookInput);
-      if (!command) {
-        return;
-      }
-      const control = await probe('permission', {
-        tool_input: { command },
-        session_id: hookInput.sessionID,
-      });
-      if (control?.decision === 'approve') {
-        output.status = 'allow';
-      }
-    },
-
-    async event({ event }) {
-      await onEvent(event.type, event.properties ?? {});
-    },
-  });
-};
-
-/* ------------------------------------------------------------------ */
-/* V2 — `setup(ctx)` on the domain-based plugin context                */
+/* Plugin context (structural — tolerant of runtime drift)             */
 /* ------------------------------------------------------------------ */
 
-interface V2Registration {
+interface Registration {
   dispose?(): Promise<void>;
 }
 
 /** `ctx.<domain>.hook(name, cb)` — hook() is declared per domain and
  *  every call site is optional-chained: a drifted runtime missing a
  *  domain degrades to "not wired", not a setup throw. */
-interface V2HookDomain<E> {
+interface HookDomain<E> {
   hook?(
     name: string,
     callback: (event: E) => void | Promise<void>
-  ): Promise<V2Registration | undefined>;
+  ): Promise<Registration | undefined>;
 }
 
 /** Superset of the session-hook event shapes we touch — `prompt`
  *  (admission draft), `context` and `compaction` (model request). The
  *  optional members partition it: a prompt event has no `system`, a
  *  context event has no `prompt`. */
-interface V2SessionEvent {
+interface SessionEvent {
   sessionID?: string;
   prompt?: { text?: string };
   system?: { type: string; text?: string }[];
@@ -913,7 +674,7 @@ interface V2SessionEvent {
   options?: Record<string, unknown>;
 }
 
-interface V2ToolEvent {
+interface ToolEvent {
   tool?: string;
   sessionID?: string;
   /** 'completed' | 'error' on execute.after */
@@ -924,7 +685,7 @@ interface V2ToolEvent {
   error?: unknown;
 }
 
-interface V2PermissionEvent {
+interface PermissionEvent {
   sessionID?: string;
   action?: string;
   resources?: unknown[];
@@ -933,7 +694,7 @@ interface V2PermissionEvent {
   message?: string;
 }
 
-interface V2ShellEvent {
+interface ShellEvent {
   command?: string;
   cwd?: string;
   timeout?: number;
@@ -943,11 +704,11 @@ interface V2ShellEvent {
 
 /** `ctx.<domain>.transform(cb)` — synchronous registry edit returning a
  *  Registration. */
-interface V2TransformDomain<E> {
-  transform?(callback: (editor: E) => void): Promise<V2Registration | undefined>;
+interface TransformDomain<E> {
+  transform?(callback: (editor: E) => void): Promise<Registration | undefined>;
 }
 
-interface V2ToolDef {
+interface ToolDef {
   name: string;
   description: string;
   /** JSON Schema — no zod in a standalone module. */
@@ -956,12 +717,12 @@ interface V2ToolDef {
   execute(input: unknown, context: unknown): Promise<unknown>;
 }
 
-interface V2ToolEditor {
+interface ToolEditor {
   namespace?(ns: { name: string; description?: string }): void;
-  add?(tool: V2ToolDef): void;
+  add?(tool: ToolDef): void;
 }
 
-interface V2CommandEditor {
+interface CommandEditor {
   add?(def: {
     name: string;
     description?: string;
@@ -973,23 +734,23 @@ interface V2CommandEditor {
   }): void;
 }
 
-interface V2McpEditor {
+interface McpEditor {
   set?(name: string, config: Record<string, unknown>): void;
 }
 
-interface V2Ctx {
+interface PluginContext {
   location?: { directory?: string };
   options?: PluginOptions;
   app?: { version?: string; log?(input: LogInput): Promise<unknown> };
-  session?: V2HookDomain<V2SessionEvent> & {
+  session?: HookDomain<SessionEvent> & {
     prompt?(input: { sessionID: string; text: string }): Promise<unknown>;
     synthetic?(input: { sessionID: string; text: string }): Promise<unknown>;
   };
-  tool?: V2HookDomain<V2ToolEvent> & V2TransformDomain<V2ToolEditor>;
-  command?: V2TransformDomain<V2CommandEditor>;
-  mcp?: V2TransformDomain<V2McpEditor>;
-  permission?: V2HookDomain<V2PermissionEvent>;
-  shell?: V2HookDomain<V2ShellEvent>;
+  tool?: HookDomain<ToolEvent> & TransformDomain<ToolEditor>;
+  command?: TransformDomain<CommandEditor>;
+  mcp?: TransformDomain<McpEditor>;
+  permission?: HookDomain<PermissionEvent>;
+  shell?: HookDomain<ShellEvent>;
   event?: { subscribe?(options?: { signal?: AbortSignal }): AsyncIterable<unknown> };
   storage?: {
     get?(key: string): Promise<unknown>;
@@ -997,10 +758,9 @@ interface V2Ctx {
   };
 }
 
-/** V2's permission evaluation carries `resources` — for a bash ask, the
- *  command segments — where V1 carried `patterns`. Same contract for the
- *  classifier: the whole ask, joined. */
-function evalCommand(event: V2PermissionEvent): string {
+/** Permission evaluation carries `resources` — for a bash ask, the command
+ *  segments. The classifier wants the whole ask joined. */
+function evalCommand(event: PermissionEvent): string {
   const resources = Array.isArray(event.resources)
     ? event.resources.filter((r): r is string => typeof r === 'string')
     : [];
@@ -1056,8 +816,8 @@ function splitArgs(input: string): string[] {
   return args;
 }
 
-/** Where the nudge lands on a V2 tool result — `output`/`content` take
- *  text directly; anything else rides metadata as `broContext`. */
+/** Where the nudge lands on a tool result — `output`/`content` take text
+ *  directly; anything else rides metadata as `broContext`. */
 function appendToolResult(result: Record<string, unknown> | null, text: string): unknown {
   if (result === null) {
     return { metadata: { broContext: text } };
@@ -1071,7 +831,7 @@ function appendToolResult(result: Record<string, unknown> | null, text: string):
   return { ...result, metadata: { ...asRecord(result.metadata), broContext: text } };
 }
 
-export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
+export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>> {
   const core = makeCore({
     // ctx.location is where this plugin instance loaded — the right cwd
     // for hook spawns; cwd() is the floor when a runtime omits it.
@@ -1102,8 +862,8 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
   });
 
   const pendingPromptContext = new Map<string, string>();
-  const registrations: Promise<V2Registration | undefined>[] = [];
-  const register = (r: Promise<V2Registration | undefined> | undefined): void => {
+  const registrations: Promise<Registration | undefined>[] = [];
+  const register = (r: Promise<Registration | undefined> | undefined): void => {
     // a hook domain that rejects registration (drifted shape, disabled
     // feature) is one unwired surface — never a failed setup
     if (r) {
@@ -1220,7 +980,6 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
       if (control?.decision === 'approve') {
         event.effect = 'allow';
       } else if (control?.decision === 'deny' || control?.decision === 'block') {
-        // the deny V1's ask-shaped slot could never send
         event.effect = 'deny';
         const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
         if (reason) {
@@ -1298,8 +1057,7 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
   }
 
   // the stop gate rides the public event stream — dispatched without
-  // awaiting so a session.deleted lands inside an in-flight idle gate,
-  // the same interleaving the V1 `event` hook got for free
+  // awaiting so a session.deleted lands inside an in-flight idle gate
   const controller = new AbortController();
   const stream = ctx.event?.subscribe?.({ signal: controller.signal });
   if (stream) {
@@ -1331,6 +1089,7 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
   };
 }
 
-/** The dual entrypoint: V1's loader (≥1.18.29 object form) calls
- *  `server()`, V2's reads `id` + `setup()`. */
-export default { id: 'bro', server: BroPlugin, setup: BroSetup };
+export default Plugin.define({
+  id: 'bro',
+  setup: BroSetup,
+});
