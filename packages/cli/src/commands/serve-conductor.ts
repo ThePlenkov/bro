@@ -21,11 +21,29 @@
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { gitCommonDir, loadConfig } from '@broject/core';
+import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
+import {
+  estimateTokens,
+  gitCommonDir,
+  isIntegerIndexKey,
+  loadConfig,
+  reserveSessionStart,
+  sessionCapViews,
+} from '@broject/core';
+import type {
+  AcpContentBlock,
+  AcpPeer,
+  AcpRetainedSession,
+  AcpTerminals,
+  OtelCtx,
+  PooledTurnOpts,
+  ProviderWireOpts,
+  Toolish,
+} from '@broject/providers';
 import {
   acpOpen,
   acpPooledTurn,
@@ -36,27 +54,42 @@ import {
   otelSpan,
   toolPayload,
 } from '@broject/providers';
-import { randomUUID } from 'node:crypto';
-import { reserveSessionStart, sessionCapViews } from '@broject/core';
-import { conductorSessionRefusal } from './session-cap.ts';
-import type { AcpTerminals, Toolish } from '@broject/providers';
-import type {
-  AcpContentBlock,
-  AcpPeer,
-  AcpRetainedSession,
-  OtelCtx,
-  PooledTurnOpts,
-  ProviderWireOpts,
-} from '@broject/providers';
+import { conductorSessionRefusal, pendingOpensBeyondClaim } from './session-cap.ts';
 import { peerAttrs } from './peer.ts';
-import { catalogModels } from './providers.ts';
-import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { type CatalogModel, catalogModels } from './providers.ts';
+import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
+import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
+
+/** One PUBLIC route — the name a client asks for, and the ENTRY it
+ *  reaches. A route is the first segment of a requested model id; the
+ *  entry is the private config name of the provider's configuration.
+ *  The two are separate things: the route names a DESTINATION, the
+ *  entry names a CONFIGURATION (spec bro-jxw7p). */
+export interface RouteBinding {
+  /** The route name — the first segment of a requested model id. */
+  name: string;
+  /** The ENTRY key — the private config name this route reaches. */
+  entry: string;
+  /** The route was DECLARED by the operator. The default lane's own key
+   *  is routable without a declaration — so a declared alias takes over
+   *  the advertisement and the implicit key never does. */
+  declared: boolean;
+}
 
 export interface ConductorConfig {
   backend: string;
   entry: AcpEntry;
+  /** The OTHER acp entries the gateway exposes — ENTRY key → entry. A
+   *  request whose model carries one of their ROUTES routes there, so
+   *  one listener serves every provider's models. */
+  providers?: Record<string, AcpEntry>;
+  /** The PUBLIC routes the gateway answers to, in order — the default
+   *  lane's own key first, then the declared routes. Several routes may
+   *  name one entry: that entry keeps ONE lane (one agent, one set of
+   *  conversations) under every name it answers to. */
+  routes?: RouteBinding[];
   /** The /v1/models source — defaults to the backend itself; a
    *  BRO_PROVIDER_CATALOG pin points at a different providers entry
    *  (a tool-less backend advertises nothing, the catalog still can). */
@@ -71,6 +104,22 @@ export interface ConductorConfig {
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+}
+
+/** The routes a config answers to — the config's own table, or the
+ *  ARRAY form's implicit one: every exposed entry under its own name,
+ *  the default lane under its own key. A config that declares no routes
+ *  behaves exactly as it did before the route table existed. */
+export function routeBindings(cfg: ConductorConfig): RouteBinding[] {
+  if (cfg.routes !== undefined) return cfg.routes;
+  return [
+    { name: cfg.backend, entry: cfg.backend, declared: false },
+    ...Object.keys(cfg.providers ?? {}).map(entry => ({
+      name: entry,
+      entry,
+      declared: true,
+    })),
+  ];
 }
 
 /** A positive-int env pin, else the fallback — 0, negative and NaN are
@@ -110,6 +159,29 @@ function requireAcpEntry(backend: string, providers: Record<string, ProviderEntr
     );
   }
   return entry;
+}
+
+/** A served provider's NAME is a model prefix — the first path segment
+ *  of the id a client asks for. The router reads that segment, so a
+ *  name carrying a slash can never be matched: the lane would be
+ *  advertised and unreachable. A name that cannot be routed is a
+ *  loud config error, never a silent drop. */
+function requireLaneName(name: string): string {
+  if (name.includes('/')) {
+    throw new Error(
+      `provider '${name}' — a served provider name is a model prefix and cannot contain '/'`
+    );
+  }
+  // a numeric index keeps no declared order — the JSON object's own
+  // iteration puts it ahead of its siblings, so "the first declared
+  // route" would name a different lane than the operator wrote
+  if (isIntegerIndexKey(name)) {
+    throw new Error(
+      `provider '${name}' — a served provider name cannot be a numeric index ` +
+        `(it would lose its declared order)`
+    );
+  }
+  return name;
 }
 
 /** The model pin — env wins over the entry's own model; the client's
@@ -164,9 +236,68 @@ export function conductorConfig(
   }
   const registry = providers ?? ((cfg.providers ?? {}) as Record<string, ProviderEntry>);
   const entry = requireAcpEntry(backend, registry);
+  // the gateway's other providers — each one an acp entry of its own,
+  // named so a request can route to it by model. An injected registry
+  // owns the whole name space: the file layer's serve.providers must
+  // not leak a name it does not define, exactly like serve.backend.
+  const declared = providers === undefined ? (cfg.serve.providers ?? []) : [];
+  // the ROUTE table — the public name a client asks for, beside the
+  // private name of the entry it reaches. Two spellings declare the
+  // same thing: an array of entry names (route ≡ entry) or a map of
+  // route → entry (the public name is chosen).
+  const bindings: RouteBinding[] = [
+    // the default lane's own key is routable WITHOUT a declaration — the
+    // one exception, so `devin-acp/…` keeps working whatever the
+    // operator declared.
+    { name: backend, entry: backend, declared: false },
+  ];
+  const byRoute = new Map<string, RouteBinding>([[backend, bindings[0]!]]);
+  const bind = (route: string, entryKey: string): void => {
+    requireLaneName(route);
+    const prior = byRoute.get(route);
+    if (prior !== undefined) {
+      if (prior.entry !== entryKey) {
+        throw new Error(
+          `provider route '${route}' names two entries ('${prior.entry}' and '${entryKey}') — ` +
+            `a route must name exactly one provider`
+        );
+      }
+      // the same route reaching the same entry — the declaration just
+      // makes it DECLARED, so it takes over the advertisement
+      prior.declared = true;
+      return;
+    }
+    const binding: RouteBinding = { name: route, entry: entryKey, declared: true };
+    byRoute.set(route, binding);
+    bindings.push(binding);
+  };
+  // the exposed LANES — the entries the declared routes reach, minus the
+  // default's own. A lane is per ENTRY: two routes naming one entry
+  // share its agent, its pool and its conversations.
+  // a null-prototype bag — an entry named '__proto__' must land as an own
+  // key, not reach Object.prototype's setter and vanish
+  const exposed: Record<string, AcpEntry> = Object.create(null) as Record<string, AcpEntry>;
+  const entries = new Set<string>();
+  if (Array.isArray(declared)) {
+    for (const name of declared) {
+      bind(name, name);
+      entries.add(name);
+    }
+  } else {
+    for (const [route, entryKey] of Object.entries(declared)) {
+      bind(route, entryKey);
+      entries.add(entryKey);
+    }
+  }
+  for (const entryKey of entries) {
+    if (entryKey === backend) continue;
+    exposed[entryKey] = requireAcpEntry(entryKey, registry);
+  }
   return {
     backend,
     entry,
+    providers: exposed,
+    routes: bindings,
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
@@ -204,6 +335,12 @@ interface MessagesRequest {
   model?: string;
   system?: string | { text?: string }[];
   messages?: { role?: string; content?: string | InBlock[] }[];
+  /** `role:'system'` turns lifted out of `messages` — context the client
+   *  sent INSIDE the conversation, not a speaker (claude 2.1.309 sends
+   *  its environment block that way). The chat and responses dialects
+   *  already claim those roles for the system slot; the messages gate
+   *  does the same instead of 400-ing on a shape the client sends. */
+  systemTurns?: string[];
   tools?: { name?: string; description?: string; input_schema?: unknown }[];
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
@@ -250,6 +387,17 @@ function toolContract(
     ...(must !== undefined ? [must] : []),
     '</tools>',
   ].join('\n');
+}
+
+/** The request's tool choice → the contract the BRIDGE honours: may a
+ *  call be bridged at all, and which tool did the request name? The
+ *  contract TEXT above is the agent's half; this is the client's. */
+function clientToolContract(choice: MessagesRequest['tool_choice']): ToolContract {
+  if (choice?.type === 'none') return { allowed: false };
+  if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    return { allowed: true, name: choice.name };
+  }
+  return { allowed: true };
 }
 
 /** tool_choice → the MUST clause of the injected contract — the one
@@ -303,13 +451,43 @@ const stopKeyOf = (seqs: string[]): string => JSON.stringify(seqs);
 
 type ClientMessage = NonNullable<MessagesRequest['messages']>[number];
 
+/** One turn's text — its blocks rendered in order (an image collapses
+ *  to its `[image]` marker). Shared by the turn serialization and the
+ *  system-slot lift, so both read a turn the same way. */
+function turnText(m: ClientMessage): string {
+  return typeof m.content === 'string' ? m.content : (m.content ?? []).map(blockText).join('');
+}
+
 /** One message's canonical serialization — shared by serializeRequest
  *  (the cold prompt) and the conversation-fingerprint hashes, so a
  *  resent byte-identical turn always matches. */
 function serTurn(m: ClientMessage): string {
-  const text =
-    typeof m.content === 'string' ? m.content : (m.content ?? []).map(blockText).join('');
+  const text = turnText(m);
   return `<turn role="${turnRole(m)}">${text}</turn>`;
+}
+
+/** A `role:'system'` turn is context, not a speaker — claude 2.1.309
+ *  sends its environment block that way. The chat and responses
+ *  dialects already claim those roles for the system slot (never a
+ *  downgraded user turn); the messages gate does the same, so the
+ *  transcript keeps its documented shape: `<system>` block, tool
+ *  contract, then `<turn role="user|assistant">` segments.
+ *
+ *  The lifted turns come from the MESSAGES only — `systemTurns` is the
+ *  conductor's own field, never something the wire may dictate. Every
+ *  system turn leaves the conversation, even an empty one: a turn that
+ *  stayed would ride the transcript as a user turn. */
+function liftSystemTurns(body: MessagesRequest): MessagesRequest {
+  const system = (body.messages ?? []).filter(m => m.role === 'system');
+  // nothing to lift — but a wire-sent `systemTurns` must still die
+  // here: `prefixText` reads the field, and a body passed through
+  // unchanged would let the client dictate the system slot
+  if (system.length === 0) return { ...body, systemTurns: undefined };
+  return {
+    ...body,
+    messages: (body.messages ?? []).filter(m => m.role !== 'system'),
+    systemTurns: system.map(turnText),
+  };
 }
 
 /** system + tools — the transcript prefix shared by serializeRequest
@@ -322,6 +500,12 @@ function prefixText(body: MessagesRequest): string {
       : (body.system ?? []).map(s => s.text ?? '').join('');
   if (system !== '') {
     parts.push(`<system>\n${system}\n</system>`);
+  }
+  // the lifted `role:'system'` turns join ONE block — the agent can
+  // tell the client's standing context from the top-level system field
+  const lifted = Array.isArray(body.systemTurns) ? body.systemTurns.join('\n\n') : '';
+  if (lifted !== '') {
+    parts.push(`<system>\n${lifted}\n</system>`);
   }
   if (body.tools !== undefined && body.tools.length > 0 && body.tool_choice?.type !== 'none') {
     parts.push(toolContract(body.tools, body.tool_choice));
@@ -779,11 +963,6 @@ function canonicalStopReason(raw: string | undefined): string {
 /** chars/4 underestimates CJK several-fold — count wide codepoints
  *  (~1 token each) against the ascii quarter-rate. Estimate only —
  *  never billing, never compaction. */
-function estTokens(s: string): number {
-  let units = 0;
-  for (const ch of s) units += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 4 : 1;
-  return Math.max(1, Math.ceil(units / 4));
-}
 
 function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -812,7 +991,7 @@ function messageStartEvent(model: string, inputTokens: number): object {
  *  resend answers from conv.lastReply, never a fresh pump. */
 function emitBlocks(res: ServerResponse, view: ReplyView): void {
   const { blocks, model, stopReason, inputTokens, stopSequence } = view;
-  const outTokens = estTokens(JSON.stringify(blocks));
+  const outTokens = estimateTokens(JSON.stringify(blocks));
   sse(res, 'message_start', messageStartEvent(model, inputTokens));
   blocks.forEach((b, i) => {
     if (b.type === 'tool_use') {
@@ -851,6 +1030,13 @@ function emitBlocks(res: ServerResponse, view: ReplyView): void {
 const OPEN_TAG = '<tool_call>';
 const CLOSE_TAG = '</tool_call>';
 
+/** The markup's payload — `<` escaped, so a value that carries the tag
+ *  cannot close the call early and truncate the JSON the parser reads.
+ *  JSON's own escape keeps the payload valid. */
+function callPayload(name: string, input: Record<string, unknown>): string {
+  return JSON.stringify({ name, input }).replaceAll('<', '\\u003c');
+}
+
 /** Narration label — a tool_call title can carry a whole command
  *  string; first line only, capped. */
 function shortLabel(s: string): string {
@@ -874,14 +1060,27 @@ function tagSuffix(s: string, tag: string): number {
  *  is swallowed (generation stops — the wire's own semantics). */
 class StopFilter {
   private tail = '';
-  private out = '';
+  /** The turn's text and its tool calls, in the order they arrived — the
+   *  buffered leg's answer reads them like the agent's (bro-sy4q3), and a
+   *  call keeps its place between the words. */
+  private readonly chunks: string[] = [];
+  /** the turn's text landed — the settle path does not feed it twice */
+  sawText = false;
   hit: string | undefined;
 
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
+    // the input ARRIVED — the turn's text landed, even when the cut holds
+    // it back as a stop-sequence prefix. The settle path must not feed it
+    // a second time: the text is already in the filter, held or emitted.
+    if (s !== '') {
+      this.sawText = true;
+    }
     const o = this.cut(s);
-    this.out += o;
+    if (o !== '') {
+      this.chunks.push(o);
+    }
     return o;
   }
 
@@ -920,15 +1119,30 @@ class StopFilter {
   flush(): string {
     const t = this.hit === undefined ? this.tail : '';
     this.tail = '';
-    this.out += t;
+    if (t !== '') {
+      this.chunks.push(t);
+      this.sawText = true;
+    }
     return t;
+  }
+
+  /** The agent's own markup for a call the bridge made — it rides the
+   *  same order the text does. The text held back as a stop-sequence
+   *  prefix belongs BEFORE the call: it was the agent's, and the call
+   *  interrupted it. */
+  addCall(markup: string): void {
+    if (this.tail !== '') {
+      this.chunks.push(this.tail);
+      this.tail = '';
+    }
+    this.chunks.push(markup);
   }
 
   /** Everything the filter let through — byte-identical to what the
    *  client saw, whatever the delta boundaries were. The recorded
    *  reply comes from this, never from a re-run of the raw text. */
   get emitted(): string {
-    return this.out;
+    return this.chunks.join('');
   }
 }
 
@@ -1038,9 +1252,12 @@ class LiveTurn extends TagPump {
    *  text: a narration landing inside a held <tool_call> corrupts the
    *  flat markup and the replay loses the call (bro-cfwc1). */
   private readonly emittedBlocks: OutBlock[] = [];
+  /** The client's tools — the bridge's vocabulary. Empty when the client
+   *  offered none: then the agent's tools stay narrated edges. */
+  private readonly clientTools: ClientTool[];
   stopReason = 'end_turn';
 
-  private readonly ping?: NodeJS.Timeout;
+  private ping?: NodeJS.Timeout;
 
   constructor(
     private readonly res: ServerResponse,
@@ -1048,12 +1265,31 @@ class LiveTurn extends TagPump {
     inputTokens: number,
     private readonly stops: StopFilter | undefined,
     pingMs?: number,
-    tools = true
+    tools = true,
+    clientTools: ClientTool[] = [],
+    private readonly contract: ToolContract = OPEN_CONTRACT
   ) {
     super(tools);
+    this.clientTools = clientTools;
     if (pingMs !== undefined && pingMs > 0) {
-      this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs);
+      this.ping = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          sse(res, 'ping', { type: 'ping' });
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
       this.ping.unref();
+      res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
     }
     sse(res, 'message_start', messageStartEvent(model, inputTokens));
   }
@@ -1062,6 +1298,30 @@ class LiveTurn extends TagPump {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
       // a stop_sequence hit cuts the wire here — later chunks swallow
       this.feed(this.stops?.feed(u.content.text) ?? u.content.text);
+      return;
+    }
+    // the agent's tool call, in the CLIENT's vocabulary: the client
+    // executes it, the wire stops at tool_use (bro-sy4q3)
+    // a stop_sequence hit ends the turn: a call that arrives after the cut
+    // is not bridged — the client must not run what the cut withheld
+    const bridged =
+      this.stops?.hit === undefined ? clientCall(u, this.clientTools, this.contract) : undefined;
+    if (bridged !== undefined) {
+      if (bridged.toolCallId !== undefined) {
+        // a repeated tool_call must not reach the client twice — the
+        // client would run the call again
+        if (this.bridged.has(bridged.toolCallId)) {
+          return;
+        }
+        this.bridged.add(bridged.toolCallId);
+        // the call is DONE from the client's view — the agent's own
+        // terminal edge must not narrate it a second time
+        this.toolDone.add(bridged.toolCallId);
+      }
+      // the text that came before it drains first — a call never lands
+      // inside a held tag
+      this.drain(false);
+      this.call(bridged.name, bridged.input);
       return;
     }
     const line = this.narrateTool(u);
@@ -1084,6 +1344,9 @@ class LiveTurn extends TagPump {
 
   private readonly toolStarted = new Set<string>();
   private readonly toolDone = new Set<string>();
+  /** The calls the bridge already sent to the client — a repeated
+   *  tool_call must not become a second tool_use the client runs again. */
+  private readonly bridged = new Set<string>();
   private readonly toolLabels = new Map<string, string>();
 
   /** Structured twin of the narration edges (bro-btccj): a named
@@ -1266,9 +1529,9 @@ class LiveTurn extends TagPump {
   }
 
   outputTokens(): number {
-    // estTokens floors at 1 — a genuinely silent turn reports 0, not
+    // estimateTokens floors at 1 — a genuinely silent turn reports 0, not
     // a phantom token (amazon-q #566)
-    return this.acc === '' ? 0 : estTokens(this.acc);
+    return this.acc === '' ? 0 : estimateTokens(this.acc);
   }
 }
 
@@ -1342,7 +1605,7 @@ const RATE = /rate.?limit|too many|quota|429/i;
  *  (amazon-q #558). */
 function inputTokensOf(prompt: AcpContentBlock[]): number {
   return (
-    estTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
+    estimateTokens(prompt.map(b => (b.type === 'text' ? b.text : '')).join('')) +
     prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
   );
 }
@@ -1370,7 +1633,7 @@ function respond(
         model,
         stop_reason: stopReason,
         stop_sequence: stopSequence ?? null,
-        usage: { input_tokens: inputTokens, output_tokens: estTokens(JSON.stringify(blocks)) },
+        usage: { input_tokens: inputTokens, output_tokens: estimateTokens(JSON.stringify(blocks)) },
       })
     );
     return;
@@ -1419,7 +1682,9 @@ interface TurnEnv {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  /** key → when its session's slot claim was taken — the cap counts
+   *  an open only after that claim outlives SESSION_SLOT_TTL_MS */
+  pendingOpens: Map<string, number>;
   key: string | undefined;
   /** request's stop settings — hashed into the conversation proofs so
    *  changed markers never replay a reply cut under different ones */
@@ -1445,6 +1710,26 @@ interface TurnEnv {
   openStream?: (inputTokens: number) => PooledTurnOpts['onUpdate'];
 }
 
+/** A resend pinning a DIFFERENT model — the session re-pins and the
+ *  recorded answer stays honest (it was generated under the old pin
+ *  either way). */
+async function repinModel(env: TurnEnv, cand: ConvSession): Promise<void> {
+  if (env.requestModel === undefined || env.requestModel === cand.requestModel) return;
+  try {
+    await cand.live.repin(env.requestModel, env.deadline);
+    cand.requestModel = env.requestModel;
+  } catch (err) {
+    evict(env.sessions, env.key, cand);
+    throw err;
+  }
+}
+
+/** The answer carries a tool call — the client would execute it a
+ *  second time (bro-sy4q3). */
+function toolAnswer(blocks: OutBlock[]): boolean {
+  return blocks.some(b => b.type === 'tool_use');
+}
+
 /** A proven continuation — the delta turns only; an empty tail is a
  *  replay (with a repin if the resend pins a different model). */
 async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
@@ -1459,19 +1744,23 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     tail = [{ role: 'user', content: env.prefix }, ...tail];
   }
   if (tail.length === 0) {
+    // a tool answer is NEVER replayed — the client would execute the
+    // call a second time; the retry asks the agent afresh (bro-sy4q3)
+    if (toolAnswer(cand.lastReply.blocks)) {
+      // a CHAINED retry cannot be answered afresh: evicting the
+      // predecessor would break the chain the client's next request rides
+      // on — it would find the predecessor gone. Fail loudly instead.
+      if (env.chained === true) {
+        throw new ChainBroken('previous_response_id carries a tool answer — the retry is empty');
+      }
+      evict(env.sessions, env.key, cand);
+      return freshTurn(env, false);
+    }
     // a pure retry — nothing new for the session; the caller replays
     // the recorded reply. A resend pinning a DIFFERENT model is not a
     // replay — the session re-pins and the recorded answer stays
     // honest (it was generated under the old pin either way).
-    if (env.requestModel !== undefined && env.requestModel !== cand.requestModel) {
-      try {
-        await cand.live.repin(env.requestModel, env.deadline);
-        cand.requestModel = env.requestModel;
-      } catch (err) {
-        evict(env.sessions, env.key, cand);
-        throw err;
-      }
-    }
+    await repinModel(env, cand);
     cand.lastSeen = Date.now();
     return { reused: true, inputTokens: 0, replay: true, conv: cand };
   }
@@ -1531,11 +1820,7 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
 function assertSessionCap(env: TurnEnv, claimKey: string): void {
   let views;
   try {
-    views = sessionCapViews(
-      env.cfg.entry.command,
-      env.cfg.agents,
-      process.env as Record<string, string>
-    );
+    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents);
   } catch (err) {
     // the count could not be established — fail closed, with the reason
     // the operator needs (a quota that cannot be verified is not walked
@@ -1545,7 +1830,15 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
     );
   }
   const view = views[0];
-  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1);
+  // in-flight opens still inside their claim's TTL are already counted
+  // — their reservation sits in view.live; only an open that outlived
+  // its claim is added here (fresh claims double-count, #926 review)
+  const refusal = conductorSessionRefusal(
+    view,
+    env.sessions.size,
+    pendingOpensBeyondClaim(env.pendingOpens),
+    view?.starts ?? 1
+  );
   if (refusal !== undefined) {
     throw new Error(refusal);
   }
@@ -1603,8 +1896,10 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose
-  // loser leaks out of the map (codeant #569)
-  env.pendingOpens.add(key);
+  // loser leaks out of the map (codeant #569). The timestamp is the
+  // claim's: assertSessionCap just took the slot, so the cap check
+  // knows when the reservation covering this open expires
+  env.pendingOpens.set(key, Date.now());
   let live: AcpRetainedSession | undefined;
   try {
     live = await acpSessionRetain(env.peer, env.cfg.entry, env.opts, env.deadline, {
@@ -1695,13 +1990,85 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
 }
 
 /** The wire surface `messages` needs — one listener's cfg, provider
- *  opts, link factory, and the session maps it owns. */
+ *  opts, link factory, and the provider lanes it routes across. */
 interface WireCtx {
   cfg: ConductorConfig;
   opts: ProviderWireOpts;
-  link: (parent?: OtelCtx) => Promise<AcpPeer>;
+  /** The link factory — keyed by the ENTRY, so one agent serves every
+   *  route that reaches its entry. */
+  link: (entry: string, parent?: OtelCtx) => Promise<AcpPeer>;
+  /** Every provider lane the gateway serves — keyed by its ENTRY. The
+   *  default backend plus the exposed ones, each with its own acp pool. */
+  lanes: Map<string, ProviderLane>;
+  /** The PUBLIC routes — route name → entry key. The router's table. */
+  routes: Map<string, string>;
+}
+
+/** One provider's LANE — the runtime carrier of an ENTRY: its model pin,
+ *  its acp pool, and the conversations it carries. A request rides ONE
+ *  lane: the one its model's route names, else the default backend.
+ *  Sessions are per lane: the same conversation key under two providers
+ *  is two conversations, each held in its own provider's context.
+ *
+ *  A lane is per ENTRY, never per route: two routes naming one entry
+ *  share this lane — one agent, one pool, one set of conversations
+ *  (spec bro-jxw7p). */
+interface ProviderLane {
+  /** The ENTRY key — the private config name. The pool, the spawn label
+   *  and the session map live under it. */
+  entry: string;
+  /** The PUBLIC routes that reach this lane. */
+  routes: string[];
+  /** The route the catalog advertises this lane under — the first
+   *  DECLARED route for its entry. */
+  primary: string;
+  cfg: ConductorConfig;
+  opts: ProviderWireOpts;
+  pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
-  pendingOpens: Set<string>;
+  pendingOpens: Map<string, number>;
+}
+
+/** A routing decision — the LANE that serves the request and the ROUTE
+ *  it answers under. The route is the public identity an operator reads
+ *  in the journal; the lane owns the agent and the conversation. */
+interface Routing {
+  lane: ProviderLane;
+  route: string;
+}
+
+/** The lane a name names — a chain's lane, or the provider prefix on a
+ *  requested model. Undefined when no lane carries the name. */
+function laneNamed(wire: WireCtx, name: string | undefined): ProviderLane | undefined {
+  if (name === undefined) return undefined;
+  const entry = wire.routes.get(name);
+  return entry === undefined ? undefined : wire.lanes.get(entry);
+}
+
+/** The lane a request rides — the model's `<route>/<model>` prefix when
+ *  it names a route, else the default backend. A bare id (or a prefix
+ *  naming no route) rides the default: a model id the default's catalog
+ *  cannot serve is that lane's own verdict — the gateway must not 400 a
+ *  client for a model it simply does not route. A chained /v1/responses
+ *  request rides its PREDECESSOR's lane — that chain already lives in
+ *  one provider's context — and answers under the route the predecessor
+ *  answered under, not under the incoming model's prefix. */
+function routeOf(wire: WireCtx, model: string | undefined, chain?: ChainEntry): Routing {
+  const chained = chain === undefined ? undefined : wire.lanes.get(chain.lane);
+  if (chained !== undefined && chain !== undefined) {
+    return { lane: chained, route: chain.route };
+  }
+  const head = model?.includes('/') === true ? model.slice(0, model.indexOf('/')) : undefined;
+  const named = laneNamed(wire, head);
+  if (named !== undefined) return { lane: named, route: head as string };
+  const fallback = wire.lanes.get(wire.cfg.backend);
+  // the default lane is built unconditionally at proxy construction —
+  // a missing one is a wiring bug, not an unroutable model
+  if (fallback === undefined) {
+    throw new Error(`bro conductor: no lane for default backend '${wire.cfg.backend}'`);
+  }
+  // nothing matched: the default lane answers under its ADVERTISED route
+  return { lane: fallback, route: fallback.primary };
 }
 
 /** `provider/model` ids are a real pin — resolved against the agent's
@@ -1762,7 +2129,7 @@ function turnError(
  *  every hit: insertion order is the LRU order sweepSessions' overflow
  *  eviction relies on. */
 function settleConv(
-  wire: WireCtx,
+  sessions: Map<string, ConvSession>,
   key: string | undefined,
   conv: ConvSession,
   body: MessagesRequest,
@@ -1794,8 +2161,55 @@ function settleConv(
   conv.busy = false;
   conv.lastReply = view;
   if (key === undefined) return;
-  wire.sessions.delete(key);
-  wire.sessions.set(key, conv);
+  sessions.delete(key);
+  sessions.set(key, conv);
+}
+
+/** One content block the renderer cannot read. A `null` block throws
+ *  inside `blockText`, a primitive mis-renders as its `[undefined]`
+ *  marker, and a text block whose `text` is not a string collapses to
+ *  silence through join — broken input the gate answers 400. The
+ *  values a block's renderer TOUCHES are checked too: a tool_result's
+ *  content must be a string or an array of objects — `.map(c => c.text)`
+ *  on a null entry throws the same way (cubic, PR #888). */
+const badBlock = (b: unknown): boolean => {
+  if (b === null || typeof b !== 'object') return true;
+  const blk = b as { type?: unknown; content?: unknown; text?: unknown };
+  // a block with no type string is not an unknown block — it is no
+  // block at all; `[undefined]` is a marker for a real type, not this
+  if (typeof blk.type !== 'string') return true;
+  if (blk.type === 'text') return typeof blk.text !== 'string';
+  if (blk.type !== 'tool_result' || blk.content === undefined) return false;
+  if (typeof blk.content === 'string') return false;
+  if (!Array.isArray(blk.content)) return true;
+  return blk.content.some(c => c === null || typeof c !== 'object');
+};
+
+/** One turn the wire cannot carry — a role the transcript has no voice
+ *  for, or content that is neither text nor blocks. A `role:'system'`
+ *  turn IS legal: it is context, and the lift moves it to the system
+ *  slot instead of the conversation. */
+const badTurn = (m: unknown): boolean => {
+  if (m === null || typeof m !== 'object') return true;
+  const msg = m as ClientMessage;
+  if (msg.role !== 'user' && msg.role !== 'assistant' && msg.role !== 'system') return true;
+  if (typeof msg.content === 'string') return false;
+  if (!Array.isArray(msg.content)) return true;
+  return msg.content.some(badBlock);
+};
+
+/** The messages shape gate — the canonical body, or undefined when the
+ *  array is missing, empty, or holds a turn the wire cannot carry.
+ *  A conversation needs a USER turn to answer: a system turn is
+ *  context, and an assistant-only request has nothing to reply to. */
+function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
+  if (!Array.isArray(body.messages) || body.messages.length === 0) return undefined;
+  if (body.messages.some(badTurn)) return undefined;
+  const canonical = liftSystemTurns(body);
+  const turns = canonical.messages ?? [];
+  if (turns.length === 0) return undefined;
+  if (!turns.some(m => m.role === 'user')) return undefined;
+  return canonical;
 }
 
 /** Request validation → 4xx answers. Returns the parsed body, or
@@ -1819,22 +2233,17 @@ async function parseMessagesBody(
     apiError(res, 400, 'invalid_request_error', 'request body must be a JSON object');
     return undefined;
   }
-  const badTurn = (m: unknown): boolean =>
-    m === null ||
-    typeof m !== 'object' ||
-    ((m as ClientMessage).role !== 'user' && (m as ClientMessage).role !== 'assistant') ||
-    (typeof (m as ClientMessage).content !== 'string' &&
-      !Array.isArray((m as ClientMessage).content));
-  if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.some(badTurn)) {
+  const canonical = canonicalMessages(body);
+  if (canonical === undefined) {
     apiError(
       res,
       400,
       'invalid_request_error',
-      'messages: a non-empty array of {role: user|assistant, content} turns is required'
+      'messages: a non-empty array of {role: user|assistant|system, content} turns with at least one user turn is required'
     );
     return undefined;
   }
-  if (stopSeqsOf(body) === undefined) {
+  if (stopSeqsOf(canonical) === undefined) {
     apiError(
       res,
       400,
@@ -1843,7 +2252,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return body;
+  return canonical;
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
@@ -1859,6 +2268,112 @@ function settledStopReason(
   if (blocks.some(b => b.type === 'tool_use')) return 'tool_use';
   if (stopHit !== undefined) return 'stop_sequence';
   return canonical;
+}
+
+/** The shared acpTurn envelope — the lane's config, its sessions, the
+ *  deadline and the provenance every dialect spells the same way. The
+ *  three dialects differ only in their openStream and their chaining. */
+function laneTurnEnv(
+  lane: ProviderLane,
+  peer: AcpPeer,
+  d: {
+    body: MessagesRequest;
+    key: string | undefined;
+    stopKey: string;
+    parent: OtelCtx | undefined;
+    requestModel: string | undefined;
+    signal: AbortSignal;
+  }
+): TurnEnv {
+  return {
+    body: d.body,
+    msgs: d.body.messages ?? [],
+    prefix: prefixText(d.body),
+    peer,
+    cfg: lane.cfg,
+    opts: lane.opts,
+    sessions: lane.sessions,
+    pendingOpens: lane.pendingOpens,
+    key: d.key,
+    stopKey: d.stopKey,
+    parent: d.parent,
+    requestModel: d.requestModel,
+    deadline: Date.now() + lane.cfg.timeoutMs,
+    signal: d.signal,
+    // the spawn label names the ENTRY — two routes reaching one entry
+    // share the agent, so they share the label too
+    by: `conductor:${lane.entry}`,
+    imageOk: peer.caps?.image === true,
+  };
+}
+
+/** The SSE opener for a streamed Messages turn — a streamed answer
+ *  commits to SSE at turn start: headers and message_start leave before
+ *  the first delta; a failed turn lands as an in-stream error event, the
+ *  wire's own dead-stream shape. x-accel-buffering:no stops a proxy from
+ *  re-buffering the stream back into one end-of-turn burst (amazon-q
+ *  #566). `set` hands the LiveTurn back so the caller's catch/finish
+ *  paths can reach it. */
+function messagesStreamOpener(
+  res: ServerResponse,
+  lane: ProviderLane,
+  body: MessagesRequest,
+  requestModel: string | undefined,
+  key: string | undefined,
+  stops: StopFilter,
+  set: (live: LiveTurn) => void
+): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
+  const tools = clientTools(body.tools);
+  if (body.stream === false) {
+    // the buffered leg writes no stream — it collects the calls the
+    // bridge made, in the agent's own markup, so the answer parses
+    // them like the agent's (bro-sy4q3)
+    const contract = clientToolContract(body.tool_choice);
+    // the bridged ids — a repeated tool_call must not reach the client
+    // twice: the client would run the call again
+    const bridged = new Set<string>();
+    return () => u => {
+      if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+        // the text lands WITH the calls, in the order they arrived — a
+        // call keeps its place between the words
+        stops.feed(u.content.text);
+        return;
+      }
+      // a stop_sequence hit ends the turn: a call that arrives after the
+      // cut is not part of the answer
+      if (stops.hit !== undefined) return;
+      const call = clientCall(u, tools, contract);
+      if (call === undefined) return;
+      if (call.toolCallId !== undefined) {
+        if (bridged.has(call.toolCallId)) return;
+        bridged.add(call.toolCallId);
+      }
+      stops.addCall(`${OPEN_TAG}${callPayload(call.name, call.input)}${CLOSE_TAG}`);
+    };
+  }
+  return inputTokens => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+      // h: pins echo like respond()'s — the internal f:
+      // fingerprint stays server-side
+      ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
+    });
+    const live = new LiveTurn(
+      res,
+      servedModel(requestModel, lane.opts, lane.cfg, body),
+      inputTokens,
+      stops,
+      lane.cfg.keepaliveMs ?? 10_000,
+      body.tool_choice?.type !== 'none',
+      tools,
+      clientToolContract(body.tool_choice)
+    );
+    set(live);
+    return live.onUpdate;
+  };
 }
 
 async function messages(
@@ -1877,67 +2392,34 @@ async function messages(
   // the buffered leg cuts the settled text post-hoc. Either way the
   // recorded reply is `stops.emitted` — exactly what the client saw.
   const stops = new StopFilter(stopSeqs);
+  // the lane this request rides — the model's route prefix names it —
+  // and the route it answers under (the public identity the journal
+  // records)
+  const requestModel = requestModelOf(body);
+  const { lane, route } = routeOf(wire, requestModel);
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort());
-    const msgs = body.messages ?? [];
-    const requestModel = requestModelOf(body);
     out = await acpTurn({
-      body,
-      msgs,
-      prefix: prefixText(body),
-      peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
-      key,
-      stopKey,
-      parent,
-      requestModel,
-      deadline: Date.now() + wire.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
-      imageOk: peer.caps?.image === true,
+      ...laneTurnEnv(lane, peer, { body, key, stopKey, parent, requestModel, signal: ac.signal }),
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
       // as an in-stream error event, the wire's own dead-stream shape.
-      // x-accel-buffering:no stops a proxy from re-buffering the stream
-      // back into one end-of-turn burst (amazon-q #566). The turn layer
-      // fires this only once a real pump is chosen — a replay never
-      // opens the stream, a failed open still answers an HTTP status.
-      openStream:
-        body.stream === false
-          ? undefined
-          : inputTokens => {
-              res.writeHead(200, {
-                'content-type': 'text/event-stream',
-                'cache-control': 'no-cache',
-                connection: 'keep-alive',
-                'x-accel-buffering': 'no',
-                // h: pins echo like respond()'s — the internal f:
-                // fingerprint stays server-side
-                ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
-              });
-              live = new LiveTurn(
-                res,
-                servedModel(requestModel, wire.opts, wire.cfg, body),
-                inputTokens,
-                stops,
-                wire.cfg.keepaliveMs ?? 10_000,
-                body.tool_choice?.type !== 'none'
-              );
-              return live.onUpdate;
-            },
+      // The turn layer fires this only once a real pump is chosen — a
+      // replay never opens the stream, a failed open still answers an
+      // HTTP status.
+      openStream: messagesStreamOpener(res, lane, body, requestModel, key, stops, l => {
+        live = l;
+      }),
     });
   } catch (err) {
-    turnError(res, err, live, wire.cfg.backend, t0);
+    turnError(res, err, live, route, t0);
     return;
   }
   // a resend that carried nothing new — replay the recorded reply,
@@ -1953,8 +2435,9 @@ async function messages(
   // let through — byte-identical to the client's own view
   live?.finish(canonicalStopReason(reply.stopReason));
   if (live === undefined) {
-    // the buffered leg's cut lands post-hoc through the same filter
-    stops.feed(reply.text);
+    // the buffered leg's cut lands post-hoc through the same filter —
+    // unless its text already landed with the calls, in order
+    if (!stops.sawText) stops.feed(reply.text);
     stops.flush();
   }
   const view: ReplyView = {
@@ -1974,16 +2457,26 @@ async function messages(
   if (out.conv !== undefined) {
     // a stop hit swallowed post-marker output the session still holds —
     // the conversation diverged from the client's view (bro-vfbyc)
-    settleConv(wire, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined);
+    settleConv(
+      lane.sessions,
+      key,
+      out.conv,
+      body,
+      view,
+      stopKey,
+      undefined,
+      stops.hit !== undefined
+    );
   }
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    // the ROUTE that answered — the public identity an operator reads
+    backend: route,
     model: reply.model,
     stop_reason: view.stopReason,
     stream: body.stream !== false,
     session_reused: out.reused,
     input_tokens: inputTokens,
-    output_tokens: live?.outputTokens() ?? estTokens(reply.text),
+    output_tokens: live?.outputTokens() ?? estimateTokens(reply.text),
     duration_ms: Date.now() - t0,
   });
   if (live !== undefined) {
@@ -2250,6 +2743,8 @@ class RespLive extends TagPump {
    *  client saw; settle reads it to flag the conversation divergent. */
   capped = false;
 
+  private ping?: NodeJS.Timeout;
+
   constructor(
     private readonly res: ServerResponse,
     private readonly respId: string,
@@ -2257,9 +2752,30 @@ class RespLive extends TagPump {
     private readonly inputTokens: number,
     private readonly store: boolean,
     tools = true,
-    private readonly cap?: number
+    private readonly cap?: number,
+    pingMs?: number
   ) {
     super(tools);
+    if (pingMs !== undefined && pingMs > 0) {
+      this.ping = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
+      this.ping.unref();
+      res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
+    }
     sse(res, 'response.created', {
       type: 'response.created',
       response: this.respObj('in_progress'),
@@ -2408,6 +2924,10 @@ class RespLive extends TagPump {
    *  The message item carries the same status: 'incomplete' on a
    *  cancelled turn would read as a token cap, not the cancel it was. */
   finish(status: string, usageOut: number, reason?: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     const st = this.capped ? 'incomplete' : status;
     this.closeItem(st);
@@ -2424,6 +2944,10 @@ class RespLive extends TagPump {
   }
 
   fail(type: string, message: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     sse(this.res, 'error', { type: 'error', code: type, message });
   }
@@ -2523,34 +3047,37 @@ function sseHead(res: ServerResponse): void {
 
 /** Estimated tokens over recorded blocks — replay output accounting. */
 const blocksTokens = (blocks: OutBlock[]): number =>
-  estTokens(blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join(''));
+  estimateTokens(
+    blocks.map(b => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join('')
+  );
 
 /** Chain ids a listener can afford to remember — LRU-trimmed like
  *  the sessions map; entries pointing at dead sessions prune away. */
 const CHAIN_CAP = 256;
 
-function pruneChains(
-  chains: Map<string, { key: string; consumed: number }>,
-  sessions: Map<string, ConvSession>
-): void {
-  const stale: string[] = [];
-  const alive: string[] = [];
+/** One /v1/responses chain entry — the conv key, the consumed count it
+ *  was recorded at, and the LANE it lives in. A chain is held in one
+ *  provider's context, so its continuation rides that provider, not
+ *  whichever one the request's model happens to name. */
+interface ChainEntry {
+  key: string;
+  consumed: number;
+  /** The lane's ENTRY key — the chain lives in that lane's context. */
+  lane: string;
+  /** The route the PREDECESSOR answered under — the public identity the
+   *  journal records for the chained turn, whatever the incoming
+   *  model's prefix asks for. */
+  route: string;
+}
+
+function pruneChains(chains: Map<string, ChainEntry>, lanes: Map<string, ProviderLane>): void {
   for (const [id, e] of chains) {
-    if (sessions.has(e.key)) {
-      alive.push(id);
-    } else {
-      stale.push(id);
-    }
-  }
-  for (const id of stale) {
-    chains.delete(id);
+    if (lanes.get(e.lane)?.sessions.has(e.key) !== true) chains.delete(id);
   }
   let overflow = chains.size - CHAIN_CAP;
-  for (let i = 0; i < alive.length; i++) {
-    if (overflow <= 0) {
-      break;
-    }
-    chains.delete(alive[i]);
+  for (const id of chains.keys()) {
+    if (overflow <= 0) break;
+    chains.delete(id);
     overflow--;
   }
 }
@@ -2607,7 +3134,7 @@ const respError = (status: string, reason?: string): unknown =>
     : null;
 
 /** A caller's output-token budget expressed in chars — the inverse of
- *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
+ *  estimateTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
 const capCharsOf = (tokens: number | undefined): number | undefined =>
   typeof tokens === 'number' && tokens > 0 ? tokens * 4 : undefined;
 
@@ -2660,9 +3187,9 @@ const respShape = (r: ResponsesRequest): string | undefined =>
       : undefined;
 
 /** The model label a recorded reply or the wire config resolves to. */
-function respModel(wire: WireCtx, body: MessagesRequest, recorded?: string): string {
+function respModel(lane: ProviderLane, body: MessagesRequest, recorded?: string): string {
   if (recorded !== undefined && recorded !== '') return recorded;
-  return servedModel(undefined, wire.opts, wire.cfg, body);
+  return servedModel(undefined, lane.opts, lane.cfg, body);
 }
 
 /** Replay branch — a resend carried nothing new; answer the recorded
@@ -2675,19 +3202,22 @@ interface RespReplayCtx {
   respId: string;
   key: string | undefined;
   store: boolean;
-  chains: Map<string, { key: string; consumed: number }>;
+  chains: Map<string, ChainEntry>;
+  lane: ProviderLane;
+  /** The route the turn ANSWERED under — the journal's public identity. */
+  route: string;
 }
 
 function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx): void {
-  const { rreq, out, respId, key, store, chains } = ctx;
+  const { rreq, out, respId, key, store, chains, lane, route } = ctx;
   const lr = out.conv?.lastReply;
   const capped = capBlocks(lr?.blocks ?? [], capCharsOf(rreq.max_output_tokens));
   const blocks = capped.blocks;
-  const model = respModel(wire, {}, lr?.model);
+  const model = respModel(lane, {}, lr?.model);
   const status = capped.capped ? 'incomplete' : respStatus(lr?.stopReason ?? '');
   if (store && out.conv !== undefined && key !== undefined) {
-    chains.set(respId, { key, consumed: out.conv.consumed });
-    pruneChains(chains, wire.sessions);
+    chains.set(respId, { key, consumed: out.conv.consumed, lane: lane.entry, route });
+    pruneChains(chains, wire.lanes);
   }
   if (rreq.stream === true) {
     sseHead(res);
@@ -2750,7 +3280,7 @@ function respConvKey(
 function respStreamOpener(
   rreq: ResponsesRequest,
   res: ServerResponse,
-  wire: WireCtx,
+  lane: ProviderLane,
   d: {
     respId: string;
     body: MessagesRequest;
@@ -2765,11 +3295,12 @@ function respStreamOpener(
     const live = new RespLive(
       res,
       d.respId,
-      servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
+      servedModel(requestModelOf(d.body), lane.opts, lane.cfg, d.body),
       inputTokens,
       d.store,
       d.tools,
-      capCharsOf(rreq.max_output_tokens)
+      capCharsOf(rreq.max_output_tokens),
+      lane.cfg.keepaliveMs ?? 10_000
     );
     d.set(live);
     return live.onUpdate;
@@ -2780,7 +3311,7 @@ async function responses(
   req: IncomingMessage,
   res: ServerResponse,
   wire: WireCtx,
-  chains: Map<string, { key: string; consumed: number }>,
+  chains: Map<string, ChainEntry>,
   parent: OtelCtx | undefined
 ): Promise<void> {
   const parsed = await parseDialect<ResponsesRequest>(req, res, respShape, responsesToBody);
@@ -2802,32 +3333,29 @@ async function responses(
   }
   const key = respConvKey(req, rreq, body, hit, store);
   const tools = body.tool_choice?.type !== 'none';
+  // the lane — a chained request rides its predecessor's provider (the
+  // chain lives in that provider's context) and answers under the route
+  // the predecessor answered under; a fresh one rides the provider its
+  // model names.
+  const { lane, route } = routeOf(wire, requestModelOf(body), hit);
   let live: RespLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      body,
-      msgs: body.messages ?? [],
-      prefix: prefixText(body),
-      peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
-      key,
-      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel: requestModelOf(body),
+        signal: ac.signal,
+      }),
       chained: hit !== undefined,
       chainConsumed: hit?.consumed,
-      parent,
-      requestModel: requestModelOf(body),
-      deadline: Date.now() + wire.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
-      imageOk: peer.caps?.image === true,
-      openStream: respStreamOpener(rreq, res, wire, {
+      openStream: respStreamOpener(rreq, res, lane, {
         respId,
         body,
         tools,
@@ -2840,7 +3368,7 @@ async function responses(
     return;
   }
   if (out.replay === true) {
-    responsesReplay(res, wire, { rreq, out, respId, key, store, chains });
+    responsesReplay(res, wire, { rreq, out, respId, key, store, chains, lane, route });
     return;
   }
   responsesDeliver(res, wire, {
@@ -2854,7 +3382,23 @@ async function responses(
     live,
     t0,
     chained: hit !== undefined,
+    lane,
+    route,
   });
+}
+
+/** Register the chain id of a stored responses turn — the chain rides
+ *  the lane its conversation lives in. */
+function registerChain(
+  chains: Map<string, ChainEntry>,
+  lanes: Map<string, ProviderLane>,
+  d: { store: boolean; respId: string; key: string; consumed: number },
+  lane: string,
+  route: string
+): void {
+  if (!d.store) return;
+  chains.set(d.respId, { key: d.key, consumed: d.consumed, lane, route });
+  pruneChains(chains, lanes);
 }
 
 /** Post-turn settlement for /v1/responses — settle the retained
@@ -2872,10 +3416,14 @@ function responsesDeliver(
     respId: string;
     key: string | undefined;
     store: boolean;
-    chains: Map<string, { key: string; consumed: number }>;
+    chains: Map<string, ChainEntry>;
     live: RespLive | undefined;
     t0: number;
     chained: boolean;
+    lane: ProviderLane;
+    /** The route the turn ANSWERED under — the predecessor's for a
+     *  chained request. */
+    route: string;
   }
 ): void {
   const reply = d.out.reply as PooledReply;
@@ -2890,12 +3438,12 @@ function responsesDeliver(
   // canonicalize before precedence applies — an unmapped backend reason
   // overridden by a cap or a tool_use still earns its otel breadcrumb
   const backendReason = canonicalStopReason(reply.stopReason);
-  const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text);
+  const outTokens = capped.capped ? blocksTokens(outBlocks) : estimateTokens(reply.text);
   const wireReason = finalRespReason(capped.capped, outBlocks, backendReason);
   const status = respStatus(wireReason);
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
-      wire,
+      d.lane.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -2914,13 +3462,17 @@ function responsesDeliver(
       // from the client's view (bro-vfbyc)
       capped.capped || d.live?.capped === true
     );
-    if (d.store) {
-      d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed });
-      pruneChains(d.chains, wire.sessions);
-    }
+    registerChain(
+      d.chains,
+      wire.lanes,
+      { store: d.store, respId: d.respId, key: d.key, consumed: d.out.conv.consumed },
+      d.lane.entry,
+      d.route
+    );
   }
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    // the ROUTE that answered — for a chained turn the predecessor's
+    backend: d.route,
     dialect: 'responses',
     model: reply.model,
     stop_reason: wireReason,
@@ -2940,7 +3492,7 @@ function responsesDeliver(
     JSON.stringify(
       respEnvelope(
         d.respId,
-        servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
+        servedModel(requestModelOf(d.body), d.lane.opts, d.lane.cfg, d.body),
         status,
         blocksToOutput(outBlocks),
         d.store,
@@ -3021,7 +3573,12 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
       typeof m.content === 'string'
         ? m.content
         : chatContent(m.content)
-            .map(b => (b.type === 'text' ? (b as { text: string }).text : ''))
+            .map(b => {
+              // same contract as chatContent above — a silent drop would
+              // let the model answer about content it never received
+              if (b.type === 'text') return (b as { text: string }).text;
+              throw new Error('tool messages support text content only');
+            })
             .join('');
     return [
       {
@@ -3157,6 +3714,8 @@ class ChatLive extends TagPump {
    *  client saw; settle reads it to flag the conversation divergent. */
   capped = false;
 
+  private ping?: NodeJS.Timeout;
+
   constructor(
     private readonly res: ServerResponse,
     private readonly id: string,
@@ -3164,9 +3723,30 @@ class ChatLive extends TagPump {
     private readonly created: number,
     tools = true,
     private readonly cap?: number,
-    private readonly stops?: StopFilter
+    private readonly stops?: StopFilter,
+    pingMs?: number
   ) {
     super(tools);
+    if (pingMs !== undefined && pingMs > 0) {
+      this.ping = setInterval(() => {
+        if (this.res.writableEnded || this.res.destroyed) {
+          if (this.ping) clearInterval(this.ping);
+          return;
+        }
+        try {
+          this.res.write(': ping\n\n');
+        } catch {
+          if (this.ping) clearInterval(this.ping);
+        }
+      }, pingMs);
+      this.ping.unref();
+      this.res.once('close', () => {
+        if (this.ping !== undefined) {
+          clearInterval(this.ping);
+          this.ping = undefined;
+        }
+      });
+    }
   }
 
   private ev(delta: Record<string, unknown>, finish: string | null = null): void {
@@ -3233,6 +3813,10 @@ class ChatLive extends TagPump {
    *  held tail flushes through the pump first — a non-marker tail is
    *  real content the wire still owes the client. */
   finish(stopReason: string, usage?: Record<string, unknown>): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     if (this.stops !== undefined) this.feed(this.stops.flush());
     this.drainAll();
     this.head();
@@ -3258,6 +3842,10 @@ class ChatLive extends TagPump {
   }
 
   fail(type: string, message: string): void {
+    if (this.ping !== undefined) {
+      clearInterval(this.ping);
+      this.ping = undefined;
+    }
     this.drainAll();
     this.res.write(`data: ${JSON.stringify({ error: { message, type } })}\n\n`);
     this.res.write('data: [DONE]\n\n');
@@ -3324,7 +3912,7 @@ function chatOutcome(
   const reply = replay ? undefined : (out.reply as PooledReply);
   const inputTokens = replay ? (lr?.inputTokens ?? 0) : out.inputTokens;
   const blocks = replay ? (lr?.blocks ?? []) : parseReply(reply?.text ?? '', tools);
-  const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '');
+  const outTokens = replay ? blocksTokens(blocks) : estimateTokens(reply?.text ?? '');
   const stopReason = chatStopReason(replay, lr, blocks, reply);
   const finish =
     ownKey(CHAT_FINISH, stopReason) ??
@@ -3347,7 +3935,12 @@ async function chatCompletions(
   const key = conversationKey(req, body);
   const chatId = `chatcmpl-${randomBytes(12).toString('hex')}`;
   const created = Math.floor(Date.now() / 1000);
-  const model = servedModel(requestModelOf(body), wire.opts, wire.cfg, body);
+  // the lane this request rides — the model's route prefix names it —
+  // and the route it answers under (the public identity the journal
+  // records)
+  const requestModel = requestModelOf(body);
+  const { lane, route } = routeOf(wire, requestModel);
+  const model = servedModel(requestModel, lane.opts, lane.cfg, body);
   const tools = body.tool_choice?.type !== 'none';
   // one filter per turn — the streamed leg feeds it delta-by-delta,
   // the buffered leg cuts the settled text post-hoc; the recorded
@@ -3356,26 +3949,18 @@ async function chatCompletions(
   let live: ChatLive | undefined;
   let out: TurnOutcome;
   try {
-    const peer = await wire.link(parent);
+    const peer = await wire.link(lane.entry, parent);
     const ac = new AbortController();
     res.once('close', () => ac.abort());
     out = await acpTurn({
-      body,
-      msgs: body.messages ?? [],
-      prefix: prefixText(body),
-      peer,
-      cfg: wire.cfg,
-      opts: wire.opts,
-      sessions: wire.sessions,
-      pendingOpens: wire.pendingOpens,
-      key,
-      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
-      parent,
-      requestModel: requestModelOf(body),
-      deadline: Date.now() + wire.cfg.timeoutMs,
-      signal: ac.signal,
-      by: `conductor:${wire.cfg.backend}`,
-      imageOk: peer.caps?.image === true,
+      ...laneTurnEnv(lane, peer, {
+        body,
+        key,
+        stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+        parent,
+        requestModel,
+        signal: ac.signal,
+      }),
       openStream:
         creq.stream === true
           ? () => {
@@ -3387,7 +3972,8 @@ async function chatCompletions(
                 created,
                 tools,
                 capCharsOf(creq.max_completion_tokens ?? creq.max_tokens),
-                stops
+                stops,
+                lane.cfg.keepaliveMs ?? 10_000
               );
               return live.onUpdate;
             }
@@ -3397,7 +3983,21 @@ async function chatCompletions(
     openaiFail(res, err, live);
     return;
   }
-  chatDeliver(res, wire, { creq, body, out, key, chatId, created, model, tools, live, stops, t0 });
+  chatDeliver(res, {
+    creq,
+    body,
+    out,
+    key,
+    chatId,
+    created,
+    model,
+    tools,
+    live,
+    stops,
+    t0,
+    lane,
+    route,
+  });
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -3406,7 +4006,6 @@ async function chatCompletions(
  *  buffered completion. */
 function chatDeliver(
   res: ServerResponse,
-  wire: WireCtx,
   d: {
     creq: ChatRequest;
     body: MessagesRequest;
@@ -3419,6 +4018,9 @@ function chatDeliver(
     live: ChatLive | undefined;
     stops: StopFilter;
     t0: number;
+    lane: ProviderLane;
+    /** The route the turn ANSWERED under — the journal's public identity. */
+    route: string;
   }
 ): void {
   const o = chatOutcome(d.out, d.tools);
@@ -3439,11 +4041,11 @@ function chatDeliver(
   const outTokens = capped.capped
     ? blocksTokens(blocks)
     : settled !== undefined
-      ? estTokens(settled)
+      ? estimateTokens(settled)
       : o.outTokens;
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
-      wire,
+      d.lane.sessions,
       d.key,
       d.out.conv,
       d.body,
@@ -3467,7 +4069,8 @@ function chatDeliver(
     total_tokens: o.inputTokens + outTokens,
   };
   otelEvent('conductor.turn', {
-    backend: wire.cfg.backend,
+    // the ROUTE that answered — the public identity an operator reads
+    backend: d.route,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
     stop_reason: stopReason,
@@ -3504,42 +4107,201 @@ function chatDeliver(
   );
 }
 
-/** The anthropic /v1/models rows — the configured catalog source
- *  (`BRO_PROVIDER_CATALOG`, else the backend itself) through the SAME
- *  `bro providers models` surface, so ids arrive `<entry>/<model>` and
- *  re-pin on /v1/messages. */
-async function models(
-  res: ServerResponse,
-  cfg: ConductorConfig,
-  opts: ProviderWireOpts
-): Promise<void> {
+/** A catalog row plus the PREFIX its id was built with and the model id
+ *  under it. The id's own first segment is not reliably the route — a
+ *  catalog entry's name may carry a slash ('opencode/account') — so the
+ *  lane carries what it advertised, and the label needs the model id to
+ *  tell a provider-qualified name from a bare one. */
+interface RoutedModel extends CatalogModel {
+  /** the prefix the id carries — the catalog entry's own name */
+  prefix?: string;
+  /** the id under that prefix — the agent's own model id */
+  modelId?: string;
+}
+
+/** One lane's catalog — its rows, or the failure that stopped it. */
+interface LaneCatalog {
+  rows?: RoutedModel[];
+  failure?: string;
+}
+
+/** One lane's catalog rows — its own entry, or the catalog override for
+ *  the DEFAULT lane. A lane that cannot be read yields a failure, not a
+ *  throw: one provider being down must not blind the other's models. */
+async function laneCatalog(lane: ProviderLane, wire: WireCtx): Promise<LaneCatalog> {
+  // the catalog override answers for the default lane only — an
+  // exposed lane advertises its own entry's models. The rows carry the
+  // lane's PRIMARY route: a lane with two routes is advertised once, so
+  // the catalog never lists its models twice (spec bro-jxw7p).
+  const source =
+    lane.entry === wire.cfg.backend && wire.cfg.catalog !== undefined
+      ? wire.cfg.catalog
+      : { name: lane.primary, entry: lane.cfg.entry };
   try {
-    const source = cfg.catalog ?? { name: cfg.backend, entry: cfg.entry };
-    const list = await catalogModels(source.name, source.entry, { acp: opts.acp });
-    const data = list.map(m => ({
-      type: 'model',
-      id: m.id,
-      display_name: m.name ?? m.id,
-      created_at: '2025-01-01T00:00:00Z',
-    }));
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        object: 'list',
-        data,
-        has_more: false,
-        first_id: data[0]?.id ?? null,
-        last_id: data[data.length - 1]?.id ?? null,
-      })
-    );
+    // the LANE's budget bounds its own catalog read — the operator's
+    // timeout, not a constant baked into the provider layer. A cold acp
+    // spawn that enumerates a multi-upstream agent's catalog can outrun
+    // 30s, and a lane that fails its read must fail with its own budget,
+    // not with a stranger's.
+    const rows = await catalogModels(source.name, source.entry, {
+      acp: lane.opts.acp,
+      deadline: Date.now() + lane.cfg.timeoutMs,
+    });
+    return {
+      rows: rows.map(r => ({
+        ...r,
+        prefix: source.name,
+        modelId: r.id.slice(source.name.length + 1),
+      })),
+    };
   } catch (err) {
-    apiError(
-      res,
-      502,
-      'api_error',
-      `bro conductor: ${err instanceof Error ? err.message : String(err)}`
-    );
+    // the lane names itself — by its ADVERTISED route, the public name a
+    // client asked for. The acp layer's messages already carry the spawn
+    // label ('broken-acp: cannot exec …'), so a prefix that repeats it
+    // would read twice
+    const why = err instanceof Error ? err.message : String(err);
+    const named = why.startsWith(`${lane.primary}: `);
+    return { failure: named ? why : `${lane.primary}: ${why}` };
   }
+}
+
+/** A header value must be latin-1 clean AND bounded — a lane's failure
+ *  text carries whatever the agent said. Non-printables and non-ascii
+ *  become '?', and the whole value is capped, so a long diagnostic can
+ *  neither break the response it rides in nor push it past a client's
+ *  header limit (undici rejects a response whose headers exceed 16KB). */
+const HEADER_MAX = 4096;
+function headerSafe(text: string): string {
+  return text.replace(/[^\x20-\x7e]/g, '?').slice(0, HEADER_MAX);
+}
+
+/** The union of the lanes' rows — first id wins, so an id two lanes
+ *  advertise is listed once. */
+function mergeCatalogs(lanes: LaneCatalog[]): RoutedModel[] {
+  const byId = new Map<string, RoutedModel>();
+  for (const row of lanes.flatMap(l => l.rows ?? [])) {
+    if (!byId.has(row.id)) byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
+/** The picker label — the model's own name, qualified by WHO serves it.
+ *  An agent may name its models "vercel/Claude Opus 5.5" (the upstream
+ *  provider rides along in the name); one that names them bare ("Claude
+ *  Opus 5.5") leaves two lanes' rows looking identical in a client
+ *  picker — the reader cannot tell which provider a row came from.
+ *
+ *  A name qualifies ITSELF when its first segment mirrors the model id's
+ *  first segment ("vercel/…" over "vercel/anthropic/…"). A name whose
+ *  slash is not that ("Claude Opus 4 / 1M") does not — the model id's own
+ *  provider names it when it has one, and the lane's prefix names it when
+ *  it does not. The id's first segment is never parsed for the route: a
+ *  catalog entry's name may carry a slash of its own. */
+function displayName(m: RoutedModel): string {
+  // a row with no label of its own shows its id — nothing to qualify
+  if (m.name === undefined) return m.id;
+  const name = m.name;
+  const modelId = m.modelId;
+  const prefix = m.prefix;
+  if (modelId === undefined || prefix === undefined) return name;
+  const own = firstSegment(modelId);
+  const head = firstSegment(name);
+  // the agent already named its provider
+  if (head !== name && head === own) return name;
+  // the model id carries its provider — it names the row better than the lane
+  if (own !== modelId) return `${own}/${name}`;
+  // no provider in the id — the lane's prefix says where the model comes from
+  return `${prefix}/${name}`;
+}
+
+/** The id's first path segment — the whole id when it carries no slash. */
+function firstSegment(id: string): string {
+  const cut = id.indexOf('/');
+  return cut <= 0 ? id : id.slice(0, cut);
+}
+
+/** One served row — the anthropic /v1/models shape.
+ *
+ *  The LANE rides the row as its own field: the reader must not have
+ *  to guess it back out of the id, whose head is a formatted string and
+ *  the model's own name may carry a slash of its own. */
+function servedRow(m: RoutedModel): Record<string, unknown> {
+  return {
+    type: 'model',
+    id: m.id,
+    display_name: displayName(m),
+    description: providerPath(m),
+    ...(m.prefix === undefined ? {} : { source: m.prefix }),
+    created_at: '2025-01-01T00:00:00Z',
+  };
+}
+
+/** The row's SECOND line — the path that serves it: the lane's prefix and
+ *  the agent's own provider chain, without the model leaf. A client picker
+ *  renders it as the row's origin ("devin-acp", "opencode-acp/vercel/anthropic")
+ *  — the answer to "which provider serves this model?" without making the
+ *  human read the id. Everything but the leaf IS the provider chain: an
+ *  agent's model id is `<provider>/<model>`, so the leaf is the model. */
+function providerPath(m: RoutedModel): string {
+  const prefix = m.prefix;
+  if (prefix === undefined) return '';
+  const modelId = m.modelId;
+  if (modelId === undefined) return prefix;
+  const cut = modelId.lastIndexOf('/');
+  const chain = cut <= 0 ? '' : modelId.slice(0, cut);
+  return chain.length > 0 ? `${prefix}/${chain}` : prefix;
+}
+
+/** The anthropic /v1/models rows — the UNION of every lane's catalog,
+ *  through the SAME `bro providers models` surface, so ids arrive
+ *  `<entry>/<model>` and re-pin on /v1/messages. The lanes answer in
+ *  PARALLEL — a catalog read costs seconds, and a caller waits for the
+ *  slowest lane, never for their sum. Every lane down IS a 502. */
+async function models(res: ServerResponse, wire: WireCtx): Promise<void> {
+  // the LANES, not the routes: a lane reached by two routes is read once
+  // and advertised once, under its primary route
+  const lanes = await Promise.all([...wire.lanes.values()].map(lane => laneCatalog(lane, wire)));
+  const rows = mergeCatalogs(lanes);
+  const failures = lanes.flatMap(l => (l.failure === undefined ? [] : [l.failure]));
+  // the degradation rides BOTH answers — a client must read the same
+  // signal whether the catalog is short (200) or the gateway is down
+  // (502). A 502 without it says "down" but not "which lane, why".
+  const laneError = failures.length > 0 ? headerSafe(failures.join('; ')) : undefined;
+  // 502 only when EVERY lane failed — a healthy lane that advertises
+  // nothing is an empty catalog, not an outage
+  if (failures.length > 0 && failures.length === lanes.length) {
+    if (laneError !== undefined) res.setHeader('x-bro-lane-error', laneError);
+    apiError(res, 502, 'api_error', `bro conductor: ${failures.join('; ')}`);
+    return;
+  }
+  const data = rows.map(servedRow);
+  // a lane that FAILED is not silently absent from the union: the
+  // degradation rides the response, so a client reading a shorter
+  // catalog can tell it apart from the whole truth. A lane that merely
+  // advertises nothing is not a failure and says nothing.
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (laneError !== undefined) {
+    headers['x-bro-lane-error'] = laneError;
+  }
+  res.writeHead(200, headers);
+  res.end(
+    JSON.stringify({
+      object: 'list',
+      data,
+      has_more: false,
+      first_id: data[0]?.id ?? null,
+      last_id: data[data.length - 1]?.id ?? null,
+    })
+  );
+}
+
+/** The terminal registry the /api/v1/terminals plane reads — one
+ *  conductor's own registry, or EVERY lane's at once: under a
+ *  multi-provider gateway a terminal lives under whichever provider
+ *  served the turn that spawned it. */
+export interface TerminalRegistry {
+  snapshot: AcpTerminals['snapshot'];
+  follow: AcpTerminals['follow'];
 }
 
 /** The conductor's `(req, res)` handler PLUS the live link's terminal
@@ -3552,8 +4314,34 @@ async function models(
  *  live devin session. */
 export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
-  terminals(): AcpTerminals | undefined;
+  terminals(): TerminalRegistry | undefined;
   dispose(): void;
+}
+
+/** A terminal created by one provider must be readable whichever
+ *  provider served the turn that spawned it — the id is looked up
+ *  lane by lane and a registry that does not know it is simply not
+ *  the owner. One live lane answers with its own registry unchanged. */
+function laneTerminals(lanes: Map<string, ProviderLane>): TerminalRegistry | undefined {
+  const regs = [...lanes.values()]
+    .map(lane => lane.pool.live()?.terminals)
+    .filter((t): t is AcpTerminals => t !== undefined);
+  if (regs.length === 0) return undefined;
+  if (regs.length === 1) return regs[0];
+  const resolve = <T>(fn: (reg: AcpTerminals) => T): T => {
+    for (const reg of regs) {
+      try {
+        return fn(reg);
+      } catch {
+        // not this lane's terminal — the next one may know it
+      }
+    }
+    throw new Error('Unknown terminal');
+  };
+  return {
+    snapshot: id => resolve(reg => reg.snapshot(id)),
+    follow: (id, listener) => resolve(reg => reg.follow(id, listener)),
+  };
 }
 
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
@@ -3574,34 +4362,113 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   // model pin and session reuse without an OTLP collector
   const common = gitCommonDir(cfg.cwd);
   if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'));
-  // warm pool: one acp child serves every /v1/messages turn — spawn +
-  // initialize is paid once per listener; session/new per request is
-  // cheap and concurrent sessions multiplex on the same connection.
-  // A dead transport drops the link so the next request respawns.
-  const pool = acpLinkPool(`conductor:${cfg.backend}`, cfg.entry, wireOpts, cfg.timeoutMs);
-  // retained conversations — one acp session per client conversation
-  // (x-bro-session pin or history fingerprint). Transport death kills
-  // every session it carried, so the death hook drops the map.
-  const sessions = new Map<string, ConvSession>();
-  pool.onDeath(() => dropSessions(sessions));
-  // keys whose first session/new is in flight — a concurrent same-key
-  // request must not open a twin (the loser would leak unmapped)
-  const pendingOpens = new Set<string>();
+  // one lane per served ENTRY — the default backend plus every exposed
+  // one. Each lane owns its acp pool, its model pin and its
+  // conversations: a request rides exactly one lane, chosen by the route
+  // on the requested model. The lane is per ENTRY, never per route — two
+  // routes naming one entry share the agent, the pool and the
+  // conversations (spec bro-jxw7p).
+  const lanes = new Map<string, ProviderLane>();
+  // the ROUTE table — the public name a client asks for, beside the
+  // entry it reaches
+  const bindings = routeBindings(cfg);
+  const routes = new Map<string, string>();
+  for (const binding of bindings) routes.set(binding.name, binding.entry);
+  // the in-process seam resolves PER ENTRY — a gateway hands each entry
+  // its own agent, and the spawn label names the entry.
+  const lanePeer = (entry: string): AgentApp | undefined => {
+    const peer = wireOpts.acp?.peer;
+    if (peer === undefined) return undefined;
+    return typeof peer === 'function' ? peer(`conductor:${entry}`) : peer;
+  };
+  // the routes that reach one entry, and the one it advertises: the
+  // first DECLARED route for it — the default lane's own key when
+  // nothing was declared for it, so `devin-acp/…` keeps being
+  // advertised exactly as it is today.
+  const routesOf = (entry: string): string[] =>
+    bindings.filter(b => b.entry === entry).map(b => b.name);
+  const primaryOf = (entry: string): string => {
+    const declared = bindings.find(b => b.entry === entry && b.declared);
+    return declared?.name ?? entry;
+  };
+  const addLane = (
+    entry: string,
+    entryCfg: AcpEntry,
+    laneCfg: ConductorConfig,
+    laneOpts: ProviderWireOpts
+  ): void => {
+    // warm pool: one acp child serves every turn of its lane — spawn +
+    // initialize is paid once per provider per listener; session/new
+    // per request is cheap and concurrent sessions multiplex on the
+    // same connection. A dead transport drops the link so the next
+    // request respawns. The pool belongs to the ENTRY, so two routes
+    // over one entry share the agent.
+    const pool = acpLinkPool(`conductor:${entry}`, entryCfg, laneOpts, laneCfg.timeoutMs);
+    // retained conversations — one acp session per client conversation
+    // (x-bro-session pin or history fingerprint). Transport death kills
+    // every session it carried, so the death hook drops the map.
+    const sessions = new Map<string, ConvSession>();
+    pool.onDeath(() => dropSessions(sessions));
+    lanes.set(entry, {
+      entry,
+      routes: routesOf(entry),
+      primary: primaryOf(entry),
+      cfg: laneCfg,
+      opts: laneOpts,
+      pool,
+      sessions,
+      // keys whose first session/new is in flight — a concurrent
+      // same-key request must not open a twin (the loser would leak
+      // unmapped)
+      pendingOpens: new Map<string, number>(),
+    });
+  };
+  addLane(cfg.backend, cfg.entry, cfg, {
+    ...wireOpts,
+    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+  });
+  for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
+    // an exposed lane serves ITS entry's own model — the default's env
+    // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
+    // every provider sharing the listener.
+    addLane(
+      entry,
+      entryCfg,
+      {
+        ...cfg,
+        backend: entry,
+        entry: entryCfg,
+        model: entryCfg.model,
+        providers: undefined,
+        routes: undefined,
+      },
+      {
+        ...wireOpts,
+        model: entryCfg.model,
+        acp: { ...wireOpts.acp, peer: lanePeer(entry) },
+      }
+    );
+  }
   // /v1/responses chain ledger: response id → the conv key + the
   // consumed count it was recorded at. The count is what makes a
   // previous_response_id a real predecessor: a session that moved
-  // past it means the caller branched — rejected, not resumed.
-  const chains = new Map<string, { key: string; consumed: number }>();
-  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent);
-  const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens };
-  return Object.assign(conductorDispatch(wire, chains, cfg, wireOpts), {
-    terminals: () => pool.live()?.terminals,
+  // past it means the caller branched — rejected, not resumed. The
+  // lane rides along: a chain lives in one provider's context.
+  const chains = new Map<string, ChainEntry>();
+  const link = async (entry: string, parent?: OtelCtx): Promise<AcpPeer> => {
+    const lane = lanes.get(entry);
+    if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
+    return lane.pool.link(parent);
+  };
+  const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };
+  return Object.assign(conductorDispatch(wire, chains, cfg), {
+    terminals: (): TerminalRegistry | undefined => laneTerminals(lanes),
     dispose: (): void => {
       // a link still inside acpOpen holds no `live` peer to close
       // — aborting rejects its init and frees the deadline timer
       // that would otherwise pin the loop past server close
       poolAbort.abort();
-      pool.dispose();
+      for (const lane of lanes.values()) lane.pool.dispose();
     },
   });
 }
@@ -3611,9 +4478,8 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
  *  IS the allowlist guard it wants to see. */
 function conductorDispatch(
   wire: WireCtx,
-  chains: Map<string, { key: string; consumed: number }>,
-  cfg: ConductorConfig,
-  wireOpts: ProviderWireOpts
+  chains: Map<string, ChainEntry>,
+  cfg: ConductorConfig
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? '/').split('?')[0];
@@ -3633,7 +4499,7 @@ function conductorDispatch(
         await countTokens(req, res);
         return;
       case 'GET /v1/models':
-        await models(res, cfg, wireOpts);
+        await models(res, wire);
         return;
       default:
         apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`);
@@ -3690,5 +4556,5 @@ async function countTokens(req: IncomingMessage, res: ServerResponse): Promise<v
 
 function apiErrorCountTokens(res: ServerResponse, raw: string): void {
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ input_tokens: estTokens(raw) }));
+  res.end(JSON.stringify({ input_tokens: estimateTokens(raw) }));
 }

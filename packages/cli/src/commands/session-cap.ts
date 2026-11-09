@@ -22,6 +22,7 @@
  */
 import { createHash } from 'node:crypto';
 import {
+  SESSION_SLOT_TTL_MS,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -39,7 +40,7 @@ import { loadAgentEnv } from '../agent-connectors.ts';
  *  decides: a quota fails closed, a hook fails open. */
 export function sessionCapRefusalForCommand(command: string, dir: string): string | undefined {
   const env = loadAgentEnv(dir);
-  return sessionCapRefusalFor(command, env.agents, process.env as Record<string, string>);
+  return sessionCapRefusalFor(command, env.agents);
 }
 
 /** The guard plane's verdict for one about-to-run tool call.
@@ -138,7 +139,7 @@ function callKey(command: string, ctx: ConnectorCtx): string {
   if (id === undefined || id === '') {
     return commandKey(command);
   }
-  // Reservation keys become filenames; strip path segments to prevent traversal.
+  // reservation keys become filenames — strip traversal/unsafe segments
   const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '_');
   return `id-${safe}`;
 }
@@ -181,18 +182,49 @@ export function sessionCapRefusalForHook(
  *
  *  The plane counts live devin PROCESSES; the conductor's retained
  *  conversations share one peer process, so the plane sees one where
- *  the conductor holds many. The conductor adds its own count on top
- *  (the shared peer is already in the plane's count, so the budget errs
- *  low, never high). */
+ *  the conductor holds many. The conductor counts its own retained and
+ *  in-flight opens; the shared peer is already in the plane's count, so
+ *  subtract one when any are present to avoid double counting it. */
 export function conductorSessionRefusal(
   view: SessionCapView | undefined,
   retained: number,
+  /** Opens whose own claim has EXPIRED — nothing else. A pending open
+   *  still inside its claim's TTL already sits inside `view.live` (the
+   *  reservation count `capViewFor` adds); counting it again here
+   *  double-counts the slot and refuses requests while capacity
+   *  remains. Use `pendingOpensBeyondClaim` to compute this. */
+  inFlight = 0,
   starts = 1
 ): string | undefined {
   if (view === undefined) {
     return undefined;
   }
-  return sessionCapRefusal({ ...view, live: view.live + retained, starts });
+  const total = retained + inFlight;
+  const live = view.live + (total > 0 ? total - 1 : 0);
+  return sessionCapRefusal({ ...view, live, starts });
+}
+
+/** The in-flight opens a cap check must still count.
+ *
+ *  A pending open claims its slot BEFORE the session lands — while that
+ *  claim is fresh the reservation count inside `view.live` already
+ *  covers it. The claim expires with `SESSION_SLOT_TTL_MS`, but the
+ *  open can outlive it (a retained session's first turn runs longer
+ *  than the claim): past the TTL the open is in neither the sessions
+ *  map nor the reservation count, so the check counts it directly.
+ *  The map's value is the open's claim time (claim and mark are one
+ *  step apart — the skew is milliseconds against a two-minute TTL). */
+export function pendingOpensBeyondClaim(
+  pending: ReadonlyMap<string, number>,
+  now = Date.now()
+): number {
+  let n = 0;
+  for (const claimedAt of pending.values()) {
+    if (now - claimedAt >= SESSION_SLOT_TTL_MS) {
+      n++;
+    }
+  }
+  return n;
 }
 
 /** The connector — the guard plane's veto for a session start. */
