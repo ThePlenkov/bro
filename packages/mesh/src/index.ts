@@ -21,11 +21,15 @@ export { localCheckout, parsePeer, transportOf, TRANSPORTS } from './peers.ts'
 export type { MeshPeer, MeshTransport } from './peers.ts'
 export {
   GITHUB_LABEL_MAX,
+  GitHubIssueThread,
+  GitHubLogin,
+  GitHubRepo,
   githubProvenance,
   issueComments,
   issueKey,
   parseComment,
   parseGithubRemote,
+  parseIssueThread,
   postComment,
   postRequest,
   renderComment,
@@ -33,6 +37,7 @@ export {
   routingLabels,
   scanGithub,
   selfLogin,
+  toGitHubRepo,
 } from './github.ts'
 export type { GhRecord, GithubRepo } from './github.ts'
 export {

@@ -36,6 +36,10 @@ export interface ApiTarget {
   baseUrl?: string
   apiKeyEnv?: string
   apiKeyCommand?: string
+  /** The key for THIS call — runtime-only: the config never holds a key
+   *  value, it names a source. It travels with the entry, so two calls in
+   *  one process cannot read each other's key. */
+  apiKey?: string
   model: string
 }
 
@@ -60,24 +64,45 @@ export interface ProviderWireOpts {
   acp?: AcpSeam
 }
 
-/** The configured key — apiKeyCommand (secret-store lookup) wins over
- *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
- *  echoed); a missing var is fail-open, and every message names the
- *  config FIELD, never the value. */
-function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
-  if (entry.apiKeyCommand !== undefined) {
-    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
+/** The runtime key — an EMPTY string is no key: the request carried
+ *  none, and an empty credential would go out instead of the configured
+ *  one. */
+function runtimeKey(entry: ApiTarget): string | undefined {
+  return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey
+}
+
+/** The key from the configured env var — the var must be NAMED (a
+ *  non-NAME apiKeyEnv is a config bug: throws, never echoed), and it must
+ *  hold something (a missing var is fail-open, and the message names the
+ *  config FIELD, never the value). */
+function envKey(entry: ApiTarget, keyField: string): string {
+  if (entry.apiKeyEnv === undefined) {
+    throw new Error(`${keyField} is not set — the provider has no key to authenticate with`)
   }
-  if (entry.apiKeyEnv === undefined || !isEnvName(entry.apiKeyEnv)) {
+  if (!isEnvName(entry.apiKeyEnv)) {
     throw new Error(`${keyField} is not a valid environment variable name`)
   }
   const key = process.env[entry.apiKeyEnv]
-  if (key === undefined || key === '') {
+  if (!key) {
     throw new JudgeUnavailable(
       `the env var named by ${keyField} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
     )
   }
   return key
+}
+
+/** The key this call authenticates with — the runtime key wins (it was
+ *  handed to THIS call on purpose), then the secret-store command, then
+ *  the configured env var. */
+function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
+  const runtime = runtimeKey(entry)
+  if (runtime !== undefined) {
+    return runtime
+  }
+  if (entry.apiKeyCommand !== undefined) {
+    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
+  }
+  return envKey(entry, keyField)
 }
 
 /** System One's error contract → the throw the caller sees: 401/403 auth is

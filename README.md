@@ -9,18 +9,16 @@
 >
 > **Landing:** [broject.dev](https://broject.dev) · **Docs:** [broject.dev/docs](https://broject.dev/docs/)
 
-Your AI agent can read a PR. Can it claim the next bead, spawn a fleet
-of workers to chew the queue, drive the review gate to merge, and sweep
-the merged threads into a debt ledger — without you orchestrating a
-thing? Can it say "bro, what's left?"
+**ICP:** maintainers and small teams with existing agents, a task store, and PR/CI.  
+**JTBD:** deterministic lifecycle closure — take work from `task → agent → PR → gate → debt`, close it without gaps, and sweep what remains.
 
-Now it can. Not another orchestrator — the rig your agent already
-carries.
+**Wedge:** portable `task → agent → PR → gate → debt` contract. Start with the review gate and debt ledger — no fleet, no model-gateway required. Orchestration (fleet/convoy/loop) is optional and progressive, not a replacement runtime.
 
 ```bash
-npx @broject/bro next                   # pick the top claimable bead
-npx @broject/bro convoy run <mol>       # pour the molecule queue — workers spawn per step
-npx @broject/bro debt status            # the damage report
+npx @broject/bro act status             # review gate verdict
+npx @broject/bro debt prs               # unprocessed merged PRs not yet swept into the ledger
+npx @broject/bro debt collect           # sweep threads into the ledger
+npx @broject/bro debt status            # what's left
 ```
 
 ## What's the deal
@@ -141,6 +139,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]`                 | Claim, work, pass the gate, close, and repeat                                                                                                               |
 | `bro convoy pour\|status\|next\|claim\|done\|list\|run`                       | Run a beads formula as a claimable molecule — `run` is the molecule queue                                                                                   |
 | `bro fleet [--json\|--live]`                                                  | View molecules, steps, agents, worktrees, and PRs                                                                                                           |
+| `bro fleet walls [--json]` / `bro fleet walls clear <account>\|--all`         | Inspect or clear host-wide provider account walls                                                                                                           |
 | `bro agents status\|up\|down\|prune`                                          | Inspect, spawn, respawn, stop, or reap detached agents                                                                                                      |
 | `bro watch [--once\|--every N\|--notify]`, `bro watch install\|uninstall`     | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
 | `bro notify <text>`                                                           | Drop an event into the session mailbox — addressed, typed, coalesced                                                                                        |
@@ -182,7 +181,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro run <plan.toml>` / `bro plan validate`      | Execute or check a validated plan                                                                          |
 | `bro plugins [list\|install\|uninstall]`         | Print the registry, or install client adapters (opencode, kilo, pi, omp)                                   |
 | `bro task\|store …`                              | Document verbs; `--global` targets the user-level store                                                    |
-| `bro cleanup [--remote] [--dry-run]`             | Delete local branches whose PR merged                                                                      |
+| `bro cleanup [--remote] [--dry-run]`             | Delete local branches whose PR merged and stale temp dirs                                                  |
 
 ## The pipeline (beads)
 

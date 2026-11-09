@@ -2,11 +2,9 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import {
   agent,
   type SessionConfigOption,
@@ -14,6 +12,7 @@ import {
   type StopReason,
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
+import { otelJournal, type AcpTerminals } from '@broject/providers';
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
@@ -39,6 +38,36 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text' as const, text },
   }));
+
+/** The client's own tool — Claude Code's Bash, with the schema the
+ *  request carries. */
+const BASH_TOOL = [
+  {
+    name: 'Bash',
+    description: 'run a command',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' }, description: { type: 'string' } },
+      required: ['command'],
+    },
+  },
+];
+
+/** An agent that CALLS a tool and then answers — the call in ACP's
+ *  shape (the bridge's input), the answer in text. */
+function agentCallingTool(toolCallId: string) {
+  const call: SessionUpdate = {
+    sessionUpdate: 'tool_call',
+    toolCallId,
+    title: 'Ran ls',
+    kind: 'execute',
+    rawInput: { command: 'ls -la' },
+  } as SessionUpdate;
+  return fakeAcpAgent({
+    updates: [call, ...chunks('done')],
+    configOptions: [MODEL_OPTION],
+  });
+}
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post() for repeated /v1/messages sends. */
@@ -201,7 +230,234 @@ describe('conductorConfig', () => {
       /providers\.nope is not configured/
     );
   });
+  test('serve.providers exposes the OTHER acp entries as routes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc-acp', 'dv-acp'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' },
+          'oc-acp': { type: 'acp', command: 'oc acp', model: 'gpt-5' },
+        },
+      })
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.backend, 'dv-acp');
+    // the backend is never re-exposed as its own route
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-acp']);
+    assert.equal(cfg?.providers?.['oc-acp']?.model, 'gpt-5');
+  });
+  test("an injected registry does not read the file layer's serve.providers", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc-acp'] },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      })
+    );
+    // the injected registry owns the whole name space — the file's
+    // oc-acp must not leak into it, and must not throw for a name the
+    // injected registry does not define
+    const cfg = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, dir, {
+      'dv-acp': { type: 'acp' as const, command: 'dv acp' },
+    });
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), []);
+  });
+  test('a served provider name carrying a slash is a loud error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['oc/one'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp' },
+          'oc/one': { type: 'acp', command: 'oc acp' },
+        },
+      })
+    );
+    // the router reads the FIRST path segment — a name with a slash
+    // would be advertised and never reachable
+    assert.throws(() => conductorConfig({}, dir), /cannot contain/);
+  });
+  test('an exposed provider that is not acp is a loud error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', providers: ['cli1'] },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp' },
+          cli1: { type: 'cli', command: 'x run' },
+        },
+      })
+    );
+    assert.throws(
+      () => conductorConfig({}, dir),
+      /type 'cli' — the conductor needs an 'acp' entry/
+    );
+  });
 
+  // --- the route table (spec bro-jxw7p) ---------------------------------
+  //
+  // The map form declares a PUBLIC route per entry: the route is what a
+  // client asks for, the entry keeps its own private name.
+
+  const mapDir = (serve: unknown, providers: unknown): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(join(dir, 'bro.config.local.json'), JSON.stringify({ serve, providers }));
+    return dir;
+  };
+
+  test('the map form declares a ROUTE per entry — the entry keeps its own name', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' },
+        'oc-iceman': { type: 'acp', command: 'oc acp', model: 'gpt-5' },
+      }
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.backend, 'dv-acp');
+    // the exposed ENTRY keeps its own name…
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-iceman']);
+    assert.equal(cfg?.providers?.['oc-iceman']?.model, 'gpt-5');
+    // …and the ROUTE reaches it
+    const routes = cfg?.routes ?? [];
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['opencode-acp', 'oc-iceman'],
+      ]
+    );
+    // the default lane's own key is routable but never DECLARED — a
+    // declared alias takes over the advertisement
+    assert.equal(routes[0]?.declared, false);
+    assert.equal(routes[1]?.declared, true);
+  });
+
+  test('the array form still means route ≡ entry', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: ['oc-acp'] },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-acp': { type: 'acp', command: 'oc acp' },
+      }
+    );
+    const routes = conductorConfig({}, dir)?.routes ?? [];
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['oc-acp', 'oc-acp'],
+      ]
+    );
+  });
+
+  test('the default lane answers to its own key AND to a declared alias', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { devin: 'dv-acp' } },
+      { 'dv-acp': { type: 'acp', command: 'dv acp' } }
+    );
+    const routes = conductorConfig({}, dir)?.routes ?? [];
+    // both names reach the SAME entry — one lane, one agent
+    assert.deepEqual(
+      routes.map(r => [r.name, r.entry]),
+      [
+        ['dv-acp', 'dv-acp'],
+        ['devin', 'dv-acp'],
+      ]
+    );
+  });
+
+  test('two entries under one route is a loud error', () => {
+    // the route 'dv-acp' is the default lane's own key AND a declared
+    // route for another entry — the router would have no honest answer
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'dv-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+      }
+    );
+    assert.throws(() => conductorConfig({}, dir), /names two entries/);
+  });
+
+  test('a route carrying a slash is a loud error', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'oc/one': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+      }
+    );
+    assert.throws(() => conductorConfig({}, dir), /cannot contain/);
+  });
+
+  test('a route naming a non-acp entry is a loud error', () => {
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'cli1' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        cli1: { type: 'cli', command: 'x run' },
+      }
+    );
+    assert.throws(
+      () => conductorConfig({}, dir),
+      /type 'cli' — the conductor needs an 'acp' entry/
+    );
+  });
+
+  test('a route named like a numeric index is a loud error', () => {
+    // an integer index keeps no declared order — the route table's
+    // "first declared route" would name a different lane
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: ['1'] },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        1: { type: 'acp', command: 'oc acp' },
+      }
+    );
+    assert.throws(() => conductorConfig({}, dir), /numeric index/);
+  });
+
+  test('an entry named __proto__ is refused — it is a reserved key', () => {
+    // raw JSON: an object literal would set the prototype instead of
+    // naming an entry
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      '{"serve":{"backend":"dv-acp","providers":{"route-x":"__proto__"}},' +
+        '"providers":{"dv-acp":{"type":"acp","command":"dv acp"},' +
+        '"__proto__":{"type":"acp","command":"oc acp"}}}'
+    );
+    // '__proto__' is a setter on Object.prototype, not a mergeable key —
+    // the config layer refuses it everywhere else too, so the route
+    // names an entry that does not exist: a loud error, never a lane
+    // that silently lost its entry
+    assert.throws(() => conductorConfig({}, dir), /providers\.__proto__/);
+  });
+
+  test('an entry with no declared route is not exposed at all', () => {
+    // the map form owns the public names — an entry nobody routes to is
+    // not a lane
+    const dir = mapDir(
+      { backend: 'dv-acp', providers: { 'opencode-acp': 'oc-iceman' } },
+      {
+        'dv-acp': { type: 'acp', command: 'dv acp' },
+        'oc-iceman': { type: 'acp', command: 'oc acp' },
+        'idle-acp': { type: 'acp', command: 'idle acp' },
+      }
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.deepEqual(Object.keys(cfg?.providers ?? {}), ['oc-iceman']);
+    assert.equal(
+      (cfg?.routes ?? []).some(r => r.entry === 'idle-acp'),
+      false
+    );
+  });
   test('the fast lane arms on the upstream key pair — env pins win (bro-6asnu)', () => {
     const env = { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_API_KEY: 'k' };
     const cfg = conductorConfig(env, '/r', providers);
@@ -273,7 +529,6 @@ describe('conductorConfig', () => {
         ?.model,
       'env-m'
     );
-  });
 });
 
 describe('parseReply', () => {
@@ -417,6 +672,84 @@ describe('serve /v1/* — the conductor plane', () => {
         d: '/tmp',
       });
       assert.equal(stopReason(ev), 'tool_use');
+    } finally {
+      await close();
+    }
+  });
+
+  // bro-sy4q3 — the agent's tool call arrives in ACP's shape; the client
+  // executes in its own. The bridge translates by CAPABILITY: the agent
+  // calls "execute", the client offers "Bash".
+  test("the agent's tool call becomes the client's tool_use", async () => {
+    const fake = agentCallingTool('exec:0#1');
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+      tools: BASH_TOOL,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const start = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.ok(start, 'the tool_use block is on the wire');
+      assert.equal((start.data.content_block as { name: string }).name, 'Bash');
+      const delta = ev.find(
+        e =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      );
+      assert.ok(delta, 'the tool_use carries its input');
+      assert.deepEqual(JSON.parse((delta.data.delta as { partial_json: string }).partial_json), {
+        command: 'ls -la',
+      });
+      assert.equal(stopReason(ev), 'tool_use');
+      // the agent's own edge is NOT narrated — the client's tool_use is it
+      assert.deepEqual(textDeltas(ev), ['done']);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a call the client cannot run stays a narrated edge', async () => {
+    const fake = agentCallingTool('exec:0#2');
+    // no tools offered — the client has nothing that can run the call
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const tu = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.equal(tu, undefined, 'no tool_use — the client cannot run it');
+      assert.ok(textDeltas(ev).join('').includes('Ran ls'), 'the edge stays narrated');
+      assert.equal(stopReason(ev), 'end_turn');
+    } finally {
+      await close();
+    }
+  });
+
+  test("the buffered answer carries the client's tool_use too", async () => {
+    const fake = agentCallingTool('exec:0#3');
+    const { r, close } = await postMessages(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    try {
+      const body = (await r.json()) as {
+        content: { type: string; name?: string; input?: unknown }[];
+      };
+      const tu = body.content.find(b => b.type === 'tool_use');
+      assert.ok(tu, 'the buffered answer carries the tool_use');
+      assert.equal(tu?.name, 'Bash');
+      assert.deepEqual(tu?.input, { command: 'ls -la' });
     } finally {
       await close();
     }
@@ -593,10 +926,18 @@ describe('serve /v1/* — the conductor plane', () => {
         ['dv-acp/swe-x', 'dv-acp/swe-y']
       );
       // acp catalog names surface as display_name — pickers show the
-      // human label, clients pin the id
+      // human label, qualified by the lane that serves it, so two lanes'
+      // identically-named models stay distinguishable; clients pin the id
       assert.deepEqual(
         body.data.map((m: { display_name: string }) => m.display_name),
-        ['SWE X', 'SWE Y']
+        ['dv-acp/SWE X', 'dv-acp/SWE Y']
+      );
+      // the lane rides the row as its own field — a reader must never
+      // have to guess it back out of the id, whose head is a formatted
+      // string and a model's name may carry a slash of its own
+      assert.deepEqual(
+        body.data.map((m: { source: string }) => m.source),
+        ['dv-acp', 'dv-acp']
       );
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
@@ -606,6 +947,51 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.equal((await c.json()).input_tokens, 100);
     } finally {
       await close();
+    }
+  });
+
+  test('a catalog name is qualified by the provider that serves it', async () => {
+    // an agent that names its models "vercel/Claude Opus 5" already says
+    // where the model comes from — the gateway must not double the prefix.
+    // a name whose slash is NOT a provider ("Claude Opus 4 / 1M") still
+    // needs one, and a model id carrying its own provider names the row.
+    // the second line answers the same question for a picker that shows
+    // the origin: the lane plus the agent's provider chain, no model leaf.
+    const cases: [string, string, string, string][] = [
+      [
+        'vercel/anthropic/claude-opus-5',
+        'vercel/Claude Opus 5',
+        'vercel/Claude Opus 5',
+        'dv-acp/vercel/anthropic',
+      ],
+      ['claude-opus-5-5-medium', 'Claude Opus/fast', 'dv-acp/Claude Opus/fast', 'dv-acp'],
+      ['anthropic/claude-opus-5', 'Claude Opus 5', 'anthropic/Claude Opus 5', 'dv-acp/anthropic'],
+      ['swe-x', 'SWE X', 'dv-acp/SWE X', 'dv-acp'],
+    ];
+    for (const [value, name, expected, described] of cases) {
+      const named: SessionConfigOption = {
+        ...MODEL_OPTION,
+        options: [{ value, name }],
+      };
+      const fake = fakeAcpAgent({ configOptions: [named] });
+      const { url, close } = await listen(
+        deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+      );
+      try {
+        const r = await fetch(`${url}/v1/models`, { headers: auth });
+        const body = await r.json();
+        assert.deepEqual(
+          body.data.map((m: { id: string; display_name: string; description: string }) => [
+            m.id,
+            m.display_name,
+            m.description,
+          ]),
+          [[`dv-acp/${value}`, expected, described]],
+          `${value} → ${expected}`
+        );
+      } finally {
+        await close();
+      }
     }
   });
 
@@ -1061,7 +1447,10 @@ describe('serve /v1/* — the conductor plane', () => {
 
   // bro-cfwc1 — narration mid-tag corrupts a post-hoc re-parse of the
   // emitted text; the recorded reply must keep the wire's real shape.
-  test('a resend replays the tool_use a mid-tag narration left intact', async () => {
+  // bro-sy4q3 — a tool answer is never replayed: the resend asks the
+  // agent afresh, so the wire shows the live shape (the narration still
+  // outside the tag's markup).
+  test('a resend never replays a tool answer — the turn runs again', async () => {
     const fake = fakeAcpAgent({
       updates: [
         ...chunks('work <tool_ca'),
@@ -1088,22 +1477,22 @@ describe('serve /v1/* — the conductor plane', () => {
             (e.data.delta as { type: string }).type === 'input_json_delta'
         )
       );
-      // an identical resend replays the RECORDED reply — narration
-      // must not sit inside the unfinished tag's markup
+      // an identical resend is NOT answered from the record — the agent
+      // runs again, so the client never re-executes a recorded call
       const re = await sseEvents(await post(body));
       const tu = re.find(
         e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
       );
-      assert.ok(tu, 'the replay still carries the tool_use — not broken markup');
-      // the exact replayed text: narration in place, no markup shards —
-      // a mid-tag corruption splits the literal into <tool_ca…ll>, which
-      // a doesNotMatch on the full tag would evade
-      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end']);
+      assert.ok(tu, 'the fresh turn still carries the tool_use — not broken markup');
+      // the exact text: narration in place, no markup shards — a mid-tag
+      // corruption splits the literal into <tool_ca…ll>, which a
+      // doesNotMatch on the full tag would evade
+      assert.deepEqual(textDeltas(re), ['work ', '\n⏺ exec: ls\n', ' end']);
       assert.equal(stopReason(re), 'tool_use');
-      // one prompt total — the resend replayed, never re-ran the turn
-      assert.equal(fake.prompts.length, 1);
+      // two prompts — the resend ran the turn again, never replayed
+      assert.equal(fake.prompts.length, 2);
     } finally {
       await close();
     }
@@ -1144,20 +1533,22 @@ describe('serve /v1/* — the conductor plane', () => {
       const reg = proxy.terminals();
       assert.ok(reg, 'the pooled acp link carries its terminal registry');
       // the registry is the live one — an agent terminal/create call
-      // over the link lands in it
-      const { terminalId } = await reg.create({
+      // over the link lands in it (one live lane answers with its own
+      // AcpTerminals; the plane-facing type only carries snapshot+follow)
+      const live = reg as AcpTerminals;
+      const { terminalId } = await live.create({
         params: { command: 'sh', args: ['-c', 'echo via-conductor'], env: [] },
       } as never);
       for (let i = 0; i < 100; i++) {
-        const snap = await reg.output({ params: { terminalId } } as never);
+        const snap = await live.output({ params: { terminalId } } as never);
         if (snap.output.includes('via-conductor')) {
           break;
         }
         await new Promise(r2 => setTimeout(r2, 10));
       }
-      const snap = await reg.output({ params: { terminalId } } as never);
+      const snap = await live.output({ params: { terminalId } } as never);
       assert.match(snap.output, /via-conductor/);
-      await reg.release({ params: { terminalId } } as never);
+      await live.release({ params: { terminalId } } as never);
     } finally {
       await close();
     }
@@ -1563,6 +1954,150 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     }
   });
 
+  // claude 2.1.309 sends its environment block as a `role:'system'`
+  // turn INSIDE messages — the gate used to 400 on it, so every turn
+  // of a current claude-code died before the agent was reached.
+  /** The prompt the conductor handed the agent for a request carrying a
+   *  `role:'system'` turn — the turn must answer, not 400. */
+  async function systemTurnPrompt(body: unknown): Promise<string> {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, body);
+    try {
+      assert.equal(r.status, 200);
+      return fake.prompts[0] ?? '';
+    } finally {
+      await close();
+    }
+  }
+
+  /** The shape gate's 400 — a system-only request and an unknown role
+   *  answer the same way. */
+  async function expectShape400(messages: unknown[]): Promise<void> {
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const { r, close } = await postMessages(fake, { model: 'x', messages, stream: false });
+    try {
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.type, 'invalid_request_error');
+    } finally {
+      await close();
+    }
+  }
+
+  test("a role:'system' turn rides the system slot, not a user turn", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: [{ type: 'text', text: '# Environment\ncwd /tmp' }] },
+      ],
+      stream: false,
+    });
+    // the system turn's text is context — it sits in a <system> block
+    assert.match(prompt, /<system>\n# Environment\ncwd \/tmp\n<\/system>/);
+    // and never rides the conversation as a user turn
+    assert.doesNotMatch(prompt, /<turn role="user"># Environment/);
+    assert.match(prompt, /<turn role="user">ping<\/turn>/);
+  });
+
+  test("a role:'system' turn with a non-text block keeps the block visible", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'ctx' },
+            { type: 'tool_addition', tool: { type: 'tool_reference', name: 'advisor' } },
+          ],
+        },
+      ],
+      stream: false,
+    });
+    // an unknown block is a marker, never a silent drop
+    assert.match(prompt, /\[tool_addition\]/);
+  });
+
+  test("an empty role:'system' turn still leaves the conversation", async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: '' },
+      ],
+      stream: false,
+    });
+    // a system turn that stayed would ride the transcript as a user turn
+    assert.doesNotMatch(prompt, /<turn role="user">\s*<\/turn>/);
+    assert.match(prompt, /<turn role="user">ping<\/turn>/);
+  });
+
+  test('a client-sent systemTurns field is ignored', async () => {
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'ping' },
+        { role: 'system', content: [{ type: 'text', text: 'real context' }] },
+      ],
+      // the conductor's own field — the wire never dictates it
+      systemTurns: 'client says otherwise',
+      stream: false,
+    });
+    assert.match(prompt, /<system>\nreal context\n<\/system>/);
+    assert.doesNotMatch(prompt, /client says otherwise/);
+  });
+
+  test('a client-sent systemTurns array with no system turn is dropped too', async () => {
+    // no lift happens here — the wire-sent field must still die
+    const prompt = await systemTurnPrompt({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'ping' }],
+      systemTurns: ['client says otherwise'],
+      stream: false,
+    });
+    assert.doesNotMatch(prompt, /client says otherwise/);
+  });
+
+  test("a request carrying only a role:'system' turn answers 400", async () => {
+    await expectShape400([{ role: 'system', content: 'ctx' }]);
+  });
+
+  test('an assistant-only request answers 400 — no user turn to answer', async () => {
+    await expectShape400([{ role: 'assistant', content: 'x' }]);
+  });
+
+  test('an unknown role still answers 400 invalid_request_error', async () => {
+    await expectShape400([{ role: 'tool', content: 'x' }]);
+  });
+
+  test('a block the renderer cannot read answers 400, not a 500', async () => {
+    // a null block throws inside blockText — the shape gate owns it
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [null] },
+    ]);
+    // a text block whose text is not a string would join to silence
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'text', text: null }] },
+    ]);
+    // a block with no type at all — `[undefined]` is not a marker to send
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{}] },
+    ]);
+    // the nested values a block's renderer touches count too
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: [null] }] },
+    ]);
+    await expectShape400([
+      { role: 'user', content: 'x' },
+      { role: 'system', content: [{ type: 'tool_result', tool_use_id: 't1', content: 5 }] },
+    ]);
+  });
+
   test('a rate-limited backend answers 429 + Retry-After', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' });
     const { r, close } = await postMessages(fake);
@@ -1722,6 +2257,655 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       assert.equal(r.status, 400);
       const body = await r.json();
       assert.equal(body.error.type, 'invalid_request_error');
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('serve /v1/* — one gateway, many providers', () => {
+  const DV_OPTION: SessionConfigOption = {
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue: 'swe-x',
+    options: [{ value: 'swe-x', name: 'SWE X' }],
+  };
+  const OC_OPTION: SessionConfigOption = {
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue: 'gpt-5',
+    options: [{ value: 'gpt-5', name: 'GPT 5' }],
+  };
+
+  /** The gateway's default lane plus one exposed lane — the listener
+   *  serves both providers' models. */
+  const MULTI: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-acp': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+  };
+
+  /** The same gateway under a CHOSEN route — the entry keeps its own
+   *  name ('oc-iceman'), the client asks for 'opencode-acp'. */
+  const ALIAS: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-iceman': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+    routes: [
+      { name: 'dv-acp', entry: 'dv-acp', declared: false },
+      { name: 'opencode-acp', entry: 'oc-iceman', declared: true },
+    ],
+  };
+
+  /** One entry under TWO routes — the same provider, two names. */
+  const TWO_ROUTES: ConductorConfig = {
+    ...CFG,
+    providers: {
+      'oc-iceman': { type: 'acp' as const, command: 'oc acp', model: 'gpt-5' },
+    },
+    routes: [
+      { name: 'dv-acp', entry: 'dv-acp', declared: false },
+      { name: 'opencode-acp', entry: 'oc-iceman', declared: true },
+      { name: 'oc-alias', entry: 'oc-iceman', declared: true },
+    ],
+  };
+
+  type Fake = ReturnType<typeof fakeAcpAgent>;
+
+  /** Boot the gateway over two agents — the in-process seam resolves by
+   *  the spawn label, which names the lane. */
+  const bootGateway = async (
+    dv: Fake,
+    oc: Fake,
+    cfg: ConductorConfig = MULTI,
+    /** The exposed entry's key — the spawn label names the ENTRY, so
+     *  the seam resolves the agent by it. */
+    ocEntry = 'oc-acp'
+  ): Promise<{ url: string; close: () => Promise<void> }> => {
+    const { url, close } = await listen(
+      deps({
+        provider: conductorProxy(cfg, {
+          acp: { peer: by => (by.endsWith(ocEntry) ? oc.app : dv.app) },
+        }),
+      })
+    );
+    return { url, close };
+  };
+
+  /** Two lanes over two agents. */
+  const withGateway = async (
+    fn: (ctx: { dv: Fake; oc: Fake; url: string }) => Promise<void>
+  ): Promise<void> => {
+    const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+    const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+    const { url, close } = await bootGateway(dv, oc);
+    try {
+      await fn({ dv, oc, url });
+    } finally {
+      await close();
+    }
+  };
+
+  const post = (url: string, body: unknown): Promise<Response> =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const textOf = async (r: Response): Promise<string> => {
+    const body = (await r.json()) as { content?: { type: string; text?: string }[] };
+    return body.content?.find(c => c.type === 'text')?.text ?? '';
+  };
+
+  test("/v1/models lists EVERY lane's models", () =>
+    withGateway(async ({ url }) => {
+      const r = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { data: { id: string }[] };
+      const ids = body.data.map(m => m.id);
+      assert.ok(ids.includes('dv-acp/swe-x'), `ids: ${ids.join(', ')}`);
+      assert.ok(ids.includes('oc-acp/gpt-5'), `ids: ${ids.join(', ')}`);
+    }));
+
+  test('a model prefix routes the turn to THAT provider', () =>
+    withGateway(async ({ dv, oc, url }) => {
+      const r = await post(url, {
+        model: 'oc-acp/gpt-5',
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(await textOf(r), 'from opencode');
+      assert.equal(oc.prompts.length, 1);
+      assert.equal(dv.prompts.length, 0);
+    }));
+
+  /** The default lane's own cases — a bare id, a prefix naming no lane
+   *  and the default's own prefix all ride the default lane. */
+  const DEFAULT_CASES: [string, string][] = [
+    ['a bare model', 'swe-x'],
+    ['a prefix naming no lane', 'nope/swe-x'],
+    ["the default lane's own prefix", 'dv-acp/swe-x'],
+  ];
+
+  for (const [what, model] of DEFAULT_CASES) {
+    test(`${what} rides the default lane`, () =>
+      withGateway(async ({ dv, oc, url }) => {
+        const r = await post(url, {
+          model,
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(r.status, 200);
+        assert.equal(await textOf(r), 'from devin');
+        assert.equal(dv.prompts.length, 1);
+        assert.equal(oc.prompts.length, 0);
+      }));
+  }
+
+  test('the same conversation under two providers is TWO sessions', () =>
+    withGateway(async ({ dv, oc, url }) => {
+      const history = [{ role: 'user', content: 'same' }];
+      await post(url, { model: 'dv-acp/swe-x', messages: history, stream: false });
+      await post(url, { model: 'oc-acp/gpt-5', messages: history, stream: false });
+      // one session/new per lane — a conversation never crosses providers
+      assert.equal(dv.sessions.length, 1);
+      assert.equal(oc.sessions.length, 1);
+      // and neither lane replayed the other's turn
+      assert.equal(dv.prompts.length, 1);
+      assert.equal(oc.prompts.length, 1);
+    }));
+
+  test('a healthy lane with an empty catalog is not an outage', () =>
+    (async () => {
+      // the broken lane's catalog fails; the healthy one advertises
+      // nothing — an empty catalog is not an outage
+      const dv = fakeAcpAgent({ replyText: 'from devin' });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNew: 'auth' });
+      const { url, close } = await bootGateway(dv, oc);
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 200);
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id);
+        assert.deepEqual(ids, []);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('one lane down still serves the other — a dead provider is not a dead gateway', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failPrompt: 'generic' });
+      const { url, close } = await bootGateway(dv, oc);
+      try {
+        // the broken lane's catalog still lists its models
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 200);
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id);
+        assert.ok(ids.includes('oc-acp/gpt-5'), `ids: ${ids.join(', ')}`);
+        // the healthy lane answers
+        const ok = await post(url, {
+          model: 'dv-acp/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(ok.status, 200);
+        assert.equal(await textOf(ok), 'from devin');
+        // the broken lane fails its own turn, on its own verdict — the
+        // acp layer calls a dead provider unavailable, so the wire
+        // answers 529 (retryable), not 500
+        const bad = await post(url, {
+          model: 'oc-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(bad.status, 529);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('a lane whose catalog FAILED says so — a shorter catalog is not a quiet one', () =>
+    (async () => {
+      // the oc lane's catalog read fails (its session/new refuses)
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNew: 'auth' });
+      const { url, close } = await bootGateway(dv, oc);
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 200);
+        // the healthy lane still advertises
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id);
+        assert.ok(ids.includes('dv-acp/swe-x'), `ids: ${ids.join(', ')}`);
+        // and the FAILED lane rides the response — a client reading a
+        // shorter catalog must be able to tell it from the whole truth
+        const header = m.headers.get('x-bro-lane-error');
+        assert.ok(header !== null, 'the failed lane must ride the response');
+        assert.match(header, /oc-acp/);
+      } finally {
+        await close();
+      }
+    })());
+
+  test("the catalog read honours the LANE's budget — not a constant 30s", () =>
+    (async () => {
+      // the agent answers session/new only after 3s; the lane's budget is
+      // 150ms — the read must end on the lane's deadline, not on the
+      // agent's pace (and not on a 30s constant baked into the provider)
+      const dv = fakeAcpAgent({
+        replyText: 'from devin',
+        configOptions: [DV_OPTION],
+        delayNewMs: 3_000,
+      });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, { ...MULTI, timeoutMs: 150 });
+      try {
+        const t0 = Date.now();
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        const elapsed = Date.now() - t0;
+        assert.equal(m.status, 200);
+        assert.ok(elapsed < 750, `the read took ${elapsed}ms — the lane budget did not bound it`);
+        const header = m.headers.get('x-bro-lane-error');
+        assert.ok(header !== null, 'the timed-out lane must ride the response');
+        assert.match(header, /dv-acp/);
+      } finally {
+        await close();
+      }
+    })());
+
+  test("a lane's failure text is CAPPED — a long diagnostic cannot blow the header", () =>
+    (async () => {
+      // the oc lane's session/new fails with a 50KB diagnostic — a stack
+      // trace, a banner, whatever the agent said
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNewMessage: 'x'.repeat(50_000) });
+      const { url, close } = await bootGateway(dv, oc);
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 200);
+        const header = m.headers.get('x-bro-lane-error');
+        assert.ok(header !== null, 'the failed lane must ride the response');
+        assert.ok(
+          header.length <= 4096,
+          `the header is ${header.length} chars — it must be capped`
+        );
+        // and the healthy lane's rows still arrive
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id);
+        assert.ok(ids.includes('dv-acp/swe-x'), `ids: ${ids.join(', ')}`);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('every lane down answers 502 — and says WHICH lane, in the header', () =>
+    (async () => {
+      const dv = fakeAcpAgent({
+        replyText: 'from devin',
+        configOptions: [DV_OPTION],
+        failNew: 'auth',
+      });
+      const oc = fakeAcpAgent({ configOptions: [OC_OPTION], failNew: 'auth' });
+      const { url, close } = await bootGateway(dv, oc);
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 502);
+        // the same signal rides the failure — a client must not have to
+        // parse the body to learn which lane died
+        const header = m.headers.get('x-bro-lane-error');
+        assert.ok(header !== null, 'the 502 must carry the lane failure');
+        assert.match(header, /dv-acp/);
+        assert.match(header, /oc-acp/);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('a declared ROUTE reaches its entry — the entry key is not routable', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, ALIAS, 'oc-iceman');
+      try {
+        // the ROUTE reaches the entry
+        const routed = await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(routed.status, 200);
+        assert.equal(await textOf(routed), 'from opencode');
+        // the ENTRY's own name is not a route — it rides the default
+        // lane, so it answers with the DEFAULT's models
+        const unrouted = await post(url, {
+          model: 'oc-iceman/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(unrouted.status, 200);
+        assert.equal(await textOf(unrouted), 'from devin');
+        assert.equal(oc.prompts.length, 1);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('the catalog advertises a lane under its PRIMARY route only', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman');
+      try {
+        const m = await fetch(`${url}/v1/models`, { headers: { ...auth } });
+        assert.equal(m.status, 200);
+        const ids = ((await m.json()) as { data: { id: string }[] }).data.map(x => x.id);
+        // the lane's models are listed ONCE, under its primary route
+        assert.ok(ids.includes('opencode-acp/gpt-5'), `ids: ${ids.join(', ')}`);
+        assert.equal(ids.includes('oc-alias/gpt-5'), false);
+        assert.equal(ids.includes('oc-iceman/gpt-5'), false);
+        assert.equal(ids.filter(id => id.endsWith('/gpt-5')).length, 1);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('two routes over ONE entry share the agent and the conversation', () =>
+    (async () => {
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman');
+      try {
+        const first = await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'one' }],
+          stream: false,
+        });
+        assert.equal(first.status, 200);
+        // the same conversation under the ALIAS — the second hop grows
+        // the history, so the lane must CONTINUE the session the first
+        // hop opened
+        const second = await post(url, {
+          model: 'oc-alias/gpt-5',
+          messages: [
+            { role: 'user', content: 'one' },
+            { role: 'user', content: 'two' },
+          ],
+          stream: false,
+        });
+        assert.equal(second.status, 200);
+        // ONE session/new — the alias is the same provider, so the same
+        // agent and the same conversation, not a twin
+        assert.equal(oc.sessions.length, 1);
+        assert.equal(oc.prompts.length, 2);
+      } finally {
+        await close();
+      }
+    })());
+
+  test('the journal names the ROUTE that answered', () =>
+    (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-journal-'));
+      const journalPath = join(dir, 'turns.jsonl');
+      otelJournal(journalPath);
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, ALIAS, 'oc-iceman');
+      try {
+        await post(url, {
+          model: 'opencode-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        const rows = readFileSync(journalPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(l => JSON.parse(l) as { event: string; backend?: string });
+        const turn = rows.find(r => r.event === 'conductor.turn');
+        // the PUBLIC route, not the private entry key
+        assert.equal(turn?.backend, 'opencode-acp');
+      } finally {
+        await close();
+        otelJournal(undefined);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })());
+
+  test("a chained turn is journaled under the PREDECESSOR's route", () =>
+    (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-journal-'));
+      const journalPath = join(dir, 'turns.jsonl');
+      otelJournal(journalPath);
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({ replyText: 'from opencode', configOptions: [OC_OPTION] });
+      const { url, close } = await bootGateway(dv, oc, TWO_ROUTES, 'oc-iceman');
+      try {
+        const first = await fetch(`${url}/v1/responses`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'opencode-acp/gpt-5', input: 'first', stream: false }),
+        });
+        assert.equal(first.status, 200);
+        const id = ((await first.json()) as { id: string }).id;
+        // the chain asks under a DIFFERENT route of the same entry —
+        // the chain already lives in the predecessor's context, so the
+        // answer belongs to the lane that holds it
+        const second = await fetch(`${url}/v1/responses`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'oc-alias/gpt-5',
+            input: 'second',
+            previous_response_id: id,
+            stream: false,
+          }),
+        });
+        assert.equal(second.status, 200);
+        const rows = readFileSync(journalPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(l => JSON.parse(l) as { event: string; backend?: string });
+        const turns = rows.filter(r => r.event === 'conductor.turn');
+        assert.equal(turns.length, 2);
+        // both turns name the PREDECESSOR's route
+        assert.deepEqual(
+          turns.map(t => t.backend),
+          ['opencode-acp', 'opencode-acp']
+        );
+      } finally {
+        await close();
+        otelJournal(undefined);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })());
+
+  test('a terminal reads back whichever lane spawned it', () =>
+    (async () => {
+      let ocTid = '';
+      const dv = fakeAcpAgent({ replyText: 'from devin', configOptions: [DV_OPTION] });
+      const oc = fakeAcpAgent({
+        replyText: 'from opencode',
+        configOptions: [OC_OPTION],
+        probeClient: async (client, sessionId) => {
+          const created = await client.request('terminal/create', {
+            sessionId,
+            command: 'sh',
+            args: ['-c', 'echo oc-term'],
+          });
+          await client.request('terminal/wait_for_exit', {
+            sessionId,
+            terminalId: created.terminalId,
+          });
+          ocTid = created.terminalId;
+        },
+      });
+      const proxy = conductorProxy(MULTI, {
+        acp: { peer: by => (by.endsWith('oc-acp') ? oc.app : dv.app) },
+      });
+      const { url, close } = await listen(deps({ provider: proxy }));
+      try {
+        // both lanes live — the registry probes each one
+        await post(url, {
+          model: 'dv-acp/swe-x',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        const r = await post(url, {
+          model: 'oc-acp/gpt-5',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        });
+        assert.equal(r.status, 200);
+        assert.ok(ocTid, 'the oc lane spawned a terminal mid-turn');
+        const reg = proxy.terminals();
+        assert.ok(reg, 'both lanes carry live registries');
+        // not the default lane's terminal — the lookup crosses to oc's
+        assert.match(reg.snapshot(ocTid).output, /oc-term/);
+        assert.throws(() => reg.snapshot('nope' as typeof ocTid), /Unknown terminal/);
+      } finally {
+        await close();
+      }
+    })());
+});
+
+describe('serve /v1/* — the bridge keeps the answer honest', () => {
+  /** The agent's own tool call, in ACP's shape. */
+  const call = (id: string, command: string) =>
+    ({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title: 'Ran ls',
+      kind: 'execute',
+      rawInput: { command },
+    }) as SessionUpdate;
+
+  /** The answer's blocks — the shape the client reads. */
+  type Blocks = { type: string; text?: string; name?: string; input?: unknown }[];
+
+  /** One buffered turn over `updates` — the answer's blocks. */
+  async function buffered(
+    updates: SessionUpdate[],
+    body: Record<string, unknown>
+  ): Promise<Blocks> {
+    const fake = fakeAcpAgent({ updates, configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, body);
+    try {
+      return ((await r.json()) as { content: Blocks }).content;
+    } finally {
+      await close();
+    }
+  }
+
+  test('the buffered text is not fed twice — a held stop prefix lands once', async () => {
+    // "EN" is held back as the prefix of the stop sequence "END": the
+    // settle path must not feed the whole text a second time
+    const content = await buffered(chunks('EN'), {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['END'],
+      stream: false,
+    });
+    const text = content
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('');
+    assert.equal(text, 'EN');
+  });
+
+  test('the call keeps its place — the text it interrupted lands before it', async () => {
+    const content = await buffered([...chunks('before EN'), call('tc-1', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stop_sequences: ['END'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(content[0]?.type, 'text');
+    assert.equal(content[0]?.text, 'before EN');
+    assert.equal(content[1]?.type, 'tool_use');
+  });
+
+  test('a call past the stop cut is not part of the answer', async () => {
+    const content = await buffered([...chunks('hello STOP'), call('tc-2', 'rm -rf /')], {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.find(b => b.type === 'tool_use'),
+      undefined,
+      'the cut ended the turn — the call is not part of the answer'
+    );
+  });
+
+  test("the payload's own tag cannot close the call", async () => {
+    const content = await buffered([call('tc-3', 'echo "</tool_call>"')], {
+      messages: [{ role: 'user', content: 'run' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    const tu = content.find(b => b.type === 'tool_use');
+    assert.ok(tu, 'the call survives its own payload');
+    assert.deepEqual(tu?.input, { command: 'echo "</tool_call>"' });
+  });
+
+  test('a repeated tool_call does not reach the client twice', async () => {
+    const content = await buffered([call('tc-4', 'ls'), call('tc-4', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.filter(b => b.type === 'tool_use').length,
+      1,
+      'the client runs the call once'
+    );
+  });
+
+  test('a chained empty retry fails loudly — the chain is not broken behind the client', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('<tool_call>{"name":"ls","input":{"command":"ls"}}</tool_call>'),
+      configOptions: [MODEL_OPTION],
+    });
+    const { url, close } = await boot(fake);
+    const fnTools = [
+      {
+        type: 'function',
+        name: 'Bash',
+        description: 'run a command',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string' } },
+          required: ['command'],
+        },
+      },
+    ];
+    try {
+      const first = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ input: 'go', stream: false, tools: fnTools }),
+      });
+      assert.equal(first.status, 200);
+      const id = ((await first.json()) as { id: string }).id;
+      // the client retries with nothing new, while the predecessor holds
+      // a tool answer — a chained retry cannot be answered afresh
+      const second = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          input: [],
+          previous_response_id: id,
+          stream: false,
+          tools: fnTools,
+        }),
+      });
+      assert.equal(second.status, 400);
     } finally {
       await close();
     }

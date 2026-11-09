@@ -15,6 +15,7 @@ import {
   git,
   initRepo,
   inside,
+  insideAsync,
   installFakeBd,
   installFakeHost,
   readHostState,
@@ -126,6 +127,44 @@ function pushedMergedStack(f: Fixture): { wa: string; wb: string } {
   return { wa, wb }
 }
 
+/** The router arc's shape: the merged member's branch carries the arc's
+ *  commit and then the layer's change to the same file, so the trunk's
+ *  squash of that branch is ONE commit — and the arc's own commit cannot
+ *  be dropped as already-upstream. Replayed, it conflicts. */
+function arcChain(f: Fixture): { wa: string; wb: string } {
+  assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+  const wa = join(f.root, 'main--fx-a')
+  writeFileSync(join(wa, 'a.txt'), 'arc\n')
+  git(['add', '-A'], wa)
+  git(['commit', '-qm', 'add a.txt'], wa)
+  writeFileSync(join(wa, 'a.txt'), 'layer\n')
+  git(['add', '-A'], wa)
+  git(['commit', '-qm', 'change a.txt'], wa)
+  git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
+  assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+  const wb = join(f.root, 'main--fx-b')
+  commitIn(wb, 'b.txt')
+  git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+  // the trunk's own squash of the layer — the same file, other content
+  writeFileSync(join(f.main, 'a.txt'), 'trunk\n')
+  git(['add', '-A'], f.main)
+  git(['commit', '-qm', 'add a.txt'], f.main)
+  git(['push', '-q', 'origin', 'main'], f.main)
+  return { wa, wb }
+}
+
+/** The child's branch after the sync: the trunk + the child's own commit
+ *  and NOTHING else. The merged member's old commit must not ride along,
+ *  and the trunk's file must survive. */
+function assertChildCarriesOnlyItsWork(f: Fixture): void {
+  assert.equal(
+    git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
+    git(['rev-parse', 'main'], f.main).trim()
+  )
+  assert.equal(git(['log', '--format=%s', 'main..stack/s/2-fx-b'], f.main).trim(), 'add b.txt')
+  assert.equal(git(['show', 'stack/s/2-fx-b:a.txt'], f.main).trim(), 'trunk')
+}
+
 /** Both members OPEN on the host — the child targets the bottom member. */
 function openPrs(f: Fixture, extra: Record<string, unknown> = {}): void {
   writeHostState(f.hostState, {
@@ -163,6 +202,22 @@ function assertBothInStack(f: Fixture, id: number): void {
   const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
   assert.equal(stacks?.['stack/s/1-fx-a'], id)
   assert.equal(stacks?.['stack/s/2-fx-b'], id)
+}
+
+/** The post-tool hook's own event — a worker's `gh pr create` landing in
+ *  the worktree that created it. */
+function prCreateHook(f: Fixture, cwd: string): CliResult {
+  return runCli(['hooks', 'post-tool'], {
+    cwd,
+    input: JSON.stringify({
+      session_id: 's1',
+      cwd,
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr create --fill' },
+      tool_response: { success: true },
+    }),
+    env: { ...f.env, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+  })
 }
 
 describe('bro stack e2e', () => {
@@ -369,6 +424,84 @@ describe('bro stack e2e', () => {
       assert.deepEqual(readHostState(f.hostState).retargets, [{ pr: 12, base: 'main' }])
     })
   })
+
+  test('the mid-cascade retirement of the merged base does not break the child\'s replay', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      const { wa } = arcChain(f)
+      // the merged member leaves NO worktree: the sync retires its branch
+      // mid-cascade, so the child's fork cannot be read from a ref
+      git(['worktree', 'remove', '--force', wa], f.main)
+      mergedBottomPrs(f)
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.doesNotMatch(r.stdout, /rebase onto main failed/)
+      assert.match(r.stdout, /stack\/s\/2-fx-b rebased onto main/)
+      assertChildCarriesOnlyItsWork(f)
+    })
+  })
+
+  test('the replay carries the member\'s own work when the host already deleted the base', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      const { wa } = arcChain(f)
+      // the HOST retired the merged member: no worktree, no branch — the
+      // child's fork cannot be read from a ref any more
+      git(['worktree', 'remove', '--force', wa], f.main)
+      git(['branch', '-D', 'stack/s/1-fx-a'], f.main)
+      mergedBottomPrs(f)
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.doesNotMatch(r.stdout, /rebase onto main failed/)
+      assert.match(r.stdout, /stack\/s\/2-fx-b rebased onto main/)
+      assertChildCarriesOnlyItsWork(f)
+    })
+  })
+
+  test('a fix that landed below rides the whole chain', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      // three members, each on the one below
+      for (const slug of ['fx-a', 'fx-b', 'fx-c']) {
+        assert.equal(f.run(['push', slug, '--name', 's']).code, 0);
+      }
+      const wa = join(f.root, 'main--fx-a');
+      const wb = join(f.root, 'main--fx-b');
+      const wc = join(f.root, 'main--fx-c');
+      commitIn(wa, 'a.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      commitIn(wb, 'b.txt');
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb);
+      commitIn(wc, 'c.txt');
+      git(['push', '-q', 'origin', 'stack/s/3-fx-c'], wc);
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+          'stack/s/3-fx-c': { number: 13, state: 'OPEN', baseRef: 'stack/s/2-fx-b' },
+        },
+      });
+      // a fix lands BELOW the chain — the bottom member's branch moves
+      commitIn(wa, 'fix.txt');
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa);
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      // the middle rides the moved bottom…
+      const midHead = git(['rev-parse', 'stack/s/2-fx-b'], f.main).trim();
+      assert.equal(
+        git(['merge-base', 'stack/s/1-fx-a', 'stack/s/2-fx-b'], f.main).trim(),
+        git(['rev-parse', 'stack/s/1-fx-a'], f.main).trim()
+      );
+      // …and the TOP rides the middle: the plan is made before the
+      // cascade, so a member that is rewritten mid-pass is re-checked
+      // against the base it now stands on
+      assert.equal(
+        git(['merge-base', 'stack/s/2-fx-b', 'stack/s/3-fx-c'], f.main).trim(),
+        midHead,
+        'the member above a rewritten one rides it'
+      );
+    });
+  });
 
   test('a merged member with no worktree loses its branch on sync', () => {
     const f = stackFixture()
@@ -642,6 +775,37 @@ describe('bro stack e2e', () => {
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 1)
       assert.match(r.stdout, /stack s publish failed — host reported no membership/)
+    })
+  })
+
+  test("a member's PR registers the chain — nobody adds the PRs by hand", async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      const { wa } = openPair(f)
+      // the worker opens the member's PR — bro's post-tool hook sees the
+      // very command and registers the chain behind it
+      const r = prCreateHook(f, wa)
+      assert.equal(r.code, 0, r.stderr)
+      // the registration is detached — the hook never waits for it
+      const deadline = Date.now() + 20_000
+      let stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      while (stacks === undefined && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      }
+      assertBothInStack(f, 901)
+    })
+  })
+
+  test('a PR outside a chain registers nothing', async () => {
+    const f = stackFixture()
+    await insideAsync(f.main, f.root, async () => {
+      openPair(f)
+      const r = prCreateHook(f, f.main)
+      assert.equal(r.code, 0, r.stderr)
+      // give a would-be registration the time to land — it must not
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+      assert.equal(readHostState(f.hostState).stacks, undefined)
     })
   })
 
