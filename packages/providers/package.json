@@ -42,7 +42,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Provider bindings for bro \u2014 the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
+  "description": "Provider bindings for bro — the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
   "keywords": [
     "providers",
     "judge",
@@ -51,5 +51,10 @@
     "agent",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "connector",
+    "facade": "providers",
+    "status": "beta"
+  }
 }
