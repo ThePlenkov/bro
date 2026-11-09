@@ -71,6 +71,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
   js,
   loadConfig,
   loadConfigLayers,
@@ -92,7 +93,14 @@ export {
   sweepSection,
   syncSection,
 } from './config.ts';
-export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts';
+export type {
+  IgnoreCheckEntry,
+  IgnoreCheckRule,
+  ServeClientConfig,
+  ServeClients,
+  SinkDef,
+  SinkType,
+} from './config.ts';
 export {
   API_WIRES,
   cliCommandModel,
@@ -103,6 +111,7 @@ export {
   modelBase,
   parseProviderEntry,
   providerCallGrade,
+  providerAccount,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -126,14 +135,31 @@ export {
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
+  fleetLeases,
+  fleetWalls,
+  deriveAccountWalls,
+  DEFAULT_FLEET_LEASE_TTLS,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
+  walkChain,
   wallText,
 } from './routing.ts';
+export {
+  clearLedgerWalls,
+  readLedgerWalls,
+  recordWall,
+  wallLedgerPath,
+} from './wall-ledger.ts';
+export type { WallLedgerOptions, WallObservation } from './wall-ledger.ts';
 export type {
   ChainEntry,
+  ChainWalk,
+  AccountWall,
+  FleetLeaseTtls,
+  FleetWallTtls,
   FleetRouter,
   OnWall,
   ProviderWall,
@@ -156,6 +182,21 @@ export type {
   BrouterRoute,
   ModelRoute,
 } from './brouter.ts';
+export { healthKey } from './router-health.ts';
+export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
+export {
+  EXPLAIN_SLICES,
+  explainFlag,
+  explainSlicesOrExit,
+  parseExplainSlices,
+  renderExplanation,
+  sliceFacts,
+  sliceNames,
+  unknownFact,
+  withSlice,
+} from './router-explain.ts';
+export type { ExplainFact, ExplainSlice, Explanation } from './router-explain.ts';
+export { estimateTokens } from './tokens.ts';
 export {
   DATA_REF,
   dataRefCommit,
@@ -249,6 +290,8 @@ export type {
 } from './lifecycle.ts';
 export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
+export { parseTaskSpecBody, taskSpecFacade } from './taskspec.ts';
+export type { TaskSpec, TaskSpecFacade } from './taskspec.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
@@ -329,11 +372,23 @@ export {
   sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
+  remoteUrl,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
+export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts';
+export type {
+  HoldRoleLeaseOptions,
+  Lease,
+  LeaseAcquire,
+  LeaseHolder,
+  LeaseStore,
+  LocalLeaseStoreOptions,
+} from './leases.ts';
+export { normalizeRemote, projectId } from './project-id.ts';
 export {
   GUARD_DEFAULT_BUDGET,
   GUARD_EVENTS,
@@ -418,6 +473,7 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
@@ -454,6 +510,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
@@ -547,8 +604,18 @@ export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './j
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
 export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export { deprecatedFlag, flag, flagAll, flagValue, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
-export { handleOwner, markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export {
+  groupMemberAlive,
+  handleOwner,
+  markerLive,
+  markerOwner,
+  pidAlive,
+  procStat,
+  scanProc,
+} from './proc.ts';
+export type { ProcEntry } from './proc.ts';
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';

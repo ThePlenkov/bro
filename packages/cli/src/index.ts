@@ -2,221 +2,98 @@
 /**
  * bro — agent's sidekick CLI.
  *
- * Thin host over the plugin registry — every capability is a BroPlugin
- * (subcommand + skill + config section); see plugins.ts for the list
- * and `bro plugins` for the live registry.
+ * A THIN HOST over the command bootstrap (@broject/command): the
+ * plugin registry (plugins.ts) is the content, this file is the mount.
+ * Every capability is a BroPlugin (subcommand + skill + config
+ * section); `bro plugins` shows the live registry.
+ *
+ * The tree: the root command holds the top-level plugins and one
+ * command per capability group (`bro review act status` → the review
+ * command → the act plugin). A group host (a plugin named like its
+ * group) is reachable both ways.
  */
-import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
-import { journalCommand } from './commands/hooks.ts'
-import { registerTelegramSink } from './commands/sinks-telegram.ts'
-import { otelSpan, setAmbient } from '@broject/providers'
-import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
-import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts'
-import { VERSION } from './version.ts'
+import { defineCommand, runCommand, type CommandPlugin } from '@broject/command';
+import { journalCommand } from './commands/hooks.ts';
+import { registerTelegramSink } from './commands/sinks-telegram.ts';
+import { otelSpan, setAmbient } from '@broject/providers';
+import { docUsageLines, reservedWords, runDocVerb } from './docs.ts';
+import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts';
+import { VERSION } from './version.ts';
 
+const EXAMPLES = [
+  'bro review debt collect             # harvest merged-PR findings → ledger + labels',
+  'bro review debt prs                 # merged PRs still unprocessed',
+  'bro review debt sync                # project the ledger into beads',
+  'bro review act status --json        # exit gate for the current PR',
+  'bro plugins                         # the registry — subcommand+skill+config',
+  'bro setup',
+];
 
-function memberList(members: BroPlugin[]): string {
-  return members
-    .filter((p) => !p.hidden)
-    .map((p) => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
-    .join(' ')
+/** The capability groups as COMMANDS — the tree the root mounts. Each
+ *  group command holds its members; the members stay plugins, so the
+ *  flat spelling (`bro act status`) keeps working through the root.
+ *
+ *  The member list is a RESOLVER, not a snapshot: `prepare` loads the
+ *  config's external plugins AFTER the tree is built, and an external
+ *  plugin that claims a group must be reachable through it
+ *  (`bro review <external>`). */
+function groupCommands() {
+  return GROUP_META.map(([name, summary]) => ({
+    name,
+    summary,
+    plugins: () => (pluginGroups().get(name) ?? []) as CommandPlugin[],
+  }));
 }
 
-function memberLabel(p: BroPlugin): string {
-  return p.aliasOf ? `→ ${p.aliasOf}` : p.summary
-}
+const cli = defineCommand({
+  name: 'bro',
+  summary: "agent's sidekick CLI",
+  version: VERSION,
+  plugins: () => PLUGINS as CommandPlugin[],
+  commands: groupCommands(),
+  usageLines: docUsageLines(),
+  examples: EXAMPLES,
+  prepare: async (argv) => {
+    // sink delivery policies — the plugin layer owns each type's wire
+    // shape; core dispatches to whoever registered (bro-mq1t2)
+    registerTelegramSink();
 
-/** `bro <group>` with no/unknown member — the member table plus the
- *  flat-spelling reminder. */
-function groupTable(cmd: string, group: BroPlugin[]): string {
-  const blurb = GROUP_META.find(([g]) => g === cmd)?.[1] ?? ''
-  const rows = group
-    .filter((p) => !p.hidden)
-    .map((p) => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
-    .join('\n')
-  return (
-    `bro ${cmd} — ${blurb}\n\n` +
-    `Members:\n${rows}\n\n` +
-    `Usage: bro ${cmd} <member> [args…]   (flat spellings stay valid: bro <member> …)`
-  )
-}
-
-/** Runs a group member reached via `bro <group> <member>` — the same
- *  plugin object the flat spelling hits. */
-async function runMember(
-  via: string,
-  member: BroPlugin,
-  args: string[]
-): Promise<void> {
-  if (member.deprecated) {
-    warnDeprecated(`'bro ${via} ${member.name}'`, member.deprecated)
-  }
-  await member.run([...(member.argvPrefix ?? []), ...args])
-}
-
-/** Flat spelling or group host — `bro act …`, `bro mesh peers`. When
- *  argv[1] names another member of the plugin's own group, the member
- *  wins (`bro plan run` reaches `run`); every other argv shape falls
- *  to the plugin exactly as before (`bro plan`, `bro spec check`). */
-async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
-  const plugin = PLUGINS.find((p) => p.name === cmd)
-  if (!plugin) {
-    return false
-  }
-  if (plugin.deprecated !== undefined) {
-    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
-  }
-  const member = pluginGroups()
-    .get(cmd)
-    ?.find((p) => p.name === rest[0] && p.name !== cmd)
-  if (member) {
-    await runMember(cmd, member, rest.slice(1))
-  } else {
-    // flat-spelling retirement (specs/cli phase 4): only a truly flat
-    // invocation warns — `bro <host> <member>` resolves the member
-    // above and stays silent. A group host has no better spelling
-    // than itself.
-    if (
-      plugin.deprecated === undefined &&
-      plugin.flatDeprecated !== undefined &&
-      plugin.group !== undefined &&
-      plugin.group !== plugin.name
-    ) {
-      warnDeprecated(
-        `'bro ${plugin.name}'`,
-        `${plugin.flatDeprecated} — prefer 'bro ${plugin.group} ${plugin.name}'`
-      )
+    // command telemetry: plugins end via process.exit() — the exit event
+    // is the only site that sees every path and its code. Meta commands
+    // and BRO_TELEMETRY=0 skip; see journalCommand for the cheap contract
+    const cmd = argv[0];
+    const t0 = Date.now();
+    const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h']);
+    if (!META_CMDS.has(cmd)) {
+      // bro.cmd span: ambient parent for everything the command opens
+      // (hook probes, acp turns, spawned workers); endDetached on exit —
+      // plugins terminate via process.exit() where in-flight fetch dies,
+      // so the completed span rides out on a detached node child.
+      const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 });
+      setAmbient(cmdSpan.ctx);
+      process.on('exit', (code) => {
+        journalCommand(cmd as string, Date.now() - t0, code ?? 0);
+        cmdSpan.endDetached(
+          { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
+          (code ?? 0) === 0 ? 'ok' : 'error'
+        );
+      });
     }
-    await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
-  }
-  return true
-}
 
-/** Group dispatch — `bro review act status`. A group with no host
- *  plugin shows its member table instead of 'unknown command'. */
-async function dispatchGroup(cmd: string, rest: string[]): Promise<boolean> {
-  const group = pluginGroups().get(cmd)
-  if (!group) {
-    return false
-  }
-  const member = group.find((p) => p.name === rest[0])
-  if (member) {
-    await runMember(cmd, member, rest.slice(1))
-    return true
-  }
-  // bare `bro <group>` and `--help` ask for the member table (stdout,
-  // 0); anything else is an unknown member — the canonical usage error
-  return printUsage(groupTable(cmd, group), rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage)
-}
+    // config `plugins` join the registry before help/dispatch — a listed
+    // external command must be dispatchable, and it should show in --help.
+    // Group names are reserved too — an external 'review' would shadow
+    // the namespace's members without ever being reachable itself.
+    await loadExternalPlugins(
+      undefined,
+      undefined,
+      new Set([...reservedWords(), ...pluginGroups().keys()])
+    );
+  },
+  fallback: async (cmd, rest) => runDocVerb(cmd, rest),
+});
 
-function usage(exitCode: ExitCode = 1): never {
-  const groups = pluginGroups()
-  const groupRows = GROUP_META.filter(([g]) =>
-    groups.get(g)?.some((p) => !p.hidden)
-  )
-    .map(([g, blurb]) => `  ${g.padEnd(8)} ${blurb}\n             ${memberList(groups.get(g) ?? [])}`)
-    .join('\n')
-  const commands = PLUGINS.filter((p) => !p.hidden && !p.group && !p.aliasOf)
-    .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
-    .join('\n')
-  printUsage(`bro — agent's sidekick CLI
-
-Usage: bro <command> [args…]
-       bro <group> <member> [args…]
-
-Groups:
-${groupRows}
-
-Top-level:
-${commands}
-${docUsageLines().join('\n')}
-
-Options:
-  --version    Print version
-  --help       This text (also: bro help, bro help <cmd>)
-
-Examples:
-  bro review debt collect             # harvest merged-PR findings → ledger + labels
-  bro review debt prs                 # merged PRs still unprocessed
-  bro review debt sync                # project the ledger into beads
-  bro review act status --json        # exit gate for the current PR
-  bro plugins                         # the registry — subcommand+skill+config
-  bro setup`, exitCode)
-}
-
-async function main(): Promise<void> {
-  // `bro help` is `bro --help`; `bro help <cmd>…` is `bro <cmd>… --help` —
-  // one spelling for explicit help whichever side of the command it sits on
-  let argv = process.argv.slice(2)
-  if (argv[0] === 'help') {
-    const tail = argv.slice(1)
-    const sep = tail.indexOf('--')
-    const head = sep === -1 ? tail : tail.slice(0, sep)
-    argv = head.length === 0 ? ['--help'] : [...head, '--help']
-  }
-  const [cmd, ...rest] = argv
-
-  // sink delivery policies — the plugin layer owns each type's wire
-  // shape; core dispatches to whoever registered (bro-mq1t2)
-  registerTelegramSink()
-
-  // command telemetry: plugins end via process.exit() — the exit event
-  // is the only site that sees every path and its code. Meta commands
-  // and BRO_TELEMETRY=0 skip; see journalCommand for the cheap contract
-  const t0 = Date.now()
-  const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h'])
-  if (!META_CMDS.has(cmd)) {
-    // bro.cmd span: ambient parent for everything the command opens
-    // (hook probes, acp turns, spawned workers); endDetached on exit —
-    // plugins terminate via process.exit() where in-flight fetch dies,
-    // so the completed span rides out on a detached node child.
-    const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 })
-    setAmbient(cmdSpan.ctx)
-    process.on('exit', (code) => {
-      journalCommand(cmd as string, Date.now() - t0, code ?? 0)
-      cmdSpan.endDetached(
-        { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
-        (code ?? 0) === 0 ? 'ok' : 'error'
-      )
-    })
-  }
-
-  if (cmd === '--version' || cmd === '-v') {
-    console.log(VERSION)
-    return
-  }
-  // config `plugins` join the registry before help/dispatch — a listed
-  // external command must be dispatchable, and it should show in --help.
-  // Group names are reserved too — an external 'review' would shadow
-  // the namespace's members without ever being reachable itself.
-  await loadExternalPlugins(
-    undefined,
-    undefined,
-    new Set([...reservedWords(), ...pluginGroups().keys()])
-  )
-
-  if (cmd === '--help' || cmd === '-h') {
-    usage(0)
-  }
-  if (!cmd) {
-    usage()
-  }
-
-  if (await dispatchPlugin(cmd, rest)) {
-    return
-  }
-  if (await dispatchGroup(cmd, rest)) {
-    return
-  }
-  // verb-first doc dispatch — `bro list`, `bro show <id>`, …
-  if (await runDocVerb(cmd, rest)) {
-    return
-  }
-  console.error(`unknown command: ${cmd}`)
-  usage(EXIT.usage)
-}
-
-main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : err)
-  process.exit(1)
-})
+runCommand(cli, process.argv.slice(2), { mounted: true }).catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});

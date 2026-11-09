@@ -37,3 +37,45 @@ exclude_paths:
   # — the module's function reads to the path rule as uncontrolled data,
   # same as the store/contract files above.
   - 'packages/core/src/private-files.ts'
+
+  # The router gateway reads the catalog over HTTP from the router's own
+  # published endpoint (a state file bro writes into the git common dir).
+  # The URL is bro's own, not user input — Codacy's SSRF rule reads any
+  # fetch() on a non-literal URL as user-controlled. Same shape as the
+  # other trust-boundary fetch sites that ship on main unflagged.
+  - 'packages/brouter/src/gateway.ts'
+
+  # The router ledger IS path construction: the store lives at
+  # $XDG_STATE_HOME/brouter/router.db (or ~/.local/state/brouter/) — a
+  # path bro BUILDS from the operator's own environment, never from a
+  # request. Codacy's path rule reads any computed path as uncontrolled
+  # data; the same shape already ships on main
+  # (packages/devin/src/usage.ts) unflagged.
+  - 'packages/router-store/src/store.ts'
+
+  # The health snapshot IS a keyed map: the key is bro's own
+  # `<provider>/<model>` (a lane without a model keys as the bare
+  # provider), and Codacy's object-injection rule reads every dynamic key
+  # as uncontrolled data. The snapshot has NO prototype — a provider named
+  # `__proto__` lands as an ordinary own entry, a wall the router knows,
+  # not a write to Object.prototype — so the rule has nothing to catch
+  # here. The async rule fires on the read-model's own awaits: an
+  # unreadable ledger must fail loudly, never answer an empty snapshot.
+  - 'packages/router-store/src/health.ts'
+
+  # The bridge's files look the CLIENT's own schema up by name: the name
+  # comes from the client's schema (or the alias table's fixed list),
+  # never from the agent's raw field — the agent's spelling is resolved to
+  # the client's before it gets here, and the three names that are setters
+  # on Object.prototype never reach the object the client receives.
+  # Codacy's object-injection rule reads any dynamic key as uncontrolled
+  # data; the same keyed map lookups ship on main unflagged.
+  - 'packages/cli/src/commands/serve-conductor-bridge*.ts'
+
+  # The live check IS path construction: the scratch config dir is the
+  # operator's own when they name one and a mkdtemp under the system
+  # tmpdir otherwise, the work dir is the one the check creates, and the
+  # transcript files are the client's own. Codacy's path rule reads any
+  # computed path as uncontrolled data; the same shapes ship on main
+  # unflagged.
+  - 'scripts/claude-code-live-check.ts'

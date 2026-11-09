@@ -23,6 +23,28 @@ process.on('exit', () => {
   else process.env.XDG_CONFIG_HOME = prevXdg;
 });
 
+function repoWith(pluginSource: string | null, plugins: unknown): string {
+  const dir = tmpDir('bro-ext-');
+  writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ plugins }));
+  if (pluginSource !== null) {
+    writeFileSync(join(dir, 'my.ts'), pluginSource);
+  }
+  return dir;
+}
+
+function unload(loaded: { name: string }[]): void {
+  for (const p of loaded) {
+    const i = PLUGINS.findIndex(x => x.name === p.name);
+    if (i >= 0) PLUGINS.splice(i, 1);
+  }
+}
+
+async function expectRejected(source: string): Promise<void> {
+  const dir = repoWith(source, ['./my.ts']);
+  const loaded = await loadExternalPlugins(dir);
+  assert.equal(loaded.length, 0);
+}
+
 describe('plugin registry', () => {
   test('names are unique', () => {
     const names = PLUGINS.map(p => p.name);
@@ -55,7 +77,10 @@ describe('plugin registry', () => {
     // `wait` is dep-plane, not thread-plane — a `mesh` membership
     // would shadow the mesh host's own `wait` subcommand (the
     // specs/cross-repo spelling is `bro wait`, top-level by design)
-    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait']);
+    // `router` is a NAMESPACE HOST, not a capability member — it
+    // mounts the brouter sub-CLI (models|clients|client|ask|acp) as
+    // one plugin, so it has no members of its own to group (bro-3bplj)
+    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait', 'router']);
     const groups = pluginGroups();
     for (const p of PLUGINS) {
       if (p.hidden || p.external) continue;
@@ -196,22 +221,6 @@ describe('assertMutableConfig', () => {
 });
 
 describe('loadExternalPlugins', () => {
-  function repoWith(pluginSource: string | null, plugins: unknown): string {
-    const dir = tmpDir('bro-ext-');
-    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ plugins }));
-    if (pluginSource !== null) {
-      writeFileSync(join(dir, 'my.ts'), pluginSource);
-    }
-    return dir;
-  }
-
-  function unload(loaded: { name: string }[]): void {
-    for (const p of loaded) {
-      const i = PLUGINS.findIndex(x => x.name === p.name);
-      if (i >= 0) PLUGINS.splice(i, 1);
-    }
-  }
-
   test('a .ts default-export plugin registers and is marked external', async () => {
     const dir = repoWith(
       `export default { name: 'hello', summary: 'test plugin', run: () => {} }`,
@@ -256,21 +265,15 @@ describe('loadExternalPlugins', () => {
   });
 
   test('wrong-typed optional fields reject the export', async () => {
-    const dir = repoWith(
-      `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`,
-      ['./my.ts']
+    await expectRejected(
+      `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`
     );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
   });
 
   test('a non-string deprecated field rejects the export', async () => {
-    const dir = repoWith(
-      `export default { name: 'badd', summary: 'x', run: () => {}, deprecated: true }`,
-      ['./my.ts']
+    await expectRejected(
+      `export default { name: 'badd', summary: 'x', run: () => {}, deprecated: true }`
     );
-    const loaded = await loadExternalPlugins(dir);
-    assert.equal(loaded.length, 0);
   });
 
   test('a string deprecated field registers and survives on the plugin', async () => {
@@ -413,6 +416,79 @@ describe('bro run — plan routing', () => {
       assert.deepEqual(seen, []);
     } finally {
       PLUGINS.splice(PLUGINS.indexOf(plugin), 1);
+    }
+  });
+});
+
+describe('external plugin/connector validation', () => {
+  const rejectionCases: Array<[string, string]> = [
+    [
+      'malformed connector matchDir is rejected',
+      `export default { name: 'bad1', summary: 'x', run: () => {}, connectors: [{ name: 'c1', matchDir: 1 }] }`,
+    ],
+    [
+      'malformed connector optInFacades rejected',
+      `export default { name: 'bad2', summary: 'x', run: () => {}, connectors: [{ name: 'c2', optInFacades: 4 }] }`,
+    ],
+    [
+      'connector with invalid optInFacades element rejected',
+      `export default { name: 'bad3', summary: 'x', run: () => {}, connectors: [{ name: 'c3', optInFacades: ['badfac'] }] }`,
+    ],
+    [
+      'argvPrefix elements must be strings',
+      `export default { name: 'bad4', summary: 'x', run: () => {}, argvPrefix: ['ok', 123] }`,
+    ],
+    [
+      'planSchema without runPlan rejected',
+      `export default { name: 'bad5', summary: 'x', run: () => {}, planSchema: () => ({}) }`,
+    ],
+    [
+      'runPlan without planSchema rejected',
+      `export default { name: 'bad6', summary: 'x', run: () => {}, runPlan: () => {} }`,
+    ],
+    [
+      'connector optIn must be boolean',
+      `export default { name: 'bad7', summary: 'x', run: () => {}, connectors: [{ name: 'c7', optIn: 'yes' }] }`,
+    ],
+    [
+      'connector callback field must be a function',
+      `export default { name: 'bad8', summary: 'x', run: () => {}, connectors: [{ name: 'c8', matchRemote: 'x' }] }`,
+    ],
+    [
+      'plugin group must be a string',
+      `export default { name: 'bad9', summary: 'x', run: () => {}, group: 1 }`,
+    ],
+    [
+      'plugin aliasOf must be a string',
+      `export default { name: 'bad10', summary: 'x', run: () => {}, aliasOf: 2 }`,
+    ],
+    [
+      'plugin hidden must be a boolean',
+      `export default { name: 'bad11', summary: 'x', run: () => {}, hidden: 'y' }`,
+    ],
+    [
+      'sparse optInFacades holes rejected',
+      `export default { name: 'bad12', summary: 'x', run: () => {}, connectors: [{ name: 'c12', optInFacades: [,'tasks'] }] }`,
+    ],
+  ];
+
+  for (const [title, source] of rejectionCases) {
+    test(title, async () => {
+      await expectRejected(source);
+    });
+  }
+
+  test('valid plugin with valid connectors still registers', async () => {
+    const dir = repoWith(
+      `export default { name: 'good1', summary: 'x', run: () => {}, connectors: [{ name: 'gc1', matchRemote: () => true, optInFacades: ['tasks'], optIn: true }] }`,
+      ['./my.ts']
+    );
+    const loaded = await loadExternalPlugins(dir);
+    try {
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].name, 'good1');
+    } finally {
+      unload(loaded);
     }
   });
 });
