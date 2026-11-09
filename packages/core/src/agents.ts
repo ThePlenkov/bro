@@ -141,6 +141,92 @@ function relReset(text: string, now: number): string | undefined {
   return undefined;
 }
 
+/** Whitespace run — bounded at 4k so a giant tail can't backtrack
+ *  the scan polynomially. */
+function skipBlank(text: string, i: number): number {
+  let j = i;
+  while (j < text.length && j - i < 4096 && [32, 9, 10, 13, 12, 11].includes(text.charCodeAt(j))) {
+    j++;
+  }
+  return j;
+}
+
+/** One duration separator — a comma and/or a word-bounded 'and'
+ *  ('1 hour, and 30 minutes'). Returns the index past it, or the
+ *  input position when neither sits there. */
+function separatorEnd(text: string, i: number): number {
+  let j = i;
+  if (text.charCodeAt(j) === 44) {
+    j = skipBlank(text, j + 1);
+  }
+  if (
+    j > 0 &&
+    !/[A-Za-z0-9_]/.test(text[j - 1]!) &&
+    text.slice(j, j + 3).toLowerCase() === 'and' &&
+    (j + 3 >= text.length || !/[A-Za-z0-9_]/.test(text[j + 3]!))
+  ) {
+    j = skipBlank(text, j + 3);
+  }
+  return j;
+}
+
+/** Up to 6 digits at i — the value and the index past them, or
+ *  undefined when i is not a digit. */
+function digitsAt(text: string, i: number): { value: number; end: number } | undefined {
+  let value = 0;
+  let j = i;
+  while (j < text.length && j - i < 6 && text.charCodeAt(j) >= 48 && text.charCodeAt(j) <= 57) {
+    value = value * 10 + (text.charCodeAt(j) - 48);
+    j++;
+  }
+  return j === i ? undefined : { value, end: j };
+}
+
+/** Exact duration units — a bare first-letter fallback maps any
+ *  adjacent word ('30 seconds 5 more' → +5 minutes) into the hold,
+ *  so an unrecognized word stops the pair scan instead of parsing. */
+const UNIT_WORDS: Record<string, 'h' | 'm' | 's' | 'ms'> = {
+  h: 'h',
+  hr: 'h',
+  hrs: 'h',
+  hour: 'h',
+  hours: 'h',
+  m: 'm',
+  min: 'm',
+  mins: 'm',
+  minute: 'm',
+  minutes: 'm',
+  s: 's',
+  sec: 's',
+  secs: 's',
+  second: 's',
+  seconds: 's',
+  ms: 'ms',
+  msec: 'ms',
+  milli: 'ms',
+  millis: 'ms',
+  millisecond: 'ms',
+  milliseconds: 'ms',
+};
+
+/** The alphabetic run at i as a UNIT_MS key — undefined when the word
+ *  is not an exact unit. */
+function unitKeyAt(
+  text: string,
+  i: number
+): { key: 'h' | 'm' | 's' | 'ms'; end: number } | undefined {
+  let j = i;
+  while (j < text.length && j - i <= 10) {
+    const cc = text.charCodeAt(j);
+    if ((cc < 65 || cc > 90) && (cc < 97 || cc > 122)) {
+      break;
+    }
+    j++;
+  }
+  const key = UNIT_WORDS[text.slice(i, j).toLowerCase()];
+  return key === undefined ? undefined : { key, end: j };
+}
+
 /** The duration tail of one `... in ` match — the summed number+unit
  *  pairs in milliseconds (margin included), or undefined when the
  *  phrase carries none. */
@@ -148,135 +234,33 @@ function relScanFrom(text: string, start: number): number | undefined {
   let ms = 0;
   let found = false;
   let i = start;
-  const relEnd = start;
-  const len = text.length;
-  while (i < len) {
-    // skip whitespace (bounded scan to avoid polynomial backtracking)
-    while (
-      i < len &&
-      (text.charCodeAt(i) === 32 ||
-        text.charCodeAt(i) === 9 ||
-        text.charCodeAt(i) === 10 ||
-        text.charCodeAt(i) === 13 ||
-        text.charCodeAt(i) === 12 ||
-        text.charCodeAt(i) === 11)
-    ) {
-      i++;
-      if (i - relEnd > 4096) break;
-    }
-    if (i >= len) break;
-    // optional comma
-    if (text.charCodeAt(i) === 44) {
-      i++;
-      const run = i;
-      while (
-        i < len &&
-        (text.charCodeAt(i) === 32 ||
-          text.charCodeAt(i) === 9 ||
-          text.charCodeAt(i) === 10 ||
-          text.charCodeAt(i) === 13)
-      ) {
-        i++;
-        if (i - run > 4096) break;
+  while (i < text.length) {
+    i = skipBlank(text, i);
+    // separators can chain ('…and, 5 minutes' — odd but harmless to
+    // keep reading); each pass ends where nothing else consumed
+    for (;;) {
+      const after = separatorEnd(text, i);
+      if (after === i) {
+        break;
       }
-      if (i >= len) break;
+      i = after;
     }
-    // optional 'and' (avoid regex backtracking/flags on hot paths)
-    if (i + 3 <= len) {
-      const c0 = text.charCodeAt(i);
-      const c1 = text.charCodeAt(i + 1);
-      const c2 = text.charCodeAt(i + 2);
-      if ((c0 === 97 || c0 === 65) && (c1 === 110 || c1 === 78) && (c2 === 100 || c2 === 68)) {
-        // check word boundary after and
-        if (i === 0 || !/[A-Za-z0-9_]/.test(text[i - 1]!)) {
-          const afterAnd = i + 3;
-          if (afterAnd >= len || !/[A-Za-z0-9_]/.test(text[afterAnd]!)) {
-            i = afterAnd;
-            const run = i;
-            while (
-              i < len &&
-              (text.charCodeAt(i) === 32 ||
-                text.charCodeAt(i) === 9 ||
-                text.charCodeAt(i) === 10 ||
-                text.charCodeAt(i) === 13)
-            ) {
-              i++;
-              if (i - run > 4096) break;
-            }
-            if (i >= len) break;
-          }
-        }
-      }
-    }
-    // read number
-    if (text.charCodeAt(i) < 48 || text.charCodeAt(i) > 57) {
+    const num = digitsAt(text, i);
+    if (num === undefined) {
       break;
     }
-    let num = 0;
-    let digits = 0;
-    while (i < len && text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57 && digits < 6) {
-      num = num * 10 + (text.charCodeAt(i) - 48);
-      i++;
-      digits++;
-    }
-    // skip whitespace
-    while (
-      i < len &&
-      (text.charCodeAt(i) === 32 ||
-        text.charCodeAt(i) === 9 ||
-        text.charCodeAt(i) === 10 ||
-        text.charCodeAt(i) === 13)
-    ) {
-      i++;
-    }
-    if (i >= len) break;
-    // read unit
-    const startUnit = i;
-    while (i < len) {
-      const cc = text.charCodeAt(i);
-      if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)) {
-        i++;
-        if (i - startUnit > 10) break;
-        continue;
-      }
+    const unit = unitKeyAt(text, skipBlank(text, num.end));
+    if (unit === undefined) {
       break;
     }
-    if (i === startUnit) break;
-    const unit = text.slice(startUnit, i).toLowerCase();
-    // exact unit words only — a bare first-letter fallback maps any
-    // adjacent word ('30 seconds 5 more' → +5 minutes) into the hold
-    const unitKey =
-      unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours'
-        ? 'h'
-        : unit === 'm' ||
-            unit === 'min' ||
-            unit === 'mins' ||
-            unit === 'minute' ||
-            unit === 'minutes'
-          ? 'm'
-          : unit === 's' ||
-              unit === 'sec' ||
-              unit === 'secs' ||
-              unit === 'second' ||
-              unit === 'seconds'
-            ? 's'
-            : unit === 'ms' ||
-                unit === 'msec' ||
-                unit === 'milli' ||
-                unit === 'millis' ||
-                unit === 'millisecond' ||
-                unit === 'milliseconds'
-              ? 'ms'
-              : undefined;
-    if (unitKey === undefined) break;
-    ms += num * (UNIT_MS[unitKey] ?? 1_000);
+    ms += num.value * (UNIT_MS[unit.key] ?? 1_000);
+    i = unit.end;
     found = true;
-    // '_' closes the phrase ('5m_ago' is not a duration); a digit is the
-    // NEXT compact pair ('1h30m'), not a boundary
-    if (i < len && text.charCodeAt(i) === 95) {
+    // '_' closes the phrase ('5m_ago' is not a duration); a digit is
+    // the NEXT compact pair ('1h30m'), not a boundary
+    if (text.charCodeAt(i) === 95) {
       break;
     }
-    // continue loop
   }
   if (!found) {
     return undefined;
