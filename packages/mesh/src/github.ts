@@ -31,6 +31,134 @@ export interface GithubRepo {
   repo: string;
 }
 
+/** A github repository coordinate — value object for the repo pair.
+ *  Instances satisfy the structural {@link GithubRepo} shape; use the
+ *  class when normalization/equality semantics are wanted. */
+export class GitHubRepo {
+  readonly owner: string
+  readonly repo: string
+  constructor(owner: string, repo: string) {
+    this.owner = owner.trim().toLowerCase()
+    this.repo = repo.trim().toLowerCase()
+  }
+
+  static from(input: { owner: string; repo: string }): GitHubRepo {
+    return new GitHubRepo(input.owner, input.repo)
+  }
+
+  equals(other: GitHubRepo | { owner: string; repo: string } | null | undefined): boolean {
+    if (other === null || other === undefined) return false
+    return this.owner === other.owner.trim().toLowerCase() && this.repo === other.repo.trim().toLowerCase()
+  }
+
+  toString(): string {
+    return `${this.owner}/${this.repo}`
+  }
+}
+
+/** A github issue thread — the issue URL is the thread anchor. */
+export class GitHubIssueThread {
+  readonly repo: GitHubRepo | null
+  readonly number: number | null
+  constructor(repo: GitHubRepo | null, number: number | null) {
+    this.repo = repo
+    // issue numbers are GitHub's own — a 1-based safe integer;
+    // anything else (0, negative, NaN, Infinity) is no issue
+    this.number =
+      number !== null && Number.isSafeInteger(number) && number > 0 ? number : null
+  }
+
+  static parse(input: string): GitHubIssueThread {
+    let t = input.trim()
+    while (t.endsWith('/')) {
+      t = t.slice(0, -1)
+    }
+    const m = /\/issues\/(\d+)$/.exec(t)
+    if (m === null) {
+      const repo = parseGithubRemote({ remote: t })
+      if (repo === null) {
+        return new GitHubIssueThread(null, null)
+      }
+      return new GitHubIssueThread(GitHubRepo.from(repo), null)
+    }
+    const base = t.replace(/\/issues\/\d+$/, '')
+    const repo = parseGithubRemote({ remote: base })
+    const n = Number(m[1])
+    if (repo === null || !Number.isSafeInteger(n)) {
+      return new GitHubIssueThread(repo === null ? null : GitHubRepo.from(repo), null)
+    }
+    return new GitHubIssueThread(GitHubRepo.from(repo), n)
+  }
+
+  static fromIssue(repo: GitHubRepo | { owner: string; repo: string }, n: number): GitHubIssueThread {
+    const r = repo instanceof GitHubRepo ? repo : GitHubRepo.from(repo)
+    if (!Number.isSafeInteger(n) || n < 0) {
+      return new GitHubIssueThread(r, null)
+    }
+    return new GitHubIssueThread(r, n)
+  }
+
+  get url(): string | null {
+    if (this.repo === null || this.number === null) {
+      return null
+    }
+    return issueUrl({ repo: this.repo, n: this.number })
+  }
+
+  get isIssue(): boolean {
+    return this.repo !== null && this.number !== null
+  }
+
+  toString(): string {
+    return this.url ?? ''
+  }
+}
+
+/** A github login/name — normalized to lowercase for comparison. */
+export class GitHubLogin {
+  readonly value: string
+  constructor(value: string) {
+    this.value = value.trim()
+  }
+
+  static from(input: string | undefined | null): GitHubLogin | null {
+    if (typeof input !== 'string' || input.trim() === '') return null
+    return new GitHubLogin(input)
+  }
+
+  equals(other: GitHubLogin | string | undefined | null): boolean {
+    if (other === null || other === undefined) return false
+    const otherVal = other instanceof GitHubLogin ? other.value : other
+    if (typeof otherVal !== 'string') return false
+    return this.value.toLowerCase() === otherVal.trim().toLowerCase()
+  }
+
+  toString(): string {
+    return this.value
+  }
+}
+
+/** Normalize a repo/remote input to GitHubRepo. */
+export function toGitHubRepo(input: { remote: string } | { owner: string; repo: string } | string): GitHubRepo | null {
+  if (typeof input === 'string') {
+    const parsed = parseGithubRemote({ remote: input })
+    return parsed === null ? null : GitHubRepo.from(parsed)
+  }
+  if ('remote' in input) {
+    const parsed = parseGithubRemote(input)
+    return parsed === null ? null : GitHubRepo.from(parsed)
+  }
+  if (
+    typeof input.owner !== 'string' ||
+    typeof input.repo !== 'string' ||
+    input.owner.trim() === '' ||
+    input.repo.trim() === ''
+  ) {
+    return null
+  }
+  return GitHubRepo.from({ owner: input.owner.trim(), repo: input.repo.trim() })
+}
+
 /** remote → {owner, repo} when it names a github.com repository —
  *  https/ssh/git@ forms, `.git` suffix and trailing slash tolerated.
  *  Other hosts and non-URL remotes return null: the caller reports
@@ -115,12 +243,18 @@ function scpHostPath(input: { rest: string }): { host: string; path: string } | 
  *  Callers that only need the repo can pass a bare repo url — `n`
  *  comes back null. */
 export function issueKey(input: { thread: string }): { repo: GithubRepo | null; n: number | null } {
-  const t = input.thread.trim();
-  const m = /\/issues\/(\d+)$/.exec(t);
+  // one parser for the thread shape — the returned repo is the plain
+  // structural GithubRepo, not the value object (deep-equality callers)
+  const t = GitHubIssueThread.parse(input.thread)
   return {
-    repo: parseGithubRemote({ remote: t.replace(/\/issues\/\d+$/, '') }),
-    n: m === null ? null : Number(m[1]),
-  };
+    repo: t.repo === null ? null : { owner: t.repo.owner, repo: t.repo.repo },
+    n: t.number,
+  }
+}
+
+/** A github thread's issue coordinate (object form). */
+export function parseIssueThread(input: { thread: string }): GitHubIssueThread {
+  return GitHubIssueThread.parse(input.thread)
 }
 
 export interface GhResult {
@@ -528,20 +662,28 @@ export function githubProvenance(rec: {
   selfLogin: string | undefined;
   ownRig: string | null;
 }): { provenance?: string; error?: string } {
+  const author = GitHubLogin.from(rec.author)
   if (rec.peer !== undefined) {
     if (rec.peer.login === undefined) {
       return {
         error: `github binding has no login — records on this plane can't be authenticated`,
       };
     }
-    if (rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
-      return { provenance: rec.peer.rig };
+    const peerLogin = GitHubLogin.from(rec.peer.login)
+    if (peerLogin !== null && author !== null && author.equals(peerLogin)) {
+      return { provenance: rec.peer.rig }
+    }
+    if (peerLogin !== null && rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
+      return { provenance: rec.peer.rig }
     }
   }
-  if (rec.selfLogin !== undefined && rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
-    return rec.ownRig === null
-      ? { error: `own record, but this rig's identity doesn't resolve` }
-      : { provenance: rec.ownRig };
+  if (rec.selfLogin !== undefined) {
+    const self = GitHubLogin.from(rec.selfLogin)
+    if ((self !== null && author !== null && author.equals(self)) || rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
+      return rec.ownRig === null
+        ? { error: `own record, but this rig's identity doesn't resolve` }
+        : { provenance: rec.ownRig }
+    }
   }
   return {
     error: `comment author ${rec.author === '' ? 'unknown' : rec.author} is neither ${
