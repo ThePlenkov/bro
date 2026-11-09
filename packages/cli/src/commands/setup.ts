@@ -18,7 +18,6 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -94,8 +93,7 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
   const git = (args: string[], cwd = process.cwd()): string =>
-    execFileSync('git', ['-C', cwd, ...args], {
-      // NOSONAR — PATH lookup is the contract
+    execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -122,8 +120,7 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], {
-        // NOSONAR — git PATH lookup is the contract
+      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], { // NOSONAR — git PATH lookup is the contract
         stdio: 'ignore',
       });
       return true;
@@ -170,8 +167,7 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], {
-      // NOSONAR — git PATH lookup is the contract
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], { // NOSONAR — git PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();

@@ -910,7 +910,8 @@ function spawnAgent(
     // single-quote escaping, not JSON.stringify: inside the sh -c
     // wrapper a double-quoted assignment still expands $ ` $() and
     // backslashes before eval ever sees the command (kody #760)
-    const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+    const sqEsc = String.raw`'\''`;
+    const shq = (s: string): string => `'${s.replaceAll("'", sqEsc)}'`;
     const wrap = (cmd: string): string =>
       `({ _bro_cmd=${shq(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
