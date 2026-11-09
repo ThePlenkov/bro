@@ -171,22 +171,24 @@ export function psRegroupPaths(tokens: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (t.startsWith('/') && !existsSync(t)) {
-      let merged = '';
-      for (let j = i + 1; j < tokens.length && j - i <= 8 && !tokens[j]!.startsWith('-'); j++) {
-        const acc = tokens.slice(i, j + 1).join(' ');
-        if (existsSync(acc)) {
-          merged = acc;
-          i = j;
-          break;
-        }
-      }
-      out.push(merged === '' ? t : merged);
-    } else {
-      out.push(t);
-    }
+    const merged = t.startsWith('/') && !existsSync(t) ? mergePathFragment(tokens, i) : null;
+    i += merged?.count ?? 0;
+    out.push(merged?.text ?? t);
   }
   return out;
+}
+
+/** tokens[i..j] rejoined until the join exists on disk — the boundary
+ *  oracle for a `ps`-split path. null when no rejoin resolves (raced
+ *  delete, relative spelling) — the caller keeps the original token. */
+function mergePathFragment(tokens: string[], i: number): { text: string; count: number } | null {
+  const bound = Math.min(tokens.length - 1, i + 8);
+  for (let j = i + 1; j <= bound; j++) {
+    if (tokens[j]!.startsWith('-')) break;
+    const acc = tokens.slice(i, j + 1).join(' ');
+    if (existsSync(acc)) return { text: acc, count: j - i };
+  }
+  return null;
 }
 
 /** `ps <args> -p <pid>` — the darwin/BSD stand-in for /proc reads.
@@ -211,28 +213,33 @@ function psOut(pid: number, args: string[]): string {
  *  badge detection). */
 export function psEwwEnvTokens(pid: number): string[] {
   for (const ewwArgs of [['eww'], ['e']]) {
-    try {
-      const argTokens = psTokenize(psOut(pid, ['-ww', '-o', 'args=']));
-      const eww = psOut(pid, ewwArgs);
-      const row = eww.split('\n').find(l => l.trim().split(/\s+/)[0] === String(pid)) ?? '';
-      const rowTokens = psTokenize(row);
-      // row = PID TT STAT TIME <argTokens> <envTokens>
-      const head = 4 + argTokens.length;
-      if (rowTokens.length < head) continue;
-      let prefix = true;
-      for (let i = 0; i < argTokens.length; i++) {
-        if (rowTokens[4 + i] !== argTokens[i]) {
-          prefix = false;
-          break;
-        }
-      }
-      if (!prefix) continue;
-      return rowTokens.slice(head).filter(t => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
-    } catch {
-      // ps spelling failed — try the next one
-    }
+    const tokens = psEwwEnvTry(pid, ewwArgs);
+    if (tokens !== null) return tokens;
   }
   return [];
+}
+
+/** One `ps e` spelling of the env read — null on any failure so the
+ *  caller walks the spelling chain; [] when the env boundary can't be
+ *  proven (an argument must never masquerade upward). */
+function psEwwEnvTry(pid: number, ewwArgs: string[]): string[] | null {
+  let argTokens: string[];
+  let row: string;
+  try {
+    argTokens = psTokenize(psOut(pid, ['-ww', '-o', 'args=']));
+    row =
+      psOut(pid, ewwArgs)
+        .split('\n')
+        .find(l => l.trim().split(/\s+/)[0] === String(pid)) ?? '';
+  } catch {
+    return null;
+  }
+  const rowTokens = psTokenize(row);
+  // row = PID TT STAT TIME <argTokens> <envTokens>
+  const head = 4 + argTokens.length;
+  if (rowTokens.length < head) return null;
+  if (!argTokens.every((t, i) => rowTokens[4 + i] === t)) return null;
+  return rowTokens.slice(head).filter(t => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
 }
 
 export interface ProcEntry {
