@@ -7,16 +7,12 @@
  * absent, and an entry whose kind has no binding at all throws —
  * naming provider + kind, never silently falling through.
  */
-import { resolveApiModel } from '@broject/core'
-import type {
-  DecideResult,
-  JudgeQuestion,
-  ProviderEntry,
-} from '@broject/core'
-import { acpClient } from './acp.ts'
-import { cliChat } from './cli.ts'
-import { openaiCompatChat } from './openai.ts'
-import { systemoneCall, type ProviderWireOpts } from './systemone.ts'
+import { resolveApiModel } from '@broject/core';
+import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
+import { acpClient } from './acp.ts';
+import { cliChat } from './cli.ts';
+import { openaiCompatChat } from './openai.ts';
+import { systemoneCall, type ProviderWireOpts } from './systemone.ts';
 
 /** The typed call surface — one decide() over the caller's absolute
  *  deadline (epoch ms), DecideResult out. */
@@ -24,29 +20,26 @@ export type ProviderCall = (
   state: unknown,
   questions: Record<string, JudgeQuestion>,
   deadline: number
-) => Promise<DecideResult>
+) => Promise<DecideResult>;
 
 /** One chat-completions round-trip: prompt in, content + resolved
  *  model + usage out. */
 export interface ProviderChatResult {
-  content: string
+  content: string;
   /** The wire-reported model, or the one the request pinned. */
-  model: string
-  usage?: DecideResult['usage']
+  model: string;
+  usage?: DecideResult['usage'];
 }
 
 /** The raw prose surface — the consumer renders the prompt and parses
  *  the reply; the binding owns the wire only. */
-export type ProviderChat = (
-  prompt: string,
-  deadline: number
-) => Promise<ProviderChatResult>
+export type ProviderChat = (prompt: string, deadline: number) => Promise<ProviderChatResult>;
 
 /** What a bound entry can serve. Absent member = the kind doesn't
  *  have that surface here — check before use, don't assume. */
 export interface ProviderClient {
-  call?: ProviderCall
-  chat?: ProviderChat
+  call?: ProviderCall;
+  chat?: ProviderChat;
 }
 
 /** The delegate an `acp` link hands every agent→client call when it
@@ -56,12 +49,8 @@ export interface ProviderClient {
  *  with its code intact. Params are the raw protocol objects; routing
  *  by `params.sessionId` is the delegate's job. */
 export interface AcpClientBridge {
-  request(
-    method: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal
-  ): Promise<unknown>
-  notify(method: string, params: Record<string, unknown>): void
+  request(method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
+  notify(method: string, params: Record<string, unknown>): void;
 }
 
 /** The acp kind's session seam — `peer` replaces the spawned `command`
@@ -71,26 +60,32 @@ export interface AcpClientBridge {
  *  tool_call, plan — while the call still resolves the whole turn;
  *  absent sink = the original whole-turn contract. */
 export interface AcpSeam {
-  peer?: import('@agentclientprotocol/sdk').AgentApp
-  cwd?: string
-  onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void
+  /** The in-process agent to talk to — the test seam production never
+   *  takes. A resolver receives the spawn label (`by`) and returns the
+   *  agent: a multi-provider gateway hands each lane its own agent,
+   *  and the lane's name is in the label. */
+  peer?:
+    | import('@agentclientprotocol/sdk').AgentApp
+    | ((by: string) => import('@agentclientprotocol/sdk').AgentApp);
+  cwd?: string;
+  onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void;
   /** Teardown signal for `acpOpen` — aborting it while the handshake
    *  is still pending closes the conn, which rejects the init request
    *  and releases the ref'd deadline timer that would otherwise pin
    *  the event loop past server shutdown. */
-  signal?: AbortSignal
+  signal?: AbortSignal;
   /** What upstream `initialize` advertises as clientCapabilities —
    *  default {fs:{readTextFile:false, writeTextFile:false}, terminal:true}:
    *  fs is never served locally, terminal runs through the local
    *  AcpTerminals registry (bro-z7afs). A brokered transport advertises
    *  the union and relays the calls through `bridge`. */
-  clientCapabilities?: import('@agentclientprotocol/sdk').ClientCapabilities
+  clientCapabilities?: import('@agentclientprotocol/sdk').ClientCapabilities;
   /** Passthrough delegate — set ⇒ EVERY agent→client request
    *  (session/request_permission, fs/*, terminal/*, elicitation/create,
    *  mcp/message) forwards to it; unset ⇒ request_permission is denied
    *  and the rest get the SDK's method-not-found. Only meaningful on
    *  the pooled path (acpOpen); one-shot calls keep the deny posture. */
-  bridge?: AcpClientBridge
+  bridge?: AcpClientBridge;
 }
 
 /** Load an entry → its typed client. `name` is the registry key —
@@ -103,34 +98,34 @@ export function providerClient(
   entry: ProviderEntry,
   opts: ProviderWireOpts = {}
 ): ProviderClient {
-  const keyField = opts.keyField ?? `providers.${name}.apiKeyEnv`
+  const keyField = opts.keyField ?? `providers.${name}.apiKeyEnv`;
   switch (entry.type) {
     case 'api': {
       // one host, per-model wire — resolve the served model first;
       // an undeclared id is a config error (the allowlist is the point)
-      const { model, wire } = resolveApiModel(entry, opts.model)
-      const target = { ...entry, model }
+      const { model, wire } = resolveApiModel(entry, opts.model);
+      const target = { ...entry, model };
       // each wire binding owns its own versioned mount — the host's
       // baseUrl flows through unchanged
       return wire === 'systemone'
         ? { call: systemoneCall(`provider:${name}`, target, { ...opts, model, keyField }) }
-        : { chat: openaiCompatChat(target, { ...opts, model, keyField }) }
+        : { chat: openaiCompatChat(target, { ...opts, model, keyField }) };
     }
     case 'acp':
       // 'auto' grade — the binding picks call vs chat on the resolved
       // model (systemone-family → typed, else prose)
-      return acpClient(`provider:${name}`, entry, { ...opts, keyField })
+      return acpClient(`provider:${name}`, entry, { ...opts, keyField });
     case 'cli':
-      return { chat: cliChat(`provider:${name}`, entry, opts) }
+      return { chat: cliChat(`provider:${name}`, entry, opts) };
     default: {
       // entry is `never` here — the union is fully bound; a raw entry
       // reaching this branch bypassed validation, so read the kind
       // defensively for the message
-      const bad = (entry as { type?: string }).type ?? 'unknown'
+      const bad = (entry as { type?: string }).type ?? 'unknown';
       throw new Error(
         `providers.${name} (type '${bad}') has no client binding — ` +
           'a registered kind with no binding is a registry defect (spec bro-ribc.1)'
-      )
+      );
     }
   }
 }

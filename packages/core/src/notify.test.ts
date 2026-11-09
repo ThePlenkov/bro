@@ -1,6 +1,7 @@
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -10,9 +11,9 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   coalesceDrops,
   drainDirs,
@@ -25,460 +26,535 @@ import {
   peekMailbox,
   renderDrop,
   userMailboxDir,
-} from './notify.ts'
-import { scrubEnv, testGit, testRepoInit } from './testkit.ts'
+} from './notify.ts';
+import { scrubEnv, testGit, testRepoInit } from './testkit.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS } from './git.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv())
+after(scrubEnv());
 
-const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
+const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix));
+
+const WIN32 = process.platform === 'win32';
 
 const withRepo = (fn: (dir: string) => void): void => {
-  const dir = tmp('bro-notify-')
+  const dir = tmp('bro-notify-');
   try {
     // a real repo, not an init-only shell — worktree add on an unborn
     // HEAD is a host-git-version dice-roll
-    testRepoInit(dir)
-    fn(dir)
+    testRepoInit(dir);
+    fn(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 /** Pin XDG state into a tmp dir the helper owns and removes — without it
  *  drainDirs() would read the real $HOME/.local/state mailbox and tests
  *  would eat a live session's drops. */
 const withXdg = <T>(fn: (xdg: string) => T): T => {
-  const dir = tmp('bro-xdg-')
-  const prev = process.env.XDG_STATE_HOME
-  process.env.XDG_STATE_HOME = dir
+  const dir = tmp('bro-xdg-');
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = dir;
   try {
-    return fn(dir)
+    return fn(dir);
   } finally {
     if (prev === undefined) {
-      delete process.env.XDG_STATE_HOME
+      delete process.env.XDG_STATE_HOME;
     } else {
-      process.env.XDG_STATE_HOME = prev
+      process.env.XDG_STATE_HOME = prev;
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 describe('mailboxDir', () => {
   test('resolves to <git-common>/bro/notify inside a repo', () => {
-    withRepo((dir) => {
-      assert.equal(mailboxDir(dir), join(dir, '.git', 'bro', 'notify'))
-    })
-  })
+    withRepo(dir => {
+      assert.equal(mailboxDir(dir), join(dir, '.git', 'bro', 'notify'));
+    });
+  });
 
   test('a linked worktree resolves to the shared common dir', () => {
-    withRepo((dir) => {
-      const wt = join(dir, '..', `${dir.split('/').pop()}-wt`)
-      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'w'])
+    withRepo(dir => {
+      const wt = join(dir, '..', `${dir.split('/').pop()}-wt`);
+      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'w']);
       try {
-        assert.equal(mailboxDir(wt), mailboxDir(dir))
+        assert.equal(mailboxDir(wt), mailboxDir(dir));
       } finally {
-        rmSync(wt, { recursive: true, force: true })
+        rmSync(wt, { recursive: true, force: true });
       }
-    })
-  })
+    });
+  });
 
   test('null outside a repo', () => {
-    const dir = tmp('bro-notify-norepo-')
+    const dir = tmp('bro-notify-norepo-');
     try {
-      assert.equal(mailboxDir(dir), null)
+      assert.equal(mailboxDir(dir), null);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+
+  test('bounded: a wedged git probe fails fast, never stalls the hook drain', {
+    skip: WIN32,
+  }, () => {
+    const dir = tmp('bro-notify-hanging-git-');
+    const prevPath = process.env.PATH;
+    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n');
+    chmodSync(join(dir, 'git'), 0o755);
+    process.env.PATH = `${dir}:${prevPath}`;
+    try {
+      const started = Date.now();
+      assert.equal(mailboxDir(dir), null);
+      assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('userMailboxDir / notifyDir', () => {
   test('XDG_STATE_HOME wins, else ~/.local/state', () => {
-    withXdg((xdg) => {
-      assert.equal(userMailboxDir(), join(xdg, 'bro', 'notify'))
-    })
-    const prev = process.env.XDG_STATE_HOME
-    delete process.env.XDG_STATE_HOME
+    withXdg(xdg => {
+      assert.equal(userMailboxDir(), join(xdg, 'bro', 'notify'));
+    });
+    const prev = process.env.XDG_STATE_HOME;
+    delete process.env.XDG_STATE_HOME;
     try {
-      assert.match(userMailboxDir(), /\.local\/state\/bro\/notify$/)
+      assert.match(userMailboxDir(), /\.local\/state\/bro\/notify$/);
     } finally {
       if (prev !== undefined) {
-        process.env.XDG_STATE_HOME = prev
+        process.env.XDG_STATE_HOME = prev;
       }
     }
-  })
+  });
 
   test('an empty XDG_STATE_HOME falls back like an unset one', () => {
-    const prev = process.env.XDG_STATE_HOME
-    process.env.XDG_STATE_HOME = ''
+    const prev = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = '';
     try {
-      assert.match(userMailboxDir(), /\.local\/state\/bro\/notify$/)
+      assert.match(userMailboxDir(), /\.local\/state\/bro\/notify$/);
     } finally {
       if (prev === undefined) {
-        delete process.env.XDG_STATE_HOME
+        delete process.env.XDG_STATE_HOME;
       } else {
-        process.env.XDG_STATE_HOME = prev
+        process.env.XDG_STATE_HOME = prev;
       }
     }
-  })
+  });
 
   test('notifyDir picks the repo mailbox, else the user mailbox', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        assert.equal(notifyDir(dir), mailboxDir(dir))
-      })
-    })
-    const bare = tmp('bro-notify-bare-')
+        assert.equal(notifyDir(dir), mailboxDir(dir));
+      });
+    });
+    const bare = tmp('bro-notify-bare-');
     try {
-      withXdg((xdg) => {
-        assert.equal(notifyDir(bare), join(xdg, 'bro', 'notify'))
-      })
+      withXdg(xdg => {
+        assert.equal(notifyDir(bare), join(xdg, 'bro', 'notify'));
+      });
     } finally {
-      rmSync(bare, { recursive: true, force: true })
+      rmSync(bare, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('dropMailbox', () => {
   test('writes one atomic <prefix>-*.txt drop and returns its path', () => {
-    const mb = tmp('bro-mb-')
+    const mb = tmp('bro-mb-');
     try {
-      const file = dropMailbox(mb, 'gate ready', 'note')
-      assert.match(file, /note-\d+-[a-z0-9]+\.txt$/)
-      assert.equal(readFileSync(file, 'utf8'), 'gate ready')
-      assert.ok(!readdirSync(mb).some((f) => f.includes('.tmp')))
+      const file = dropMailbox(mb, 'gate ready', 'note');
+      assert.match(file, /note-\d+-[a-z0-9]+\.txt$/);
+      assert.equal(readFileSync(file, 'utf8'), 'gate ready');
+      assert.ok(!readdirSync(mb).some(f => f.includes('.tmp')));
     } finally {
-      rmSync(mb, { recursive: true, force: true })
+      rmSync(mb, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('drainMailbox', () => {
   test('delivers drops oldest-first, verbatim — once per session', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        writeFileSync(join(mb, 'note-100-a.txt'), 'first')
-        writeFileSync(join(mb, 'note-200-b.txt'), 'two\n  indented')
-        writeFileSync(join(mb, '.note-300.tmp'), 'half-written')
-        assert.deepEqual(drainMailbox(dir, 's1'), ['first', 'two\n  indented'])
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(join(mb, 'note-100-a.txt'), 'first');
+        writeFileSync(join(mb, 'note-200-b.txt'), 'two\n  indented');
+        writeFileSync(join(mb, '.note-300.tmp'), 'half-written');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['first', 'two\n  indented']);
         // same session: no redelivery
-        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
         // the cursor lives in the mailbox dir
-        assert.ok(existsSync(join(mb, '.seen-s1')))
-      })
-    })
-  })
+        assert.ok(existsSync(join(mb, '.seen-s1')));
+      });
+    });
+  });
 
   test('orders by drop time across prefixes — watch-* does not wait on note-*', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        writeFileSync(join(mb, 'watch-100-a.txt'), 'older watch')
-        writeFileSync(join(mb, 'note-200-b.txt'), 'newer note')
-        writeFileSync(join(mb, 'watch-50-c.txt'), 'oldest watch')
-        assert.deepEqual(drainMailbox(dir, 's1'), [
-          'oldest watch',
-          'older watch',
-          'newer note',
-        ])
-      })
-    })
-  })
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(join(mb, 'watch-100-a.txt'), 'older watch');
+        writeFileSync(join(mb, 'note-200-b.txt'), 'newer note');
+        writeFileSync(join(mb, 'watch-50-c.txt'), 'oldest watch');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['oldest watch', 'older watch', 'newer note']);
+      });
+    });
+  });
 
   test('broadcast: a different session still gets the drops', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        dropMailbox(mb, 'for everyone', 'note')
-        assert.deepEqual(drainMailbox(dir, 's1'), ['for everyone'])
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'for everyone', 'note');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['for everyone']);
         // s1's drain must not eat it — s2 is the intended recipient case
-        assert.deepEqual(drainMailbox(dir, 's2'), ['for everyone'])
+        assert.deepEqual(drainMailbox(dir, 's2'), ['for everyone']);
         // and the writer session echoing it back is delivery, not loss
-        assert.deepEqual(drainMailbox(dir, 's3'), ['for everyone'])
-      })
-    })
-  })
+        assert.deepEqual(drainMailbox(dir, 's3'), ['for everyone']);
+      });
+    });
+  });
 
   test('a drop older than the TTL is reaped undelivered', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        const stale = join(mb, 'note-100-a.txt')
-        writeFileSync(stale, 'ancient')
-        const old = new Date(Date.now() - DROP_TTL_MS - 1000)
-        utimesSync(stale, old, old)
-        assert.deepEqual(drainMailbox(dir, 's1'), [])
-        assert.equal(existsSync(stale), false)
-      })
-    })
-  })
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        const stale = join(mb, 'note-100-a.txt');
+        writeFileSync(stale, 'ancient');
+        const old = new Date(Date.now() - DROP_TTL_MS - 1000);
+        utimesSync(stale, old, old);
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+        assert.equal(existsSync(stale), false);
+      });
+    });
+  });
 
   test('drains the user mailbox too — drops written outside a repo', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        dropMailbox(userMailboxDir(), 'from a repo-less writer', 'note')
-        assert.deepEqual(drainMailbox(dir, 's1'), ['from a repo-less writer'])
-      })
-    })
-  })
+        dropMailbox(userMailboxDir(), 'from a repo-less writer', 'note');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['from a repo-less writer']);
+      });
+    });
+  });
 
   test('no mailboxes anywhere is an empty drain, not an error', () => {
-    const dir = tmp('bro-notify-empty-')
+    const dir = tmp('bro-notify-empty-');
     try {
-      withXdg((xdg) => {
-        assert.deepEqual(drainDirs(dir), [join(xdg, 'bro', 'notify')])
-        assert.deepEqual(drainMailbox(dir, 's1'), [])
-      })
+      withXdg(xdg => {
+        assert.deepEqual(drainDirs(dir), [join(xdg, 'bro', 'notify')]);
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+      });
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('addressed drop reaches only its recipient and deletes on read', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'pick A or B', to: 'fixer-1', source: 'sdd-2' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'ask',
+            payload: 'pick A or B',
+            to: 'fixer-1',
+            source: 'sdd-2',
+          }),
           'note'
-        )
+        );
         // a different agent sees nothing and must not consume it
         assert.deepEqual(
           drainMailbox(dir, 'sA', { for: { sessionId: 'sA', agentId: 'fixer-9' } }),
           []
-        )
-        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 1)
+        );
+        assert.equal(readdirSync(mb).filter(f => f.endsWith('.txt')).length, 1);
         // an orchestrator session (no agentId) does not match an agent address
-        assert.deepEqual(drainMailbox(dir, 'sB', { for: { sessionId: 'sB' } }), [])
+        assert.deepEqual(drainMailbox(dir, 'sB', { for: { sessionId: 'sB' } }), []);
         // the addressed worker drains it — and the file is gone
-        const got = drainMailbox(dir, 'sW', { for: { sessionId: 'sW', agentId: 'fixer-1' } })
-        assert.equal(got.length, 1)
-        assert.match(got[0]!, /pick A or B/)
-        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 0)
-      })
-    })
-  })
+        const got = drainMailbox(dir, 'sW', { for: { sessionId: 'sW', agentId: 'fixer-1' } });
+        assert.equal(got.length, 1);
+        assert.match(got[0]!, /pick A or B/);
+        assert.equal(readdirSync(mb).filter(f => f.endsWith('.txt')).length, 0);
+      });
+    });
+  });
 
   test('to=orchestrator drains for a sessionless-agent consumer only', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'build done', to: 'orchestrator', source: 'w-1' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'info',
+            payload: 'build done',
+            to: 'orchestrator',
+            source: 'w-1',
+          }),
           'note'
-        )
+        );
         // a spawned worker (carries an agentId) is never the orchestrator
-        assert.deepEqual(drainMailbox(dir, 'sA', { for: { agentId: 'w-2' } }), [])
-        const got = drainMailbox(dir, 's1', { for: { sessionId: 's1' } })
-        assert.equal(got.length, 1)
-        assert.match(got[0]!, /build done/)
-        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 0)
-      })
-    })
-  })
+        assert.deepEqual(drainMailbox(dir, 'sA', { for: { agentId: 'w-2' } }), []);
+        const got = drainMailbox(dir, 's1', { for: { sessionId: 's1' } });
+        assert.equal(got.length, 1);
+        assert.match(got[0]!, /build done/);
+        assert.equal(readdirSync(mb).filter(f => f.endsWith('.txt')).length, 0);
+      });
+    });
+  });
 
   test('broadcast drops still fan out next to addressed ones', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        dropMailbox(mb, 'plain note for all', 'note')
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'plain note for all', 'note');
         dropMailbox(
           mb,
           JSON.stringify({ topic: 'notify', kind: 'info', payload: 'only for me', to: 'agent-x' }),
           'note'
-        )
+        );
         assert.deepEqual(drainMailbox(dir, 'sA', { for: { sessionId: 'sA' } }), [
           'plain note for all',
-        ])
-        const got = drainMailbox(dir, 'sB', { for: { sessionId: 'sB', agentId: 'agent-x' } })
-        assert.equal(got.length, 2)
+        ]);
+        const got = drainMailbox(dir, 'sB', { for: { sessionId: 'sB', agentId: 'agent-x' } });
+        assert.equal(got.length, 2);
         // same-millisecond drops order by filename — assert membership, not position
-        assert.ok(got.includes('plain note for all'))
-        assert.ok(got.some((t) => t.includes('only for me')))
-      })
-    })
-  })
+        assert.ok(got.includes('plain note for all'));
+        assert.ok(got.some(t => t.includes('only for me')));
+      });
+    });
+  });
 
   test('a rejected keep leaves addressed drops pending — a filtered drain does not eat them', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         const file = dropMailbox(
           mb,
           JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'later', to: 'me' }),
           'note'
-        )
+        );
         assert.deepEqual(
           drainMailbox(dir, 's1', { for: { agentId: 'me' }, keep: () => false }),
           []
-        )
-        assert.ok(existsSync(file))
-        assert.equal(drainMailbox(dir, 's1', { for: { agentId: 'me' } }).length, 1)
-        assert.equal(existsSync(file), false)
-      })
-    })
-  })
-})
+        );
+        assert.ok(existsSync(file));
+        assert.equal(drainMailbox(dir, 's1', { for: { agentId: 'me' } }).length, 1);
+        assert.equal(existsSync(file), false);
+      });
+    });
+  });
+});
 
 describe('coalesceDrops', () => {
   test('a newer same-key drop supersedes pending ones from the same source', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         const note = (payload: string) =>
-          JSON.stringify({ topic: 'notify', kind: 'info', payload, key: 'pr-7', source: 'watch' })
-        dropMailbox(mb, note('v1'), 'note')
+          JSON.stringify({ topic: 'notify', kind: 'info', payload, key: 'pr-7', source: 'watch' });
+        dropMailbox(mb, note('v1'), 'note');
         // publish order: the new write coalesces pending same-key drops first
-        coalesceDrops(mb, 'pr-7', { source: 'watch', topic: 'notify' })
-        dropMailbox(mb, note('v2'), 'note')
-        const txts = drainMailbox(dir, 's1')
-        assert.equal(txts.length, 1)
-        assert.match(txts[0]!, /v2/)
-      })
-    })
-  })
+        coalesceDrops(mb, 'pr-7', { source: 'watch', topic: 'notify' });
+        dropMailbox(mb, note('v2'), 'note');
+        const txts = drainMailbox(dir, 's1');
+        assert.equal(txts.length, 1);
+        assert.match(txts[0]!, /v2/);
+      });
+    });
+  });
 
   test('same key from another source is an independent note, not superseded', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
           JSON.stringify({ topic: 'notify', kind: 'info', payload: 'mine', key: 'k', source: 'a' }),
           'note'
-        )
+        );
         // b publishes key 'k': coalescing removes b's pending drops only, then b's drop lands
-        coalesceDrops(mb, 'k', { source: 'b', topic: 'notify' })
+        coalesceDrops(mb, 'k', { source: 'b', topic: 'notify' });
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'theirs', key: 'k', source: 'b' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'info',
+            payload: 'theirs',
+            key: 'k',
+            source: 'b',
+          }),
           'note'
-        )
-        assert.equal(drainMailbox(dir, 's1').length, 2)
-      })
-    })
-  })
+        );
+        assert.equal(drainMailbox(dir, 's1').length, 2);
+      });
+    });
+  });
 
   test('an anonymous publisher coalesces nothing — undefined source is no identity', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         const note = (payload: string) =>
-          JSON.stringify({ topic: 'mesh', kind: 'info', payload, key: 'mesh-inbox' })
-        dropMailbox(mb, note('pending'), 'note')
+          JSON.stringify({ topic: 'mesh', kind: 'info', payload, key: 'mesh-inbox' });
+        dropMailbox(mb, note('pending'), 'note');
         // a second sourceless publish of the same key must not eat the
         // first — two sessions without a source are not the same source
-        coalesceDrops(mb, 'mesh-inbox', { topic: 'mesh' })
-        dropMailbox(mb, note('fresh'), 'note')
-        assert.equal(drainMailbox(dir, 's1').length, 2)
-      })
-    })
-  })
+        coalesceDrops(mb, 'mesh-inbox', { topic: 'mesh' });
+        dropMailbox(mb, note('fresh'), 'note');
+        assert.equal(drainMailbox(dir, 's1').length, 2);
+      });
+    });
+  });
 
   test('a drop with no key never coalesces', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        dropMailbox(mb, 'one', 'note')
-        dropMailbox(mb, 'two', 'note')
-        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' }) // nothing carries key 'k' — no-op
-        assert.equal(drainMailbox(dir, 's1').length, 2)
-      })
-    })
-  })
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'one', 'note');
+        dropMailbox(mb, 'two', 'note');
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' }); // nothing carries key 'k' — no-op
+        assert.equal(drainMailbox(dir, 's1').length, 2);
+      });
+    });
+  });
 
   test('same key+source on a different topic is an independent drop', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
           JSON.stringify({ topic: 'notify', kind: 'info', payload: 'kept', key: 'k', source: 'w' }),
           'note'
-        )
+        );
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'watch', kind: 'info', payload: 'kept too', key: 'k', source: 'w' }),
+          JSON.stringify({
+            topic: 'watch',
+            kind: 'info',
+            payload: 'kept too',
+            key: 'k',
+            source: 'w',
+          }),
           'note'
-        )
+        );
         // a new 'watch' drop with key 'k' from 'w' supersedes only the watch one
-        coalesceDrops(mb, 'k', { source: 'w', topic: 'watch' })
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'watch' });
         dropMailbox(
           mb,
           JSON.stringify({ topic: 'watch', kind: 'info', payload: 'fresh', key: 'k', source: 'w' }),
           'note'
-        )
-        const txts = drainMailbox(dir, 's1')
-        assert.equal(txts.length, 2)
-        assert.ok(txts.some((t) => t.includes('kept')))
-        assert.ok(txts.some((t) => t.includes('fresh')))
-      })
-    })
-  })
+        );
+        const txts = drainMailbox(dir, 's1');
+        assert.equal(txts.length, 2);
+        assert.ok(txts.some(t => t.includes('kept')));
+        assert.ok(txts.some(t => t.includes('fresh')));
+      });
+    });
+  });
 
   test('same key+source+topic addressed to another recipient is independent', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'for a', key: 'k', source: 'w', to: 'a' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'ask',
+            payload: 'for a',
+            key: 'k',
+            source: 'w',
+            to: 'a',
+          }),
           'note'
-        )
-        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' })
+        );
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' });
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'for b', key: 'k', source: 'w', to: 'b' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'ask',
+            payload: 'for b',
+            key: 'k',
+            source: 'w',
+            to: 'b',
+          }),
           'note'
-        )
+        );
         // addressed drops stay pending for their recipient — count the
         // mailbox, not a drain by a third session
-        assert.equal(readdirSync(mb).filter((f) => !f.startsWith('.')).length, 2)
-      })
-    })
-  })
+        assert.equal(readdirSync(mb).filter(f => !f.startsWith('.')).length, 2);
+      });
+    });
+  });
 
   test('a broadcast drop never supersedes an addressed one (and back)', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        const pending = () => readdirSync(mb).filter((f) => !f.startsWith('.')).length
+        const mb = mailboxDir(dir)!;
+        const pending = () => readdirSync(mb).filter(f => !f.startsWith('.')).length;
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'addressed', key: 'k', source: 'w', to: 'a' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'info',
+            payload: 'addressed',
+            key: 'k',
+            source: 'w',
+            to: 'a',
+          }),
           'note'
-        )
+        );
         // broadcast publisher (no to) must not remove the addressed drop
-        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' })
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' });
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'broadcast', key: 'k', source: 'w' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'info',
+            payload: 'broadcast',
+            key: 'k',
+            source: 'w',
+          }),
           'note'
-        )
+        );
         // and an addressed publisher must not remove the broadcast drop
-        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' })
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' });
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'for b', key: 'k', source: 'w', to: 'b' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'info',
+            payload: 'for b',
+            key: 'k',
+            source: 'w',
+            to: 'b',
+          }),
           'note'
-        )
-        assert.equal(pending(), 3)
-      })
-    })
-  })
-})
+        );
+        assert.equal(pending(), 3);
+      });
+    });
+  });
+});
 
 describe('renderDrop', () => {
   test('typed envelopes render addressing; plain notes stay verbatim', () => {
-    assert.equal(renderDrop('plain heartbeat'), 'plain heartbeat')
+    assert.equal(renderDrop('plain heartbeat'), 'plain heartbeat');
     assert.equal(
       renderDrop(
         JSON.stringify({
@@ -491,131 +567,137 @@ describe('renderDrop', () => {
         })
       ),
       '[ask fixer-1 → orchestrator] pick one ↳note-1-a.txt'
-    )
+    );
     assert.equal(
       renderDrop(JSON.stringify({ topic: 'notify', kind: 'note', payload: 'plain json note' })),
       'plain json note'
-    )
-  })
-})
+    );
+  });
+});
 
 describe('peekMailbox', () => {
   test('tails pending drops newest-first without consuming — files stay put', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        dropMailbox(mb, 'older note', 'note')
-        writeFileSync(join(mb, 'note-9999999999999-z.txt'), 'newest note')
-        const first = peekMailbox(dir)
-        assert.equal(first.length, 2)
-        assert.match(first[0]!.text, /newest note/)
-        assert.match(first[1]!.text, /older note/)
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'older note', 'note');
+        writeFileSync(join(mb, 'note-9999999999999-z.txt'), 'newest note');
+        const first = peekMailbox(dir);
+        assert.equal(first.length, 2);
+        assert.match(first[0]!.text, /newest note/);
+        assert.match(first[1]!.text, /older note/);
         // nothing consumed: a second peek returns the same tail, and a
         // real drain still delivers both drops afterwards
-        assert.equal(peekMailbox(dir).length, 2)
-        assert.equal(drainMailbox(dir, 's1').length, 2)
-      })
-    })
-  })
+        assert.equal(peekMailbox(dir).length, 2);
+        assert.equal(drainMailbox(dir, 's1').length, 2);
+      });
+    });
+  });
 
   test('expired and empty drops skip the tail but are not reaped', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        const stale = join(mb, 'note-100-a.txt')
-        writeFileSync(stale, 'ancient')
-        const old = new Date(Date.now() - DROP_TTL_MS - 1000)
-        utimesSync(stale, old, old)
-        writeFileSync(join(mb, 'note-200-b.txt'), '   ')
-        dropMailbox(mb, 'live note', 'note')
-        const out = peekMailbox(dir)
-        assert.equal(out.length, 1)
-        assert.match(out[0]!.text, /live note/)
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        const stale = join(mb, 'note-100-a.txt');
+        writeFileSync(stale, 'ancient');
+        const old = new Date(Date.now() - DROP_TTL_MS - 1000);
+        utimesSync(stale, old, old);
+        writeFileSync(join(mb, 'note-200-b.txt'), '   ');
+        dropMailbox(mb, 'live note', 'note');
+        const out = peekMailbox(dir);
+        assert.equal(out.length, 1);
+        assert.match(out[0]!.text, /live note/);
         // read-only contract: the expired drop stays for the drain to reap
-        assert.equal(existsSync(stale), true)
-      })
-    })
-  })
+        assert.equal(existsSync(stale), true);
+      });
+    });
+  });
 
   test('addressed drops appear in the tail — it reports mailbox state, not one consumer', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
+        const mb = mailboxDir(dir)!;
         dropMailbox(
           mb,
-          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'pick A', to: 'fixer-1', source: 'sdd' }),
+          JSON.stringify({
+            topic: 'notify',
+            kind: 'ask',
+            payload: 'pick A',
+            to: 'fixer-1',
+            source: 'sdd',
+          }),
           'note'
-        )
-        const out = peekMailbox(dir)
-        assert.equal(out.length, 1)
-        assert.match(out[0]!.text, /pick A/)
-        assert.match(out[0]!.text, /fixer-1/)
-      })
-    })
-  })
+        );
+        const out = peekMailbox(dir);
+        assert.equal(out.length, 1);
+        assert.match(out[0]!.text, /pick A/);
+        assert.match(out[0]!.text, /fixer-1/);
+      });
+    });
+  });
 
   test('a symlinked .txt is debris, not a drop — peek and drain never read through', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        const secret = join(dir, 'secret-outside-mailbox.txt')
-        writeFileSync(secret, 's3cret-bytes')
-        const name = `note-${Date.now()}-ab12.txt`
-        symlinkSync(secret, join(mb, name))
-        assert.deepEqual(peekMailbox(dir), [])
-        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        const secret = join(dir, 'secret-outside-mailbox.txt');
+        writeFileSync(secret, 's3cret-bytes');
+        const name = `note-${Date.now()}-ab12.txt`;
+        symlinkSync(secret, join(mb, name));
+        assert.deepEqual(peekMailbox(dir), []);
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
         // the drain did not consume it either — it lingers until its own
         // mtime expires, but its bytes never left the mailbox
-        assert.ok(readdirSync(mb).includes(name))
-      })
-    })
-  })
+        assert.ok(readdirSync(mb).includes(name));
+      });
+    });
+  });
 
   test('the limit caps the tail; no mailboxes anywhere is an empty tail', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
         for (let i = 0; i < 5; i++) {
-          writeFileSync(join(mb, `note-${1000 + i}-x${i}.txt`), `note ${i}`)
+          writeFileSync(join(mb, `note-${1000 + i}-x${i}.txt`), `note ${i}`);
         }
-        assert.equal(peekMailbox(dir, 3).length, 3)
-      })
-    })
-    const bare = tmp('bro-peek-none-')
+        assert.equal(peekMailbox(dir, 3).length, 3);
+      });
+    });
+    const bare = tmp('bro-peek-none-');
     try {
       withXdg(() => {
-        assert.deepEqual(peekMailbox(bare), [])
-      })
+        assert.deepEqual(peekMailbox(bare), []);
+      });
     } finally {
-      rmSync(bare, { recursive: true, force: true })
+      rmSync(bare, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('notifyConnector', () => {
-  test('sessionStart drains pending drops — a dead session\'s mail lands at the next start', () => {
-    withRepo((dir) => {
+  test("sessionStart drains pending drops — a dead session's mail lands at the next start", () => {
+    withRepo(dir => {
       withXdg(() => {
-        const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        writeFileSync(join(mb, 'note-100-a.txt'), 'gate ready')
-        const hooks = notifyConnector.hooks?.({ dir, sessionId: 's1' })
-        assert.ok(hooks?.sessionStart)
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(join(mb, 'note-100-a.txt'), 'gate ready');
+        const hooks = notifyConnector.hooks?.({ dir, sessionId: 's1' });
+        assert.ok(hooks?.sessionStart);
         assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's1' }), [
           'bro notify — 1 mailbox message(s):',
           'gate ready',
-        ])
+        ]);
         // the same session's next probe sees nothing — delivered once
-        assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's1' }), [])
+        assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's1' }), []);
         // broadcast survives for a different session
         assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's2' }), [
           'bro notify — 1 mailbox message(s):',
           'gate ready',
-        ])
-      })
-    })
-  })
-})
+        ]);
+      });
+    });
+  });
+});

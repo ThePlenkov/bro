@@ -20,8 +20,16 @@
  * postTool, orchestrator-only) rearms a dead supervisor from it.
  * `daemon down` under an install is a transient stop — the next
  * checkpoint brings it back; `bro drive uninstall` is the disarm.
+ *
+ * Loop installs mirror drive: `bro loop install` writes
+ * `<git-common>/bro/loop.json` and brings a supervised `bro loop` up;
+ * `daemon run --loop` runs it, and the rearm checkpoints can revive it.
  */
-import { execFileSync, spawn } from 'node:child_process';
+import {
+  execFileSync,
+  spawn,
+  type ExecFileSyncOptionsWithStringEncoding,
+} from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -47,18 +55,20 @@ import {
 import type { ExitCode } from '@broject/core';
 import { flag } from './args.ts';
 import { driveLockPath, runDriveCommand } from './drive.ts';
+import { runLoopCommand } from './loop.ts';
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 import { readWantMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 import { mainWorktree } from './work.ts';
 import { loadBroConfig } from '../plugins.ts';
+import { loopSection } from '@broject/loop';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
-    'Usage: bro daemon <up|status|down|run> [--every SEC]\n' +
+    'Usage: bro daemon <up|status|down|run> [--every SEC] [--loop]\n' +
       '  up      spawn the detached supervisor (orchestrator sessions only)\n' +
       '  status  supervisor liveness — lock holder, armer record, log path\n' +
       '  down    SIGTERM the supervisor and clear the armer record\n' +
@@ -73,23 +83,27 @@ export interface DaemonRecord {
   spawnedAt: string;
   cmd: string;
   /** the child's /proc start time — pins the pid against reuse; absent
-   *  on older records, which the probe trusts only briefly after
-   *  `spawnedAt` (the pre-lock window is seconds anyway) */
+   *  on older records, which the probe never trusts (a bare pid cannot
+   *  be told from a recycled one) */
   pidStart?: string;
 }
 
-/** Records without a `pidStart` are trusted this long after `spawnedAt`
- *  — long enough to cover the pre-lock window, short enough that a
- *  reused pid can't impersonate the daemon forever. */
-const RECORD_TRUST_MS = 120_000;
+/** Records written by older binaries lack `pidStart` — they are never
+ *  trusted: a record's only job is the pre-lock window of a NEW spawn,
+ *  and new records always carry the pin. Trusting a bare pid would let
+ *  a recycled one take SIGTERM meant for a dead supervisor. */
 
-/** `<git-common>/bro/daemon.json` — who armed the daemon. Written by
- *  `up`, removed by `down`; distinct from `drive.lock`, which is the
- *  supervisor's own liveness hold. A record without a live holder is
- *  the watchdog's "daemon died" signal. */
-export function daemonStatePath(dir: string): string | null {
+/** `<git-common>/bro/daemon.json` — who armed the daemon
+ *  (`daemon-loop.json` for the loop kind: each supervisor kind keeps
+ *  its own record so a both-installed repo's later spawn cannot
+ *  clobber the first's pre-lock cover). Written by `up`, removed by
+ *  `down`; distinct from the kind's own lock, which is the
+ *  supervisor's liveness hold. A record without a live holder is the
+ *  watchdog's "daemon died" signal. */
+export function daemonStatePath(dir: string, opts: { loop?: boolean } = {}): string | null {
   const common = gitCommonDir(dir);
-  return common === null ? null : join(common, 'bro', 'daemon.json');
+  const file = opts.loop === true ? 'daemon-loop.json' : 'daemon.json';
+  return common === null ? null : join(common, 'bro', file);
 }
 
 export function daemonLogPath(dir: string): string | null {
@@ -97,8 +111,8 @@ export function daemonLogPath(dir: string): string | null {
   return common === null ? null : join(common, 'bro', 'daemon.log');
 }
 
-export function readDaemonRecord(dir: string): DaemonRecord | null {
-  const file = daemonStatePath(dir);
+export function readDaemonRecord(dir: string, opts: { loop?: boolean } = {}): DaemonRecord | null {
+  const file = daemonStatePath(dir, opts);
   if (file === null || !existsSync(file)) {
     return null;
   }
@@ -118,8 +132,8 @@ export function readDaemonRecord(dir: string): DaemonRecord | null {
   }
 }
 
-function writeDaemonRecord(dir: string, rec: DaemonRecord): void {
-  const file = daemonStatePath(dir);
+function writeDaemonRecord(dir: string, rec: DaemonRecord, opts: { loop?: boolean } = {}): void {
+  const file = daemonStatePath(dir, opts);
   if (file === null) {
     return;
   }
@@ -129,22 +143,34 @@ function writeDaemonRecord(dir: string, rec: DaemonRecord): void {
   renameSync(tmp, file);
 }
 
-/** Who is supervising right now — the `drive.lock` holder when alive,
- *  else a still-alive recorded armer (child spawned, not yet holding).
+/** `<git-common>/bro/loop.lock` — the loop supervisor's liveness hold,
+ *  `drive.lock`'s loop-kind twin: held for the whole `bro loop --every`
+ *  run, reaped by the same janitor when its holder dies. */
+export function loopLockPath(dir: string): string | null {
+  const common = gitCommonDir(dir);
+  return common === null ? null : join(common, 'bro', 'loop.lock');
+}
+
+export interface SupervisorProbe {
+  live: boolean;
+  pid?: number;
+  recorded: DaemonRecord | null;
+}
+
+/** The probe every supervisor kind shares: the kind's own lock is the
+ *  liveness truth, its own spawn record covers the pre-lock window.
  *  `staleLock` bounds the holder check the way a contender's steal
  *  does: `pidAlive` alone is reuse-blind (the token is `pid:hex`, no
  *  start time), so a hold whose heartbeat aged past the abandoned
  *  bound doesn't count even while its pid lives — a recycled pid
  *  masks a dead supervisor for one window at most, never forever. */
-export function daemonProbe(dir: string): {
-  live: boolean;
-  pid?: number;
-  recorded: DaemonRecord | null;
-} {
-  const lock = driveLockPath(dir);
+function probeSupervisor(
+  dir: string,
+  lock: string | null,
+  recorded: DaemonRecord | null
+): SupervisorProbe {
   const lockLive = lock !== null && existsSync(lock) && !staleLock(lock);
   const lockPid = lockLive ? lockHolderPid(lock) : null;
-  const recorded = readDaemonRecord(dir);
   if (lockPid !== null && pidAlive(lockPid)) {
     return { live: true, pid: lockPid, recorded };
   }
@@ -154,14 +180,25 @@ export function daemonProbe(dir: string): {
   return { live: false, recorded };
 }
 
-/** A recorded pid is trusted only with its stored start time; records that
- *  predate the field cannot be verified against reuse and must not be
- *  trusted to kill processes. */
-function recordedPidAlive(rec: DaemonRecord, now: number = Date.now()): boolean {
-  if (rec.pidStart !== undefined) {
-    return pidAlive(rec.pid, rec.pidStart);
-  }
-  return false;
+/** The drive kind's probe — the `drive.lock` holder when alive, else a
+ *  still-alive recorded armer (child spawned, not yet holding). */
+export function daemonProbe(dir: string): SupervisorProbe {
+  return probeSupervisor(dir, driveLockPath(dir), readDaemonRecord(dir));
+}
+
+/** The loop kind's probe — `loop.lock` + `daemon-loop.json`. A live
+ *  drive supervisor must never mask a dead loop (and vice versa):
+ *  each want-marker rearms against its own plane or a both-installed
+ *  repo revives only half of what it armed. */
+export function loopProbe(dir: string): SupervisorProbe {
+  return probeSupervisor(dir, loopLockPath(dir), readDaemonRecord(dir, { loop: true }));
+}
+
+/** A recorded pid is trusted only with its stored start time; records
+ *  that predate the field cannot be verified against reuse and must
+ *  never be trusted to supervise or kill processes. */
+function recordedPidAlive(rec: DaemonRecord): boolean {
+  return rec.pidStart !== undefined && pidAlive(rec.pid, rec.pidStart);
 }
 
 export type DaemonUpDecision =
@@ -174,12 +211,13 @@ export type DaemonUpDecision =
  *  BRO_AGENT_ID and never arm one. */
 export function daemonUpDecision(
   dir: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { loop?: boolean } = {}
 ): DaemonUpDecision {
   if (!isOrchestratorSession(env)) {
     return { kind: 'refuse-worker' };
   }
-  const probe = daemonProbe(dir);
+  const probe = opts.loop === true ? loopProbe(dir) : daemonProbe(dir);
   return probe.live ? { kind: 'already', pid: probe.pid! } : { kind: 'spawn' };
 }
 
@@ -199,32 +237,44 @@ export function daemonUpLockPath(dir: string): string | null {
  *  daemon gets a real log — an owner must be debuggable. The record is
  *  best-effort: `drive.lock` is the liveness truth, `daemon.json` only
  *  says who armed it — a failed write warns, never orphans the report. */
-export function spawnDaemon(dir: string, everySec: number): { pid: number; log: string | null } {
+export function spawnDaemon(
+  dir: string,
+  everySec: number,
+  opts: { loop?: boolean } = {}
+): { pid: number; log: string | null } {
   const log = daemonLogPath(dir);
   const broDir = daemonStatePath(dir);
   if (broDir !== null) {
     mkdirSync(join(broDir, '..'), { recursive: true });
   }
   const out = log === null ? 'ignore' : openSync(log, 'a');
-  const child = spawn(
-    process.execPath,
-    [SELF_ENTRY!, 'daemon', 'run', '--every', String(everySec)],
-    {
-      cwd: dir,
-      detached: true,
-      stdio: ['ignore', out, out],
-      env: { ...process.env, BRO_LOG_TIMESTAMP: '1' },
-    }
-  );
+  const args = opts.loop
+    ? [SELF_ENTRY!, 'daemon', 'run', '--loop', '--every', String(everySec)]
+    : [SELF_ENTRY!, 'daemon', 'run', '--every', String(everySec)];
+  const child = spawn(process.execPath, args, {
+    cwd: dir,
+    detached: true,
+    stdio: ['ignore', out, out],
+    // stamp every daemon-log line — BRO_LOG_TIMESTAMP is read only by
+    // logWithTs/errWithTs and the TTY/json-guarded index patch, so a
+    // worker that inherits it never gets timestamped machine output
+    env: { ...process.env, BRO_LOG_TIMESTAMP: '1' },
+  });
   child.unref();
   try {
-    writeDaemonRecord(dir, {
-      pid: child.pid!,
-      everySec,
-      spawnedAt: new Date().toISOString(),
-      cmd: `bro daemon run --every ${everySec}`,
-      pidStart: procStat(child.pid!)?.start,
-    });
+    writeDaemonRecord(
+      dir,
+      {
+        pid: child.pid!,
+        everySec,
+        spawnedAt: new Date().toISOString(),
+        cmd: opts.loop
+          ? `bro daemon run --loop --every ${everySec}`
+          : `bro daemon run --every ${everySec}`,
+        pidStart: procStat(child.pid!)?.start,
+      },
+      opts
+    );
   } catch (err) {
     // an unrecorded child is an unsupervised supervisor — kill it and
     // fail, never leave a daemon nobody can see
@@ -239,7 +289,7 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
 }
 
 /** Every supervision-loop process OWNED BY THIS REPO — `daemon run
- *  --every` children plus raw `bro drive --every` runs (they hold the
+ *  --every` children plus raw `bro drive --every`/`bro loop --every` runs (they hold the
  *  same lock, so `down` owes them the same SIGTERM or a standby
  *  quietly inherits it). The pgrep match is machine-wide, so each hit
  *  is re-scoped by repo: the candidate's /proc cwd must resolve to the
@@ -249,21 +299,34 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
  *  can't be verified — no /proc, cwd raced away, outside any repo —
  *  is spared: the sweep errs toward missing a standby, never toward
  *  killing a stranger. */
-function supervisionProcs(dir: string): number[] {
+function supervisionProcs(dir: string, kind?: 'drive' | 'loop'): number[] {
   const common = gitCommonDir(dir);
   if (common === null) {
     return [];
   }
   let pids: number[];
   try {
-    const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], {
-      // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
+    // pgrep is a required runtime dep; the options pin PATH to fixed
+    // unwriteable dirs — the default inherited PATH can contain
+    // user-writable dirs (sonar S4036). The call stays one line so the
+    // NOSONAR survives biome reformatting.
+    // one alternation per kind — `daemon run --loop --every` carries the
+    // `loop --every` pair inside it, so the loop pattern alone covers
+    // spawned and raw loop supervisors; the drive side needs its two
+    // shapes spelled out
+    const pattern =
+      kind === 'loop'
+        ? 'loop --every'
+        : kind === 'drive'
+          ? '(daemon run|drive) --every'
+          : '(daemon run|drive|loop) --every';
+    const pgrepArgs = ['-f', pattern];
+    const pgrepOpts: ExecFileSyncOptionsWithStringEncoding = {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      // fixed, unwriteable PATH for the binary lookup — the default
-      // inherited PATH can contain user-writable dirs (sonar S4036)
       env: { PATH: '/usr/bin:/bin' },
-    });
+    };
+    const out = execFileSync('pgrep', pgrepArgs, pgrepOpts); // NOSONAR
     pids = out
       .split('\n')
       .map(s => Number(s.trim()))
@@ -333,22 +396,28 @@ export function supervisorUp(
   dir: string,
   everySec: number,
   env: NodeJS.ProcessEnv = process.env,
-  opts: { requireMarker?: boolean } = {}
+  opts: { requireMarker?: boolean; loop?: boolean } = {}
 ): SupervisorUp {
   const upLock = daemonUpLockPath(dir);
   const release = upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' });
   try {
-    const decision = daemonUpDecision(dir, env);
+    const decision = daemonUpDecision(dir, env, { loop: opts.loop });
     if (decision.kind === 'refuse-worker') {
       return { kind: 'refuse-worker' };
     }
     if (decision.kind === 'already') {
       return { kind: 'already', pid: decision.pid };
     }
-    if (opts.requireMarker === true && readDriveMarker(dir) === null) {
-      return { kind: 'disarmed' };
+    if (opts.requireMarker === true) {
+      if (opts.loop) {
+        if (readLoopMarker(dir) === null) {
+          return { kind: 'disarmed' };
+        }
+      } else if (readDriveMarker(dir) === null) {
+        return { kind: 'disarmed' };
+      }
     }
-    const spawned = spawnDaemon(dir, everySec);
+    const spawned = spawnDaemon(dir, everySec, { loop: opts.loop });
     return { kind: 'spawned', pid: spawned.pid, log: spawned.log };
   } finally {
     release();
@@ -363,17 +432,34 @@ export interface SupervisorDown {
 }
 
 /** The down path — SIGTERM the holder plus every supervision loop that
- *  could inherit its lock (standbys wait on drive.lock), then clear the
- *  armer record. `daemon down`'s core; `drive uninstall` runs the same
- *  sweep after disarming the marker. */
-export function supervisorDown(dir: string): SupervisorDown {
-  const probe = daemonProbe(dir);
-  const state = daemonStatePath(dir);
-  const victims = new Set<number>([
-    ...(probe.live ? [probe.pid!] : []),
-    ...(probe.recorded !== null && recordedPidAlive(probe.recorded) ? [probe.recorded.pid] : []),
-    ...supervisionProcs(dir),
-  ]);
+ *  could inherit its lock (standbys wait on the kind's lock), then clear
+ *  the armer record. `daemon down` sweeps every kind; `drive|loop
+ *  uninstall` scopes the sweep to its own plane so a sibling's
+ *  supervision survives — a repo with both installed never loses the
+ *  one it didn't uninstall. */
+export function supervisorDown(
+  dir: string,
+  opts: { kind?: 'drive' | 'loop' } = {}
+): SupervisorDown {
+  const kinds = opts.kind === undefined ? (['drive', 'loop'] as const) : [opts.kind];
+  /** One kind's victims — its lock holder, its still-live recorded pid,
+   *  and every repo-scoped standby that could inherit the lock. */
+  const victimsOf = (kind: 'drive' | 'loop'): number[] => {
+    const probe = kind === 'loop' ? loopProbe(dir) : daemonProbe(dir);
+    // live-but-pidless probes exist (e.g. a lock held by an
+    // unresolvable holder) — a bare `!` would push undefined into the
+    // kill list and count a TypeError as "already gone"
+    const pids = probe.live && probe.pid !== undefined ? [probe.pid] : [];
+    if (
+      probe.recorded !== null &&
+      probe.recorded.pidStart !== undefined &&
+      pidAlive(probe.recorded.pid, probe.recorded.pidStart)
+    ) {
+      pids.push(probe.recorded.pid);
+    }
+    return [...pids, ...supervisionProcs(dir, kind)];
+  };
+  const victims = new Set<number>(kinds.flatMap(victimsOf));
   victims.delete(process.pid);
   for (const pid of victims) {
     try {
@@ -382,36 +468,46 @@ export function supervisorDown(dir: string): SupervisorDown {
       // already gone — SIGTERM is advisory, absence is not a failure
     }
   }
-  const hadRecord = state !== null && existsSync(state);
-  if (state !== null) {
-    rmSync(state, { force: true });
+  // the sweep clears only its own kinds' armer records
+  let hadRecord = false;
+  for (const kind of kinds) {
+    const state = daemonStatePath(dir, { loop: kind === 'loop' });
+    if (state !== null) {
+      hadRecord = hadRecord || existsSync(state);
+      rmSync(state, { force: true });
+    }
   }
   return { pids: [...victims], hadRecord };
 }
 
+/** The daemon-log voice — a spawned supervisor's stdout is the log
+ *  file, so its own lines get the ISO stamp the index patch gives TTY
+ *  sessions (BRO_LOG_TIMESTAMP pins which children speak stamped). */
 function logWithTs(msg: string): void {
   if (process.env.BRO_LOG_TIMESTAMP === '1') {
     try {
-      const ts = new Date().toISOString();
-      process.stdout.write(`[${ts}] ${msg}\n`);
+      process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
       return;
-    } catch {}
+    } catch {
+      // fall through to the plain write
+    }
   }
   console.log(msg);
 }
 function errWithTs(msg: string): void {
   if (process.env.BRO_LOG_TIMESTAMP === '1') {
     try {
-      const ts = new Date().toISOString();
-      process.stderr.write(`[${ts}] ${msg}\n`);
+      process.stderr.write(`[${new Date().toISOString()}] ${msg}\n`);
       return;
-    } catch {}
+    } catch {
+      // fall through to the plain write
+    }
   }
   console.error(msg);
 }
 
-function daemonUp(main: string, interval: number): void {
-  const up = supervisorUp(main, interval);
+function daemonUp(main: string, interval: number, opts: { loop?: boolean } = {}): void {
+  const up = supervisorUp(main, interval, process.env, { loop: opts.loop });
   switch (up.kind) {
     case 'refuse-worker':
       errWithTs(
@@ -432,21 +528,39 @@ function daemonUp(main: string, interval: number): void {
 
 function daemonStatus(main: string): void {
   const probe = daemonProbe(main);
+  const lprobe = loopProbe(main);
   const log = daemonLogPath(main);
-  const marker = readDriveMarker(main);
-  const installed = marker === null ? '' : ` · installed (every ${marker.everySec}s)`;
-  if (!probe.live) {
+  const dmarker = readDriveMarker(main);
+  const lmarker = readLoopMarker(main);
+  const installed = [];
+  if (dmarker !== null) {
+    installed.push(`drive installed (every ${dmarker.everySec}s)`);
+  }
+  if (lmarker !== null) {
+    installed.push(`loop installed (every ${lmarker.everySec}s)`);
+  }
+  const installedStr = installed.length === 0 ? '' : ` · ${installed.join(' · ')}`;
+  // per-kind planes — a both-installed repo reports both supervisors
+  const live: string[] = [];
+  if (probe.live) {
+    live.push(lprobe.live ? `pid ${probe.pid} (drive)` : `pid ${probe.pid}`);
+  }
+  if (lprobe.live) {
+    live.push(probe.live ? `pid ${lprobe.pid} (loop)` : `pid ${lprobe.pid}`);
+  }
+  const recorded = probe.recorded ?? lprobe.recorded;
+  if (live.length === 0) {
     logWithTs(
-      (probe.recorded === null
+      (recorded === null
         ? `daemon down — no supervisor; 'bro daemon up' to start`
-        : `daemon down — recorded pid ${probe.recorded.pid} is dead`) + installed
+        : `daemon down — recorded pid ${recorded.pid} is dead`) + installedStr
     );
     return;
   }
   logWithTs(
-    `daemon up — pid ${probe.pid} supervising` +
-      (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
-      installed +
+    `daemon up — ${live.join(' · ')} supervising` +
+      (recorded === null ? ' (unrecorded holder)' : `, armed ${recorded.spawnedAt}`) +
+      installedStr +
       (log === null ? '' : ` — log ${log}`)
   );
 }
@@ -464,6 +578,10 @@ function daemonDown(main: string): void {
     release();
   }
   const { pids } = down;
+  const disarms = [
+    readDriveMarker(main) !== null ? `'bro drive uninstall'` : null,
+    readLoopMarker(main) !== null ? `'bro loop uninstall'` : null,
+  ].filter((s): s is string => s !== null);
   logWithTs(
     [
       pids.length === 0
@@ -471,9 +589,9 @@ function daemonDown(main: string): void {
         : `daemon down — signalled ${pids.join(', ')}`,
       // under an install, down is a transient stop — the next session
       // checkpoint rearms from the marker; uninstall is the disarm
-      readDriveMarker(main) !== null
-        ? `installed — the next session checkpoint rearms it; 'bro drive uninstall' disarms`
-        : '',
+      disarms.length === 0
+        ? ''
+        : `installed — the next session checkpoint rearms it; disarm with ${disarms.join(' or ')}`,
     ]
       .filter(s => s !== '')
       .join('\n  ')
@@ -504,13 +622,14 @@ export function readDriveMarker(dir: string): DriveMarker | null {
   return readWantMarker(driveMarkerPath(dir));
 }
 
+/** The want-marker arm states — armed fresh, re-armed at a new cadence,
+ *  or already holding the same cadence. */
+export type ArmState = 'armed' | 'updated' | 'already';
+
 /** Write the want-marker (tmp+rename — the mailbox drop rule). Same
  *  cadence is `already` and leaves the file alone; a changed one is
  *  `updated`. */
-export function armDrive(
-  dir: string,
-  everySec: number
-): { state: 'armed' | 'updated' | 'already'; marker: DriveMarker } {
+export function armDrive(dir: string, everySec: number): { state: ArmState; marker: DriveMarker } {
   const file = driveMarkerPath(dir);
   if (file === null) {
     throw new Error('not a git repository — the install marker has no common dir to live in');
@@ -568,9 +687,38 @@ export interface DriveSchedDeps {
     dir: string,
     everySec: number,
     env?: NodeJS.ProcessEnv,
-    opts?: { requireMarker?: boolean }
+    opts?: { requireMarker?: boolean; loop?: boolean }
   ) => SupervisorUp;
-  down?: (dir: string) => SupervisorDown;
+  down?: (dir: string, opts?: { kind?: 'drive' | 'loop' }) => SupervisorDown;
+}
+
+/** The loop installer's seams — the same supervisor verbs, loop kind. */
+export type LoopSchedDeps = DriveSchedDeps;
+
+/** The install detail's supervisor fragment — one wording for both
+ *  install kinds (drive and loop). */
+function installSupLine(up: SupervisorUp, everySec: number): string {
+  if (up.kind === 'spawned') {
+    return `supervisor up — pid ${up.pid} every ${everySec}s`;
+  }
+  if (up.kind === 'already') {
+    return `already supervising (pid ${up.pid})`;
+  }
+  if (up.kind === 'disarmed') {
+    return 'supervisor not spawned — a racing uninstall disarmed it';
+  }
+  return 'supervisor spawn refused — workers never arm it';
+}
+
+/** The arm verb in an install detail — armed / re-armed / already armed. */
+function armVerb(state: ArmState): string {
+  if (state === 'already') {
+    return 'already armed';
+  }
+  if (state === 'updated') {
+    return 're-armed';
+  }
+  return 'armed';
 }
 
 /** `bro drive install` — arm the want-marker, then bring the supervisor
@@ -607,19 +755,11 @@ export function installDrive(
     const up = (deps.up ?? supervisorUp)(dir, opts.everySec, process.env, {
       requireMarker: true,
     });
-    sup =
-      up.kind === 'spawned'
-        ? `supervisor up — pid ${up.pid} every ${opts.everySec}s`
-        : up.kind === 'already'
-          ? `already supervising (pid ${up.pid})`
-          : up.kind === 'disarmed'
-            ? 'supervisor not spawned — a racing uninstall disarmed it'
-            : 'supervisor spawn refused — workers never arm it';
+    sup = installSupLine(up, opts.everySec);
   } catch (err) {
     sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`;
   }
-  const verb =
-    arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed';
+  const verb = armVerb(arm.state);
   return {
     state: arm.state === 'armed' ? 'installed' : arm.state,
     detail: `drive install ${verb} (every ${opts.everySec}s) — ${sup}; session checkpoints rearm a dead supervisor`,
@@ -637,7 +777,142 @@ export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveIns
   const release = upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' });
   try {
     const marker = disarmDrive(dir);
-    const down = (deps.down ?? supervisorDown)(dir);
+    const down = (deps.down ?? supervisorDown)(dir, { kind: 'drive' });
+    const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0;
+    return {
+      state: removed ? 'removed' : 'absent',
+      detail: [
+        marker === 'disarmed' ? 'install marker removed' : 'no install marker',
+        down.pids.length > 0 ? `supervisor signalled (${down.pids.join(', ')})` : '',
+        down.hadRecord ? 'armer record cleared' : '',
+        removed ? '' : `nothing installed for ${basename(dir)}`,
+      ]
+        .filter(s => s !== '')
+        .join(' — '),
+    };
+  } finally {
+    release();
+  }
+}
+
+// --- the loop install want-marker --------------------------------------
+// `bro loop install` mirrors drive: `<git-common>/bro/loop.json` is the
+// durable want the connector's checkpoints rearm `daemon run --loop`
+// from. The probe differs — the loop supervisor holds `loop.lock`, so
+// its liveness plane is loopProbe, never the drive.lock truth.
+
+export interface LoopMarker {
+  /** pass cadence the rearmed supervisor runs `--every` at */
+  everySec: number;
+  armedAt: string;
+}
+
+/** `<git-common>/bro/loop.json` — `drive.json`'s loop-kind analogue. */
+export function loopMarkerPath(dir: string): string | null {
+  const common = gitCommonDir(dir);
+  return common === null ? null : join(common, 'bro', 'loop.json');
+}
+
+/** The loop want-record — null when absent, malformed, or the repo has
+ *  no common dir; readWantMarker owns the torn/cadence verdict. */
+export function readLoopMarker(dir: string): LoopMarker | null {
+  return readWantMarker(loopMarkerPath(dir));
+}
+
+/** Write the loop want-marker — same tmp+rename contract as `armDrive`. */
+export function armLoop(dir: string, everySec: number): { state: ArmState; marker: LoopMarker } {
+  const file = loopMarkerPath(dir);
+  if (file === null) {
+    throw new Error('not a git repository — the install marker has no common dir to live in');
+  }
+  const cur = readLoopMarker(dir);
+  if (cur !== null && cur.everySec === everySec) {
+    return { state: 'already', marker: cur };
+  }
+  const marker: LoopMarker = { everySec, armedAt: new Date().toISOString() };
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(marker, null, 2));
+  renameSync(tmp, file);
+  return { state: cur === null ? 'armed' : 'updated', marker };
+}
+
+/** Remove the loop want-marker — `disarmDrive`'s mirror. */
+export function disarmLoop(dir: string): 'disarmed' | 'absent' {
+  const file = loopMarkerPath(dir);
+  if (file === null || !existsSync(file)) {
+    return 'absent';
+  }
+  rmSync(file);
+  return 'disarmed';
+}
+
+/** The loop checkpoint decision — `driveRearm` on the loop plane:
+ *  armed `loop.json` + dead `loop.lock` holder + orchestrator → rearm. */
+export function loopRearm(dir: string, env: NodeJS.ProcessEnv = process.env): DriveRearm {
+  if (!isOrchestratorSession(env)) {
+    return { kind: 'quiet' };
+  }
+  const marker = readLoopMarker(dir);
+  if (marker === null || loopProbe(dir).live) {
+    return { kind: 'quiet' };
+  }
+  return { kind: 'rearm', everySec: marker.everySec };
+}
+
+/** `bro loop install` — `installDrive` on the loop plane: arm the
+ *  want-marker, then bring the supervisor up (enable --now). The spawn
+ *  side re-checks `loop.json` under `daemon.up.lock` — a racing
+ *  uninstall still lands no markerless supervisor. */
+export function installLoop(
+  dir: string,
+  opts: { everySec: number; print?: boolean },
+  deps: LoopSchedDeps = {}
+): DriveInstallResult {
+  if (loopMarkerPath(dir) === null) {
+    return {
+      state: 'error',
+      detail: 'not a git repository — the install marker has no common dir to live in',
+    };
+  }
+  if (opts.print === true) {
+    return {
+      state: 'printed',
+      detail: [
+        `# ${loopMarkerPath(dir)} — the want-marker; session checkpoints rearm a dead supervisor from it`,
+        JSON.stringify({ everySec: opts.everySec, armedAt: '<install time>' }, null, 2),
+        '# the supervisor itself:',
+        `bro daemon run --loop --every ${opts.everySec}   # detached; loop.lock one-per-repo`,
+      ].join('\n'),
+    };
+  }
+  const arm = armLoop(dir, opts.everySec);
+  let sup: string;
+  try {
+    const up = (deps.up ?? supervisorUp)(dir, opts.everySec, process.env, {
+      requireMarker: true,
+      loop: true,
+    });
+    sup = installSupLine(up, opts.everySec);
+  } catch (err) {
+    sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`;
+  }
+  const verb = armVerb(arm.state);
+  return {
+    state: arm.state === 'armed' ? 'installed' : arm.state,
+    detail: `loop install ${verb} (every ${opts.everySec}s) — ${sup}; session checkpoints rearm a dead supervisor`,
+  };
+}
+
+/** `bro loop uninstall` — `uninstallDrive` on the loop plane: disarm
+ *  FIRST (a racing checkpoint must never rearm a dying want), then the
+ *  `daemon down` sweep under `daemon.up.lock`. */
+export function uninstallLoop(dir: string, deps: LoopSchedDeps = {}): DriveInstallResult {
+  const upLock = daemonUpLockPath(dir);
+  const release = upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' });
+  try {
+    const marker = disarmLoop(dir);
+    const down = (deps.down ?? supervisorDown)(dir, { kind: 'loop' });
     const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0;
     return {
       state: removed ? 'removed' : 'absent',
@@ -665,15 +940,23 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
   }
   const main = mainWorktree().path;
   const broCfg = loadBroConfig(main) as Record<string, unknown>;
-  const interval = everyArg(argv, driveSection(broCfg.drive).intervalSec);
+  const isLoop = argv.includes('--loop');
+  const interval = everyArg(
+    argv,
+    isLoop ? loopSection(broCfg.loop).everySec : driveSection(broCfg.drive).intervalSec
+  );
 
   switch (verb) {
     case 'up':
-      daemonUp(main, interval);
+      daemonUp(main, interval, { loop: isLoop });
       return;
     case 'run':
       // the supervised loop — drive's own guard, lock and cadence apply;
       // reached directly only via `up`'s detached spawn
+      if (isLoop) {
+        await runLoopCommand(['--every', String(interval)]);
+        return;
+      }
       await runDriveCommand(['--every', String(interval)]);
       return;
     case 'status':

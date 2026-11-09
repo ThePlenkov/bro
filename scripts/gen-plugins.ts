@@ -22,6 +22,12 @@
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
+ * `/bro` is the one dispatcher command every client ships: the canonical
+ * content is skills/bro/SKILL.md (devin skills ARE slash commands, and
+ * every skills/-linked client resolves the same file); Claude's native
+ * surface is commands/bro.md, generated here from that body so
+ * `check:plugins` catches drift.
+ *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
@@ -284,6 +290,66 @@ function cursorHooksJson() {
   return `${JSON.stringify(body, null, 2)}\n`;
 }
 
+/** Devin's hook manifest is generated, not hand-written: the event map,
+ * matchers, timeouts, and the bounded fallback live here so check:plugins
+ * detects any drift instead of linting a JSON file. The command calls
+ * `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` directly — the shared launcher owns
+ * root resolution AND the watchdog. The fallback (P unset, e.g. an older
+ * client that never exported the root var) is a `bro hooks` bounded by a
+ * sleep/kill watcher pair — portable where GNU `timeout` is absent
+ * (stock macOS), never able to outlive the hook budget. */
+function devinHooksJson() {
+  // fallback anatomy (all three review findings):
+  //  1. `cmd &` under POSIX without job control reads stdin from /dev/null —
+  //     `bro hooks` takes its session payload from fd 0, so the stop gate
+  //     would go blind; fd3 preserves the payload into the async child.
+  //  2. the watcher polls kill -0 once a second and exits on its own the
+  //     tick after bro dies — `wait $w` reaps it with no orphan sleep; fds
+  //     off the hook pipe so a host reading to EOF doesn't eat the budget.
+  //  3. TERM at 8s, `pkill -TERM -P` sweeps bro's direct probe children
+  //     (bd/git) while still attached, KILL at 9s — under the 10s minimum
+  //     hook timeout; pkill absent degrades to the c-only kill.
+  const cmd = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `( exec 3<&0; bro hooks ${event} <&3 3<&- & c=$!; ` +
+    `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
+    `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
+    `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
+  // post-tool is fire-and-forget telemetry — it must never block the
+  // agent's next turn, so neither path may keep the foreground waiting:
+  // stdin is captured to a tempfile first (a detached child cannot read
+  // the parent's pipe once the shell exits), then the hook runs in a
+  // detached subshell. A mktemp or cat failure drops the event: stdin
+  // has already been consumed by cat, so no fallback can replay the
+  // payload. The subshell is redirected off the hook's pipes so a host
+  // reading the hook pipe to EOF is not blocked by the detached work.
+  const cmdDetached = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
+  const hook = (event, timeout, matcher = '', command = cmd) => ({
+    matcher,
+    hooks: [{ type: 'command', command: command(event), timeout }],
+  });
+  const body = {
+    SessionStart: [hook('session-start', 20)],
+    PostCompaction: [hook('post-compaction', 20)],
+    UserPromptSubmit: [hook('prompt-submit', 15)],
+    PostToolUse: [hook('post-tool', 10, '^exec$', cmdDetached)],
+    Stop: [hook('stop', 25)],
+    PermissionRequest: [hook('permission', 10, '^exec$')],
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
+}
+
 function opencodeReadme() {
   return `# bro — opencode plugin
 
@@ -408,7 +474,7 @@ function ompManifest() {
       name: 'bro',
       version: manifest.version,
       description:
-        "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
+        "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
       author: { name: 'Petr Plenkov' },
       homepage: 'https://broject.dev',
       repository: {
@@ -595,7 +661,7 @@ const ADAPTERS = {
   },
   'plugins/devin/bro': {
     'plugin.json': 'plugin.json',
-    'hooks.json': 'hooks.json',
+    'hooks.json': [devinHooksJson()],
   },
   'plugins/claude/bro': {
     // hand-written (Claude event names). Not hooks/hooks.json: that path
@@ -633,8 +699,41 @@ const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
 const drift = [];
 
+/** Remove symlinked path components above `path` so generated writes can't
+ *  follow a link outside the checkout. Returns true when drift was recorded
+ *  (check mode) so the caller can skip. */
+function guardSymlinkedParents(path) {
+  const parts = path.split(/[\\/]/);
+  let cur = ROOT;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    let pst: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pst = lstatSync(cur);
+    } catch {
+      pst = undefined;
+    }
+    if (!pst?.isSymbolicLink()) {
+      continue;
+    }
+    if (CHECK) {
+      drift.push(path);
+      return true;
+    }
+    rmSync(cur, { recursive: true, force: true });
+  }
+  return false;
+}
+
 function emit(path, content) {
   const p = join(ROOT, path);
+  // Guard every path component: if any parent (or the file itself) is a
+  // symlink, the write/read would follow it and could touch a file outside
+  // the checkout. Treat a symlinked component as stale drift in check mode
+  // and remove + recreate it as a real directory in write mode.
+  if (guardSymlinkedParents(path)) {
+    return;
+  }
   // lstat, not exists/stat: a stale directory or symlink where a file is
   // expected must be REPLACED — readFileSync would crash on the dir and
   // writeFileSync would write through the link to an external target
@@ -657,6 +756,11 @@ function emit(path, content) {
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, content);
 }
+
+// the devin hook manifest is generated like every other artifact — the
+// root file and the adapter copy both emit from devinHooksJson(), so a
+// hand-edit to either surfaces as drift here, not as a separate lint
+emit('hooks.json', devinHooksJson());
 
 // keep every `@broject/bro@…` npx pin equal to plugin.json's version
 for (const src of VERSIONED_SOURCES) {
@@ -739,6 +843,61 @@ emit(
     hooks: './plugins/codex/bro/hooks/hooks.json',
   })
 );
+
+// `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
+// the canonical content: devin resolves skills as slash commands, codex
+// and every skills/-linked adapter read the same file. Claude's native
+// surface is commands/bro.md; opencode's is .opencode/commands/bro.md —
+// derived from the skill body here so a hand edit on either side surfaces
+// as check:plugins drift. (Codex has no custom prompt surface: it reads
+// the canonical skills/bro/SKILL.md.) opencode's /bro is also native
+// (opencode-tui.ts), but the command file ships too.
+const BRO_SKILL = 'skills/bro/SKILL.md';
+if (!existsSync(join(ROOT, BRO_SKILL))) {
+  // same convention as the `null` adapter entries: generation can't
+  // create a missing hand-written source — error in write mode, drift
+  // in check mode
+  if (!CHECK) {
+    console.error(`required canonical file missing: ${BRO_SKILL}`);
+    process.exit(1);
+  }
+  drift.push(BRO_SKILL);
+} else {
+  const skillText = readFileSync(join(ROOT, BRO_SKILL), 'utf8');
+  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(skillText);
+  if (fm === null) {
+    console.error(`${BRO_SKILL}: no YAML frontmatter — cannot derive commands/bro.md`);
+    process.exit(1);
+  }
+  const body = skillText.slice(fm[0].length);
+  // the skill's leading H1 must come first — markdownlint MD041 wants a
+  // top-level heading before any text, so the `$ARGUMENTS` note follows
+  // the title instead of preceding it (that order also produced the
+  // double blank line MD012 flagged)
+  const trimmed = body.replace(/^\s+/, '');
+  if (!/^#(?:\s|$)/.test(trimmed)) {
+    console.error(`${BRO_SKILL}: body must start with a level-one heading`);
+    process.exit(1);
+  }
+  const h1End = trimmed.indexOf('\n');
+  const h1 = h1End === -1 ? trimmed : trimmed.slice(0, h1End);
+  // one blank line between the $ARGUMENTS note and the body — the skill's
+  // own leading blank run would land as consecutive blanks (MD012); the
+  // emit template already ends the note's line, so rest carries one \n
+  const rest = (h1End === -1 ? '' : trimmed.slice(h1End)).replace(/^(\r?\n)+/, '\n');
+  // the npx fallback pin tracks the release line (major.minor) the skill
+  // advertises — the grouped `bro review`/`bro flow` surface needs 0.3+
+  const broReleaseLine = cliVersion.split('.').slice(0, 2).join('.');
+  emit(
+    'commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // opencode command dir (plural) — same body, opencode frontmatter.
+  emit(
+    '.opencode/commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+}
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
   // A symlinked adapter dir is replaced before any write. emit() only
@@ -831,6 +990,17 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       }
     }
     if (wantRunSh) {
+      // run.sh is a real file, never a symlink: remove a stale link/dir
+      // first so cpSync cannot follow it outside the checkout
+      let rsh: ReturnType<typeof lstatSync> | undefined;
+      try {
+        rsh = lstatSync(join(ROOT, runShOut));
+      } catch {
+        rsh = undefined;
+      }
+      if (rsh?.isSymbolicLink() || rsh?.isDirectory()) {
+        rmSync(join(ROOT, runShOut), { recursive: true, force: true });
+      }
       mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true });
       cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut));
     }

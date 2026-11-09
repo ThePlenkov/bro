@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/act-status.schema.json",
+  "title": "bro act status --json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr", "exit_gate"],
+  "properties": {
+    "pr": {
+      "$ref": "#/$defs/PrActState"
+    },
+    "exit_gate": {
+      "$ref": "#/$defs/ExitGate"
+    }
+  },
+  "$defs": {
+    "PrActState": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "pr",
+        "url",
+        "headSha",
+        "headRef",
+        "state",
+        "isDraft",
+        "mergeable",
+        "mergeState",
+        "openThreads",
+        "threads",
+        "reopenedThreads",
+        "ciPending",
+        "ciFailing",
+        "reviewersPending",
+        "reviewersFailing",
+        "sastPending",
+        "sastUnknown",
+        "fixRounds",
+        "maxRounds",
+        "docsOnly",
+        "alerts"
+      ],
+      "properties": {
+        "pr": { "type": "integer" },
+        "url": { "type": "string" },
+        "headSha": { "type": "string" },
+        "headRef": { "type": "string" },
+        "state": { "type": "string" },
+        "isDraft": { "type": "boolean" },
+        "mergeable": { "type": "string" },
+        "mergeState": { "type": "string" },
+        "openThreads": { "type": "integer" },
+        "threads": { "type": "array" },
+        "reopenedThreads": { "type": "array" },
+        "ciPending": { "type": "integer" },
+        "ciFailing": { "type": "integer" },
+        "reviewersPending": { "type": "integer" },
+        "reviewersFailing": { "type": "integer" },
+        "sastPending": { "type": "integer" },
+        "sastUnknown": { "type": "integer" },
+        "fixRounds": { "type": "integer" },
+        "maxRounds": { "type": "integer" },
+        "docsOnly": { "type": "boolean" },
+        "alerts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "reviewDecision": { "type": "string" },
+        "humanApproval": { "type": "boolean" },
+        "humanApprovalReason": { "type": "string" },
+        "humanApprovalApprovers": { "type": "array" },
+        "humanApprovalHeadSha": { "type": "string" },
+        "humanApprovalProbe": { "type": "string" }
+      }
+    },
+    "ExitGate": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "ok",
+        "blockers",
+        "open_threads",
+        "ci_pending",
+        "ci_failing",
+        "reviewers_pending",
+        "reviewers_failing",
+        "sast_pending",
+        "sast_unknown",
+        "is_draft",
+        "fix_rounds",
+        "max_rounds",
+        "docs_only",
+        "alerts",
+        "reopened_threads"
+      ],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "open_threads": { "type": "integer" },
+        "ci_pending": { "type": "integer" },
+        "ci_failing": { "type": "integer" },
+        "reviewers_pending": { "type": "integer" },
+        "reviewers_failing": { "type": "integer" },
+        "sast_pending": { "type": "integer" },
+        "sast_unknown": { "type": "integer" },
+        "is_draft": { "type": "boolean" },
+        "fix_rounds": { "type": "integer" },
+        "max_rounds": { "type": "integer" },
+        "docs_only": { "type": "boolean" },
+        "alerts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "reopened_threads": { "type": "integer" }
+      }
+    }
+  }
+}

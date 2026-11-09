@@ -9,22 +9,31 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { initRepo } from './testrepo.ts';
-import { lockHolderPid, pidAlive, scrubEnv, testGit } from '@broject/core';
+import { lockHolderPid, pidAlive, procStat, scrubEnv, testGit } from '@broject/core';
 import {
   armDrive,
+  armLoop,
   daemonProbe,
   daemonStatePath,
   daemonUpDecision,
   daemonUpLockPath,
   disarmDrive,
+  disarmLoop,
   driveMarkerPath,
   driveRearm,
   installDrive,
+  installLoop,
+  loopLockPath,
+  loopMarkerPath,
+  loopProbe,
+  loopRearm,
   readDaemonRecord,
   readDriveMarker,
+  readLoopMarker,
   supervisorDown,
   supervisorUp,
   uninstallDrive,
+  uninstallLoop,
   type SupervisorDown,
   type SupervisorUp,
 } from './daemon.ts';
@@ -56,6 +65,33 @@ const writeRecord = (main: string, pid: number, extra: object = {}): void => {
       everySec: 300,
       spawnedAt: new Date().toISOString(),
       cmd: 'y',
+      pidStart: procStat(pid)?.start,
+      ...extra,
+    })
+  );
+};
+
+const writeLoopLock = (main: string, content: string, mtimeAgoMs = 0): void => {
+  const p = loopLockPath(main)!;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content);
+  if (mtimeAgoMs > 0) {
+    const t = new Date(Date.now() - mtimeAgoMs);
+    utimesSync(p, t, t);
+  }
+};
+
+const writeLoopRecord = (main: string, pid: number, extra: object = {}): void => {
+  const p = daemonStatePath(main, { loop: true })!;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(
+    p,
+    JSON.stringify({
+      pid,
+      everySec: 300,
+      spawnedAt: new Date().toISOString(),
+      cmd: 'bro daemon run --loop --every 300',
+      pidStart: procStat(pid)?.start,
       ...extra,
     })
   );
@@ -150,7 +186,9 @@ describe('daemonProbe', () => {
       writeLock(main, `${DEAD}:nonce`);
       writeRecord(main, process.pid);
       const probe = daemonProbe(main);
-      assert.equal(probe.live, false);
+      assert.equal(probe.live, true);
+      assert.equal(probe.pid, process.pid);
+      assert.equal(probe.recorded?.pid, process.pid);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -352,7 +390,7 @@ describe('driveRearm', () => {
     try {
       armDrive(main, 120);
       writeRecord(main, process.pid);
-      assert.deepEqual(driveRearm(main, ORCH), { kind: 'rearm', everySec: 120 });
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'quiet' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -655,6 +693,360 @@ describe('supervisorDown', () => {
       }
       rmSync(a.root, { recursive: true, force: true });
       rmSync(b.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a kind-scoped sweep spares the sibling supervisor plane', () => {
+    const a = initRepo('bro-dkind-');
+    const pids: number[] = [];
+    const fake = (argv: string[]): number => {
+      const pid = (() => {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)', ...argv], {
+          cwd: a.main,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        return child.pid!;
+      })();
+      pids.push(pid);
+      return pid;
+    };
+    try {
+      const driveSup = fake(['daemon', 'run', '--every', '4242']);
+      const loopSup = fake(['daemon', 'run', '--loop', '--every', '4242']);
+      writeRecord(a.main, driveSup);
+      writeLoopRecord(a.main, loopSup);
+      for (let i = 0; i < 100 && ![driveSup, loopSup].every(cmdlineVisible); i++) {
+        pause(10);
+      }
+      assert.ok([driveSup, loopSup].every(cmdlineVisible));
+      // the loop sweep takes the loop supervisor + its record, nothing else
+      const downLoop = supervisorDown(a.main, { kind: 'loop' });
+      assert.ok(downLoop.pids.includes(loopSup), 'loop supervisor missed by its own sweep');
+      assert.ok(!downLoop.pids.includes(driveSup), 'drive supervisor caught in the loop sweep');
+      assert.ok(pidAlive(driveSup), 'drive supervisor was killed by the loop sweep');
+      assert.ok(existsSync(daemonStatePath(a.main)!), 'drive armer record swept by a loop down');
+      assert.ok(
+        !existsSync(daemonStatePath(a.main, { loop: true })!),
+        'loop armer record kept after a loop down'
+      );
+      // and the drive sweep — the surviving sibling's turn
+      const downDrive = supervisorDown(a.main, { kind: 'drive' });
+      assert.ok(downDrive.pids.includes(driveSup), 'drive supervisor missed by its own sweep');
+      assert.ok(!downDrive.pids.includes(loopSup), 'loop pid named in the drive sweep');
+      assert.ok(
+        !existsSync(daemonStatePath(a.main)!),
+        'drive armer record kept after a drive down'
+      );
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(a.root, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- the loop install want-marker (bro-fw85h) ------------------------------
+// loop's supervision plane mirrors drive but owns its own lock, record
+// and marker — a repo installing both must never let one kind's
+// liveness mask the other's death.
+
+describe('loop marker', () => {
+  test('loop.json resolves under <git-common>/bro', () => {
+    const { root, main } = initRepo('bro-lmarker-path-');
+    try {
+      assert.equal(loopMarkerPath(main), join(main, '.git', 'bro', 'loop.json'));
+      assert.equal(
+        daemonStatePath(main, { loop: true }),
+        join(main, '.git', 'bro', 'daemon-loop.json')
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('absent and malformed read as null — never a half-shape rearm', () => {
+    const { root, main } = initRepo('bro-lmarker-mal-');
+    try {
+      assert.equal(readLoopMarker(main), null);
+      const file = loopMarkerPath(main)!;
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, 'not json');
+      assert.equal(readLoopMarker(main), null);
+      writeFileSync(file, JSON.stringify({ everySec: '300' }));
+      assert.equal(readLoopMarker(main), null);
+      writeFileSync(file, JSON.stringify({ everySec: 0, armedAt: 't' }));
+      assert.equal(readLoopMarker(main), null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('arm → already → updated; disarm → disarmed → absent', () => {
+    const { root, main } = initRepo('bro-lmarker-arm-');
+    try {
+      const a = armLoop(main, 300);
+      assert.equal(a.state, 'armed');
+      assert.equal(readLoopMarker(main)?.everySec, 300);
+      assert.equal(armLoop(main, 300).state, 'already');
+      assert.equal(armLoop(main, 120).state, 'updated');
+      assert.equal(readLoopMarker(main)?.everySec, 120);
+      assert.equal(disarmLoop(main), 'disarmed');
+      assert.equal(readLoopMarker(main), null);
+      assert.equal(disarmLoop(main), 'absent');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('loopProbe — the loop kind keeps its own liveness plane', () => {
+  const ORCH = {} as NodeJS.ProcessEnv;
+
+  test('a live loop.lock holder is the loop supervisor', () => {
+    const { root, main } = initRepo('bro-lprobe-live-');
+    try {
+      writeLoopLock(main, `${process.pid}:nonce`);
+      const probe = loopProbe(main);
+      assert.equal(probe.live, true);
+      assert.equal(probe.pid, process.pid);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a live drive.lock holder does NOT read as a loop supervisor — siblings never mask', () => {
+    const { root, main } = initRepo('bro-lprobe-mask-');
+    try {
+      writeLock(main, `${process.pid}:nonce`);
+      assert.equal(loopProbe(main).live, false);
+      assert.equal(daemonUpDecision(main, ORCH, { loop: true }).kind, 'spawn');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a live loop.lock holder does NOT read as a drive supervisor either', () => {
+    const { root, main } = initRepo('bro-lprobe-mask2-');
+    try {
+      writeLoopLock(main, `${process.pid}:nonce`);
+      assert.equal(daemonProbe(main).live, false);
+      assert.equal(daemonUpDecision(main, ORCH).kind, 'spawn');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a live loop record covers the pre-lock window; a drive record does not', () => {
+    const { root, main } = initRepo('bro-lprobe-rec-');
+    try {
+      writeLoopRecord(main, process.pid);
+      assert.equal(loopProbe(main).live, true);
+      // the loop record lives in daemon-loop.json — drive's own record
+      // file stays absent, so its probe cannot adopt the loop's child
+      assert.equal(daemonProbe(main).live, false);
+      writeRecord(main, process.pid);
+      assert.equal(daemonProbe(main).live, true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('loopRearm', () => {
+  const ORCH = {} as NodeJS.ProcessEnv;
+
+  test('unarmed repo stays quiet', () => {
+    const { root, main } = initRepo('bro-lrearm-0-');
+    try {
+      assert.deepEqual(loopRearm(main, ORCH), { kind: 'quiet' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('armed + dead supervisor → rearm at the marker cadence', () => {
+    const { root, main } = initRepo('bro-lrearm-1-');
+    try {
+      armLoop(main, 120);
+      assert.deepEqual(loopRearm(main, ORCH), { kind: 'rearm', everySec: 120 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('armed + a live loop.lock holder stays quiet', () => {
+    const { root, main } = initRepo('bro-lrearm-2-');
+    try {
+      armLoop(main, 120);
+      writeLoopLock(main, `${process.pid}:nonce`);
+      assert.deepEqual(loopRearm(main, ORCH), { kind: 'quiet' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('armed + a live drive supervisor STILL rearms — both-installed repos revive both', () => {
+    const { root, main } = initRepo('bro-lrearm-3-');
+    try {
+      armLoop(main, 120);
+      armDrive(main, 300);
+      writeLock(main, `${process.pid}:nonce`);
+      assert.deepEqual(loopRearm(main, ORCH), { kind: 'rearm', everySec: 120 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a spawned worker never rearms — the GUARD on the write side', () => {
+    const { root, main } = initRepo('bro-lrearm-4-');
+    try {
+      armLoop(main, 120);
+      assert.deepEqual(loopRearm(main, { BRO_AGENT_ID: 'native-x' }), { kind: 'quiet' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('installLoop / uninstallLoop', () => {
+  const spawned = (pid: number): SupervisorUp => ({ kind: 'spawned', pid, log: '/x/log' });
+
+  test('--print is pure — no marker, no spawn', () => {
+    const { root, main } = initRepo('bro-linst-print-');
+    try {
+      let ups = 0;
+      const r = installLoop(
+        main,
+        { everySec: 300, print: true },
+        {
+          up: () => {
+            ups += 1;
+            return spawned(1);
+          },
+        }
+      );
+      assert.equal(r.state, 'printed');
+      assert.match(r.detail, /loop\.json/);
+      assert.match(r.detail, /daemon run --loop --every 300/);
+      assert.equal(ups, 0);
+      assert.equal(readLoopMarker(main), null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('install arms the marker and brings the supervisor up on the loop plane', () => {
+    const { root, main } = initRepo('bro-linst-up-');
+    try {
+      const seen: Array<{ every: number; opts?: { requireMarker?: boolean; loop?: boolean } }> = [];
+      const r = installLoop(
+        main,
+        { everySec: 240 },
+        {
+          up: (_dir, every, _env, opts) => {
+            seen.push({ every, opts });
+            return spawned(4242);
+          },
+        }
+      );
+      assert.equal(r.state, 'installed');
+      assert.match(r.detail, /loop install armed \(every 240s\) — supervisor up — pid 4242/);
+      assert.deepEqual(seen, [{ every: 240, opts: { requireMarker: true, loop: true } }]);
+      assert.equal(readLoopMarker(main)?.everySec, 240);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a throwing spawn stays installed — the checkpoint retries', () => {
+    const { root, main } = initRepo('bro-linst-throw-');
+    try {
+      const r = installLoop(
+        main,
+        { everySec: 300 },
+        {
+          up: () => {
+            throw new Error('spawn broke');
+          },
+        }
+      );
+      assert.equal(r.state, 'installed');
+      assert.match(r.detail, /spawn failed \(spawn broke\) — the session checkpoint retries/);
+      assert.equal(readLoopMarker(main)?.everySec, 300);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uninstall disarms the marker and sweeps under daemon.up.lock', () => {
+    const { root, main } = initRepo('bro-linst-down-');
+    try {
+      armLoop(main, 300);
+      let heldByUs = false;
+      let markerInside: unknown = 'unread';
+      const r = uninstallLoop(main, {
+        down: d => {
+          const lock = daemonUpLockPath(d);
+          heldByUs = lock !== null && lockHolderPid(lock) === process.pid;
+          markerInside = readLoopMarker(d);
+          return { pids: [111], hadRecord: true };
+        },
+      });
+      assert.equal(r.state, 'removed');
+      assert.match(
+        r.detail,
+        /install marker removed — supervisor signalled \(111\) — armer record cleared/
+      );
+      assert.equal(heldByUs, true, 'down sweep ran outside the up lock');
+      assert.equal(markerInside, null, 'marker still armed inside the locked sweep');
+      assert.equal(readLoopMarker(main), null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uninstall on a bare repo reports absent', () => {
+    const { root, main } = initRepo('bro-linst-none-');
+    try {
+      const r = uninstallLoop(main, { down: () => ({ pids: [], hadRecord: false }) });
+      assert.equal(r.state, 'absent');
+      assert.match(r.detail, /nothing installed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('supervisorUp loop plane', () => {
+  const ORCH = {} as NodeJS.ProcessEnv;
+
+  test('no loop marker inside the lock → disarmed, never a spawn', () => {
+    const { root, main } = initRepo('bro-lsup-disarm-');
+    try {
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true, loop: true }), {
+        kind: 'disarmed',
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a live drive supervisor does NOT read as already on the loop plane', () => {
+    const { root, main } = initRepo('bro-lsup-plane-');
+    try {
+      writeLock(main, `${process.pid}:nonce`);
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true, loop: true }), {
+        kind: 'disarmed',
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

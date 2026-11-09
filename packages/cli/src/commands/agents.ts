@@ -60,7 +60,9 @@ import {
   countSessionReservations,
   gitCommonDir,
   hasHelpFlag,
+  localLeaseStore,
   printUsage,
+  projectId,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
   removeAgentRegistryEntries,
@@ -72,8 +74,11 @@ import {
   taskStoreAt,
   type AgentConnector,
   type AgentInfo,
+  type AgentRegistryEntry,
   type AgentState,
   type DiscoveredSession,
+  type Lease,
+  type LeaseStore,
   type SpawnSpec,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
@@ -89,10 +94,13 @@ import {
   fleetProfileOf,
   loadAgentEnv,
   pidAlive,
+  profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
+import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
 import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
 import { flag, positionals } from './args.ts';
 import { mainWorktree, worktreePathFor } from './work.ts';
@@ -348,10 +356,25 @@ export function occupancyLine(o: FleetOccupancy): string {
   return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`;
 }
 
+/** The lane's wall/gate state (spec bro-y3jvd) — wall, paused
+ *  workers, and the rate-gate budget, before the per-agent table.
+ *  Silent when no lane has anything to say. */
+function printLaneSection(lanes: LaneStatusRow[]): void {
+  const lines = laneStatusLines(lanes);
+  if (lines.length === 0) {
+    return;
+  }
+  console.log('lanes:');
+  for (const l of lines) {
+    console.log(l);
+  }
+}
+
 function printStatusTable(
   backends: AgentBackendPlane[],
   occupancy: FleetOccupancy,
-  sessions: SessionQuotaView[]
+  sessions: SessionQuotaView[],
+  lanes: LaneStatusRow[] = []
 ): void {
   console.log(occupancyLine(occupancy));
   for (const s of sessions) {
@@ -364,6 +387,7 @@ function printStatusTable(
       console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`);
     }
   }
+  printLaneSection(lanes);
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
@@ -458,6 +482,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
         {
           occupancy: occupancyOf(dir, env),
           sessions: sessionQuotaViewsOf(env),
+          lanes: laneStatus(dir, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -471,7 +496,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     );
     return;
   }
-  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env));
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env), laneStatus(dir, env));
 }
 
 // --- up / down ------------------------------------------------------------------
@@ -676,8 +701,9 @@ export function spawnStepAgent(
   }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
-  // provider. The routed chain head supplies the provider only when no
-  // explicit lane was picked (--provider/--profile outrank the table).
+  // provider. The routed chain head is the initial provider only when
+  // no explicit lane was picked (--provider/--profile outrank the table);
+  // prepareSpawn may walk forward from the registry's current provider.
   // M7 fleet.router: fires only on an UNCLASSED step (no --class, no
   // class: label) with a table declared and the router armed — its one
   // `bd show` carries both the label check and the title/description
@@ -700,21 +726,48 @@ export function spawnStepAgent(
   );
   return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then(route => {
     const provider = req.provider ?? profile?.provider ?? route?.provider;
+    let namedBy: 'flag' | 'profile' | 'backend' = 'backend';
+    if (req.provider !== undefined) {
+      namedBy = 'flag';
+    } else if (profile !== undefined) {
+      namedBy = 'profile';
+    }
     return resolveSpawnProvider(
       env,
       conn.name,
       {
         provider,
-        // the routed model pin pairs with the routed provider — an
-        // explicit provider override must not inherit chain[0]'s model
         model:
           req.model ??
-          profile?.model ??
+          // a profile's model rides only on its own provider's lane
+          profileModelFor(profile, provider) ??
+          // the routed model pin pairs with the routed provider — an
+          // explicit provider override must not inherit chain[0]'s model
           (provider !== undefined && provider === route?.provider ? route.model : undefined),
         autoApprove: req.autoApprove ?? profile?.autoApprove,
       },
-      req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
-    ).then(pick => {
+      namedBy
+    ).then(async pick => {
+      // a flag-named profile's provider is an explicit pick — it
+      // outranks the table like --provider does, so matching the chain
+      // head must not arm the walk (a provider-less profile only
+      // presets fields; routing stays armed for it)
+      const routeSpec =
+        route !== undefined &&
+        req.provider === undefined &&
+        profile?.provider === undefined &&
+        provider === route.provider
+          ? await resolveSpawnRoute(
+              env,
+              conn.name,
+              route,
+              {
+                model: req.model ?? profile?.model,
+                autoApprove: req.autoApprove ?? profile?.autoApprove,
+              },
+              namedBy
+            )
+          : undefined;
       // a spawned worker is a child trace: the span ctx crosses the
       // process boundary as TRACEPARENT (and the endpoint itself so the
       // worker emits without sourcing provider.env) — the worker's own
@@ -740,14 +793,24 @@ export function spawnStepAgent(
             ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
           },
           provider: pick.provider,
+          account: pick.account,
           model: pick.model,
           class: route?.class,
           delegatedBy: req.delegatedBy,
           worker: pick.worker,
+          ...(routeSpec === undefined ? {} : { route: routeSpec }),
           enter: resolved.enter,
         })
         .then(r => {
-          span.end({ 'agent.id': String(r.id ?? ''), 'agent.pid': r.pid ?? 0 });
+          // the registry's stamped provenance is what ran — a chain
+          // walk can move the spawn off the head pick the span opened
+          // with, so end-attrs overwrite them
+          span.end({
+            'agent.id': String(r.id ?? ''),
+            'agent.pid': r.pid ?? 0,
+            'agent.provider': r.provider ?? '',
+            'agent.model': r.model ?? '',
+          });
           return r;
         });
     });
@@ -853,8 +916,18 @@ export async function stopAgent(
     current.state === 'exited' || current.state === 'stopped' || current.state === 'blocked';
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined;
+  // the generation the connector's stop binds is the registry's CURRENT
+  // entry for this agentId (a respawn reuses the id) — capture it
+  // BEFORE the stop so the release below can be token-checked against
+  // ITS lease. Re-reading after stop (or keying off leaseKey alone)
+  // re-opens the double-spawn window: A stops → B legitimately
+  // acquires the key → A's release deletes B's live row → C duplicates.
+  const stoppedEntry = readAgentRegistry(dir)[current.molStep];
   try {
     await hit.conn.stop(hit.agent.id);
+    if (stoppedEntry?.agentId === hit.agent.id && stoppedEntry.backend === hit.conn.name) {
+      releaseEntryLease(dir, stoppedEntry);
+    }
   } catch {
     // a connector whose own liveness probe fails must not crash the
     // verdict path — the post-stop status read below carries the
@@ -1312,6 +1385,7 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     if (outcome.degraded.length > 0) {
       die(`down: no agent "${target}" found — backend(s) degraded: ${outcome.degraded.join('; ')}`);
     }
+    forceReleaseStepLease(dir, target);
     // stop() is idempotent — a gone agent is the desired end state
     console.log(`down: no agent "${target}" — nothing to stop`);
     return;
@@ -1347,6 +1421,78 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     );
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`);
+}
+
+/** A stored lease record only releases when the entry's own key+token
+ *  still agree with it — a diverged pair is tampered state, not a
+ *  release handle. */
+function recordedLease(entry: AgentRegistryEntry | undefined): Lease | undefined {
+  const record = entry?.leaseRecord;
+  if (record === undefined) {
+    return undefined;
+  }
+  if (record.key !== entry?.leaseKey || record.token !== entry?.leaseToken) {
+    return undefined;
+  }
+  return record;
+}
+
+/** The live row an entry's key+token still owns — read returns live
+ *  rows only, so a stale token can never name a successor's lease. */
+function tokenKeyedLease(
+  store: LeaseStore,
+  entry: AgentRegistryEntry | undefined
+): Lease | undefined {
+  if (typeof entry?.leaseKey !== 'string' || typeof entry.leaseToken !== 'string') {
+    return undefined;
+  }
+  const live = store.read(entry.leaseKey);
+  return live?.token === entry.leaseToken ? live : undefined;
+}
+
+/** Release a step's work lease. When the registry entry carries lease
+ *  identity the release is TOKEN-checked (releaseClassifiedLease's
+ *  shape in agent-connectors.ts): a blind forceRelease(key) re-opens
+ *  the double-spawn window — a stale actor's release lands after a
+ *  successor legitimately acquired the key and deletes its live row,
+ *  so a third spawn duplicates the worker. Raw forceRelease stays for
+ *  rows no token names: the operator path on a lease-less entry, or a
+ *  fallback key with no entry at all. */
+function releaseEntryLease(
+  dir: string,
+  entry: AgentRegistryEntry | undefined,
+  fallbackKey?: string
+): void {
+  try {
+    const store = localLeaseStore(projectId(dir));
+    const lease = recordedLease(entry) ?? tokenKeyedLease(store, entry);
+    if (lease !== undefined) {
+      store.release(lease);
+      return;
+    }
+    // the entry names a lease identity nothing live matched — the row
+    // a stale token would free belongs to a successor; a blind
+    // forceRelease re-opens the double-spawn window the token check
+    // exists to close, so a token-carrying mismatch releases nothing
+    if (typeof entry?.leaseToken === 'string') {
+      return;
+    }
+    const key = typeof entry?.leaseKey === 'string' ? entry.leaseKey : fallbackKey;
+    if (key !== undefined) {
+      store.forceRelease(key);
+    }
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+function forceReleaseStepLease(dir: string, target: string): void {
+  const registry = readAgentRegistry(dir);
+  const entry =
+    registry[target] ?? Object.values(registry).find(candidate => candidate.agentId === target);
+  releaseEntryLease(dir, entry, `bead/${target}`);
 }
 
 /** States prune reaps — 'blocked' stays: a wall-parked worker is
