@@ -21,6 +21,15 @@ name: Act gate
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # The manual lever: a PR opened before this workflow reached main has no
+  # gate check, and a required context that never reports blocks the merge.
+  # Dispatch it for that PR — and to re-evaluate on demand.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to evaluate"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -28,7 +37,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: act-gate-${{ github.event.pull_request.number }}
+  group: act-gate-${{ github.event.inputs.pr || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -59,7 +68,7 @@ jobs:
       - name: Evaluate the act gate
         if: ${{ !github.event.pull_request.draft }}
         env:
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.inputs.pr || github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         # exit 1 = the gate is blocked or the wait timed out; the blockers
         # are printed, so the job log names what is missing

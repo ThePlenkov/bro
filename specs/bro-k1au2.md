@@ -95,6 +95,13 @@ The ruleset is not a file — it is project configuration. The context
 otherwise every open PR would wait for a check that no workflow produces
 yet.
 
+A `pull_request` workflow only runs when its file is on the default
+branch — so a PR opened before this lands has no gate check, and a
+required context that never reports **blocks** the merge. The workflow
+therefore carries a `workflow_dispatch` lever: dispatch it with the PR
+number and the gate runs (that is also how the open PRs are covered
+before the ruleset change, and how an operator re-evaluates on demand).
+
 ## Non-goals
 
 - Not replacing `required_review_thread_resolution` — it is already on.
@@ -113,13 +120,15 @@ yet.
 
 ## Plan
 
-- [ ] `.github/workflows/act-gate.yml` — the gate job
-- [ ] the formula's merge step states the division of labour: the project
+- [x] `.github/workflows/act-gate.yml` — the gate job, plus the
+      `workflow_dispatch` lever for the PRs that predate it
+- [x] the formula's merge step states the division of labour: the project
       lands the PR (auto-merge), the agent fixes the findings, the step
       closes on the PR's state
 - [ ] after the merge: add the context `act-gate` to the ruleset's
       `required_status_checks` (project config — one API call, documented
-      here, not in the repo)
+      here, not in the repo) — and dispatch the workflow once for each PR
+      that was open before it landed
 
 ## Verify
 
