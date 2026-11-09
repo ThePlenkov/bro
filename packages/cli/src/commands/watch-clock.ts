@@ -15,6 +15,12 @@ import { ghTryAsync } from '@broject/core';
  *  the tick's stamps are flagged, not trusted. */
 export const CLOCK_SKEW_MS = 60_000;
 
+/** The probe's own deadline — strictly below CLOCK_SKEW_MS so a slow
+ *  response cannot age past the skew bound between the local sample and
+ *  the verdict (a 60s+ late answer would read as skew even on aligned
+ *  clocks), and a stalled `gh` never holds the pulse lock open. */
+export const CLOCK_PROBE_TIMEOUT_MS = 45_000;
+
 export interface WatchClock {
   /** Date.now() at probe time — the tick's own clock reading. */
   local: string;
@@ -71,7 +77,7 @@ type ClockProbe = () => Promise<{ code: number; out: string; err: string }>;
 export async function clockPlane(
   dir: string,
   host: { name?: string },
-  probe: ClockProbe = () => ghTryAsync(['api', '/', '--include'], dir),
+  probe: ClockProbe = () => ghTryAsync(['api', '/', '--include'], dir, CLOCK_PROBE_TIMEOUT_MS),
   now: number = Date.now()
 ): Promise<WatchClock | undefined> {
   if (host.name !== 'github') {

@@ -587,7 +587,7 @@ function buildLine(build: NonNullable<BroStatus['build']>): string {
 function watchLine(watch: HeartbeatSummary): string {
   const tail = watch.attention === 0 ? 'quiet' : `${watch.attention} attention`;
   if (watch.futureMs !== undefined) {
-    return `watch: heartbeat stamped ${heartbeatAge(watch.futureMs)} in the future — writer clock skew — ${tail}`;
+    return `watch: heartbeat stamped ${heartbeatAge(watch.futureMs)} in the future — writer or reader clock skew — ${tail}`;
   }
   const skew = watch.writerSkewed === true ? ' — writer clock skew' : '';
   return `watch: heartbeat ${heartbeatAge(watch.ageMs)} ago${skew} — ${tail}`;

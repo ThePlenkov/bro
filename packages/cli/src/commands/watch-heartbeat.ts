@@ -11,13 +11,13 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { gitCommonDir } from '@broject/core';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
 import { CLOCK_SKEW_MS } from './watch-clock.ts';
 
 /** `<git-common>/bro/heartbeat.json`; null outside a repository — the
  *  same boundary the mailbox has: no shared state dir, no heartbeat. */
 export function heartbeatFile(dir: string): string | null {
-  const common = gitCommonDir(dir);
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'heartbeat.json');
 }
 
@@ -120,7 +120,7 @@ export function heartbeatLine(dir: string): string | null {
   }
   const tail = h.attention === 0 ? 'quiet' : `${h.attention} attention`;
   if (h.futureMs !== undefined) {
-    return `last tick stamped ${heartbeatAge(h.futureMs)} in the future — writer clock skew — ${tail}`;
+    return `last tick stamped ${heartbeatAge(h.futureMs)} in the future — writer or reader clock skew — ${tail}`;
   }
   if (h.writerSkewed === true) {
     return `last tick ${heartbeatAge(h.ageMs)} ago — writer clock skew — ${tail}`;

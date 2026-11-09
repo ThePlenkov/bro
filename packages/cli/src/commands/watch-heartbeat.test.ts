@@ -139,7 +139,7 @@ describe('heartbeatLine', () => {
       assert.equal(h.ageMs, 0);
       assert.match(
         heartbeatLine(main) ?? '',
-        /^last tick stamped \d+m in the future — writer clock skew — quiet$/
+        /^last tick stamped \d+m in the future — writer or reader clock skew — quiet$/
       );
       // sub-bound clock drift is ordinary — not a skew verdict
       const near = { ...snap, ts: new Date(Date.now() + 5_000).toISOString() };
