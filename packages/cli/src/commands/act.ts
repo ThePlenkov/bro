@@ -449,17 +449,29 @@ async function settleWait(
   timeout: number
 ): Promise<void> {
   const json = argv.includes('--json');
+  if (!res.timedOut && res.state.state === 'MERGED') {
+    // the merge landed — the verdict is MERGED, whatever the gate says:
+    // a PR that another actor landed while the checks were still red is
+    // a landing, not a block (spec: specs/bro-0i1lm.md). The gate's
+    // state cannot demote a landed PR to a blocked one.
+    if (!json) {
+      // a landed PR is a verdict, not a lifecycle failure — the caller
+      // gets the landing and its actor (spec: specs/bro-0i1lm.md)
+      console.log(landedLine(rev, t, res.state));
+    }
+    await recordSettledVerdict(rev, t, res.state.url, settledLabel(res.state));
+    // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
+    closeBeadIfLanded(argv, rev, t, res.state.state);
+    await harvestClosedPr(rev, t, res.state.state);
+    process.exitCode = 0;
+    return;
+  }
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
     if (!res.timedOut && !res.gate.ok) {
       await recordBlockedVerdict(rev, t, res, timeout);
     } else if (!res.timedOut && res.state.state !== 'OPEN') {
-      // externally settled (merged/closed between polls) — the "wait
+      // externally settled (closed between polls) — the "wait
       // finished" moment a sink is for (spec: specs/bro-huy5o.8.md)
-      if (!json && res.state.state === 'MERGED') {
-        // a landed PR is a verdict, not a lifecycle failure — the caller
-        // gets the landing and its actor (spec: specs/bro-0i1lm.md)
-        console.log(landedLine(rev, t, res.state));
-      }
       await recordSettledVerdict(rev, t, res.state.url, settledLabel(res.state));
     }
     // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
