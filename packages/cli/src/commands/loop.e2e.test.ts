@@ -57,6 +57,12 @@ function loopFixture(
   extra: (host: { state: string; agent: string }) => Record<string, unknown> = () => ({})
 ): Fixture {
   const { root, main } = initRepo('bro-loop-e2e-');
+  // a bare origin makes the remote-branch lifecycle real — the run's
+  // `push origin --delete` lands (or reports) instead of failing on a
+  // remote that was never configured
+  spawnSync('git', ['init', '--bare', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'remote', 'add', 'origin', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'push', '-q', 'origin', 'main']);
   const { binDir, db } = installFakeBd(root, rows);
   const host = installFakeHost(main);
   writeFileSync(

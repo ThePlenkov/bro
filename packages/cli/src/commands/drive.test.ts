@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import {
   patchAgentRegistry,
+  localLeaseStore,
   procStat,
+  projectId,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
   type AgentInfo,
@@ -35,9 +37,11 @@ import {
   occupancyProofs,
   processesRootedIn,
   projectorKicker,
+  projectorWatcher,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
+  runDriveCommand,
   supervisedBy,
   supervisorFresh,
   worktreeClaim,
@@ -45,7 +49,7 @@ import {
   type WorkEntry,
 } from './drive.ts';
 import { driveSection } from './drive-config.ts';
-import { git, initRepo, inside } from './testrepo.ts';
+import { git, initRepo, inside, insideAsync, installFakeBd, scrubEnv } from './testrepo.ts';
 
 const agent = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   id: 'native-aaa',
@@ -82,6 +86,57 @@ describe('driveArgs', () => {
     // the floor fleet already enforces — below it is a busy loop
     assert.equal(driveArgs(['--every', '0.1']).everySec, 0.1);
   });
+});
+
+test('drive removes its exit listener when role-lease acquisition is aborted', async () => {
+  const { root, main } = initRepo('bro-drive-lease-abort-');
+  const { binDir, db } = installFakeBd(root);
+  const stateHome = mkdtempSync(join(tmpdir(), 'bro-drive-lease-state-'));
+  const path = process.env.PATH ?? '';
+  const restoreEnv = scrubEnv(['PATH', 'HOME', 'XDG_STATE_HOME', 'FAKE_BD_DB']);
+  try {
+    process.env.PATH = `${binDir}:${path}`;
+    process.env.HOME = root;
+    process.env.XDG_STATE_HOME = stateHome;
+    process.env.FAKE_BD_DB = db;
+    await insideAsync(main, root, async () => {
+      const store = localLeaseStore(projectId(main));
+      assert.equal(
+        store.acquire('role/drive', { host: 'other-host', pid: 1, rig: 'other' }, 60_000).ok,
+        true
+      );
+
+      const listenersBefore = {
+        exit: process.listenerCount('exit'),
+        sigint: new Set(process.listeners('SIGINT')),
+        sigterm: process.listenerCount('SIGTERM'),
+      };
+      const originalKill = process.kill;
+      process.kill = ((pid, signal) => {
+        if (pid === process.pid && signal === 'SIGINT') return true;
+        return originalKill(pid, signal);
+      }) as typeof process.kill;
+      try {
+        const running = runDriveCommand([]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const abortHandler = process
+          .listeners('SIGINT')
+          .find(listener => !listenersBefore.sigint.has(listener));
+        assert.ok(abortHandler, 'drive SIGINT listener was not installed');
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit + 1);
+        abortHandler.call(process, 'SIGINT');
+        await assert.rejects(running, /aborted/i);
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit);
+        assert.equal(process.listenerCount('SIGINT'), listenersBefore.sigint.size);
+        assert.equal(process.listenerCount('SIGTERM'), listenersBefore.sigterm);
+      } finally {
+        process.kill = originalKill;
+      }
+    });
+  } finally {
+    restoreEnv();
+    rmSync(stateHome, { recursive: true, force: true });
+  }
 });
 
 describe('driveSection', () => {
@@ -1430,5 +1485,76 @@ describe('projectorKicker — the event-kick coalescer (bro-xmd9l)', () => {
     // the second fire lands at/after the first fire + kickMs, not at t0+30
     assert.ok(firedAt[1]! - firedAt[0]! >= 55, `gap ${firedAt[1]! - firedAt[0]!}ms < 55ms`);
     assert.ok(firedAt[1]! - t0 >= 55);
+  });
+});
+
+describe('projectorWatcher — the write-point fast path (bro-9me97)', () => {
+  const waitFor = async (cond: () => boolean, ms = 3000): Promise<boolean> => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (cond()) return true;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return false;
+  };
+
+  test('a matching filename kicks, a non-matching one stays quiet', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'projwatch-'));
+    let n = 0;
+    const ws = projectorWatcher(
+      [{ dir, hit: name => name === 'agents.json' || name.endsWith('.exit') }],
+      () => {
+        n += 1;
+      }
+    );
+    try {
+      assert.equal(ws.length, 1);
+      // inotify registration lag is unbounded on a loaded runner —
+      // poke at a sane interval until the kick lands rather than
+      // trusting one settle window (a 25ms-cadence storm starves the
+      // loop and delayed the first run's own delivery past timeout)
+      let lastWrite = 0;
+      const kicked = await waitFor(() => {
+        if (n === 0 && Date.now() - lastWrite > 300) {
+          lastWrite = Date.now();
+          writeFileSync(join(dir, 'native-x.1.exit'), '1\n');
+        }
+        return n >= 1;
+      }, 8000);
+      assert.ok(kicked, 'no kick on .exit');
+      // drain before the baseline — an .exit write fires rename AND
+      // change, and a retried poke can still be in flight; snapshot
+      // only once n holds still past the poke cadence or late kicks
+      // land inside the quiet window below
+      // n must hold across fourteen 25ms polls (~350ms, past the
+      // 300ms poke cadence) before it counts as drained
+      let stable = 0;
+      let last = -1;
+      const drained = await waitFor(() => {
+        if (n !== last) {
+          last = n;
+          stable = 0;
+          return false;
+        }
+        return ++stable >= 14;
+      }, 8000);
+      assert.ok(drained, 'kick stream never settled');
+      const before = n;
+      writeFileSync(join(dir, 'other.log'), 'noise\n');
+      writeFileSync(join(dir, 'state.tmp'), 'noise\n');
+      const quiet = await waitFor(() => n > before, 400);
+      assert.equal(quiet, false, 'a non-matching write must not kick');
+    } finally {
+      for (const w of ws) w.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an absent dir yields no watcher — a no-watch, not a failure', () => {
+    const ws = projectorWatcher(
+      [{ dir: join(tmpdir(), 'projwatch-absent-does-not-exist'), hit: () => true }],
+      () => {}
+    );
+    assert.equal(ws.length, 0);
   });
 });

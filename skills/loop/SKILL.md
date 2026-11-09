@@ -43,15 +43,15 @@ class picks its own provider chain, same as `bro agents up`: the
 {
   "fleet": {
     "routing": {
-      "default": { "chain": ["devin"] },
+      "default": { "chain": ["opencode"] },
       "sweep": { "chain": ["kilo-free"] }
     }
   }
 }
 ```
 
-The chain head supplies the provider (and its inline `model` pin) unless
-a flag-tier pick already named one — explicit `--provider`,
+The chain head supplies the initial provider (and its inline `model` pin)
+unless a flag-tier pick already named one — explicit `--provider`,
 `--agent <provider>`, `--profile` still pin the lane for every bead,
 with the resolved class stamped as provenance (`BRO_AGENT_CLASS`); the
 config picks (`loop.provider`, `loop.profile`, `agents.native.provider`)
@@ -59,13 +59,32 @@ are standing defaults the declared table outranks. A resolved class
 missing from the table is a config error — `default` is preflighted
 before the first claim, a bad `class:` label parks its bead instead of
 silently falling through. `fleet.router` (shadow/enforce) classifies
-unclassed beads by judge verdict, same as `agents up`.
+unclassed beads by judge verdict, same as `agents up`. For a registry
+spawn, a fresh step walks from the chain head; a respawn walks from its
+current provider. `fallthrough` moves forward to the first un-walled
+provider without wrapping; `park` keeps the step blocked on its current
+provider.
+
+**Route table** — declare `brouter.routes` and the loop asks the ROUTER's
+own table instead: the bead's class label is the task's `type`, its
+priority the task's band, and the table's `chain` names the models (the
+honest `<entry>/<model>` ids). `fleet.routing` stays the compatibility
+face — a run that declares no table behaves exactly as before. A table
+that breaks, or names a model `brouter.models` contradicts, is a config
+error: the run refuses to spawn rather than land the bead elsewhere
+(`bro router route "<task>"` shows the verdict and the why).
+
+`bro loop --explain` prints WHY each bead landed on its route — the route
+slice (the route, the chain, the rejects), the model slice (the model and
+who pinned it), the health slice (the walls the router knew) and the cost
+slice (the ledger's counters). `--explain=route,model` takes a subset; the
+explanation goes to stderr so the run log on stdout stays clean.
 
 **Raw template** — `loop.agent` (or an `--agent` value that names no
 provider) is the escape hatch:
 
 ```json
-{ "loop": { "agent": "devin --prompt-file {promptFile} -p" } }
+{ "loop": { "agent": "opencode --prompt-file {promptFile} -p" } }
 ```
 
 `{promptFile}` is replaced with the work-order file bro writes into the
@@ -74,8 +93,8 @@ Examples: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 {promptFile})"`. The spawn env carries `BRO_BEAD_ID`, `BRO_BEAD_TITLE`,
 `BRO_PROMPT_FILE` (provider lane also pins `BRO_AGENT_PROVIDER`,
 `BRO_AGENT_MODEL`). Whatever permission flags your agent needs for
-unattended work are yours to choose — e.g. devin's
-`--permission-mode dangerous --respect-workspace-trust false` skips all
+unattended work are yours to choose — e.g. a permissive flag pair
+that skips all
 human confirmation, which is the point of the loop but obviously grants
 the agent full autonomy; scope it to machines/repos you trust. A
 template `--agent` flag wins over a configured `loop.provider` — the
@@ -85,7 +104,8 @@ entirely (a warn line says so): every bead runs the literal template.
 Other `loop` keys: `bootstrap` (runs once per worktree),
 `stallMin` (advisory output-silence flag at check-in — never a kill),
 `mergeTimeoutMin`, `fixRounds`, `maxItems`, `maxOpen` — the gate stack's
-open-PR cap (default 3) — `worktreeMb` / `diskMinSlots`, the disk
+open-PR cap (default 1) — `maxOpenTotal` (default 10, total fleet PRs),
+`worktreeWarn` (default 40), `worktreeMb` / `diskMinSlots`, the disk
 floor below — and `batch` / `batchMinPriority`, the clump
 knobs below.
 
@@ -96,6 +116,7 @@ knobs below.
 | `bro flow loop`                         | Run the queue until idle or gated                                                                                                                                                                                                                                       |
 | `bro flow loop --max N`                 | At most N beads this run                                                                                                                                                                                                                                                |
 | `bro flow loop --max-open N`            | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot                                                                                                                                                                             |
+| `bro flow loop --max-open-total N`      | Hard ceiling on total open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-`) — claims held while >= ceiling; 0 = off (default 10)                                                                                                                                         |
 | `bro flow loop --disk-min-slots N`      | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables)                                                                                                                                |
 | `bro flow loop --dry-run`               | Print the top item's plan (claim, worktree, agent cmd) — changes nothing                                                                                                                                                                                                |
 | `bro flow loop --agent '<tpl>'`         | One-off agent override — a provider name resolves through the registry                                                                                                                                                                                                  |
@@ -157,11 +178,14 @@ knobs below.
   clump when no reset was reported. The shared exit-cause taxonomy —
   the same contract convoy supervision runs — decides. Only a `rate_limited` reset
   at settlement is waited on; quota, reset-less, and stopped exits keep the flat cooldown.
-- **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
-  many gates sit on the stack; a full stack services gates only until a
-  merge frees a slot. Independent branches drift against shared files
-  fast — keep the cap tight rather than wide, or run `--stack` so
-  members chain onto each other and conflicts surface at rebase-time.
+- **The open-PR set is bounded** — `loop.maxOpen` (default 1, serial) caps how
+  many gates sit on the stack; `loop.maxOpenTotal` (default 10) is a hard
+  ceiling on all open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-`). When
+  at ceiling, claims hold — only gate service and stale-orphan reconcile
+  run. A full stack services gates only until a merge frees a slot.
+  Independent branches drift against shared files fast — keep the cap
+  tight rather than wide, or run `--stack` so members chain onto each
+  other and conflicts surface at rebase-time.
 - **Pushes also hold on the disk floor** — a slot is priced at
   `loop.worktreeMb` (default 400 MB: worktree + bootstrap/agent
   litter); while free disk on the worktree parent or tmpdir drops

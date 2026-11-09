@@ -23,7 +23,8 @@
   "files": [
     "dist",
     "skills",
-    "formulas"
+    "formulas",
+    "pack.json"
   ],
   "engines": {
     "node": ">=22.18"
