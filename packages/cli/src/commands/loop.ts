@@ -4602,9 +4602,14 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
-  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
+  if (q.drained || maxed || Date.now() < q.pushHoldUntil) {
     return false;
   }
+  // the stack cap is consulted AFTER the ceiling check — a full stack
+  // must not silence the ceiling-hold line: at/over the fleet ceiling
+  // the hold belongs to the ceiling, and this log is the only place an
+  // operator learns that pushes are held for it (#791)
+  const stackFull = q.stack.length >= ctx.cfg.maxOpen;
   // Hard ceiling on TOTAL open fleet PRs — plus every admitted-but-
   // PR-less claim a sibling loop holds a reservation for. The
   // reservation is what makes the bound atomic: without it two loops
@@ -4644,8 +4649,10 @@ async function tryClaim(
         }
         ctx.claimsHeld = undefined;
         // admit = reserve, still under the lock — the claim→spawn→open
-        // window is then visible to the next loop's count
-        if (resDir !== null) {
+        // window is then visible to the next loop's count. A full
+        // stack admits nothing this pass, so it reserves nothing —
+        // the listing above still served the hold line
+        if (!stackFull && resDir !== null) {
           ceilingRes = reserveCeilingSlot(resDir);
           if (ceilingRes === null) {
             if (!ctx.claimsHeld) {
@@ -4689,6 +4696,9 @@ async function tryClaim(
     }
   } else {
     ctx.claimsHeld = undefined;
+  }
+  if (stackFull) {
+    return false;
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
