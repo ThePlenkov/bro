@@ -105,7 +105,10 @@ describe('splitSlots', () => {
 
   test('a live worker is in flight; a dead record is residue', () => {
     const { slots, residue } = splitSlots({
-      runs: [run({ slug: 'bro-live', pid: 4242 }), run({ slug: 'bro-dead', pid: 4343, state: 'dead' })],
+      runs: [
+        run({ slug: 'bro-live', pid: 4242 }),
+        run({ slug: 'bro-dead', pid: 4343, state: 'dead' }),
+      ],
       mainPid: 1583595,
     });
     assert.deepEqual(
@@ -270,8 +273,14 @@ describe('collectBaselines', () => {
     // an empty value is not a zero — cubic caught the parser reading it as one
     assert.equal(parseMeminfo({ text: 'SwapTotal:\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
     // the unit and the digits are part of the measurement
-    assert.equal(parseMeminfo({ text: 'SwapTotal: 1 gb\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
-    assert.equal(parseMeminfo({ text: 'SwapTotal: abc kB\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
+    assert.equal(
+      parseMeminfo({ text: 'SwapTotal: 1 gb\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }),
+      null
+    );
+    assert.equal(
+      parseMeminfo({ text: 'SwapTotal: abc kB\nSwapFree: 0 kB\nMemAvailable: 1 kB\n' }),
+      null
+    );
     assert.equal(parseMeminfo({ text: 'SwapFree: 0 kB\nMemAvailable: 1 kB\n' }), null);
   });
 });
