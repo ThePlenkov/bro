@@ -21,18 +21,18 @@ import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugin
 import { VERSION } from './version.ts';
 
 // ISO timestamps on console output — only for processes pinned
-// BRO_LOG_TIMESTAMP=1 (daemon/postmerge children writing to log files)
-// AND only human output: --json/--jsonl argv, BRO_JSON, machine-output
-// pins, and non-TTY stdout all opt out, so an inherited flag can never
-// corrupt a nested `bro ... --json` (spec bro-7h976).
+// BRO_LOG_TIMESTAMP=1 (daemon/postmerge children writing to log files —
+// their stdout is the log fd, so a TTY check would disable exactly the
+// path this exists for) AND only human output: --json/--jsonl argv,
+// BRO_JSON, machine-output pins all opt out, so an inherited flag can
+// never corrupt a nested `bro ... --json` (spec bro-7h976).
 if (
   process.env.BRO_LOG_TIMESTAMP === '1' &&
   !process.argv.some(
     a => a === '--json' || a === '--jsonl' || a === '-j' || a.startsWith('--json=')
   ) &&
   !process.env.BRO_JSON &&
-  !process.env.BRO_MACHINE_OUTPUT &&
-  process.stdout.isTTY === true
+  !process.env.BRO_MACHINE_OUTPUT
 ) {
   const origLog = console.log;
   const origErr = console.error;

@@ -122,6 +122,7 @@ import {
   sessionQuotaConfig,
   sessionSlotsDir,
   stepParent,
+  taskStoreAt,
   UnknownProviderError,
   walkChain,
   wallText,
@@ -310,9 +311,15 @@ export function fleetCapOf(env: AgentConnectorEnv): number {
  *  spawn error naming the key, never a silent no-op (ribc.1's
  *  no-silent-fallthrough rule). */
 export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfile {
-  const profiles = env.fleet?.profiles;
-  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  const profiles = env.fleet?.profiles
+  // hasOwn pins the lookup to configured keys — 'constructor'/'__proto__' must not
   // resolve to an inherited member and skip the missing-profile error
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input'
+    )
+  }
   const profile =
     profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
   if (profile === undefined) {
@@ -1704,7 +1711,14 @@ function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+): {
+  claimed: boolean;
+  actor: string | undefined;
+  phantom: boolean;
+  /** the assignee the step carried BEFORE our rebind — the rollback
+   *  target when a later spawn write fails */
+  previousAssignee?: string;
+} {
   const step = probeStep(spec.beadsDir, spec.molStep);
   if (spec.claimRequired !== true && spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true };
@@ -1729,7 +1743,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     );
   }
-  return { claimed: true, actor, phantom: false };
+  return { claimed: true, actor, phantom: false, previousAssignee: step.assignee };
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -2092,7 +2106,11 @@ function prepareSpawn(
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
-  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
+  const { claimed, actor, phantom, previousAssignee } = guardClaim(
+    spec,
+    existing !== undefined,
+    opts.claimAs
+  );
   const now = Date.now();
   const candidates =
     spec.route?.candidates ??
@@ -2240,6 +2258,7 @@ function prepareSpawn(
           claimed,
           actor,
           phantom,
+          previousAssignee,
           existing,
           lease: workLease.lease,
         }
@@ -2263,7 +2282,90 @@ function prepareSpawn(
     // and the lease: a spawn that never committed must not hold the
     // cross-repo claim either
     releaseSpawnLease(dir, workLease.lease);
+    // and the half-committed write facts: the claim rebind and the
+    // registry row both roll back to the state this spawn found —
+    // compare-and-set, so an entry a parallel actor rewrote is never
+    // clobbered
+    rollbackSpawnWrite(dir, spec, {
+      agentId,
+      claimed,
+      actor,
+      phantom,
+      previousAssignee,
+      existing,
+      claimAs: opts.claimAs,
+    });
     throw err;
+  }
+}
+
+/** Undo the write facts a failed commitSpawn may have left — the beads
+ *  claim AND the registry row. Both rollbacks are compare-and-set: the
+ *  claim is only rewritten while it still carries an assignee this
+ *  spawn wrote (a claim another actor moved meanwhile is theirs, not
+ *  ours to unbind), and the registry row is only restored/removed while
+ *  it still names this spawn's agentId. Every step is best-effort — a
+ *  rollback that fails leaves the 'lost' registry entry the ordering
+ *  comment above promises, never a second thrown error masking the
+ *  first. */
+function rollbackSpawnWrite(
+  dir: string,
+  spec: SpawnSpec,
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee: string | undefined;
+    existing: AgentRegistryEntry | undefined;
+    claimAs: string | undefined;
+  }
+): void {
+  // the claim — a phantom step carries none, so there is nothing to unbind
+  if (!run.phantom) {
+    try {
+      const now = probeStep(spec.beadsDir, spec.molStep);
+      const store = taskStoreAt(spec.beadsDir);
+      if (run.claimed && run.previousAssignee !== undefined) {
+        // rebind: the bookkeeping wrote `actor`, then `claimAs` when the
+        // caller pinned one — restore the pre-spawn assignee only while
+        // the step still carries a name this spawn wrote (a claim another
+        // actor moved meanwhile is theirs, not ours to unbind)
+        if (now?.assignee === run.actor || now?.assignee === run.claimAs) {
+          store.update(spec.molStep, { assignee: run.previousAssignee });
+        }
+      } else if (!run.claimed) {
+        // fresh claim: reopen only while the step still sits in the
+        // in_progress/our-actor state this spawn's claimStep produced
+        if (now?.status === 'in_progress' && now.assignee === bdActor(spec.beadsDir)) {
+          store.reopen(spec.molStep);
+        }
+      }
+    } catch {
+      // best-effort — the 'lost' entry below still names the failed run
+    }
+  }
+  // the registry row this spawn wrote over `existing` — restore the row
+  // it replaced (a respawn keeps its predecessor's facts), or drop the
+  // fresh row so no dead spawn entry lingers. Only while the row still
+  // names OUR agentId — a respawn that already landed owns it now.
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[spec.molStep];
+      if (cur === undefined || cur.agentId !== run.agentId) {
+        return;
+      }
+      if (run.existing !== undefined) {
+        reg[spec.molStep] = run.existing;
+      } else {
+        delete reg[spec.molStep];
+      }
+      writeAgentRegistry(dir, reg);
+    });
+  } catch {
+    // best-effort — a row we cannot roll back is the same 'lost' entry
+    // the ordering already tolerates
   }
 }
 
@@ -2330,6 +2432,7 @@ function commitSpawn(
     claimed: boolean;
     actor: string | undefined;
     phantom: boolean;
+    previousAssignee?: string;
     existing: AgentRegistryEntry | undefined;
     lease: Lease;
   }

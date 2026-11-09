@@ -194,11 +194,29 @@ export function loopProbe(dir: string): SupervisorProbe {
   return probeSupervisor(dir, loopLockPath(dir), readDaemonRecord(dir, { loop: true }));
 }
 
+/** How long an UNPINNED record may stand in for the pre-lock window —
+ *  a fresh spawn's pid cannot have been recycled seconds after minting.
+ *  Past it, the record is trusted only with its start-time pin. */
+const UNPINNED_RECORD_GRACE_MS = 120_000;
+
 /** A recorded pid is trusted only with its stored start time; records
  *  that predate the field cannot be verified against reuse and must
- *  never be trusted to supervise or kill processes. */
+ *  never be trusted to supervise or kill processes. One exception: on a
+ *  host where /proc cannot produce a start time at all (procStat fails
+ *  for our own pid — no procfs, macOS, a restricted container), a NEW
+ *  record still cannot carry the pin — yet the pid it names was minted
+ *  seconds ago, so reuse has had no window. Those records are trusted
+ *  for the spawn grace only; an old record on a /proc-capable host is
+ *  never trusted unpinned. */
 function recordedPidAlive(rec: DaemonRecord): boolean {
-  return rec.pidStart !== undefined && pidAlive(rec.pid, rec.pidStart);
+  if (rec.pidStart !== undefined) {
+    return pidAlive(rec.pid, rec.pidStart);
+  }
+  if (procStat(process.pid) !== null) {
+    return false;
+  }
+  const age = Date.now() - Date.parse(rec.spawnedAt);
+  return Number.isFinite(age) && age >= 0 && age <= UNPINNED_RECORD_GRACE_MS && pidAlive(rec.pid);
 }
 
 export type DaemonUpDecision =

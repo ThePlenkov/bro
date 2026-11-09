@@ -907,8 +907,12 @@ function spawnAgent(
     // (spec bro-7h976). The wrapped command's exit status is captured to
     // a side file before the filter runs, so the pipeline reports the
     // AGENT's code, never the while loop's 0.
+    // single-quote escaping, not JSON.stringify: inside the sh -c
+    // wrapper a double-quoted assignment still expands $ ` $() and
+    // backslashes before eval ever sees the command (kody #760)
+    const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
     const wrap = (cmd: string): string =>
-      `({ _bro_cmd=${JSON.stringify(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
+      `({ _bro_cmd=${shq(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
