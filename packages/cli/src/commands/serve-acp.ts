@@ -340,6 +340,10 @@ export function acpTransport(
       closeUpstream(sess, sid);
     }
     st.sessions.clear();
+    // the connection's churn scope dies with it — a per-connection key
+    // kept forever leaks one guard entry per client that ever
+    // connected (codeant #963)
+    guard.forgetScope({ scope: st.scope });
   };
 
   // link death ⇒ every session it carried is dead weight — drop them
@@ -351,6 +355,9 @@ export function acpTransport(
       sess.conn.sessions.delete(sid);
       disposeQuiet(sess.retained);
     }
+    // the peer's churn died with it — the respawned child is a fresh
+    // peer, not refused for its predecessor's abandoned sessions
+    guard.forgetPeer({ scope: by, peer: by });
   });
 
   /** A session-scoped method forwarded verbatim — set_config_option and

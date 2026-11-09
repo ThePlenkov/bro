@@ -454,13 +454,16 @@ async function acpSessionOpen(
   gc?: AcpGuardCtx
 ) {
   // the dead-loop guard speaks BEFORE the session opens: a refused
-  // scope costs no session and no quota (spec bro-b961a)
-  gc?.guard.open(gc);
+  // scope costs no session and no quota (spec bro-b961a). The charge
+  // it hands back is THIS session's debt — the caller resolves it on
+  // the first completed turn; a failed open leaves it counted (that
+  // is the churn the budgets measure).
+  const charge = gc?.guard.open(gc);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError);
-  return session;
+  return { session, charge };
 }
 
 async function acpSession(
@@ -470,7 +473,7 @@ async function acpSession(
   deadline: number
 ) {
   const { asAuthError, req, caps } = await acpInit(ctx, by, deadline);
-  const session = await acpSessionOpen(ctx, opts, asAuthError, req);
+  const { session } = await acpSessionOpen(ctx, opts, asAuthError, req);
   return { session, asAuthError, req, caps };
 }
 
@@ -793,12 +796,6 @@ export const promptText = (prompt: string | ContentBlock[]): string => {
     .join('\n');
 };
 
-/** The guard's accounting for a completed turn — the progress that resets
- *  the scope's churn (spec bro-b961a). */
-function guardDone(gc: AcpGuardCtx | undefined): void {
-  gc?.guard.done(gc);
-}
-
 /** A peer refusal breaks the peer — the loop may live inside the child,
  *  and a fresh child is the only cure for a loop that survived in the
  *  old one. The child dies with the link; the pool respawns on the next
@@ -812,6 +809,25 @@ function breakPeer(err: unknown, peer: AcpPeer): void {
   } catch {
     // the kill is the point — one stubborn peer can't block the rest
   }
+}
+
+/** A failed turn — the peer's own churn may now be systemic: the loop
+ *  can live inside the child, and a fresh child is the only cure for a
+ *  loop that survived in the old one. Over the peer's budget the child
+ *  dies HERE — waiting for the next open to refuse it leaves the
+ *  loop's host alive between requests. The trip is thrown in place of
+ *  the failure: it names what actually went wrong. A healthy peer is
+ *  left alone. */
+function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
+  if (gc?.peer === undefined) {
+    return;
+  }
+  const trip = gc.guard.peerTrip(gc);
+  if (trip === undefined) {
+    return;
+  }
+  breakPeer(trip, peer);
+  throw trip;
 }
 
 /** The stall bound — a turn that produces no `session/update` for this
@@ -853,7 +869,10 @@ export async function pumpTurn(
   parent?: OtelCtx,
   cwd?: string,
   drainTimeoutMs?: number,
-  stallMs?: number
+  // the silence bound — a direct caller that omits it gets the default
+  // five minutes, so a turn that never reports cannot hang forever. An
+  // explicit 0 still disables the watchdog.
+  stallMs = 300_000
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
@@ -878,7 +897,7 @@ export async function pumpTurn(
       // the silence bound — a turn that reports nothing for stallMs is
       // ended (spec bro-b961a). The window resets on every update, so a
       // long tool call that reports itself is untouched.
-      const watchdog = stallMs === undefined || stallMs <= 0 ? undefined : stallWatchdog(stallMs, by);
+      const watchdog = stallMs <= 0 ? undefined : stallWatchdog(stallMs, by);
       const race: Array<Promise<ActiveSessionMessage>> = [
         // prompt failures surface on the queue itself — classify the
         // rejection through asAuthError the same as a direct throw
@@ -1030,7 +1049,10 @@ function spawnAcpChild(
   if (bin === undefined) {
     fail(new AcpConfigError(`${by}: acp command is empty`));
   }
-  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() });
+  // detached: the child leads its own process group — the pool's close
+  // must take the whole group: a backend that forked children holding
+  // an account lane frees it only when every descendant dies
+  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv(), detached: true });
   proc.unref();
   for (const s of proc.stdio) {
     (s as unknown as { unref?: () => void } | null)?.unref?.();
@@ -1113,7 +1135,17 @@ export async function acpOpen(
   const close = (): void => {
     conn.close();
     terminals.dispose();
-    child?.kill('SIGKILL');
+    if (child === undefined) {
+      return;
+    }
+    try {
+      // detached at spawn: the child leads its own group — kill the
+      // group so descendants it forked (and the lanes they hold) die
+      // with it; a group signal miss falls back to the child alone
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
   };
   // a dead transport is itself a close: pooled callers only drop their
   // peer refs on abort — without this, terminals the agent spawned (and
@@ -1338,7 +1370,7 @@ export async function acpPooledTurn(
   };
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const session = await acpSessionOpen(
+    const { session, charge } = await acpSessionOpen(
       ctx,
       opts,
       peer.asAuthError,
@@ -1374,7 +1406,9 @@ export async function acpPooledTurn(
         3_000,
         turn.stallMs
       );
-      guardDone(turn.guard);
+      // the turn answered — the session's own charge settles (spec
+      // bro-b961a); a failed turn leaves it counted as abandoned
+      charge?.resolve();
       endSession();
       end({
         'acp.session_id': session.sessionId,
@@ -1394,12 +1428,16 @@ export async function acpPooledTurn(
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
     end({ error: errMsg(err) }, 'error');
-    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      throw err;
-    }
     if (err instanceof AcpDeadLoopError) {
       // the refusal cost no session — a peer refusal breaks the peer
       breakPeer(err, peer);
+      throw err;
+    }
+    // a stalled or failed turn counts against the peer the same — over
+    // budget the loop lives in the child: kill it BEFORE the failure
+    // surfaces, or further requests keep opening sessions on it
+    guardFail(turn.guard, peer);
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
     const tail = peer.tail();
@@ -1455,7 +1493,7 @@ export async function acpSessionRetain(
     { parent: turn.parent }
   );
   try {
-    const session = await acpSessionOpen(
+    const { session, charge } = await acpSessionOpen(
       ctx,
       opts,
       peer.asAuthError,
@@ -1575,7 +1613,11 @@ export async function acpSessionRetain(
             undefined,
             t.stallMs ?? turn.stallMs
           );
-          guardDone(turn.guard);
+          // the session opened once — its own charge settles on the
+          // first turn that answers. resolve() is idempotent: a later
+          // prompt must not decrement another session's charge (spec
+          // bro-b961a)
+          charge?.resolve();
           return { ...r, model: effective };
         } catch (err) {
           // a failed turn leaves the session's context in doubt — the
@@ -1588,6 +1630,9 @@ export async function acpSessionRetain(
           }
           if (err instanceof AcpDeadLoopError) {
             breakPeer(err, peer);
+          } else {
+            // the peer's churn may now be systemic — kill it and name it
+            guardFail(turn.guard, peer);
           }
           throw classifyWire(err);
         }
@@ -1598,12 +1643,15 @@ export async function acpSessionRetain(
     };
   } catch (err) {
     span.end({ error: errMsg(err) }, 'error');
-    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      throw err;
-    }
     if (err instanceof AcpDeadLoopError) {
       // the refusal cost no session — a peer refusal breaks the peer
       breakPeer(err, peer);
+      throw err;
+    }
+    // the peer's churn may now be systemic — a failed retain still
+    // counts against it (the open was measured): kill it and name it
+    guardFail(turn.guard, peer);
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
     const tail = peer.tail();

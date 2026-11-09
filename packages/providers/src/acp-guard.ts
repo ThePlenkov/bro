@@ -58,7 +58,8 @@ export class AcpDeadLoopError extends Error {
   }) {
     const kind = detail.kind ?? 'scope';
     const why =
-      detail.reason ?? (kind === 'scope'
+      detail.reason ??
+      (kind === 'scope'
         ? 'the churn is refused, no session was opened'
         : 'the peer was killed, the next request respawns it');
     super(
@@ -93,6 +94,17 @@ export interface AcpDeadLoopOptions {
  *  measures. The ctx IS the target — one shape, one meaning. */
 export interface AcpGuardCtx extends AcpTarget {
   guard: AcpDeadLoopGuard;
+}
+
+/** What one admitted open owes the guard — the tallies it was counted
+ *  in, at the window they stood at. `resolve` settles THIS charge
+ *  once: a completion that lands after its window rolled was already
+ *  written off by the reset, so freeing it would eat a newer session's
+ *  count; a second resolve frees nothing (a session's continuation
+ *  prompts answer its own open, never another's). */
+export interface AcpCharge {
+  /** The session's own charge settled — idempotent. */
+  resolve(): void;
 }
 
 /** One counter set — the window's pending sessions. */
@@ -138,15 +150,67 @@ export class AcpDeadLoopGuard {
 
   /** A session is about to open in the target's scope — throws when the
    *  scope is in a dead loop. The refusal happens BEFORE the session
-   *  opens, so a tripped scope costs no quota at all. */
-  open(target: AcpTarget): void {
+   *  opens, so a tripped scope costs no quota at all. The returned
+   *  charge is the session's own debt: `resolve` it when its turn
+   *  completes (a failed or abandoned open never resolves — that IS
+   *  the churn the budgets measure). */
+  open(target: AcpTarget): AcpCharge {
     const now = Date.now();
     const tally = this.tally(this.scopes, target.scope, now);
     // was the scope tripped before this call? — the open that follows the
     // cooldown is the probe, and only the probe
     const halfOpened = tally.trippedUntil > 0;
+    this.refuseRefusedScope(target.scope, tally, now);
+    this.refuseBusyPeer(target, now);
+    this.refuseOverBudget(target.scope, tally, now);
+    tally.pending += 1;
+    // the window the charge was counted in — a rolled window already
+    // wrote this charge off, so resolve() checks it before freeing
+    const since = tally.since;
+    let peerTally: Tally | undefined;
+    let peerSince = 0;
+    if (target.peer !== undefined) {
+      peerTally = this.tally(this.peers, target.peer, now);
+      peerTally.pending += 1;
+      peerSince = peerTally.since;
+    }
+    // the scope was tripped a moment ago — this open IS the probe
+    if (halfOpened) {
+      tally.probeInFlight = true;
+    }
+    this.prune(this.scopes, now);
+    this.prune(this.peers, now);
+    let resolved = false;
+    return {
+      resolve: () => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        // the window this charge was counted in rolled — the reset
+        // already wrote it off; freeing it now would hide a NEWER
+        // session's open behind this completion
+        if (tally.since === since && tally.pending > 0) {
+          tally.pending -= 1;
+        }
+        // a completed turn clears the trip outright — a working
+        // conversation is never stuck behind a stale refusal
+        tally.trippedUntil = 0;
+        // the probe answered — the scope is healthy again
+        tally.probeInFlight = false;
+        if (peerTally !== undefined && peerTally.since === peerSince && peerTally.pending > 0) {
+          peerTally.pending -= 1;
+        }
+      },
+    };
+  }
+
+  /** The scope is refused — the cooldown has not expired yet, or the
+   *  half-open probe has not answered. The refusal costs no session:
+   *  the scope is reset to half-open BEFORE the probe is counted. */
+  private refuseRefusedScope(scope: string, tally: Tally, now: number): void {
     if (tally.trippedUntil > now) {
-      throw new AcpDeadLoopError({ scope: target.scope, opens: tally.pending, budget: this.maxOpens });
+      throw new AcpDeadLoopError({ scope, opens: tally.pending, budget: this.maxOpens });
     }
     if (tally.trippedUntil > 0) {
       // the cooldown expired — the burst that tripped the scope is stale.
@@ -161,67 +225,63 @@ export class AcpDeadLoopGuard {
       // the probe has not answered — no second open. A half-open scope
       // admits one open per cooldown, not a fresh budget.
       throw new AcpDeadLoopError({
-        scope: target.scope,
+        scope,
         opens: tally.pending,
         budget: this.maxOpens,
         reason: 'the half-open probe has not answered, no session was opened',
       });
     }
-    // the peer's churn is systemic — the loop may live inside the child.
-    // Checked BEFORE anything is counted: a refused open opens nothing.
-    if (target.peer !== undefined) {
-      const peerTally = this.tally(this.peers, target.peer, now);
-      if (peerTally.pending + 1 > this.maxAbandoned) {
-        throw new AcpDeadLoopError({
-          scope: target.peer,
-          opens: peerTally.pending + 1,
-          budget: this.maxAbandoned,
-          kind: 'peer',
-        });
-      }
-    }
-    // the open that would cross the budget never happens — the refusal
-    // is the point: no session, no quota
-    if (tally.pending + 1 > this.maxOpens) {
-      // tripped until the cooldown ends — a probe is allowed then, and a
-      // completed turn clears the trip outright
-      tally.trippedUntil = now + this.cooldownMs;
-      throw new AcpDeadLoopError({
-        scope: target.scope,
-        opens: tally.pending + 1,
-        budget: this.maxOpens,
-      });
-    }
-    tally.pending += 1;
-    if (target.peer !== undefined) {
-      this.tally(this.peers, target.peer, now).pending += 1;
-    }
-    // the scope was tripped a moment ago — this open IS the probe
-    if (halfOpened) {
-      tally.probeInFlight = true;
-    }
-    this.prune(this.scopes, now);
-    this.prune(this.peers, now);
   }
 
-  /** The scope's turn completed — the session it opened is resolved and
-   *  leaves the churn measure. A completed turn also clears the trip: a
-   *  working conversation is never stuck behind a stale refusal. */
-  done(target: AcpTarget): void {
-    const now = Date.now();
-    const tally = this.tally(this.scopes, target.scope, now);
-    if (tally.pending > 0) {
-      tally.pending -= 1;
+  /** The peer's churn is systemic — the loop may live inside the child.
+   *  Checked BEFORE anything is counted: a refused open opens nothing. */
+  private refuseBusyPeer(target: AcpTarget, now: number): void {
+    if (target.peer === undefined) {
+      return;
     }
-    tally.trippedUntil = 0;
-    // the probe answered — the scope is healthy again
-    tally.probeInFlight = false;
+    const peerTally = this.tally(this.peers, target.peer, now);
+    if (peerTally.pending + 1 > this.maxAbandoned) {
+      throw new AcpDeadLoopError({
+        scope: target.peer,
+        opens: peerTally.pending + 1,
+        budget: this.maxAbandoned,
+        kind: 'peer',
+      });
+    }
+  }
+
+  /** The open that would cross the scope's budget never happens — the
+   *  refusal is the point: no session, no quota. The scope is tripped
+   *  until the cooldown ends — a probe is allowed then, and a completed
+   *  turn clears the trip outright. */
+  private refuseOverBudget(scope: string, tally: Tally, now: number): void {
+    if (tally.pending + 1 <= this.maxOpens) {
+      return;
+    }
+    tally.trippedUntil = now + this.cooldownMs;
+    throw new AcpDeadLoopError({
+      scope,
+      opens: tally.pending + 1,
+      budget: this.maxOpens,
+    });
+  }
+
+  /** The peer is gone — its churn died with it. A replacement is a
+   *  fresh child: the old child's abandoned sessions are not the new
+   *  child's, so the new peer must not be refused for them. */
+  forgetPeer(target: AcpTarget): void {
     if (target.peer !== undefined) {
-      const peerTally = this.tally(this.peers, target.peer, now);
-      if (peerTally.pending > 0) {
-        peerTally.pending -= 1;
-      }
+      this.peers.delete(target.peer);
     }
+  }
+
+  /** The scope itself is gone — a dropped connection's own key dies
+   *  with it (a per-connection scope kept forever leaks one entry per
+   *  client that ever connected). Only the scope's own entry is
+   *  forgotten: the peer's tally keeps what it counted — those
+   *  sessions happened. */
+  forgetScope(target: AcpTarget): void {
+    this.scopes.delete(target.scope);
   }
 
   /** The peer's churn is OVER its budget — the sessions it opened and
@@ -266,13 +326,16 @@ export class AcpDeadLoopGuard {
   /** The tallies are keyed by client-supplied scopes — they must not
    *  grow without bound. The prune drops the entries whose window
    *  closed; it runs only when the map grew past the threshold, so the
-   *  hot path stays a map lookup. */
+   *  hot path stays a map lookup. An entry whose COOLDOWN is still
+   *  live survives the prune: the trip owns the refusal past the
+   *  window it tripped in, and dropping it would admit the scope with
+   *  a fresh budget mid-refusal. */
   private prune(map: Map<string, Tally>, now: number): void {
     if (map.size < PRUNE_AT) {
       return;
     }
     for (const [key, t] of map) {
-      if (now - t.since >= this.windowMs) {
+      if (now - t.since >= this.windowMs && t.trippedUntil <= now) {
         map.delete(key);
       }
     }

@@ -4,7 +4,9 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import type { ProviderEntry } from '@broject/core';
-import { acpLinkPool } from './serve-conductor.ts';
+import { acpLinkPool, conductorProxy } from './serve-conductor.ts';
+import type { ConductorConfig } from './serve-conductor.ts';
+import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -73,6 +75,47 @@ describe('the pooled peer idle release (bro-7ira8)', () => {
       assert.ok(pool.live());
     } finally {
       pool.dispose();
+    }
+  });
+
+  test('a turn in flight keeps its peer — the release waits for the turn', async () => {
+    // the turn outlives the idle window: the release must not drop the
+    // peer while the turn is still running. A pool that reports itself
+    // idle before the turn settles drops the peer mid-flight and the
+    // answer is lost.
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const fake = fakeAcpAgent({ replyText: 'ok', holdEnd: () => gate });
+    const cfg: ConductorConfig = {
+      backend: 'dv-acp',
+      entry: ENTRY,
+      cwd: process.cwd(),
+      timeoutMs: 30_000,
+      agents: {},
+      idleReleaseMs: 40,
+    };
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const pending = fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        }),
+      });
+      // the idle window passes while the turn is still pending
+      await sleep(150);
+      release();
+      const r = await pending;
+      const body = await r.text();
+      assert.equal(r.status, 200, `status=${r.status} body=${body}`);
+    } finally {
+      await close();
     }
   });
 });

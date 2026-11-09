@@ -77,6 +77,7 @@ export {
   js,
   loadConfig,
   loadConfigLayers,
+  MAX_TIMER_MS,
   mcpSection,
   meshSection,
   mirrorSection,

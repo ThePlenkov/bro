@@ -5,7 +5,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JudgeUnavailable } from '@broject/core';
 import type { ProviderEntry } from '@broject/core';
-import { acpOpen, acpPooledTurn } from './acp.ts';
+import { acpOpen, acpPooledTurn, acpSessionRetain } from './acp.ts';
 import { AcpDeadLoopError, AcpDeadLoopGuard } from './acp-guard.ts';
 import { fakeAcpAgent } from './testkit.ts';
 
@@ -61,6 +61,39 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
         assert.equal(r.text, 'ok');
       }
       assert.equal(guard.churn({ scope: 'conv-1' }), 0);
+    } finally {
+      peer.close();
+    }
+  });
+
+  test("a retained session resolves its churn ONCE — a later prompt never clears another session's charge", async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
+    try {
+      const guard = new AcpDeadLoopGuard({ maxOpens: 4, maxAbandoned: 4 });
+      const ctx = { guard, scope: 'conv-1', peer: 'conductor:t' };
+      // another session of the SAME scope is open and never answered —
+      // its charge must survive the retained session's later prompts
+      guard.open(ctx);
+      const retained = await acpSessionRetain(
+        peer,
+        ENTRY,
+        { acp: { peer: fake.app } },
+        deadline(),
+        { by: 'conductor:t', guard: ctx }
+      );
+      try {
+        await retained.prompt('one', deadline());
+        // the retained session's own charge is resolved — the other
+        // session's is still counted
+        assert.equal(guard.churn(ctx), 1);
+        await retained.prompt('two', deadline());
+        // a second prompt must not decrement again: the charge it would
+        // take is the other session's
+        assert.equal(guard.churn(ctx), 1);
+      } finally {
+        retained.dispose();
+      }
     } finally {
       peer.close();
     }
@@ -125,6 +158,31 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
         stallMs: 50,
       });
       assert.equal(r.text, 'ok');
+    } finally {
+      peer.close();
+    }
+  });
+
+  test('a turn that outlives the stall window but keeps reporting is untouched', async () => {
+    // the turn lasts LONGER than the watchdog window, and reports every
+    // 20ms — the silence bound measures the silence, not the turn. A
+    // watchdog that counted the turn's whole life would fire here.
+    const fake = fakeAcpAgent({
+      updates: [
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'a' } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'b' } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'c' } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } },
+      ],
+      updateDelayMs: 20,
+    });
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline());
+    try {
+      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+        by: 'conductor:t',
+        stallMs: 50,
+      });
+      assert.equal(r.text, 'abcok');
     } finally {
       peer.close();
     }

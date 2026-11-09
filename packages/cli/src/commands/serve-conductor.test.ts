@@ -250,6 +250,10 @@ describe('conductorConfig', () => {
     // a window above node's timer ceiling is clamped — late, not instant
     const huge = conductorConfig({ BRO_PROVIDER_IDLE_RELEASE_MS: '9999999999' }, dir);
     assert.equal(huge?.idleReleaseMs, 2_147_483_647);
+    // the stall bound takes the same clamp — an oversized pin must not
+    // wrap the watchdog into firing at once
+    const hugeStall = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: '9999999999' }, dir);
+    assert.equal(hugeStall?.acpStallMs, 2_147_483_647);
   });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(

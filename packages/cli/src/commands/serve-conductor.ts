@@ -33,6 +33,7 @@ import {
   isIntegerIndexKey,
   loadConfig,
   LockTimeout,
+  MAX_TIMER_MS,
   planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
@@ -180,10 +181,6 @@ function positiveIntEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): 
   return Number.isInteger(num) && num > 0 ? num : fallback;
 }
 
-/** Node's timer ceiling — a window above it wraps and fires at once, so
- *  the release would be instant instead of late. */
-const MAX_TIMER_MS = 2_147_483_647;
-
 /** The idle window (spec bro-7ira8) — the env pin wins over the file,
  *  and 0 is a deliberate "keep the peer". A fractional value is not a
  *  window; a window above the timer ceiling is clamped (late, not
@@ -202,14 +199,18 @@ function idleWindow(env: NodeJS.ProcessEnv, fallback: number): number {
 /** The silence bound (spec bro-b961a) — the env pin wins over the file,
  *  and 0 is a deliberate "off". A negative or fractional value is not a
  *  window at all, so the fallback wins (a fractional 0.5 must not floor
- *  into 0 and silently switch the watchdog OFF). */
+ *  into 0 and silently switch the watchdog OFF). A window above the
+ *  timer ceiling is clamped — late, not instant (the watchdog would
+ *  fire at once on a wrapped delay). */
 function stallWindow(env: NodeJS.ProcessEnv, fallback: number): number {
   const raw = env.BRO_PROVIDER_ACP_STALL_MS?.trim();
   if (raw === undefined || raw === '') {
-    return fallback;
+    return Math.min(fallback, MAX_TIMER_MS);
   }
   const num = Number(raw);
-  return Number.isInteger(num) && num >= 0 ? num : fallback;
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or
@@ -425,11 +426,7 @@ export function conductorConfig(
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
     // the dead-loop budgets (spec bro-b961a) — the env pin wins over the
     // file, like BRO_PROVIDER_TIMEOUT_MS
-    acpMaxOpens: positiveIntEnv(
-      env,
-      'BRO_PROVIDER_ACP_MAX_OPENS',
-      cfg.serve?.acpMaxOpens ?? 8
-    ),
+    acpMaxOpens: positiveIntEnv(env, 'BRO_PROVIDER_ACP_MAX_OPENS', cfg.serve?.acpMaxOpens ?? 8),
     acpMaxAbandoned: positiveIntEnv(
       env,
       'BRO_PROVIDER_ACP_MAX_ABANDONED',
@@ -2294,7 +2291,10 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
       if (why !== undefined) {
         throw new ChainBroken(`previous_response_id ${why}`);
       }
-      return continuationTurn(env, cand as ConvSession);
+      // awaited — the pool must stay busy until the turn settles: a
+      // returned promise releases the peer while the turn is still
+      // running, and the idle release can drop it mid-flight
+      return await continuationTurn(env, cand as ConvSession);
     }
     const usable =
       cand !== undefined &&
@@ -2303,7 +2303,7 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
       cand.consumed <= env.msgs.length &&
       hashTurns(env.prefix, env.msgs, cand.consumed, env.stopKey) === cand.historyHash;
     if (usable === true) {
-      return continuationTurn(env, cand);
+      return await continuationTurn(env, cand);
     }
     const candBusy = cand?.busy === true;
     if (cand !== undefined && !candBusy && env.key !== undefined) {
@@ -2311,7 +2311,7 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
       // its session is poison for THIS conversation, retire it
       evict(env.sessions, env.key, cand);
     }
-    return freshTurn(env, candBusy);
+    return await freshTurn(env, candBusy);
   } finally {
     env.pool.idle();
   }
@@ -3435,12 +3435,29 @@ async function parseDialect<T>(
 function openaiFailKind(
   err: unknown,
   msg: string
-): { status: number; stream: string; wire: string } {
+): { status: number; stream: string; wire: string; retryAfter?: string } {
   if (err instanceof ChainBroken) {
     return { status: 400, stream: 'invalid_request_error', wire: 'invalid_request_error' };
   }
+  if (err instanceof AcpDeadLoopError) {
+    // the refusal is the guard's cooldown, not a quota wall (spec
+    // bro-b961a): the churn was stopped before it cost a session, so the
+    // client waits and tries again — the same mapping the transport
+    // path uses, in both openai dialects
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: '60',
+    };
+  }
   if (RATE.test(msg)) {
-    return { status: 429, stream: 'rate_limit_error', wire: 'rate_limit_error' };
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: '30',
+    };
   }
   if (AVAIL.test(msg)) {
     return { status: 503, stream: 'overloaded', wire: 'server_error' };
@@ -3461,7 +3478,7 @@ function openaiFail(
     res.end();
     return;
   }
-  if (kind.status === 429) res.setHeader('retry-after', '30');
+  if (kind.retryAfter !== undefined) res.setHeader('retry-after', kind.retryAfter);
   openaiError(res, kind.status, kind.wire, `bro conductor: ${msg}`);
 }
 
@@ -4847,6 +4864,17 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // every session it carried, so the death hook drops the map.
     const sessions = new Map<string, ConvSession>();
     pool.onDeath(() => dropSessions(sessions));
+    // the lane's churn accounting — one guard per lane (spec bro-b961a)
+    const guard = new AcpDeadLoopGuard({
+      maxOpens: laneCfg.acpMaxOpens ?? 8,
+      maxAbandoned: laneCfg.acpMaxAbandoned ?? 32,
+    });
+    // the peer's churn died with the peer: the replacement is a fresh
+    // child, and it must not be refused for its predecessor's abandoned
+    // sessions (a killed peer that keeps its tally blocks the backend
+    // until the window closes).
+    const peerKey = `conductor:${entry}`;
+    pool.onDeath(() => guard.forgetPeer({ scope: peerKey, peer: peerKey }));
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -4859,11 +4887,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // same-key request must not open a twin (the loser would leak
       // unmapped)
       pendingOpens: new Map<string, number>(),
-      // the lane's churn accounting — one guard per lane (spec bro-b961a)
-      guard: new AcpDeadLoopGuard({
-        maxOpens: laneCfg.acpMaxOpens ?? 8,
-        maxAbandoned: laneCfg.acpMaxAbandoned ?? 32,
-      }),
+      guard,
     });
   };
   addLane(cfg.backend, cfg.entry, cfg, {

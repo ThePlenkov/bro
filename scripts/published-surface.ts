@@ -200,17 +200,22 @@ export interface TopHelp {
   docVerbs: string[];
 }
 
-/** `bro --help` → the Commands: rows plus `doc types:`/`shorthand:`
- *  lines. Indentation-based: rows are `  name   summary`, the block
- *  ends at a blank line. */
+/** `bro --help` → the Commands: rows (pre-0.3 layout) or the
+ *  Groups:/Top-level: rows (0.3+ layout) plus `doc types:`/`shorthand:`
+ *  lines. Indentation-based: rows are `  name   summary`, a section
+ *  ends at a blank line. A group's member list is a deeper-indented
+ *  continuation of bare words — each word names a dispatched command
+ *  (`alias→target` counts the alias's own name). */
 function parseTopLevelHelp(out: string): TopHelp {
   const commands = new Map<string, string>();
   const docNouns: string[] = [];
   const docVerbs: string[] = [];
   let inCmds = false;
+  let inGroups = false;
   for (const line of out.split('\n')) {
-    if (/^\s*Commands:\s*$/.test(line)) {
+    if (/^\s*(Commands:|Groups:|Top-level:)\s*$/.test(line)) {
       inCmds = true;
+      inGroups = /^\s*Groups:\s*$/.test(line);
       continue;
     }
     if (!inCmds) {
@@ -231,8 +236,22 @@ function parseTopLevelHelp(out: string): TopHelp {
       commands.set(row[1]!, row[2]!);
       continue;
     }
+    // a group's member list — bare words under a group row; the members
+    // are dispatched names the docs may call verbatim (`bro act`, `bro
+    // debt` — the flat spellings the group layout keeps working)
+    const members = /^\s{4,}([a-z][a-z0-9→-]*(?:\s+[a-z][a-z0-9→-]*)*)\s*$/.exec(line);
+    if (inGroups && members !== null) {
+      for (const word of members[1]!.split(/\s+/)) {
+        const name = word.split('→')[0]!;
+        if (!commands.has(name)) {
+          commands.set(name, 'group member');
+        }
+      }
+      continue;
+    }
     if (line.trim() === '') {
       inCmds = false;
+      inGroups = false;
     }
   }
   return { commands, docNouns, docVerbs };

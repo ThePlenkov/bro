@@ -991,6 +991,11 @@ function serveClients(raw: unknown): ServeClients | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Node's timer ceiling — a delay above it wraps and fires at once, so
+ *  a window above the ceiling would be instant instead of late. Every
+ *  window that reaches a timer is clamped to it. */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
@@ -1048,9 +1053,10 @@ export const serveSection: ConfigSection<{
   if (fastModel !== undefined) out.fastModel = fastModel;
   if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
   // the idle window — 0 disables the release, a negative or fractional
-  // value is not a window at all (the loader drops it, the default wins)
+  // value is not a window at all (the loader drops it, the default wins),
+  // and a window above the timer ceiling is clamped (late, not instant)
   if (typeof obj.idleReleaseMs === 'number' && Number.isInteger(obj.idleReleaseMs)) {
-    if (obj.idleReleaseMs >= 0) out.idleReleaseMs = obj.idleReleaseMs;
+    if (obj.idleReleaseMs >= 0) out.idleReleaseMs = Math.min(obj.idleReleaseMs, MAX_TIMER_MS);
   }
   // the churn budgets — a budget is a COUNT, so a fractional or
   // non-positive value is not a budget (the loader drops it, the
@@ -1062,7 +1068,7 @@ export const serveSection: ConfigSection<{
     if (obj.acpMaxAbandoned > 0) out.acpMaxAbandoned = obj.acpMaxAbandoned;
   }
   if (typeof obj.acpStallMs === 'number' && Number.isInteger(obj.acpStallMs)) {
-    if (obj.acpStallMs >= 0) out.acpStallMs = obj.acpStallMs;
+    if (obj.acpStallMs >= 0) out.acpStallMs = Math.min(obj.acpStallMs, MAX_TIMER_MS);
   }
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
