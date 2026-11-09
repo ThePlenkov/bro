@@ -620,6 +620,37 @@ export function patchAgentRegistry(
   });
 }
 
+/** Conditional read-modify-write — `patch` lands only while `onlyIf`
+ *  still accepts the CURRENT entry, all under the one registry lock.
+ *  This is the patch-shaped CAS twin of `removeAgentRegistryEntries`'s
+ *  `expected`: a caller settling a failed attempt must never rewrite a
+ *  row a parallel respawn replaced between its probe and its write —
+ *  the check and the write are one critical section here. Returns the
+ *  patched entry, or undefined when the predicate refused. */
+export function patchAgentRegistryIf(
+  dir: string,
+  molStep: string,
+  patch: Partial<AgentRegistryEntry>,
+  onlyIf: (cur: AgentRegistryEntry | undefined) => boolean
+): AgentRegistryEntry | undefined {
+  return withAgentRegistryLock(dir, () => {
+    const reg = readAgentRegistry(dir);
+    const cur = reg[molStep];
+    if (!onlyIf(cur)) {
+      return undefined;
+    }
+    const next = { ...(cur ?? { agentId: '', backend: '', spawnedAt: '' }), ...patch };
+    if (patch.stopped === true && Array.isArray(next.attempts)) {
+      next.attempts = (next.attempts as unknown[]).map(a =>
+        a !== null && typeof a === 'object' ? { ...a, stopped: true } : a
+      );
+    }
+    reg[molStep] = next;
+    writeAgentRegistry(dir, reg);
+    return next;
+  });
+}
+
 /** Remove entries by molStep key — the prune path for terminal
  *  records (the caller decides which states are reapable; this only
  *  guarantees the same lock+atomic-write discipline as a patch).

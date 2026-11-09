@@ -492,6 +492,7 @@ export {
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
+  patchAgentRegistryIf,
   probeStep,
   readAgentRegistry,
   removeAgentRegistryEntries,

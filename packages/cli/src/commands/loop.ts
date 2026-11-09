@@ -82,6 +82,7 @@ import {
   awaitFileLock,
   BATCH_MARKER_ENV,
   type BrouterModels,
+  bdActor,
   bodyMeta,
   CLASS_LABEL_PREFIX,
   type ClaimCapability,
@@ -108,8 +109,10 @@ import {
   mkdirPrivateSync,
   openPrivateAppendSync,
   patchAgentRegistry,
+  patchAgentRegistryIf,
   pidAlive,
   printUsage,
+  probeStep,
   procStat,
   projectId,
   type ResolvedClass,
@@ -1105,8 +1108,46 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     // before claimStep): a pid-less entry reads as a remote worker in
     // flight and walls the retry's re-pick — mark this push's own entry
     // dead. A refusal thrown before the pin leaves none to kill.
-    if (readAgentRegistry(ctx.root)[m.beads[0]!.id] !== undefined) {
-      patchAgentRegistry(ctx.root, m.beads[0]!.id, { stopped: true, spawnError: msg });
+    //
+    // Ownership: a surviving row is this attempt's ONLY while it still
+    // carries the failure stamp the dying connector wrote onto its own
+    // row before throwing — commitSpawn clears spawnError/pid on every
+    // fresh row, so a pid-less entry whose stamp matches this error can
+    // only be our dead pin. A racing respawn's fresh row has neither
+    // and must never be stopped. The predicate and the write ride ONE
+    // registry lock — a separate read-then-patch could stop a live
+    // worker that slipped between the two.
+    patchAgentRegistryIf(
+      ctx.root,
+      m.beads[0]!.id,
+      { stopped: true, spawnError: msg },
+      cur =>
+        cur !== undefined &&
+        cur.stopped !== true &&
+        cur.pid === undefined &&
+        typeof cur.spawnError === 'string' &&
+        cur.spawnError !== '' &&
+        (msg.includes(cur.spawnError) || cur.spawnError.includes(msg))
+    );
+    // The lead's claim can survive a post-commit backend failure too
+    // (the connector's CAS rollback only covers commitSpawn's own
+    // writes): claimStep succeeded, then tmux/launch died, and the lead
+    // sits in_progress with no worker — ready skips it, the infra hold
+    // can't re-pick it. Reopen it ONLY while the claim still names an
+    // owner this spawn wrote: the attempt's actor (bdActor) or the
+    // claimAs identity (the step id itself). An assignee a foreign loop
+    // moved meanwhile is theirs — reopening would steal a live claim.
+    // Batch members were claimMembers'd by this push and release
+    // unconditionally below.
+    const leadClaim =
+      ctx.beadsDir !== undefined ? probeStep(ctx.beadsDir, m.beads[0]!.id) : undefined;
+    if (
+      leadClaim?.status === 'in_progress' &&
+      leadClaim.assignee !== undefined &&
+      leadClaim.assignee !== '' &&
+      (leadClaim.assignee === bdActor(ctx.beadsDir!) || leadClaim.assignee === m.beads[0]!.id)
+    ) {
+      reopenBead(ctx, m.beads[0]!.id);
     }
     // batch members claimed by claimMembers remain in_progress even if
     // the lead spawn never landed; release them now so the retry can
@@ -2368,6 +2409,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     }
     // a reaped entry can't prove its death — 'lost' settles it below
   }
+  // a successful status read clears the strike count — isolated fetch
+  // errors between healthy polls must not accumulate toward the park
+  m.fetchErrors = 0;
   const superseded =
     info?.spawnedAt !== undefined && w.spawnedAt !== undefined && info.spawnedAt !== w.spawnedAt;
   const state: AgentState = superseded || info === undefined ? 'lost' : info.state;
@@ -2498,6 +2542,19 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     return 'kept';
   }
   m.nextPollAt = undefined;
+  // finish a marker that died mid-settle: when watchBegin threw inside
+  // the worker's PR-discovery settle, m.pr is already armed and
+  // m.worker already cleared — a retry would service the gate with a
+  // null marker forever, and act rearm could never resurrect the PR.
+  // Complete the begin BEFORE the refresh/gate below; a throw here
+  // strikes fetchErrors and re-polls, so the marker eventually lands
+  // or the member parks on the same budget as any fetch outage.
+  if (m.marker === null && m.pr !== undefined) {
+    m.marker = watchBegin(ctx.root, {
+      ...loopWatch(m.pr, prRef(ctx, m.pr), m.item.worktreeDir, ctx.cfg),
+      bead: m.beads.map(b => b.id).join(','),
+    });
+  }
   // re-stamp the member's marker on every real service tick — stallMin
   // is advisory, so a running member outlives the marker's priced TTL
   // (the 24h floor included) and a pruned marker reads as an orphaned
@@ -2575,6 +2632,9 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     );
     return leave(m, 'parked');
   }
+  // a successful fetch clears the strike count — isolated fetch errors
+  // between healthy polls must not accumulate toward the park
+  m.fetchErrors = 0;
   const act = memberAction(snap, m, {
     fixRounds: ctx.cfg.fixRounds,
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
@@ -4388,6 +4448,10 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     let verdict: ServiceVerdict;
     try {
       verdict = await serviceMember(ctx, m);
+      // a clean service pass clears the strike count — isolated
+      // service failures between healthy polls must not accumulate
+      // toward the park (the settle-failure counter is separate)
+      m.fetchErrors = 0;
     } catch (err) {
       // a member's settle can still throw on infra — the task store
       // wedged mid-write, a dead spawn, a failed projection call. That's
