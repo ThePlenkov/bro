@@ -1041,7 +1041,6 @@ serveSection.jsonSchema = js.obj({
   fastLane: js.bool,
 });
 
-
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
  *  native tracker items at PR time. Beads stays the source of truth;

@@ -2501,7 +2501,9 @@ function logServePlanes(planes: {
   const { conductorCfg, providerCfg } = planes;
   if (conductorCfg !== undefined) {
     const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
-    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`);
+    console.log(
+      `provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`
+    );
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }

@@ -2474,9 +2474,7 @@ function fastLaneOf(
   }
   // a disabled lane is the operator's intent — only a missing upstream
   // key earns the unrouted observability marker
-  return cfg.fastDisabled === true
-    ? { lane: 'session' }
-    : { lane: 'session', unrouted: true };
+  return cfg.fastDisabled === true ? { lane: 'session' } : { lane: 'session', unrouted: true };
 }
 
 async function messages(

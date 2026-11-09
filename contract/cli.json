@@ -189,10 +189,7 @@
       "name": "watchdog",
       "group": "flow",
       "summary": "Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]",
-      "spellings": [
-        "watchdog",
-        "flow watchdog"
-      ],
+      "spellings": ["watchdog", "flow watchdog"],
       "aliases": [],
       "hidden": false,
       "skill": "watchdog",
@@ -852,9 +849,7 @@
     "router": {
       "name": "router",
       "summary": "The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]",
-      "spellings": [
-        "router"
-      ],
+      "spellings": ["router"],
       "aliases": [],
       "hidden": false,
       "skill": "brouter",

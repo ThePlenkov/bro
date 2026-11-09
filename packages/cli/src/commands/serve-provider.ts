@@ -185,7 +185,10 @@ export interface ForwardOptions {
  *  against nobody's session, and a stalled upstream must not hold the
  *  request open past the turn budget it answers under. `drop` clears
  *  the deadline. */
-function laneAbort(res: ServerResponse, timeoutMs?: number): { signal: AbortSignal; drop: () => void } {
+function laneAbort(
+  res: ServerResponse,
+  timeoutMs?: number
+): { signal: AbortSignal; drop: () => void } {
   const abort = new AbortController();
   res.on('close', () => abort.abort());
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort.abort(), timeoutMs);
