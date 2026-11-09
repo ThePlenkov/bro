@@ -125,10 +125,6 @@ import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import '@broject/devin';
-import { assertMutableConfig } from '../config-policy.ts';
-import { enterWorktree } from '../commands/work.ts';
-import { writeCopilotCount } from '../session-planes/copilot.ts';
 import {
   devinLogsDir,
   devinPidBead,
@@ -138,6 +134,9 @@ import {
   devinSessionPlane,
   listDevinSessions,
 } from '@broject/devin';
+import { assertMutableConfig } from '../config-policy.ts';
+import { enterWorktree } from '../commands/work.ts';
+import { writeCopilotCount } from '../session-planes/copilot.ts';
 
 export * from '@broject/core';
 export { otelEvent } from '@broject/providers';
@@ -235,12 +234,7 @@ export type {
   SpawnWorker,
 };
 import '../session-planes/copilot.ts';
-import {
-  type LaneAdmission,
-  laneGateAdmission,
-  laneGateTake,
-  reconcileLanePauseForRegistry,
-} from '../lane.ts';
+import { type LaneAdmission, laneGateTake } from '../lane.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -1101,7 +1095,7 @@ function isAllowedByEnvPolicy(
   if (key === 'BRO_PIPELINE_KEY') return false;
   if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
   // strict mode: only allowlisted
-  if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
+  if (policy.envAllowlist?.includes(key) === true) return true;
   // allow provider API key if known
   if (spec.provider && env.providers?.[spec.provider]) {
     const p = env.providers[spec.provider] as any;
@@ -2477,7 +2471,7 @@ function commitSpawn(
   opts: {
     entry?: (agentId: string) => Record<string, unknown>;
     claimAs?: string;
-    sessionQuota?: SessionQuotaLane | undefined;
+    sessionQuota?: SessionQuotaLane;
   },
   /** The run's write facts — the minted id, the claim verdict, the
    *  registry row this spawn replaces, and the work lease it holds. */
@@ -2530,12 +2524,8 @@ function commitSpawn(
   // `down` cleared this step's walls — a respawn over a stopped entry
   // must not resurrect the pre-stop attempt records: carried over they'd
   // re-wall the provider the moment the fresh entry's stopped flips false
-  const attempts =
-    existing?.stopped === true
-      ? []
-      : Array.isArray(existing?.attempts)
-        ? (existing.attempts as unknown[])
-        : [];
+  const priorAttempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : [];
+  const attempts = existing?.stopped === true ? [] : priorAttempts;
   const nextAttempts = outgoingAttempt === undefined ? attempts : [...attempts, outgoingAttempt];
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
@@ -3144,9 +3134,37 @@ function procTreeIndex(entries: ProcEntry[]): {
   const children = new Map<number, number[]>();
   for (const e of entries) {
     byPid.set(e.pid, e);
-    children.set(e.ppid, [...(children.get(e.ppid) ?? []), e.pid]);
+    // push into the existing list — copying the array per entry makes
+    // the /proc scan O(N²) on busy hosts (status/stop call it per probe)
+    const list = children.get(e.ppid);
+    if (list === undefined) {
+      children.set(e.ppid, [e.pid]);
+    } else {
+      list.push(e.pid);
+    }
   }
   return { byPid, children };
+}
+
+/** Pre-signal group ownership re-check — a pgid captured by the unit
+ *  snapshot may have been emptied and recycled between scan and kill,
+ *  and kill(-g) would then land SIGTERM on an unrelated process group.
+ *  A group is still ours while a live member recorded in the snapshot
+ *  sits in it carrying its recorded starttime (the pid+start identity
+ *  pin the liveness probes use); members recorded without a starttime
+ *  stay fail-open the way pidAlive does. */
+function unitOwnsGroup(
+  scan: { entries: ProcEntry[] },
+  g: number,
+  recorded: ReadonlyMap<number, string | undefined>
+): boolean {
+  return scan.entries.some(
+    e =>
+      e.pgrp === g &&
+      e.state !== 'Z' &&
+      recorded.has(e.pid) &&
+      (recorded.get(e.pid) === undefined || e.start === recorded.get(e.pid))
+  );
 }
 
 /** Live state for a registry entry under this backend. */
@@ -3851,7 +3869,32 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         const snap = unitSnapshot(pid);
         unit = snap.members;
         const groups = new Set<number>([pid, ...snap.groups]);
+        // pid → recorded starttime for every pid the snapshot owns —
+        // the identity table the per-group re-check below signals
+        // against (a recycled pgid holds none of these pids)
+        const recorded = new Map<number, string | undefined>([[pid, start]]);
+        for (const m of unit) {
+          recorded.set(m.pid, m.start);
+        }
         for (const g of groups) {
+          // re-verify the group is still ours before signaling: between
+          // snapshot and kill the group could have emptied and its pgid
+          // been recycled, and kill(-g) would then hit an unrelated
+          // process group. The wrapper's own group gets the weaker
+          // groupMemberAlive re-check when no recorded member answers:
+          // a descendant that already outlived the wrapper is absent
+          // from the pre-death snapshot yet still holds the group, and
+          // skipping it would leak the unit's last writer. Off /proc
+          // (scan null) no re-check is possible — the legacy signal
+          // stands, same as before.
+          const fresh = scanProc();
+          if (
+            fresh !== null &&
+            !unitOwnsGroup(fresh, g, recorded) &&
+            !(g === pid && groupMemberAlive(pid, start))
+          ) {
+            continue;
+          }
           try {
             // a lane-paused group (spec bro-y3jvd) pends every signal —
             // SIGCONT first or the TERM below waits on a stopped process
@@ -4157,7 +4200,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             .filter(
               (e): e is [string, string] =>
                 e[1] !== undefined &&
-                /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
+                /^[A-Za-z_]\w*$/.test(e[0]) &&
                 !AGENT_PIN_KEYS.has(e[0]) &&
                 !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
                 isAllowedByEnvPolicy(
@@ -4425,6 +4468,12 @@ function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string;
   };
 }
 
+/** gc failure detail — stderr when the run wrote any, else the bare
+ *  exit code. Shared so the failure messages below stay flat
+ *  templates. */
+const gcErr = (r: { code: number; err: string }): string =>
+  r.err !== '' ? r.err : `exited ${r.code}`;
+
 /** `gc session list` row — only the fields this connector reads; the
  *  schema carries more (`gc session list --json-schema result`). */
 interface GcSession {
@@ -4633,10 +4682,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // a failed init must not leave the marker standing — otherwise the
       // next spawn sees city.toml and skips init on a half-built city
       rmSync(toml, { force: true });
-      throw new SpawnError(
-        `gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`,
-        'unavailable'
-      );
+      throw new SpawnError(`gc init failed — ${gcErr(init)}`, 'unavailable');
     }
   };
 
@@ -4676,10 +4722,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
       // the worker, so the env table filters them out and re-injects
       // the connector's own below
-      ([k]) =>
-        /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) &&
-        !AGENT_PIN_KEYS.has(k) &&
-        !GIT_REPOSITORY_ENV_KEYS.has(k)
+      ([k]) => /^[A-Za-z_]\w*$/.test(k) && !AGENT_PIN_KEYS.has(k) && !GIT_REPOSITORY_ENV_KEYS.has(k)
     );
     // caller env plus the connector-owned identity pins — pins always
     // render so the table exists even when spec.env is empty
@@ -4723,10 +4766,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (!registered) {
       const add = gcRun(['rig', 'add', rigDir, '--adopt', '--city', city], 60_000);
       if (add.code !== 0) {
-        throw new SpawnError(
-          `gc rig add ${rigDir} failed — ${add.err !== '' ? add.err : `exited ${add.code}`}`,
-          'unavailable'
-        );
+        throw new SpawnError(`gc rig add ${rigDir} failed — ${gcErr(add)}`, 'unavailable');
       }
     }
   };
@@ -4737,10 +4777,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (gcSupervisorRunning() !== true) {
       const start = gcRun(['start', city], 120_000);
       if (start.code !== 0) {
-        throw new SpawnError(
-          `gc start failed — ${start.err !== '' ? start.err : `exited ${start.code}`}`,
-          'unavailable'
-        );
+        throw new SpawnError(`gc start failed — ${gcErr(start)}`, 'unavailable');
       }
     }
   };
@@ -4788,9 +4825,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (alive !== undefined) {
       const reset = gcRun(['session', 'reset', alive.id, '--city', city]);
       if (reset.code !== 0) {
-        throw new Error(
-          `gc session reset ${alive.id} — ${reset.err !== '' ? reset.err : `exited ${reset.code}`}`
-        );
+        throw new Error(`gc session reset ${alive.id} — ${gcErr(reset)}`);
       }
       return alive.id;
     }
@@ -4809,9 +4844,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       120_000
     );
     if (created.code !== 0) {
-      throw new Error(
-        `gc session new ${spec.molStep} — ${created.err !== '' ? created.err : `exited ${created.code}`}`
-      );
+      throw new Error(`gc session new ${spec.molStep} — ${gcErr(created)}`);
     }
     let v: { session_id?: string; ok?: boolean };
     try {
@@ -4838,15 +4871,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   const dispatchStep = (spec: SpawnSpec, city: string): void => {
     const sling = gcRun(['sling', spec.molStep, spec.molStep, '--city', city]);
     if (sling.code !== 0) {
-      throw new Error(
-        `gc sling ${spec.molStep} — ${sling.err !== '' ? sling.err : `exited ${sling.code}`}`
-      );
+      throw new Error(`gc sling ${spec.molStep} — ${gcErr(sling)}`);
     }
     const submit = gcRun(['session', 'submit', spec.molStep, spec.prompt, '--city', city]);
     if (submit.code !== 0) {
-      throw new Error(
-        `gc session submit ${spec.molStep} — ${submit.err !== '' ? submit.err : `exited ${submit.code}`}`
-      );
+      throw new Error(`gc session submit ${spec.molStep} — ${gcErr(submit)}`);
     }
   };
 
@@ -4862,9 +4891,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     const { sessions } = listGcSessions(city);
     const s = sessions?.find(x => x.id === target || x.alias === molStep);
     if (s === undefined ? sessions === undefined : gcState(s) !== 'exited') {
-      throw new Error(
-        `gc session close ${target} — ${close.err !== '' ? close.err : `exited ${close.code}`}`
-      );
+      throw new Error(`gc session close ${target} — ${gcErr(close)}`);
     }
   };
 
@@ -4998,9 +5025,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             sessionId,
             spawnError: err instanceof Error ? err.message : String(err),
           });
-          throw err instanceof SpawnError
-            ? err
-            : new SpawnError(err instanceof Error ? err.message : String(err), 'unavailable');
+          const why = err instanceof Error ? err.message : String(err);
+          throw err instanceof SpawnError ? err : new SpawnError(why, 'unavailable');
         }
         return patchAgentRegistry(dir, spec.molStep, { sessionId });
       });
@@ -5117,10 +5143,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
       const r = gcRun(['stop', city], 120_000);
       if (r.code !== 0) {
-        throw new SpawnError(
-          `gc stop failed — ${r.err !== '' ? r.err : `exited ${r.code}`}`,
-          'unavailable'
-        );
+        throw new SpawnError(`gc stop failed — ${gcErr(r)}`, 'unavailable');
       }
     },
 
@@ -5611,7 +5634,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
     .filter((e): e is [string, string] => {
       if (
         e[1] === undefined ||
-        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
+        !/^[A-Za-z_]\w*$/.test(e[0]) ||
         AGENT_PIN_KEYS.has(e[0]) ||
         GIT_REPOSITORY_ENV_KEYS.has(e[0])
       ) {
@@ -6530,7 +6553,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   const targetRepo = (spec: SpawnSpec): { owner: string; repo: string; slug: string } => {
     const slug = knobString('repo') ?? copilotRemoteRepo(spec.repoRoot);
     const m = slug === undefined ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(slug);
-    if (m === null || m[1] === undefined || m[2] === undefined || slug === undefined) {
+    if (m?.[1] === undefined || m?.[2] === undefined || slug === undefined) {
       throw new SpawnError(
         `no repository to dispatch the copilot task against — set agents.copilot.repo ` +
           `('owner/repo') or an origin remote on ${spec.repoRoot}`,

@@ -1,3 +1,2 @@
-import { registerAgentConnector } from './core.ts'
-import { makeNativeConnector } from './core.ts'
-registerAgentConnector('native', makeNativeConnector, {}, { builtin: true })
+import { makeNativeConnector, registerAgentConnector } from './core.ts';
+registerAgentConnector('native', makeNativeConnector, {}, { builtin: true });
