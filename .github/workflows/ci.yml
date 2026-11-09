@@ -49,6 +49,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test E2E
+        run: npm run test:e2e
+
       - name: Hook latency baseline
         # earlier steps may fail after the build — run anyway when the
         # dist exists so the artifact survives the run that needs it

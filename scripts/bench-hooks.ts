@@ -131,8 +131,6 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
 }
 
-const VALUE_FLAGS = new Set(['--runs', '--warmup', '--out', '--budget', '--lanes']);
-
 function argValue(argv: string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
   if (i < 0) {

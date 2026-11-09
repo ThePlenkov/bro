@@ -24,6 +24,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   loadConfig,
   lockHolderPid,
@@ -43,12 +44,12 @@ export interface PulseMarker {
 }
 
 export function pulseMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'pulse.json')
 }
 
 export function pulseLockPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'pulse.lock')
 }
 
@@ -80,17 +81,24 @@ export function armPulse(dir: string, everySec: number): { state: ArmState; mark
   return { state: cur === null ? 'armed' : 'updated', marker }
 }
 
-export type DisarmState = 'disarmed' | 'absent'
+export type DisarmState = 'disarmed' | 'absent' | 'unknown'
 
 /** Remove the want-marker. The running pulse (if any) keeps its lock —
  *  disarming only drops the rearm intent. */
 export function disarmPulse(dir: string): DisarmState {
   const file = pulseMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
+  if (file === null) {
+    return 'unknown'
+  }
+  if (!existsSync(file)) {
     return 'absent'
   }
-  rmSync(file)
-  return 'disarmed'
+  try {
+    rmSync(file)
+    return 'disarmed'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** Is a `bro watch --every` alive on this repo? The lock's holder pid
@@ -131,7 +139,7 @@ export interface PulseSpawn {
  *  — without it every postTool would pile another standby on a dead
  *  incumbent. */
 export function pulseSpawnPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'pulse.spawn.json')
 }
 
