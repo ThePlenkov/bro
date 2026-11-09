@@ -74,6 +74,45 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
     })
   })
 
+  test('the base is fetched before the spawn — the rebase target is the tip, not a stale ref', async () => {
+    // bro-by8d3: the repo's tracking refs are as old as the last fetch
+    // anybody ran; the drive lane ran none. The rebase fixer must get
+    // the base's tip at spawn time, and the work order must name it.
+    const f = fixture()
+    await insideAsync(f.main, f.root, async () => {
+      git(['init', '-q', '--bare', join(f.root, 'origin.git')], f.root)
+      git(['remote', 'add', 'origin', join(f.root, 'origin.git')], f.main)
+      git(['push', '-qu', 'origin', 'main'], f.main)
+      // main advances on the remote; the local tracking ref is dropped,
+      // so only a fetch can bring the tip back
+      git(['commit', '-qm', 'remote', '--allow-empty'], f.main)
+      git(['push', '-q', 'origin', 'main'], f.main)
+      const tip = git(['rev-parse', 'HEAD'], f.main).trim()
+      git(['update-ref', '-d', 'refs/remotes/origin/main'], f.main)
+      git(['branch', 'work/fx-a'], f.main)
+      writeHostState(f.hostState, { prs: conflicting })
+
+      const first = verdict(f.run(['--once', '--json']))
+      assert.equal(first.verdict, 'spawned', first.detail)
+
+      // the base tip is in the repo now — fetched by the drive, not by luck
+      assert.equal(git(['rev-parse', 'origin/main'], f.main).trim(), tip)
+
+      const agentsDir = join(f.main, '.git', 'bro', 'agents')
+      assert.equal(
+        await waitFor(
+          () =>
+            existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.prompt.md'))
+        ),
+        true
+      )
+      const pf = readdirSync(agentsDir).find((n) => n.endsWith('.prompt.md'))!
+      const prompt = readFileSync(join(agentsDir, pf), 'utf8')
+      assert.match(prompt, new RegExp(tip))
+      assert.match(prompt, /Fetch the base AGAIN, immediately before the rebase/)
+    })
+  })
+
   test('an occupied conflicted PR stays occupied — never force-spawned', async () => {
     const f = fixture()
     await insideAsync(f.main, f.root, async () => {

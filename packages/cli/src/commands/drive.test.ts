@@ -26,6 +26,7 @@ import {
   detailMatches,
   driveArgs,
   ensureFixerWorktree,
+  fetchBaseTip,
   fixerAttemptSpent,
   fixerBeadFor,
   fixerRef,
@@ -1119,6 +1120,86 @@ describe('buildRebaseFixerPrompt', () => {
     assert.match(p, /--force-with-lease/);
     assert.match(p, /NEVER merge/);
   });
+
+  test('names the fetched base tip and orders the work fetch → verify → re-check → rebase', () => {
+    // bro-by8d3: the base tip bro fetched is the target, and the fixer
+    // must notice the base moving under it instead of rebasing blind
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseSha: 'abc1234',
+      worktree: '/repos/bro--bro-a',
+    });
+    assert.match(p, /abc1234/);
+    assert.match(p, /must still read `abc1234`/);
+    assert.match(p, /Fetch the base AGAIN, immediately before the rebase/);
+    assert.match(p, /gh pr view\s+42 --json mergeable/);
+    assert.match(p, /MERGEABLE means the conflict dissolved — STOP/);
+    // the fetch lands BEFORE the rebase in the order of work
+    assert.ok(p.indexOf('Fetch the base AGAIN') < p.indexOf('git rebase origin/main'));
+  });
+
+  test('a base bro could not fetch says so — no invented sha', () => {
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      worktree: '/repos/bro--bro-a',
+    });
+    assert.match(p, /could not fetch `origin\/main`/);
+    assert.doesNotMatch(p, /must still read/);
+  });
+});
+
+describe('fetchBaseTip', () => {
+  test('fetches the base and reads its tip — a stale tracking ref is refreshed', () => {
+    const { root, main } = initRepo('bro-drive-base-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-qu', 'origin', 'main'], main);
+      // the remote advances; the local tracking ref stays behind
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main'], main);
+      const tip = git(['-C', main, 'rev-parse', 'HEAD'], main).trim();
+      git(['update-ref', '-d', 'refs/remotes/origin/main'], main);
+
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.sha, tip);
+      assert.equal(r.err, undefined);
+      assert.equal(git(['-C', main, 'rev-parse', 'origin/main'], main).trim(), tip);
+    });
+  });
+
+  test('a repo with no origin remote skips — there is nothing to fetch', () => {
+    const { root, main } = initRepo('bro-drive-basen-');
+    inside(main, root, () => {
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.skipped, true);
+      assert.equal(r.sha, undefined);
+      assert.equal(r.err, undefined);
+    });
+  });
+
+  test('a base the remote does not have skips; a broken remote is an error', () => {
+    const { root, main } = initRepo('bro-drive-basex-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      assert.equal(fetchBaseTip(main, 'main').skipped, true);
+
+      // a remote that is not a repository — the fetch fails for a real
+      // reason: the spawn must be refused, not the base guessed
+      git(['remote', 'set-url', 'origin', join(root, 'nope.git')], main);
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.sha, undefined);
+      assert.equal(r.skipped, undefined);
+      assert.ok(r.err !== undefined && r.err.length > 0);
+    });
+  });
 });
 
 describe('ensureFixerWorktree', () => {
@@ -1196,8 +1277,25 @@ describe('ensureFixerWorktree', () => {
     });
   });
 
-  test('a branch diverged from its remote is refused, never clobbered', () => {
-    const { root, main } = initRepo('bro-drive-wtd-');
+  test('an occupied checkout is never refreshed — the guard answers before the move', () => {
+    // bro-by8d3: the branch of a live session is not moved, not even by
+    // a fast-forward. The guard is asked BEFORE the refresh.
+    const { root, main } = initRepo('bro-drive-wto-');
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main);
+      // the remote advances — a refresh would fast-forward the branch
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main);
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main);
+      const before = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
+      const r = ensureFixerWorktree(main, 'work/bro-a', () => 'session armed work on work/bro-a');
+      assert.equal(r.path, undefined);
+      assert.equal(r.occupied, 'session armed work on work/bro-a');
+      assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), before);
+    });
+  });
+
+  test('a branch diverged from its remote is refused, never clobbered', () => {    const { root, main } = initRepo('bro-drive-wtd-');
     inside(main, root, () => {
       const dir = remoteBackedCheckout(root, main);
       // local tip one way, remote the other — the tracking ref is

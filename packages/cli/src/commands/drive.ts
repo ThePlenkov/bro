@@ -704,6 +704,41 @@ function addFixerWorktree(
   return { err: retry.err || add.err };
 }
 
+/** The base ref's tip, fetched NOW (bro-by8d3). The rebase target is a
+ *  fact, not a guess: the repo's remote-tracking refs are as old as the
+ *  last fetch anybody in the repo ran, and the drive lane ran none — a
+ *  rebase onto that ref lands on a base that has already moved, and the
+ *  PR stays CONFLICTING after a whole fixer round (the 2026-11-07
+ *  incident: rebased onto 780fc295 while main was at 96fca6d1).
+ *
+ *  `skipped` is the honest answer for a repo with no `origin` remote (or
+ *  a base that lives only locally): there is nothing to fetch, and the
+ *  work order says so instead of naming a sha. `err` is a fetch that
+ *  failed for any other reason — the caller refuses the spawn, because
+ *  a rebase onto a known-stale base is worse than no rebase. */
+export function fetchBaseTip(
+  dir: string,
+  base: string
+): { sha?: string; skipped?: boolean; err?: string } {
+  const remote = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  if (remote.code !== 0) {
+    return { skipped: true };
+  }
+  const fetch = gitTry(['-C', dir, 'fetch', 'origin', base, '--quiet']);
+  if (fetch.code !== 0) {
+    // the remote has no such branch — nothing to fetch, not a failure
+    if (/couldn't find remote ref|remote ref does not exist|no such ref/i.test(fetch.err)) {
+      return { skipped: true };
+    }
+    return { err: fetch.err.trim() || `git fetch origin ${base} failed` };
+  }
+  const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `origin/${base}`]);
+  if (tip.code !== 0) {
+    return { skipped: true };
+  }
+  return { sha: tip.out.trim() };
+}
+
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
  *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
  *  caller can retire it when the work evaporates. A dir standing on
@@ -712,11 +747,18 @@ function addFixerWorktree(
  *  `<repo>--work-x` path instead of refusing as foreign. Either path is
  *  handed over only once it can reach origin/<branch>'s tip — a fixer
  *  rebasing a stale tip omits the commits pushed since, and the lease
- *  push drops them on the PR. */
+ *  push drops them on the PR.
+ *
+ *  `guard` is the occupancy answer for a candidate checkout (bro-by8d3):
+ *  a checkout a live session owns is never refreshed — the branch of
+ *  another writer is not moved, not even by a fast-forward. The guard
+ *  closes the window BEFORE the mutation; the spawn's locked re-check
+ *  closes it before the spawn. */
 export function ensureFixerWorktree(
   mainRoot: string,
-  branch: string
-): { path?: string; created?: boolean; err?: string } {
+  branch: string,
+  guard?: (dir: string) => string | undefined
+): { path?: string; created?: boolean; err?: string; occupied?: string } {
   // fetch first — an orphaned PR's remote head may be newer than ours;
   // a branch diverged from it is refused outright: no checkout of it
   // can keep both histories
@@ -727,6 +769,10 @@ export function ensureFixerWorktree(
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name);
     if (existsSync(dir)) {
+      const owner = guard?.(dir);
+      if (owner !== undefined) {
+        return { occupied: owner };
+      }
       const r = reuseFixerWorktree(dir, branch);
       if (r !== undefined) {
         return r;
@@ -1190,7 +1236,22 @@ async function spawnFixer(
   let wt = worktree;
   let created = false;
   if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef);
+    const fresh = freshOccupancy(ctx.mainRoot, known);
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef, dir =>
+      occupied({
+        agents: fresh.agents,
+        fixerBead: fixer?.id,
+        branch: state.headRef,
+        worktree: dir,
+        workDetails: fresh.workDetails,
+        scanProc: agentProcessesIn,
+        pr,
+        watches: fresh.watches,
+      })
+    );
+    if (ensured.occupied !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: ensured.occupied };
+    }
     if (ensured.path === undefined) {
       return { pr, link, verdict: 'no-worktree', detail: ensured.err };
     }
@@ -1252,14 +1313,36 @@ async function spawnFixer(
  *  conflict round (`buildRebasePrompt` in @broject/loop): the gate
  *  reports CONFLICTING, the fixer rebases the PR's branch onto its
  *  declared base and force-pushes. The rebase IS the fix: no thread
- *  work is owed on this spawn. */
+ *  work is owed on this spawn.
+ *
+ *  `baseSha` is the base tip bro fetched right before the spawn
+ *  (bro-by8d3). It travels into the work order because the base moves:
+ *  a rebase onto a stale tip is a rebase that stays conflicting, and
+ *  the PR goes back to CONFLICTING for another round. The order of
+ *  operations is fetch → verify the tip → re-check the PR → rebase. */
 export function buildRebaseFixerPrompt(opts: {
   pr: number;
   link: string;
   branch: string;
   base: string;
+  baseSha?: string;
   worktree: string;
 }): string {
+  const target =
+    opts.baseSha === undefined
+      ? `bro could not fetch \`origin/${opts.base}\` here — fetch it yourself before the rebase.`
+      : `bro fetched \`origin/${opts.base}\` and it read \`${opts.baseSha}\`. That is the base tip you rebase onto: a rebase onto a stale base is a rebase that stays conflicting.`;
+  const moved =
+    opts.baseSha === undefined
+      ? ''
+      : [
+          '',
+          '  Fetch the base AGAIN, immediately before the rebase — `git rev-parse',
+          `  origin/${opts.base}\` must still read \`${opts.baseSha}\`. If it moved, the base`,
+          '  advanced under you: re-check the PR (`gh pr view',
+          `  ${opts.pr} --json mergeable\`). MERGEABLE means the conflict dissolved — STOP`,
+          '  and report that; do not rebase. CONFLICTING means rebase onto the new tip.',
+        ].join('\n');
   return [
     `# Rebase fixer — ${opts.link}`,
     '',
@@ -1268,6 +1351,8 @@ export function buildRebaseFixerPrompt(opts: {
     '',
     `This PR has merge conflicts with its base branch \`${opts.base}\`. The rebase`,
     'IS the work — no review-thread fixing is owed on this spawn.',
+    '',
+    target + moved,
     '',
     `- \`git fetch origin ${opts.branch} ${opts.base}\` — the PR branch too:`,
     '  commits pushed since this checkout was made are invisible to a stale',
@@ -1571,11 +1656,38 @@ async function spawnRebaseFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'conflict-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase');
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase', known);
   if ('verdict' in lane) {
     return lane;
   }
   const wt = lane.wt;
+  // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
+  // as old as the last fetch anybody in the repo ran, and the drive lane
+  // ran none. A fetch that failed for a real reason refuses the spawn:
+  // a rebase onto a known-stale base is a round that ends CONFLICTING.
+  const tip = fetchBaseTip(wt, meta.baseRef);
+  if (tip.err !== undefined) {
+    return { pr, link, verdict: 'rebase-base-unavailable', detail: tip.err };
+  }
+  // the PR, re-checked against the tip just fetched: the base may have
+  // moved under the fetch, and a conflict that dissolved with it is not
+  // work — the pass ends green and drive merges it.
+  if (tip.sha !== undefined) {
+    let after: PrMeta;
+    try {
+      after = await metaOf(ctx, pr);
+    } catch (err) {
+      return { pr, link, verdict: 'probe-failed', detail: errText(err) };
+    }
+    if (after.state !== 'OPEN') {
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+      return { pr, link, verdict: 'settled', detail: after.state.toLowerCase() };
+    }
+    if (after.mergeable === 'MERGEABLE') {
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+      return { pr, link, verdict: 'conflict-resolved', detail: `base ${meta.baseRef} moved — ${tip.sha.slice(0, 8)}` };
+    }
+  }
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
@@ -1586,6 +1698,7 @@ async function spawnRebaseFixer(
       link,
       branch: state.headRef,
       base: meta.baseRef,
+      baseSha: tip.sha,
       worktree: wt,
     }),
     tag: 'rebase ',
@@ -1630,7 +1743,13 @@ async function freshOpen(
 
 /** The shared tail of every fixer spawn — the class attempt spent on
  *  this head → its verdict; no caller-held worktree → the branch
- *  checkout is ensured here (or no-worktree). */
+ *  checkout is ensured here (or no-worktree).
+ *
+ *  The ensure path may move the branch (a fast-forward to the remote
+ *  tip), so the occupancy ladder answers FIRST (bro-by8d3): a checkout
+ *  a live session owns is never refreshed. The verdict is 'occupied',
+ *  never 'no-worktree' — the worktree exists, it belongs to someone
+ *  else. */
 function fixerLane(
   ctx: Ctx,
   pr: number,
@@ -1639,7 +1758,8 @@ function fixerLane(
   worktree: string | undefined,
   fixer: TaskRow | undefined,
   headSha: string,
-  cls: string
+  cls: string,
+  known: AgentInfo[]
 ): { wt: string } | PrVerdict {
   const spent = fixerSpent(ctx, pr, headSha, fixer, cls);
   if (spent !== undefined) {
@@ -1648,7 +1768,22 @@ function fixerLane(
   if (worktree !== undefined) {
     return { wt: worktree };
   }
-  const ensured = ensureFixerWorktree(ctx.mainRoot, branch);
+  const fresh = freshOccupancy(ctx.mainRoot, known);
+  const ensured = ensureFixerWorktree(ctx.mainRoot, branch, dir =>
+    occupied({
+      agents: fresh.agents,
+      fixerBead: fixer?.id,
+      branch,
+      worktree: dir,
+      workDetails: fresh.workDetails,
+      scanProc: agentProcessesIn,
+      pr,
+      watches: fresh.watches,
+    })
+  );
+  if (ensured.occupied !== undefined) {
+    return { pr, link, verdict: 'occupied', detail: ensured.occupied };
+  }
   if (ensured.path === undefined) {
     return { pr, link, verdict: 'no-worktree', detail: ensured.err };
   }
@@ -1861,7 +1996,7 @@ async function spawnCiFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'ci-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci');
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci', known);
   if ('verdict' in lane) {
     return lane;
   }
@@ -1926,7 +2061,7 @@ async function spawnSastFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'sast-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast');
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast', known);
   if ('verdict' in lane) {
     return lane;
   }
