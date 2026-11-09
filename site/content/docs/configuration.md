@@ -98,9 +98,9 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `parkedWakeMin`    | `120`   | Minutes a parked bead stays `deferred` before the next ready-front read wakes it to `open` — the claim-side park TTL. `0` ices the bead until `bd undefer`              |
 | `fixRounds`        | `3`     | Maximum review-fix respawns per bead                                                                                                                                    |
 | `maxItems`         | `0`     | Maximum beads per run; `0` means until idle or gated                                                                                                                    |
-| `maxOpen`          | `1`     | Maximum open PRs on the run's gate stack — a full stack only services gates until a merge frees a slot. Serial by default; widen with `--max-open`                        |
-| `maxOpenTotal`     | `10`    | Hard ceiling on TOTAL open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-` heads) — claims hold while at or above it; `0` disables                                         |
-| `worktreeWarn`     | `40`    | Linked-worktree count that makes the run warn — hygiene mark only, the reconcile/settle reaps do the shrinking. `0` disables                                              |
+| `maxOpen`          | `1`     | Maximum open PRs on the run's gate stack — a full stack only services gates until a merge frees a slot. Serial by default; widen with `--max-open`                    |
+| `maxOpenTotal`     | `10`    | Hard ceiling on TOTAL open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-` heads) — claims hold while at or above it; `0` disables                                     |
+| `worktreeWarn`     | `40`    | Linked-worktree count that makes the run warn — hygiene mark only, the reconcile/settle reaps do the shrinking. `0` disables                                          |
 | `worktreeMb`       | `400`   | Estimated disk footprint of one open slot in MB — the disk floor prices every slot at this cost                                                                         |
 | `diskMinSlots`     | `2`     | Disk floor in slot units — pushes hold while free disk on the worktree parent or tmpdir drops below `diskMinSlots × worktreeMb`. `0` disables the watermark             |
 | `batch`            | `1`     | Max beads one claim may clump into a single work item — one worktree, one worker, one PR closing them all. `1` = solo claims only                                       |
