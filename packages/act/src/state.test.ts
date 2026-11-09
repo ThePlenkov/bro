@@ -506,9 +506,13 @@ describe('fetchPrActState — the gate never counts itself', () => {
   });
 
   test('a composite workflow / job name is the gate', async () => {
-    const s = await fetchPrActState(fakeRev([check('Act gate / act-gate', 'pending')], []), target, {
-      selfCheck: 'act-gate',
-    });
+    const s = await fetchPrActState(
+      fakeRev([check('Act gate / act-gate', 'pending')], []),
+      target,
+      {
+        selfCheck: 'act-gate',
+      }
+    );
     assert.equal(s.ciPending, 0);
   });
 });
