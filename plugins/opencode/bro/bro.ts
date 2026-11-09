@@ -1306,7 +1306,10 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
             .filter((l) => {
               const t = l.trim().toLowerCase()
               if (!t) return true
-              if (t.includes('bro learn')) return false
+              // drop only the `bro learn ...` hint line itself — a
+              // substring match would eat real output that mentions it
+              const words = t.split(/\s+/)
+              if (words[0] === 'bro' && words[1] === 'learn') return false
               return true
             })
             .join('\n')

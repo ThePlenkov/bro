@@ -406,14 +406,25 @@ function checkPrereqs(needBeads: boolean): void {
  * skipped with a line saying so, and one unreachable upstream does not stop
  * the rest.
  */
+/** A lockfile is still external input: a `--flag`-shaped `source` or
+ *  `name` would be parsed by npx/skills as an option instead of a
+ *  positional — a path to arbitrary-code install, not just a failed
+ *  add. Admit only plain tokens (no leading dash, no whitespace); `--`
+ *  cannot sit mid-argv here because real flags follow the positional. */
+const SKILL_ARG = /^(?!-)[^\s]+$/;
+
 function installOneLockedSkill(dir: string, skill: LockedSkill): void {
   // `npx skills add` owns the fetch, the symlink and the lockfile
   // update; bro only decides what to ask for.
+  if (!SKILL_ARG.test(skill.source) || !SKILL_ARG.test(skill.name)) {
+    console.error(`  ${skill.name}: lock entry has an unsafe source/name — skipped`);
+    return;
+  }
   try {
-    execFileSync(
+    execFileSync( // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
       'npx',
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-      { cwd: dir, stdio: 'pipe' } // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
+      { cwd: dir, stdio: 'pipe' }
     )
   } catch {
     // one unreachable upstream does not stop the rest
