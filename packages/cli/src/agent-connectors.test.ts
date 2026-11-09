@@ -1,4 +1,3 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -10,38 +9,52 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
-  agentExitFileName,
-  agentRegistryPath,
-  bdActor,
-  countSessionReservations,
-  DEFAULT_CONFIG,
-  handleOwner,
-  patchAgentRegistry,
-  procStat,
-  readAgentRegistry,
-  scrubEnv,
-  SESSION_SLOT_TTL_MS,
-  SpawnError,
-  AgentNotFound,
-  testGitSpawn,
   type AgentCapabilities,
   type AgentConnector,
   type AgentInfo,
+  AgentNotFound,
   type AgentRegistryEntry,
+  agentExitFileName,
+  agentRegistryPath,
+  bdActor,
   type ConnectorCtx,
+  countSessionReservations,
+  DEFAULT_CONFIG,
+  BATCH_MARKER_ENV,
+  deriveProviderWalls,
+  handleOwner,
+  localLeaseStore,
+  projectId,
+  readLedgerWalls,
+  recordWall,
+  patchAgentRegistry,
+  procStat,
+  readAgentRegistry,
+  type ResolvedClass,
+  SESSION_SLOT_TTL_MS,
+  SpawnError,
+  type SpawnSpec,
+  scrubEnv,
+  testGitSpawn,
 } from '@broject/core';
+import { devinSessionPlane } from '@broject/devin';
 import {
+  type AgentConnectorEnv,
   agentConnectorNames,
   armNativeSpawnTestSeam,
+  BUDGET_LIMITS,
+  type BudgetSnapshot,
+  batchWallRefusal,
   broSpawnArgv,
   budgetLines,
   budgetSnapshot,
-  BUDGET_LIMITS,
   dockerImageFor,
   eachAgentConnector,
   fleetOccupancy,
@@ -54,25 +67,33 @@ import {
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
-  SpawnAbandoned,
   registerAgentConnector,
-  batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
+  SpawnAbandoned,
   sessionKindOf,
   sessionQuotaOf,
   systemdScopeProbe,
   unregisterAgentConnector,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
-import { devinSessionPlane } from '@broject/devin';
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
+const previousLeaseStateHome = process.env.XDG_STATE_HOME;
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-agent-lease-state-'));
+process.env.XDG_STATE_HOME = leaseStateHome;
+after(() => {
+  if (previousLeaseStateHome === undefined) {
+    delete process.env.XDG_STATE_HOME;
+  } else {
+    process.env.XDG_STATE_HOME = previousLeaseStateHome;
+  }
+  rmSync(leaseStateHome, { recursive: true, force: true });
+});
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -133,6 +154,9 @@ if (args[0] === 'list-sessions') {
   fs.writeSync(1, live.join('\\n') + '\\n'); process.exit(0)
 }
 if (args[0] === 'list-panes') {
+  // TMUX_FAKE_NOPANE: a server that can't report pane pids — the spawn
+  // must still land, and its lease must not die with the spawner
+  if (process.env.TMUX_FAKE_NOPANE) { console.error('pane pid unavailable'); process.exit(1) }
   const s = load().sessions[target()]
   if (!s || !alive(s.pid)) { console.error('no session'); process.exit(1) }
   fs.writeSync(1, s.pid + '\\n'); process.exit(0)
@@ -474,6 +498,74 @@ function connectorContract(b: BackendCase): void {
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true });
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env);
   const kill = (f: Fixture, info: AgentInfo) => killRun(f.main, info);
+
+  if (b.name === 'native') {
+    test('a project work lease refuses a spawn held by another clone', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const held = localLeaseStore(projectId(f.main)).acquire(
+          'bead/fx-1',
+          { host: 'other-host', pid: 9876, rig: 'other-rig', agentId: 'other-agent' },
+          60_000
+        );
+        assert.equal(held.ok, true);
+        await assert.rejects(
+          conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) => {
+            assert.ok(err instanceof SpawnError);
+            assert.equal(err.kind, 'cap');
+            assert.match(err.message, /bead\/fx-1 leased by other-rig@other-host pid 9876 until/);
+            return true;
+          }
+        );
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a respawn reuses its matching live lease token', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      const store = localLeaseStore(projectId(f.main));
+      try {
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        const entry = readAgentRegistry(f.main)['fx-1']!;
+        const lease = store.read('bead/fx-1');
+        assert.equal(entry.leaseToken, lease?.token);
+        assert.ok(lease !== undefined);
+        assert.ok(store.rebind(lease, { pid: process.pid }));
+        kill(f, first);
+        await until(() => !pidAlive(first.pid!));
+        assert.equal(store.read('bead/fx-1')?.token, lease.token);
+        const second = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        );
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.leaseToken, lease.token);
+        await c.stop(second.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+
+    test('a local backend rebinds the work lease to the worker pid', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      const c = conn(f);
+      try {
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+        assert.ok(lease !== undefined);
+        // a local worker keeps the lease pid-governed — its death frees
+        // the key without waiting out the TTL
+        assert.equal(lease.holder.host, hostname());
+        assert.equal(lease.holder.pid, info.pid);
+        await c.stop(info.id);
+      } finally {
+        cleanup(f);
+      }
+    });
+  }
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
@@ -1003,6 +1095,9 @@ function connectorContract(b: BackendCase): void {
       assert.equal(st.state, 'blocked');
       assert.equal(st.cause, 'rate_limited');
       assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now());
+      // the exit harvested the lease too — a dead run never holds the
+      // key (forceRelease reports nothing to free)
+      assert.equal(localLeaseStore(projectId(f.main)).forceRelease('bead/fx-1'), false);
       // the registry carries the cause
       const entry = readAgentRegistry(f.main)['fx-1']!;
       assert.equal(entry.cause, 'rate_limited');
@@ -1253,6 +1348,43 @@ describe('native credential scope (bro-l8c4f.6)', () => {
       delete process.env.BRO_BATCH;
       delete process.env.KEEP_ME;
       delete process.env.LEAK_ME;
+      cleanup(f);
+    }
+  });
+
+  test('BRO_PIPELINE_KEY never reaches the worker — denied in trusted-host AND strict mode', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_PIPELINE_KEY = 'channel-key';
+    // the worker writes back what it saw — the customer-channel key is
+    // never a worker credential (a worker holding it mints verdicts)
+    const payload = "require('fs').writeFileSync('env.out', process.env.BRO_PIPELINE_KEY ?? '')";
+    try {
+      // trusted-host mode (no strictEnv): the blanket passthrough must
+      // still refuse it
+      const a = await conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await conn(f).stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // strict mode — denied too, even allowlisted AND spec.env'd
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'BRO_PIPELINE_KEY'],
+      };
+      const c = conn(f);
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_PIPELINE_KEY: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_PIPELINE_KEY;
       cleanup(f);
     }
   });
@@ -1718,6 +1850,29 @@ describe('tmux connector', () => {
     }
   });
 
+  test('a missing pane pid stamps the work lease foreign — the TTL, not the spawner pid, backs it', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
+    const prevNoPane = process.env.TMUX_FAKE_NOPANE;
+    process.env.TMUX_FAKE_NOPANE = '1';
+    try {
+      const c = makeTmuxConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // pidAlive:()=>false plays the spawner already gone — a local
+      // stamp would read dead and free the key for a duplicate while
+      // the pane still runs; a foreign holder is TTL-governed (spec:
+      // a foreign-host pid is ignored until expiry)
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevNoPane === undefined) delete process.env.TMUX_FAKE_NOPANE;
+      else process.env.TMUX_FAKE_NOPANE = prevNoPane;
+      cleanup(f);
+    }
+  });
+
   test('a failing tmux binary degrades list() and refuses spawn', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
     try {
@@ -1770,6 +1925,50 @@ describe('docker connector', () => {
       );
       await n.stop(first.id);
     } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a remote daemon stamps the work lease foreign — the spawner exit frees nothing', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = 'tcp://daemon-remote:2375';
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.equal(info.state, 'running');
+      // the daemon's State.Pid names ITS host — no local probe sees it;
+      // the lease must hold by TTL, not die with the spawner's own pid
+      const lease = localLeaseStore(projectId(f.main), { pidAlive: () => false }).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.notEqual(lease.holder.host, hostname());
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      cleanup(f);
+    }
+  });
+
+  test('a local daemon binds the work lease to the container pid', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    const prevHost = process.env.DOCKER_HOST;
+    const prevCtx = process.env.DOCKER_CONTEXT;
+    delete process.env.DOCKER_HOST;
+    delete process.env.DOCKER_CONTEXT;
+    try {
+      const c = makeDockerConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const lease = localLeaseStore(projectId(f.main)).read('bead/fx-1');
+      assert.ok(lease !== undefined);
+      assert.equal(lease.holder.host, hostname());
+      assert.equal(lease.holder.pid, info.pid);
+      await c.stop(info.id);
+    } finally {
+      if (prevHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = prevHost;
+      if (prevCtx === undefined) delete process.env.DOCKER_CONTEXT;
+      else process.env.DOCKER_CONTEXT = prevCtx;
       cleanup(f);
     }
   });
@@ -2192,10 +2391,70 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.causes.length, 1);
       assert.equal(snap.causes[0]!.cause, 'rate_limited');
       assert.equal(snap.blocked, 1);
-      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z');
+      // devin free-tier wall parks 10min of grace past the stamp
+      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:10:00.000Z');
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an instant rate death escalates the recorded hold — streak rides the registry (bro-9eeld)', () => {
+    const { root, main } = initRepo('bro-ratedeath-');
+    try {
+      const home = agentsHomeOf(main);
+      mkdirSync(home, { recursive: true });
+      const spawnedAt = '2026-10-27T18:05:33Z';
+      // the .exit mtime is the honest death stamp — 11s after spawn,
+      // inside the instant-death window
+      const died = new Date(Date.parse(spawnedAt) + 11_000);
+      const dead = (id: string, at: Date, runId?: string): AgentRegistryEntry => {
+        const f = join(home, agentExitFileName(id, runId));
+        writeFileSync(f, '1');
+        utimesSync(f, at, at);
+        const log = join(home, `${id}${runId === undefined ? '' : `.${runId}`}.log`);
+        // a RELATIVE reset — the classified deadline anchors to the
+        // .exit mtime, never to whenever the walk read the tail; an
+        // absolute ISO mark could not tell the two clocks apart
+        // a generic wall — 'Reached free model rate limit' would add the
+        // Devin grace beat and blur the streak arithmetic under test
+        writeFileSync(log, 'boom\nrate limit — try again in 10 minutes\n');
+        return { agentId: id, backend: 'native', spawnedAt, log, runId };
+      };
+      // a fresh step, and a step whose first instant death is already
+      // harvested before its respawn dies the same way
+      patchAgentRegistry(main, 'step-first', dead('native-a1', died));
+      patchAgentRegistry(main, 'step-second', dead('native-a2', died, 'r1'));
+      assert.equal(budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW).blocked, 2);
+      assert.equal(readAgentRegistry(main)['step-second']!.rateStreak, 1);
+      // the respawn re-stamps spawnedAt + runId and clears the death
+      // fields — the streak survives the registry merge as step history
+      const spawned2 = '2026-10-27T19:05:33Z';
+      const died2 = new Date(Date.parse(spawned2) + 11_000);
+      patchAgentRegistry(main, 'step-second', {
+        ...dead('native-a2', died2, 'r2'),
+        spawnedAt: spawned2,
+        exitStatus: undefined,
+        cause: undefined,
+        resetAt: undefined,
+      });
+      const snap = budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW);
+      assert.equal(snap.blocked, 2);
+      const first = readAgentRegistry(main)['step-first']!;
+      const second = readAgentRegistry(main)['step-second']!;
+      // the recorded hold is the exit-anchored reported mark PLUS the
+      // streak-scaled wait — 30s on the first instant death, 60s on the
+      // consecutive one; a read-time-anchored classifier lands nowhere
+      // near these values
+      const reported1 = died.getTime() + 10 * 60_000 + 90_000;
+      const reported2 = died2.getTime() + 10 * 60_000 + 90_000;
+      assert.equal(first.cause, 'rate_limited');
+      assert.equal(first.resetAt, new Date(reported1 + 30_000).toISOString());
+      assert.equal(first.rateStreak, 1);
+      assert.equal(second.resetAt, new Date(reported2 + 60_000).toISOString());
+      assert.equal(second.rateStreak, 2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2241,7 +2500,8 @@ describe('budgetSnapshot', () => {
       );
       assert.deepEqual(
         snap.resets.map(r => [r.step, r.resetAt, r.holding]),
-        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+        // devin free-tier wall parks 10min of grace past the stamp
+        [['step-wall', '2999-01-01T00:10:00.000Z', true]]
       );
       assert.equal(registry['step-wall']!.cause, 'rate_limited');
     } finally {
@@ -2426,6 +2686,98 @@ describe('resolveSpawnProvider', () => {
       '--auto-approve',
     ]);
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo');
+  });
+
+  test('acp mcpServers ride the worker payload, never argv — env credentials stay off ps', async () => {
+    const servers = [
+      {
+        type: 'stdio',
+        name: 'bro',
+        command: 'bro',
+        args: ['mcp'],
+        env: [{ name: 'BRO_KEY', value: 'sk-secret' }],
+      },
+    ];
+    const pick = await resolveSpawnProvider(
+      {
+        ...env,
+        providers: { kilo: { type: 'acp', command: 'kilo --acp', mcpServers: servers } },
+      },
+      'native',
+      { provider: 'kilo' },
+      'flag'
+    );
+    assert.equal(pick.worker?.kind, 'argv');
+    const worker = pick.worker?.kind === 'argv' ? pick.worker : undefined;
+    assert.deepEqual(worker?.mcpServers, servers);
+    assert.ok(
+      !worker?.argv.some(a => a.includes('sk-secret') || a === '--mcp-servers'),
+      `argv leaked descriptors: ${worker?.argv.join(' ')}`
+    );
+  });
+
+  test('a route candidate resolution failure names the class and provider as config', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'local' }, { provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'local',
+        },
+        {}
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'config' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    );
+  });
+
+  test('a route candidate preserves an input error kind', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'missing',
+        },
+        {},
+        'flag'
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'input' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    );
+  });
+
+  test('a model selection applies to the chain head, not fallback provider pins', async () => {
+    const routeEnv: AgentConnectorEnv = {
+      ...env,
+      providers: {
+        A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+        B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+        C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      },
+    };
+    const resolved: ResolvedClass = {
+      class: 'free',
+      chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+      onWall: 'fallthrough',
+      provider: 'A',
+      model: 'a1',
+    };
+    const route = await resolveSpawnRoute(routeEnv, 'native', resolved, { model: 'x' });
+    assert.deepEqual(
+      route.candidates.map(candidate => candidate.model),
+      ['x', 'b-default', 'c1']
+    );
   });
 
   test('cli {model} placeholder wires the resolved model into the worker command', async () => {
@@ -2738,6 +3090,45 @@ describe('provider-resolved spawns', () => {
     }
   });
 
+  test('native: argv worker mcpServers land as a 0600 artifact + BRO_MCP_FILE pin — never argv, never forgeable', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const script = join(f.main, 'agent.mjs');
+      writeFileSync(
+        script,
+        "import { writeFileSync, readFileSync } from 'node:fs'\n" +
+          "writeFileSync('mcp.out', [process.env.BRO_MCP_FILE, readFileSync(process.env.BRO_MCP_FILE, 'utf8'), process.argv.slice(2).join(' ')].join('\\x1f'))\n"
+      );
+      const servers = [
+        {
+          type: 'stdio',
+          name: 'bro',
+          command: 'bro',
+          args: ['mcp'],
+          env: [{ name: 'K', value: 'sk-mcp-secret' }],
+        },
+      ];
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused — the worker owns the program'),
+        worker: { kind: 'argv', argv: [process.execPath, script], mcpServers: servers },
+        // a caller-supplied pin must not redirect the artifact path
+        env: { BRO_MCP_FILE: '/etc/passwd' },
+      });
+      await until(() => existsSync(join(f.main, 'mcp.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      const [mcpFile, json, argv] = readFileSync(join(f.main, 'mcp.out'), 'utf8').split('\x1f');
+      assert.ok(mcpFile!.endsWith(`${entry.agentId}.mcp.json`), mcpFile);
+      assert.deepEqual(JSON.parse(json!), servers);
+      assert.ok(!argv!.includes('sk-mcp-secret'), argv);
+      // the artifact is owner-only — the descriptors can carry env credentials
+      assert.equal(statSync(mcpFile!).mode & 0o777, 0o600);
+      await until(() => !pidAlive(info.pid!));
+    } finally {
+      cleanup(f);
+    }
+  });
+
   test('tmux: an argv worker pane execs slots verbatim', async () => {
     const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true });
     try {
@@ -2787,6 +3178,77 @@ describe('provider-resolved spawns', () => {
       assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'local|none');
       // and the env file itself never carried the forged key
       assert.equal(existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.env`)), false);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: pipeline provenance pins BRO_FORMULA + session, stamps the registry (spec bro-7d5nb)', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = 'f'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipeline', formulaSha: sha, stage: 'work', sessionId: 'sess-9' },
+        // ambient forgery attempts are pin-filtered like every other
+        // provenance key
+        env: { BRO_FORMULA: 'forged@bad', BRO_SESSION_ID: 'forged-session' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipeline@${sha}|sess-9`);
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, 'pipeline');
+      assert.equal(entry.formula_sha, sha);
+      assert.equal(entry.pipeline_stage, 'work');
+      assert.equal(entry.session_id, 'sess-9');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a pipeline spawn without a sessionId pins agentId as the attested session', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const sha = '0'.repeat(64);
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_FORMULA, process.env.BRO_SESSION_ID].join('|'))"
+        ),
+        pipeline: { formula: 'pipe', formulaSha: sha },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), `pipe@${sha}|${entry.agentId}`);
+      assert.equal(entry.session_id, entry.agentId);
+      assert.equal(entry.pipeline_stage, undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('native: a non-pipeline spawn writes no formula stamps', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = makeNativeConnector({ dir: f.main }, f.env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.formula, undefined);
+      assert.equal(entry.formula_sha, undefined);
+      assert.equal(entry.pipeline_stage, undefined);
+      assert.equal(entry.session_id, undefined);
       await c.stop(info.id);
     } finally {
       cleanup(f);
@@ -3076,5 +3538,475 @@ describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => 
       batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_BATCH: '1' } }),
       undefined
     );
+  });
+});
+
+describe('fleet chain walk spawn integration', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const future = '2099-01-01T00:00:00Z';
+  const oldSpawn = '2026-10-20T00:00:00Z';
+  const routeFor = (onWall: 'park' | 'fallthrough'): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall,
+    candidates: ['A', 'B'].map(provider => ({
+      provider,
+      account: provider,
+      model: `model-${provider}`,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  });
+  const withStateHome = async <T>(root: string, fn: () => Promise<T>): Promise<T> => {
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, 'state');
+    try {
+      return await fn();
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+    }
+  };
+  const withLedgerFixture = async <T>(fn: (f: Fixture) => Promise<T>): Promise<T> => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    return withStateHome(f.root, async () => {
+      try {
+        return await fn(f);
+      } finally {
+        cleanup(f);
+      }
+    });
+  };
+  const routeForAccounts = (
+    candidates: Array<{ provider: string; account: string }>
+  ): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall: 'fallthrough',
+    candidates: candidates.map(({ provider, account }) => ({
+      provider,
+      account,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  });
+  const spawnRouted = (
+    f: Fixture,
+    route: NonNullable<SpawnSpec['route']>,
+    prompt = 'setTimeout(() => {}, 30000)'
+  ) => conn(f).spawn({ ...SPEC(f.main, f.beadsDir, 'fx-1', prompt), route });
+  const recordTestWall = (
+    overrides: Partial<Parameters<typeof recordWall>[0]> = {},
+    opts?: Parameters<typeof recordWall>[1]
+  ) =>
+    recordWall(
+      {
+        account: overrides.account ?? 'shared-account',
+        cause: overrides.cause ?? 'quota',
+        observedAt: overrides.observedAt ?? new Date().toISOString(),
+        provider: overrides.provider ?? 'A',
+        rig: overrides.rig ?? 'repo',
+        ...(overrides.resetAt === undefined ? {} : { resetAt: overrides.resetAt }),
+        ...(overrides.step === undefined ? {} : { step: overrides.step }),
+      },
+      opts
+    );
+  const death = (provider: string): AgentRegistryEntry => ({
+    agentId: `native-${provider.toLowerCase()}-dead`,
+    backend: 'native',
+    spawnedAt: oldSpawn,
+    provider,
+    model: `model-${provider}`,
+    cause: 'rate_limited',
+    resetAt: future,
+    stopped: false,
+    acpSessionId: 'old-acp-session',
+    resumeSessionId: 'old-resume-session',
+  });
+
+  test('falls through A to B and retains A as a walled attempt', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      const attempts = entry.attempts as unknown[];
+      assert.deepEqual(attempts[0], {
+        provider: 'A',
+        account: 'A',
+        model: 'model-A',
+        cause: 'rate_limited',
+        resetAt: future,
+        spawnedAt: oldSpawn,
+        stopped: false,
+      });
+      assert.equal(entry.acpSessionId, undefined);
+      assert.equal(entry.resumeSessionId, undefined);
+      assert.equal(
+        deriveProviderWalls(registry, Date.now()).find(wall => wall.provider === 'A')?.cause,
+        'rate_limited'
+      );
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a cause-less routed respawn records its outgoing provider when it moves', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-a-lost',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'A',
+        model: 'model-A',
+        stopped: false,
+      });
+      patchAgentRegistry(f.main, 'fx-2', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      assert.deepEqual((entry.attempts as unknown[])[0], {
+        provider: 'A',
+        account: 'A',
+        model: 'model-A',
+        spawnedAt: oldSpawn,
+        stopped: false,
+      });
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a respawn over a stopped entry does not resurrect its attempt walls', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-b-dead',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'B',
+        model: 'model-B',
+        cause: 'rate_limited',
+        resetAt: future,
+        // `bro agents down` — the manual clear. The retained attempt
+        // would re-wall A the moment the respawn flips stopped:false
+        stopped: true,
+        attempts: [
+          {
+            provider: 'A',
+            model: 'model-A',
+            cause: 'rate_limited',
+            resetAt: future,
+            spawnedAt: oldSpawn,
+            stopped: false,
+          },
+        ],
+      });
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      const registry = readAgentRegistry(f.main);
+      const entry = registry['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      // the pre-stop attempt list is evicted — only the outgoing
+      // (stopped:true, never wallable) record remains
+      assert.deepEqual(entry.attempts, [
+        {
+          provider: 'B',
+          account: 'B',
+          model: 'model-B',
+          cause: 'rate_limited',
+          resetAt: future,
+          spawnedAt: oldSpawn,
+          stopped: true,
+        },
+      ]);
+      assert.deepEqual(deriveProviderWalls(registry, Date.now()), []);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('fallback provider uses its own model instead of the chain-head selection', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    f.env.providers = {
+      A: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'a-default',
+        account: 'acct-a',
+      },
+      B: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'b-default',
+        account: 'acct-b',
+      },
+      C: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'c-default',
+        account: 'acct-c',
+      },
+    };
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      const resolved: ResolvedClass = {
+        class: 'free',
+        chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+        onWall: 'fallthrough',
+        provider: 'A',
+        model: 'a1',
+      };
+      const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' });
+      assert.deepEqual(
+        route.candidates.map(candidate => candidate.account),
+        ['acct-a', 'acct-b', 'acct-c']
+      );
+      assert.deepEqual(
+        route.candidates.map(candidate => candidate.model),
+        ['x', 'b-default', 'c1']
+      );
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route,
+      });
+      const entry = readAgentRegistry(f.main)['fx-1']!;
+      assert.equal(entry.provider, 'B');
+      assert.equal(entry.model, 'b-default');
+      assert.notEqual(entry.model, 'x');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('onWall park refuses the step and points to agents down', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('park'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" parked — onWall park/.test(err.message) &&
+          /A walled — rate_limited til/.test(err.message) &&
+          /held by fx-1/.test(err.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('fallthrough exhaustion names the final walled provider', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'));
+      patchAgentRegistry(f.main, 'fx-2', death('B'));
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" chain exhausted/.test(err.message) &&
+          /B walled — rate_limited til/.test(err.message) &&
+          /held by fx-2/.test(err.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a fresh step falls through a wall recorded by another step', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-2', death('A'));
+      const c = conn(f);
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      });
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'B');
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('provider aliases sharing an account are skipped together', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    try {
+      patchAgentRegistry(f.main, 'fx-2', { ...death('kiloA'), account: 'kilo' });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'kiloA', account: 'kilo' },
+          { provider: 'kiloB', account: 'kilo' },
+          { provider: 'or', account: 'or' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'or');
+      await conn(f).stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a host ledger wall skips an account with no local registry entry', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({
+        account: 'openrouter',
+        cause: 'rate_limited',
+        resetAt: future,
+        provider: 'other-repo-provider',
+        rig: 'other-repo',
+      });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'backup');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('an expired host ledger wall does not skip its provider', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall(
+        {
+          account: 'openrouter',
+          cause: 'rate_limited',
+          resetAt: '2020-01-01T00:00:00.000Z',
+          observedAt: '2019-01-01T00:00:00.000Z',
+          provider: 'other-repo-provider',
+          rig: 'other-repo',
+        },
+        { now: Date.parse('2019-01-01T00:00:00.000Z') }
+      );
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      );
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'openrouter');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('classification writes a wall to the host ledger using entry account', async () => {
+    await withLedgerFixture(async f => {
+      const log = join(f.root, 'rate-limit.log');
+      writeFileSync(log, 'HTTP 429 Too Many Requests');
+      patchAgentRegistry(f.main, 'fx-1', {
+        ...death('A'),
+        account: 'shared-account',
+        cause: undefined,
+        resetAt: undefined,
+        exitStatus: 1,
+        log,
+      });
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'A', account: 'shared-account' },
+          { provider: 'B', account: 'backup' },
+        ])
+      );
+      const row = readLedgerWalls().find(wall => wall.account === 'shared-account');
+      assert.equal(row?.provider, 'A');
+      assert.equal(row?.cause, 'rate_limited');
+      assert.equal(row?.step, 'fx-1');
+      await conn(f).stop(info.id);
+    });
+  });
+
+  test('stopping an agent does not clear its host ledger wall', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({ step: 'fx-1' });
+      const info = await conn(f).spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      );
+      await conn(f).stop(info.id);
+      assert.equal(
+        readLedgerWalls().some(wall => wall.account === 'shared-account'),
+        true
+      );
+    });
+  });
+
+  test('an unrouted batch spawn refuses a ledger-walled account', async () => {
+    await withLedgerFixture(async f => {
+      recordTestWall({ provider: 'other-repo-provider' });
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          provider: 'candidate',
+          account: 'shared-account',
+          env: { [BATCH_MARKER_ENV]: '1' },
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /candidate \(account shared-account\) walled/.test(err.message)
+      );
+    });
+  });
+
+  test('a live entry still refuses a routed spawn', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    let info: AgentInfo | undefined;
+    try {
+      const c = conn(f);
+      info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      await assert.rejects(
+        c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError && /fx-1 already has a live agent/.test(err.message)
+      );
+    } finally {
+      if (info !== undefined) {
+        await conn(f).stop(info.id);
+      }
+      cleanup(f);
+    }
   });
 });

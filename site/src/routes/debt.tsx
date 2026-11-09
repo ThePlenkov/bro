@@ -1,70 +1,70 @@
-import { useEffect, useMemo, useState } from 'react'
-import { createFileRoute } from '@tanstack/react-router'
-import css from '../styles.css?url'
+import { useEffect, useMemo, useState } from 'react';
+import { createFileRoute } from '@tanstack/react-router';
+import css from '../styles.css?url';
 
 export const Route = createFileRoute('/debt')({
   head: () => ({ links: [{ rel: 'stylesheet', href: css }] }),
   component: DebtDashboard,
-})
+});
 
-const GITHUB = 'https://github.com/ThePlenkov/bro'
-const BASE_URL = import.meta.env.BASE_URL
-const DOCS = `${BASE_URL}docs`
+const GITHUB = 'https://github.com/ThePlenkov/bro';
+const BASE_URL = import.meta.env.BASE_URL;
+const DOCS = `${BASE_URL}docs`;
 
 // bro keeps its own review-debt ledger on refs/bro/data — a data ref, not
 // a branch, so it never shows up in MR diffs. The page resolves the ref
 // tip through the git API, then reads the artifacts by sha off
 // raw.githubusercontent (which serves any commit, not just heads).
-const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data'
-const TREE_API = 'https://api.github.com/repos/ThePlenkov/bro/git/trees'
-const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro'
-const SUMMARY_PATH = '.agents/review-debt/debt-summary.json'
-const LEDGER_PATH = '.agents/review-debt/ledger.jsonl'
-const HARVEST_PREFIX = '.agents/review-debt/harvests/'
+const REF_API = 'https://api.github.com/repos/ThePlenkov/bro/git/ref/bro/data';
+const TREE_API = 'https://api.github.com/repos/ThePlenkov/bro/git/trees';
+const RAW = 'https://raw.githubusercontent.com/ThePlenkov/bro';
+const SUMMARY_PATH = '.agents/review-debt/debt-summary.json';
+const LEDGER_PATH = '.agents/review-debt/ledger.jsonl';
+const HARVEST_PREFIX = '.agents/review-debt/harvests/';
 // harvests/ holds one .jsonl per collect run — filenames sort by time;
 // only the newest few are needed for the recent-findings table
-const HARVEST_FETCH = 10
-const SNAPSHOT_KEY = 'bro:debt:snapshot:v1'
+const HARVEST_FETCH = 10;
+const SNAPSHOT_KEY = 'bro:debt:snapshot:v1';
 
 interface Summary {
-  generated_at: string
-  open_count: number
-  by_area: Record<string, number>
-  by_author: Record<string, number>
-  duplicate_fingerprints: Array<{ fingerprint: string; count: number; prs: number[] }>
-  oldest_open: string | null
+  generated_at: string;
+  open_count: number;
+  by_area: Record<string, number>;
+  by_author: Record<string, number>;
+  duplicate_fingerprints: Array<{ fingerprint: string; count: number; prs: number[] }>;
+  oldest_open: string | null;
 }
 
 interface Row {
-  thread_id: string
-  status: string
-  fix_pr: number | null
-  fixed_at: string | null
-  notes: string | null
+  thread_id: string;
+  status: string;
+  fix_pr: number | null;
+  fixed_at: string | null;
+  notes: string | null;
 }
 
 /** A harvested review finding — these land before any status verdict,
  *  so the dashboard needs them beyond the ledger's status overlay. */
 interface Finding {
-  thread_id: string
-  thread_url?: string
-  status: string
-  priority?: string
-  source_pr: number
-  source_pr_title?: string
-  path?: string
-  line?: number | null
-  author?: string
-  body_preview?: string
-  area?: string
-  fingerprint?: string
-  harvested_at?: string
+  thread_id: string;
+  thread_url?: string;
+  status: string;
+  priority?: string;
+  source_pr: number;
+  source_pr_title?: string;
+  path?: string;
+  line?: number | null;
+  author?: string;
+  body_preview?: string;
+  area?: string;
+  fingerprint?: string;
+  harvested_at?: string;
 }
 
 interface Data {
-  summary: Summary
-  rows: Row[]
-  findings: Finding[]
+  summary: Summary;
+  rows: Row[];
+  findings: Finding[];
 }
 
 interface CachedSnapshot {
@@ -228,291 +228,386 @@ function formatDateTime(iso: string): string {
 function parseJsonl<T>(text: string): T[] {
   return text
     .split('\n')
-    .filter((l) => l.trim() !== '')
-    .flatMap((l) => {
+    .filter(l => l.trim() !== '')
+    .flatMap(l => {
       try {
-        return [JSON.parse(l) as T]
+        return [JSON.parse(l) as T];
       } catch {
-        return [] // a malformed line drops that row, not the page
+        return []; // a malformed line drops that row, not the page
       }
-    })
+    });
 }
 
 /** Newest harvest files under <sha> — the trees API lists paths, raw
  *  serves the content by sha (one repo, one dashboard: a handful of GETs). */
 const isHarvestBlob = (e: { path: string; type: string }) =>
-  e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl')
+  e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl');
 
 async function fetchHarvests(sha: string): Promise<Finding[]> {
-  const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`)
+  const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`);
   if (!treeRes.ok) {
-    return []
+    return [];
   }
-  const tree = (await treeRes.json()) as { tree?: Array<{ path: string; type: string }> }
+  const tree = (await treeRes.json()) as { tree?: Array<{ path: string; type: string }> };
   const paths = (tree.tree ?? [])
     .filter(isHarvestBlob)
-    .map((e) => e.path)
+    .map(e => e.path)
     .sort((a, b) => a.localeCompare(b))
-    .slice(-HARVEST_FETCH)
+    .slice(-HARVEST_FETCH);
   const texts = await Promise.all(
-    paths.map((p) => fetch(`${RAW}/${sha}/${p}`).then((r) => (r.ok ? r.text() : '')))
-  )
-  return texts.flatMap((t) => parseJsonl<Finding>(t))
+    paths.map(p => fetch(`${RAW}/${sha}/${p}`).then(r => (r.ok ? r.text() : '')))
+  );
+  return texts.flatMap(t => parseJsonl<Finding>(t));
 }
 
-async function load(): Promise<{ data: Data; source: 'live' | 'cache'; fetchedAt: string; sha?: string; cacheReason?: CacheReason }> {
-  let refRes: Response
+async function load(): Promise<{
+  data: Data;
+  source: 'live' | 'cache';
+  fetchedAt: string;
+  sha?: string;
+  cacheReason?: CacheReason;
+}> {
+  let refRes: Response;
   try {
-    refRes = await fetch(REF_API)
+    refRes = await fetch(REF_API);
   } catch (err) {
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'network' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'network',
+      };
     }
-    throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
+    throw {
+      kind: 'unknown',
+      message: err instanceof Error ? err.message : String(err),
+    } satisfies LoadError;
   }
 
-  const refBodyPromise = refRes.clone().text().catch(() => '')
-  const refBody = await refBodyPromise
+  const refBodyPromise = refRes
+    .clone()
+    .text()
+    .catch(() => '');
+  const refBody = await refBodyPromise;
   if (isRateLimitedStatus(refRes.status, refRes, refBody)) {
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'rate_limited' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'rate_limited',
+      };
     }
-    const { retryAfter, reset } = getRateLimitHeaders(refRes)
-    const resetMsg = !retryAfter && reset ? ` reset at ${new Date(parseInt(reset) * 1000).toISOString()}.` : ''
+    const { retryAfter, reset } = getRateLimitHeaders(refRes);
+    const resetMsg =
+      !retryAfter && reset ? ` reset at ${new Date(parseInt(reset) * 1000).toISOString()}.` : '';
     throw {
       kind: 'rate_limited',
       status: refRes.status,
       retryAfter,
       reset,
-      message: retryAfter ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.` : `GitHub API rate limit reached (HTTP ${refRes.status})${resetMsg ? resetMsg.slice(0, -1) + '.' : '.'}`,
-    } satisfies LoadError
+      message: retryAfter
+        ? `GitHub API rate limit reached (HTTP ${refRes.status}); retry after ${retryAfter}s.`
+        : `GitHub API rate limit reached (HTTP ${refRes.status})${resetMsg ? resetMsg.slice(0, -1) + '.' : '.'}`,
+    } satisfies LoadError;
   }
 
   if (!refRes.ok) {
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached && refRes.status === 404) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'ref_missing',
+      };
     }
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: refRes.status === 404 ? 'ref_missing' : 'unknown' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: refRes.status === 404 ? 'ref_missing' : 'unknown',
+      };
     }
-    throw { kind: refRes.status === 404 ? 'ref_missing' : 'unknown', message: `Failed to resolve bro/data ref (HTTP ${refRes.status}).` } satisfies LoadError
+    throw {
+      kind: refRes.status === 404 ? 'ref_missing' : 'unknown',
+      message: `Failed to resolve bro/data ref (HTTP ${refRes.status}).`,
+    } satisfies LoadError;
   }
 
-  let refJson: any
+  let refJson: any;
   try {
-    refJson = await refRes.json()
+    refJson = await refRes.json();
   } catch (err) {
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'unknown',
+      };
     }
-    throw { kind: 'unknown', message: err instanceof Error ? err.message : String(err) } satisfies LoadError
+    throw {
+      kind: 'unknown',
+      message: err instanceof Error ? err.message : String(err),
+    } satisfies LoadError;
   }
 
-  const sha = refJson?.object?.sha
+  const sha = refJson?.object?.sha;
   if (!sha) {
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'ref_missing' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'ref_missing',
+      };
     }
-    throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError
+    throw { kind: 'ref_missing', message: 'data ref not found' } satisfies LoadError;
   }
 
   try {
     const [summaryRes, ledgerRes, findingsRes] = await Promise.allSettled([
-      fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then((r) => {
-        if (!r.ok) throw { kind: 'summary_failed', message: `summary fetch failed (HTTP ${r.status})` } satisfies LoadError
-        return r.json() as Promise<Summary>
+      fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then(r => {
+        if (!r.ok)
+          throw {
+            kind: 'summary_failed',
+            message: `summary fetch failed (HTTP ${r.status})`,
+          } satisfies LoadError;
+        return r.json() as Promise<Summary>;
       }),
       // the status overlay is optional — a fresh ledger may not exist yet;
       // a 404 means "no rows", not a broken dashboard. Transient failures
       // must fall back to cache rather than overwriting it with empty rows.
-      fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => {
-        if (r.ok) return r.text()
-        if (r.status === 404) return ''
-        throw { kind: 'unknown', message: `ledger fetch failed (HTTP ${r.status})` } satisfies LoadError
+      fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then(r => {
+        if (r.ok) return r.text();
+        if (r.status === 404) return '';
+        throw {
+          kind: 'unknown',
+          message: `ledger fetch failed (HTTP ${r.status})`,
+        } satisfies LoadError;
       }),
-      fetchHarvests(sha).then((f) => ({ findings: f, ok: true })).catch(() => ({ findings: [] as Finding[], ok: false })), // harvests missing ≠ broken dashboard
-    ])
+      fetchHarvests(sha)
+        .then(f => ({ findings: f, ok: true }))
+        .catch(() => ({ findings: [] as Finding[], ok: false })), // harvests missing ≠ broken dashboard
+    ]);
 
     if (summaryRes.status !== 'fulfilled') {
-      const err = summaryRes.reason
+      const err = summaryRes.reason;
       if ((err as LoadError)?.kind) {
-        const cached = readSnapshot()
+        const cached = readSnapshot();
         if (cached) {
-          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+          return {
+            data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+            source: 'cache',
+            fetchedAt: cached.fetched_at,
+            sha: cached.sha,
+            cacheReason: (err as LoadError).kind,
+          };
         }
-        throw err
+        throw err;
       }
-      throw err
+      throw err;
     }
 
     if (ledgerRes.status !== 'fulfilled') {
-      const err = ledgerRes.reason
+      const err = ledgerRes.reason;
       if ((err as LoadError)?.kind) {
-        const cached = readSnapshot()
+        const cached = readSnapshot();
         if (cached) {
-          return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+          return {
+            data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+            source: 'cache',
+            fetchedAt: cached.fetched_at,
+            sha: cached.sha,
+            cacheReason: (err as LoadError).kind,
+          };
         }
-        throw err
+        throw err;
       }
-      const cached = readSnapshot()
+      const cached = readSnapshot();
       if (cached) {
-        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+        return {
+          data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+          source: 'cache',
+          fetchedAt: cached.fetched_at,
+          sha: cached.sha,
+          cacheReason: 'unknown',
+        };
       }
-      throw err
+      throw err;
     }
 
-    const summary = summaryRes.value
-    const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : ''
-    const harvestRes = findingsRes.status === 'fulfilled' ? findingsRes.value : { findings: [] as Finding[], ok: false }
+    const summary = summaryRes.value;
+    const ledgerText = ledgerRes.status === 'fulfilled' ? ledgerRes.value : '';
+    const harvestRes =
+      findingsRes.status === 'fulfilled'
+        ? findingsRes.value
+        : { findings: [] as Finding[], ok: false };
     // Only cache if all artifact fetches completed successfully (ledger ok or 404, harvests ok)
     if (!harvestRes.ok || ledgerRes.status !== 'fulfilled') {
-      const cached = readSnapshot()
+      const cached = readSnapshot();
       if (cached) {
-        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+        return {
+          data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+          source: 'cache',
+          fetchedAt: cached.fetched_at,
+          sha: cached.sha,
+          cacheReason: 'unknown',
+        };
       }
       // If harvest failed and we have no cache, don't overwrite cache with empty data
       if (!harvestRes.ok) {
-        throw { kind: 'unknown', message: 'failed to load harvests' } satisfies LoadError
+        throw { kind: 'unknown', message: 'failed to load harvests' } satisfies LoadError;
       }
     }
-    const findings = harvestRes.findings
-    const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings }
-    const fetchedAt = new Date().toISOString()
-    writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings })
-    return { data, source: 'live', fetchedAt, sha }
+    const findings = harvestRes.findings;
+    const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings };
+    const fetchedAt = new Date().toISOString();
+    writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings });
+    return { data, source: 'live', fetchedAt, sha };
   } catch (err) {
     if ((err as LoadError)?.kind) {
-      const cached = readSnapshot()
+      const cached = readSnapshot();
       if (cached) {
-        return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: (err as LoadError).kind }
+        return {
+          data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+          source: 'cache',
+          fetchedAt: cached.fetched_at,
+          sha: cached.sha,
+          cacheReason: (err as LoadError).kind,
+        };
       }
-      throw err
+      throw err;
     }
-    const cached = readSnapshot()
+    const cached = readSnapshot();
     if (cached) {
-      return { data: { summary: cached.summary, rows: cached.rows, findings: cached.findings }, source: 'cache', fetchedAt: cached.fetched_at, sha: cached.sha, cacheReason: 'unknown' }
+      return {
+        data: { summary: cached.summary, rows: cached.rows, findings: cached.findings },
+        source: 'cache',
+        fetchedAt: cached.fetched_at,
+        sha: cached.sha,
+        cacheReason: 'unknown',
+      };
     }
-    throw err
+    throw err;
   }
 }
 
-const STATUS_ORDER = ['open', 'claimed', 'done', 'wontfix', 'duplicate']
+const STATUS_ORDER = ['open', 'claimed', 'done', 'wontfix', 'duplicate'];
 
 function DebtDashboard() {
-  const [data, setData] = useState<Data | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null)
-  const [retryAfter, setRetryAfter] = useState<string | null>(null)
-  const [source, setSource] = useState<'live' | 'cache' | null>(null)
-  const [fetchedAt, setFetchedAt] = useState<string | null>(null)
-  const [sha, setSha] = useState<string | undefined>(undefined)
-  const [cacheReason, setCacheReason] = useState<CacheReason>(null)
+  const [data, setData] = useState<Data | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<LoadError['kind'] | null>(null);
+  const [retryAfter, setRetryAfter] = useState<string | null>(null);
+  const [source, setSource] = useState<'live' | 'cache' | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
+  const [sha, setSha] = useState<string | undefined>(undefined);
+  const [cacheReason, setCacheReason] = useState<CacheReason>(null);
 
   useEffect(() => {
-    let active = true
+    let active = true;
     load().then(
-      (res) => {
-        if (!active) return
-        setData(res.data)
-        setSource(res.source)
-        setFetchedAt(res.fetchedAt)
-        setSha(res.sha)
-        setCacheReason(res.cacheReason ?? null)
-        setError(null)
-        setErrorKind(null)
-        setRetryAfter(null)
+      res => {
+        if (!active) return;
+        setData(res.data);
+        setSource(res.source);
+        setFetchedAt(res.fetchedAt);
+        setSha(res.sha);
+        setCacheReason(res.cacheReason ?? null);
+        setError(null);
+        setErrorKind(null);
+        setRetryAfter(null);
       },
       (err: unknown) => {
-        if (!active) return
-        console.error('debt dashboard:', err)
-        setSource(null)
-        setCacheReason(null)
-        setFetchedAt(null)
-        setSha(undefined)
+        if (!active) return;
+        console.error('debt dashboard:', err);
+        setSource(null);
+        setCacheReason(null);
+        setFetchedAt(null);
+        setSha(undefined);
         if (err && typeof err === 'object' && 'kind' in err) {
-          const e = err as LoadError
-          setErrorKind(e.kind)
+          const e = err as LoadError;
+          setErrorKind(e.kind);
           if (e.kind === 'rate_limited') {
-            setRetryAfter(e.retryAfter ?? null)
-            setError(e.message)
+            setRetryAfter(e.retryAfter ?? null);
+            setError(e.message);
           } else if (e.kind === 'ref_missing') {
-            setError('data ref not found — the review-debt snapshot may not be published yet.')
+            setError('data ref not found — the review-debt snapshot may not be published yet.');
           } else if (e.kind === 'summary_failed') {
-            setError('summary fetch failed — could not load the latest review-debt summary.')
+            setError('summary fetch failed — could not load the latest review-debt summary.');
           } else {
-            setError('could not load the ledger — check the console for details')
+            setError('could not load the ledger — check the console for details');
           }
-          if (e.kind === 'summary_failed') {
-            setData(null)
-          } else {
-            setData(null)
-          }
+          setData(null);
         } else if (err instanceof Error) {
-          setErrorKind('unknown')
-          setError(err.message === 'data ref not found' ? 'data ref not found — the review-debt snapshot may not be published yet.' : 'could not load the ledger — check the console for details')
-          setData(null)
+          setErrorKind('unknown');
+          setError(
+            err.message === 'data ref not found'
+              ? 'data ref not found — the review-debt snapshot may not be published yet.'
+              : 'could not load the ledger — check the console for details'
+          );
+          setData(null);
         } else {
-          setErrorKind('unknown')
-          setError('could not load the ledger — check the console for details')
-          setData(null)
+          setErrorKind('unknown');
+          setError('could not load the ledger — check the console for details');
+          setData(null);
         }
       }
-    )
+    );
     return () => {
-      active = false
-    }
-  }, [])
+      active = false;
+    };
+  }, []);
 
   const { counts, total, recent } = useMemo(() => {
-    const c: Record<string, number> = {}
+    const c: Record<string, number> = {};
     for (const r of data?.rows ?? []) {
-      c[r.status] = (c[r.status] ?? 0) + 1
+      c[r.status] = (c[r.status] ?? 0) + 1;
     }
     const closed = (data?.rows ?? [])
-      .filter((r) => r.status !== 'open' && r.status !== 'claimed' && r.fix_pr !== null)
+      .filter(r => r.status !== 'open' && r.status !== 'claimed' && r.fix_pr !== null)
       .sort((a, b) => (b.fixed_at ?? '').localeCompare(a.fixed_at ?? ''))
-      .slice(0, 10)
-    return { counts: c, total: data?.rows.length ?? 0, recent: closed }
-  }, [data])
+      .slice(0, 10);
+    return { counts: c, total: data?.rows.length ?? 0, recent: closed };
+  }, [data]);
 
   const openFindings = useMemo(() => {
     // findings with a closed ledger overlay are not open anymore —
     // and the same finding repeats across harvest runs, so dedupe
     const closedIds = new Set(
       (data?.rows ?? [])
-        .filter((r) => r.status !== 'open' && r.status !== 'claimed')
-        .map((r) => r.thread_id)
-    )
-    const seen = new Set<string>()
-    const out: Finding[] = []
+        .filter(r => r.status !== 'open' && r.status !== 'claimed')
+        .map(r => r.thread_id)
+    );
+    const seen = new Set<string>();
+    const out: Finding[] = [];
     for (const f of data?.findings ?? []) {
-      if (f.status !== 'open' || closedIds.has(f.thread_id)) continue
-      const key = f.fingerprint ?? f.thread_id
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(f)
+      if (f.status !== 'open' || closedIds.has(f.thread_id)) continue;
+      const key = f.fingerprint ?? f.thread_id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(f);
     }
-    out.sort((a, b) => (b.harvested_at ?? '').localeCompare(a.harvested_at ?? ''))
-    return out.slice(0, 12)
-  }, [data])
+    out.sort((a, b) => (b.harvested_at ?? '').localeCompare(a.harvested_at ?? ''));
+    return out.slice(0, 12);
+  }, [data]);
 
   return (
     <>
-      <header className="nav">
-        <a className="logo" href={BASE_URL}>
-          bro <span aria-hidden="true">🤝</span>
-        </a>
-        <nav>
-          <a href={DOCS}>docs</a>
-          <a href={GITHUB}>github</a>
-        </nav>
-      </header>
-
       <main>
         <section className="hero">
           <p className="kicker">bro keeps books on itself</p>
@@ -520,9 +615,9 @@ function DebtDashboard() {
             Review debt, <em>live</em>.
           </h1>
           <p className="lede">
-            This is bro's own ledger — every unresolved review thread a merged PR left behind, fetched straight
-            from <code>refs/bro/data</code> on {GITHUB.replace('https://', '')}. No database, no backend: git is
-            the store, this page is the view.
+            This is bro's own ledger — every unresolved review thread a merged PR left behind,
+            fetched straight from <code>refs/bro/data</code> on {GITHUB.replace('https://', '')}. No
+            database, no backend: git is the store, this page is the view.
           </p>
         </section>
 
@@ -578,7 +673,9 @@ function DebtDashboard() {
                 <span className="stat-l">ledger rows</span>
               </div>
               <div className="stat">
-                <span className="stat-n">{total === 0 ? '—' : `${Math.round(((counts.done ?? 0) / total) * 100)}%`}</span>
+                <span className="stat-n">
+                  {total === 0 ? '—' : `${Math.round(((counts.done ?? 0) / total) * 100)}%`}
+                </span>
                 <span className="stat-l">resolved</span>
               </div>
               <div className="stat">
@@ -589,7 +686,11 @@ function DebtDashboard() {
                   })}
                 </span>
                 <span className="stat-l">
-                  last sync {new Date(data.summary.generated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                  last sync{' '}
+                  {new Date(data.summary.generated_at).toLocaleTimeString('en-GB', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
                   {source === 'cache' && fetchedAt ? ` · snapshot ${formatAge(fetchedAt)}` : ''}
                 </span>
               </div>
@@ -600,7 +701,7 @@ function DebtDashboard() {
                 <h2>By status</h2>
                 <table className="debt-table">
                   <tbody>
-                    {STATUS_ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => (
+                    {STATUS_ORDER.filter(s => (counts[s] ?? 0) > 0).map(s => (
                       <tr key={s}>
                         <td>{s}</td>
                         <td className="num">{counts[s]}</td>
@@ -650,7 +751,7 @@ function DebtDashboard() {
               ) : (
                 <table className="debt-table">
                   <tbody>
-                    {openFindings.map((f) => (
+                    {openFindings.map(f => (
                       <tr key={f.fingerprint ?? f.thread_id}>
                         <td>
                           {f.source_pr > 0 ? (
@@ -675,7 +776,7 @@ function DebtDashboard() {
               <h2>Latest closed debt</h2>
               <table className="debt-table">
                 <tbody>
-                  {recent.map((r) => (
+                  {recent.map(r => (
                     <tr key={r.thread_id}>
                       <td>
                         <a href={`${GITHUB}/pull/${r.fix_pr}`}>#{r.fix_pr}</a>
@@ -700,10 +801,11 @@ function DebtDashboard() {
       <footer className="foot">
         <p>bro doesn't fix your code. bro makes sure it gets fixed.</p>
         <p className="links">
-          <a href={DOCS}>docs</a> · <a href={`${BASE_URL}debt`}>debt</a> · <a href={GITHUB}>github</a> ·{' '}
-          <a href="https://www.npmjs.com/package/@broject/bro">npm</a> · MIT
+          <a href={DOCS}>docs</a> · <a href={`${BASE_URL}debt`}>debt</a> ·{' '}
+          <a href={GITHUB}>github</a> · <a href="https://www.npmjs.com/package/@broject/bro">npm</a>{' '}
+          · MIT
         </p>
       </footer>
     </>
-  )
+  );
 }

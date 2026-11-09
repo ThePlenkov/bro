@@ -33,7 +33,7 @@ done
 
 # Format clean files (without unstaged changes)
 if [ -s "$clean_file" ]; then
-  tr '\n' '\0' < "$clean_file" | xargs -0 -r ./node_modules/.bin/biome format --write --
+  tr '\n' '\0' < "$clean_file" | xargs -0 -r ./node_modules/.bin/biome format --write --no-errors-on-unmatched --
   # Re-stage the formatted clean files
   while IFS= read -r file; do
     GIT_LITERAL_PATHSPECS=1 git add -- "$file"
