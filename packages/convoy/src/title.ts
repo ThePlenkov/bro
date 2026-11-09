@@ -74,7 +74,7 @@ function edgeText(seg: TitleSegment | undefined): string {
  *  between the edges. */
 function innerLiterals(m: TitleMatch): string[] {
   const head = m.segments[0];
-  const tail = m.segments[m.segments.length - 1];
+  const tail = m.segments.at(-1);
   const parts: string[] = [];
   for (const seg of m.segments) {
     if (!isLiteral(seg)) continue;
