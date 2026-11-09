@@ -1736,7 +1736,10 @@ const UPSTREAM_KEY_ENVS = [
 function fastLaneArmed(
   env: Record<string, string> | undefined,
   serveLane?: boolean,
-  sameProcess?: boolean
+  sameProcess?: boolean,
+  /** the file layer's serve.apiKeyEnv — an upstream key can live in
+   *  a config-named var beyond the three hardcoded ones */
+  apiKeyEnv?: string
 ): boolean {
   // the config escape hatch — serve.fastLane:false disables the lane
   // regardless of env evidence, exactly as resolveFastLane honors it
@@ -1761,7 +1764,11 @@ function fastLaneArmed(
     }
     return ownEnv ? (process.env as Record<string, string | undefined>)[k] : undefined;
   };
-  const hasKey = (): boolean => UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k)));
+  const hasKey = (): boolean =>
+    UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k))) ||
+    // the file layer names its own key var — providerConfig resolves
+    // it for the lane, so doctor's arming check must see it too
+    (apiKeyEnv !== undefined && nonBlank(get(apiKeyEnv)));
   return hasKey() && !flagsOff(get('BRO_PROVIDER_FAST_LANE'));
 }
 
@@ -1872,6 +1879,27 @@ interface ClassifierCtx {
   fastModel?: string;
 }
 
+/** A `<acp-name>/<id>` pin — conductor vocabulary the upstream cannot
+ *  serve verbatim. Split on the slash and test whole segments: a bare
+ *  model id that merely contains a '/' is not a prefix pin. */
+function isConductorPin(v: string, acpNames: Set<string>): boolean {
+  const slash = v.indexOf('/');
+  return slash > 0 && v.slice(slash + 1) !== '' && acpNames.has(v.slice(0, slash));
+}
+
+/** First non-blank value, trimmed — resolveFastLane's model chain
+ *  semantics: a set-but-empty env pin falls through to the file layer
+ *  instead of winning the ?? chain. */
+function firstTrimmed(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    const t = v?.trim();
+    if (t !== undefined && t !== '') {
+      return t;
+    }
+  }
+  return undefined;
+}
+
 /** One client source → its warn row(s). A live-endpoint hit outranks
  *  bare pin hits: the classifier rides the same base url (no separate
  *  URL knob exists), so the conductor answer is the live one. */
@@ -1894,7 +1922,7 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
     if (
       ctx.fastArmed === true &&
       (ctx.fastModel !== undefined ||
-        !classifierPins(src).some(([, v]) => v.includes('/')))
+        !classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames)))
     ) {
       return [
         check(
@@ -1937,7 +1965,7 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
     // without the model pin it forwards verbatim and fails there
     const needsModelPin =
       ctx.fastModel === undefined &&
-      classifierPins(src).some(([, v]) => v.includes('/'));
+      classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames));
     if (armedHere && !needsModelPin) {
       return [
         check(
@@ -1993,11 +2021,12 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
-    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess),
+    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess, fileServe.apiKeyEnv),
     fastModel:
-      env?.BRO_PROVIDER_FAST_MODEL ??
-      (env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined) ??
-      fileServe.fastModel,
+      firstTrimmed(
+        env?.BRO_PROVIDER_FAST_MODEL,
+        env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined
+      ) ?? fileServe.fastModel,
   };
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
   const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));

@@ -2512,7 +2512,7 @@ async function messages(
       fast.model === undefined
         ? raw
         : JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: fast.model });
-    await forwardBody(req, res, fast, payload, wire.cfg.timeoutMs);
+    await forwardBody(req, res, fast, { payload, timeoutMs: wire.cfg.timeoutMs });
     return;
   }
   const key = conversationKey(req, body);
