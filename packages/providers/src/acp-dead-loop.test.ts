@@ -3,10 +3,13 @@
  *  session, a quota, or an operator's account. */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { AgentApp } from '@agentclientprotocol/sdk';
 import { JudgeUnavailable } from '@broject/core';
 import type { ProviderEntry } from '@broject/core';
 import { acpOpen, acpPooledTurn, acpSessionRetain } from './acp.ts';
+import type { AcpPeer } from './acp.ts';
 import { AcpDeadLoopError, AcpDeadLoopGuard } from './acp-guard.ts';
+import type { AcpGuardCtx } from './acp-guard.ts';
 import { fakeAcpAgent } from './testkit.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
@@ -14,6 +17,15 @@ type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' };
 
 const deadline = (ms = 10_000): number => Date.now() + ms;
+
+/** A turn on the peer under the guard — the churn the guard sees. The
+ *  shape every refusal test shares: one turn, one guard, one scope. */
+function guardedTurn(peer: AcpPeer, app: AgentApp, ctx: AcpGuardCtx) {
+  return acpPooledTurn(peer, ENTRY, { acp: { peer: app } }, 'p', deadline(), {
+    by: 'conductor:t',
+    guard: ctx,
+  });
+}
 
 describe('acp dead-loop prevention (bro-b961a)', () => {
   test('the churn is refused BEFORE the session opens — the refusal costs no quota', async () => {
@@ -25,20 +37,14 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
       // two failing turns — each opened a session and answered nothing
       for (let i = 0; i < 2; i++) {
         await assert.rejects(
-          acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-            by: 'conductor:t',
-            guard: ctx,
-          }),
+          guardedTurn(peer, fake.app, ctx),
           JudgeUnavailable
         );
       }
       assert.equal(fake.sessions.length, 2);
       // the third is refused — and NO third session is opened
       await assert.rejects(
-        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-          by: 'conductor:t',
-          guard: ctx,
-        }),
+        guardedTurn(peer, fake.app, ctx),
         (err: unknown) => err instanceof AcpDeadLoopError && err.scope === 'conv-1'
       );
       assert.equal(fake.sessions.length, 2);
@@ -54,10 +60,7 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
       const guard = new AcpDeadLoopGuard({ maxOpens: 1 });
       const ctx = { guard, scope: 'conv-1', peer: 'conductor:t' };
       for (let i = 0; i < 5; i++) {
-        const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-          by: 'conductor:t',
-          guard: ctx,
-        });
+        const r = await guardedTurn(peer, fake.app, ctx);
         assert.equal(r.text, 'ok');
       }
       assert.equal(guard.churn({ scope: 'conv-1' }), 0);
@@ -108,20 +111,14 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
       // the first turn opens a session and answers nothing — the peer's
       // churn is one unfinished session
       await assert.rejects(
-        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-          by: 'conductor:t',
-          guard: ctx,
-        }),
+        guardedTurn(peer, fake.app, ctx),
         JudgeUnavailable
       );
       assert.equal(fake.sessions.length, 1);
       // the next open crosses the peer's budget — it is refused BEFORE the
       // session opens, and the peer is killed (the child with it)
       await assert.rejects(
-        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-          by: 'conductor:t',
-          guard: ctx,
-        }),
+        guardedTurn(peer, fake.app, ctx),
         (err: unknown) => err instanceof AcpDeadLoopError && err.kind === 'peer'
       );
       assert.equal(fake.sessions.length, 1);

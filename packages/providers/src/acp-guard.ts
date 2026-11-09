@@ -190,19 +190,29 @@ export class AcpDeadLoopGuard {
         // the window this charge was counted in rolled — the reset
         // already wrote it off; freeing it now would hide a NEWER
         // session's open behind this completion
-        if (tally.since === since && tally.pending > 0) {
-          tally.pending -= 1;
-        }
+        this.releasePending(tally, since);
         // a completed turn clears the trip outright — a working
         // conversation is never stuck behind a stale refusal
         tally.trippedUntil = 0;
         // the probe answered — the scope is healthy again
         tally.probeInFlight = false;
-        if (peerTally !== undefined && peerTally.since === peerSince && peerTally.pending > 0) {
-          peerTally.pending -= 1;
+        if (peerTally !== undefined) {
+          this.releasePending(peerTally, peerSince);
         }
       },
     };
+  }
+
+  /** One pending count down — only if the window the charge was counted
+   *  in is still the current one (a rolled window already wrote it off). */
+  private releasePending(tally: Tally, since: number): void {
+    if (tally.since !== since) {
+      return;
+    }
+    if (tally.pending === 0) {
+      return;
+    }
+    tally.pending -= 1;
   }
 
   /** The scope is refused — the cooldown has not expired yet, or the
