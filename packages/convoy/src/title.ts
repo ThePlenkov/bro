@@ -37,24 +37,25 @@ function variableEnd(pattern: string, at: number): number {
   return close + 2;
 }
 
-/** The pattern's segments — the literals and the wildcards. */
+/** The pattern's segments — the literals and the wildcards. The literal
+ *  between two variables is a span of the pattern, so the walk tracks
+ *  where the span starts instead of accumulating the pattern's text. */
 function titleSegments(pattern: string): TitleSegment[] {
   const segments: TitleSegment[] = [];
-  let literal = '';
+  let literalStart = 0;
   let i = 0;
   while (i < pattern.length) {
     const end = pattern.startsWith('{{', i) ? variableEnd(pattern, i) : -1;
     if (end > 0) {
-      segments.push({ kind: 'literal', text: literal });
+      segments.push({ kind: 'literal', text: pattern.slice(literalStart, i) });
       segments.push({ kind: 'wildcard' });
-      literal = '';
+      literalStart = end;
       i = end;
       continue;
     }
-    literal += pattern.slice(i, i + 1);
     i += 1;
   }
-  segments.push({ kind: 'literal', text: literal });
+  segments.push({ kind: 'literal', text: pattern.slice(literalStart) });
   return segments;
 }
 
