@@ -335,6 +335,7 @@ export type {
   ScanOpts,
 } from './review.ts';
 export {
+  countMergesInRange,
   gitStacks,
   MANUAL_CASCADE,
   mergeChainPerLayer,

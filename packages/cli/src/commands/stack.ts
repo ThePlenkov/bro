@@ -24,6 +24,7 @@
 import { basename } from 'node:path';
 import {
   acquireFileLock,
+  countMergesInRange,
   facade,
   gitTry,
   LockTimeout,
@@ -105,6 +106,51 @@ function allBranches(dir: string): string[] {
 
 function localBranch(dir: string, name: string): boolean {
   return gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `refs/heads/${name}`]).code === 0;
+}
+
+/** The base's usable commit-ish — the LOCAL head first, then the
+ *  remote-tracking ref (bro-yi9sz).
+ *
+ *  Git's rev-parse never falls back from `main` to `origin/main`: the
+ *  shorthand names `refs/heads/main`, the tracking branch is
+ *  `origin/main`. So a repository whose default branch has no local
+ *  branch (a checkout that never created it, a default branch renamed
+ *  on the remote) reads every base as dead — the chain is unsyncable
+ *  and every member is skipped with a reason.
+ *
+ *  The NAME stays the name: the PR retarget and the recorded stack edge
+ *  need the branch name, not a ref. Only the git reads take the
+ *  commit-ish. `undefined` when the base exists nowhere — the old
+ *  answer, and the only honest one. */
+export function baseRef(dir: string, base: string): string | undefined {
+  const local = `refs/heads/${base}`;
+  if (gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', local]).code === 0) {
+    return local;
+  }
+  for (const remote of remotesOf(dir)) {
+    const tracking = `refs/remotes/${remote}/${base}`;
+    if (gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', tracking]).code === 0) {
+      return tracking;
+    }
+  }
+  return undefined;
+}
+
+/** The configured remotes, `origin` first — the conventional remote is
+ *  the one a default branch tracks. */function remotesOf(dir: string): string[] {
+  const names = gitTry(['-C', dir, 'remote'])
+    .out.split('\n')
+    .map(r => r.trim())
+    .filter(r => r !== '');
+  const origin = names.filter(r => r === 'origin');
+  return [...origin, ...names.filter(r => r !== 'origin')];
+}
+
+/** The rebase target — the base's usable commit-ish (bro-yi9sz). The
+ *  NAME stays the name for the PR retarget and the recorded edge; only
+ *  the git call takes the ref. */
+function ontoBase(dir: string, base: string): string {
+  return baseRef(dir, base) ?? base;
 }
 
 /** Stack name resolution: --name wins, else the current worktree's own
@@ -516,15 +562,8 @@ function baseOf(m: MemberView, prev: string): string {
  * rather than claiming a success it cannot prove.
  */
 function carriesBaseHead(branch: string, base: string, root: string): boolean | undefined {
-  const baseHead = gitTry([
-    '-C',
-    root,
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    `refs/heads/${base}`,
-  ]).out.trim();
-  return carriesCommit(branch, baseHead, root);
+  const baseHead = baseTip(root, base);
+  return carriesCommit(branch, baseHead ?? '', root);
 }
 
 /** Does the branch still carry this COMMIT? The chain's base==prev-head
@@ -554,14 +593,11 @@ function carriesCommit(branch: string, baseHead: string, root: string): boolean 
  *  ONE read, ONE answer: the containment check and the fork use the
  *  same commit, so the base cannot slip between the two reads. */
 function baseTip(root: string, base: string): string | undefined {
-  const sha = gitTry([
-    '-C',
-    root,
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    `refs/heads/${base}^{commit}`,
-  ]).out.trim();
+  const ref = baseRef(root, base);
+  if (ref === undefined) {
+    return undefined;
+  }
+  const sha = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).out.trim();
   return sha === '' ? undefined : sha;
 }
 
@@ -683,20 +719,25 @@ function forkFromReflog(branch: string, wt: string): string | undefined {
  * that replays the base's commits is not.
  */
 export function forkPoint(base: string, wt: string): string {
-  const mergeBase = gitTry(['-C', wt, 'merge-base', base, 'HEAD']).out.trim();
+  // the base is read through the resolver (bro-yi9sz): a base that lives
+  // only as a remote-tracking ref is a base, not a dead ref. An
+  // unresolvable base keeps the old behaviour — the git calls below fail
+  // and the caller sees no fork.
+  const ref = baseRef(wt, base) ?? base;
+  const mergeBase = gitTry(['-C', wt, 'merge-base', ref, 'HEAD']).out.trim();
   if (mergeBase === '') {
     return mergeBase;
   }
   // the base's tip is already inside the child — the merge-base IS the fork
-  if (gitTry(['-C', wt, 'merge-base', '--is-ancestor', base, 'HEAD']).code === 0) {
+  if (gitTry(['-C', wt, 'merge-base', '--is-ancestor', ref, 'HEAD']).code === 0) {
     return mergeBase;
   }
   // git's own answer — the base's reflog, not a guess
-  const forked = gitTry(['-C', wt, 'merge-base', '--fork-point', base, 'HEAD']).out.trim();
+  const forked = gitTry(['-C', wt, 'merge-base', '--fork-point', ref, 'HEAD']).out.trim();
   if (forked !== '') {
     return forked;
   }
-  const cherry = gitTry(['-C', wt, 'cherry', base, 'HEAD']).out.trim();
+  const cherry = gitTry(['-C', wt, 'cherry', ref, 'HEAD']).out.trim();
   if (cherry === '') {
     // every commit the member carries is in the base by patch — there is
     // no work of its own to replay, and the fork is its own tip
@@ -779,7 +820,28 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
     );
     return false;
   }
-  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork]);
+  // A plain rebase LINEARIZES: the merge commits in the replayed range
+  // are dropped, and with them the conflict resolutions they carry. The
+  // member comes out rewritten and the sync says "rebased" — the
+  // content is gone. Same corruption class as `stack merge --rebase`,
+  // which refuses it (bro-dz0u9, PR #872) — the same counter, the same
+  // wording. The tip is PINNED: `m.branch` is a moving ref, and the
+  // count, the range and the rebase must speak about the same commits.
+  const head = gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', m.branch]).out.trim();
+  if (head === '') {
+    lines.push(`  ${m.branch} skipped — its tip cannot be read; owner resolves on enter`);
+    return false;
+  }
+  const merges = countMergesInRange(wt.path, `${fork}..${head}`);
+  if (merges === undefined || merges > 0) {
+    lines.push(
+      merges === undefined
+        ? `  ${m.branch} skipped — the merge commits in its range cannot be counted; owner resolves on enter`
+        : `  ${m.branch} contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash`
+    );
+    return false;
+  }
+  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', ontoBase(wt.path, item.desiredBase), fork]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(
@@ -1168,7 +1230,14 @@ export function syncStack(
   const members = collectMembers(name, root, ctx.rev);
   // a branch that no longer exists cannot carry the chain — the git truth
   // decides, so the root falls back to the default branch
-  const chainRoot = chainRootBase(members, ctx.trunk, b => localBranch(root, b));
+  const chainRoot =
+    chainRootBase(members, ctx.trunk, b => localBranch(root, b)) ??
+    // the default branch may live ONLY as a remote-tracking ref
+    // (bro-yi9sz): a checkout that never created it locally still has a
+    // base to stand on. A member's own edge base keeps the local-only
+    // rule above — a deleted branch must not be resurrected by a stale,
+    // unpruned tracking ref.
+    (baseRef(root, ctx.trunk) !== undefined ? ctx.trunk : undefined);
   if (chainRoot === undefined) {
     // not even the default branch exists locally: there is nothing to
     // stand on, and planning onto a dead ref is what this guard is for
