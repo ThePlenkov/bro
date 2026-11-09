@@ -228,6 +228,9 @@ export interface ReviewFacade {
    *  leaves callers on the prsForBranch scan. Connector-bounded (one
    *  listing page); a repo past the cap under-counts, never errors. */
   openPrs?(repo: string): { pr: number; headRef: string }[];
+  /** Close a PR/MR without merging it (orphan/reconcile cleanup).
+   *  Optional — hosts without it report once and skip the action. */
+  closePr?(t: PrTarget): void;
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text
    *  names none. */

@@ -479,6 +479,13 @@ brouterSection.jsonSchema = js.obj({
   models: js.map(
     js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
   ),
+  routes: js.str,
+  // the decision model — the judge that picks the route. The same shape
+  // the fleet's router keeps: a provider and a mode.
+  router: js.obj(
+    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    { required: ['provider', 'mode'] }
+  ),
 });
 
 /** bro.config.json `connectors` section — facade → connector precedence,
@@ -904,23 +911,85 @@ function serveApiKeyEnv(raw: unknown): string | undefined {
  *  config; `BRO_PROVIDER_UPSTREAM` overrides). `apiKeyEnv` names the env
  *  var holding the real credential (secret channel; `BRO_PROVIDER_API_KEY`
  *  / `ANTHROPIC_*` override). */
+/** One thin client's own knobs — where `bro router client` writes the
+ *  model block, and which binary the launch stage execs.
+ *
+ *  The client reads its settings at START, so the order matters: the
+ *  router must be up (the catalog is the truth) and the settings must
+ *  carry the block BEFORE the client starts. This config says where
+ *  that block lands — the machine-local path, not a committed one. */
+export interface ServeClientConfig {
+  /** the settings FILE the model block is merged into */
+  settingsPath?: string;
+  /** the client binary the launch stage execs */
+  command?: string;
+}
+
+/** The client configs, keyed by client name (`claude-code`). */
+export type ServeClients = Record<string, ServeClientConfig>;
+
+/** A string field, trimmed — undefined when it is absent or blank. */
+function trimmedField(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** One client's config — its fields, trimmed. Undefined when the entry is
+ *  malformed or carries nothing to configure. */
+function serveClientConfig(raw: unknown, name: string): ServeClientConfig | undefined {
+  if (!isPlainObject(raw)) {
+    console.error(`bro.config: serve.client.${name} must be an object — client dropped`);
+    return undefined;
+  }
+  const settingsPath = trimmedField(raw.settingsPath);
+  const command = trimmedField(raw.command);
+  const cfg: ServeClientConfig = {
+    ...(settingsPath === undefined ? {} : { settingsPath }),
+    ...(command === undefined ? {} : { command }),
+  };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+/** The client configs — a malformed entry drops ITS OWN fields, never
+ *  the whole section (same discipline as the lane limits). */
+function serveClients(raw: unknown): ServeClients | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    console.error(
+      'bro.config: serve.client must be an object of client → config — section dropped'
+    );
+    return undefined;
+  }
+  const out: ServeClients = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (name === '__proto__') continue;
+    const cfg = serveClientConfig(value, name);
+    if (cfg !== undefined) out[name] = cfg;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
   upstream?: string;
   apiKeyEnv?: string;
+  client?: ServeClients;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
     providers?: unknown;
     upstream?: unknown;
     apiKeyEnv?: unknown;
+    client?: unknown;
   };
   const out: {
     backend?: string;
     providers?: ServeProviders;
     upstream?: string;
     apiKeyEnv?: string;
+    client?: ServeClients;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -931,6 +1000,8 @@ export const serveSection: ConfigSection<{
   if (upstream !== undefined) out.upstream = upstream;
   const apiKeyEnv = serveApiKeyEnv(obj.apiKeyEnv);
   if (apiKeyEnv !== undefined) out.apiKeyEnv = apiKeyEnv;
+  const client = serveClients(obj.client);
+  if (client !== undefined) out.client = client;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -949,6 +1020,12 @@ serveSection.jsonSchema = js.obj({
   }),
   upstream: js.str,
   apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+  client: js.map(
+    js.obj({
+      settingsPath: js.str,
+      command: js.str,
+    })
+  ),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1886,14 +1963,6 @@ export function loadConfigLayers(
   ];
   const layers: ConfigLayerHit[] = [];
   const broken: string[] = [];
-  // Tests must not leak ambient global config (BRO_TEST / BRO_NO_GLOBAL_CONFIG)
-  if (process.env.BRO_TEST === '1' || process.env.BRO_NO_GLOBAL_CONFIG === '1') {
-    if (only === undefined) {
-      only = ['project', 'local'];
-    } else if (only.includes('global')) {
-      only = only.filter((l) => l !== 'global');
-    }
-  }
   const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
   if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
   if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);

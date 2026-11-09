@@ -86,6 +86,8 @@ describe('loopSection', () => {
       autoMerge: true,
       maxItems: 5,
       maxOpen: 2,
+      maxOpenTotal: 10,
+      worktreeWarn: 40,
       worktreeMb: 350,
       diskMinSlots: 3,
       batch: 6,
@@ -310,6 +312,9 @@ describe('expandAgentCmd', () => {
     // the prompt path never enters the line — injection by filename is
     // impossible no matter what the artifact is called
     assert.equal(expandAgentCmd(''), '"$BRO_PROMPT_FILE"');
-    assert.equal(expandAgentCmd('a {promptFile} b {promptFile}'), 'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"');
+    assert.equal(
+      expandAgentCmd('a {promptFile} b {promptFile}'),
+      'a "$BRO_PROMPT_FILE" b "$BRO_PROMPT_FILE"'
+    );
   });
 });

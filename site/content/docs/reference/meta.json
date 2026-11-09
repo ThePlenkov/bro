@@ -64,6 +64,7 @@
     "pipeline",
     "---Utility---",
     "check",
+    "router",
     "setup",
     "doctor",
     "wait",
