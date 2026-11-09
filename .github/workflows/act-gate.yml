@@ -35,6 +35,10 @@ permissions:
   contents: read
   pull-requests: read
   checks: read
+  # The gate reads check-runs, not the legacy commit-statuses API — but a
+  # verdict must never depend on a hidden 403 from a scope that was not
+  # granted, so the read is there.
+  statuses: read
 
 concurrency:
   group: act-gate-${{ github.event.inputs.pr || github.event.pull_request.number }}

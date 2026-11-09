@@ -44,7 +44,10 @@ the verdict:
 # .github/workflows/act-gate.yml
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr: {description: "PR number to evaluate", required: true, type: string}
 
 jobs:
   act-gate:
@@ -56,7 +59,7 @@ jobs:
       - run: npm ci && npm run build
       - run: bro review act wait "$PR" --timeout 20
         env:
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.inputs.pr || github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
 ```
 
