@@ -546,7 +546,13 @@ function loadStateFromPath(p: string): PluginState | null {
 }
 
 export function loadState(scope: string): PluginState {
-  const cur = loadStateFromPath(stateFile(scope)) ?? { workspaces: {}, mirrors: {}, renderers: {}, statuses: {}, gone: {} };
+  const cur = loadStateFromPath(stateFile(scope)) ?? { workspaces: {}, mirrors: {}, renderers: {}, statuses: {}, sessions: {}, gone: {} };
+  if (!cur.sessions) cur.sessions = {};
+  if (!cur.workspaces) cur.workspaces = {};
+  if (!cur.mirrors) cur.mirrors = {};
+  if (!cur.renderers) cur.renderers = {};
+  if (!cur.statuses) cur.statuses = {};
+  if (!cur.gone) cur.gone = {};
 
   // try legacy locations and merge any managed workspaces we don't have
   const home = process.env.HOME ?? (typeof homedir === 'function' ? homedir() : '/root');
@@ -577,7 +583,7 @@ export function loadState(scope: string): PluginState {
             cur.workspaces[k] = { ...(cur.workspaces[k] as any), managed: true };
           }
         }
-        // merge mirrors/renderers/statuses/gone if missing
+        // merge mirrors/renderers/statuses/sessions/gone if missing
         for (const k of Object.keys(st.mirrors || {})) {
           if (cur.mirrors[k] === undefined) cur.mirrors[k] = (st.mirrors as any)[k];
         }
@@ -587,12 +593,18 @@ export function loadState(scope: string): PluginState {
         for (const k of Object.keys(st.statuses || {})) {
           if (cur.statuses[k] === undefined) cur.statuses[k] = (st.statuses as any)[k];
         }
+        if ((st as any).sessions) {
+          for (const k of Object.keys((st as any).sessions || {})) {
+            if ((cur as any).sessions[k] === undefined) (cur as any).sessions[k] = (st as any).sessions[k];
+          }
+        }
         for (const k of Object.keys(st.gone || {})) {
           if (cur.gone[k] === undefined) cur.gone[k] = (st.gone as any)[k];
         }
       }
     } catch {}
   }
+  if (!cur.sessions) cur.sessions = {};
   return cur;
 }
 
