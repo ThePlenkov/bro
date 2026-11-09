@@ -80,6 +80,7 @@ case "$1 $2" in
   "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $4" >> "$FAKE_GH_LOG"; fi
       if [ -n "$FAKE_GH_ANN_SLEEP" ]; then sleep "$FAKE_GH_ANN_SLEEP"; fi
       case "$4" in
+      *pulls\\?*) echo '[{"number":9,"head":"work/x"},{"number":11,"head":"loop/y"}]' ;;
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
@@ -195,9 +196,13 @@ describe('githubReview', { skip: WIN32 }, () => {
       ]);
       // the projection IS the contract — the full REST pull objects carry
       // every body, and one busy page of them crosses Node's spawnSync
-      // buffer, which killed the child and read as a bare 'gh api failed'
+      // buffer, which killed the child and read as a bare 'gh api failed'.
+      // --paginate --slurp folds every page into one doc before the
+      // projection runs: the ceiling counts this listing as complete.
+      const args = readFileSync(log, 'utf8');
+      assert.ok(args.includes('--paginate'), 'openPrs must page the full listing');
       assert.ok(
-        readFileSync(log, 'utf8').includes('--jq [.[]|{number,head:.head.ref}]'),
+        args.includes('--jq [.[][]|{number,head:.head.ref}]'),
         'openPrs must ask gh for the projected listing'
       );
     });
@@ -453,6 +458,22 @@ describe('githubReview', { skip: WIN32 }, () => {
       });
       assert.equal(prs.length, 1);
       assert.match(readFileSync(log, 'utf8'), /pr list .*--search merged:>=2026-01-01\n/);
+    });
+  });
+
+  test('mergedPrs state=closed adds is:unmerged — merged rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'closed' });
+      const lines = readFileSync(log, 'utf8');
+      assert.match(lines, /pr list .*--state closed/);
+      assert.match(lines, /--search is:unmerged\n/);
+    });
+  });
+
+  test('mergedPrs state=all adds is:closed — open rows cannot crowd the cap out', () => {
+    withFakeGh({}, log => {
+      githubReview().mergedPrs('acme/widgets', { limit: 10, state: 'all' });
+      assert.match(readFileSync(log, 'utf8'), /--search is:closed\n/);
     });
   });
 

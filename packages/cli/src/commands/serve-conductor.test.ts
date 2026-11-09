@@ -3,6 +3,8 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -38,6 +40,36 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text' as const, text },
   }));
+
+/** The client's own tool — Claude Code's Bash, with the schema the
+ *  request carries. */
+const BASH_TOOL = [
+  {
+    name: 'Bash',
+    description: 'run a command',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' }, description: { type: 'string' } },
+      required: ['command'],
+    },
+  },
+];
+
+/** An agent that CALLS a tool and then answers — the call in ACP's
+ *  shape (the bridge's input), the answer in text. */
+function agentCallingTool(toolCallId: string) {
+  const call: SessionUpdate = {
+    sessionUpdate: 'tool_call',
+    toolCallId,
+    title: 'Ran ls',
+    kind: 'execute',
+    rawInput: { command: 'ls -la' },
+  } as SessionUpdate;
+  return fakeAcpAgent({
+    updates: [call, ...chunks('done')],
+    configOptions: [MODEL_OPTION],
+  });
+}
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post() for repeated /v1/messages sends. */
@@ -428,6 +460,78 @@ describe('conductorConfig', () => {
       false
     );
   });
+  test('the fast lane arms on the upstream key pair — env pins win (bro-6asnu)', () => {
+    const env = { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_API_KEY: 'k' };
+    const cfg = conductorConfig(env, '/r', providers);
+    assert.equal(cfg?.fast?.upstream, 'https://api.anthropic.com');
+    assert.equal(cfg?.fast?.apiKey, 'k');
+    assert.equal(cfg?.fast?.model, undefined);
+    assert.equal(cfg?.fast?.maxTokens, 2048);
+    // every pin: upstream host, model rewrite, classification cap
+    const pinned = conductorConfig(
+      {
+        ...env,
+        BRO_PROVIDER_UPSTREAM: 'http://up.example/v1/',
+        BRO_PROVIDER_FAST_MODEL: 'haiku-x',
+        BRO_PROVIDER_FAST_MAX_TOKENS: '512',
+      },
+      '/r',
+      providers
+    );
+    assert.equal(pinned?.fast?.upstream, 'http://up.example/v1');
+    assert.equal(pinned?.fast?.model, 'haiku-x');
+    assert.equal(pinned?.fast?.maxTokens, 512);
+    // a non-positive cap falls back to the default
+    assert.equal(
+      conductorConfig({ ...env, BRO_PROVIDER_FAST_MAX_TOKENS: '0' }, '/r', providers)?.fast
+        ?.maxTokens,
+      2048
+    );
+    // the ambient credential fallbacks arm it like the byte proxy does
+    assert.equal(
+      conductorConfig(
+        { BRO_PROVIDER_BACKEND: 'dv-acp', ANTHROPIC_AUTH_TOKEN: 't' },
+        '/r',
+        providers
+      )?.fast?.apiKey,
+      't'
+    );
+    // no key at all → unarmed, fast shapes still conduct
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.fast,
+      undefined
+    );
+    // the off switch — every spelling
+    for (const flag of ['off', '0', 'false', 'OFF']) {
+      assert.equal(
+        conductorConfig({ ...env, BRO_PROVIDER_FAST_LANE: flag }, '/r', providers)?.fast,
+        undefined,
+        flag
+      );
+    }
+  });
+
+  test('serve.fastModel + serve.fastLane ride the config file (bro-6asnu)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fast-'));
+    const write = (serve: Record<string, unknown>) =>
+      writeFileSync(
+        join(dir, 'bro.config.local.json'),
+        JSON.stringify({
+          serve,
+          providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+        })
+      );
+    write({ backend: 'dv-acp', fastLane: false });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast, undefined);
+    write({ backend: 'dv-acp', fastModel: 'haiku-cfg' });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast?.model, 'haiku-cfg');
+    // env wins over the committed pin
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_API_KEY: 'k', BRO_PROVIDER_FAST_MODEL: 'env-m' }, dir)?.fast
+        ?.model,
+      'env-m'
+    );
+  });
 });
 
 describe('parseReply', () => {
@@ -571,6 +675,84 @@ describe('serve /v1/* — the conductor plane', () => {
         d: '/tmp',
       });
       assert.equal(stopReason(ev), 'tool_use');
+    } finally {
+      await close();
+    }
+  });
+
+  // bro-sy4q3 — the agent's tool call arrives in ACP's shape; the client
+  // executes in its own. The bridge translates by CAPABILITY: the agent
+  // calls "execute", the client offers "Bash".
+  test("the agent's tool call becomes the client's tool_use", async () => {
+    const fake = agentCallingTool('exec:0#1');
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+      tools: BASH_TOOL,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const start = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.ok(start, 'the tool_use block is on the wire');
+      assert.equal((start.data.content_block as { name: string }).name, 'Bash');
+      const delta = ev.find(
+        e =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      );
+      assert.ok(delta, 'the tool_use carries its input');
+      assert.deepEqual(JSON.parse((delta.data.delta as { partial_json: string }).partial_json), {
+        command: 'ls -la',
+      });
+      assert.equal(stopReason(ev), 'tool_use');
+      // the agent's own edge is NOT narrated — the client's tool_use is it
+      assert.deepEqual(textDeltas(ev), ['done']);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a call the client cannot run stays a narrated edge', async () => {
+    const fake = agentCallingTool('exec:0#2');
+    // no tools offered — the client has nothing that can run the call
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    });
+    try {
+      const ev = await sseEvents(r);
+      const tu = ev.find(
+        e =>
+          e.event === 'content_block_start' &&
+          (e.data.content_block as { type: string }).type === 'tool_use'
+      );
+      assert.equal(tu, undefined, 'no tool_use — the client cannot run it');
+      assert.ok(textDeltas(ev).join('').includes('Ran ls'), 'the edge stays narrated');
+      assert.equal(stopReason(ev), 'end_turn');
+    } finally {
+      await close();
+    }
+  });
+
+  test("the buffered answer carries the client's tool_use too", async () => {
+    const fake = agentCallingTool('exec:0#3');
+    const { r, close } = await postMessages(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    try {
+      const body = (await r.json()) as {
+        content: { type: string; name?: string; input?: unknown }[];
+      };
+      const tu = body.content.find(b => b.type === 'tool_use');
+      assert.ok(tu, 'the buffered answer carries the tool_use');
+      assert.equal(tu?.name, 'Bash');
+      assert.deepEqual(tu?.input, { command: 'ls -la' });
     } finally {
       await close();
     }
@@ -752,6 +934,13 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.deepEqual(
         body.data.map((m: { display_name: string }) => m.display_name),
         ['dv-acp/SWE X', 'dv-acp/SWE Y']
+      );
+      // the lane rides the row as its own field — a reader must never
+      // have to guess it back out of the id, whose head is a formatted
+      // string and a model's name may carry a slash of its own
+      assert.deepEqual(
+        body.data.map((m: { source: string }) => m.source),
+        ['dv-acp', 'dv-acp']
       );
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
@@ -1261,7 +1450,10 @@ describe('serve /v1/* — the conductor plane', () => {
 
   // bro-cfwc1 — narration mid-tag corrupts a post-hoc re-parse of the
   // emitted text; the recorded reply must keep the wire's real shape.
-  test('a resend replays the tool_use a mid-tag narration left intact', async () => {
+  // bro-sy4q3 — a tool answer is never replayed: the resend asks the
+  // agent afresh, so the wire shows the live shape (the narration still
+  // outside the tag's markup).
+  test('a resend never replays a tool answer — the turn runs again', async () => {
     const fake = fakeAcpAgent({
       updates: [
         ...chunks('work <tool_ca'),
@@ -1288,22 +1480,22 @@ describe('serve /v1/* — the conductor plane', () => {
             (e.data.delta as { type: string }).type === 'input_json_delta'
         )
       );
-      // an identical resend replays the RECORDED reply — narration
-      // must not sit inside the unfinished tag's markup
+      // an identical resend is NOT answered from the record — the agent
+      // runs again, so the client never re-executes a recorded call
       const re = await sseEvents(await post(body));
       const tu = re.find(
         e =>
           e.event === 'content_block_delta' &&
           (e.data.delta as { type: string }).type === 'input_json_delta'
       );
-      assert.ok(tu, 'the replay still carries the tool_use — not broken markup');
-      // the exact replayed text: narration in place, no markup shards —
-      // a mid-tag corruption splits the literal into <tool_ca…ll>, which
-      // a doesNotMatch on the full tag would evade
-      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end']);
+      assert.ok(tu, 'the fresh turn still carries the tool_use — not broken markup');
+      // the exact text: narration in place, no markup shards — a mid-tag
+      // corruption splits the literal into <tool_ca…ll>, which a
+      // doesNotMatch on the full tag would evade
+      assert.deepEqual(textDeltas(re), ['work ', '\n⏺ exec: ls\n', ' end']);
       assert.equal(stopReason(re), 'tool_use');
-      // one prompt total — the resend replayed, never re-ran the turn
-      assert.equal(fake.prompts.length, 1);
+      // two prompts — the resend ran the turn again, never replayed
+      assert.equal(fake.prompts.length, 2);
     } finally {
       await close();
     }
@@ -2583,4 +2775,353 @@ describe('serve /v1/* — one gateway, many providers', () => {
         await close();
       }
     })());
+});
+
+describe('serve /v1/* — the bridge keeps the answer honest', () => {
+  /** The agent's own tool call, in ACP's shape. */
+  const call = (id: string, command: string) =>
+    ({
+      sessionUpdate: 'tool_call',
+      toolCallId: id,
+      title: 'Ran ls',
+      kind: 'execute',
+      rawInput: { command },
+    }) as SessionUpdate;
+
+  /** The answer's blocks — the shape the client reads. */
+  type Blocks = { type: string; text?: string; name?: string; input?: unknown }[];
+
+  /** One buffered turn over `updates` — the answer's blocks. */
+  async function buffered(
+    updates: SessionUpdate[],
+    body: Record<string, unknown>
+  ): Promise<Blocks> {
+    const fake = fakeAcpAgent({ updates, configOptions: [MODEL_OPTION] });
+    const { r, close } = await postMessages(fake, body);
+    try {
+      return ((await r.json()) as { content: Blocks }).content;
+    } finally {
+      await close();
+    }
+  }
+
+  test('the buffered text is not fed twice — a held stop prefix lands once', async () => {
+    // "EN" is held back as the prefix of the stop sequence "END": the
+    // settle path must not feed the whole text a second time
+    const content = await buffered(chunks('EN'), {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['END'],
+      stream: false,
+    });
+    const text = content
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('');
+    assert.equal(text, 'EN');
+  });
+
+  test('the call keeps its place — the text it interrupted lands before it', async () => {
+    const content = await buffered([...chunks('before EN'), call('tc-1', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stop_sequences: ['END'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(content[0]?.type, 'text');
+    assert.equal(content[0]?.text, 'before EN');
+    assert.equal(content[1]?.type, 'tool_use');
+  });
+
+  test('a call past the stop cut is not part of the answer', async () => {
+    const content = await buffered([...chunks('hello STOP'), call('tc-2', 'rm -rf /')], {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.find(b => b.type === 'tool_use'),
+      undefined,
+      'the cut ended the turn — the call is not part of the answer'
+    );
+  });
+
+  test("the payload's own tag cannot close the call", async () => {
+    const content = await buffered([call('tc-3', 'echo "</tool_call>"')], {
+      messages: [{ role: 'user', content: 'run' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    const tu = content.find(b => b.type === 'tool_use');
+    assert.ok(tu, 'the call survives its own payload');
+    assert.deepEqual(tu?.input, { command: 'echo "</tool_call>"' });
+  });
+
+  test('a repeated tool_call does not reach the client twice', async () => {
+    const content = await buffered([call('tc-4', 'ls'), call('tc-4', 'ls')], {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: false,
+      tools: BASH_TOOL,
+    });
+    assert.equal(
+      content.filter(b => b.type === 'tool_use').length,
+      1,
+      'the client runs the call once'
+    );
+  });
+
+  test('a chained empty retry fails loudly — the chain is not broken behind the client', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('<tool_call>{"name":"ls","input":{"command":"ls"}}</tool_call>'),
+      configOptions: [MODEL_OPTION],
+    });
+    const { url, close } = await boot(fake);
+    const fnTools = [
+      {
+        type: 'function',
+        name: 'Bash',
+        description: 'run a command',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string' } },
+          required: ['command'],
+        },
+      },
+    ];
+    try {
+      const first = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ input: 'go', stream: false, tools: fnTools }),
+      });
+      assert.equal(first.status, 200);
+      const id = ((await first.json()) as { id: string }).id;
+      // the client retries with nothing new, while the predecessor holds
+      // a tool answer — a chained retry cannot be answered afresh
+      const second = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          input: [],
+          previous_response_id: id,
+          stream: false,
+          tools: fnTools,
+        }),
+      });
+      assert.equal(second.status, 400);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// --- the fast lane (bro-6asnu) ------------------------------------------
+// A classifier-shaped /v1/messages call byte-forwards to the direct
+// upstream instead of paying session/new.
+
+/** A canned Messages upstream — records every forwarded call and
+ *  answers a fixed anthropic reply; stands in for api.anthropic.com. */
+async function upstreamStub(): Promise<{
+  url: string;
+  calls: { path?: string; apiKey?: string; body: { model?: string } }[];
+  close: () => Promise<void>;
+}> {
+  const calls: { path?: string; apiKey?: string; body: { model?: string } }[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', c => {
+      raw += c;
+    });
+    req.on('end', () => {
+      calls.push({
+        path: req.url,
+        apiKey: req.headers['x-api-key'] as string | undefined,
+        body: JSON.parse(raw === '' ? '{}' : raw) as { model?: string },
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'msg_up',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'upstream-answer' }],
+          model: 'upstream-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 7, output_tokens: 3 },
+        })
+      );
+    });
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    calls,
+    close: () => new Promise<void>(r => server.close(() => r())),
+  };
+}
+
+describe('conductor fast lane (bro-6asnu)', () => {
+  /** fast-lane cfg pointing at the test's stub upstream. */
+  const fastCfg = (upstream: string, model?: string): ConductorConfig => ({
+    ...CFG,
+    fast: { upstream, apiKey: 'up-key', model, maxTokens: 2048 },
+  });
+
+  const CLASSIFIER_BODY = {
+    model: 'dv-acp/swe-2-max',
+    max_tokens: 512,
+    messages: [
+      {
+        role: 'user',
+        content:
+          'Evaluate whether this tool call is safe: {"name":"Bash","input":{"command":"rm x"}}',
+      },
+    ],
+    stream: false,
+  };
+
+  test('a classifier-shaped call byte-forwards upstream — no session/new', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'session answer' });
+    const { r, close } = await postMessages(fake, CLASSIFIER_BODY, fastCfg(up.url));
+    try {
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'upstream-answer');
+      // the whole call rode the upstream — credential swapped, path and
+      // model forwarded verbatim (no pin configured)
+      assert.equal(up.calls.length, 1);
+      assert.equal(up.calls[0]?.path, '/v1/messages');
+      assert.equal(up.calls[0]?.apiKey, 'up-key');
+      assert.equal(up.calls[0]?.body.model, 'dv-acp/swe-2-max');
+      // and no acp session was paid
+      assert.equal(fake.sessions.length, 0);
+      assert.equal(fake.prompts.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('fast.model rewrites the forwarded body — the inherited-lane fix', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const { r, close } = await postMessages(
+      fake,
+      CLASSIFIER_BODY,
+      fastCfg(up.url, 'claude-haiku-4-5')
+    );
+    try {
+      assert.equal(r.status, 200);
+      // the conductor-only id never reaches the upstream
+      assert.equal(up.calls[0]?.body.model, 'claude-haiku-4-5');
+      assert.equal(fake.sessions.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a tool-carrying call conducts even inside the token cap', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        tools: [{ name: 'Bash', description: 'run', input_schema: {} }],
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a session-scale cap conducts — compaction stays on the session lane', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 32_000,
+        messages: [{ role: 'user', content: 'summarize the whole thread' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('an unarmed lane still conducts the fast-shaped call', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake); // CFG carries no fast lane
+    try {
+      const r = await post({ ...CLASSIFIER_BODY, model: undefined });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'agent answer');
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a config-disabled lane conducts the fast-shaped call even with a key', async () => {
+    // serve.fastLane:false resolves to fast:undefined — the wire sees
+    // exactly this cfg; boot it end-to-end so the disable is honored
+    // through the routing decision, not just the config read
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fastoff-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', fastLane: false },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      })
+    );
+    const cfg = conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir);
+    assert.equal(cfg?.fast, undefined);
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, cfg as ConductorConfig);
+    try {
+      // model must name an id the agent actually serves — the routed
+      // gateway validates the id against the catalog, unlike bare CFG
+      const r = await post({ ...CLASSIFIER_BODY, model: 'swe-x' });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a fast-shaped streamed call conducts over SSE when the lane is unarmed', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: 'x' }],
+        stream: true,
+      });
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.equal(fake.sessions.length, 1);
+      await r.text(); // drain the stream so the server can close
+    } finally {
+      await close();
+    }
+  });
 });

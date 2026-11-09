@@ -122,6 +122,7 @@ import {
   sessionQuotaConfig,
   sessionSlotsDir,
   stepParent,
+  taskStoreAt,
   UnknownProviderError,
   walkChain,
   wallText,
@@ -311,8 +312,14 @@ export function fleetCapOf(env: AgentConnectorEnv): number {
  *  no-silent-fallthrough rule). */
 export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfile {
   const profiles = env.fleet?.profiles;
-  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  // hasOwn pins the lookup to configured keys — 'constructor'/'__proto__' must not
   // resolve to an inherited member and skip the missing-profile error
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input'
+    );
+  }
   const profile =
     profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
   if (profile === undefined) {
@@ -437,6 +444,17 @@ function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolea
   return primary !== undefined && primary.model !== undefined;
 }
 
+/** The argv worker's opt-in MCP descriptors — bulk data that rides the
+ *  worker payload → a 0600 artifact at commitSpawn + the BRO_MCP_FILE
+ *  pin. Never argv: a stdio server's `env` credentials would be
+ *  world-readable in ps/procfs. Helper keeps resolveSpawnProvider flat
+ *  (Sonar cognitive budget). */
+function argvMcpServersExtra(entry: { mcpServers?: unknown[] }): { mcpServers?: unknown[] } {
+  return Array.isArray(entry.mcpServers) && entry.mcpServers.length > 0
+    ? { mcpServers: entry.mcpServers }
+    : {};
+}
+
 /** Resolve the spawn's provider into a worker payload. `sel` carries
  *  the explicit fields already merged over the profile's piecewise;
  *  `backend` is the RESOLVED connector name (a profile's `backend`
@@ -532,6 +550,7 @@ export async function resolveSpawnProvider(
             sessionRm: entry.sessionRm,
           }),
           cliName: commandCliName(entry.command),
+          ...argvMcpServersExtra(entry),
         },
       };
     }
@@ -960,6 +979,9 @@ const AGENT_PIN_KEYS = new Set([
   // registry never recorded, and `bro trace` only catches a claim it
   // can compare
   'BRO_FORMULA',
+  // the MCP-servers artifact path is connector-owned too — a caller-
+  // supplied BRO_MCP_FILE would point the worker at a planted file
+  'BRO_MCP_FILE',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -1070,6 +1092,17 @@ const agentEnvPins = (
   }
   if (spec.delegatedBy !== undefined) {
     pins.push(['BRO_DELEGATED_BY', spec.delegatedBy]);
+  }
+  // an argv worker carrying MCP descriptors gets its artifact pin —
+  // the 0600 file commitSpawn writes next to the prompt. The
+  // descriptors never ride argv: a stdio server's `env` credentials
+  // would be world-readable in ps/procfs.
+  if (
+    spec.worker?.kind === 'argv' &&
+    Array.isArray(spec.worker.mcpServers) &&
+    spec.worker.mcpServers.length > 0
+  ) {
+    pins.push(['BRO_MCP_FILE', join(dirname(promptFile), `${agentId}.mcp.json`)]);
   }
   return pins;
 };
@@ -1678,7 +1711,14 @@ function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+): {
+  claimed: boolean;
+  actor: string | undefined;
+  phantom: boolean;
+  /** the assignee the step carried BEFORE our rebind — the rollback
+   *  target when a later spawn write fails */
+  previousAssignee?: string;
+} {
   const step = probeStep(spec.beadsDir, spec.molStep);
   if (spec.claimRequired !== true && spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true };
@@ -1703,7 +1743,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     );
   }
-  return { claimed: true, actor, phantom: false };
+  return { claimed: true, actor, phantom: false, previousAssignee: step.assignee };
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -2066,7 +2106,11 @@ function prepareSpawn(
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
-  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
+  const { claimed, actor, phantom, previousAssignee } = guardClaim(
+    spec,
+    existing !== undefined,
+    opts.claimAs
+  );
   const now = Date.now();
   const candidates =
     spec.route?.candidates ??
@@ -2214,6 +2258,7 @@ function prepareSpawn(
           claimed,
           actor,
           phantom,
+          previousAssignee,
           existing,
           lease: workLease.lease,
         }
@@ -2237,7 +2282,90 @@ function prepareSpawn(
     // and the lease: a spawn that never committed must not hold the
     // cross-repo claim either
     releaseSpawnLease(dir, workLease.lease);
+    // and the half-committed write facts: the claim rebind and the
+    // registry row both roll back to the state this spawn found —
+    // compare-and-set, so an entry a parallel actor rewrote is never
+    // clobbered
+    rollbackSpawnWrite(dir, spec, {
+      agentId,
+      claimed,
+      actor,
+      phantom,
+      previousAssignee,
+      existing,
+      claimAs: opts.claimAs,
+    });
     throw err;
+  }
+}
+
+/** Undo the write facts a failed commitSpawn may have left — the beads
+ *  claim AND the registry row. Both rollbacks are compare-and-set: the
+ *  claim is only rewritten while it still carries an assignee this
+ *  spawn wrote (a claim another actor moved meanwhile is theirs, not
+ *  ours to unbind), and the registry row is only restored/removed while
+ *  it still names this spawn's agentId. Every step is best-effort — a
+ *  rollback that fails leaves the 'lost' registry entry the ordering
+ *  comment above promises, never a second thrown error masking the
+ *  first. */
+function rollbackSpawnWrite(
+  dir: string,
+  spec: SpawnSpec,
+  run: {
+    agentId: string;
+    claimed: boolean;
+    actor: string | undefined;
+    phantom: boolean;
+    previousAssignee: string | undefined;
+    existing: AgentRegistryEntry | undefined;
+    claimAs: string | undefined;
+  }
+): void {
+  // the claim — a phantom step carries none, so there is nothing to unbind
+  if (!run.phantom) {
+    try {
+      const now = probeStep(spec.beadsDir, spec.molStep);
+      const store = taskStoreAt(spec.beadsDir);
+      if (run.claimed && run.previousAssignee !== undefined) {
+        // rebind: the bookkeeping wrote `actor`, then `claimAs` when the
+        // caller pinned one — restore the pre-spawn assignee only while
+        // the step still carries a name this spawn wrote (a claim another
+        // actor moved meanwhile is theirs, not ours to unbind)
+        if (now?.assignee === run.actor || now?.assignee === run.claimAs) {
+          store.update(spec.molStep, { assignee: run.previousAssignee });
+        }
+      } else if (!run.claimed) {
+        // fresh claim: reopen only while the step still sits in the
+        // in_progress/our-actor state this spawn's claimStep produced
+        if (now?.status === 'in_progress' && now.assignee === bdActor(spec.beadsDir)) {
+          store.reopen(spec.molStep);
+        }
+      }
+    } catch {
+      // best-effort — the 'lost' entry below still names the failed run
+    }
+  }
+  // the registry row this spawn wrote over `existing` — restore the row
+  // it replaced (a respawn keeps its predecessor's facts), or drop the
+  // fresh row so no dead spawn entry lingers. Only while the row still
+  // names OUR agentId — a respawn that already landed owns it now.
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir);
+      const cur = reg[spec.molStep];
+      if (cur === undefined || cur.agentId !== run.agentId) {
+        return;
+      }
+      if (run.existing !== undefined) {
+        reg[spec.molStep] = run.existing;
+      } else {
+        delete reg[spec.molStep];
+      }
+      writeAgentRegistry(dir, reg);
+    });
+  } catch {
+    // best-effort — a row we cannot roll back is the same 'lost' entry
+    // the ordering already tolerates
   }
 }
 
@@ -2264,6 +2392,25 @@ function outgoingAttemptOf(
   };
 }
 
+/** An argv worker's MCP descriptors land as a 0600 artifact — the
+ *  worker reads them via the BRO_MCP_FILE pin (agentEnvPins). Never
+ *  argv: a stdio server's `env` credentials would be world-readable in
+ *  ps/procfs. A respawn over an entry whose config dropped the servers
+ *  clears the stale file — secrets don't linger unreferenced. Helper
+ *  keeps commitSpawn under the Sonar cognitive budget. */
+function commitMcpArtifact(home: string, agentId: string, spec: SpawnSpec): void {
+  const mcpFile = join(home, `${agentId}.mcp.json`);
+  const mcpServers =
+    spec.worker?.kind === 'argv' && Array.isArray(spec.worker.mcpServers)
+      ? spec.worker.mcpServers
+      : undefined;
+  if (mcpServers !== undefined && mcpServers.length > 0) {
+    writePrivateFileSync(mcpFile, JSON.stringify(mcpServers));
+  } else {
+    rmSync(mcpFile, { force: true });
+  }
+}
+
 /** The write phase of a spawn — prompt/log/exit files, the registry
  *  row, then claim bookkeeping. Split from the guard/admission phase
  *  so a refused spawn leaves no half-state and a caller-side
@@ -2285,6 +2432,7 @@ function commitSpawn(
     claimed: boolean;
     actor: string | undefined;
     phantom: boolean;
+    previousAssignee?: string;
     existing: AgentRegistryEntry | undefined;
     lease: Lease;
   }
@@ -2321,6 +2469,7 @@ function commitSpawn(
   if (stderrLog !== undefined) {
     appendPrivateFileSync(stderrLog, '');
   }
+  commitMcpArtifact(home, agentId, spec);
   const logFrom = logSizeOrZero(log);
   const stderrFrom = stderrLog !== undefined ? logSizeOrZero(stderrLog) : undefined;
   const outgoingAttempt = outgoingAttemptOf(spec, existing);
@@ -3072,18 +3221,16 @@ function workerCliBadge(worker: SpawnWorker | undefined, command: string): strin
 
 /** The shell line a worker runs — a template expansion, an argv worker
  *  single-quoted slot by slot (the provider argv never re-parses into
- *  a different program), or the configured command's expansion. */
-function workerRunLine(
-  worker: SpawnWorker | undefined,
-  command: string,
-  promptFile: string
-): string {
+ *  a different program), or the configured command's expansion. The
+ *  prompt path itself never enters the line — every backend's env
+ *  carries BRO_PROMPT_FILE, so the last slot is the env reference. */
+function workerRunLine(worker: SpawnWorker | undefined, command: string): string {
   if (worker === undefined) {
-    return expandAgentCmd(command, promptFile);
+    return expandAgentCmd(command);
   }
   return worker.kind === 'argv'
-    ? [...worker.argv, promptFile].map(shQuote).join(' ')
-    : expandAgentCmd(worker.command, promptFile);
+    ? [...worker.argv].map(shQuote).join(' ') + ' "$BRO_PROMPT_FILE"'
+    : expandAgentCmd(worker.command);
 }
 
 /** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
@@ -3473,7 +3620,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ]
               : [
                   '-c',
-                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
+                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
                   handleFile,
@@ -3762,8 +3909,8 @@ registerAgentConnector('native', makeNativeConnector);
 
 // --- tmux ----------------------------------------------------------------------
 
-/** tmux runs the pane command through sh — single-quote a path the same
- *  way expandAgentCmd quotes {promptFile}. */
+/** tmux runs the pane command through sh — single-quote a literal the
+ *  way the workerRunLine argv slots are quoted. */
 const SH_SQUOTE = String.raw`'\''`; // ' → '\'' : close, escaped quote, reopen
 const shQuote = (s: string): string => `'${s.replaceAll("'", SH_SQUOTE)}'`;
 
@@ -4045,7 +4192,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           // with every element single-quoted — the provider argv never
           // re-parses into a different program.
           warnNoPromptFile(worker, command);
-          const runLine = workerRunLine(worker, command, promptFile);
+          const runLine = workerRunLine(worker, command);
           // stderr splits into its own capture when the backend records
           // one; without a capture it folds into the stdout tee so the
           // worker's noise still lands in the .log (docker does the same)
@@ -4202,7 +4349,22 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** The gascity backend — `gc` as code. Spec: specs/sessions/bro-f4ot/
  *  spec.md + spike-gascity.md (bro-4bkv verdict: viable connector, the
- *  model mismatch is absorbed here, not in the facade).
+ *  model mismatch is absorbed here, not in the facade). Ownership/runbook:
+ *  docs/gascity-ownership.md (bro-l8c4f.10). Gas City is a complement, not
+ *  Gas Town — no second scheduler.
+ *
+ *  Ownership (single owner):
+ *   - Claims/assignment: BRO (shared beads store; rig adopted via
+ *     `gc rig add --adopt`, rig DB IS repo store). `gc sling --force` never used.
+ *   - Spawn/bootstrap: BRO orchestrates (policy/dedup/serialization), GC
+ *     executes (provider command from `city.toml`).
+ *   - Retry/respawn: BRO (registry reuse, reset vs new, rebind).
+ *   - Reconciliation/liveness: BRO + GC cooperative (BRO interprets states;
+ *     lost only if supervisor verifiably running, else degraded/unknown).
+ *   - Shutdown/stop: BRO requests (`gc session close`), GC terminates;
+ *     never `gc supervisor stop` (machine-wide).
+ *   - Gate/admission: BRO enforces (dedup/serialization/indeterminate
+ *     liveness blocks spawn).
  *
  *  Contract mapping (spike-probed on gc 1.4.2):
  *   - spawn   = lazy city bootstrap → author a per-step agent
@@ -4742,7 +4904,20 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // spawn → registry patch, all under the agents.json lock — and the
       // molecule pin's bd show resolves before it, off the critical path
       const mol = stepParent(spec.beadsDir, spec.molStep);
-      return withAgentRegistryLock(dir, () => {
+      // gc round-trips are blocking subprocesses — the session list
+      // prefetches BEFORE the registry lock whenever the step already
+      // owns an entry, so the critical section never serializes
+      // concurrent spawns/status on gc latency in the common case.
+      // But a pre-lock snapshot can only prove LIFE, never loss: the
+      // unlocked registry read above can observe an entry while its
+      // creator still holds the lock building the session, so a
+      // snapshot missing that session may simply predate it. A live
+      // verdict may ride the snapshot; a lost verdict re-probes under
+      // the lock (kody's lock-latency fix and coderabbit's stale-read
+      // race both hold under this rule).
+      const priorEntry = readAgentRegistry(dir)[spec.molStep];
+      const preSessions = priorEntry === undefined ? undefined : listGcSessions(city);
+      const spawned = withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep];
         const { agentId, promptFile, lease, reservation, crossKindReservations } = prepareSpawn(
           dir,
@@ -4751,6 +4926,17 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           spec,
           {
             isLive: e => {
+              const snap = gcSessionFor(e, spec.molStep, preSessions?.sessions ?? []);
+              if (
+                snap !== undefined &&
+                (gcState(snap) === 'running' || gcState(snap) === 'spawned')
+              ) {
+                return true; // the snapshot proves life — it cannot predate existence
+              }
+              // anything short of proven-live re-verifies under the
+              // lock: a session absent from a stale pre-lock snapshot
+              // may exist by now, and only a fresh list can carry a
+              // lost verdict (rebind/reset hangs off it)
               const { sessions, err } = listGcSessions(city);
               if (sessions === undefined) {
                 // an unverifiable liveness probe must not let a duplicate
@@ -4761,7 +4947,19 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
                 );
               }
               const s = gcSessionFor(e, spec.molStep, sessions);
-              const st = s === undefined ? 'lost' : gcState(s);
+              if (s === undefined) {
+                // session listing omitted the worker but supervisor liveness
+                // is indeterminate — cannot conclude lost/rebindable without
+                // a verifiably running supervisor (admission guarantee)
+                if (gcSupervisorRunning() !== true) {
+                  throw new SpawnError(
+                    'gc supervisor not running — agent liveness unknown',
+                    'unavailable'
+                  );
+                }
+                return false;
+              }
+              const st = gcState(s);
               return st === 'running' || st === 'spawned';
             },
             liveDetail: e =>
@@ -4800,10 +4998,14 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             ? err
             : new SpawnError(err instanceof Error ? err.message : String(err), 'unavailable');
         }
-        const spawned = patchAgentRegistry(dir, spec.molStep, { sessionId });
-        const { sessions } = listGcSessions(city);
-        return toInfo(spec.molStep, spawned, sessions ?? [], 'spawned');
+        return patchAgentRegistry(dir, spec.molStep, { sessionId });
       });
+      // the session list rides AFTER the lock — it must see the session
+      // just dispatched, and a gc round-trip never holds agents.json.
+      // A failed list passes undefined → 'spawned' (the contract's
+      // registered-unverified state), not a faked live read.
+      const { sessions } = listGcSessions(city);
+      return toInfo(spec.molStep, spawned, sessions, 'spawned');
     },
 
     async list(): Promise<ListResult> {
@@ -5587,7 +5789,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           const worker = spec.worker;
           warnNoPromptFile(worker, command);
           const cliBadge = workerCliBadge(worker, command);
-          const runLine = workerRunLine(worker, command, promptFile);
+          const runLine = workerRunLine(worker, command);
           // the native wrapper, verbatim — the mounted paths make .exit/
           // log land where the host ladder reads them. --init gives the
           // worker a reaper so grandchildren can't zombie inside; --rm

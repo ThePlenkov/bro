@@ -193,6 +193,37 @@ describe('loadConfig serve.providers', () => {
   });
 });
 
+describe('loadConfig serve.upstream / serve.apiKeyEnv', () => {
+  test('upstream trims and strips trailing slashes', () => {
+    const cfg = load({ serve: { upstream: '  http://proxy.local///  ' } });
+    assert.equal(cfg.serve.upstream, 'http://proxy.local');
+  });
+
+  test('a slash-only upstream reads as unset, never an empty base', () => {
+    assert.equal(load({ serve: { upstream: '///' } }).serve.upstream, undefined);
+    assert.equal(load({ serve: { upstream: '  ' } }).serve.upstream, undefined);
+  });
+
+  test('apiKeyEnv stores a valid env-var name', () => {
+    const cfg = load({ serve: { apiKeyEnv: 'MY_PROXY_KEY' } });
+    assert.equal(cfg.serve.apiKeyEnv, 'MY_PROXY_KEY');
+  });
+
+  test('an invalid apiKeyEnv name drops loud, like providers.* entries', () => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (message: unknown) => errors.push(String(message));
+    try {
+      const cfg = load({ serve: { apiKeyEnv: 'my-proxy-key' } });
+      assert.equal(cfg.serve.apiKeyEnv, undefined);
+      assert.equal(errors.length, 1);
+      assert.match(errors[0]!, /serve\.apiKeyEnv must name an env var/);
+    } finally {
+      console.error = original;
+    }
+  });
+});
+
 describe('loadConfig pack', () => {
   test('absent pack → undefined, not a default leak', () => {
     assert.equal(load().pack, undefined);
@@ -386,12 +417,12 @@ describe('loadConfig fleet', () => {
   });
 
   test('fleet lease TTLs default and drop invalid values independently', () => {
-    assert.deepEqual(load().fleet.leases, { roleTtlSeconds: 60, workTtlMinutes: 360 })
+    assert.deepEqual(load().fleet.leases, { roleTtlSeconds: 60, workTtlMinutes: 360 });
     assert.deepEqual(
       load({ fleet: { leases: { roleTtlSeconds: 15, workTtlMinutes: 'bad' } } }).fleet.leases,
       { roleTtlSeconds: 15, workTtlMinutes: 360 }
-    )
-  })
+    );
+  });
 
   test('non-object fleet section falls back to defaults', () => {
     assert.equal(load({ fleet: 'wide' }).fleet.maxConcurrent, 3);
@@ -812,6 +843,42 @@ describe('config layers (spec bro-9vmx)', () => {
     } finally {
       undo();
     }
+  });
+
+  test('fleet.providerCaps is global-only — repo layers cannot raise the machine-wide cap', () => {
+    const undo = withGlobalConfig({ fleet: { providerCaps: { devin: 3 } } });
+    try {
+      const dir = tmpDir('bro-config-');
+      project(dir, { fleet: { providerCaps: { devin: 99 } } });
+      local(dir, { fleet: { providerCaps: { claude: 9 } } });
+      const errs: string[] = [];
+      const orig = console.error;
+      console.error = (m: unknown) => errs.push(String(m));
+      try {
+        const cfg = loadConfig(dir);
+        assert.equal(cfg.fleet.providerCaps.devin, 3); // global wins, not the merged 99
+        assert.equal(cfg.fleet.providerCaps.claude, undefined); // local-only key dropped
+      } finally {
+        console.error = orig;
+      }
+      assert.match(errs.join('\n'), /providerCaps is global-only/);
+    } finally {
+      undo();
+    }
+  });
+
+  test('fleet.providerCaps with no global entry reads empty even when a repo layer sets it', () => {
+    const dir = tmpDir('bro-config-');
+    project(dir, { fleet: { providerCaps: { devin: 5 } } });
+    const orig = console.error;
+    const errs: string[] = [];
+    console.error = (m: unknown) => errs.push(String(m));
+    try {
+      assert.deepEqual(loadConfig(dir).fleet.providerCaps, {});
+    } finally {
+      console.error = orig;
+    }
+    assert.match(errs.join('\n'), /providerCaps is global-only/);
   });
 
   test('config.ts works as the global file too', () => {

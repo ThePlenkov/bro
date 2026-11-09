@@ -317,15 +317,33 @@ function devinHooksJson() {
     `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
     `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
     `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
-  const hook = (event, timeout, matcher = '') => ({
+  // post-tool is fire-and-forget telemetry — it must never block the
+  // agent's next turn, so neither path may keep the foreground waiting:
+  // stdin is captured to a tempfile first (a detached child cannot read
+  // the parent's pipe once the shell exits), then the hook runs in a
+  // detached subshell. A mktemp or cat failure drops the event: stdin
+  // has already been consumed by cat, so no fallback can replay the
+  // payload. The subshell is redirected off the hook's pipes so a host
+  // reading the hook pipe to EOF is not blocked by the detached work.
+  const cmdDetached = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
+  const hook = (event, timeout, matcher = '', command = cmd) => ({
     matcher,
-    hooks: [{ type: 'command', command: cmd(event), timeout }],
+    hooks: [{ type: 'command', command: command(event), timeout }],
   });
   const body = {
     SessionStart: [hook('session-start', 20)],
     PostCompaction: [hook('post-compaction', 20)],
     UserPromptSubmit: [hook('prompt-submit', 15)],
-    PostToolUse: [hook('post-tool', 10, '^exec$')],
+    PostToolUse: [hook('post-tool', 10, '^exec$', cmdDetached)],
     Stop: [hook('stop', 25)],
     PermissionRequest: [hook('permission', 10, '^exec$')],
   };
@@ -681,8 +699,41 @@ const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
 const drift = [];
 
+/** Remove symlinked path components above `path` so generated writes can't
+ *  follow a link outside the checkout. Returns true when drift was recorded
+ *  (check mode) so the caller can skip. */
+function guardSymlinkedParents(path) {
+  const parts = path.split(/[\\/]/);
+  let cur = ROOT;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    let pst: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pst = lstatSync(cur);
+    } catch {
+      pst = undefined;
+    }
+    if (!pst?.isSymbolicLink()) {
+      continue;
+    }
+    if (CHECK) {
+      drift.push(path);
+      return true;
+    }
+    rmSync(cur, { recursive: true, force: true });
+  }
+  return false;
+}
+
 function emit(path, content) {
   const p = join(ROOT, path);
+  // Guard every path component: if any parent (or the file itself) is a
+  // symlink, the write/read would follow it and could touch a file outside
+  // the checkout. Treat a symlinked component as stale drift in check mode
+  // and remove + recreate it as a real directory in write mode.
+  if (guardSymlinkedParents(path)) {
+    return;
+  }
   // lstat, not exists/stat: a stale directory or symlink where a file is
   // expected must be REPLACED — readFileSync would crash on the dir and
   // writeFileSync would write through the link to an external target
@@ -796,9 +847,11 @@ emit(
 // `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
 // the canonical content: devin resolves skills as slash commands, codex
 // and every skills/-linked adapter read the same file. Claude's native
-// surface is commands/bro.md — derived from the skill body here so a
-// hand edit on either side surfaces as check:plugins drift. opencode's
-// /bro is native (opencode-tui.ts), no file to check.
+// surface is commands/bro.md; opencode's is .opencode/commands/bro.md —
+// derived from the skill body here so a hand edit on either side surfaces
+// as check:plugins drift. (Codex has no custom prompt surface: it reads
+// the canonical skills/bro/SKILL.md.) opencode's /bro is also native
+// (opencode-tui.ts), but the command file ships too.
 const BRO_SKILL = 'skills/bro/SKILL.md';
 if (!existsSync(join(ROOT, BRO_SKILL))) {
   // same convention as the `null` adapter entries: generation can't
@@ -838,6 +891,11 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
   emit(
     'commands/bro.md',
     `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // opencode command dir (plural) — same body, opencode frontmatter.
+  emit(
+    '.opencode/commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
   );
 }
 
@@ -932,6 +990,17 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       }
     }
     if (wantRunSh) {
+      // run.sh is a real file, never a symlink: remove a stale link/dir
+      // first so cpSync cannot follow it outside the checkout
+      let rsh: ReturnType<typeof lstatSync> | undefined;
+      try {
+        rsh = lstatSync(join(ROOT, runShOut));
+      } catch {
+        rsh = undefined;
+      }
+      if (rsh?.isSymbolicLink() || rsh?.isDirectory()) {
+        rmSync(join(ROOT, runShOut), { recursive: true, force: true });
+      }
       mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true });
       cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut));
     }

@@ -7,7 +7,7 @@
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "stack"]
+      "members": ["convoy", "next", "loop", "watchdog", "stack"]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -35,7 +35,17 @@
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
-      "members": ["retrospect", "wtf", "learn", "skills", "judge", "dogfood", "guard", "providers"]
+      "members": [
+        "retrospect",
+        "wtf",
+        "learn",
+        "skills",
+        "judge",
+        "dogfood",
+        "benchmark",
+        "guard",
+        "providers"
+      ]
     },
     "comms": {
       "summary": "events & session mailbox",
@@ -173,6 +183,27 @@
       "skill": "loop",
       "configKey": "loop",
       "plan": false,
+      "external": false
+    },
+    "watchdog": {
+      "name": "watchdog",
+      "group": "flow",
+      "summary": "Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]",
+      "spellings": ["watchdog", "flow watchdog"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "watchdog",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`"
+        },
+        "json": "schemas/cli/watchdog.json",
+        "exits": {
+          "0": "brief printed (human or --json)",
+          "2": "unknown flag — usage on stderr"
+        }
+      },
       "external": false
     },
     "pipeline": {
@@ -604,6 +635,17 @@
       "plan": false,
       "external": false
     },
+    "benchmark": {
+      "name": "benchmark",
+      "group": "self",
+      "summary": "Paired native-vs-BRO workflow outcome benchmarks",
+      "spellings": ["benchmark", "self benchmark"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "dogfood",
+      "plan": false,
+      "external": false
+    },
     "guard": {
       "name": "guard",
       "group": "self",
@@ -801,6 +843,16 @@
       "aliases": [],
       "hidden": false,
       "skill": "providers",
+      "plan": false,
+      "external": false
+    },
+    "router": {
+      "name": "router",
+      "summary": "The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]",
+      "spellings": ["router"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "brouter",
       "plan": false,
       "external": false
     },

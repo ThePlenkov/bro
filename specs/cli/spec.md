@@ -1,6 +1,6 @@
 ---
-parent: project
----
+
+## parent: project
 
 # cli — command-surface structure: groups, aliases, naming contract
 
@@ -34,7 +34,7 @@ bro mesh     me | peers | pull | inbox | request | claim | done |
              accept | reject | wait | list            (already grouped)
 bro plan     list | validate | run | query
 bro spec     check | drift | init | new | tree        (already grouped)
-top-level    status? check setup doctor plugins
+top-level    status? check setup doctor plugins wait router
 hidden       hooks acp-worker docs
              *telemetry stays an alias — see alias model
 ```

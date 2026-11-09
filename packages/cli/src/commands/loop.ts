@@ -49,8 +49,10 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   statfsSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -61,6 +63,7 @@ import {
   agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
+  bodyMeta,
   CLASS_LABEL_PREFIX,
   commandCliName,
   emitLifecycle,
@@ -76,6 +79,7 @@ import {
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  pidAlive,
   procStat,
   projectId,
   releaseSessionSlot,
@@ -96,7 +100,10 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type BrouterModels,
   type ClaimCapability,
+  type ExitCode,
+  type ExplainSlice,
   type Lease,
   type LeaseStore,
   type MirrorPolicy,
@@ -106,11 +113,11 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   admitSessionSlot,
+  explainSlicesOrExit,
   hasHelpFlag,
   issueLink,
   printUsage,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -125,22 +132,29 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import {
+  beadForHead,
   buildFixPrompt,
   buildRebasePrompt,
   buildWorkPrompt,
+  ceilingHeld,
   clumpMembers,
   coveredBeadIds,
   diskFloorBreach,
   diskFloorBytes,
   expandAgentCmd,
+  FLEET_HEAD_PREFIXES,
+  isFleetHead,
   MB,
   memberAction,
+  orphanVerdict,
   planItem,
   projectBeads,
   type DiskProbe,
+  type FleetPrRow,
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
+  type ReconcileBead,
 } from '@broject/loop';
 import { loadBroConfig } from '../plugins.ts';
 import {
@@ -162,6 +176,8 @@ import { runSyncCommand } from './sync.ts';
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
 import { isStackName } from '@broject/stack';
 import { loopSlug } from '@broject/loop';
+import { routeTableLane, type RouteTableLane } from './loop-routes.ts';
+import { explainSpawn } from './loop-explain.ts';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -183,8 +199,9 @@ import {
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
-import { MIN_INTERVAL_SEC } from './drive-config.ts';
-
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
+import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -225,6 +242,10 @@ interface Ctx {
   routing: boolean;
   intervalS: number;
   json: boolean;
+  /** The explain slices — when the operator asked for the routing
+   *  decision's reasons, the spawn path prints them (stderr). Absent =
+   *  the run says nothing about its routing. */
+  explain?: ExplainSlice[];
   /** Declared label scope — `bro loop --label debt,ui` only claims
    *  beads carrying one of these labels; the rest of the shared queue
    *  stays untouched. */
@@ -244,6 +265,8 @@ interface Ctx {
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
    *  PR targeting the member below. */
   stack?: string;
+  /** Cease claiming new work — only service gate stack + reconcile. */
+  claimsHeld?: { open: number; max: number };
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[];
@@ -273,6 +296,9 @@ const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
 function usage(exitCode: ExitCode = 2): never {
   printUsage(
     `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+       bro loop [--every SEC]        run in supervised loop mode
+       bro loop install [--every N] [--print]
+       bro loop uninstall
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -283,6 +309,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 class:<name> label, else 'default')
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
+  --explain[=SLICES]             print why the bead landed on this route —
+                                route, model, health, cost (or a subset)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --parked-wake MIN              parked bead's snooze before it wakes to
                                 open (loop.parkedWakeMin, 120; 0 = iced
@@ -291,7 +319,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 of these labels are claimable
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
-  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 1)
+  --max-open-total N             hard ceiling on total open fleet PRs (loop.maxOpenTotal, 10; 0 = off)
   --disk-min-slots N             disk floor in slot units — pushes hold while
                                 free disk < N×loop.worktreeMb on any fs the
                                 run writes to (loop.diskMinSlots, 2; 0 = off)
@@ -299,6 +328,7 @@ function usage(exitCode: ExitCode = 2): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
+  --every SEC                    supervised loop cadence, ≥${MIN_INTERVAL_SEC}s
   --interval SEC                 gate poll interval, ≥0.1s (60)`,
     exitCode
   );
@@ -692,11 +722,73 @@ function beadClassInfo(
  *  verdict). Throws SpawnError — a bad `class:` label or broken chain
  *  is a config error the caller settles as a failed item, never a
  *  silent template drop. */
+/** The task the route table is asked about — the bead's class and
+ *  label, plus the served universe the operator declared. */
+interface RouteTableTask {
+  /** the table's path */
+  table: string;
+  /** the bead's explicit class */
+  class?: string;
+  /** the bead's `class:` label */
+  label?: string;
+  /** the bead's priority */
+  priority?: number;
+  /** what the operator declared the router serves */
+  served?: BrouterModels;
+}
+
+function routeTableTask(
+  ctx: Ctx,
+  table: string,
+  label: { label?: string; priority?: number }
+): RouteTableTask {
+  const task: RouteTableTask = { table };
+  if (ctx.sel.class !== undefined) {
+    task.class = ctx.sel.class;
+  }
+  if (label.label !== undefined) {
+    task.label = label.label;
+  }
+  if (label.priority !== undefined) {
+    task.priority = label.priority;
+  }
+  const models = ctx.env.brouter?.models;
+  if (models !== undefined) {
+    task.served = models;
+  }
+  return task;
+}
+
+/** The route table's lane for one bead — undefined when the operator
+ *  declares no table (fleet.routing stays the compatibility face for the
+ *  runs that declare none). */
+async function routeTableLaneFor(
+  ctx: Ctx,
+  bead: ReadyBead
+): Promise<{ lane: LoopLane; routed: RouteTableLane } | undefined> {
+  const tablePath = ctx.env.brouter?.routes;
+  if (tablePath === undefined) {
+    return undefined;
+  }
+  const label = beadClassInfo(ctx, bead, false);
+  const routed = await routeTableLane(routeTableTask(ctx, tablePath, label));
+  return routed === undefined
+    ? undefined
+    : { lane: await resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, routed), routed };
+}
+
 async function resolveBeadLane(
   ctx: Ctx,
   bead: ReadyBead,
   opts: { router?: boolean } = {}
 ): Promise<LoopLane> {
+  // the route table is the router's own routing face — when the
+  // operator declares one, it answers
+  const tableLane = await routeTableLaneFor(ctx, bead);
+  if (tableLane !== undefined) {
+    explainSpawn({ slices: ctx.explain, bead: bead.id, routed: tableLane.routed });
+    return tableLane.lane;
+  }
   if (!ctx.routing) {
     return ctx.lane;
   }
@@ -810,13 +902,29 @@ function spawnAgent(
       detached: true,
     };
     const w = lane.worker;
+    // When a log file is open, prefix every emitted line with an ISO8601
+    // timestamp so loop.out/daemon.log-style trails stay attributable
+    // (spec bro-7h976). The wrapped command's exit status is captured to
+    // a side file before the filter runs, so the pipeline reports the
+    // AGENT's code, never the while loop's 0.
+    // single-quote escaping, not JSON.stringify: inside the sh -c
+    // wrapper a double-quoted assignment still expands $ ` $() and
+    // backslashes before eval ever sees the command (kody #760)
+    const sqEsc = String.raw`'\''`;
+    const shq = (s: string): string => `'${s.replaceAll("'", sqEsc)}'`;
+    const wrap = (cmd: string): string =>
+      `({ _bro_cmd=${shq(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
-          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
+          logFd !== null
+          ? spawn('sh', ['-c', wrap('"$@"'), 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+          : spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+        : logFd !== null
+          ? spawn('sh', ['-c', wrap(expandAgentCmd(laneCommand(ctx, lane)))], opts) // NOSONAR — operator-configured agent command
+          : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -1326,11 +1434,77 @@ async function finalizeMerge(
       ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`);
       console.error(`loop: ${ctx.tails.at(-1)}`);
     }
-    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-    if (br.code !== 0) {
-      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-      console.error(`loop: ${ctx.tails.at(-1)}`);
+    // Remove any worktree checked out on this branch first (including possibly another one)
+    try {
+      const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt.code === 0) {
+        const trees = parseWorktreePorcelain(wt.out);
+        for (const t of trees) {
+          if (t.branch === item.branch && t.path) {
+            if (t.path === item.worktreeDir) {
+              continue;
+            }
+            const r = processesRootedIn(t.path);
+            // same contract as the primary removal: a live process or
+            // uncommitted work keeps the checkout — --force would burn
+            // files nothing else holds (and strand the process on them)
+            const st =
+              r.length === 0
+                ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                : { code: 1, out: '', err: '' };
+            if (r.length === 0 && st.code === 0 && st.out.trim() === '') {
+              gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+              gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+            } else if (r.length === 0) {
+              ctx.tails.push(
+                `worktree ${t.path} kept — has uncommitted changes or status unreadable; branch ${item.branch} kept with it`
+              );
+            } else {
+              ctx.tails.push(
+                `worktree ${t.path} kept — hosts live process(es): ${r.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+              );
+            }
+          }
+        }
+      }
+    } catch {
+      /* best effort */
     }
+    // Only delete branch if no worktree is still using it
+    try {
+      const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt2.code === 0) {
+        const trees2 = parseWorktreePorcelain(wt2.out);
+        const stillCheckedOut = trees2.some(t => t.branch === item.branch);
+        if (!stillCheckedOut) {
+          const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+          if (br.code !== 0) {
+            ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+            console.error(`loop: ${ctx.tails.at(-1)}`);
+          }
+        } else {
+          ctx.tails.push(`branch ${item.branch} not deleted — checked out in a worktree`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      } else {
+        const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+        if (br.code !== 0) {
+          ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      }
+    } catch {
+      const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+      if (br.code !== 0) {
+        ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+        console.error(`loop: ${ctx.tails.at(-1)}`);
+      }
+    }
+    // delete remote branch on merge/close (spec bro-jis0c)
+    deleteRemoteBranch(ctx, item.branch, '');
+  } else {
+    // even if worktree kept due to live processes, try to delete remote branch if possible
+    deleteRemoteBranch(ctx, item.branch, '');
   }
   say(ctx, `loop: ${beads.map(b => b.id).join(', ')} landed via ${prRef(ctx, pr)}`);
   return 'landed';
@@ -1586,15 +1760,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
+  // operator-configured bootstrap; PATH lookup is the contract (same as git/bd)
+  const b = /* NOSONAR */ spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
   if (b.status === 0) {
     return true;
   }
@@ -2213,6 +2384,16 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    if (exit.code === 0 && !superseded) {
+      // If the fix worker exited cleanly but did not resolve threads,
+      // we must not let the cycle loop forever. Do not auto-retry here;
+      // let the gate re-poll and the memberAction decide. However, ensure
+      // we don't re-trigger without budget pressure - the gate will see
+      // current thread state. Also log to make the behavior explicit.
+      console.error(
+        `loop ${prRef(ctx, m.pr)}: fix worker exited 0 without obvious thread resolution — gate will re-poll`
+      );
+    }
     return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
@@ -2445,14 +2626,39 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'merge':
       gateRow('green', { action: 'merge' });
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr));
-    case 'closed':
+    case 'closed': {
       gateRow('closed', { action: 'closed' });
+      // closePr cleanup: delete remote branch + reap worktree/branch
+      deleteRemoteBranch(ctx, m.item.branch, 'on PR close');
+      try {
+        const rooted = processesRootedIn(m.item.worktreeDir);
+        // a live process or uncommitted work keeps the checkout —
+        // --force removes dirty trees, and those files have no other
+        // copy (the base behavior kept the worktree on close)
+        const st =
+          rooted.length === 0
+            ? gitTry(['-C', m.item.worktreeDir, 'status', '--porcelain'])
+            : { code: 1, out: '', err: '' };
+        if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+          gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
+          gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
+          gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
+        } else if (rooted.length === 0) {
+          ctx.tails.push(
+            `worktree ${m.item.worktreeDir} kept on PR close — has uncommitted changes or status unreadable; branch ${m.item.branch} kept with it`
+          );
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      } catch {
+        /* best effort */
+      }
       parkBeads(
         ctx,
         m.beads,
         `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
+    }
     case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers });
       const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane));
@@ -2677,9 +2883,13 @@ const LOOP_VALUE_FLAGS = new Set([
   '--parked-wake',
   '--max',
   '--max-open',
+  '--max-open-total',
+  '--worktree-warn',
   '--disk-min-slots',
   '--batch',
+  '--batch-min-priority',
   '--interval',
+  '--every',
   '--label',
   '--stack',
   '--provider',
@@ -2687,25 +2897,135 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
+const LOOP_BOOL_FLAGS = new Set([
+  '--json',
+  '--dry-run',
+  '--help',
+  '--auto-approve',
+  '--print',
+  '--explain',
+]);
+
+function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
+  // install arms and uninstall disarms — both are the orchestrator's
+  // own authority over the supervisor cadence; a spawned worker owns
+  // neither side of it
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never own the supervisor; ' +
+        'the orchestrator session owns it'
+    );
+    process.exit(2);
+  }
+  // a typo'd flag (`--evry`) or a stray positional must not silently
+  // install the configured cadence — whitelist each verb's argv before
+  // any mutation
+  const installArgv = argv[0] === 'install';
+  const stray = positionals(argv.slice(1), installArgv ? new Set(['--every']) : new Set(), {
+    boolFlags: installArgv
+      ? new Set(['--print', '--dry-run', '--help'])
+      : new Set(['--dry-run', '--help']),
+    strict: true,
+  });
+  if (stray.length > 0) {
+    console.error(`error: unexpected argument '${stray[0]}'`);
+    process.exit(2);
+  }
+  if (argv[0] === 'uninstall') {
+    if (argv.includes('--dry-run')) {
+      const marker = readLoopMarker(dir);
+      console.log(
+        marker === null
+          ? 'loop uninstall — no install marker; nothing would be disarmed'
+          : `loop uninstall — would disarm the marker (every ${marker.everySec}s) and SIGTERM the loop supervisor`
+      );
+      return;
+    }
+    const r = uninstallLoop(dir);
+    console.log(r.detail);
+    if (r.state === 'error') {
+      process.exit(1);
+    }
+    return;
+  }
+  const everyRaw = flag(argv, '--every');
+  const everySec = everyRaw === undefined ? loopCfg.everySec : Number(everyRaw);
+  // the marker cadence bounds are the want-marker's — the same
+  // MIN/MAX_INTERVAL_SEC every supervised entrypoint validates against
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    );
+    process.exit(2);
+  }
+  // --dry-run is the preview verb here just like --print: plan, don't arm
+  const print = argv.includes('--print') || argv.includes('--dry-run');
+  const r = installLoop(dir, { everySec, print });
+  console.log(r.detail);
+  if (r.state === 'error') {
+    process.exit(1);
+  }
+}
+
+/** Supervised mode — `daemon run --loop` and `loop install` reach
+ *  `runLoopCommand` through the marker; `--every` is the outer re-scan
+ *  cadence (the queue drains, the pass sleeps, the next pass rescans),
+ *  while `--interval` stays the in-run gate poll. The same arming guard
+ *  as `bro drive --every` applies — spawned workers never own a
+ *  supervisor cadence; the orchestrator session does. */
+function everySecArg(argv: string[]): number | undefined {
+  const everyRaw = flag(argv, '--every');
+  if (everyRaw === undefined) {
+    return undefined;
+  }
+  const everySec = Number(everyRaw);
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+    );
+    process.exit(2);
+  }
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+        'the orchestrator session owns the cadence'
+    );
+    process.exit(2);
+  }
+  return everySec;
+}
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     usage(0);
   }
-  rejectStrayArgs(argv);
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim();
   if (!root) {
     console.error('bro loop: not inside a git worktree');
     process.exit(1);
   }
   const broCfg = loadBroConfig(root);
+  const loopCfg = broCfg.loop as LoopConfig;
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // install validates the configured tasks backend — a github-tasks
+    // rig has no beads to check; previews (--print/--dry-run) stay pure
+    if (argv[0] === 'install' && !argv.includes('--print') && !argv.includes('--dry-run')) {
+      ensureTasksBackend(root, broCfg.connectors);
+    }
+    runLoopSched(argv, root, loopCfg);
+    return;
+  }
+  rejectStrayArgs(argv);
+  const everySec = everySecArg(argv);
   const backend = ensureTasksBackend(root, broCfg.connectors);
   const cfg = broCfg.loop as LoopConfig;
   const run = await resolveRunLane(root, argv, cfg);
   const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
   const leaseStore = localLeaseStore(projectId(root));
   ctx.leaseStore = leaseStore;
+  // the explain slices ride the run — the spawn path prints them when the
+  // operator asked for the routing story
+  ctx.explain = explainSlicesOrExit(argv);
   if (argv.includes('--dry-run')) {
     await dryRunPlan(ctx);
     return;
@@ -2739,17 +3059,30 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       (ctx.env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
       { signal: abort.signal, onLost: () => releaseSupervisor() }
     );
-    const loopLock = gitCommonDir(root);
+    const loopLock = loopLockPath(root);
     if (loopLock !== null) {
-      releaseSupervisor = await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+      releaseSupervisor = await awaitFileLock(loopLock, {
         label: 'loop supervisor lock',
-        onStandby: pid =>
-          say(ctx, `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`),
+        onStandby: pid => {
+          const by = pid === null ? '' : ` by pid ${pid}`;
+          say(ctx, `loop: already supervised${by} — standing by`);
+        },
       });
     }
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
-    await guardedRun(ctx, releaseAll);
+    if (everySec === undefined) {
+      await guardedRun(ctx, releaseAll);
+    } else {
+      // supervised passes are strictly sequential — a pass drains the
+      // queue, then the supervisor sleeps until the next re-scan; the
+      // awaits must stay inside the loop, not fan out
+      for (;;) {
+        ctx.tails.length = 0; // pass N+1's audit must not re-report pass N's cleanup errors
+        await guardedRun(ctx, releaseAll); // NOSONAR — sequential supervised passes
+        await sleep(everySec * 1000); // NOSONAR — the cadence sleep between passes
+      }
+    }
   } finally {
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
@@ -2944,8 +3277,13 @@ function buildCtx(
       parkedWakeMin: num(flag(argv, '--parked-wake'), cfg.parkedWakeMin, 0),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      maxOpenTotal: num(flag(argv, '--max-open-total'), cfg.maxOpenTotal, 0),
+      worktreeWarn: num(flag(argv, '--worktree-warn'), cfg.worktreeWarn, 0),
       diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
+      batchMinPriority: flag(argv, '--batch-min-priority')
+        ? Number(flag(argv, '--batch-min-priority'))
+        : cfg.batchMinPriority,
     },
     act: broCfg.act,
     // the feed dedup's freshness contract is "at most one poll window
@@ -3155,7 +3493,7 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
   const argvLine =
     w?.kind === 'argv'
       ? [...w.argv, item.promptFile].map(shRender).join(' ')
-      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile);
+      : expandAgentCmd(laneCommand(ctx, lane));
   console.log(`  agent: ${argvLine}`);
 }
 
@@ -3238,6 +3576,19 @@ interface RefTails {
   worktreeBranches: string[];
   branches: string[];
   errors: string[];
+}
+
+/** Every linked worktree this clone holds — the spec's `worktreeWarn`
+ *  mark counts checkouts, and disk/coordination pressure doesn't care
+ *  which branch a checkout sits on. The main worktree heads `worktree
+ *  list`, so linked = rows − 1. undefined when the listing fails —
+ *  an unreadable count warns nothing. */
+function linkedWorktreeCount(root: string): number | undefined {
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
+  if (wt.code !== 0) {
+    return undefined;
+  }
+  return Math.max(0, parseWorktreePorcelain(wt.out).length - 1);
 }
 
 /** loop/* worktrees still checked out + loop/* branches with no
@@ -3390,6 +3741,13 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
     );
+    const linked = linkedWorktreeCount(ctx.root);
+    if (ctx.cfg.worktreeWarn > 0 && linked !== undefined && linked > ctx.cfg.worktreeWarn) {
+      say(
+        ctx,
+        `loop: linked worktrees ${linked} > ${ctx.cfg.worktreeWarn} (disk/coordination pressure)`
+      );
+    }
     const claimed = claimedTails(ctx.tasks, seen);
     sayLoopAudit(ctx, reap, [
       // PRs live on branches — worktree'd ones (a parked bead keeps both)
@@ -3681,14 +4039,330 @@ interface QueueState {
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
+  /** Fleet PRs whose host can't close — reported once per run, not
+   *  once per pass (the reconcile retries every tick). */
+  unclosableNoted: Set<number>;
+  /** Branch → ceiling reservation file — released when the member
+   *  leaves the stack; an open PR on the branch consumes it earlier
+   *  via the fleet listing. */
+  ceilingRes: Map<string, string>;
 }
 
-/** One service pass over the stack, oldest-first — a snapshot copy
- *  because leave() splices members out mid-iteration. True when any
- *  member moved (action, merge, park): the next tick polls immediately
- *  instead of paying the interval. */
+/** The widest listing cap a TaskStore backend can silently impose —
+ *  the github task store stops at QUERY_CAP (packages/github/
+ *  src/tasks.ts) and returns the truncated page as a complete
+ *  snapshot. A full page is indistinguishable from a huge store, and
+ *  either way a reconcile on it can bury PRs whose live beads fell
+ *  past the cap — so a capped read answers 'unknown', not 'complete'.
+ *  The reconcile is an optimization; skipping it closes nothing. */
+const TASK_LIST_SNAPSHOT_CAP = 1000;
+
+/** Build slug -> bead map for reconcile. Returns null if the listing is unknown. */
+function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> | null {
+  const out = new Map<string, ReconcileBead>();
+  try {
+    const rows = ctx.tasks.list({ all: true });
+    if (rows.length >= TASK_LIST_SNAPSHOT_CAP) {
+      return null;
+    }
+    for (const r of rows) {
+      if (!r?.id) continue;
+      const slug = loopSlug(r.id);
+      if (!out.has(slug)) {
+        out.set(slug, { id: r.id, status: r.status });
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Get all open fleet PRs (headRef + pr). Returns null if listing is unknown/incomplete. */
+function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
+  const rows: FleetPrRow[] = [];
+  try {
+    if (typeof ctx.rev.openPrs === 'function') {
+      const list = ctx.rev.openPrs(ctx.repo);
+      for (const p of list ?? []) {
+        if (p?.headRef && isFleetHead(p.headRef)) {
+          rows.push({ pr: p.pr, headRef: p.headRef });
+        }
+      }
+      return rows;
+    }
+  } catch {
+    // PR listing failed — cannot produce complete listing
+    return null;
+  }
+  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown.
+  // LOCAL refs alone undercount: a pushed head whose local branch was already
+  // deleted (land cleanup, another clone's push) is still a live fleet PR, so
+  // remote heads join the scan — `ls-remote` answers the authoritative set.
+  const prefixes = FLEET_HEAD_PREFIXES;
+  try {
+    const tails = loopRefTails(ctx.root, prefixes);
+    if (tails.errors.length > 0) {
+      return null;
+    }
+    const remote: string[] = [];
+    for (const prefix of prefixes) {
+      const ls = gitTry(['-C', ctx.root, 'ls-remote', '--heads', 'origin', `${prefix}*`]);
+      if (ls.code !== 0) {
+        // no origin at all is a complete answer (the fleet is local-only);
+        // an unreachable remote is 'unknown'
+        if (
+          /does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)
+        ) {
+          continue;
+        }
+        return null;
+      }
+      remote.push(
+        ...ls.out
+          .split('\n')
+          .map(l => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '')
+          .filter(Boolean)
+      );
+    }
+    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches, ...remote])];
+    for (const b of branches) {
+      try {
+        for (const pr of ctx.rev.prsForBranch(b)) {
+          if (isFleetHead(b)) {
+            rows.push({ pr, headRef: b });
+          }
+        }
+      } catch {
+        // failed to check a branch - listing incomplete
+        return null;
+      }
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
+/** `push origin --delete <branch>` as a tails verdict — a remote that
+ *  already dropped the ref answers "does not exist", which IS the
+ *  end state we want (the host's own merge-time deleteBranch beat us
+ *  to it), never a leftover. Every other failure leaves a remote
+ *  branch the report should name. */
+function deleteRemoteBranch(ctx: Ctx, branch: string, why: string): void {
+  const del = gitTry(['-C', ctx.root, 'push', 'origin', '--delete', branch]);
+  if (del.code === 0 || /remote ref does not exist|Couldn't find remote ref/i.test(del.err)) {
+    return;
+  }
+  ctx.tails.push(
+    `remote branch ${branch} not deleted${why === '' ? '' : ` ${why}`} — ${del.err.trim()}`
+  );
+  console.error(`loop: ${ctx.tails.at(-1)}`);
+}
+
+/** The member ids a `loop/` PR's provenance trailer stamps — `bead:
+ *  "id1,id2"` written by stampLoopPr when the clump pushed. null when
+ *  the list can't be proven: no prBody capability on the host, a fetch
+ *  error, or a batch head with no trailer. An unenumerated batch is
+ *  never a burial order. */
+function fleetPrMemberIds(ctx: Ctx, row: FleetPrRow): string[] | null {
+  if (typeof ctx.rev.prBody !== 'function') {
+    return null;
+  }
+  let meta: Record<string, unknown>;
+  try {
+    meta = bodyMeta(ctx.rev.prBody({ repo: ctx.repo, pr: row.pr }));
+  } catch {
+    return null;
+  }
+  const raw = meta.bead;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return null;
+  }
+  const ids = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return ids.length === 0 ? null : ids;
+}
+
+/** Member ids → bead rows against a listing — a member the listing
+ *  can't find reads 'unknown', and 'unknown' is never dead. */
+function memberBeads(
+  ids: readonly string[],
+  beadsById: ReadonlyMap<string, ReconcileBead>
+): ReconcileBead[] {
+  return ids.map(id => beadsById.get(id) ?? { id, status: 'unknown' });
+}
+
+/** Reconcile orphaned fleet PRs not on the current stack. */
+async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
+  try {
+    const fleet = listOpenFleetPrs(ctx);
+    if (fleet === null || fleet.length === 0) return;
+    const stackPrs = new Set<number>();
+    const stackBranches = new Set<string>();
+    for (const m of q.stack) {
+      if (m.pr !== undefined) stackPrs.add(m.pr);
+      // a worker-pending member has no PR number until its .exit lands
+      // — its about-to-open PR protects by branch, not by number
+      stackBranches.add(m.item.branch);
+    }
+    const beadsBySlug = buildBeadsBySlug(ctx);
+    if (beadsBySlug === null) {
+      // Bead listing unknown — skip reconciliation to avoid false closures
+      return;
+    }
+    const beadsById = new Map([...beadsBySlug.values()].map(b => [b.id, b] as const));
+    for (const row of fleet) {
+      if (stackPrs.has(row.pr) || stackBranches.has(row.headRef)) continue;
+      const bead = beadForHead(row, beadsBySlug);
+      let verdict = orphanVerdict(row, bead);
+      if (verdict.kind === 'close') {
+        // a batch head shares its branch across members — the lead's
+        // status is not the clump's. Any member not positively closed
+        // (open, in_progress, deferred, unreadable) keeps the PR. A
+        // `bead:` trailer overrides the single-bead read on ANY head;
+        // a `loop/` head is stamped at open, so a missing trailer
+        // there is 'unknown' — and unknown never buries a batch.
+        const ids = fleetPrMemberIds(ctx, row);
+        if (ids !== null) {
+          verdict = orphanVerdict(row, bead, memberBeads(ids, beadsById));
+        } else if (row.headRef.startsWith('loop/')) {
+          verdict = { kind: 'keep' };
+        }
+      }
+      if (verdict.kind !== 'close') {
+        continue;
+      }
+      // the verdict rode a snapshot a whole pass old — reread before
+      // burying: a bead reopened since must not close its live work
+      const fresh = buildBeadsBySlug(ctx);
+      if (fresh === null) {
+        continue;
+      }
+      const freshBead = beadForHead(row, fresh);
+      const freshById = new Map([...fresh.values()].map(b => [b.id, b] as const));
+      const freshIds = fleetPrMemberIds(ctx, row);
+      const recheck =
+        freshIds === null && row.headRef.startsWith('loop/')
+          ? { kind: 'keep' as const }
+          : orphanVerdict(
+              row,
+              freshBead,
+              freshIds === null ? undefined : memberBeads(freshIds, freshById)
+            );
+      if (recheck.kind !== 'close') {
+        continue;
+      }
+      try {
+        let closed = false;
+        if (typeof ctx.rev.closePr === 'function') {
+          try {
+            ctx.rev.closePr({ repo: ctx.repo, pr: row.pr });
+            closed = true;
+          } catch {
+            closed = false;
+          }
+        }
+        if (!closed && typeof ctx.rev.closePr !== 'function') {
+          // a host with no closePr keeps the PR — name why once per
+          // run, then let the next pass check silently again
+          if (!q.unclosableNoted.has(row.pr)) {
+            q.unclosableNoted.add(row.pr);
+            say(
+              ctx,
+              `loop: reconcile keeps ${prRef(ctx, row.pr)} (${row.headRef}) — host has no closePr; ${verdict.why}`
+            );
+          }
+          continue;
+        }
+        if (!closed) {
+          // closePr exists but failed; avoid reporting a close and retrying aggressively
+          continue;
+        }
+        say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
+        deleteRemoteBranch(ctx, row.headRef, 'after reconcile close');
+        try {
+          // try to remove local worktree/branch if any
+          try {
+            const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt.code === 0) {
+              const trees = parseWorktreePorcelain(wt.out);
+              for (const t of trees) {
+                if (t.branch === row.headRef && t.path) {
+                  const rooted = processesRootedIn(t.path);
+                  // a live process or uncommitted work keeps the
+                  // checkout — --force removes dirty trees, and those
+                  // files have no other copy
+                  const st =
+                    rooted.length === 0
+                      ? gitTry(['-C', t.path, 'status', '--porcelain'])
+                      : { code: 1, out: '', err: '' };
+                  if (rooted.length === 0 && st.code === 0 && st.out.trim() === '') {
+                    gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+                    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+                    if (rm.code !== 0) {
+                      ctx.tails?.push(
+                        `worktree ${t.path} not removed (orphan reconcile) — ${rm.err.trim()}`
+                      );
+                    }
+                  } else {
+                    ctx.tails?.push(
+                      rooted.length > 0
+                        ? `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                        : `worktree ${t.path} kept (orphan reconcile) — has uncommitted changes or status unreadable; branch ${row.headRef} kept with it`
+                    );
+                  }
+                  break;
+                }
+              }
+            }
+          } catch {
+            /* best effort */
+          }
+          // Only delete branch if no worktree is still using it
+          try {
+            const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+            if (wt2.code === 0) {
+              const trees2 = parseWorktreePorcelain(wt2.out);
+              const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
+              if (!stillCheckedOut) {
+                const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+                if (br.code !== 0) {
+                  ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+                }
+              } else {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
+              }
+            } else {
+              const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+              if (br.code !== 0) {
+                ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+              }
+            }
+          } catch {
+            const br = gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+            if (br.code !== 0) {
+              ctx.tails?.push(`branch ${row.headRef} not deleted — ${br.err.trim()}`);
+            }
+          }
+        } catch {
+          /* best effort */
+        }
+      } catch (err) {
+        console.error(`loop: reconcile failed for ${prRef(ctx, row.pr)} — ${String(err)}`);
+      }
+    }
+  } catch (err) {
+    console.error(`loop: reconcile error — ${String(err)}`);
+  }
+}
+
+/** One service pass over the stack, oldest-first — closure-first order. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
+  // (a)/(b) service gate stack first
   for (const m of [...q.stack]) {
     const verdict = await serviceMember(ctx, m);
     if (verdict === 'kept') {
@@ -3699,6 +4373,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       continue;
     }
     q.stack.splice(q.stack.indexOf(m), 1);
+    // the member's ceiling reservation dies with its tenure — landed
+    // or failed, no PR of its own keeps arriving to consume it
+    releaseMemberReservation(q, m);
     q.tally[verdict] += 1;
     if (verdict === 'parked') {
       for (const b of m.beads) {
@@ -3714,6 +4391,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       );
     }
   }
+  // (c) reconcile orphaned fleet PRs
+  await reconcileFleet(ctx, q);
+  // (d) ceiling check handled by tryClaim
   return busy;
 }
 
@@ -3791,6 +4471,127 @@ function settleOutcome(
   }
 }
 
+/** One admitted-but-PR-less claim, as a file other loop processes can
+ *  count. The ceiling lock only spans the check; the claim→spawn→open
+ *  window sits outside it, and two loops that each read n<max in that
+ *  window both admit — the listing can't see a PR that doesn't exist
+ *  yet. A reservation file closes the window: written under the lock
+ *  at admission, re-stamped with the branch once the member exists,
+ *  consumed when the branch's PR lists, released on every
+ *  non-member outcome and on member splice, and swept when the
+ *  owning pid is dead. Lives in the COMMON git dir so linked
+ *  worktrees of this clone coordinate (separate clones share only
+ *  the remote listing — a remote reservation ref is follow-up work).
+ */
+interface CeilingRes {
+  pid: number;
+  pidStart?: string;
+  branch?: string;
+  ts: number;
+}
+
+const CEILING_RES_PREFIX = 'res-';
+
+/** Count admitted-but-PR-less claims across loops sharing this common
+ *  dir — and collect the ones already discharged. Consumed: the
+ *  branch's PR now lists (the listing counts it). Released: the owner
+ *  pid is dead (its claim can never spawn). Anything else — alive
+ *  owner, branch not yet listed, unreadable file — counts: an
+ *  unverifiable reservation is a held slot, never a free one. */
+function sweepCeilingReservations(dir: string, fleet: FleetPrRow[]): number {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const heads = new Set(fleet.map(r => r.headRef));
+  let live = 0;
+  for (const name of names) {
+    if (!name.startsWith(CEILING_RES_PREFIX) || !name.endsWith('.json')) {
+      continue;
+    }
+    const p = join(dir, name);
+    let res: CeilingRes | undefined;
+    try {
+      res = JSON.parse(readFileSync(p, 'utf8')) as CeilingRes;
+    } catch {
+      res = undefined;
+    }
+    if (res !== undefined && res.branch !== undefined && heads.has(res.branch)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    if (res !== undefined && typeof res.pid === 'number' && !pidAlive(res.pid, res.pidStart)) {
+      try {
+        unlinkSync(p);
+      } catch {
+        /* raced removal — fine */
+      }
+      continue;
+    }
+    live += 1;
+  }
+  return live;
+}
+
+/** Write one reservation under the caller's lock — null when the file
+ *  can't be proven to exist (the slot then counts as held, not free). */
+function reserveCeilingSlot(dir: string): string | null {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, `${CEILING_RES_PREFIX}${process.pid}-${Date.now()}.json`);
+    const res: CeilingRes = {
+      pid: process.pid,
+      pidStart: procStat(process.pid)?.start,
+      ts: Date.now(),
+    };
+    writeFileSync(p, JSON.stringify(res), 'utf8');
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** The member's branch joined the reservation — the file now names
+ *  the head its future PR will list under, so the next sweep can tell
+ *  'worker still spawning' from 'listing already counts this slot'. */
+function stampCeilingReservation(file: string, branch: string): void {
+  try {
+    const res = JSON.parse(readFileSync(file, 'utf8')) as CeilingRes;
+    res.branch = branch;
+    writeFileSync(file, JSON.stringify(res), 'utf8');
+  } catch {
+    /* the file stays counted either way — a branchless reservation is the same held slot */
+  }
+}
+
+function releaseCeilingFile(file: string | null): void {
+  if (file === null) {
+    return;
+  }
+  try {
+    unlinkSync(file);
+  } catch {
+    /* already gone */
+  }
+}
+
+/** A member left the stack — its reservation (if the PR never listed
+ *  it away) dies with the tenure. */
+function releaseMemberReservation(q: QueueState, member: GateMember): void {
+  const file = q.ceilingRes.get(member.item.branch);
+  if (file === undefined) {
+    return;
+  }
+  q.ceilingRes.delete(member.item.branch);
+  releaseCeilingFile(file);
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -3801,7 +4602,102 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
-  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
+  if (q.drained || maxed || Date.now() < q.pushHoldUntil) {
+    return false;
+  }
+  // the stack cap is consulted AFTER the ceiling check — a full stack
+  // must not silence the ceiling-hold line: at/over the fleet ceiling
+  // the hold belongs to the ceiling, and this log is the only place an
+  // operator learns that pushes are held for it (#791)
+  const stackFull = q.stack.length >= ctx.cfg.maxOpen;
+  // Hard ceiling on TOTAL open fleet PRs — plus every admitted-but-
+  // PR-less claim a sibling loop holds a reservation for. The
+  // reservation is what makes the bound atomic: without it two loops
+  // sharing this common dir can both read n<max in the claim→spawn→open
+  // window and each admit a clump.
+  let ceilingRes: string | null = null;
+  if (ctx.cfg.maxOpenTotal > 0) {
+    try {
+      const fleetCommon = gitCommonDir(ctx.root);
+      const resDir = fleetCommon === null ? null : join(fleetCommon, 'bro', 'ceiling.reserved');
+      let held = false;
+      const doCeilCheck = (): boolean => {
+        const fleet = listOpenFleetPrs(ctx);
+        if (fleet === null) {
+          // a listing that can't be produced holds too (fail closed)
+          if (!ctx.claimsHeld) {
+            ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+            say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+          }
+          return true;
+        }
+        const pending = resDir === null ? 0 : sweepCeilingReservations(resDir, fleet);
+        const open = fleet.length + pending;
+        if (ceilingHeld(open, ctx.cfg.maxOpenTotal)) {
+          if (
+            !ctx.claimsHeld ||
+            ctx.claimsHeld.open !== open ||
+            ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
+          ) {
+            ctx.claimsHeld = { open, max: ctx.cfg.maxOpenTotal };
+            say(
+              ctx,
+              `loop: claims held — ceiling ${fleet.length} open + ${pending} reserved/${ctx.cfg.maxOpenTotal}`
+            );
+          }
+          return true;
+        }
+        ctx.claimsHeld = undefined;
+        // admit = reserve, still under the lock — the claim→spawn→open
+        // window is then visible to the next loop's count. A full
+        // stack admits nothing this pass, so it reserves nothing —
+        // the listing above still served the hold line
+        if (!stackFull && resDir !== null) {
+          ceilingRes = reserveCeilingSlot(resDir);
+          if (ceilingRes === null) {
+            if (!ctx.claimsHeld) {
+              ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+              say(
+                ctx,
+                `loop: claims held — ceiling reservation unwritable/${ctx.cfg.maxOpenTotal}`
+              );
+            }
+            return true;
+          }
+        }
+        return false;
+      };
+      if (fleetCommon !== null) {
+        try {
+          withFileLock(join(fleetCommon, 'bro', 'loop.ceiling.lock'), () => {
+            held = doCeilCheck();
+          });
+        } catch {
+          held = doCeilCheck();
+        }
+      } else {
+        held = doCeilCheck();
+      }
+      if (held) {
+        // drain beats the hold — an empty queue behind the ceiling has
+        // nothing to wait for (same rule as the disk floor)
+        if (queueDrained(ctx, scope, q.seen)) {
+          q.drained = true;
+        }
+        return false;
+      }
+    } catch {
+      // a listing that can't be produced holds too (fail closed)
+      if (!ctx.claimsHeld) {
+        ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+        say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+      }
+      return false;
+    }
+  } else {
+    ctx.claimsHeld = undefined;
+  }
+  if (stackFull) {
     return false;
   }
   // the disk floor — admission, not eviction. A breached floor holds
@@ -3811,6 +4707,7 @@ async function tryClaim(
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
+    releaseCeilingFile(ceilingRes);
     return holdForDisk(ctx, scope, q, breach);
   }
   if (q.diskHeld) {
@@ -3832,12 +4729,14 @@ async function tryClaim(
   try {
     clump = claimClump(ctx, scope, q.seen, budget);
   } catch (err) {
+    releaseCeilingFile(ceilingRes);
     const msg = err instanceof Error ? err.message : String(err);
     say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
     return false;
   }
   if (clump === undefined) {
+    releaseCeilingFile(ceilingRes);
     q.drained = true;
     return false;
   }
@@ -3847,13 +4746,35 @@ async function tryClaim(
   }
   q.claimed += clump.length;
   ctx.bead = clump[0]!.id;
-  const out = await pushItem(ctx, clump);
+  let out: PushOutcome;
+  try {
+    out = await pushItem(ctx, clump);
+  } catch (err) {
+    // an uncaught push failure is still an admission that never
+    // produced a member — the slot goes back, not into a leak that
+    // only a dead-pid sweep would find
+    releaseCeilingFile(ceilingRes);
+    throw err;
+  }
   if (out.kind === 'hold') {
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
+    releaseCeilingFile(ceilingRes);
     unseeClump(ctx, q, clump);
     return false;
+  }
+  if (out.kind === 'member') {
+    if (ceilingRes !== null) {
+      // the reservation lives until the member's PR lists (swept then)
+      // or the member leaves the stack without one
+      stampCeilingReservation(ceilingRes, out.member.item.branch);
+      q.ceilingRes.set(out.member.item.branch, ceilingRes);
+      ceilingRes = null;
+    }
+  } else {
+    // parked/failed — no PR will ever list for this admission
+    releaseCeilingFile(ceilingRes);
   }
   recordClaimOutcome(ctx, q, ids, out);
   return true;
@@ -3939,6 +4860,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
     pushHoldUntil: 0,
     diskHeld: false,
     diskProbeWarned: new Set(),
+    unclosableNoted: new Set(),
+    ceilingRes: new Map(),
   };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid

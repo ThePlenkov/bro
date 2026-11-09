@@ -65,7 +65,8 @@ import {
   type ServeState,
 } from './serve.ts';
 import { conductorConfig, conductorProxy } from './serve-conductor.ts';
-import { providerConfig, providerProxy } from './serve-provider.ts';
+import { fileProviderConfig, providerProxy } from './serve-provider.ts';
+import { loadBroConfig } from '../plugins.ts';
 
 /** The well-known port — the whole point of the host listener is that
  *  `ANTHROPIC_BASE_URL=http://127.0.0.1:4545` is a permanent
@@ -313,7 +314,12 @@ async function cmdServe(argv: string[]): Promise<void> {
   // refused start holds nothing.
   const configDir = dirname(statePath);
   const conductorCfg = conductorConfig(process.env, configDir, undefined, 'global');
-  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
+  // global layer only, same as the conductor scan above — a committed
+  // bro.config must never redirect the machine-wide listener's upstream
+  const providerCfg =
+    conductorCfg === undefined
+      ? fileProviderConfig(process.env, () => loadBroConfig(configDir, ['global']))
+      : undefined;
   if (conductorCfg === undefined && providerCfg === undefined) {
     console.error(
       'error: nothing to serve — no serve.backend in the global config and no upstream ' +
