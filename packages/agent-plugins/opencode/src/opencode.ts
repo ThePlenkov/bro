@@ -214,12 +214,11 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   // probed cheaply (the hook call itself carries the hook budget — a cold
   // npx resolve degrades to no-context for that turn, not a hang)
   if (await exitsZero('npx', ['--version'])) {
-    if (await exitsZero('npx', ['-y', '--prefer-offline', NPX_PIN, 'hooks'])) {
-      return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] };
-    }
-    const latest = '@broject/bro';
-    if (await exitsZero('npx', ['-y', '--prefer-offline', latest, 'hooks'])) {
-      return { cmd: 'npx', args: ['-y', '--prefer-offline', latest] };
+    const specs = [NPX_PIN, '@broject/bro'];
+    for (const spec of specs) {
+      if (await exitsZero('npx', ['-y', '--prefer-offline', spec, 'hooks'])) {
+        return { cmd: 'npx', args: ['-y', '--prefer-offline', spec] };
+      }
     }
   }
   return null;
