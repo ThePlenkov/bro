@@ -2,17 +2,44 @@
  * GitHub CLI helpers. `gh` is a hard dependency — bro shells out rather than
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { killGroup, spawnCollect } from './live-procs.ts';
+
+/** Node's `spawnSync` caps a child's output at 1 MiB and KILLS it with
+ *  ENOBUFS past that — `status` goes null, and the caller cannot tell a
+ *  killed child from a quiet one. A bulk listing crosses that cap easily
+ *  (the open-PR REST page carries every body), so the sync helpers get a
+ *  real budget: 64 MiB sits orders of magnitude above the listing sizes
+ *  these calls produce and stays bounded — a `--paginate` listing over a
+ *  very large repo can still exceed it, and then the caller reads the
+ *  ENOBUFS reason instead of silence. The async twins stream into a
+ *  string and never had the cap. */
+const GH_MAX_BUFFER = 64 * 1024 * 1024;
+
+/** Why a `gh` call failed — stderr when the CLI spoke, else the spawn
+ *  error (a killed child can leave stderr empty), else a bounded head of
+ *  stdout (some tools print the diagnosis there), else the signal or the
+ *  exit code. Never empty on a failure: an undiagnosable failure is its
+ *  own bug. */
+function ghFailure(proc: SpawnSyncReturns<string>): string {
+  const err = (proc.stderr ?? '').trim();
+  if (err !== '') return err;
+  if (proc.error !== undefined) return proc.error.message;
+  const out = (proc.stdout ?? '').trim();
+  if (out !== '') return out.length > 200 ? `${out.slice(0, 200)}…` : out;
+  if (proc.signal !== null && proc.signal !== undefined) return `signal ${proc.signal}`;
+  return `exit ${proc.status ?? 'unknown'}`;
+}
 
 export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    maxBuffer: GH_MAX_BUFFER,
   });
   if (proc.status !== 0) {
-    throw new Error(`gh ${args[0]} failed: ${(proc.stderr ?? '').trim()}`);
+    throw new Error(`gh ${args[0]} failed: ${ghFailure(proc)}`);
   }
   return proc.stdout ?? '';
 }
@@ -80,13 +107,21 @@ export async function ghJsonAsync<T>(args: string[], cwd?: string, opts?: GhOpts
  * (`gh pr checks` exits 1 when checks fail while still printing JSON).
  */
 export function ghTry(args: string[], cwd?: string): { code: number; out: string; err: string } {
-  const proc = spawnSync('gh', args, {
-    // NOSONAR — user-installed CLI; PATH lookup is the contract
+  // user-installed CLI — PATH lookup is the contract; the NOSONAR must
+  // share the callee's line (biome reflows a trailing one inside {})
+  const proc = /* NOSONAR */ spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    maxBuffer: GH_MAX_BUFFER,
   });
-  return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() };
+  const err = (proc.stderr ?? '').trim();
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    // a silent success stays silent; a silent FAILURE says why
+    err: err !== '' || proc.status === 0 ? err : ghFailure(proc),
+  };
 }
 
 /** Async ghTry — same exit-code contract without the event-loop block.
@@ -157,14 +192,16 @@ export async function resolveRepoAsync(positional: string[], cwd?: string): Prom
  *  of github.com. */
 export function ghHost(): string {
   const h = process.env.GH_HOST;
+  if (h === undefined || h.trim() === '') return 'github.com';
   // GH_HOST is a bare host per gh(1) — but a pasted URL with a scheme
-  // would produce https://https://… links, so normalize it away
-  return h !== undefined && h.trim() !== ''
-    ? h
-        .trim()
-        .replace(/^https?:\/\//, '')
-        .replace(/\/+$/, '')
-    : 'github.com';
+  // would produce https://https://… links, so normalize it away. The
+  // trailing-slash trim is a loop, not /\/+$/: a greedy quantifier
+  // pinned to end-of-input backtracks super-linearly on hostile input
+  let host = h.trim().replace(/^https?:\/\//, '');
+  while (host.endsWith('/')) {
+    host = host.slice(0, -1);
+  }
+  return host;
 }
 
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every

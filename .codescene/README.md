@@ -2,21 +2,21 @@
 
 bro's Code Health policy, expressed as code. Three files carry it:
 
-| File | What it holds |
-| --- | --- |
-| `code-health-rules.json` | The numeric bar. bro's ceilings are pinned as **warning** thresholds: function CC ≤ 9, file mean CC ≤ 4, function LoC ≤ 50, nesting ≤ 4, bumpy road ≤ 2 bumps at depth 2, function args ≤ 4, constructor args ≤ 5, duplication ≥ 10 LoC @ 75 %. The **alert** thresholds stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a wave decision, not a default. |
-| `custom-quality-gates.json` | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates. |
-| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt. |
+| File                           | What it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `code-health-rules.json`       | The numeric bar. bro's ceilings are pinned as **warning** thresholds: function CC ≤ 8, file mean CC ≤ 4, function LoC ≤ 50, nesting ≤ 4, bumpy road ≤ 1 bump at depth 2, function args ≤ 4, constructor args ≤ 5, duplication < 10 LoC @ 75 %. A pinned threshold is the value at which the rule **fires** — CodeScene's own wording for the CC rule is "a cyclomatic complexity lower than 9", so the pinned 9 makes cc 9 a finding and the clean bar is one below it. The **alert** thresholds stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a wave decision, not a default. |
+| `custom-quality-gates.json`    | The ladder — which bar applies to which file. Rules are tried in order, the first match wins; no match means no gates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `../scripts/codescene-gate.ts` | The gate itself — a diff may not add technical debt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## The ladder
 
-| Rung | Profile | Who carries it |
-| --- | --- | --- |
-| 3 | `pay_down_tech_debt` | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced. |
-| 2 | `bare_minimum` | **129 files** — no *critical* rule fires. The critical-rule safety net plus "no new debt". |
-| 1 | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
+| Rung | Profile                       | Who carries it                                                                                                  |
+| ---- | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 3    | `pay_down_tech_debt`          | **62 files** — zero CodeScene findings. The strictest bar: every check, goals enforced.                         |
+| 2    | `bare_minimum`                | **129 files** — no _critical_ rule fires. The critical-rule safety net plus "no new debt".                      |
+| 1    | `{ "new_code_health": true }` | **133 files** — the legacy backlog. New code must not introduce technical debt; pre-existing debt is tolerated. |
 
-A *critical* rule is one of the four CodeScene names: Low Cohesion, Deep
+A _critical_ rule is one of the four CodeScene names: Low Cohesion, Deep
 Nested Logic, Bumpy Road, Brain/God Functions. Everything else is advisory —
 advisory rules are a judgement call, critical ones are not.
 
@@ -52,7 +52,7 @@ Wave 1 covered `packages/cli/src/commands/serve-conductor.ts` — `conductorConf
 Bumpy Road → four helpers). The file's critical-rule findings went to zero, so
 it graduated from the floor to rung 2. The wave also shipped the ladder itself.
 
-## Two traps worth knowing
+## Four traps worth knowing
 
 **A partial threshold list is not a partial bar.** Omitting a threshold does
 not fall back to CodeScene's default — it falls back to a stricter one.
@@ -61,19 +61,50 @@ and the same file with 8 thresholds left out → **1.84**. The file lists every
 threshold; the ones bro does not override carry `"-"` (use the default).
 
 **An explicit threshold beats the project's configured value.** The CLI's
-`cs rules-config list-thresholds` reports CodeScene's *defaults*, not what
+`cs rules-config list-thresholds` reports CodeScene's _defaults_, not what
 project 86325 actually enforces. Setting `function_cyclomatic_complexity_alert`
 to 9 (the skill's ceiling) fired Complex Method on every cc >= 9 method and
 cost 1.3 points of file score on its own. That is why only the warning
 thresholds are pinned here, and why the bar is raised one threshold at a time,
 each time measured.
 
+**A split can add a finding.** Two rules read the WHOLE file, not the
+function that changed: Primitive Obsession (the share of the file's
+functions that take primitive arguments — bro pins 30 %) and String
+Heavy Function Arguments (the share of the file's arguments that are
+string types — CodeScene's default, 50 %). Both need eight functions in
+the file before they speak at all. Measured on `cli-args.ts`: seven
+functions carry neither finding, and adding one helper with two string
+arguments fires both (69 % of the arguments string). Two ways out —
+keep the file's function count below the volume the rules need, or give
+the arguments a domain type. Measured on `command.ts`: the same split
+with loose strings fired Primitive Obsession at 36 % of the functions;
+the same split carrying one `Invocation` (the argv and the pieces the
+dispatch reads out of it) fired nothing. The split must be measured on
+the FILE, not on the function it touched.
+
+**A file's mean complexity speaks from seven functions.** Overall Code
+Complexity reads the file's MEAN cyclomatic complexity (bro pins the
+threshold at 4), but the rule only fires from SEVEN functions in the
+file. Measured on `gateway.ts`: six functions carrying a mean of 4.5 and
+no finding; a seventh function — mean 4.57 — fires the rule at once.
+A probe file of six functions at cc 5 (mean 5.0) is still silent, so the
+trigger is the function COUNT, not the average. A seventh function is
+not a free helper: it puts the file's average on the scale.
+
+The counting is not the textbook one: **every `throw` is a decision
+point** (measured: four `if`s and four `throw`s are cc 9, two `if`s and
+two `throw`s are cc 5, one `if` with an `||` and one `throw` are cc 4).
+A guard that refuses a value twice — "not a URL" and "a URL that cannot
+carry the token" — pays a rung for the second refusal. Two guards in two
+files cost less than one guard with two mouths.
+
 ## Who enforces the ladder
 
 **The CodeScene GitHub App** — it is the gate. It authenticates itself
 (an app installation needs no secret in this repo), it reads
 `.codescene/custom-quality-gates.json` **from the branch under review**, and
-it posts the review as the *CodeScene Code Health Review* check. That check
+it posts the review as the _CodeScene Code Health Review_ check. That check
 is what blocks a merge here: on PR #599 the App failed the PR over a
 Complex Method the diff introduced (cc 10) and the review gate counted it
 as a failing check.
@@ -86,7 +117,7 @@ carries the policy it enforces.
 The same delta analysis, before you push:
 
 ```bash
-npm run check:codescene                    # delta vs origin/main
+npm run check:codescene                    # delta vs the merge-base with origin/main
 node scripts/codescene-gate.ts <report>    # evaluate a saved report
 node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing findings
 ```
@@ -108,10 +139,10 @@ carries `cli.access` only, and expires in an hour.
 
 `change-type` per finding, as CodeScene reports it:
 
-| change-type | Meaning | Fails the gate? |
-| --- | --- | --- |
-| `fixed` | the diff resolved it | no |
-| `improved` | the diff made it milder | no |
-| `unchanged` | pre-existing debt, untouched | no (`--strict`: yes) |
-| `introduced` | the diff added it | **yes** |
-| `degraded` | the diff made it worse | **yes** |
+| change-type  | Meaning                      | Fails the gate?      |
+| ------------ | ---------------------------- | -------------------- |
+| `fixed`      | the diff resolved it         | no                   |
+| `improved`   | the diff made it milder      | no                   |
+| `unchanged`  | pre-existing debt, untouched | no (`--strict`: yes) |
+| `introduced` | the diff added it            | **yes**              |
+| `degraded`   | the diff made it worse       | **yes**              |

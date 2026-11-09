@@ -6,15 +6,14 @@
  */
 import {
   type AgentEntry,
-  actStates,
   agentsJson,
   armedWorkDetails,
   type BroStatus,
   broStatus,
+  gitCommonDir,
   type HerdrWorkspace,
   type HerdrWorktreeList,
   loadState,
-  type PrActCacheEntry,
   paneExists,
   silentBucketMin,
   stateScope,
@@ -22,6 +21,7 @@ import {
   worktreeGone,
   worktreeList,
 } from './lib.ts';
+import { type Lane, lanesRead } from './lanes.ts';
 
 export interface Planes {
   /** The bro repo being reconciled. */
@@ -45,9 +45,15 @@ export interface Planes {
   /** plugin state → event-tail pane alive? — same reasoning as
    *  mirrorPanes: a killed renderer pane has to move the key. */
   rendererPanes: Record<string, boolean>;
-  /** act-state file cache — the last-observed PR gate summary per PR,
-   *  display-only (spec bro-8dbyb). */
-  act: PrActCacheEntry[];
+  /** plugin state → status / session pane alive? — same reasoning:
+   *  a killed status or session pane must move the key on ordinary
+   *  wakes, not wait for the forced pass. */
+  statusPanes: Record<string, boolean>;
+  sessionPanes: Record<string, boolean>;
+  /** The daemon projector's per-worktree lane verdict — 'acp' when
+   *  the session-owning agent's provider is a headless acp worker:
+   *  the workspace composes exactly one pane (spec bro-l8wqu). */
+  lanes: Record<string, Lane>;
 }
 
 export function readPlanes(repo: string): Planes {
@@ -72,7 +78,13 @@ export function readPlanes(repo: string): Planes {
     rendererPanes: Object.fromEntries(
       Object.values(state.renderers).map(r => [r.pane_id, paneExists(r.pane_id)])
     ),
-    act: actStates(main),
+    statusPanes: Object.fromEntries(
+      Object.values(state.statuses).map(s => [s.pane_id, paneExists(s.pane_id)])
+    ),
+    sessionPanes: Object.fromEntries(
+      Object.values(state.sessions).map(s => [s.pane_id, paneExists(s.pane_id)])
+    ),
+    lanes: lanesRead(gitCommonDir(main) ?? main),
   };
 }
 
@@ -107,17 +119,8 @@ export function diffKey(p: Planes): string {
     reg: Object.entries(p.registry).map(([k, e]) => [k, e.agentId, e.log, e.worktree, e.pid]),
     mirrorPanes: p.mirrorPanes,
     rendererPanes: p.rendererPanes,
-    act: p.act.map(e => [
-      e.state.pr,
-      e.state.headRef,
-      e.state.state,
-      e.state.isDraft,
-      e.state.mergeable,
-      e.state.openThreads,
-      e.state.ciFailing,
-      e.state.ciPending,
-      e.state.reviewersPending,
-      e.state.sastPending,
-    ]),
+    statusPanes: p.statusPanes,
+    sessionPanes: p.sessionPanes,
+    lanes: p.lanes,
   });
 }

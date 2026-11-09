@@ -1,6 +1,7 @@
 ---
+
 name: acp
-description: "Use when an ACP client (Zed, JetBrains, Neovim, devin acp, kilo acp) should sit behind bro's hook seam instead of talking to the agent directly — `bro acp proxy -- <agent cmd>` is the cascading edge: verbatim forwarding plus session context on the first prompt. Thin wrapper over the bro CLI — mechanics live in the CLI."
+description: "Use when an ACP client (Zed, JetBrains, Neovim, or any `* acp` agent binary) should sit behind bro's hook seam instead of talking to the agent directly — `bro acp proxy -- <agent cmd>` is the cascading edge: verbatim forwarding plus session context on the first prompt. Thin wrapper over the bro CLI — mechanics live in the CLI."
 ---
 
 # /acp (bro)
@@ -18,8 +19,8 @@ session-start + prompt-submit context `bro hooks` emits, probed inside
 
 ## Command
 
-| Command | What it does |
-| ------- | ------------ |
+| Command                         | What it does                                                                                                                                                                                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bro acp proxy -- <agent cmd…>` | Foreground proxy — stdin/stdout IS the upstream wire. `--` is mandatory; the tail is exec'd directly (no shell), env `BRO_HOOKS=0` so the downstream tree never re-runs hooks. Exit 0 = client ended the wire; 1 = downstream died first; 2 = usage |
 
 ## Wiring a client
@@ -27,8 +28,6 @@ session-start + prompt-submit context `bro hooks` emits, probed inside
 Point the client's "custom agent" at bro the same way it would name any
 ACP server:
 
-- **devin**: `devin acp` is itself an agent — `bro acp proxy -- devin acp`
-  chains bro in front of it for a Devin-driven session.
 - **kilo**: `bro acp proxy -- kilo acp`.
 - **Zed / JetBrains / Neovim**: add bro as an external agent with the
   same argv shape — the client's own config syntax for a stdio ACP

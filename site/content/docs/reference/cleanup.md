@@ -1,9 +1,9 @@
 ---
 title: "bro cleanup"
-description: "Delete local branches whose PR merged [--remote] [--dry-run]"
+description: "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]"
 ---
 
-**`bro cleanup`** — Delete local branches whose PR merged [--remote] [--dry-run]
+**`bro cleanup`** — Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]
 
 | | |
 | --- | --- |

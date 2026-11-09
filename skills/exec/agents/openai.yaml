@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Exec"
+  short_description: "Run a command and report its finish through connector taskFinish probes — the report-back plane"
+  brand_color: "#5B5BD6"
+  default_prompt: "Use $exec for long builds and delayed jobs whose result should reach this session — `bro exec <cmd>`."
+policy:
+  allow_implicit_invocation: true
