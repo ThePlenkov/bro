@@ -38,3 +38,11 @@ export type {
   StepKind,
   StepState,
 } from './types.ts'
+export {
+  mergeClaimTarget,
+  mergeCloseReason,
+  MERGE_STEP_TYPE,
+  verifyMergeClose,
+} from './verify.ts'
+export type { MergeClaim, MergeProbe, MergeTarget, MergeVerdict } from './verify.ts'
+export { titleMatches } from './title.ts'

@@ -58,7 +58,7 @@ and resolve with a pointer. `bro act threads` lists what's open. Exit non-zero
 [[steps]]
 id = "merge"
 title = "Merge — bro act wait --merge"
-type = "agent"
+type = "merge-step"
 needs = ["pr-gate"]
 condition = "{{merge}} == auto"
 description = """
@@ -78,6 +78,10 @@ retires the worktree deliberately, after the bead is closed.
 If it refuses because reviewers are still pending or threads arrived after
 pr-gate, keep working: fix/defer threads, then merge again. Never wait for
 a human — the merge is yours.
+This step closes on a VERDICT: `bro flow convoy done` reads the PR's state
+from the host and refuses while the PR is not merged. Name the PR in the
+result (a PR reference) or pass `--pr N` — a claim nobody can verify does
+not close.
 """
 
 [[steps]]

@@ -21,7 +21,16 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { checkBeads, hasHelpFlag, printUsage, taskStore, type ExitCode } from '@broject/core'
+import {
+  checkBeads,
+  EXIT,
+  facadeAuth,
+  hasHelpFlag,
+  printUsage,
+  reviewHost,
+  taskStore,
+  type ExitCode,
+} from '@broject/core'
 import {
   beadsDir,
   claimStep,
@@ -30,22 +39,31 @@ import {
   inlineFormulaDoc,
   listMolecules,
   loadMolecule,
+  MERGE_STEP_TYPE,
   nextStep,
   pourFormula,
   resolveMolecule,
   stepInputs,
   stepKind,
   stepsOf,
+  titleMatches,
+  verifyMergeClose,
 } from '@broject/convoy'
 import type {
   ConvoyInline,
   ConvoyMolecule,
   ConvoyNext,
   ConvoyPlan,
+  ConvoyStep,
+  MergeClaim,
+  MergeProbe,
+  MergeTarget,
   MolIssue,
+  Molecule,
   StepState,
 } from '@broject/convoy'
 import { flag, flagAll, positionals } from './args.ts'
+import { loadBroConfig } from '../plugins.ts'
 import { publishGate, runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
@@ -55,7 +73,9 @@ function usage(exitCode: ExitCode = 2): never {
 Commands:
   status [mol] [--mol ID]         Render the DAG — done/ready/blocked per step
   next [mol] [--mol ID]           Emit the next executable step as JSON
-  done <step-id> [--result TEXT] [--mol ID]  Close a step and emit the new next
+  done <step-id> [--result TEXT] [--pr N] [--mol ID]  Close a step and emit the new next
+                                                  (a merge step closes only on a merged PR — the host
+                                                   decides; --pr names it when the result does not)
   claim <step-id> [--mol ID]               Atomically claim a step (assignee + in_progress)
   pour <formula> [--var K=V]…     Pour a formula into a molecule (registers agent/human types)
   list                            Open molecules in this workspace
@@ -70,7 +90,7 @@ Commands:
   With no mol id, the single open molecule is used; ambiguity is an error.`, exitCode)
 }
 
-const VALUE_FLAGS: ReadonlySet<string> = new Set(['--result', '--var', '--mol'])
+const VALUE_FLAGS: ReadonlySet<string> = new Set(['--result', '--pr', '--var', '--mol'])
 
 const convoyPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
@@ -81,6 +101,61 @@ function withInputs(next: ConvoyNext, mol: Parameters<typeof stepInputs>[0]): Co
   if (!next.step) return next
   const inputs = stepInputs(mol, next.step.id)
   return inputs.length > 0 ? { ...next, inputs } : next
+}
+
+/** Is this step the merge step?
+ *
+ *  Two independent signals, because bd flattens an unregistered custom
+ *  type to `task`: the poured issue's own type, and the formula the
+ *  molecule was poured from (bd's `formula show` keeps the declared
+ *  type). A molecule poured by plain `bd mol pour` still carries the
+ *  declaration in its formula. */
+function isMergeStep(mol: Molecule, step: ConvoyStep): boolean {
+  if (step.type === MERGE_STEP_TYPE) return true
+  let declared: MolIssue[] = []
+  try {
+    declared = formulaSteps(mol.root.title)
+  } catch {
+    // the formula is gone — the poured type was the only signal left
+    return false
+  }
+  return declared.some(
+    (s) => s.issue_type === MERGE_STEP_TYPE && titleMatches(s.title, step.title)
+  )
+}
+
+/** The claim a merge step closes on — null when the step is not a merge
+ *  step (nothing to verify). The PR comes from `--pr`, else the
+ *  result's own words, else the upstream handoff. */
+function mergeClaimFor(
+  mol: Molecule,
+  step: ConvoyStep,
+  result: string,
+  prFlag: string | undefined
+): MergeClaim | null {
+  if (!isMergeStep(mol, step)) return null
+  return {
+    result,
+    pr: prFlag === undefined ? undefined : Number(prFlag),
+    inputs: stepInputs(mol, step.id).map((i) => ({ id: i.id, reason: i.reason })),
+  }
+}
+
+/** The host's answer about a PR — the merge record the verifier reads.
+ *  The host is asked only when a merge step closes: a plain step must
+ *  not pay for the call. */
+async function probePr(target: MergeTarget): Promise<MergeProbe> {
+  // one read of the config: auth and the host must agree on the connectors
+  const broConfig = loadBroConfig()
+  // the auth failure is a refusal, not a crash: the verifier turns it
+  // into the actionable exit the caller reads (bro-4cxnd)
+  const auth = facadeAuth('reviews', { dir: process.cwd() }, { prefer: broConfig.connectors })
+  if (auth !== null) throw new Error(auth)
+  const rev = reviewHost(undefined, broConfig.connectors)
+  const repo = target.repo ?? rev.resolveRepo([])
+  const t = { repo, pr: target.pr }
+  const meta = rev.prMetaAsync ? await rev.prMetaAsync(t) : rev.prMeta(t)
+  return { state: meta.state, mergedBy: meta.mergedBy, mergeSha: meta.mergeSha }
 }
 
 const slugify = (s: string): string =>
@@ -189,7 +264,10 @@ function rollbackPoured(poured: string[]): string[] {
   return orphans
 }
 
-export async function runConvoyCommand(argv: string[]): Promise<void> {
+export async function runConvoyCommand(
+  argv: string[],
+  deps?: { probe?: (target: MergeTarget) => Promise<MergeProbe> }
+): Promise<void> {
   const [sub, ...rest] = argv
   if (sub === '--help' || sub === '-h') usage(0)
   if (!sub) usage()
@@ -276,6 +354,25 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       if (!result) {
         console.error('error: done requires --result — the next steps read it as their input')
         process.exit(2)
+      }
+      // A merge step closes on a VERDICT, not on a claim (bro-4cxnd):
+      // the host says whether the PR is merged, and the verdict leads
+      // the close reason. A step that is not a merge step closes as
+      // before.
+      const mergeClaim = mergeClaimFor(mol, step, result, flag(rest, '--pr'))
+      if (mergeClaim) {
+        const verdict = await verifyMergeClose(mergeClaim, deps?.probe ?? probePr)
+        if (!verdict.ok) {
+          // exitCode + return, never process.exit: the caller reads the
+          // code, and a hard exit would truncate a piped line
+          console.error(`error: ${verdict.message}`)
+          process.exitCode = EXIT.actionable
+          return
+        }
+        taskStore().close(stepId, verdict.reason)
+        const merged = resolveMolecule(mol.root.id)
+        console.log(JSON.stringify(withInputs(nextStep(merged), merged), null, 2))
+        return
       }
       taskStore().close(stepId, result)
       const fresh = resolveMolecule(mol.root.id)
