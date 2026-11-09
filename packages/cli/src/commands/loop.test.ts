@@ -1,16 +1,18 @@
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { after, describe, test } from 'node:test';
 import {
   bdTry,
-  resolveStepClass,
-  SpawnError,
   type FleetProfile,
+  type Lease,
   type ProviderEntry,
   type RoutingTable,
+  resolveStepClass,
+  SpawnError,
   type SpawnWorker,
 } from '@broject/core';
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop';
+import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import {
   claimAuthorityNote,
   declaredClaimCapability,
@@ -18,10 +20,32 @@ import {
   loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
+  skipLeasedBeads,
   syncAfterAudit,
 } from './loop.ts';
-import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
+
+test('loop picker skips live bead leases held by another process', () => {
+  const lease: Lease = {
+    key: 'bead/leased',
+    token: 'token',
+    holder: { host: 'other-host', pid: 44, rig: 'other-rig' },
+    acquiredAt: new Date(0).toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const logs: string[] = [];
+  assert.deepEqual(
+    skipLeasedBeads(
+      [{ id: 'leased' }, { id: 'free' }],
+      key => (key === 'bead/leased' ? lease : undefined),
+      line => logs.push(line),
+      'local',
+      10
+    ),
+    [{ id: 'free' }]
+  );
+  assert.deepEqual(logs, ['loop: skipping leased — leased by other-rig@other-host pid 44']);
+});
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 
@@ -425,7 +449,6 @@ describe('claimAuthorityNote', () => {
     assert.match(note, /exclusive-claim store/);
   });
 });
-
 
 // --- syncAfterAudit — the audit's fail-open sync boundary (bro-cu3q8) ----------
 

@@ -5,18 +5,20 @@
  *  is exercised with no bd/gh/network. The regression cost here is a PR
  *  merged without a gate or a bead stranded claimed — the assertions
  *  check store state, refs, and the worktree, not just output. */
-import { describe, test } from 'node:test';
+
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import { agentExitFileName } from '@broject/core';
 import {
-  CLI_DIST,
-  FAKE_BEAD,
   assertLandedBead,
   bead,
+  CLI_DIST,
+  type CliResult,
   e2eEnv,
+  FAKE_BEAD,
   git,
   initRepo,
   inside,
@@ -26,7 +28,6 @@ import {
   readHostState,
   runCli,
   writeHostState,
-  type CliResult,
 } from './testrepo.ts';
 
 interface Fixture {
@@ -57,6 +58,12 @@ function loopFixture(
   extra: (host: { state: string; agent: string }) => Record<string, unknown> = () => ({})
 ): Fixture {
   const { root, main } = initRepo('bro-loop-e2e-');
+  // a bare origin makes the remote-branch lifecycle real — the run's
+  // `push origin --delete` lands (or reports) instead of failing on a
+  // remote that was never configured
+  spawnSync('git', ['init', '--bare', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'remote', 'add', 'origin', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'push', '-q', 'origin', 'main']);
   const { binDir, db } = installFakeBd(root, rows);
   const host = installFakeHost(main);
   writeFileSync(
@@ -466,9 +473,9 @@ describe('bro loop e2e', () => {
     f.env.FAKE_BD_READY_FAILS = '1';
     inside(f.main, f.root, () => {
       const r = f.run();
-      // the message spans the wrapped spawn error (multi-line) — anchor
-      // the two halves instead of one dot-all
-      assert.match(r.stdout, /loop: claim read failed — [\s\S]*?holding pushes for [\d.]+s/);
+      // the hold rides holdForInfra's warn (stderr) — the message spans
+      // the wrapped spawn error (multi-line), anchor the two halves
+      assert.match(r.stderr, /loop: claim failed — [\s\S]*?infra hold; the next interval retries/);
       // the same run recovered and finished the pipeline — exit 0, no
       // raw err.message death at the supervisor's top level
       assert.equal(r.code, 0);

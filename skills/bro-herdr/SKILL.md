@@ -1,22 +1,22 @@
 ---
 
 name: bro-herdr
-description: "Use when driving herdr devin sessions — sending a session a prompt, reading agent status, reporting agent state, or tearing a worktree down. The orchestration playbook: /goal-first prompts, composer-queue delivery, live-pane report binding, invisible metadata tokens, and the five-step teardown order."
+description: "Use when driving herdr agent sessions — sending a session a prompt, reading agent status, reporting agent state, or tearing a worktree down. The orchestration playbook: /goal-first prompts, composer-queue delivery, live-pane report binding, invisible metadata tokens, and the five-step teardown order."
 ---
 
 # bro-herdr — the herdr orchestration playbook
 
-Contract for any agent (bro or otherwise) orchestrating devin sessions
+Contract for any agent (bro or otherwise) orchestrating agent sessions
 through the `herdr` CLI. The `herdr` skill owns command reference; this
 playbook owns the five failure modes that silently lose work. Control
 commands require `HERDR_ENV=1`.
 
 ## 1. `/goal` is a prompt position, not a prompt
 
-Every prompt sent to a herdr devin session **begins with `/goal`** —
-native goal-mode fires on the trigger at position zero, and any leading
-prose (a greeting, a heading, even `Here is your task:`) makes it plain
-text the session never parses as a goal.
+Every prompt sent to a herdr agent session **begins with `/goal`** —
+a kind's native goal-mode fires on the trigger at position zero, and
+any leading prose (a greeting, a heading, even `Here is your task:`)
+makes it plain text the session never parses as a goal.
 
 The goal names the **completion gate**, never a milestone:
 

@@ -63,7 +63,8 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   acquireAgentRegistryLock,
@@ -79,6 +80,9 @@ import {
   facadeName,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
+  projectId,
   patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
@@ -132,7 +136,7 @@ import {
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
 import { collectAgents } from './fleet.ts';
-import { projectFleet } from './herdr-projector.ts';
+import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
   driveSection,
   MAX_INTERVAL_SEC,
@@ -774,10 +778,12 @@ export function buildFixerPrompt(opts: {
     'Rules:',
     "- Read skills/act/SKILL.md first — it owns this loop's policy.",
     '- Fix valid findings on this branch; commit and push — the push is the verdict.',
+    '- For EVERY thread: fix+push OR reply with reason and resolve, OR explicitly defer to a follow-up bead and resolve. You MUST address all threads before stopping.',
+    '- You cannot exit cleanly with unresolved threads and no action taken on them.',
     '- Resolve fixed threads silently; reply + resolve with the reason on reject/defer.',
     '- Defer non-blocking nits (P2/P3) to debt beads — never chase a perfect PR.',
     '- NEVER merge — `bro drive` owns the merge on green.',
-    '- Exit when threads are zero or all deferred.',
+    '- Exit when threads are zero or all deferred/resolved with explanation.',
     '',
   ].join('\n');
 }
@@ -2503,6 +2509,9 @@ function herdrProjectorTick(ctx: Ctx): void {
   // the event trigger re-arms lazily here — a broker that came up since
   // the last pass restores event mode without a daemon restart
   void armProjectorEvents(ctx);
+  // and the write points without an envelope get their fs.watch fast
+  // path the same way — armed once, loop mode only
+  armProjectorWatches(ctx);
   try {
     const r = projectFleet(ctx.mainRoot);
     if (r.reachable !== herdrWasReachable) {
@@ -2567,8 +2576,15 @@ export function projectorKicker(fire: () => void, kickMs = PROJECTOR_KICK_MS): (
 }
 
 let projectorKickFn: (() => void) | undefined;
+/** Latest daemon ctx — rebound on every kick source call so a standby
+ *  takeover never fires the projector through the first invocation's
+ *  closure. */
+let projectorCtx: Ctx | undefined;
 function kickProjector(ctx: Ctx): void {
-  projectorKickFn ??= projectorKicker(() => herdrProjectorTick(ctx));
+  projectorCtx = ctx;
+  projectorKickFn ??= projectorKicker(() => {
+    if (projectorCtx !== undefined) herdrProjectorTick(projectorCtx);
+  });
   projectorKickFn();
 }
 
@@ -2622,6 +2638,86 @@ async function armProjectorEvents(ctx: Ctx): Promise<void> {
     }
   } finally {
     projectorArming = false;
+  }
+}
+
+// --- write-point watches (spec bro-9me97) -------------------------------------
+
+/** Filename-filtered dir watches kicking the projector on the write
+ *  points the bus does not cover: a `.exit` lands the instant a worker
+ *  dies but `agent-exit` only journals at the next harvest;
+ *  `agents.json` mutates outside lifecycle emits; plugin ledgers have
+ *  no bus path at all. Everything funnels into the same coalescing
+ *  kicker, and a missed/overflowed inotify event still has the tick
+ *  behind it — the watch is a fast path, never the only path.
+ *  Exported so tests drive it with injected dirs + kick. */
+export function projectorWatcher(
+  dirs: { dir: string; hit: (name: string) => boolean }[],
+  kick: () => void
+): FSWatcher[] {
+  const out: FSWatcher[] = [];
+  for (const { dir, hit } of dirs) {
+    try {
+      const w = watch(dir, (_e, name) => {
+        if (typeof name === 'string' && hit(name)) {
+          kick();
+        }
+      });
+      // an inotify limit or a dir removed mid-watch degrades to the
+      // tick — never a crash inside the supervisor loop
+      w.on('error', () => {});
+      w.unref?.();
+      out.push(w);
+    } catch {
+      // an absent dir (a ledger root the plugin never created) is a
+      // no-watch, not a failure
+    }
+  }
+  return out;
+}
+
+interface ProjectorWatchSlot {
+  dir: string;
+  hit: (name: string) => boolean;
+  w?: FSWatcher;
+}
+
+let projectorWatchSpec: ProjectorWatchSlot[] | undefined;
+function armProjectorWatches(ctx: Ctx): void {
+  if (ctx.everySec === undefined) {
+    return;
+  }
+  projectorCtx = ctx;
+  if (projectorWatchSpec === undefined) {
+    const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
+    projectorWatchSpec = [
+      // registry mutations the lifecycle mirror does not emit for
+      { dir: join(common, 'bro'), hit: name => name === 'agents.json' },
+      // death before the harvest — the wrapper's .exit write point
+      { dir: join(common, 'bro', 'agents'), hit: name => name.endsWith('.exit') },
+      // plugin workspace/status bindings — no bus coverage at all
+      ...pluginLedgerDirs().map(dir => ({ dir, hit: (name: string) => name.startsWith('state') })),
+    ];
+  }
+  // re-attach every slot that is not watched yet — `bro/agents` only
+  // exists after the first native spawn, ledger roots after the first
+  // plugin run; a one-shot arm would leave those points tick-bound
+  // forever (same lazy re-arm shape as armProjectorEvents)
+  for (const d of projectorWatchSpec) {
+    if (d.w !== undefined) {
+      continue;
+    }
+    const [w] = projectorWatcher([d], () => {
+      if (projectorCtx !== undefined) kickProjector(projectorCtx);
+    });
+    if (w !== undefined) {
+      const drop = (): void => {
+        d.w = undefined;
+      };
+      w.on('error', drop);
+      w.on('close', drop);
+      d.w = w;
+    }
   }
 }
 
@@ -2716,21 +2812,52 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   // the same PRs raced fixer spawns and merge probes overnight
   // (retro bro-l63ji). Taken before auth/facade planes so a standby
   // stays a cheap local wait.
-  const driveLock = driveLockPath(main.path);
-  const releaseSupervisor =
-    driveLock === null
-      ? () => {}
-      : await awaitFileLock(driveLock, {
-          label: 'drive supervisor lock',
-          onStandby: pid =>
-            console.error(
-              `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
-        });
+  const env = loadAgentEnv(main.path);
+  const store = localLeaseStore(projectId(main.path));
+  const abort = new AbortController();
+  let roleLease: { release: () => void } | undefined;
+  let releaseSupervisor = () => {};
+  const releaseAll = (): void => {
+    releaseSupervisor();
+    roleLease?.release();
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort();
+    releaseAll();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.kill(process.pid, signal);
+  };
+  const onInt = (): void => onSignal('SIGINT');
+  const onTerm = (): void => onSignal('SIGTERM');
+  const onExit = (): void => releaseAll();
   try {
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    process.on('exit', onExit);
+    roleLease = await holdRoleLease(
+      store,
+      'drive',
+      { host: hostname(), pid: process.pid, rig: basename(main.path) },
+      (env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    );
+    const driveLock = driveLockPath(main.path);
+    if (driveLock !== null) {
+      releaseSupervisor = await awaitFileLock(driveLock, {
+        label: 'drive supervisor lock',
+        onStandby: pid =>
+          console.error(
+            `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+          ),
+      });
+    }
     await runDrive(main.path, broCfg, drive, args);
   } finally {
-    releaseSupervisor();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.removeListener('exit', onExit);
+    releaseAll();
   }
 }
 
