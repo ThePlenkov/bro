@@ -522,9 +522,10 @@ function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
 
 function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
   // typeof null === 'object' — a null element would pass the object
-  // check and throw on .number
+  // check and throw on .number; Number.isInteger keeps 1.5/NaN/Infinity
+  // out of issue URLs and API paths (external data, kody integer rule)
   return rows.filter(
-    (i): i is GhIssue => i !== null && typeof i === 'object' && typeof i.number === 'number'
+    (i): i is GhIssue => i !== null && typeof i === 'object' && Number.isInteger(i.number)
   );
 }
 
