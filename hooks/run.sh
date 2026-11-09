@@ -634,9 +634,20 @@ cursor_permission_ask() {
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
   _rc=$?
+  # BRO_HOOKS_NO_FALLBACK=1 — the latency bench pins it so the in-tree
+  # dist result IS the measurement: a nonzero exit or an expired
+  # deadline is the error, never a PATH-bro swap. Never set it on a
+  # live session: it weakens the fail-open contract.
+  if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+    { [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; } && exit 1
+    exit 0
+  fi
   [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
   [ "$_rc" -eq 0 ] && exit 0
 fi
+# same pin when dist or node is missing — the PATH fallback must not
+# hide it either
+[ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
   [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask

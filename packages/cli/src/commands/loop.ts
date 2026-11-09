@@ -2881,7 +2881,14 @@ const LOOP_VALUE_FLAGS = new Set([
   '--class',
   '--model',
 ]);
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve', '--print', '--explain']);
+const LOOP_BOOL_FLAGS = new Set([
+  '--json',
+  '--dry-run',
+  '--help',
+  '--auto-approve',
+  '--print',
+  '--explain',
+]);
 
 function runLoopSched(argv: string[], dir: string, loopCfg: LoopConfig): void {
   // install arms and uninstall disarms — both are the orchestrator's
@@ -2971,8 +2978,6 @@ function everySecArg(argv: string[]): number | undefined {
   }
   return everySec;
 }
-
-
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
@@ -4090,7 +4095,9 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
       if (ls.code !== 0) {
         // no origin at all is a complete answer (the fleet is local-only);
         // an unreachable remote is 'unknown'
-        if (/does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)) {
+        if (
+          /does not appear to be a git repository|No such remote|not a git command/i.test(ls.err)
+        ) {
           continue;
         }
         return null;

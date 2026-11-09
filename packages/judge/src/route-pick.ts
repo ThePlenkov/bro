@@ -11,13 +11,7 @@
  * The model picks a ROUTE. It never names a provider: it cannot see the
  * rate limits, and a route whose chain is walled was never a candidate.
  */
-import type {
-  DecideResult,
-  JudgeAnswer,
-  JudgeFacade,
-  JudgeQuestion,
-  Verdict,
-} from '@broject/core';
+import type { DecideResult, JudgeAnswer, JudgeFacade, JudgeQuestion, Verdict } from '@broject/core';
 import { appendRow } from './journal.ts';
 
 /** Journal kind — discriminates route verdicts from the fleet's

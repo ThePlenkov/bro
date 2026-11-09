@@ -81,7 +81,12 @@ test('a call that already ran is a report, not a request', () => {
   );
   assert.equal(
     clientCall(
-      { sessionUpdate: 'tool_call', kind: 'execute', rawInput: { command: 'ls' }, status: 'failed' },
+      {
+        sessionUpdate: 'tool_call',
+        kind: 'execute',
+        rawInput: { command: 'ls' },
+        status: 'failed',
+      },
       CLAUDE_TOOLS
     ),
     undefined
@@ -256,7 +261,11 @@ test("the client's own spelling wins — 'file_path' is the client's 'path'", ()
   const tools = clientTools([
     {
       name: 'read',
-      input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      input_schema: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
     },
   ]);
   const call = clientCall(
@@ -303,7 +312,7 @@ test("the vocabulary reads the request's own definitions", () => {
   assert.deepEqual(clientTools(undefined), []);
 });
 
-test("a property the client names __proto__ is an ordinary entry, not a prototype swap", () => {
+test('a property the client names __proto__ is an ordinary entry, not a prototype swap', () => {
   const tools = clientTools([
     {
       name: 'read',

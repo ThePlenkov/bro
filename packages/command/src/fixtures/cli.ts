@@ -8,7 +8,13 @@
  *   plan           → prints "plan-host"  (the host itself)
  *   group          → prints the member table
  */
-import { defineCommand, definePlugin, runCommand, type Command, type CommandPlugin } from '../index.ts';
+import {
+  defineCommand,
+  definePlugin,
+  runCommand,
+  type Command,
+  type CommandPlugin,
+} from '../index.ts';
 
 const seen: string[] = [];
 
@@ -66,7 +72,7 @@ const planRun = definePlugin({
 const runner = definePlugin({
   name: 'runner',
   summary: 'a plugin that runs unless help leads',
-  run: (argv) => {
+  run: argv => {
     console.log(argv[0] === '--help' ? 'runner-help' : 'runner-ran');
   },
 });
@@ -76,7 +82,7 @@ const runner = definePlugin({
 const actor = definePlugin({
   name: 'act',
   summary: 'a member that runs unless help leads',
-  run: (argv) => {
+  run: argv => {
     console.log(argv[0] === '--help' ? 'act-help' : 'act-ran');
   },
 });
@@ -88,7 +94,7 @@ const creator = definePlugin({
   name: 'creator',
   summary: 'a plugin that selects create with its prefix',
   argvPrefix: ['create'],
-  run: (argv) => {
+  run: argv => {
     console.log(argv.includes('--help') ? `${argv[0]}-help` : `${argv[0]}-ran`);
   },
 });
