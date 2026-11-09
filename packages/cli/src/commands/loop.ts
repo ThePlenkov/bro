@@ -4509,7 +4509,12 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
  *  reservation (landed or failed, no PR of its own keeps arriving to
  *  consume it), tally the verdict, and stamp the parked-claim set /
  *  post-merge sync / json row the verdict asks for. */
-function retireMember(ctx: Ctx, q: QueueState, m: GateMember, verdict: ServiceVerdict): void {
+function retireMember(
+  ctx: Ctx,
+  q: QueueState,
+  m: GateMember,
+  verdict: keyof QueueState['tally']
+): void {
   q.stack.splice(q.stack.indexOf(m), 1);
   releaseMemberReservation(q, m);
   q.tally[verdict] += 1;
