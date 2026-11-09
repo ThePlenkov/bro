@@ -892,18 +892,13 @@ if (!existsSync(join(ROOT, BRO_SKILL))) {
     'commands/bro.md',
     `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
   );
-  // opencode command dir (plural) — thin wrapper: full policy lives in
-  // the skill; a short expansion avoids dumping the whole template into
-  // the visible prompt.
-  emit(
-    '.opencode/commands/bro.md',
-    `---\ndescription: bro plugin dispatcher (narrow scope) — /bro help shows plugin help; /bro <family> hands off\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n` +
-      `Invoked: \`/bro $ARGUMENTS\`\n\n` +
-      `Follow \`${BRO_SKILL}\` (plugin dispatcher, **not** full \`bro\` CLI):\n` +
-      `- no args or \`help\` → print plugin help only (dispatch table). Do **not** run \`bro --help\`.\n` +
-      `- \`status\` → run \`bro status --deep\` and summarize the board.\n` +
-      `- \`<family> [args]\` → read \`skills/<family>/SKILL.md\`, then run \`bro <family> [args]\` (or mapped CLI family).\n`
-  );
+  // opencode: /bro is handled by the plugin (TUI/V2 command). A file-based
+  // command here makes opencode expand/dump the template visibly — don't ship it.
+  const ocCmd = join(ROOT, '.opencode/commands/bro.md');
+  if (existsSync(ocCmd)) {
+    if (CHECK) drift.push('.opencode/commands/bro.md');
+    else rmSync(ocCmd, { force: true });
+  }
 }
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
