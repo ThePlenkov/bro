@@ -437,8 +437,16 @@ async function fetchState(
   // name. A substring match would drop unrelated checks from the gate —
   // the one thing the gate must never do (Kody rule: no substring
   // checks as semantic tests).
-  const self = normalizeCheckName(opts?.selfCheck ?? '');
+  const selfName = opts?.selfCheck;
   const isSelf = (c: CheckInfo): boolean => {
+    // absent is not the same as empty: a missing setting means "this
+    // project has no gate check", an empty one means "the gate names
+    // nothing" — neither excludes a check, and neither is a sentinel
+    // for the other (Kody rule: discriminate on presence).
+    if (selfName === undefined) {
+      return false;
+    }
+    const self = normalizeCheckName(selfName);
     if (self === '') {
       return false;
     }
