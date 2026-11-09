@@ -13,7 +13,7 @@
  * group) is reachable both ways.
  */
 import { defineCommand, runCommand, type CommandPlugin } from '@broject/command';
-import { EXIT, isCommandError, printUsage, type CommandError } from '@broject/core';
+import { EXIT, isCommandError, printUsage } from '@broject/core';
 import { journalCommand } from './commands/hooks.ts';
 import { registerTelegramSink } from './commands/sinks-telegram.ts';
 import { otelSpan, setAmbient } from '@broject/providers';
@@ -54,7 +54,7 @@ const cli = defineCommand({
   commands: groupCommands(),
   usageLines: docUsageLines(),
   examples: EXAMPLES,
-  prepare: async (argv) => {
+  prepare: async argv => {
     // sink delivery policies — the plugin layer owns each type's wire
     // shape; core dispatches to whoever registered (bro-mq1t2)
     registerTelegramSink();
@@ -72,7 +72,7 @@ const cli = defineCommand({
       // so the completed span rides out on a detached node child.
       const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 });
       setAmbient(cmdSpan.ctx);
-      process.on('exit', (code) => {
+      process.on('exit', code => {
         journalCommand(cmd as string, Date.now() - t0, code ?? 0);
         cmdSpan.endDetached(
           { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
@@ -94,11 +94,11 @@ const cli = defineCommand({
   fallback: async (cmd, rest) => runDocVerb(cmd, rest),
 });
 
-runCommand(cli, process.argv.slice(2), { mounted: true }).catch((err: unknown) => {
-  // A command throws CommandError instead of exiting — this catch is
-  // the single dispatcher exit the type exists for: usage text and
-  // code ride the error, the stream follows the code (isCommandError
-  // also catches a bundled duplicate module's copy of the type).
+// A command throws CommandError instead of exiting — this catch is
+// the single dispatcher exit the type exists for: usage text and
+// code ride the error, the stream follows the code (isCommandError
+// also catches a bundled duplicate module's copy of the type).
+function dispatchFatal(err: unknown): void {
   if (isCommandError(err)) {
     const e = err;
     const code = typeof e.code === 'number' ? e.code : 1;
@@ -118,4 +118,6 @@ runCommand(cli, process.argv.slice(2), { mounted: true }).catch((err: unknown) =
   }
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
-});
+}
+
+runCommand(cli, process.argv.slice(2), { mounted: true }).catch(dispatchFatal);

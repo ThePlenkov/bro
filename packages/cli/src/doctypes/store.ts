@@ -12,18 +12,18 @@
  * Project and global beads never mix: the store is a plain `bd init`
  * directory addressed by cwd, not by merged state.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
-import { CommandError, DEFAULT_GLOBAL_BEADS_DIR, EXIT, gitTry, taskStore } from '@broject/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core'
-import { loadBroConfig } from '../plugins.ts'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
+import { CommandError, DEFAULT_GLOBAL_BEADS_DIR, EXIT, gitTry, taskStore } from '@broject/core';
+import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core';
+import { loadBroConfig } from '../plugins.ts';
 
 export interface StoreInfo {
-  name: 'project' | 'global'
-  path: string
+  name: 'project' | 'global';
+  path: string;
   /** .beads present → usable store */
-  initialized: boolean
-  prefix?: string
+  initialized: boolean;
+  prefix?: string;
 }
 
 /** Where the global store lives — config/env/default resolution. A
@@ -31,25 +31,27 @@ export interface StoreInfo {
  *  loaded for), not at whatever process.cwd happens to be — absolute
  *  or `~/…` paths are preferred and skip the warning. */
 export function resolveGlobalDir(cwd: string = process.cwd()): string {
-  const cfg = loadBroConfig(cwd) as { beads?: { global?: string } }
-  const p = cfg.beads?.global ?? DEFAULT_GLOBAL_BEADS_DIR
+  const cfg = loadBroConfig(cwd) as { beads?: { global?: string } };
+  const p = cfg.beads?.global ?? DEFAULT_GLOBAL_BEADS_DIR;
   if (!isAbsolute(p)) {
-    console.error(`bro: relative beads.global '${p}' resolves against ${cwd} — prefer an absolute or ~/… path`)
+    console.error(
+      `bro: relative beads.global '${p}' resolves against ${cwd} — prefer an absolute or ~/… path`
+    );
   }
-  return resolve(cwd, p)
+  return resolve(cwd, p);
 }
 
 /** The store dir when it must exist — scheduling from a store that was
  *  never initialized must fail loudly, not read an empty queue. */
 export function requireGlobalStore(cwd: string = process.cwd()): string {
-  const dir = resolveGlobalDir(cwd)
+  const dir = resolveGlobalDir(cwd);
   if (!existsSync(join(dir, '.beads'))) {
     throw new CommandError(
       `error: no global beads store at ${dir} — run \`bro store init --global\` first`,
       EXIT.usage
-    )
+    );
   }
-  return dir
+  return dir;
 }
 
 function storeInfo(name: Scope, path: string): StoreInfo {
@@ -60,45 +62,45 @@ function storeInfo(name: Scope, path: string): StoreInfo {
   // taskStore() is the port handle (connectors.tasks selects *which*
   // backend; a .beads dir is always beads).
   try {
-    const prefix = taskStore(path).prefix()
-    return { name, path, initialized: true, prefix }
+    const prefix = taskStore(path).prefix();
+    return { name, path, initialized: true, prefix };
   } catch {
-    return { name, path, initialized: false }
+    return { name, path, initialized: false };
   }
 }
 
 /** Project store root — the repo top-level when inside one. */
 function projectRoot(cwd: string): string {
-  const top = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel']).out.trim()
-  return top || cwd
+  const top = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel']).out.trim();
+  return top || cwd;
 }
 
 function storePath(name: Scope, root: string): string {
-  return name === 'global' ? resolveGlobalDir(root) : projectRoot(root)
+  return name === 'global' ? resolveGlobalDir(root) : projectRoot(root);
 }
 
 /** The store a verb targets: explicit ref ("global"/"project") wins,
  *  else the resolved scope. */
 function storeName(ref: string | undefined, scope: Scope): Scope | undefined {
   if (ref === 'project' || ref === 'global') {
-    return ref
+    return ref;
   }
   if (ref !== undefined) {
-    return undefined
+    return undefined;
   }
-  return scope
+  return scope;
 }
 
 /** Report an init failure precisely — a missing binary throws ENOENT,
  *  and "bd init failed" would bury that diagnostic. `drop` removes
  *  what this run created so a failed init doesn't strand a store. */
 function initFailed(err: unknown, dir: string, drop: () => void): never {
-  const enoent = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+  const enoent = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
   const msg = enoent
     ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
-    : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
-  drop()
-  throw new CommandError(msg, EXIT.error)
+    : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`;
+  drop();
+  throw new CommandError(msg, EXIT.error);
 }
 
 /** One init at a time per store dir. The rollback in `initStore`
@@ -107,41 +109,71 @@ function initFailed(err: unknown, dir: string, drop: () => void): never {
  *  losing process's drop() deletes the winner's live store. The lock
  *  is a pid-stamped dir: mkdir is atomic create-or-fail, and a dead
  *  owner's lock is reclaimed like the ceiling reservations do. */
-const INIT_LOCK = '.bro-init.lock'
+const INIT_LOCK = '.bro-init.lock';
 
 function pidAlive(pid: number): boolean {
   try {
-    process.kill(pid, 0)
-    return true
+    process.kill(pid, 0);
+    return true;
   } catch (err) {
-    // ESRCH → gone; EPERM → alive but not ours
-    return (err as NodeJS.ErrnoException).code === 'EPERM'
+    // Only ESRCH reliably means "gone". EPERM means the process exists
+    // but we can't signal it (owned by another user) — and every other
+    // error is "unknown". Reclaiming on an unknown liveness races the
+    // real owner, so anything but ESRCH keeps the lock.
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/** A pid write lands right after mkdir — a missing/unreadable stamp on
+ *  a lock THIS young is an init in flight, not corruption. Past the
+ *  grace window a stamp-less lock is abandoned garbage to reclaim. */
+const INIT_LOCK_GRACE_MS = 10_000;
+
+function lockAgeMs(lock: string): number | undefined {
+  try {
+    return Date.now() - statSync(lock).mtimeMs;
+  } catch {
+    return undefined;
   }
 }
 
 function takeInitLock(dir: string): { release: () => void } {
-  const lock = join(dir, INIT_LOCK)
+  const lock = join(dir, INIT_LOCK);
   try {
-    mkdirSync(lock)
+    mkdirSync(lock);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-    let owner: number | undefined
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    let owner: number | undefined;
     try {
-      owner = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
+      owner = Number(readFileSync(join(lock, 'pid'), 'utf8').trim());
     } catch {
-      owner = undefined
+      owner = undefined;
     }
-    if (owner !== undefined && Number.isInteger(owner) && !pidAlive(owner)) {
-      rmSync(lock, { recursive: true, force: true })
-      return takeInitLock(dir)
+    if (owner === undefined || !Number.isInteger(owner) || owner <= 0) {
+      // no readable live owner — stale or corrupted lock (crashed init,
+      // missing/garbage pid file). Refuse only a young one: its pid
+      // write may simply not have landed yet.
+      const age = lockAgeMs(lock);
+      if (age !== undefined && age < INIT_LOCK_GRACE_MS) {
+        throw new CommandError(
+          `error: another store init is running in ${dir} — retry when it finishes`,
+          EXIT.error
+        );
+      }
+      rmSync(lock, { recursive: true, force: true });
+      return takeInitLock(dir);
+    }
+    if (!pidAlive(owner)) {
+      rmSync(lock, { recursive: true, force: true });
+      return takeInitLock(dir);
     }
     throw new CommandError(
       `error: another store init is running in ${dir} — retry when it finishes`,
       EXIT.error
-    )
+    );
   }
   try {
-    writeFileSync(join(lock, 'pid'), String(process.pid))
+    writeFileSync(join(lock, 'pid'), String(process.pid));
   } catch {
     // best effort — an unstamped lock is still a lock, it just can't
     // be reclaimed until a human removes it
@@ -149,104 +181,104 @@ function takeInitLock(dir: string): { release: () => void } {
   return {
     release: () => {
       try {
-        rmSync(lock, { recursive: true, force: true })
+        rmSync(lock, { recursive: true, force: true });
       } catch {
         // a stuck empty lock dir is harmless — the pid check reclaims it
       }
     },
-  }
+  };
 }
 
 /** Exported for tests — the ENOENT/prefix paths are the contract a
  *  missing or mismatched bd installation must surface, not swallow. */
 export function initStore(name: Scope, flags: DocFlags, root: string): void {
-  const dir = storePath(name, root)
-  const prefix = flags['prefix'] ?? (name === 'global' ? 'global' : undefined)
-  const created = !existsSync(dir)
-  mkdirSync(dir, { recursive: true })
+  const dir = storePath(name, root);
+  const prefix = flags['prefix'] ?? (name === 'global' ? 'global' : undefined);
+  const created = !existsSync(dir);
+  mkdirSync(dir, { recursive: true });
   // the lock is what makes the snapshots below trustworthy: with it
   // held, no second init can create .beads between our check and our
   // rollback — drop() can only ever remove what THIS run made
-  const lock = takeInitLock(dir)
+  const lock = takeInitLock(dir);
   try {
     // only what THIS run made may be removed on failure — the dir itself,
     // or the .beads init added to an existing one. A store that pre-dates
     // this run is the user's data: a validation exit must not delete it
-    const freshStore = !existsSync(join(dir, '.beads'))
+    const freshStore = !existsSync(join(dir, '.beads'));
     const drop = (): void => {
       try {
         if (created) {
-          rmSync(dir, { recursive: true, force: true })
+          rmSync(dir, { recursive: true, force: true });
         } else if (freshStore) {
-          rmSync(join(dir, '.beads'), { recursive: true, force: true })
+          rmSync(join(dir, '.beads'), { recursive: true, force: true });
         }
       } catch (err) {
         // rollback is best-effort but never silent — a stranded partial
         // store the operator can't see is the worst of both states
         console.error(
           `warning: could not remove partial store under ${dir} — ${err instanceof Error ? err.message : String(err)}`
-        )
+        );
       }
-    }
-    const store = taskStore(dir) // a .beads dir is always beads — the connector's init capability
+    };
+    const store = taskStore(dir); // a .beads dir is always beads — the connector's init capability
     try {
-      const out = store.init?.({ prefix })
+      const out = store.init?.({ prefix });
       if (out) {
-        process.stdout.write(out.endsWith('\n') ? out : `${out}\n`)
+        process.stdout.write(out.endsWith('\n') ? out : `${out}\n`);
       }
     } catch (err) {
-      initFailed(err, dir, drop)
+      initFailed(err, dir, drop);
     }
     // validate: a store that can't answer is broken, not created — and a
     // store that accepts --prefix but doesn't apply it must not report a
     // prefix it never set, so verify what it actually recorded
-    let reported: string | undefined
+    let reported: string | undefined;
     try {
-      reported = store.prefix()
+      reported = store.prefix();
     } catch (err) {
-      drop()
+      drop();
       throw new CommandError(
         `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`,
         EXIT.error
-      )
+      );
     }
     if (prefix && reported !== prefix) {
-      drop()
+      drop();
       throw new CommandError(
         `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`,
         EXIT.error
-      )
+      );
     }
-    const suffix = prefix ? ` (prefix ${prefix})` : ''
-    console.log(`${name} store ready: ${dir}${suffix}`)
+    const suffix = prefix ? ` (prefix ${prefix})` : '';
+    console.log(`${name} store ready: ${dir}${suffix}`);
   } finally {
-    lock.release()
+    lock.release();
   }
 }
 
 function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {
-  const named = (ref: string | undefined): Scope | undefined => storeName(ref, ctx.scope)
+  const named = (ref: string | undefined): Scope | undefined => storeName(ref, ctx.scope);
   return {
-    list: () => (['project', 'global'] as const).map((n) => storeInfo(n, storePath(n, ctx.root))),
-    get: (ref) => {
-      const name = named(ref)
-      return name ? storeInfo(name, storePath(name, ctx.root)) : null
+    list: () => (['project', 'global'] as const).map(n => storeInfo(n, storePath(n, ctx.root))),
+    get: ref => {
+      const name = named(ref);
+      return name ? storeInfo(name, storePath(name, ctx.root)) : null;
     },
     init: (ref: string | undefined, flags: DocFlags) => {
-      const name = named(ref)
+      const name = named(ref);
       if (!name) {
-        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage)
+        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage);
       }
-      initStore(name, flags, ctx.root)
+      initStore(name, flags, ctx.root);
     },
     path: (ref: string | undefined) => {
-      const name = named(ref)
+      const name = named(ref);
       if (!name) {
-        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage)
+        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage);
       }
-      console.log(storePath(name, ctx.root))
+      console.log(storePath(name, ctx.root));
     },
-  }
+  };
 }
 
 export const storeDoc: DocType<StoreInfo> = {
@@ -254,8 +286,8 @@ export const storeDoc: DocType<StoreInfo> = {
   aliases: ['stores'],
   scopes: ['project', 'global'],
   render(s) {
-    const state = s.initialized ? (s.prefix ?? '?') : 'uninitialized'
-    return `${s.name.padEnd(8)} ${state.padEnd(13)} ${s.path}`
+    const state = s.initialized ? (s.prefix ?? '?') : 'uninitialized';
+    return `${s.name.padEnd(8)} ${state.padEnd(13)} ${s.path}`;
   },
   adapter: storeAdapter,
-}
+};

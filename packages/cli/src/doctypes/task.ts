@@ -15,143 +15,151 @@
  * `--global` retargets every verb at the user-level store — scope is a
  * flag resolved at adapter construction, never a verb concern.
  */
-import { spawnSync } from 'node:child_process'
-import { CommandError, EXIT, facade, passthroughExitCode } from '@broject/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType, ExitCode, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
-import { requireGlobalStore } from './store.ts'
-import { loadBroConfig } from '../plugins.ts'
+import { spawnSync } from 'node:child_process';
+import { CommandError, EXIT, facade, passthroughExitCode } from '@broject/core';
+import type {
+  DocAdapter,
+  DocCtx,
+  DocFlags,
+  DocType,
+  TaskFilter,
+  TaskInput,
+  TaskRow,
+  TaskStore,
+} from '@broject/core';
+import { requireGlobalStore } from './store.ts';
+import { loadBroConfig } from '../plugins.ts';
 
-export type { TaskRow }
+export type { TaskRow };
 
 /** The store this invocation targets — lazily, per verb call, so a
  *  missing global store fails only the verb that needed it. Resolved
  *  through the connector registry: `connectors.tasks` in bro.config
  *  can point the whole surface at another work-item system. */
 function storeFor(ctx: DocCtx): () => TaskStore {
-  const dir = () => (ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root)
+  const dir = () => (ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root);
   // the global store is beads by construction — a connectors.tasks pin
   // targets the project store, never the user-level queue
   return () =>
     facade(
       'tasks',
       { dir: dir() },
-      ctx.scope === 'global' ? { connector: 'beads' } : { prefer: loadBroConfig(ctx.root).connectors }
-    )
+      ctx.scope === 'global'
+        ? { connector: 'beads' }
+        : { prefer: loadBroConfig(ctx.root).connectors }
+    );
 }
 
 /** CLI flags → TaskFilter — known keys map, the rest are ignored
  *  (the store contract is typed; arbitrary backend flags go through
  *  `exec`). */
 function toFilter(flags: DocFlags): TaskFilter {
-  const f: TaskFilter = {}
-  if (flags['status']) f.status = flags['status']
-  if (flags['type']) f.type = flags['type']
-  if (flags['all'] === 'true') f.all = true
-  const limit = flags['limit'] ?? flags['n']
-  if (limit) f.limit = Number(limit)
-  const label = flags['label'] ?? flags['l']
-  if (label) f.labels = label.split(',')
-  const exclude = flags['exclude-label']
-  if (exclude) f.excludeLabels = exclude.split(',')
-  return f
+  const f: TaskFilter = {};
+  if (flags['status']) f.status = flags['status'];
+  if (flags['type']) f.type = flags['type'];
+  if (flags['all'] === 'true') f.all = true;
+  const limit = flags['limit'] ?? flags['n'];
+  if (limit) f.limit = Number(limit);
+  const label = flags['label'] ?? flags['l'];
+  if (label) f.labels = label.split(',');
+  const exclude = flags['exclude-label'];
+  if (exclude) f.excludeLabels = exclude.split(',');
+  return f;
 }
 
 /** CLI flags → TaskInput — everything the dispatcher didn't consume
  *  as the title. */
 function toInput(input: Record<string, unknown>, flags: DocFlags): TaskInput {
-  const i: TaskInput = { title: '' }
-  if (typeof input['title'] === 'string') i.title = input['title']
-  if (flags['type']) i.type = flags['type']
-  if (flags['priority']) i.priority = Number(flags['priority'])
-  if (flags['description']) i.description = flags['description']
-  if (flags['label']) i.labels = flags['label'].split(',')
-  if (flags['deps']) i.deps = flags['deps'].split(',')
-  if (flags['parent']) i.parent = flags['parent']
-  if (flags['external-ref']) i.externalRef = flags['external-ref']
-  if (flags['ephemeral'] === 'true') i.ephemeral = true
-  if (flags['no-inherit-labels'] === 'true') i.noInheritLabels = true
+  const i: TaskInput = { title: '' };
+  if (typeof input['title'] === 'string') i.title = input['title'];
+  if (flags['type']) i.type = flags['type'];
+  if (flags['priority']) i.priority = Number(flags['priority']);
+  if (flags['description']) i.description = flags['description'];
+  if (flags['label']) i.labels = flags['label'].split(',');
+  if (flags['deps']) i.deps = flags['deps'].split(',');
+  if (flags['parent']) i.parent = flags['parent'];
+  if (flags['external-ref']) i.externalRef = flags['external-ref'];
+  if (flags['ephemeral'] === 'true') i.ephemeral = true;
+  if (flags['no-inherit-labels'] === 'true') i.noInheritLabels = true;
   if (flags['metadata']) {
     try {
-      i.metadata = JSON.parse(flags['metadata']) as Record<string, unknown>
+      i.metadata = JSON.parse(flags['metadata']) as Record<string, unknown>;
     } catch {
-      i.metadata = { value: flags['metadata'] }
+      i.metadata = { value: flags['metadata'] };
     }
   }
-  return i
+  return i;
 }
 
 function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
-  const store = storeFor(ctx)
+  const store = storeFor(ctx);
   const die = (msg: string): never => {
-    throw new CommandError(`error: ${msg}`, EXIT.usage)
-  }
+    throw new CommandError(`error: ${msg}`, EXIT.usage);
+  };
   return {
-    list: (flags) => store().list(toFilter(flags)),
-    get: (ref) => (ref ? store().get(ref) : undefined),
+    list: flags => store().list(toFilter(flags)),
+    get: ref => (ref ? store().get(ref) : undefined),
     create: (input, flags) => {
-      const i = toInput(input, flags)
+      const i = toInput(input, flags);
       if (i.title === '') {
-        die('bro task new needs a title — `bro task new "title"`')
+        die('bro task new needs a title — `bro task new "title"`');
       }
-      return store().create(i)
+      return store().create(i);
     },
     update: (ref, patch) => {
       if (!ref) {
-        die('bro task set needs a ref — `bro task set <id> --status=open`')
+        die('bro task set needs a ref — `bro task set <id> --status=open`');
       }
-      const s = store()
-      s.update(ref, patch)
+      const s = store();
+      s.update(ref, patch);
       // the mutation already landed — a failed readback must not turn
       // a successful update into a reported failure
       try {
-        return s.get(ref)
+        return s.get(ref);
       } catch {
-        return { id: ref }
+        return { id: ref };
       }
     },
-    remove: (ref) => {
+    remove: ref => {
       if (!ref) {
-        die('bro task rm needs a ref — `bro task rm <id>`')
+        die('bro task rm needs a ref — `bro task rm <id>`');
       }
-      store().remove(ref)
+      store().remove(ref);
     },
     close: (ref: string | undefined, flags: DocFlags) => {
-      const id = ref ?? die('bro task close needs a ref — `bro task close <id> [--reason=…]`')
-      store().close(id, flags['reason'])
+      const id = ref ?? die('bro task close needs a ref — `bro task close <id> [--reason=…]`');
+      store().close(id, flags['reason']);
     },
     // raw passthrough — `bro task exec [--global] -- <bd args>`;
     // anything after `--` reaches bd untouched. The escape hatch for
     // bd features the store contract does not model yet.
     exec: (_ref: string | undefined, _flags: DocFlags, positional: string[]) => {
-      const dir = ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root
-      const res = spawnSync('bd', positional, { cwd: dir, stdio: 'inherit' }) // NOSONAR — PATH contract
+      const dir = ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root;
+      const res = spawnSync('bd', positional, { cwd: dir, stdio: 'inherit' }); // NOSONAR — PATH contract
       // a missing bd spawns nothing — stdio: 'inherit' means silence, so
       // the real diagnostic (ENOENT + install hint) must come from here
       if (res.error) {
-        const enoent = (res.error as NodeJS.ErrnoException).code === 'ENOENT'
+        const enoent = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
         throw new CommandError(
           enoent
             ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
             : `error: bd failed — ${res.error.message}`,
           res.status === null ? EXIT.error : passthroughExitCode(res.status)
-        )
+        );
       }
       if (res.status === null) {
         // spawn failure threw above; a null status here means bd died
         // on a signal — never render that as a bare exit-1
-        throw new CommandError(
-          `error: bd terminated by ${res.signal ?? 'signal'}`,
-          EXIT.error
-        )
+        throw new CommandError(`error: bd terminated by ${res.signal ?? 'signal'}`, EXIT.error);
       }
       if (res.status !== 0) {
         // raw passthrough: bd's own exit code IS the contract — callers
         // key off its taxonomy (0 free · 1 unreadable · 2 unresolved ·
         // 3 actionable · 4 timeout, plus any bd adds); never clamp
-        throw new CommandError('', passthroughExitCode(res.status))
+        throw new CommandError('', passthroughExitCode(res.status));
       }
     },
-  }
+  };
 }
 
 export const taskDoc: DocType<TaskRow> = {
@@ -159,9 +167,9 @@ export const taskDoc: DocType<TaskRow> = {
   aliases: ['tasks', 'bead', 'beads', 'issue'],
   scopes: ['project', 'global'],
   render(t) {
-    const kind = t.issue_type ? ` ${t.issue_type}` : ''
-    const title = (t.title ?? '').replace(/\s+/g, ' ').slice(0, 80)
-    return `${t.id}  [${t.status ?? '?'}${kind}]  ${title}`
+    const kind = t.issue_type ? ` ${t.issue_type}` : '';
+    const title = (t.title ?? '').replace(/\s+/g, ' ').slice(0, 80);
+    return `${t.id}  [${t.status ?? '?'}${kind}]  ${title}`;
   },
   adapter: taskAdapter,
-}
+};
