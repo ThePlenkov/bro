@@ -14,6 +14,14 @@
  *  `{{var}}` wildcards. */
 type TitleSegment = { kind: 'literal'; text: string } | { kind: 'wildcard' };
 
+/** What the matcher walks — the pattern's segments and the title they
+ *  are matched against. One context, so the title is not threaded down
+ *  every step of the walk. */
+interface TitleMatch {
+  segments: TitleSegment[];
+  title: string;
+}
+
 /** Is this segment a literal? */
 function isLiteral(seg: TitleSegment): seg is { kind: 'literal'; text: string } {
   return seg.kind === 'literal';
@@ -64,11 +72,11 @@ function edgeText(seg: TitleSegment | undefined): string {
 
 /** The pattern's inner literals — the ones that must appear, in order,
  *  between the edges. */
-function innerLiterals(segments: TitleSegment[]): string[] {
-  const head = segments[0];
-  const tail = segments[segments.length - 1];
+function innerLiterals(m: TitleMatch): string[] {
+  const head = m.segments[0];
+  const tail = m.segments[m.segments.length - 1];
   const parts: string[] = [];
-  for (const seg of segments) {
+  for (const seg of m.segments) {
     if (!isLiteral(seg)) continue;
     if (seg === head || seg === tail) continue;
     if (seg.text === '') continue;
@@ -79,10 +87,10 @@ function innerLiterals(segments: TitleSegment[]): string[] {
 
 /** Do the pattern's inner literals appear, in order, between the
  *  edges? */
-function orderedInside(segments: TitleSegment[], title: string, from: number, to: number): boolean {
+function orderedInside(m: TitleMatch, from: number, to: number): boolean {
   let at = from;
-  for (const text of innerLiterals(segments)) {
-    const found = title.indexOf(text, at);
+  for (const text of innerLiterals(m)) {
+    const found = m.title.indexOf(text, at);
     if (found < 0) return false;
     if (found + text.length > to) return false;
     at = found + text.length;
@@ -94,21 +102,21 @@ function orderedInside(segments: TitleSegment[], title: string, from: number, to
  *  edges, and the inner literals must appear, in order, between them.
  *  The edges must not overlap: a title shorter than the two edges
  *  cannot carry both. */
-function anchoredMatch(segments: TitleSegment[], title: string): boolean {
-  const head = edgeText(segments[0]);
-  const tail = edgeText(segments[segments.length - 1]);
-  if (!title.startsWith(head) || !title.endsWith(tail)) return false;
-  if (head.length + tail.length > title.length) return false;
-  return orderedInside(segments, title, head.length, title.length - tail.length);
+function anchoredMatch(m: TitleMatch): boolean {
+  const head = edgeText(m.segments[0]);
+  const tail = edgeText(m.segments[m.segments.length - 1]);
+  if (!m.title.startsWith(head) || !m.title.endsWith(tail)) return false;
+  if (head.length + tail.length > m.title.length) return false;
+  return orderedInside(m, head.length, m.title.length - tail.length);
 }
 
 /** Does the title match the pattern's segments? */
-function segmentsMatch(segments: TitleSegment[], title: string): boolean {
-  if (!segments.some((seg) => !isLiteral(seg))) {
+function segmentsMatch(m: TitleMatch): boolean {
+  if (!m.segments.some((seg) => !isLiteral(seg))) {
     // no free part: the title is the pattern, exactly
-    return title === literalText(segments);
+    return m.title === literalText(m.segments);
   }
-  return anchoredMatch(segments, title);
+  return anchoredMatch(m);
 }
 
 /** A formula step's title against a poured step's title.
@@ -117,5 +125,5 @@ function segmentsMatch(segments: TitleSegment[], title: string): boolean {
  *  `{{var}}`s interpolated — so the formula's pattern is matched with
  *  each variable as a wildcard. */
 export function titleMatches(pattern: string, title: string): boolean {
-  return segmentsMatch(titleSegments(pattern), title.trim());
+  return segmentsMatch({ segments: titleSegments(pattern), title: title.trim() });
 }

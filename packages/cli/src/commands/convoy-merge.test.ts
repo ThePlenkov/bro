@@ -37,7 +37,7 @@ const MERGE_TITLE = 'Merge — bro act wait --merge';
 const PR = 958;
 
 /** The molecule: a closed verify step and a ready merge step. */
-function moleculeJson(mergeType: string): string {
+function moleculeJson(opts: { mergeType: string }): string {
   return JSON.stringify({
     root: { id: 'm-1', title: 'ship-bead', status: 'open', issue_type: 'molecule' },
     issues: [
@@ -48,7 +48,7 @@ function moleculeJson(mergeType: string): string {
         status: 'closed',
         issue_type: 'agent',
       },
-      { id: 's-1', title: MERGE_TITLE, status: 'open', issue_type: mergeType },
+      { id: 's-1', title: MERGE_TITLE, status: 'open', issue_type: opts.mergeType },
     ],
     dependencies: [{ issue_id: 's-1', depends_on_id: 's-0', type: 'blocks' }],
   });
@@ -56,24 +56,24 @@ function moleculeJson(mergeType: string): string {
 
 /** The formula the molecule was poured from — the declaration lives
  *  here when bd flattened the poured type. */
-function formulaJson(stepType: string): string {
+function formulaJson(opts: { stepType: string }): string {
   return JSON.stringify({
     formula: 'ship-bead',
     steps: [
       { id: 'work', title: 'Implement {{bead}} per its spec', type: 'agent' },
       { id: 'pr-gate', title: 'Verify — bro act status until exit 0', type: 'agent' },
-      { id: 'merge', title: MERGE_TITLE, type: stepType },
+      { id: 'merge', title: MERGE_TITLE, type: opts.stepType },
     ],
   });
 }
 
-function tasksJson(reason: string): string {
+function tasksJson(opts: { reason: string }): string {
   return JSON.stringify([
     {
       id: 's-0',
       title: 'Verify — bro act status until exit 0',
       status: 'closed',
-      close_reason: reason,
+      close_reason: opts.reason,
     },
   ]);
 }
@@ -87,9 +87,10 @@ interface Fixture {
   ) => Promise<void>;
 }
 
-/** The files the fake bd serves — the molecule, the formula, the task
- *  rows and the close log. */
+/** The files the fake bd serves — the directory it lives in, the
+ *  molecule, the formula, the task rows and the close log. */
 interface BdFiles {
+  dir: string;
   mol: string;
   formula: string;
   tasks: string;
@@ -98,10 +99,10 @@ interface BdFiles {
 
 /** Point the environment at the fake bd and its files — the restore
  *  comes back with it. */
-function fakeBdEnv(dir: string, files: BdFiles): () => void {
+function fakeBdEnv(files: BdFiles): () => void {
   const keys = ['PATH', 'FAKE_BD_MOL', 'FAKE_BD_FORMULA', 'FAKE_BD_TASKS', 'FAKE_BD_LOG'];
   const prev = new Map(keys.map((k) => [k, process.env[k]]));
-  process.env.PATH = `${dir}:${prev.get('PATH') ?? ''}`;
+  process.env.PATH = `${files.dir}:${prev.get('PATH') ?? ''}`;
   process.env.FAKE_BD_MOL = files.mol;
   process.env.FAKE_BD_FORMULA = files.formula;
   process.env.FAKE_BD_TASKS = files.tasks;
@@ -124,18 +125,21 @@ function fixture(opts: {
   writeFileSync(join(dir, 'bd'), FAKE_BD);
   chmodSync(join(dir, 'bd'), 0o755);
   const files: BdFiles = {
+    dir,
     mol: join(dir, 'mol.json'),
     formula: join(dir, 'formula.json'),
     tasks: join(dir, 'tasks.json'),
     log: join(dir, 'closes.log'),
   };
-  writeFileSync(files.mol, moleculeJson(opts.mergeType));
-  writeFileSync(files.formula, formulaJson(opts.formulaType));
+  writeFileSync(files.mol, moleculeJson({ mergeType: opts.mergeType }));
+  writeFileSync(files.formula, formulaJson({ stepType: opts.formulaType }));
   writeFileSync(
     files.tasks,
-    tasksJson(opts.upstreamReason ?? `Gate green on [#${PR}](https://github.com/o/r/pull/${PR})`)
+    tasksJson({
+      reason: opts.upstreamReason ?? `Gate green on [#${PR}](https://github.com/o/r/pull/${PR})`,
+    })
   );
-  const restore = fakeBdEnv(dir, files);
+  const restore = fakeBdEnv(files);
   return {
     closes: () => (existsSync(files.log) ? readFileSync(files.log, 'utf8') : ''),
     cleanup: () => {
@@ -181,8 +185,9 @@ const MERGED: MergeProbe = {
 
 /** What the command must have done — the exit code, the closes it
  *  asked for, and the PRs the host was asked about. */
-function assertOutcome(s: Scenario, closes: string, asked: number[]): void {
+function assertOutcome(s: Scenario, f: Fixture, asked: number[]): void {
   assert.equal(process.exitCode, s.exit);
+  const closes = f.closes();
   if (s.closed === undefined) {
     assert.equal(closes, '');
     return;
@@ -207,7 +212,7 @@ async function runScenario(s: Scenario): Promise<void> {
       if (answer === undefined) throw new Error('the host must not be asked');
       return answer(t);
     });
-    assertOutcome(s, f.closes(), asked);
+    assertOutcome(s, f, asked);
   } finally {
     process.exitCode = prev;
     f.cleanup();
