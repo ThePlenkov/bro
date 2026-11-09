@@ -276,10 +276,16 @@ function broEnabled(startDir: string): boolean {
 const asInt = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isInteger(v) ? v : undefined
 
+/** JSON array elements may be null or primitives — read fields only off
+ *  real objects or the cast crashes the whole board parse. */
+const asObj = (v: unknown): Record<string, unknown> | null =>
+  typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null
+
 function parseRows(v: unknown): Array<{ id: string; title: string; assignee?: string }> {
   if (!Array.isArray(v)) return []
   return v.flatMap((r) => {
-    const row = r as { id?: unknown; title?: unknown; assignee?: unknown }
+    const row = asObj(r)
+    if (row === null) return []
     if (typeof row.id === 'string' && typeof row.title === 'string') {
       const out: { id: string; title: string; assignee?: string } = { id: row.id, title: row.title }
       if (typeof row.assignee === 'string') out.assignee = row.assignee
@@ -292,7 +298,8 @@ function parseRows(v: unknown): Array<{ id: string; title: string; assignee?: st
 function parseAgents(v: unknown): Board['fleet']['agents'] {
   if (!Array.isArray(v)) return []
   return v.flatMap((a) => {
-    const row = a as Record<string, unknown>
+    const row = asObj(a)
+    if (row === null) return []
     if (typeof row.id === 'string' && typeof row.state === 'string') {
       return [
         {
@@ -313,7 +320,8 @@ function parseAgents(v: unknown): Board['fleet']['agents'] {
 function parseRuns(v: unknown): Board['loop']['runs'] {
   if (!Array.isArray(v)) return []
   return v.flatMap((r) => {
-    const row = r as Record<string, unknown>
+    const row = asObj(r)
+    if (row === null) return []
     if (typeof row.slug === 'string' && typeof row.state === 'string') {
       return [
         {
@@ -330,7 +338,8 @@ function parseRuns(v: unknown): Board['loop']['runs'] {
 function parseWorktrees(v: unknown): Board['worktrees'] {
   if (!Array.isArray(v)) return undefined
   return v.flatMap((w) => {
-    const row = w as Record<string, unknown>
+    const row = asObj(w)
+    if (row === null) return []
     if (typeof row.name === 'string') {
       return [
         {
@@ -705,7 +714,9 @@ export default Plugin.define({
         })
       }),
       context.data.on('session.execution.failed', (event) => {
-        const d = event.data as { error?: unknown }
+        // same guard as permission.asked — the event may carry no data
+        const d = (event?.data ?? null) as { error?: unknown } | null
+        if (d === null || typeof d !== 'object') return
         const error = d.error
         const errorObj = typeof error === 'object' && error !== null ? (error as { message?: unknown }) : null
         let message = 'session error'
