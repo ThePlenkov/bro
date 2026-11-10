@@ -68,7 +68,9 @@ interface Collected {
 
 /** The explicit PR — `--pr N`. An unusable number is refused, not
  *  guessed. */
-function explicitTarget(pr: number | undefined): { target?: MergeTarget; message?: string } | undefined {
+function explicitTarget(
+  pr: number | undefined
+): { target?: MergeTarget; message?: string } | undefined {
   if (pr === undefined) return undefined;
   if (!Number.isInteger(pr) || pr <= 0) {
     return { message: `invalid PR number "${pr}"` };
@@ -97,7 +99,10 @@ function evidenceOf(reason: string): string {
 function claimSources(claim: MergeClaim): RefSource[] {
   return [
     { name: 'result', refs: prRefs(claim.result) },
-    { name: 'handoff', refs: (claim.inputs ?? []).flatMap((input) => prRefs(evidenceOf(input.reason))) },
+    {
+      name: 'handoff',
+      refs: (claim.inputs ?? []).flatMap(input => prRefs(evidenceOf(input.reason))),
+    },
   ];
 }
 
@@ -141,7 +146,7 @@ function collectTargets(refs: PrRef[]): Collected {
 
 /** The PR numbers, as they read in a message. */
 function numbered(prs: number[]): string {
-  return prs.map((n) => `#${n}`).join(', ');
+  return prs.map(n => `#${n}`).join(', ');
 }
 
 /** The one PR a set of references names — and the ambiguity verdict
@@ -242,7 +247,10 @@ async function verdictFor(
 ): Promise<MergeVerdict> {
   const answered = await askHost(target, probe);
   if ('error' in answered) {
-    return { ok: false, message: `the host could not answer for PR #${target.pr}: ${answered.error}` };
+    return {
+      ok: false,
+      message: `the host could not answer for PR #${target.pr}: ${answered.error}`,
+    };
   }
   if (answered.state.state !== 'MERGED') {
     return {

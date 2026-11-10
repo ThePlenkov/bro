@@ -36,12 +36,12 @@ describe('titleMatches', () => {
     assert.equal(titleMatches('a {{b}c}}', 'a {{b}c}}'), true);
   });
 
-  test('a leading wildcard leaves the title\'s start free', () => {
+  test("a leading wildcard leaves the title's start free", () => {
     assert.equal(titleMatches('{{what}} per its spec', 'anything per its spec'), true);
     assert.equal(titleMatches('{{what}} per its spec', 'anything else'), false);
   });
 
-  test('a trailing wildcard leaves the title\'s end free', () => {
+  test("a trailing wildcard leaves the title's end free", () => {
     assert.equal(titleMatches('Merge {{what}}', 'Merge PR #958'), true);
     assert.equal(titleMatches('Merge {{what}}', 'Closed PR #958'), false);
   });

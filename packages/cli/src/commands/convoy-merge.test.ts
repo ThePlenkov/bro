@@ -86,10 +86,7 @@ function tasksJson(opts: { reason: string }): string {
 interface Fixture {
   closes: () => string;
   cleanup: () => void;
-  run: (
-    args: string[],
-    probe?: (target: MergeTarget) => Promise<MergeProbe>
-  ) => Promise<void>;
+  run: (args: string[], probe?: (target: MergeTarget) => Promise<MergeProbe>) => Promise<void>;
 }
 
 /** The files the fake bd serves — the directory it lives in, the
@@ -106,7 +103,7 @@ interface BdFiles {
  *  comes back with it. */
 function fakeBdEnv(files: BdFiles): () => void {
   const keys = ['PATH', 'FAKE_BD_MOL', 'FAKE_BD_FORMULA', 'FAKE_BD_TASKS', 'FAKE_BD_LOG'];
-  const prev = new Map(keys.map((k) => [k, process.env[k]]));
+  const prev = new Map(keys.map(k => [k, process.env[k]]));
   process.env.PATH = `${files.dir}:${prev.get('PATH') ?? ''}`;
   process.env.FAKE_BD_MOL = files.mol;
   process.env.FAKE_BD_FORMULA = files.formula;

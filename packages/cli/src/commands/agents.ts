@@ -138,7 +138,7 @@ function usage(exitCode: ExitCode = 2): never {
 // never-returning function declarations as terminating the control flow,
 // so the die() call sites below narrow correctly
 function die(msg: string): never {
-  throw new CommandError(`error: ${msg}`, EXIT.error)
+  throw new CommandError(`error: ${msg}`, EXIT.error);
 }
 
 /** One backend's plane — the connector plus what its list() saw. */
@@ -1022,7 +1022,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
     });
   } catch (err) {
-    if (isCommandError(err)) throw err
+    if (isCommandError(err)) throw err;
     die(err instanceof Error ? err.message : String(err));
   }
   reportSpawn(info, molStep);
@@ -1363,7 +1363,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
     });
   } catch (err) {
-    if (isCommandError(err)) throw err
+    if (isCommandError(err)) throw err;
     die(err instanceof Error ? err.message : String(err));
   }
   reportSpawn(info, molStep);
@@ -1381,8 +1381,8 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     return;
   }
   const outcome = await stopAgent(dir, env, target, connectorName).catch((err: unknown) => {
-    if (isCommandError(err)) throw err
-    die(err instanceof Error ? err.message : String(err))
+    if (isCommandError(err)) throw err;
+    die(err instanceof Error ? err.message : String(err));
   });
   if (!outcome.found) {
     // a degraded read can't confirm "gone" — report unverified, don't

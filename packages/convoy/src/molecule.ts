@@ -1,17 +1,25 @@
-import { dirname } from 'node:path'
-import { bd, bdJson, getTasks, taskStore } from '@broject/core'
-import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
-import { MERGE_STEP_TYPE } from './verify.ts'
+import { dirname } from 'node:path';
+import { bd, bdJson, getTasks, taskStore } from '@broject/core';
+import type {
+  ConvoyNext,
+  ConvoyStep,
+  Molecule,
+  MolIssue,
+  StepInput,
+  StepKind,
+  StepState,
+} from './types.ts';
+import { MERGE_STEP_TYPE } from './verify.ts';
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
 export function loadMolecule(id: string): Molecule {
-  return bdJson<Molecule>(['mol', 'show', id])
+  return bdJson<Molecule>(['mol', 'show', id]);
 }
 
 /** Open molecule roots — convoy candidates in this workspace. */
 export function listMolecules(): MolIssue[] {
-  const issues = bdJson<MolIssue[]>(['list', '--type', 'molecule'])
-  return issues.filter((i) => i.status !== 'closed' && i.status !== 'done')
+  const issues = bdJson<MolIssue[]>(['list', '--type', 'molecule']);
+  return issues.filter(i => i.status !== 'closed' && i.status !== 'done');
 }
 
 /**
@@ -20,12 +28,13 @@ export function listMolecules(): MolIssue[] {
  * caller picks an id, never a silent wrong convoy.
  */
 export function resolveMolecule(id?: string): Molecule {
-  if (id) return loadMolecule(id)
-  const open = listMolecules()
-  if (open.length === 0) throw new Error('no open molecule — pour one first: bd mol pour <formula>')
+  if (id) return loadMolecule(id);
+  const open = listMolecules();
+  if (open.length === 0)
+    throw new Error('no open molecule — pour one first: bd mol pour <formula>');
   if (open.length > 1)
-    throw new Error(`multiple open molecules — pass an id: ${open.map((m) => m.id).join(', ')}`)
-  return loadMolecule(open[0]!.id)
+    throw new Error(`multiple open molecules — pass an id: ${open.map(m => m.id).join(', ')}`);
+  return loadMolecule(open[0]!.id);
 }
 
 /**
@@ -39,13 +48,13 @@ export function resolveMolecule(id?: string): Molecule {
  * registers agent/human in types.custom up front.
  */
 export function stepKind(issue: MolIssue): StepKind {
-  const t = issue.issue_type
-  if (t === 'human' || t === 'gate') return 'human'
-  return 'agent'
+  const t = issue.issue_type;
+  if (t === 'human' || t === 'gate') return 'human';
+  return 'agent';
 }
 
-const CLOSED = new Set(['closed', 'done'])
-const CLAIMED = new Set(['in_progress'])
+const CLOSED = new Set(['closed', 'done']);
+const CLAIMED = new Set(['in_progress']);
 
 /**
  * Flatten a molecule into ordered steps with scheduling state. Children
@@ -54,24 +63,24 @@ const CLAIMED = new Set(['in_progress'])
  * not scheduling constraints.
  */
 export function stepsOf(mol: Molecule): ConvoyStep[] {
-  const closed = new Set(mol.issues.filter((i) => CLOSED.has(i.status)).map((i) => i.id))
-  const rootId = mol.root.id
+  const closed = new Set(mol.issues.filter(i => CLOSED.has(i.status)).map(i => i.id));
+  const rootId = mol.root.id;
   return mol.issues
-    .filter((i) => i.id !== rootId)
+    .filter(i => i.id !== rootId)
     .map((i): ConvoyStep => {
       // bd edge {issue_id: A, depends_on_id: B, type: 'blocks'} = "A
       // depends on B" — A waits for B. My blockers are the depends_on_id
       // side of edges where issue_id is me; the other side is dependents.
       const blockedBy = mol.dependencies
-        .filter((d) => d.type === 'blocks' && d.issue_id === i.id && !closed.has(d.depends_on_id))
-        .map((d) => d.depends_on_id)
+        .filter(d => d.type === 'blocks' && d.issue_id === i.id && !closed.has(d.depends_on_id))
+        .map(d => d.depends_on_id);
       const state: StepState = CLOSED.has(i.status)
         ? 'done'
         : CLAIMED.has(i.status)
           ? 'in_progress'
           : blockedBy.length > 0
             ? 'blocked'
-            : 'ready'
+            : 'ready';
       return {
         id: i.id,
         title: i.title,
@@ -80,8 +89,8 @@ export function stepsOf(mol: Molecule): ConvoyStep[] {
         kind: stepKind(i),
         state,
         blockedBy,
-      }
-    })
+      };
+    });
 }
 
 /** Blocked steps that can never unblock: a closed dependency loop, or a
@@ -92,36 +101,41 @@ export function stepsOf(mol: Molecule): ConvoyStep[] {
  *  blocker is stuck in a cycle, so `some` would hide it; the residue —
  *  steps with even one permanently blocked blocker — is the stuck set. */
 export function permanentlyBlocked(steps: ConvoyStep[]): string[] {
-  const blocked = new Map(
-    steps.filter((s) => s.state === 'blocked').map((s) => [s.id, s.blockedBy])
-  )
-  const escapable = new Set<string>()
-  let grew = true
+  const blocked = new Map(steps.filter(s => s.state === 'blocked').map(s => [s.id, s.blockedBy]));
+  const escapable = new Set<string>();
+  let grew = true;
   while (grew) {
-    grew = false
+    grew = false;
     for (const [id, by] of blocked) {
-      if (escapable.has(id)) continue
-      if (by.every((b) => !blocked.has(b) || escapable.has(b))) {
-        escapable.add(id)
-        grew = true
+      if (escapable.has(id)) continue;
+      if (by.every(b => !blocked.has(b) || escapable.has(b))) {
+        escapable.add(id);
+        grew = true;
       }
     }
   }
-  return [...blocked.keys()].filter((id) => !escapable.has(id))
+  return [...blocked.keys()].filter(id => !escapable.has(id));
 }
 
 /** What the agent should do next — computed from persisted state only. */
 export function nextStep(mol: Molecule): ConvoyNext {
-  const steps = stepsOf(mol)
-  const ready = steps.filter((s) => s.state === 'ready')
-  const blocked = steps.filter((s) => s.state === 'blocked').map((s) => s.id)
-  const gates = ready.filter((s) => s.kind === 'human').map((s) => s.id)
-  const inProgress = steps.filter((s) => s.state === 'in_progress').map((s) => s.id)
-  const base = { mol: mol.root.id, ready, gates, inProgress, blocked, stuck: permanentlyBlocked(steps) }
-  if (steps.every((s) => s.state === 'done')) return { ...base, state: 'complete' }
-  const step = ready[0]
-  if (!step) return { ...base, state: 'blocked' }
-  return { ...base, state: step.kind === 'human' ? 'gate' : 'step', step }
+  const steps = stepsOf(mol);
+  const ready = steps.filter(s => s.state === 'ready');
+  const blocked = steps.filter(s => s.state === 'blocked').map(s => s.id);
+  const gates = ready.filter(s => s.kind === 'human').map(s => s.id);
+  const inProgress = steps.filter(s => s.state === 'in_progress').map(s => s.id);
+  const base = {
+    mol: mol.root.id,
+    ready,
+    gates,
+    inProgress,
+    blocked,
+    stuck: permanentlyBlocked(steps),
+  };
+  if (steps.every(s => s.state === 'done')) return { ...base, state: 'complete' };
+  const step = ready[0];
+  if (!step) return { ...base, state: 'blocked' };
+  return { ...base, state: step.kind === 'human' ? 'gate' : 'step', step };
 }
 
 /**
@@ -131,21 +145,21 @@ export function nextStep(mol: Molecule): ConvoyNext {
  * the ~0.65s spawn floor even at in-degree 1–2.
  */
 export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
-  const closed = new Set(mol.issues.filter((i) => CLOSED.has(i.status)).map((i) => i.id))
+  const closed = new Set(mol.issues.filter(i => CLOSED.has(i.status)).map(i => i.id));
   const edges = mol.dependencies.filter(
-    (d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id)
-  )
+    d => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id)
+  );
   const byId = new Map(
     getTasks(
       taskStore(),
-      edges.map((d) => d.depends_on_id)
-    ).map((r) => [r.id, r])
-  )
-  return edges.map((d) => ({
+      edges.map(d => d.depends_on_id)
+    ).map(r => [r.id, r])
+  );
+  return edges.map(d => ({
     id: d.depends_on_id,
     title: byId.get(d.depends_on_id)?.title ?? '',
     reason: byId.get(d.depends_on_id)?.close_reason ?? '',
-  }))
+  }));
 }
 
 /**
@@ -154,14 +168,14 @@ export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
  * this — whoever claims first owns the step.
  */
 export function claimStep(stepId: string): void {
-  taskStore().claim(stepId)
+  taskStore().claim(stepId);
 }
 
 /** The resolved beads directory — `bd info` reports the database inside
  *  it; `<dir>/formulas/` is bd's first formula search path. */
 export function beadsDir(): string {
-  const info = bdJson<{ database_path: string }>(['info'])
-  return dirname(info.database_path)
+  const info = bdJson<{ database_path: string }>(['info']);
+  return dirname(info.database_path);
 }
 
 /** A formula's declared steps as MolIssue shells — enough for `stepKind`
@@ -171,18 +185,14 @@ export function beadsDir(): string {
  *  same classification `stepKind` applies post-pour. */
 export function formulaSteps(formula: string): MolIssue[] {
   const doc = bdJson<{
-    steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[]
-  }>([
-    'formula',
-    'show',
-    formula,
-  ])
-  return (doc.steps ?? []).map((s) => ({
+    steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[];
+  }>(['formula', 'show', formula]);
+  return (doc.steps ?? []).map(s => ({
     id: s.id ?? '',
     title: s.title ?? '',
     status: 'open',
     issue_type: s.gate ? 'gate' : (s.type?.trim() ?? 'task'),
-  }))
+  }));
 }
 
 /** Register the custom step types — `agent`, `human`, and the merge
@@ -190,16 +200,16 @@ export function formulaSteps(formula: string): MolIssue[] {
  *  flattened merge step loses the declaration its close verifies on. */
 function registerStepTypes(): void {
   try {
-    const current = bd(['config', 'get', 'types.custom']).trim()
+    const current = bd(['config', 'get', 'types.custom']).trim();
     // the existing value is read leniently — an operator's hand-written
     // "agent human" must survive the rewrite as two types, not as one
     // bogus name
-    const types = new Set(current ? current.split(/[\s,]+/) : [])
-    types.add('agent').add('human')
-    types.add(MERGE_STEP_TYPE)
+    const types = new Set(current ? current.split(/[\s,]+/) : []);
+    types.add('agent').add('human');
+    types.add(MERGE_STEP_TYPE);
     // bd parses types.custom as a comma-separated list — a space-joined
     // value reads back as one bogus type and the pour still flattens
-    bd(['config', 'set', 'types.custom', [...types].join(',')])
+    bd(['config', 'set', 'types.custom', [...types].join(',')]);
   } catch {
     // old bd without types.custom — the registration check below fails
   }
@@ -214,11 +224,11 @@ function registeredTypes(): string[] {
   try {
     return bd(['config', 'get', 'types.custom'])
       .split(',')
-      .map((t) => t.trim())
-      .filter((t) => t !== '')
+      .map(t => t.trim())
+      .filter(t => t !== '');
   } catch {
     // registration unverifiable is a failure too
-    return []
+    return [];
   }
 }
 
@@ -228,28 +238,28 @@ function registeredTypes(): string[] {
  * Returns the new molecule root id.
  */
 export function pourFormula(formula: string, vars: Record<string, string> = {}): string {
-  registerStepTypes()
-  const registered = registeredTypes()
+  registerStepTypes();
+  const registered = registeredTypes();
   if (!registered.includes('agent') || !registered.includes('human')) {
     throw new Error(
       'types.custom could not register agent/human — pouring would flatten declared gates to task. ' +
         'Upgrade bd, or register the types by hand — bd reads a comma-separated list, ' +
         'so keep the types you already have: ' +
-        'bd config set types.custom "agent,human"',
-    )
+        'bd config set types.custom "agent,human"'
+    );
   }
   if (!registered.includes(MERGE_STEP_TYPE)) {
     throw new Error(
       `types.custom could not register ${MERGE_STEP_TYPE} — pouring would flatten the merge step to task, ` +
         'and the step would close without a host verdict. ' +
         'Register it by hand — bd reads a comma-separated list, so keep the types you ' +
-        `already have: bd config set types.custom "agent,human,${MERGE_STEP_TYPE}"`,
-    )
+        `already have: bd config set types.custom "agent,human,${MERGE_STEP_TYPE}"`
+    );
   }
-  const args = ['mol', 'pour', formula]
-  for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}=${v}`)
-  const out = bd(args)
-  const m = /Root issue:\s*(\S+)/.exec(out)
-  if (!m) throw new Error(`bd mol pour did not report a root issue:\n${out}`)
-  return m[1]!
+  const args = ['mol', 'pour', formula];
+  for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}=${v}`);
+  const out = bd(args);
+  const m = /Root issue:\s*(\S+)/.exec(out);
+  if (!m) throw new Error(`bd mol pour did not report a root issue:\n${out}`);
+  return m[1]!;
 }

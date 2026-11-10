@@ -14,7 +14,7 @@
  * 1 and 2 (see {@link EXIT_CODES}) are documented exceptions, not a
  * license for new ones.
  */
-import { writeSync } from 'node:fs'
+import { writeSync } from 'node:fs';
 
 /** The taxonomy as constants — new code reads names, never digits. */
 export const EXIT = {
@@ -29,17 +29,17 @@ export const EXIT = {
   actionable: 3,
   /** a bounded wait hit its deadline — watcher-verdict code. */
   timeout: 4,
-} as const
+} as const;
 
-export type ExitCode = (typeof EXIT)[keyof typeof EXIT]
+export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 
 export interface ExitCodeRow {
-  code: number
-  name: keyof typeof EXIT
+  code: number;
+  name: keyof typeof EXIT;
   /** the generic meaning a caller may rely on sight-unseen. */
-  meaning: string
+  meaning: string;
   /** shipped verdict overloads — frozen meanings on specific commands. */
-  verdicts?: string
+  verdicts?: string;
 }
 
 /** The contract as a table — `bro contract dump` (bro-k9ces)
@@ -75,15 +75,15 @@ export const EXIT_CODES: readonly ExitCodeRow[] = [
     meaning: 'bounded wait hit its deadline',
     verdicts: 'convoy wait · wait — same meaning',
   },
-]
+];
 
 /** Is this argv asking for help? `--help`/`-h` count only before a
  *  `--` separator — everything after it is verbatim payload (notify
  *  text, pulse commands, goal conditions), never a flag. */
 export function hasHelpFlag(argv: readonly string[]): boolean {
-  const sep = argv.indexOf('--')
-  const head = sep === -1 ? argv : argv.slice(0, sep)
-  return head.includes('--help') || head.includes('-h')
+  const sep = argv.indexOf('--');
+  const head = sep === -1 ? argv : argv.slice(0, sep);
+  return head.includes('--help') || head.includes('-h');
 }
 
 /** The fd write behind printUsage — a mutable holder so in-process
@@ -91,9 +91,9 @@ export function hasHelpFlag(argv: readonly string[]): boolean {
  *  writeSync). Production never reassigns it. */
 export const usageWriter = {
   write(fd: 1 | 2, text: string): void {
-    writeSync(fd, text)
+    writeSync(fd, text);
   },
-}
+};
 
 /** Print usage/help text on the stream its exit code owns — 0 stdout,
  *  non-zero stderr — then exit. Every `usage()`/USAGE site routes
@@ -101,20 +101,20 @@ export const usageWriter = {
  *  by per-site convention. writeSync, not console.*: a buffered pipe
  *  write must be flushed before process.exit, never pending behind it.
  *  The code is typed ExitCode — only the documented taxonomy may exit. */
-import { CommandError } from './errors.ts'
+import { CommandError } from './errors.ts';
 
 /** A foreign process's exit code rides through verbatim — exec/passthrough
  *  contracts (task exec → bd, acp worker, plugin runPlan) can't clamp into
  *  bro's own taxonomy without losing the subprocess's codes. One audited
  *  cast site instead of `code as any` scattered per call. */
 export function passthroughExitCode(code: number): ExitCode {
-  return code as ExitCode
+  return code as ExitCode;
 }
 
 export function printUsage(text: string, code: ExitCode): never {
-  usageWriter.write(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`)
+  usageWriter.write(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`);
   if (code === EXIT.ok) {
-    throw new CommandError(text, code, text)
+    throw new CommandError(text, code, text);
   }
-  throw new CommandError(text, code, text)
+  throw new CommandError(text, code, text);
 }

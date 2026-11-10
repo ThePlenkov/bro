@@ -712,7 +712,7 @@ export const PLUGINS: BroPlugin[] = [
     // the beads config section and keeps the registry honest
     hidden: true,
     run: () => {
-      throw new CommandError('docs plugin must be dispatched via verb-first dispatch', EXIT.usage)
+      throw new CommandError('docs plugin must be dispatched via verb-first dispatch', EXIT.usage);
     },
     skill: 'docs',
     configKey: 'beads',
@@ -935,8 +935,8 @@ export const PLUGINS: BroPlugin[] = [
     runPlan: async plan => {
       const code = await applyQueryPlan(plan as QueryPlan);
       if (code !== 0) {
-        const core = await import('@broject/core')
-        throw new core.CommandError('', core.passthroughExitCode(code))
+        const core = await import('@broject/core');
+        throw new core.CommandError('', core.passthroughExitCode(code));
       }
     },
   }),
@@ -1041,7 +1041,10 @@ export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter(a => !a.startsWith('-'));
   const kinds = PLUGINS.filter(p => p.planSchema && p.runPlan).map(p => p.name);
   if (files.length !== 1) {
-    throw new CommandError(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`, EXIT.usage)
+    throw new CommandError(
+      `usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`,
+      EXIT.usage
+    );
   }
   const file = files[0] as string;
   const { plugin, plan } = resolvePlanDoc(file, PLUGINS);

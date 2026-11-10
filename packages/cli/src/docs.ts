@@ -31,17 +31,17 @@ import {
   type DocFlags,
   type DocType,
   type Scope,
-} from '@broject/core'
-import { PLUGINS } from './plugins.ts'
-import { storeDoc } from './doctypes/store.ts'
-import { taskDoc } from './doctypes/task.ts'
+} from '@broject/core';
+import { PLUGINS } from './plugins.ts';
+import { storeDoc } from './doctypes/store.ts';
+import { taskDoc } from './doctypes/task.ts';
 
-const BUILTIN_DOCS: DocType[] = [taskDoc, storeDoc]
-const EXTRA_DOCS: DocType[] = []
+const BUILTIN_DOCS: DocType[] = [taskDoc, storeDoc];
+const EXTRA_DOCS: DocType[] = [];
 
 /** Runtime registration — external plugin loaders and tests. */
 export function registerDocType(type: DocType): void {
-  EXTRA_DOCS.push(type)
+  EXTRA_DOCS.push(type);
 }
 
 /** Registration filter: a doc type whose noun duplicates another
@@ -52,35 +52,36 @@ export function registerDocType(type: DocType): void {
  *  becomes ambiguous) is dropped with a warning — one bad plugin doc
  *  must not corrupt the namespace. */
 export function filterDocTypes(types: DocType[]): DocType[] {
-  const nouns = new Set(PLUGINS.map((p) => p.name))
-  const prefixes: [string, string][] = []
-  const out: DocType[] = []
+  const nouns = new Set(PLUGINS.map(p => p.name));
+  const prefixes: [string, string][] = [];
+  const out: DocType[] = [];
   for (const t of types) {
-    const names = [t.name, ...(t.aliases ?? [])]
-    const clash = names.find((n) => nouns.has(n) || Object.hasOwn(STANDARD_VERBS, n))
+    const names = [t.name, ...(t.aliases ?? [])];
+    const clash = names.find(n => nouns.has(n) || Object.hasOwn(STANDARD_VERBS, n));
     if (clash) {
-      console.error(`warning: doc type "${t.name}" noun "${clash}" is reserved — skipped`)
-      continue
+      console.error(`warning: doc type "${t.name}" noun "${clash}" is reserved — skipped`);
+      continue;
     }
-    const px = t.idPrefix && prefixes.find(([p]) => p.startsWith(t.idPrefix!) || t.idPrefix!.startsWith(p))
+    const px =
+      t.idPrefix && prefixes.find(([p]) => p.startsWith(t.idPrefix!) || t.idPrefix!.startsWith(p));
     if (px) {
       console.error(
         `warning: doc type "${t.name}" idPrefix "${t.idPrefix}" overlaps "${px[1]}" — skipped`
-      )
-      continue
+      );
+      continue;
     }
     for (const n of names) {
-      nouns.add(n)
+      nouns.add(n);
     }
     if (t.idPrefix) {
-      prefixes.push([t.idPrefix, t.name])
+      prefixes.push([t.idPrefix, t.name]);
     }
-    out.push(t)
+    out.push(t);
   }
-  return out
+  return out;
 }
 
-let docTypesCache: { sig: string; filtered: DocType[] } | undefined
+let docTypesCache: { sig: string; filtered: DocType[] } | undefined;
 
 /** All registered doc types — builtins, plugin `docs` fields, and
  *  runtime registrations — minus namespace collisions. Memoized on the
@@ -91,81 +92,81 @@ let docTypesCache: { sig: string; filtered: DocType[] } | undefined
  *  load, or an in-place mutation of a registered type — rebuilds the
  *  list and re-filters once. */
 export function docTypes(): DocType[] {
-  const raw = [...BUILTIN_DOCS, ...PLUGINS.flatMap((p) => p.docs ?? []), ...EXTRA_DOCS]
+  const raw = [...BUILTIN_DOCS, ...PLUGINS.flatMap(p => p.docs ?? []), ...EXTRA_DOCS];
   // plugin names are reserved nouns too — a late external registration
   // must invalidate the filter even when it ships no doc types
   const sig =
-    PLUGINS.map((p) => p.name).join('\n') +
+    PLUGINS.map(p => p.name).join('\n') +
     '\n' +
-    raw.map((t) => `${t.name}${t.aliases?.join(',') ?? ''}${t.idPrefix ?? ''}`).join('\n')
+    raw.map(t => `${t.name}${t.aliases?.join(',') ?? ''}${t.idPrefix ?? ''}`).join('\n');
   if (docTypesCache?.sig !== sig) {
-    docTypesCache = { sig, filtered: filterDocTypes(raw) }
+    docTypesCache = { sig, filtered: filterDocTypes(raw) };
   }
-  return docTypesCache.filtered
+  return docTypesCache.filtered;
 }
 
 /** Parse argv for doc verbs: `--key=value`, boolean `--key`, scope
  *  flags, and `--` ending flag parsing (rest is raw positional). */
 export function docArgs(argv: string[]): {
-  positional: string[]
-  flags: DocFlags
-  scope: Scope
+  positional: string[];
+  flags: DocFlags;
+  scope: Scope;
 } {
-  const positional: string[] = []
-  const flags: DocFlags = {}
-  let scope: Scope = 'project'
-  let raw = false
+  const positional: string[] = [];
+  const flags: DocFlags = {};
+  let scope: Scope = 'project';
+  let raw = false;
   for (const a of argv) {
     if (raw) {
-      positional.push(a)
+      positional.push(a);
     } else if (a === '--') {
-      raw = true
+      raw = true;
     } else if (a === '--global') {
-      scope = 'global'
+      scope = 'global';
     } else if (a === '--project') {
-      scope = 'project'
+      scope = 'project';
     } else if (a.startsWith('--')) {
-      const eq = a.indexOf('=')
+      const eq = a.indexOf('=');
       if (eq > 0) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1)
+        flags[a.slice(2, eq)] = a.slice(eq + 1);
       } else {
-        flags[a.slice(2)] = 'true'
+        flags[a.slice(2)] = 'true';
       }
     } else {
-      positional.push(a)
+      positional.push(a);
     }
   }
-  return { positional, flags, scope }
+  return { positional, flags, scope };
 }
 
 function die(msg: string): never {
-  throw new CommandError(`error: ${msg}`, EXIT.usage)
+  throw new CommandError(`error: ${msg}`, EXIT.usage);
 }
 
 function needRef(type: DocType, ref: string | undefined, verb: string): string {
   if (!ref) {
-    die(`bro ${type.name} ${verb} needs a ref — \`bro ${type.name} ${verb} <id>\``)
+    die(`bro ${type.name} ${verb} needs a ref — \`bro ${type.name} ${verb} <id>\``);
   }
-  return ref
+  return ref;
 }
 
 function printResult(type: DocType, verb: string, result: unknown): void {
   if (result === undefined || result === null) {
-    return
+    return;
   }
-  const render = type.render ?? ((d: unknown) => JSON.stringify(d))
+  const render = type.render ?? ((d: unknown) => JSON.stringify(d));
   if (Array.isArray(result) || (result as Iterable<unknown>)[Symbol.iterator] !== undefined) {
     for (const d of result as Iterable<unknown>) {
-      console.log(render(d))
+      console.log(render(d));
     }
-    return
+    return;
   }
   if (verb === 'get' || verb === 'show') {
-    const describe = type.describe ?? ((d: unknown) => JSON.stringify(d, null, 2))
-    console.log(describe(result))
-    return
+    const describe = type.describe ?? ((d: unknown) => JSON.stringify(d, null, 2));
+    console.log(describe(result));
+    return;
   }
-  console.log(render(result))
+  console.log(render(result));
 }
 
 /** Invoke `verb` on `type`'s adapter — unknown verbs die with the
@@ -177,20 +178,20 @@ async function runBound(
   flags: DocFlags,
   ctx: DocCtx
 ): Promise<true> {
-  const adapter = type.adapter(ctx)
-  const method = verbMethod(adapter, verb)
+  const adapter = type.adapter(ctx);
+  const method = verbMethod(adapter, verb);
   if (!method) {
-    die(`bro ${type.name} ${verb} — ${type.name} verbs: ${docVerbs(adapter).join(' ')}`)
+    die(`bro ${type.name} ${verb} — ${type.name} verbs: ${docVerbs(adapter).join(' ')}`);
   }
   if (ctx.scope === 'global' && !(type.scopes ?? ['project']).includes('global')) {
-    die(`--global is not supported on ${type.name}`)
+    die(`--global is not supported on ${type.name}`);
   }
 
-  let result: unknown
+  let result: unknown;
   switch (STANDARD_VERBS[verb]) {
     case 'list':
-      result = [...(adapter.list?.(flags) ?? [])]
-      break
+      result = [...(adapter.list?.(flags) ?? [])];
+      break;
     case 'get': {
       // scope alone can answer a bare show (`bro store show --global`) —
       // the ref requirement only kicks in when the adapter declines
@@ -198,29 +199,27 @@ async function runBound(
         adapter.get?.(rest[0]) ??
         (rest[0] === undefined
           ? die(`bro ${type.name} ${verb} needs a ref — \`bro ${type.name} ${verb} <id>\``)
-          : die(`${type.name} "${rest[0]}" not found`))
-      break
+          : die(`${type.name} "${rest[0]}" not found`));
+      break;
     }
     case 'create':
-      result = adapter.create?.({ ...flags, title: rest.join(' ') }, flags)
-      break
+      result = adapter.create?.({ ...flags, title: rest.join(' ') }, flags);
+      break;
     case 'update':
-      result = adapter.update?.(needRef(type, rest[0], verb), flags)
-      break
+      result = adapter.update?.(needRef(type, rest[0], verb), flags);
+      break;
     case 'remove':
-      adapter.remove?.(needRef(type, rest[0], verb))
-      break
+      adapter.remove?.(needRef(type, rest[0], verb));
+      break;
     default:
       // custom verb — ref is a convenience head; `positional` carries
       // the full tail so passthrough verbs (exec) lose nothing
-      result = await (method as (
-        ref: string | undefined,
-        flags: DocFlags,
-        positional: string[]
-      ) => unknown)(rest[0], flags, rest)
+      result = await (
+        method as (ref: string | undefined, flags: DocFlags, positional: string[]) => unknown
+      )(rest[0], flags, rest);
   }
-  printResult(type, verb, result)
-  return true
+  printResult(type, verb, result);
+  return true;
 }
 
 /**
@@ -231,57 +230,57 @@ async function runBound(
  * verb — the caller falls through to "unknown command".
  */
 export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> {
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-  const { positional, flags, scope } = docArgs(argv)
-  const ctx: DocCtx = { root, scope }
-  const types = docTypes()
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
+  const { positional, flags, scope } = docArgs(argv);
+  const ctx: DocCtx = { root, scope };
+  const types = docTypes();
 
   // noun-first — canonical: `bro store init --global`
-  const noun = types.find((t) => docTypeNamed(t, cmd))
+  const noun = types.find(t => docTypeNamed(t, cmd));
   if (noun) {
-    const [verb = 'list', ...rest] = positional
-    return runBound(noun, verb, rest, flags, ctx)
+    const [verb = 'list', ...rest] = positional;
+    return runBound(noun, verb, rest, flags, ctx);
   }
 
   // verb-first shorthand: ref-prefix inference wins, else the default
   // type (task). `bro show bro-n5t` / `bro list` — anything noun- or
   // foreign-verb-shaped gets a noun-first redirect, not silent magic.
-  const pref = positional[0]
+  const pref = positional[0];
   const inferred =
-    (pref !== undefined &&
-      types.find((t) => t.idPrefix && pref.startsWith(t.idPrefix))) ||
-    types.find((t) => t.name === 'task') ||
-    types[0]
+    (pref !== undefined && types.find(t => t.idPrefix && pref.startsWith(t.idPrefix))) ||
+    types.find(t => t.name === 'task') ||
+    types[0];
   if (!inferred) {
-    return false
+    return false;
   }
-  let inferredHas = false
+  let inferredHas = false;
   try {
-    inferredHas = verbMethod(inferred.adapter(ctx), cmd) !== undefined
+    inferredHas = verbMethod(inferred.adapter(ctx), cmd) !== undefined;
   } catch {
     // a throwing adapter factory can't answer — treat as no-match and
     // let the guarded redirect search below find the verb's real owner
   }
   if (!inferredHas) {
     // one bad plugin adapter must not abort the redirect search
-    const owner = types.find((t) => {
+    const owner = types.find(t => {
       try {
-        return verbMethod(t.adapter(ctx), cmd) !== undefined
+        return verbMethod(t.adapter(ctx), cmd) !== undefined;
       } catch {
-        return false
+        return false;
       }
-    })
+    });
     if (owner) {
-      die(`'${cmd}' is a ${owner.name} verb — use \`bro ${owner.name} ${cmd} …\``)
+      die(`'${cmd}' is a ${owner.name} verb — use \`bro ${owner.name} ${cmd} …\``);
     }
-    return false
+    return false;
   }
-  if (pref !== undefined && types.some((t) => t !== inferred && docTypeNamed(t, pref))) {
-    die(`'${pref}' is a doc noun — use \`bro ${pref} ${cmd} …\``)
+  if (pref !== undefined && types.some(t => t !== inferred && docTypeNamed(t, pref))) {
+    die(`'${pref}' is a doc noun — use \`bro ${pref} ${cmd} …\``);
   }
   // the bound type's own noun stays consumable: `bro show task <id>`
-  const rest = pref !== undefined && docTypeNamed(inferred, pref) ? positional.slice(1) : positional
-  return runBound(inferred, cmd, rest, flags, ctx)
+  const rest =
+    pref !== undefined && docTypeNamed(inferred, pref) ? positional.slice(1) : positional;
+  return runBound(inferred, cmd, rest, flags, ctx);
 }
 
 /** Words external plugins must not take as command names — plugin
@@ -290,33 +289,33 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
  *  The set is computed, not declared: plugin commands ∪ doc nouns ∪
  *  the default type's shorthand verbs. Everything else is usable. */
 export function reservedWords(root = process.cwd()): Set<string> {
-  const ctx: DocCtx = { root, scope: 'project' }
-  const words = new Set(Object.keys(STANDARD_VERBS))
+  const ctx: DocCtx = { root, scope: 'project' };
+  const words = new Set(Object.keys(STANDARD_VERBS));
   for (const p of PLUGINS) {
-    words.add(p.name)
+    words.add(p.name);
   }
-  const types = docTypes()
+  const types = docTypes();
   for (const t of types) {
-    words.add(t.name)
+    words.add(t.name);
     for (const a of t.aliases ?? []) {
-      words.add(a)
+      words.add(a);
     }
   }
   // only the default type's verbs are verb-first reachable — a custom
   // verb on another noun is always `bro <noun> <verb>` and can never be
   // shadowed by a plugin command, so it isn't a reservation. A throwing
   // adapter factory must not take startup or --help down with it.
-  const def = types.find((t) => t.name === 'task') ?? types[0]
+  const def = types.find(t => t.name === 'task') ?? types[0];
   if (def) {
     try {
       for (const v of docVerbs(def.adapter(ctx))) {
-        words.add(v)
+        words.add(v);
       }
     } catch {
       // broken adapter — its nouns above are still reserved
     }
   }
-  return words
+  return words;
 }
 
 /** Noun/verb lines for `bro --help` — discovered, not hardcoded.
@@ -324,18 +323,18 @@ export function reservedWords(root = process.cwd()): Set<string> {
  *  usable verb-first; every type's full verb set lives behind
  *  `bro <noun> <verb>`. */
 export function docUsageLines(): string[] {
-  const root = process.cwd()
-  const ctx: DocCtx = { root, scope: 'project' }
-  const types = docTypes()
-  const def = types.find((t) => t.name === 'task') ?? types[0]
-  let verbs: string[] = []
+  const root = process.cwd();
+  const ctx: DocCtx = { root, scope: 'project' };
+  const types = docTypes();
+  const def = types.find(t => t.name === 'task') ?? types[0];
+  let verbs: string[] = [];
   try {
-    verbs = def ? docVerbs(def.adapter(ctx)) : []
+    verbs = def ? docVerbs(def.adapter(ctx)) : [];
   } catch {
     // a throwing adapter factory degrades help to the noun list
   }
   return [
-    `  doc types: ${types.map((t) => t.name).join(' ')}   — \`bro <noun> <verb>\` (e.g. \`bro task list\`, \`bro store init --global\`)`,
+    `  doc types: ${types.map(t => t.name).join(' ')}   — \`bro <noun> <verb>\` (e.g. \`bro task list\`, \`bro store init --global\`)`,
     `  shorthand: ${verbs.join(' ')}   — ${def?.name ?? 'task'} verbs usable verb-first (\`bro show <id>\`)`,
-  ]
+  ];
 }

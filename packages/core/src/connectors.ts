@@ -773,8 +773,8 @@ export function facadeAuth<K extends keyof FacadeMap>(
 
 /** Hard auth gate for commands — exits(1) with the remediation line when
  *  the resolved connector isn't usable. */
-import { CommandError } from './errors.ts'
-import { EXIT } from './exits.ts'
+import { CommandError } from './errors.ts';
+import { EXIT } from './exits.ts';
 
 export function ensureAuth<K extends keyof FacadeMap>(
   kind: K,
@@ -783,7 +783,7 @@ export function ensureAuth<K extends keyof FacadeMap>(
 ): void {
   const msg = facadeAuth(kind, ctx, opts);
   if (msg) {
-    throw new CommandError(`error: ${msg}`, EXIT.error)
+    throw new CommandError(`error: ${msg}`, EXIT.error);
   }
 }
 

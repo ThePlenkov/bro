@@ -1750,7 +1750,17 @@ async function spawnRebaseFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'conflict-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase', known);
+  const lane = fixerLane(
+    ctx,
+    pr,
+    link,
+    state.headRef,
+    worktree,
+    fixer,
+    meta.headSha,
+    'rebase',
+    known
+  );
   if ('verdict' in lane) {
     return lane;
   }
@@ -2189,7 +2199,17 @@ async function spawnSastFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'sast-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast', known);
+  const lane = fixerLane(
+    ctx,
+    pr,
+    link,
+    state.headRef,
+    worktree,
+    fixer,
+    meta.headSha,
+    'sast',
+    known
+  );
   if ('verdict' in lane) {
     return lane;
   }

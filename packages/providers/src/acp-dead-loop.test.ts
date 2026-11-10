@@ -36,10 +36,7 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
       const ctx = { guard, scope: 'conv-1', peer: 'conductor:t' };
       // two failing turns — each opened a session and answered nothing
       for (let i = 0; i < 2; i++) {
-        await assert.rejects(
-          guardedTurn(peer, fake.app, ctx),
-          JudgeUnavailable
-        );
+        await assert.rejects(guardedTurn(peer, fake.app, ctx), JudgeUnavailable);
       }
       assert.equal(fake.sessions.length, 2);
       // the third is refused — and NO third session is opened
@@ -110,10 +107,7 @@ describe('acp dead-loop prevention (bro-b961a)', () => {
       const ctx = { guard, scope: 'conv-1', peer: 'conductor:t' };
       // the first turn opens a session and answers nothing — the peer's
       // churn is one unfinished session
-      await assert.rejects(
-        guardedTurn(peer, fake.app, ctx),
-        JudgeUnavailable
-      );
+      await assert.rejects(guardedTurn(peer, fake.app, ctx), JudgeUnavailable);
       assert.equal(fake.sessions.length, 1);
       // the next open crosses the peer's budget — it is refused BEFORE the
       // session opens, and the peer is killed (the child with it)

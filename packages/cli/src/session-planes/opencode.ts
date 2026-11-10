@@ -225,8 +225,7 @@ function opencodeEntryActivity(
   ctx: ExternalProbeCtx,
   detail: (pid: number, note: string) => ExternalActivity
 ): ExternalActivity | number {
-  const dataDir =
-    typeof override === 'string' && override.trim() !== '' ? override : entry.dataDir;
+  const dataDir = typeof override === 'string' && override.trim() !== '' ? override : entry.dataDir;
   if (entry.unknown || dataDir === undefined) {
     return detail(entry.pid, 'no provable activity stamp');
   }
