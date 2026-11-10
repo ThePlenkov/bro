@@ -2,6 +2,8 @@
  * Shared hand-rolled arg parsing for bro commands — no parser library.
  */
 import { warnDeprecated } from './deprecation.ts';
+import { CommandError } from './errors.ts';
+import { EXIT } from './exits.ts';
 
 /** Warn (once per invocation) that a flag is deprecated — it still
  *  applies; removal lands in a later release. Matches both `--flag`
@@ -18,13 +20,11 @@ export function flagValue(argv: string[], i: number, name: string): string {
   // non-empty
   const v = argv.at(i + 1);
   if (v === undefined || v.trim() === '') {
-    console.error(`error: ${name} requires a value`);
-    process.exit(2);
+    throw new CommandError(`error: ${name} requires a value`, EXIT.usage);
   }
   // and it must not look like another option
   if (v.startsWith('--')) {
-    console.error(`error: ${name} requires a value`);
-    process.exit(2);
+    throw new CommandError(`error: ${name} requires a value`, EXIT.usage);
   }
   return v;
 }
@@ -47,8 +47,7 @@ export function flag(argv: string[], name: string): string | undefined {
     return undefined;
   }
   if (occurrences.length > 1) {
-    console.error(`error: ${name} may be given only once`);
-    process.exit(2);
+    throw new CommandError(`error: ${name} may be given only once`, EXIT.usage);
   }
   const eq = occurrences.at(0) ?? '';
   if (!eq.startsWith(`${name}=`)) {
@@ -58,8 +57,7 @@ export function flag(argv: string[], name: string): string | undefined {
   // never a silent drop
   const v = eq.slice(name.length + 1);
   if (v === '') {
-    console.error(`error: ${name} requires a value`);
-    process.exit(2);
+    throw new CommandError(`error: ${name} requires a value`, EXIT.usage);
   }
   return v;
 }
@@ -82,8 +80,7 @@ export function flagAll(argv: string[], name: string): string[] {
     // never a silent drop
     const v = arg.slice(name.length + 1);
     if (v === '') {
-      console.error(`error: ${name} requires a value`);
-      process.exit(2);
+      throw new CommandError(`error: ${name} requires a value`, EXIT.usage);
     }
     out.push(v);
   }
@@ -116,8 +113,7 @@ function flagTokenKind(
     if (opts?.strict === true) {
       const next = argv.at(i + 1);
       if (next === undefined || next.startsWith('--')) {
-        console.error(`error: option ${name} requires a value`);
-        process.exit(2);
+        throw new CommandError(`error: option ${name} requires a value`, EXIT.usage);
       }
     }
     return 'value';
@@ -127,14 +123,12 @@ function flagTokenKind(
     // `argv.includes('--dry-run')` checks miss it — a silent live run.
     // strict mode refuses the inline value outright
     if (opts?.strict === true && arg !== name) {
-      console.error(`error: option ${name} takes no value`);
-      process.exit(2);
+      throw new CommandError(`error: option ${name} takes no value`, EXIT.usage);
     }
     return 'bool';
   }
   if (opts?.strict === true) {
-    console.error(`error: unknown option ${name}`);
-    process.exit(2);
+    throw new CommandError(`error: unknown option ${name}`, EXIT.usage);
   }
   return 'drop';
 }

@@ -623,6 +623,12 @@ describe('benchmark (bro-l8c4f.9)', () => {
           await runBenchmarkCommand(args);
           return { code: -1, err };
         } catch (e: any) {
+          // CommandError is the dispatcher contract now — the code rides
+          // the error, the message is what process.exit would have seen
+          if (e?.name === 'CommandError' || e?.constructor?.name === 'CommandError') {
+            if (e.message) err.push(String(e.message));
+            return { code: typeof e.code === 'number' ? e.code : 1, err };
+          }
           return { code: e?.exitCode ?? -1, err };
         } finally {
           process.exit = origExit;

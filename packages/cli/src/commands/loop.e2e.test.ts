@@ -70,6 +70,9 @@ function loopFixture(
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      // the spawned loop's external guard must not see the host's real
+      // agents (a live opencode/devin session refuses every spawn)
+      spawn: { externalBlock: false },
       ...extra(host),
       loop: {
         agent: `node ${host.agent}`,
@@ -1612,10 +1615,15 @@ describe('bro loop gate-stack round-robin', () => {
     // servicing the rest: B's spawn AND merge land while A's agent is
     // still inside its deliberate delay — an ordering the awaited-spawn
     // shape made impossible.
-    const f = loopFixture([
-      { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
-      { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
-    ]);
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
+      ],
+      // the overlap this test exists to prove needs a second stack
+      // slot — the serial-by-default cap (bro-jis0c) is opted out of
+      { maxOpen: 2 }
+    );
     writeHostState(f.hostState, { prs: {}, delays: { 'fx-a': 5000 } });
     inside(f.main, f.root, () => {
       const r = f.run();
@@ -1638,10 +1646,15 @@ describe('bro loop gate-stack round-robin', () => {
   });
 
   test('a pending gate does not block the next claim — B lands while A waits', () => {
-    const f = loopFixture([
-      { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },
-      { ...FAKE_BEAD, id: 'fx-b', title: 'fast gate' },
-    ]);
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'fast gate' },
+      ],
+      // B must claim while A's member still gates — impossible under
+      // the serial-by-default cap (bro-jis0c), so the test opts out
+      { maxOpen: 2 }
+    );
     // A is pending until B's PR (12 — A takes 11) merges
     writeHostState(f.hostState, {
       prs: {

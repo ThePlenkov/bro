@@ -44,7 +44,12 @@ if (top.commands.size === 0) {
   console.error(`${spec}: no Commands: block parsed from \`bro --help\``);
   process.exit(1);
 }
-const liveNames = new Set([...top.commands.keys(), ...top.docNouns, ...top.docVerbs]);
+const liveNames = new Set([
+  ...top.commands.keys(),
+  ...top.members,
+  ...top.docNouns,
+  ...top.docVerbs,
+]);
 
 const manifest = loadPublishedSurface();
 const manifestFresh = manifest?.version === version;

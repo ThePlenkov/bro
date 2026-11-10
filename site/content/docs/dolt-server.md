@@ -1,4 +1,5 @@
 ---
+
 title: Beads store on a managed dolt sql-server
 description: Embedded-mode bd pays engine open + a store lock per call; a persistent `dolt sql-server` endpoint removes both. Install, cold-start fallback, diagnostics, revert.
 ---
@@ -29,11 +30,10 @@ per-call startup disappears.
 
 ## Install / migrate
 
-```bash
-node scripts/beads-dolt-server.ts install            # store at ./.beads or $BEADS_DIR
-node scripts/beads-dolt-server.ts install --beads /path/to/.beads --port 37934
-node scripts/beads-dolt-server.ts status             # mode, endpoint reachability, unit state
-```
+Managed server installation is a store-administration operation. See the
+[server administration reference](https://github.com/ThePlenkov/bro/blob/main/scripts/beads-dolt-server.ts)
+for the install, endpoint and status contract. Application setup uses `bro setup`;
+store connectivity can be checked with `bd dolt test`.
 
 `install` is idempotent: moves `embeddeddolt/` → `dolt/`, writes the
 server config + port file, flips `metadata.json` to `dolt_mode:
@@ -58,11 +58,11 @@ The unit survives reboot only with linger
 ## Revert to embedded
 
 ```bash
-node scripts/beads-dolt-server.ts uninstall        # unit + endpoint block gone
 cd <repo> && mv .beads/dolt .beads/embeddeddolt
 # metadata.json: dolt_mode → "embedded", drop dolt_server_host
 # remove the dolt: block from .beads/config.yaml
 ```
 
-`uninstall` leaves the store server-mode pointing at a dead endpoint —
+First remove the managed unit and endpoint block using the server administration
+reference above. That leaves the store server-mode pointing at a dead endpoint —
 the `mv` + metadata flip is what completes a real revert.

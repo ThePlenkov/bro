@@ -641,7 +641,20 @@ export async function runRigCommand(argv: string[]): Promise<void> {
     cmdStatus(resolved, argv);
   }
   if (sub === 'next') {
-    runRigNext(cwd, pos[1], argv.includes('--json') || argv.some(a => a.startsWith('--json=')));
+    // `--json=false`/`--json=0` are explicit opt-outs — a `--json=` prefix
+    // alone must not count as enabling JSON
+    const jsonEnabled =
+      argv.includes('--json') ||
+      argv.some(
+        a =>
+          a.startsWith('--json=') &&
+          !['false', '0'].includes(a.slice('--json='.length).trim().toLowerCase()),
+      );
+    const code = await runRigNext(cwd, pos[1], jsonEnabled);
+    if (code !== 0) {
+      process.exitCode = code;
+    }
+    return;
   }
   if (sub === 'watch') {
     await cmdWatch(argv, cfg, resolved);

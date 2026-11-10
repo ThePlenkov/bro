@@ -238,6 +238,7 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
       // answer before any hook trusts it
       child = spawn(cmd, args, {
         stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
         detached: process.platform !== 'win32',
       }); // NOSONAR typescript:S4036
     } catch {
@@ -353,6 +354,7 @@ function callHook(
         cwd: directory,
         stdio: ['pipe', 'pipe', 'ignore'],
         // own process group so killAfter can take spawned children down too
+        windowsHide: true,
         detached: process.platform !== 'win32',
       });
     } catch {
@@ -497,6 +499,10 @@ function makeCore(input: BroCoreInput) {
   // and opencode loads plugins even in repos where bro is inert.
   let command: Promise<Command | null> | undefined;
 
+  const notify = (level: Level, message: string): void => {
+    log(level, message).catch(() => {})
+  }
+
   const probe = async (
     event: string,
     payload: unknown,
@@ -504,7 +510,15 @@ function makeCore(input: BroCoreInput) {
   ): Promise<HookControl | null> => {
     command ??= resolveCommand(options);
     const resolved = await command;
-    return resolved ? callHook(resolved, event, payload, directory, timeoutMs) : null;
+    if (!resolved) {
+      notify('debug', `bro probe skipped (no cli) for event=${event}`);
+      return null;
+    }
+    const result = await callHook(resolved, event, payload, directory, timeoutMs);
+    if (result === null) {
+      notify('debug', `bro probe returned null for event=${event}`);
+    }
+    return result;
   };
 
   /** Spawn `<bro> args` and capture stdout — the read-verb path tool
@@ -525,6 +539,7 @@ function makeCore(input: BroCoreInput) {
           child = spawn(resolved.cmd, [...resolved.args, ...args], {
             cwd: directory,
             stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
             detached: process.platform !== 'win32',
           });
         } catch {
@@ -564,26 +579,29 @@ function makeCore(input: BroCoreInput) {
    *  probe is evicted rather than cached — timing out once is not the
    *  session's verdict, and the next turn deserves a retry; only a real
    *  answer (including an empty one) is sticky. */
-  const rehydration = new Map<string, Promise<string>>();
+  const rehydration = new Map<string, Promise<string | undefined>>();
   const hydrate = (
     sessionID: string,
     event: 'session-start' | 'post-compaction'
-  ): Promise<string> => {
+  ): Promise<string | undefined> => {
     const pending = rehydration.get(sessionID);
     if (pending) {
       return pending;
     }
-    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(
-      control => {
-        // evict only our own failed entry — a compaction may have already
-        // replaced it with a newer probe, which must not be deleted out
-        // from under the session that owns it
-        if (control === null && rehydration.get(sessionID) === started) {
-          rehydration.delete(sessionID);
-        }
-        return contextOf(control);
+    notify('debug', `bro hydrate starting for session=${sessionID} event=${event}`);
+    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(control => {
+      // evict only our own failed entry — a compaction may have already
+      // replaced it with a newer probe, which must not be deleted out
+      // from under the session that owns it
+      if (control === null && rehydration.get(sessionID) === started) {
+        rehydration.delete(sessionID);
       }
-    );
+      const ctx = contextOf(control);
+      if (ctx) {
+        notify('debug', `bro hydrate injected context for session=${sessionID} len=${ctx.length}`);
+      }
+      return ctx;
+    });
     rehydration.set(sessionID, started);
     return started;
   };
@@ -810,6 +828,7 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
       }
     },
 
+
     async 'experimental.session.compacting'(hookInput, output) {
       const text = contextOf(
         await probe('pre-compact', { session_id: hookInput.sessionID }, REHYDRATION_TIMEOUT_MS)
@@ -846,6 +865,8 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
         output.output = `${output.output}\n\n${text}`;
       }
     },
+
+
 
     async 'permission.ask'(hookInput, output) {
       const command = permissionCommand(hookInput);
@@ -1025,6 +1046,26 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
     description: 'fleet snapshot — mols × steps × agents × worktrees × PRs',
     args: ['fleet'],
   },
+  {
+    name: 'next',
+    description: 'bro next actionable work — pick the next ready bead respecting constraints',
+    args: ['next', '--list'],
+  },
+  {
+    name: 'drill_status',
+    description: 'current drill frame status — scoped investigation context',
+    args: ['work', 'drill', 'status'],
+  },
+  {
+    name: 'review_threads',
+    description: 'unresolved PR review threads for current branch/PR',
+    args: ['review', 'act', 'threads'],
+  },
+  {
+    name: 'worktree_status',
+    description: 'worktree and branch hygiene — dirty/uncommitted changes',
+    args: ['status', '--json'],
+  },
 ];
 
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
@@ -1111,11 +1152,34 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
 
   register(
     ctx.session?.hook?.('compaction', async event => {
-      const text = contextOf(
-        await core.probe('pre-compact', { session_id: event.sessionID }, REHYDRATION_TIMEOUT_MS)
-      );
-      if (text && event.system !== undefined) {
-        event.system.push({ type: 'text', text });
+      try {
+        const text = contextOf(
+          await core.probe('pre-compact', { session_id: event.sessionID }, REHYDRATION_TIMEOUT_MS)
+        );
+        if (text && event.system !== undefined) {
+          event.system.push({ type: 'text', text });
+          try {
+            await ctx.app?.log?.({
+              body: {
+                service: 'bro',
+                level: 'info',
+                message: `compaction context injected for session=${event.sessionID} len=${text.length}`,
+              },
+            });
+          } catch {}
+        } else {
+          try {
+            await ctx.app?.log?.({
+              body: {
+                service: 'bro',
+                level: 'debug',
+                message: `compaction hook completed with no bro context for session=${event.sessionID}`,
+              },
+            });
+          } catch {}
+        }
+      } catch {
+        // fail-open
       }
     })
   );
@@ -1249,7 +1313,21 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
           const args = splitArgs(prompt?.text ?? '');
           const verb = args.length > 0 ? args : ['status'];
           const { code, out, err } = await core.exec(verb);
-          const body = out || err || '(no output)';
+          let body = out || err || '(no output)';
+          body = body
+            .split('\n')
+            .filter(l => {
+              const t = l.trim().toLowerCase();
+              if (!t) return true;
+              // drop only the `bro learn ...` hint line itself — a
+              // substring match would eat real output that mentions it
+              const words = t.split(/\s+/);
+              if (words[0] === 'bro' && words[1] === 'learn') return false;
+              return true;
+            })
+            .join('\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
           const suffix = code === 0 ? '' : ` (exit ${code})`;
           await ctx.session.prompt({
             sessionID,

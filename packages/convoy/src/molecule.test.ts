@@ -1,7 +1,10 @@
-import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
-import { nextStep, stepKind, stepsOf } from './molecule.ts'
-import type { Molecule, MolIssue } from './types.ts'
+import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it } from 'node:test';
+import { nextStep, pourFormula, stepKind, stepsOf } from './molecule.ts';
+import type { Molecule, MolIssue } from './types.ts';
 
 const issue = (id: string, over: Partial<MolIssue> = {}): MolIssue => ({
   id,
@@ -9,55 +12,63 @@ const issue = (id: string, over: Partial<MolIssue> = {}): MolIssue => ({
   status: 'open',
   issue_type: 'task',
   ...over,
-})
+});
 
 const mol = (issues: MolIssue[], deps: { from: string; to: string }[]): Molecule => ({
   root: issues[0]!,
   issues,
   dependencies: [
     // every step is a child of the root
-    ...issues.slice(1).map((i) => ({ issue_id: i.id, depends_on_id: issues[0]!.id, type: 'parent-child' })),
+    ...issues
+      .slice(1)
+      .map(i => ({ issue_id: i.id, depends_on_id: issues[0]!.id, type: 'parent-child' })),
     // `from` blocks `to` → bd edge {issue_id: to, depends_on_id: from}
-    ...deps.map((d) => ({ issue_id: d.to, depends_on_id: d.from, type: 'blocks' })),
+    ...deps.map(d => ({ issue_id: d.to, depends_on_id: d.from, type: 'blocks' })),
   ],
-})
+});
 
 describe('stepsOf', () => {
   it('marks a step with an open blocker as blocked', () => {
-    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a'), issue('b')], [{ from: 'a', to: 'b' }])
-    const steps = stepsOf(m)
-    assert.equal(steps.find((s) => s.id === 'a')!.state, 'ready')
-    assert.equal(steps.find((s) => s.id === 'b')!.state, 'blocked')
-    assert.deepEqual(steps.find((s) => s.id === 'b')!.blockedBy, ['a'])
-  })
+    const m = mol(
+      [issue('root', { issue_type: 'molecule' }), issue('a'), issue('b')],
+      [{ from: 'a', to: 'b' }]
+    );
+    const steps = stepsOf(m);
+    assert.equal(steps.find(s => s.id === 'a')!.state, 'ready');
+    assert.equal(steps.find(s => s.id === 'b')!.state, 'blocked');
+    assert.deepEqual(steps.find(s => s.id === 'b')!.blockedBy, ['a']);
+  });
 
   it('unblocks a step once its blocker is closed', () => {
     const m = mol(
       [issue('root', { issue_type: 'molecule' }), issue('a', { status: 'closed' }), issue('b')],
-      [{ from: 'a', to: 'b' }],
-    )
-    assert.equal(stepsOf(m).find((s) => s.id === 'b')!.state, 'ready')
-  })
+      [{ from: 'a', to: 'b' }]
+    );
+    assert.equal(stepsOf(m).find(s => s.id === 'b')!.state, 'ready');
+  });
 
   it('excludes the molecule root from steps', () => {
-    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a')], [])
-    assert.deepEqual(stepsOf(m).map((s) => s.id), ['a'])
-  })
-})
+    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a')], []);
+    assert.deepEqual(
+      stepsOf(m).map(s => s.id),
+      ['a']
+    );
+  });
+});
 
 describe('stepKind', () => {
   it('honors declared types', () => {
-    assert.equal(stepKind(issue('x', { issue_type: 'human' })), 'human')
-    assert.equal(stepKind(issue('x', { issue_type: 'gate' })), 'human')
-    assert.equal(stepKind(issue('x', { issue_type: 'agent' })), 'agent')
-  })
+    assert.equal(stepKind(issue('x', { issue_type: 'human' })), 'human');
+    assert.equal(stepKind(issue('x', { issue_type: 'gate' })), 'human');
+    assert.equal(stepKind(issue('x', { issue_type: 'agent' })), 'agent');
+  });
 
   it('treats the title as display-only — gate-titled tasks are agent work', () => {
-    assert.equal(stepKind(issue('x', { title: 'HUMAN GATE — approve plan' })), 'agent')
-    assert.equal(stepKind(issue('x', { title: 'GATE — bro act status' })), 'agent')
-    assert.equal(stepKind(issue('x', { title: 'Merge — bro act merge' })), 'agent')
-  })
-})
+    assert.equal(stepKind(issue('x', { title: 'HUMAN GATE — approve plan' })), 'agent');
+    assert.equal(stepKind(issue('x', { title: 'GATE — bro act status' })), 'agent');
+    assert.equal(stepKind(issue('x', { title: 'Merge — bro act merge' })), 'agent');
+  });
+});
 
 describe('nextStep', () => {
   const chain = (statuses: string[]): Molecule =>
@@ -71,31 +82,31 @@ describe('nextStep', () => {
       [
         { from: 'a', to: 'b' },
         { from: 'b', to: 'g' },
-      ],
-    )
+      ]
+    );
 
   it('emits the first ready step', () => {
-    const n = nextStep(chain(['open', 'open', 'open']))
-    assert.equal(n.state, 'step')
-    assert.equal(n.step!.id, 'a')
-    assert.deepEqual(n.blocked, ['b', 'g'])
-  })
+    const n = nextStep(chain(['open', 'open', 'open']));
+    assert.equal(n.state, 'step');
+    assert.equal(n.step!.id, 'a');
+    assert.deepEqual(n.blocked, ['b', 'g']);
+  });
 
   it('advances after the blocker closes', () => {
-    const n = nextStep(chain(['closed', 'open', 'open']))
-    assert.equal(n.step!.id, 'b')
-  })
+    const n = nextStep(chain(['closed', 'open', 'open']));
+    assert.equal(n.step!.id, 'b');
+  });
 
   it('reports a human gate as gate state', () => {
-    const n = nextStep(chain(['closed', 'closed', 'open']))
-    assert.equal(n.state, 'gate')
-    assert.equal(n.step!.id, 'g')
-  })
+    const n = nextStep(chain(['closed', 'closed', 'open']));
+    assert.equal(n.state, 'gate');
+    assert.equal(n.step!.id, 'g');
+  });
 
   it('reports complete when every step is done', () => {
-    const n = nextStep(chain(['closed', 'closed', 'closed']))
-    assert.equal(n.state, 'complete')
-  })
+    const n = nextStep(chain(['closed', 'closed', 'closed']));
+    assert.equal(n.state, 'complete');
+  });
 
   it('reports blocked on a dependency cycle', () => {
     const m = mol(
@@ -103,13 +114,13 @@ describe('nextStep', () => {
       [
         { from: 'a', to: 'b' },
         { from: 'b', to: 'a' },
-      ],
-    )
-    const n = nextStep(m)
-    assert.equal(n.state, 'blocked')
-    assert.deepEqual(n.blocked.sort(), ['a', 'b'])
-    assert.deepEqual(n.stuck.sort(), ['a', 'b'])
-  })
+      ]
+    );
+    const n = nextStep(m);
+    assert.equal(n.state, 'blocked');
+    assert.deepEqual(n.blocked.sort(), ['a', 'b']);
+    assert.deepEqual(n.stuck.sort(), ['a', 'b']);
+  });
 
   it('marks a chain ending in a cycle stuck — nothing upstream can release it', () => {
     const m = mol(
@@ -118,11 +129,11 @@ describe('nextStep', () => {
         { from: 'a', to: 'b' },
         { from: 'b', to: 'a' },
         { from: 'b', to: 'c' },
-      ],
-    )
-    const n = nextStep(m)
-    assert.deepEqual(n.stuck.sort(), ['a', 'b', 'c'])
-  })
+      ]
+    );
+    const n = nextStep(m);
+    assert.deepEqual(n.stuck.sort(), ['a', 'b', 'c']);
+  });
 
   it('a step waiting on an in-progress claim is transiently blocked, not stuck', () => {
     const m = mol(
@@ -131,12 +142,12 @@ describe('nextStep', () => {
         issue('a', { status: 'in_progress' }),
         issue('b'),
       ],
-      [{ from: 'a', to: 'b' }],
-    )
-    const n = nextStep(m)
-    assert.equal(n.state, 'blocked')
-    assert.deepEqual(n.stuck, [])
-  })
+      [{ from: 'a', to: 'b' }]
+    );
+    const n = nextStep(m);
+    assert.equal(n.state, 'blocked');
+    assert.deepEqual(n.stuck, []);
+  });
 
   it('an open blocker cannot release a step whose other blocker is in a cycle', () => {
     // a↔b is a closed loop — b also waits on external work, but closing
@@ -147,27 +158,90 @@ describe('nextStep', () => {
         { from: 'a', to: 'b' },
         { from: 'b', to: 'a' },
         { from: 'external-issue', to: 'b' },
-      ],
-    )
-    const n = nextStep(m)
-    assert.equal(n.state, 'blocked')
-    assert.deepEqual(n.stuck.sort(), ['a', 'b'])
-  })
+      ]
+    );
+    const n = nextStep(m);
+    assert.equal(n.state, 'blocked');
+    assert.deepEqual(n.stuck.sort(), ['a', 'b']);
+  });
 
   it('a blocked step waiting on open work outside the mol is not stuck', () => {
-    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a')], [
-      { from: 'external-issue', to: 'a' },
-    ])
-    const n = nextStep(m)
-    assert.equal(n.state, 'blocked')
-    assert.deepEqual(n.stuck, [])
-  })
+    const m = mol(
+      [issue('root', { issue_type: 'molecule' }), issue('a')],
+      [{ from: 'external-issue', to: 'a' }]
+    );
+    const n = nextStep(m);
+    assert.equal(n.state, 'blocked');
+    assert.deepEqual(n.stuck, []);
+  });
 
   it('exposes independent ready steps for parallelism', () => {
-    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a'), issue('b')], [])
-    const n = nextStep(m)
-    assert.equal(n.state, 'step')
-    assert.equal(n.ready.length, 2)
-    assert.equal(n.step!.id, 'a')
-  })
-})
+    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a'), issue('b')], []);
+    const n = nextStep(m);
+    assert.equal(n.state, 'step');
+    assert.equal(n.ready.length, 2);
+    assert.equal(n.step!.id, 'a');
+  });
+});
+
+/** A `bd` that takes the registration write but keeps its old type list —
+ *  the shape of an older bd that does not know `merge-step`. The pour
+ *  must never reach it: a flattened merge step closes without a verdict.
+ *  `types` is what the read-back answers with. */
+const OLD_BD = (types: string) => `#!/bin/sh
+case "$1" in
+  config)
+    case "$2" in
+      get) echo '${types}' ;;
+      set) : ;;
+    esac ;;
+  mol)
+    case "$2" in
+      pour) echo 'POURED ANYWAY' >&2; exit 1 ;;
+    esac ;;
+esac
+`;
+
+function withOldBd(types: string, fn: () => void): () => void {
+  return () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-old-bd-'));
+    writeFileSync(join(dir, 'bd'), OLD_BD(types));
+    chmodSync(join(dir, 'bd'), 0o755);
+    const prev = process.env.PATH;
+    process.env.PATH = `${dir}:${prev}`;
+    try {
+      fn();
+    } finally {
+      process.env.PATH = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+describe('pourFormula', () => {
+  it(
+    'refuses to pour when the merge step type did not register',
+    { skip: process.platform === 'win32' },
+    withOldBd('agent,human', () => {
+      assert.throws(
+        () => pourFormula('ship-bead'),
+        (err: Error) => /merge-step/.test(err.message) && !/POURED ANYWAY/.test(err.message)
+      );
+    })
+  );
+
+  it(
+    'refuses to pour when the types read back space-joined — bd reads one type',
+    { skip: process.platform === 'win32' },
+    // bd parses types.custom as a comma-separated list: "agent human
+    // merge-step" is ONE type to bd, and the merge step would be
+    // flattened to task. Reading it as three would report a
+    // registration that never happened.
+    withOldBd('agent human merge-step', () => {
+      assert.throws(
+        () => pourFormula('ship-bead'),
+        (err: Error) => /could not register/.test(err.message) && !/POURED ANYWAY/.test(err.message)
+      );
+    })
+  );
+});

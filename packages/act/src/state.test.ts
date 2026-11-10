@@ -162,15 +162,16 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(h.recorded, [`Kilo Code@${SHA.slice(0, 7)}=fail`]);
   });
 
-  test('an ignored SAST check carrying failure annotations still gates — findings are must-fix', async () => {
+  test('an explicitly ignored SAST check drops its annotations from the gate', async () => {
     const rev = fakeRev([check('SonarCloud Code Analysis', 'pass')], []);
     rev.checkAnnotations = () => new Map([['SonarCloud Code Analysis', 3]]);
     const s = await fetchPrActState(rev, target, {
       ignoreChecks: ['sonarcloud'],
       checkHistory: memHistory(0),
     });
-    // a static scanner is never advisory — its annotations ARE the findings
-    assert.equal(s.sastPending, 3);
+    // the operator named the scanner advisory — an explicit rule wins
+    // over the SAST must-fix default, annotations and all
+    assert.equal(s.sastPending, 0);
     assert.deepEqual(s.alerts, []);
   });
 
@@ -185,7 +186,7 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(s.alerts, []);
   });
 
-  test('a failing ignored SAST check counts as failing — the job itself is a finding', async () => {
+  test('a failing ignored SAST check is advisory — surfaced as an alert, not a blocker', async () => {
     const s = await fetchPrActState(
       fakeRev([check('Codacy Static Code Analysis', 'fail')], []),
       target,
@@ -194,8 +195,19 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
         checkHistory: memHistory(9),
       }
     );
-    // ignore is for flaky REVIEWERS — a failed scanner job is a real
-    // project-caused failure and must hold the gate
+    // the explicit rule excludes the scanner from the gate; with no
+    // thread activity it cannot prove itself alive, so it stays loud
+    assert.equal(s.ciFailing, 0);
+    assert.equal(s.alerts.length, 1);
+    assert.match(s.alerts[0]!, /no thread activity/);
+  });
+
+  test('an unnamed SAST check still gates — the override must be explicit', async () => {
+    const s = await fetchPrActState(
+      fakeRev([check('Codacy Static Code Analysis', 'fail')], []),
+      target,
+      { checkHistory: memHistory(9) }
+    );
     assert.equal(s.ciFailing, 1);
     assert.deepEqual(s.alerts, []);
   });
@@ -432,5 +444,75 @@ describe('fetchPrActState — approval probe identity (PR 636 review)', () => {
     assert.equal(releases.length, 2);
     await Promise.all([p1, p2]);
     assert.deepEqual(seen.sort(), [['a'], ['b']]);
+  });
+});
+
+describe('fetchPrActState — the gate never counts itself', () => {
+  // The gate publishes itself as a project-side required check: while the
+  // gate job runs, its own check is pending on the PR's head SHA. A gate
+  // that counts itself waits for itself — it can never settle green, and
+  // the required context can never report success (bro-k1au2).
+
+  test('a pending self check is not counted as pending CI', async () => {
+    const s = await fetchPrActState(fakeRev([check('act-gate', 'pending')], []), target, {
+      selfCheck: 'act-gate',
+    });
+    assert.equal(s.ciPending, 0);
+  });
+
+  test('a failing self check is not counted as failing CI', async () => {
+    const s = await fetchPrActState(fakeRev([check('act-gate', 'fail')], []), target, {
+      selfCheck: 'act-gate',
+    });
+    assert.equal(s.ciFailing, 0);
+  });
+
+  test('without the setting the self check counts like any other check', async () => {
+    const s = await fetchPrActState(fakeRev([check('act-gate', 'pending')], []), target);
+    assert.equal(s.ciPending, 1);
+  });
+
+  test('the match ignores case and separator style', async () => {
+    const s = await fetchPrActState(fakeRev([check('Act Gate', 'pending')], []), target, {
+      selfCheck: 'ACT-GATE',
+    });
+    assert.equal(s.ciPending, 0);
+  });
+
+  test('the other checks still gate', async () => {
+    const s = await fetchPrActState(
+      fakeRev([check('act-gate', 'pending'), check('build-test', 'fail')], []),
+      target,
+      { selfCheck: 'act-gate' }
+    );
+    assert.equal(s.ciPending, 0);
+    assert.equal(s.ciFailing, 1);
+  });
+
+  test('an empty setting excludes nothing', async () => {
+    const s = await fetchPrActState(fakeRev([check('act-gate', 'pending')], []), target, {
+      selfCheck: '',
+    });
+    assert.equal(s.ciPending, 1);
+  });
+
+  test('a check that merely contains the name is not the gate', async () => {
+    // a substring match would drop an unrelated check from the gate —
+    // the one thing the gate must never do
+    const s = await fetchPrActState(fakeRev([check('my act gate wrapper', 'fail')], []), target, {
+      selfCheck: 'act-gate',
+    });
+    assert.equal(s.ciFailing, 1);
+  });
+
+  test('a composite workflow / job name is the gate', async () => {
+    const s = await fetchPrActState(
+      fakeRev([check('Act gate / act-gate', 'pending')], []),
+      target,
+      {
+        selfCheck: 'act-gate',
+      }
+    );
+    assert.equal(s.ciPending, 0);
   });
 });

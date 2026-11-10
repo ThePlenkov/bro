@@ -136,11 +136,39 @@ describe('sessionCapVerdict', () => {
     withReservations(dir => {
       withPlane(testPlane('twice', { live: 0 }), () => {
         const bags = { twice: { maxSessions: 1, reservationsDir: dir } };
+        // a call's identity is its toolUseId — the two hook events of
+        // one call share it; without one each event is a DISTINCT call
+        // and must claim its own slot
+        const callCtx = { dir: process.cwd(), sessionId: 'sess-1', toolUseId: 'tw-1' } as never;
+        const call = () =>
+          sessionCapVerdict(callCtx, { tool: 'bash', input: { command: 'twice-run --now' } }, bags);
         // the pre-tool event claims the slot...
-        assert.deepEqual(verdictFor('twice-run --now', bags), []);
+        assert.deepEqual(call(), []);
         // ...and the permission event for the SAME call must not count
         // its start twice (the claim is already in the live count)
-        assert.deepEqual(verdictFor('twice-run --now', bags), []);
+        assert.deepEqual(call(), []);
+      });
+    });
+  });
+
+  test('a contended admission mutex degrades to the un-locked path — the hook never stalls', () => {
+    withReservations(dir => {
+      withPlane(testPlane('fake', { live: 3 }), () => {
+        // a live holder (this pid) parks on the kind's admission mutex —
+        // the verdict must still arrive, and the cap still applies
+        writeFileSync(join(dir, 'admission.mutex'), String(process.pid), { flag: 'wx' });
+        try {
+          const verdicts = sessionCapVerdict(
+            ctx,
+            { tool: 'bash', input: { command: 'fake-run --now' } },
+            { fake: { maxSessions: 3, reservationsDir: dir } },
+            150
+          );
+          assert.equal(verdicts.length, 1);
+          assert.match(verdicts[0]!.block ?? '', /fake session quota reached/);
+        } finally {
+          rmSync(join(dir, 'admission.mutex'), { force: true });
+        }
       });
     });
   });
