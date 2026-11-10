@@ -2173,11 +2173,6 @@ function prepareSpawn(
   assertMutableConfig(dir);
   const registry = readAgentRegistry(dir);
   const existing = registry[spec.molStep];
-  const effectiveResumeSessionId =
-    spec.resumeSessionId ??
-    (existing !== undefined && existing.provider === spec.provider && spec.provider !== undefined
-      ? existing.acpSessionId
-      : undefined);
   // A batch spawn must not walk into a provider wall the fleet already
   // hit. The wall is DERIVED from the registry (spec bro-1x7p: walls
   // derived, not stored) and it is an ACCOUNT fact: one rate-limited
@@ -2219,6 +2214,15 @@ function prepareSpawn(
       : [{ provider: spec.provider, account: spec.account ?? spec.provider }]);
   const walls = spawnWalls(dir, registry, now, env, candidates);
   applySpawnRoute(spec, walls, existing, registry);
+  // computed AFTER the route walk — a routed spawn can land on a different
+  // provider than the head candidate, and the resume id is only loadable
+  // when the post-walk provider still matches the existing entry's (the
+  // same comparison commitSpawn makes)
+  const effectiveResumeSessionId =
+    spec.resumeSessionId ??
+    (existing !== undefined && existing.provider === spec.provider && spec.provider !== undefined
+      ? existing.acpSessionId
+      : undefined);
   const wallRefusal = batchWallRefusal(registry, spec, now, walls);
   if (wallRefusal !== undefined) {
     // The wall stops the whole lane, not just this admission (spec
@@ -4437,7 +4441,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             .map(([k, v]) => `export ${k}=${shQuote(v)}`)
             .join('\n');
           writePrivateFileSync(envFile, `${ambient}\n`);
-          const worker = spec.worker;
+          const worker = workerWithResume(spec.worker, resumeSessionId);
           const cliBadge = workerCliBadge(worker, command);
           const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
             ([k, v]) => ['-e', `${k}=${v}`]
