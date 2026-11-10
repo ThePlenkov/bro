@@ -41,13 +41,14 @@ import type {
   StopReason,
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
-import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { isSystemoneFamily, JudgeUnavailable, MAX_TIMER_MS, modelBase } from '@broject/core';
 import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
 import { otelEvent, otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
+import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
 import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
@@ -449,13 +450,20 @@ async function acpSessionOpen(
   opts: ProviderWireOpts,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
-  sessionRequest?: NewSessionRequest
+  sessionRequest?: NewSessionRequest,
+  gc?: AcpGuardCtx
 ) {
+  // the dead-loop guard speaks BEFORE the session opens: a refused
+  // scope costs no session and no quota (spec bro-b961a). The charge
+  // it hands back is THIS session's debt — the caller resolves it on
+  // the first completed turn; a failed open leaves it counted (that
+  // is the churn the budgets measure).
+  const charge = gc?.guard.open(gc);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError);
-  return session;
+  return { session, charge };
 }
 
 async function acpSession(
@@ -465,7 +473,7 @@ async function acpSession(
   deadline: number
 ) {
   const { asAuthError, req, caps } = await acpInit(ctx, by, deadline);
-  const session = await acpSessionOpen(ctx, opts, asAuthError, req);
+  const { session } = await acpSessionOpen(ctx, opts, asAuthError, req);
   return { session, asAuthError, req, caps };
 }
 
@@ -788,6 +796,68 @@ export const promptText = (prompt: string | ContentBlock[]): string => {
     .join('\n');
 };
 
+/** A peer refusal breaks the peer — the loop may live inside the child,
+ *  and a fresh child is the only cure for a loop that survived in the
+ *  old one. The child dies with the link; the pool respawns on the next
+ *  request. A scope refusal leaves the peer alone. */
+function breakPeer(err: unknown, peer: AcpPeer): void {
+  if (!(err instanceof AcpDeadLoopError) || err.kind !== 'peer') {
+    return;
+  }
+  try {
+    peer.close();
+  } catch {
+    // the kill is the point — one stubborn peer can't block the rest
+  }
+}
+
+/** A failed turn — the peer's own churn may now be systemic: the loop
+ *  can live inside the child, and a fresh child is the only cure for a
+ *  loop that survived in the old one. Over the peer's budget the child
+ *  dies HERE — waiting for the next open to refuse it leaves the
+ *  loop's host alive between requests. The trip is thrown in place of
+ *  the failure: it names what actually went wrong. A healthy peer is
+ *  left alone. */
+function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
+  if (gc?.peer === undefined) {
+    return;
+  }
+  const trip = gc.guard.peerTrip(gc);
+  if (trip === undefined) {
+    return;
+  }
+  breakPeer(trip, peer);
+  throw trip;
+}
+
+/** The stall bound — a turn that produces no `session/update` for this
+ *  long is ended (spec bro-b961a). The promise rejects; the caller
+ *  cancels the turn. */
+function stallWatchdog(ms: number, by: string): { promise: Promise<never>; cancel: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new JudgeUnavailable(
+            `acp ${by} unavailable — turn stalled: no session/update for ${ms}ms`
+          )
+        ),
+      ms
+    );
+    // the watchdog must not hold the event loop open
+    timer.unref?.();
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -798,7 +868,11 @@ export async function pumpTurn(
   by: string,
   parent?: OtelCtx,
   cwd?: string,
-  drainTimeoutMs?: number
+  drainTimeoutMs?: number,
+  // the silence bound — a direct caller that omits it gets the default
+  // five minutes, so a turn that never reports cannot hang forever. An
+  // explicit 0 still disables the watchdog.
+  stallMs = 300_000
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
@@ -820,12 +894,29 @@ export async function pumpTurn(
   let text = '';
   try {
     for (;;) {
-      const msg: ActiveSessionMessage = await Promise.race([
+      // the silence bound — a turn that reports nothing for stallMs is
+      // ended (spec bro-b961a). The window resets on every update, so a
+      // long tool call that reports itself is untouched.
+      // a window above Node's timer ceiling wraps and fires at once —
+      // clamp it: late is honest, instant is a stall watchdog that never
+      // waited
+      const watchdog =
+        stallMs <= 0 ? undefined : stallWatchdog(Math.min(stallMs, MAX_TIMER_MS), by);
+      const race: Array<Promise<ActiveSessionMessage>> = [
         // prompt failures surface on the queue itself — classify the
         // rejection through asAuthError the same as a direct throw
         session.nextUpdate().catch(asAuthError),
         aborted,
-      ]);
+      ];
+      if (watchdog !== undefined) {
+        race.push(watchdog.promise);
+      }
+      let msg: ActiveSessionMessage;
+      try {
+        msg = await Promise.race(race);
+      } finally {
+        watchdog?.cancel();
+      }
       if (msg.kind === 'stop') {
         traced.flush('ok');
         plane.stop(msg.stopReason, { replyLen: text.length });
@@ -962,7 +1053,10 @@ function spawnAcpChild(
   if (bin === undefined) {
     fail(new AcpConfigError(`${by}: acp command is empty`));
   }
-  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() });
+  // detached: the child leads its own process group — the pool's close
+  // must take the whole group: a backend that forked children holding
+  // an account lane frees it only when every descendant dies
+  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv(), detached: true });
   proc.unref();
   for (const s of proc.stdio) {
     (s as unknown as { unref?: () => void } | null)?.unref?.();
@@ -1045,7 +1139,17 @@ export async function acpOpen(
   const close = (): void => {
     conn.close();
     terminals.dispose();
-    child?.kill('SIGKILL');
+    if (child === undefined) {
+      return;
+    }
+    try {
+      // detached at spawn: the child leads its own group — kill the
+      // group so descendants it forked (and the lanes they hold) die
+      // with it; a group signal miss falls back to the child alone
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
   };
   // a dead transport is itself a close: pooled callers only drop their
   // peer refs on abort — without this, terminals the agent spawned (and
@@ -1235,6 +1339,13 @@ export interface PooledTurnOpts {
    *  (spec bro-ymbq1) passes the downstream client's cwd/mcpServers/
    *  _meta through instead of the synthesized {cwd, mcpServers:[]}. */
   sessionRequest?: NewSessionRequest;
+  /** The dead-loop guard (spec bro-b961a) — the conversation scope this
+   *  session belongs to and the peer behind it. Absent = the caller
+   *  does not attribute its sessions (a one-shot flow opens one). */
+  guard?: AcpGuardCtx;
+  /** The silence bound for the turn, ms — a turn that produces no
+   *  `session/update` for this long is ended (spec bro-b961a). 0 = off. */
+  stallMs?: number;
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1263,7 +1374,14 @@ export async function acpPooledTurn(
   };
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const { session, charge } = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
       sessSpan.end({ 'acp.session_id': session.sessionId, ...a });
     try {
@@ -1289,8 +1407,12 @@ export async function acpPooledTurn(
         by,
         sessSpan.ctx,
         opts.acp?.cwd,
-        3_000
+        3_000,
+        turn.stallMs
       );
+      // the turn answered — the session's own charge settles (spec
+      // bro-b961a); a failed turn leaves it counted as abandoned
+      charge?.resolve();
       endSession();
       end({
         'acp.session_id': session.sessionId,
@@ -1310,6 +1432,15 @@ export async function acpPooledTurn(
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
     end({ error: errMsg(err) }, 'error');
+    if (err instanceof AcpDeadLoopError) {
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
+      throw err;
+    }
+    // a stalled or failed turn counts against the peer the same — over
+    // budget the loop lives in the child: kill it BEFORE the failure
+    // surfaces, or further requests keep opening sessions on it
+    guardFail(turn.guard, peer);
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
@@ -1366,7 +1497,14 @@ export async function acpSessionRetain(
     { parent: turn.parent }
   );
   try {
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const { session, charge } = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const configOptions = session.newSessionResponse.configOptions ?? [];
     const base = opts.model ?? entry.model;
     // the RAW requested id (possibly a composite like 'swe-2-max') —
@@ -1415,7 +1553,11 @@ export async function acpSessionRetain(
      *  JudgeUnavailable naming the backend and the last transport
      *  lines. */
     const classifyWire = (err: unknown): Error => {
-      if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      if (
+        err instanceof JudgeUnavailable ||
+        err instanceof AcpConfigError ||
+        err instanceof AcpDeadLoopError
+      ) {
         return err;
       }
       const tail = peer.tail();
@@ -1470,8 +1612,16 @@ export async function acpSessionRetain(
             r2,
             t.signal,
             by,
-            t.parent
+            t.parent,
+            undefined,
+            undefined,
+            t.stallMs ?? turn.stallMs
           );
+          // the session opened once — its own charge settles on the
+          // first turn that answers. resolve() is idempotent: a later
+          // prompt must not decrement another session's charge (spec
+          // bro-b961a)
+          charge?.resolve();
           return { ...r, model: effective };
         } catch (err) {
           // a failed turn leaves the session's context in doubt — the
@@ -1482,6 +1632,12 @@ export async function acpSessionRetain(
           } catch {
             // already gone — the drop is the point
           }
+          if (err instanceof AcpDeadLoopError) {
+            breakPeer(err, peer);
+          } else {
+            // the peer's churn may now be systemic — kill it and name it
+            guardFail(turn.guard, peer);
+          }
           throw classifyWire(err);
         }
       },
@@ -1491,6 +1647,14 @@ export async function acpSessionRetain(
     };
   } catch (err) {
     span.end({ error: errMsg(err) }, 'error');
+    if (err instanceof AcpDeadLoopError) {
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
+      throw err;
+    }
+    // the peer's churn may now be systemic — a failed retain still
+    // counts against it (the open was measured): kill it and name it
+    guardFail(turn.guard, peer);
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }

@@ -31,6 +31,7 @@ export {
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
+  worktreePathFor,
   worktreeGitDir,
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
@@ -77,6 +78,7 @@ export {
   js,
   loadConfig,
   loadConfigLayers,
+  MAX_TIMER_MS,
   mcpSection,
   meshSection,
   mirrorSection,
@@ -365,6 +367,7 @@ export {
   preToolVerdicts,
   promptContextLines,
   registerConnector,
+  unregisterConnector,
   reviewHost,
   specStore,
   sessionPinnedClaims,
@@ -547,6 +550,17 @@ export type {
   SessionQuota,
 } from './session-planes.ts';
 export {
+  clearExternalPlanes,
+  externalPlanes,
+  ownedEnviron,
+  registerExternalPlane,
+} from './external-planes.ts';
+export type {
+  ExternalActivity,
+  ExternalActivityPlane,
+  ExternalProbeCtx,
+} from './external-planes.ts';
+export {
   admitSessionStart,
   admitSessionStartAsync,
   planeStartingSessions,
@@ -619,9 +633,17 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
-export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export {
+  EXIT,
+  EXIT_CODES,
+  hasHelpFlag,
+  passthroughExitCode,
+  printUsage,
+  usageWriter,
+} from './exits.ts';
 export { deprecatedFlag, flag, flagAll, flagValue, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
+export { CommandError, isCommandError } from './errors.ts';
 export {
   groupMemberAlive,
   handleOwner,

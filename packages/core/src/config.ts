@@ -991,6 +991,11 @@ function serveClients(raw: unknown): ServeClients | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Node's timer ceiling — a delay above it wraps and fires at once, so
+ *  a window above the ceiling would be instant instead of late. Every
+ *  window that reaches a timer is clamped to it. */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 export const serveSection: ConfigSection<{
   backend?: string;
   providers?: ServeProviders;
@@ -999,6 +1004,13 @@ export const serveSection: ConfigSection<{
   client?: ServeClients;
   fastModel?: string;
   fastLane?: boolean;
+  idleReleaseMs?: number;
+  /** The dead-loop budgets (spec bro-b961a) — sessions opened without a
+   *  completed turn, per conversation and per peer. */
+  acpMaxOpens?: number;
+  acpMaxAbandoned?: number;
+  /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
+  acpStallMs?: number;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1008,6 +1020,10 @@ export const serveSection: ConfigSection<{
     client?: unknown;
     fastModel?: unknown;
     fastLane?: unknown;
+    idleReleaseMs?: unknown;
+    acpMaxOpens?: unknown;
+    acpMaxAbandoned?: unknown;
+    acpStallMs?: unknown;
   };
   const out: {
     backend?: string;
@@ -1017,6 +1033,10 @@ export const serveSection: ConfigSection<{
     client?: ServeClients;
     fastModel?: string;
     fastLane?: boolean;
+    idleReleaseMs?: number;
+    acpMaxOpens?: number;
+    acpMaxAbandoned?: number;
+    acpStallMs?: number;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1032,6 +1052,24 @@ export const serveSection: ConfigSection<{
   const fastModel = trimmedField(obj.fastModel);
   if (fastModel !== undefined) out.fastModel = fastModel;
   if (typeof obj.fastLane === 'boolean') out.fastLane = obj.fastLane;
+  // the idle window — 0 disables the release, a negative or fractional
+  // value is not a window at all (the loader drops it, the default wins),
+  // and a window above the timer ceiling is clamped (late, not instant)
+  if (typeof obj.idleReleaseMs === 'number' && Number.isInteger(obj.idleReleaseMs)) {
+    if (obj.idleReleaseMs >= 0) out.idleReleaseMs = Math.min(obj.idleReleaseMs, MAX_TIMER_MS);
+  }
+  // the churn budgets — a budget is a COUNT, so a fractional or
+  // non-positive value is not a budget (the loader drops it, the
+  // default wins); the silence bound is a window and 0 disables it
+  if (typeof obj.acpMaxOpens === 'number' && Number.isInteger(obj.acpMaxOpens)) {
+    if (obj.acpMaxOpens > 0) out.acpMaxOpens = obj.acpMaxOpens;
+  }
+  if (typeof obj.acpMaxAbandoned === 'number' && Number.isInteger(obj.acpMaxAbandoned)) {
+    if (obj.acpMaxAbandoned > 0) out.acpMaxAbandoned = obj.acpMaxAbandoned;
+  }
+  if (typeof obj.acpStallMs === 'number' && Number.isInteger(obj.acpStallMs)) {
+    if (obj.acpStallMs >= 0) out.acpStallMs = Math.min(obj.acpStallMs, MAX_TIMER_MS);
+  }
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1058,6 +1096,14 @@ serveSection.jsonSchema = js.obj({
   ),
   fastModel: js.str,
   fastLane: js.bool,
+  // the idle window — 0 disables the release; a negative window is not
+  // a window at all
+  idleReleaseMs: js.int(0),
+  // the churn budgets (spec bro-b961a) — counts, so the floor is 1
+  acpMaxOpens: js.int(1),
+  acpMaxAbandoned: js.int(1),
+  // the silence bound — 0 disables the watchdog
+  acpStallMs: js.int(0),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1417,6 +1463,36 @@ export const mcpSection: ConfigSection<{ planes?: string[] }> = raw => {
 
 mcpSection.jsonSchema = js.obj({ planes: js.strList });
 
+/** bro.config.json `spawn` section — the spawn guard's own knobs (spec
+ *  bro-eqi2d): `externalBlock` arms the external-agent exclusion at
+ *  every `prepareSpawn` path, `externalIdleSec` is the idle window a
+ *  foreign session's proven activity must sit inside to hold the guard.
+ *  Defaults arm the guard — a shared account is the common case; the
+ *  opt-out is explicit. */
+export const spawnSection: ConfigSection<{
+  externalBlock: boolean;
+  externalIdleSec: number;
+}> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    externalBlock?: unknown;
+    externalIdleSec?: unknown;
+  };
+  return {
+    externalBlock: obj.externalBlock !== false,
+    externalIdleSec:
+      typeof obj.externalIdleSec === 'number' &&
+      Number.isFinite(obj.externalIdleSec) &&
+      obj.externalIdleSec > 0
+        ? obj.externalIdleSec
+        : DEFAULT_CONFIG.spawn.externalIdleSec,
+  };
+};
+
+spawnSection.jsonSchema = js.obj({
+  externalBlock: js.bool,
+  externalIdleSec: { type: 'number', exclusiveMinimum: 0 },
+});
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. Exported for the schema
  *  registry in config-schema.ts (spec: bro-d9dmx) — the .jsonSchema
@@ -1432,6 +1508,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
+  spawn: spawnSection as ConfigSection<unknown>,
   mesh: meshSection as ConfigSection<unknown>,
   mcp: mcpSection as ConfigSection<unknown>,
   mirror: mirrorSection as ConfigSection<unknown>,
@@ -1562,6 +1639,12 @@ export interface BroConfig {
    *  own field overrides (default 4); `env` is the global literal
    *  overlay applied under each step's `env`. */
   query: { concurrency: number; env: Record<string, string> };
+  /** Spawn-guard knobs (spec bro-eqi2d). `externalBlock` arms the
+   *  external-agent exclusion — bro refuses to start a session while an
+   *  agent it does not own is actively working (default true).
+   *  `externalIdleSec` is the idle window: an external session whose
+   *  proven activity is older releases the guard (default 480s). */
+  spawn: { externalBlock: boolean; externalIdleSec: number };
   /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
    *  identity when origin doesn't derive one; `peers` maps alias →
    *  { rig, remote, transport? } — remote is the git URL the peer's
@@ -1591,6 +1674,16 @@ export interface BroConfig {
     apiKeyEnv?: string;
     fastModel?: string;
     fastLane?: boolean;
+    /** The idle window — the pooled peer is released after it (spec
+     *  bro-7ira8). 0 disables the release. */
+    idleReleaseMs?: number;
+    /** The dead-loop budgets (spec bro-b961a) — sessions opened and not
+     *  completed, per conversation (acpMaxOpens) and per peer
+     *  (acpMaxAbandoned). */
+    acpMaxOpens?: number;
+    acpMaxAbandoned?: number;
+    /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
+    acpStallMs?: number;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
@@ -1644,6 +1737,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     leases: { roleTtlSeconds: 60, workTtlMinutes: 360 },
   },
   query: { concurrency: 4, env: {} },
+  spawn: { externalBlock: true, externalIdleSec: 480 },
   mesh: { peers: {} },
   mcp: {},
   serve: {},

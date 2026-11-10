@@ -522,6 +522,11 @@ const gitConnector: Connector = {
 
 const registry: Connector[] = [beadsConnector, gitConnector];
 
+/** Names that were in the registry at boot — unregisterConnector refuses
+ *  to drop them: removing a built-in breaks facade resolution for every
+ *  caller. */
+const builtinConnectorNames = new Set(registry.map(x => x.name));
+
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
  *  names are skipped — a plugin cannot shadow a built-in system. */
 export function registerConnector(c: Connector): void {
@@ -530,6 +535,19 @@ export function registerConnector(c: Connector): void {
     return;
   }
   registry.push(c);
+}
+
+/** Remove a previously registered plugin connector by name — test
+ *  cleanup counterpart to registerConnector. Built-in connectors
+ *  (beads, git) are not removable through this. */
+export function unregisterConnector(name: string): void {
+  if (builtinConnectorNames.has(name)) {
+    return;
+  }
+  const idx = registry.findIndex(x => x.name === name);
+  if (idx >= 0) {
+    registry.splice(idx, 1);
+  }
 }
 
 export function connectors(): readonly Connector[] {
@@ -773,6 +791,9 @@ export function facadeAuth<K extends keyof FacadeMap>(
 
 /** Hard auth gate for commands — exits(1) with the remediation line when
  *  the resolved connector isn't usable. */
+import { CommandError } from './errors.ts';
+import { EXIT } from './exits.ts';
+
 export function ensureAuth<K extends keyof FacadeMap>(
   kind: K,
   ctx: ConnectorCtx,
@@ -780,8 +801,7 @@ export function ensureAuth<K extends keyof FacadeMap>(
 ): void {
   const msg = facadeAuth(kind, ctx, opts);
   if (msg) {
-    console.error(`error: ${msg}`);
-    process.exit(1);
+    throw new CommandError(`error: ${msg}`, EXIT.error);
   }
 }
 

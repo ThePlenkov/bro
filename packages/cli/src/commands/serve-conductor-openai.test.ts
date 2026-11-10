@@ -1205,3 +1205,30 @@ describe('serve /v1/* openai — keepalive', () => {
     }
   });
 });
+
+describe('serve /v1/* openai — the dead-loop refusal', () => {
+  test('a churning conversation is refused with 429 + retry-after in BOTH dialects', async () => {
+    // one mapping, both routes: the refusal is the guard's cooldown, not
+    // a quota wall — the client waits and tries again
+    const fake = fakeAcpAgent({ failPrompt: 'generic' });
+    const { post, close } = await boot(fake, { ...CFG, acpMaxOpens: 1 });
+    try {
+      // the first turn opens a session and answers nothing
+      const first = await post('/v1/responses', { input: 'x', stream: false });
+      assert.notEqual(first.status, 429);
+      // the second crosses the churn budget — the refusal costs no session
+      const second = await post('/v1/responses', { input: 'x', stream: false });
+      assert.equal(second.status, 429);
+      assert.equal(second.headers.get('retry-after'), '60');
+      // the other dialect refuses the same way
+      const chat = await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      });
+      assert.equal(chat.status, 429);
+      assert.equal(chat.headers.get('retry-after'), '60');
+    } finally {
+      await close();
+    }
+  });
+});
