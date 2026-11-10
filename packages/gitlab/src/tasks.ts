@@ -365,8 +365,13 @@ function getIssueSync(
       gopts(dir)
     );
     return issue;
-  } catch {
-    return undefined;
+  } catch (err) {
+    // a missing issue reads as undefined — transport/auth failures
+    // don't get to masquerade as "not found" (kilo #834)
+    if (err instanceof Error && /\b404\b|not found/i.test(err.message)) {
+      return undefined;
+    }
+    throw err;
   }
 }
 
@@ -619,7 +624,10 @@ function closeSync(dir: string, id: string, reason?: string): void {
 
 function removeSync(dir: string, id: string): void {
   const ref = parseIssueRef(dir, id);
-  glabTry(['api', '-X', 'DELETE', api(ref.projectPath, `issues/${ref.iid}`)], gopts(dir));
+  const r = glabTry(['api', '-X', 'DELETE', api(ref.projectPath, `issues/${ref.iid}`)], gopts(dir));
+  if (r.code !== 0) {
+    throw new Error(`gitlab tasks: failed to remove ${id} — ${r.err || r.out || `exit ${r.code}`}`);
+  }
 }
 
 // --- relations/deps ------------------------------------------------------------
