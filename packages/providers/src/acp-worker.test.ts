@@ -94,21 +94,15 @@ describe('acpWorkerArgv', () => {
     assert.ok(!argv.includes('--auto-approve'));
   });
 
-  test('sessionRm rides --session-rm verbatim; the flag value overrides the entry pin', () => {
+  test('sessionRm never rides the worker argv — it renders at PR settlement (bro-5qsnr)', () => {
     const entry = {
       type: 'acp' as const,
       command: 'devin acp',
       sessionRm: 'devin rm {sessionId} --force',
     };
     const argv = acpWorkerArgv(['bro'], entry);
-    const i = argv.indexOf('--session-rm');
-    assert.equal(argv[i + 1], 'devin rm {sessionId} --force');
-
-    const over = acpWorkerArgv(['bro'], entry, { sessionRm: 'rm -f {sessionId}.lock' });
-    assert.equal(over[over.indexOf('--session-rm') + 1], 'rm -f {sessionId}.lock');
-
-    const none = acpWorkerArgv(['bro'], { type: 'acp', command: 'devin acp' });
-    assert.ok(!none.includes('--session-rm'));
+    assert.ok(!argv.includes('--session-rm'));
+    assert.ok(!argv.some(a => a.includes('sessionId')));
   });
 
   test('mcpServers never reach argv — descriptors ride the worker payload to a 0600 file', () => {
@@ -397,21 +391,110 @@ describe('runAcpWorker', () => {
     }
   });
 
-  test('sessionRm arms a deferred cleanup substituting {sessionId}', async () => {
-    const fake = fakeAcpAgent({ replyText: 'done' });
-    const { spec, lines, dir } = workerSpec({ peer: fake.app });
-    spec.sessionRm = `touch ${join(dir, 'removed-{sessionId}')}`;
+  test('a resumeSessionId rides session/load — the SAME session id records back (bro-5qsnr)', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'done',
+      loadCapable: true,
+      configOptions: [MODEL_OPTION],
+    });
+    const recorded: { acpSessionId?: string; model?: string }[] = [];
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+      record: p => recorded.push(p),
+    });
     try {
       assert.equal(await runAcpWorker(spec), 0);
-      assert.match(lines.join('\n'), /cleanup armed — deferred/);
-      // the detached retrier sleeps before its first attempt — poll
-      // for the marker file instead of sleeping a fixed beat
-      const marker = join(dir, 'removed-sess-1');
-      const deadline = Date.now() + 15_000;
-      while (!existsSync(marker) && Date.now() < deadline) {
-        await new Promise(res => setTimeout(res, 500));
-      }
-      assert.ok(existsSync(marker), 'deferred cleanup ran the template');
+      // load, never new — the coder's own session got the follow-up turn
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
+      assert.equal(fake.sessions.length, 0);
+      assert.deepEqual(fake.prompts, ['PROMPT-TEXT']);
+      // the registry records the RESUMED id — before/after identity is
+      // the acceptance check
+      assert.deepEqual(recorded[0], { acpSessionId: 'sess-old' });
+      assert.match(lines.join('\n'), /resumes session sess-old/);
+      assert.match(lines.join('\n'), /turn stopped — end_turn/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sessionCapabilities.resume agents take session/resume — the ladder's second rung", async () => {
+    const fake = fakeAcpAgent({ replyText: 'done', resumeCapable: true });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.resumes, ['sess-old']);
+      assert.equal(fake.sessions.length, 0);
+      assert.match(lines.join('\n'), /resumes session sess-old/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('loadSession beats resume when both are advertised', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'done',
+      loadCapable: true,
+      resumeCapable: true,
+    });
+    const { spec, dir } = workerSpec({ peer: fake.app, resumeSessionId: 'sess-old' });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
+      assert.equal(fake.resumes.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('no advertised capability falls back to session/new — a cold fixer is the floor', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const recorded: { acpSessionId?: string; model?: string }[] = [];
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+      record: p => recorded.push(p),
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.equal(fake.loads.length, 0);
+      assert.equal(fake.sessions.length, 1);
+      assert.deepEqual(recorded[0], { acpSessionId: 'sess-1' });
+      assert.match(lines.join('\n'), /not resumable/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a gone session falls back to session/new — the resume failure is a log line, never a spawn failure', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done', loadCapable: true, failLoad: true });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.loads, [{ sessionId: 'sess-old', cwd: dir }]);
+      assert.equal(fake.sessions.length, 1);
+      assert.match(lines.join('\n'), /resume failed.*fresh session/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('worker exit runs no session cleanup — the session outlives the worker by design (bro-5qsnr)', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.ok(!lines.some(l => l.includes('cleanup')));
+      // nothing armed means nothing runs — the settle helper owns
+      // session death now; give a would-be retrier no surface at all
+      assert.equal(existsSync(join(dir, 'removed-sess-1')), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -171,6 +171,7 @@ import {
   resolveSpawnProvider,
   resolveSpawnRoute,
   sessionQuotaOf,
+  settleAcpSessions,
   type AgentConnectorEnv,
   type SpawnProviderPick,
 } from '../agent-connectors.ts';
@@ -551,6 +552,30 @@ export async function resolveLoopLane(
     ...(route === undefined ? {} : { class: route.class }),
     ...(routeSpec === undefined ? {} : { route: routeSpec }),
   };
+}
+
+/** Donor lookup — a recorded `acpSessionId` rides again only when the
+ *  fixer's lane is the same provider + an argv (acp) worker, so a
+ *  foreign provider or a template lane never receives a meaningless
+ *  id (spec bro-5qsnr §3-4). A corrupt registry reads as "no session"
+ *  rather than throwing past the claim. */
+export function resumeSessionFor(
+  ctx: { root: string },
+  molStep: string,
+  lane: { provider?: string; worker?: SpawnWorker } | undefined
+): string | undefined {
+  try {
+    const reg = readAgentRegistry(ctx.root);
+    const entry = reg[molStep];
+    if (entry === undefined) return undefined;
+    const id = entry.acpSessionId;
+    if (typeof id !== 'string' || id === '') return undefined;
+    if (lane?.provider === undefined || entry.provider !== lane.provider) return undefined;
+    if (lane.worker?.kind !== 'argv') return undefined;
+    return id;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -1491,6 +1516,15 @@ async function finalizeMerge(
     }
     const meta = ctx.rev.prMeta({ repo: ctx.repo, pr });
     if (meta.state !== 'MERGED') {
+      // a CLOSED PR settled without merging — its sessions are done; an
+      // OPEN park keeps the session alive for the next round
+      if (meta.state === 'CLOSED') {
+        try {
+          settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+        } catch {
+          // advisory
+        }
+      }
       parkBeads(
         ctx,
         beads,
@@ -1518,6 +1552,11 @@ async function finalizeMerge(
       `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     );
     return 'parked';
+  }
+  try {
+    settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+  } catch {
+    // advisory
   }
   settleClump(ctx, beads, item, pr);
   // a process rooted in the tree (a serve, a watcher, a leftover agent)

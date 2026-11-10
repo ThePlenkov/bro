@@ -324,6 +324,45 @@ describe('bro agents prune', () => {
       fx.restore();
     }
   });
+
+  // bro-5qsnr review: an adhoc `agents run` worker's acp session id only
+  // lives in the registry row — reaping it first would strand the
+  // provider session forever, so prune settles before the rows go
+  test("a reaped row's recorded acp session settles while the id is still on file", async () => {
+    const fx = fixture();
+    try {
+      const gone = join(fx.root, 'session-gone');
+      writeFileSync(
+        join(fx.main, 'bro.config.local.json'),
+        JSON.stringify({
+          providers: {
+            p: { type: 'acp', command: 'x', sessionRm: `touch ${gone}` },
+          },
+        })
+      );
+      const dead = spawnSync('true').pid!;
+      writeAgentRegistry(fx.main, {
+        'fx-acp': {
+          agentId: 'native-acp',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 0,
+          provider: 'p',
+          acpSessionId: 'sess-1',
+        },
+      });
+      const r = await agents(['prune']);
+      assert.equal(r.code, 0, r.err.join('\n'));
+      assert.deepEqual(readAgentRegistry(fx.main), {});
+      // the rm render is a detached sh — poll for the side effect
+      await until(() => existsSync(gone));
+      assert.ok(existsSync(gone), 'sessionRm ran before the row was reaped');
+    } finally {
+      fx.restore();
+    }
+  });
 });
 
 describe('bro agents up|down — supervisor verb', () => {

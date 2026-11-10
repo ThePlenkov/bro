@@ -540,6 +540,7 @@ describe('parseSpawnBody', () => {
       profile: undefined,
       class: undefined,
       autoApprove: undefined,
+      resumeSessionId: undefined,
     });
   });
 

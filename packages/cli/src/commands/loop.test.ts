@@ -1,8 +1,11 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
+  agentRegistryPath,
   bdTry,
+  patchAgentRegistry,
   resolveStepClass,
   SpawnError,
   type FleetProfile,
@@ -19,6 +22,7 @@ import {
   loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
+  resumeSessionFor,
   skipLeasedBeads,
   wallWaitUntil,
 } from './loop.ts';
@@ -515,5 +519,54 @@ describe('claimAuthorityNote', () => {
     assert.match(note, /one credential claims as the same identity/);
     assert.match(note, /one loop on this backlog/);
     assert.match(note, /exclusive-claim store/);
+  });
+});
+
+describe("resumeSessionFor — the coder's own session rides again (bro-5qsnr)", () => {
+  const argvLane = {
+    provider: 'devin',
+    worker: { kind: 'argv' as const, argv: ['bro', 'acp-worker'], cliName: 'devin' },
+  };
+
+  test('same provider + argv worker + recorded id resumes; every other shape stays cold', () => {
+    const { root, main } = initRepo('bro-loop-resume-');
+    inside(main, root, () => {
+      // agentId+backend or the registry reader drops the row as torn
+      patchAgentRegistry(main, 'bro-x1', {
+        agentId: 'native-deadbeef',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+        provider: 'devin',
+        acpSessionId: 'sess-1',
+        worktree: main,
+      });
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), 'sess-1');
+      // a provider switch feeds a foreign agent a meaningless id — cold
+      assert.equal(
+        resumeSessionFor({ root: main }, 'bro-x1', { ...argvLane, provider: 'kilo' }),
+        undefined
+      );
+      // no argv worker — a template lane has no --resume surface
+      assert.equal(
+        resumeSessionFor({ root: main }, 'bro-x1', {
+          provider: 'devin',
+          worker: { kind: 'template', command: 'devin -p {promptFile}' },
+        }),
+        undefined
+      );
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', {}), undefined);
+      // nothing recorded — a bead that never ran acp
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x2', argvLane), undefined);
+    });
+  });
+
+  test('a corrupt agents.json is "no session" — never a throw past the claim', () => {
+    const { root, main } = initRepo('bro-loop-resume-');
+    inside(main, root, () => {
+      const reg = agentRegistryPath(main)!;
+      mkdirSync(dirname(reg), { recursive: true });
+      writeFileSync(reg, '{not json');
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), undefined);
+    });
   });
 });

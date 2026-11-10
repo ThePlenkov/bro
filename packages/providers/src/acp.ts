@@ -883,6 +883,12 @@ export async function pumpTurn(
   // explicit 0 still disables the watchdog.
   stallMs = 300_000
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
+  // an already-cancelled caller never gets a turn — the prompt send
+  // below would start billable agent work the later abort race can only
+  // interrupt mid-flight (tools may already have run)
+  if (signal?.aborted === true) {
+    throw new JudgeUnavailable(`${by}: caller aborted the turn`);
+  }
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
   plane.start(promptText(prompt));
@@ -1787,7 +1793,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`;
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
+  opts: { model?: string; autoApprove?: boolean } = {}
 ): string[] {
   const command =
     entry.profile === undefined
@@ -1801,10 +1807,8 @@ export function acpWorkerArgv(
   if (opts.autoApprove ?? entry.autoApprove) {
     argv.push('--auto-approve');
   }
-  const sessionRm = opts.sessionRm ?? entry.sessionRm;
-  if (sessionRm !== undefined) {
-    argv.push('--session-rm', sessionRm);
-  }
+  // sessionRm never rides the worker argv — the template renders at
+  // PR settlement via settleAcpSessions (spec bro-5qsnr)
   return argv;
 }
 
