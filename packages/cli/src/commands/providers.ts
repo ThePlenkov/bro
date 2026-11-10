@@ -9,7 +9,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   brouterStaticCatalog,
   hasHelpFlag,
@@ -100,9 +100,8 @@ function readConfigJson(path: string): Record<string, unknown> {
     }
     return raw;
   } catch (err) {
-    die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  throw new Error('unreachable');
 }
 
 const PRESETS: Record<string, { command: string }> = {
@@ -330,15 +329,20 @@ function parseAddArgs(argv: string[]): ParsedAdd {
   return { preset, name, global, force };
 }
 
-function getAddConfigPath(global: boolean): string {
-  const cwd = process.cwd();
-  const dir = global ? globalConfigDir() : cwd;
+/** Shadow check for `bro providers add` — returns the conflicting
+ *  .ts path when a TypeScript config would shadow the .json write. */
+function addConfigShadow(global: boolean, dir: string): string | undefined {
   if (!global && hasBroConfigTs(dir)) {
-    die(`bro.config.ts shadows bro.config.json — edit providers in ${join(dir, 'bro.config.ts')}`);
+    return join(dir, 'bro.config.ts');
   }
   if (global && existsSync(join(dir, 'config.ts'))) {
-    die(`config.ts shadows config.json — edit providers in ${join(dir, 'config.ts')}`);
+    return join(dir, 'config.ts');
   }
+  return undefined;
+}
+
+function getAddConfigPath(global: boolean): string {
+  const dir = global ? globalConfigDir() : process.cwd();
   return global ? globalConfigJsonPath() : projectConfigPath(dir);
 }
 
@@ -353,6 +357,18 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     die(`unknown preset ${presetName} — available: ${Object.keys(PRESETS).join(', ')}`);
   }
   const providerName = parsed.name ?? presetName;
+  if (!/^(?!__proto__$|constructor$|prototype$)[A-Za-z0-9][\w.-]*$/.test(providerName)) {
+    die(
+      `unsafe provider name ${JSON.stringify(providerName)} — use [A-Za-z0-9._-], not __proto__/constructor/prototype`
+    );
+  }
+  const dir = parsed.global ? globalConfigDir() : process.cwd();
+  const shadow = addConfigShadow(parsed.global, dir);
+  if (shadow !== undefined) {
+    die(
+      `${basename(shadow)} shadows ${basename(shadow, '.ts')}.json — edit providers in ${shadow}`
+    );
+  }
   const path = getAddConfigPath(parsed.global);
   return withFileLock(`${path}.lock`, () => {
     const cfg = readConfigJson(path);
