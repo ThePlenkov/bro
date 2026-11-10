@@ -273,9 +273,12 @@ function agentAttention(rows: FleetRow[]): string[] {
  *  `worker.silent` bus emit (bro-294hf); null when the run is dead,
  *  unverifiable, or still under the bound. */
 export function silentRunMin(loop: WatchLoop, r: LoopRunView): number | null {
-  return loop.stallMin > 0 && r.state !== 'dead' && r.silentMs !== null && r.silentMs >= loop.stallMin * 60_000
+  return loop.stallMin > 0 &&
+    r.state !== 'dead' &&
+    r.silentMs !== null &&
+    r.silentMs >= loop.stallMin * 60_000
     ? Math.floor(r.silentMs / 60_000)
-    : null
+    : null;
 }
 
 /** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
@@ -318,30 +321,30 @@ function prAttention(prs: WatchPrGate[]): string[] {
  *  agentId resolves best-effort off the registry; a run the registry
  *  never claimed still emits keyed on its beadId. */
 function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
-  pruneSilentSeen(snap.loop.runs, seen)
-  let reg: ReturnType<typeof readAgentRegistry> | undefined
+  pruneSilentSeen(snap.loop.runs, seen);
+  let reg: ReturnType<typeof readAgentRegistry> | undefined;
   const registry = (): ReturnType<typeof readAgentRegistry> => {
     if (reg === undefined) {
       try {
-        reg = readAgentRegistry(dir)
+        reg = readAgentRegistry(dir);
       } catch {
-        reg = {} // a wedged registry is no agentId, never a dead tick
+        reg = {}; // a wedged registry is no agentId, never a dead tick
       }
     }
-    return reg
-  }
+    return reg;
+  };
   for (const r of snap.loop.runs) {
-    trackSilentTransition(dir, snap.loop, r, seen, registry)
+    trackSilentTransition(dir, snap.loop, r, seen, registry);
   }
 }
 
 /** A run that ended while silent leaves no row to re-clear its entry —
  *  prune gone beads or a respawn on the same bead can never emit again. */
 function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
-  const live = new Set(runs.map(r => r.beadId))
+  const live = new Set(runs.map(r => r.beadId));
   for (const beadId of seen) {
     if (!live.has(beadId)) {
-      seen.delete(beadId)
+      seen.delete(beadId);
     }
   }
 }
@@ -355,16 +358,16 @@ function trackSilentTransition(
   seen: Set<string>,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const silentMin = silentRunMin(loop, r)
+  const silentMin = silentRunMin(loop, r);
   if (silentMin === null) {
-    seen.delete(r.beadId)
-    return
+    seen.delete(r.beadId);
+    return;
   }
   if (seen.has(r.beadId)) {
-    return
+    return;
   }
-  seen.add(r.beadId)
-  emitRunSilent(dir, r, silentMin, registry)
+  seen.add(r.beadId);
+  emitRunSilent(dir, r, silentMin, registry);
 }
 
 /** One run past its silence bound → a keyed `worker.silent` envelope.
@@ -376,13 +379,15 @@ function emitRunSilent(
   silentMin: number,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const entry = registry()[r.beadId]
+  const entry = registry()[r.beadId];
   emitWorkerSilent(dir, {
     bead: r.beadId,
     silentMin,
-    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== ''
+      ? { agentId: entry.agentId }
+      : {}),
     ...(r.log !== undefined ? { log: r.log } : {}),
-  })
+  });
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every
