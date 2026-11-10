@@ -13,16 +13,16 @@
  * retarget) rewrites branches a live session may be working in, so it
  * stays an explicit `bro stack sync` (spec bro-awbgd).
  */
-import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { gitTry } from '@broject/core'
-import { parseStackBranch } from '@broject/stack'
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { gitTry } from '@broject/core';
+import { parseStackBranch } from '@broject/stack';
 
 /** The stack a branch belongs to — undefined when the branch is not a
  *  stack member. */
 export function stackNameOfBranch(branch: string): string | undefined {
-  return parseStackBranch(branch)?.name
+  return parseStackBranch(branch)?.name;
 }
 
 /** The repo's MAIN worktree — where bro's config and plugins live. A
@@ -30,9 +30,9 @@ export function stackNameOfBranch(branch: string): string | undefined {
  *  older revision and an untracked plugin is simply absent, so the
  *  registration runs where every other bro invocation runs. */
 function mainWorktreeDir(dir: string): string {
-  const out = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']).out
-  const first = out.split('\n').find((l) => l.startsWith('worktree '))
-  return first?.slice('worktree '.length).trim() ?? dir
+  const out = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']).out;
+  const first = out.split('\n').find(l => l.startsWith('worktree '));
+  return first?.slice('worktree '.length).trim() ?? dir;
 }
 
 /** The detached child: the CLI's own entry, unref'd, so the hook never
@@ -42,9 +42,9 @@ function spawnStackPublish(entry: string, cwd: string, name: string): void {
     cwd,
     detached: true,
     stdio: 'ignore',
-  })
-  child.on('error', () => {})
-  child.unref()
+  });
+  child.on('error', () => {});
+  child.unref();
 }
 
 /** The hook half: a member's PR landed — register the chain with the
@@ -56,17 +56,17 @@ export function maybeSpawnStackPublish(
   entry: string | undefined = process.argv[1]
 ): void {
   try {
-    const branch = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
-    const name = stackNameOfBranch(branch)
+    const branch = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
+    const name = stackNameOfBranch(branch);
     if (name === undefined) {
-      return
+      return;
     }
     // the child runs in the MAIN worktree — a relative entry would be
     // resolved against THAT directory, and the child would find no CLI
     if (entry === undefined || !existsSync(entry)) {
-      return
+      return;
     }
-    spawnFn(resolve(entry), mainWorktreeDir(dir), name)
+    spawnFn(resolve(entry), mainWorktreeDir(dir), name);
   } catch {
     // registration never affects the agent — silence is the contract
   }

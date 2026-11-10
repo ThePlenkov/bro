@@ -19,12 +19,6 @@
       "skillPath": "skills/guiding-refactoring-with-code-health/SKILL.md",
       "computedHash": "22d342392a555cfa0acbce6798771f803f81a78767e8ac41edb5c2667d52dac9"
     },
-    "herdr": {
-      "source": "herdrdev/herdr",
-      "sourceType": "github",
-      "skillPath": "skills/herdr/SKILL.md",
-      "computedHash": "72177e911f55467de8737174072ec6bb08e30bbf62bceabcb69678e944398b18"
-    },
     "installing-and-activating-codescene-mcp": {
       "source": "codescene-oss/codescene-mcp-server",
       "sourceType": "github",

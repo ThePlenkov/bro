@@ -15,7 +15,7 @@ description = "The bead id to ship"
 required = true
 
 [vars.merge]
-description = "Merge mode: 'auto' lands the PR through bro act wait --merge (armed in-session or by a driver — the convoy/orchestration default; fixer/driver covers post-exit review rounds). 'human' pours a human merge gate instead."
+description = "Merge mode: 'auto' lands the PR through the project's own auto-merge (armed at PR creation) with the act gate as a required check — the convoy/orchestration default; 'human' pours a human merge gate instead."
 required = false
 default = "auto"
 enum = ["auto", "human"]
@@ -58,19 +58,30 @@ and resolve with a pointer. `bro act threads` lists what's open. Exit non-zero
 [[steps]]
 id = "merge"
 title = "Merge — bro act wait --merge"
-type = "agent"
+type = "merge-step"
 needs = ["pr-gate"]
 condition = "{{merge}} == auto"
 description = """
-Run `bro act wait --merge --squash` from the worktree: the watcher polls the
-exit gate and lands the PR the moment it settles green — in orchestration
-mode the merge is covered by the act formula, not a human gate. `bro act
-merge` (dispatched by wait) refuses while the gate is blocked, so this step
-can only complete green. No `--cleanup` here — the following step retires
-the worktree deliberately, after the bead is closed.
+The merge is the PROJECT's: auto-merge is armed at PR creation
+(`gh pr merge --auto --squash`) and lands the PR once GitHub's required
+checks are green — the act gate is one of them (spec bro-k1au2), so the
+merge cannot land while a thread is open or a reviewer has not reported.
+Arm it with --auto; never merge directly (`gh pr merge` WITHOUT --auto
+skips the gate). In orchestration mode the merge is covered by the act
+formula, not a human gate.
+`bro act wait --merge --squash` from the worktree is the watcher of
+record: it polls the exit gate and lands the PR itself the moment it
+settles green — the path for a PR whose auto-merge is not armed.
+`bro act merge` (dispatched by wait) refuses while the gate is blocked, so
+this step can only complete green. No `--cleanup` here — the following step
+retires the worktree deliberately, after the bead is closed.
 If it refuses because reviewers are still pending or threads arrived after
-pr-gate, keep working: fix/defer threads, then merge again. Never use
-`gh pr merge` and never wait for a human — the merge is yours.
+pr-gate, keep working: fix/defer threads, then merge again. Never wait for
+a human — the merge is yours.
+This step closes on a VERDICT: `bro flow convoy done` reads the PR's state
+from the host and refuses while the PR is not merged. Name the PR in the
+result (a PR reference) or pass `--pr N` — a claim nobody can verify does
+not close.
 """
 
 [[steps]]

@@ -31,6 +31,8 @@ import {
   loadConfig,
   printUsage,
   resolveModelRoute,
+  CommandError,
+  EXIT,
 } from '@broject/core';
 import type { BrouterConfig, ModelRoute, ProviderEntry } from '@broject/core';
 import type { AcpSeam } from '@broject/providers';
@@ -40,8 +42,7 @@ const USAGE = `usage:
   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
 `;
 const die = (msg: string): never => {
-  console.error(`bro providers: ${msg}`);
-  process.exit(1);
+  throw new CommandError(`bro providers: ${msg}`, EXIT.error);
 };
 
 const execFile = promisify(execFileCb);
@@ -242,7 +243,7 @@ async function runModelsCommand(
     }
   }
   if (failed > 0) {
-    process.exit(1);
+    throw new CommandError('bro providers: failed to list some models', EXIT.error);
   }
 }
 

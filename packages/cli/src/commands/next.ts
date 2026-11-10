@@ -34,6 +34,7 @@ import {
   type FacadeOpts,
   type TaskStore,
 } from '@broject/core';
+import { NEVER_CLAIM_LABELS, readyBeads, storeFor, type ReadyBead } from '@broject/rig';
 import { flag } from './args.ts';
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts';
 import { requireGlobalStore } from '../doctypes/store.ts';
@@ -46,25 +47,6 @@ import { loadBroConfig } from '../plugins.ts';
  *  resolves the same backend; the global store is beads-only by
  *  construction — its dir carries no bro.config, so resolution falls
  *  to the registry default anyway. */
-function storeFor(dir?: string, opts?: FacadeOpts): TaskStore {
-  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd());
-  return facade('tasks', { dir: root }, opts ?? { prefer: loadBroConfig(root).connectors });
-}
-
-export interface ReadyBead {
-  id: string;
-  title: string;
-  description?: string;
-  status: string;
-  priority: number;
-  issue_type: string;
-  created_at: string;
-  parent?: string;
-  /** bd labels — present on `bd ready --json` rows; the labels scope
-   *  filter in plans/argv only claims beads carrying a declared label. */
-  labels?: string[];
-}
-
 interface NextResult {
   state: 'task' | 'gated' | 'idle';
   /** first pick — the single-bead form argv callers expect */
@@ -84,18 +66,6 @@ interface NextResult {
 }
 
 const HUMAN_GATE = /human.?gate/i;
-
-/** Labels that mark coordination primitives, not work — excluded bd-side
- *  so a shared queue's semaphores can never look claimable. Gas Town's
- *  merge-slot bead (<prefix>-merge-slot) is the known instance. */
-export const NEVER_CLAIM_LABELS = ['gt:slot'];
-
-/** The single `bd ready` contract for next and loop: coordination
- *  primitives are filtered out by bd itself, before classification.
- *  `dir` retargets the query at another store — `bro next --global`. */
-export function readyBeads(dir?: string, opts?: FacadeOpts): ReadyBead[] {
-  return storeFor(dir, opts).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS });
-}
 
 /** This checkout's bead id scope — what `bd init` recorded as
  *  issue_prefix. An explicitly unset prefix means the db cannot tell
@@ -553,3 +523,6 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     filters: labels !== undefined ? { labels } : {},
   });
 }
+
+export { NEVER_CLAIM_LABELS, readyBeads, storeFor } from '@broject/rig';
+export type { ReadyBead } from '@broject/rig';

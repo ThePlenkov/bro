@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  CommandError,
+  EXIT,
   actSection,
   agentsSection,
   beadsSection,
@@ -15,7 +17,9 @@ import {
   configPolicyErrors,
   debtSection,
   definePlugin,
+  hasHelpFlag,
   loadConfig,
+  printUsage,
   busConnector,
   mailboxConnector,
   notifyConnector,
@@ -98,7 +102,7 @@ import { applyDrillPlan, runDrillCommand } from './commands/drill.ts';
 import { runFleetCommand } from './commands/fleet.ts';
 import { runDelegateCommand } from './commands/delegate-cli.ts';
 import { runGoalCommand } from './commands/goal.ts';
-import { runDogfoodCommand } from './commands/dogfood.ts';
+import { runDogfoodCommand, runBenchmarkCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
 import { runHerdrCommand } from './commands/herdr.ts';
@@ -114,6 +118,7 @@ import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
 import { watchConnector } from './commands/watch-pulse.ts';
 import { watchSection } from './commands/watch-config.ts';
+import { runWatchdogCommand } from './commands/watchdog.ts';
 import { runAgentsCommand } from './commands/agents.ts';
 import { runStatusCommand } from './commands/status.ts';
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts';
@@ -124,6 +129,7 @@ import { runMeshCommand } from './commands/mesh.ts';
 import { runRequestCommand } from './commands/request.ts';
 import { runWaitCommand } from './commands/wait.ts';
 import { runProvidersCommand } from './commands/providers.ts';
+import { runRouterCommand } from './commands/router.ts';
 import { runSpecCommand, sddConnector } from './commands/spec.ts';
 import { sessionCapConnector } from './commands/session-cap.ts';
 import { runExecCommand } from './commands/exec.ts';
@@ -194,6 +200,10 @@ registerConnector(busConnector);
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c);
 }
+
+/** The telemetry plane's usage — the plane had no help of its own, and
+ *  `bro telemetry --help` ran the report. */
+const TELEMETRY_USAGE = 'bro telemetry [--session <id>] [--json]   Hook + command latency report';
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -299,6 +309,27 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    // The loop's supervisor, not a second runner: this verb prints the
+    // launch brief + tick-0 baselines and points at the skill that owns
+    // the tick protocol — the loop itself stays model work.
+    name: 'watchdog',
+    group: 'flow',
+    summary: 'Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]',
+    run: runWatchdogCommand,
+    skill: 'watchdog',
+    contract: {
+      flags: {
+        '--json':
+          'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
+      },
+      json: 'schemas/cli/watchdog.json',
+      exits: {
+        0: 'brief printed (human or --json)',
+        2: 'unknown flag — usage on stderr',
+      },
+    },
   }),
   definePlugin({
     name: 'pipeline',
@@ -657,6 +688,13 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'dogfood',
   }),
   definePlugin({
+    name: 'benchmark',
+    group: 'self',
+    summary: 'Paired native-vs-BRO workflow outcome benchmarks',
+    run: runBenchmarkCommand,
+    skill: 'dogfood',
+  }),
+  definePlugin({
     // No `skill` yet: the skill documents the hook-side evaluation,
     // which lands with the engine (bro-nkn6.3) — same stub-skill
     // reasoning as `bus` above.
@@ -673,7 +711,9 @@ export const PLUGINS: BroPlugin[] = [
     // dispatch lives in index.ts's argv[0] fallback — this entry owns
     // the beads config section and keeps the registry honest
     hidden: true,
-    run: () => process.exit(2),
+    run: () => {
+      throw new CommandError('docs plugin must be dispatched via verb-first dispatch', EXIT.usage);
+    },
     skill: 'docs',
     configKey: 'beads',
     configSchema: beadsSection,
@@ -723,7 +763,15 @@ export const PLUGINS: BroPlugin[] = [
     group: 'fleet',
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
-    run: argv => runHooksCommand(['perf', ...argv]),
+    run: argv => {
+      // a help request never runs the report: the plane reads the perf
+      // journal, and the token that leads the argv says help, not run
+      if (hasHelpFlag(argv)) {
+        printUsage(TELEMETRY_USAGE, 0);
+        return;
+      }
+      return runHooksCommand(['perf', ...argv]);
+    },
   }),
   definePlugin({
     name: 'trace',
@@ -808,6 +856,13 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'providers',
   }),
   definePlugin({
+    name: 'router',
+    summary:
+      'The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]',
+    run: runRouterCommand,
+    skill: 'brouter',
+  }),
+  definePlugin({
     name: 'setup',
     summary: 'Wire bro into the current repo',
     run: runSetupCommand,
@@ -880,7 +935,8 @@ export const PLUGINS: BroPlugin[] = [
     runPlan: async plan => {
       const code = await applyQueryPlan(plan as QueryPlan);
       if (code !== 0) {
-        process.exit(code);
+        const core = await import('@broject/core');
+        throw new core.CommandError('', core.passthroughExitCode(code));
       }
     },
   }),
@@ -980,12 +1036,15 @@ export function pluginGroups(): Map<string, BroPlugin[]> {
 /** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
  *  envelope `version`, validate with the owning plugin's planSchema,
  *  execute via runPlan. Resolution is shared with `bro plan validate`. */
+
 export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter(a => !a.startsWith('-'));
   const kinds = PLUGINS.filter(p => p.planSchema && p.runPlan).map(p => p.name);
   if (files.length !== 1) {
-    console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`);
-    process.exit(2);
+    throw new CommandError(
+      `usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`,
+      EXIT.usage
+    );
   }
   const file = files[0] as string;
   const { plugin, plan } = resolvePlanDoc(file, PLUGINS);

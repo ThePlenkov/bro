@@ -1,7 +1,7 @@
 {
   "name": "@broject/bro",
   "version": "0.3.0",
-  "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
+  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
   "keywords": [
     "agent-rig",
     "orchestration",
@@ -88,15 +88,23 @@
   },
   "dependencies": {
     "@broject/bro-pack": "^0.3.0",
+    "@broject/brouter": "^0.3.0",
+    "@broject/command": "^0.3.0",
     "@broject/devin": "^0.3.0",
     "@broject/mcp": "^0.3.0",
+    "@broject/router-routes": "^0.3.0",
+    "@broject/router-store": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "ip-address": "^10.7.4",
     "smol-toml": "^1.9.0",
     "sverka": "^0.2.10"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@kilocode/plugin": "^7.8.3",
+    "@opencode/plugin": "^2.1.4",
+    "@opentui/solid": "^0.7.0",
+    "solid-js": "^1.9.12",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
@@ -115,5 +123,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "bro": {
+    "kind": "core",
+    "status": "beta"
   }
 }

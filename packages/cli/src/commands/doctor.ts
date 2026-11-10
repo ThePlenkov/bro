@@ -10,7 +10,7 @@
  * failure; warnings pass. Probes are read-only — a broken tool reports as
  * a failing check, never as a crash.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import {
   existsSync,
   readdirSync,
@@ -21,11 +21,20 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import type {
+  BdCompat,
+  BdProbe,
+  ConfigDiagnostic,
+  DoltHeadHealth,
+  DoltRemote,
+  ProviderEntry,
+  ProviderSurface,
+} from '@broject/core';
 import {
   bdTry,
   CONFIG_SECTION_LAYERS,
-  connectors,
   CORE_CONFIG_SECTIONS,
+  connectors,
   displayUrl,
   doltDirHealth,
   doltRemoteSrc,
@@ -40,25 +49,19 @@ import {
   janitorDidWork,
   janitorLine,
   listDoltRemotes,
+  loadConfig,
   loadConfigLayers,
+  PROVIDER_REGISTRY,
   pidAlive,
   printUsage,
-  procStat,
   probeBdCompat,
+  psEwwEnvTokens,
+  psRegroupPaths,
+  psTokenize,
   probeDoltRemote,
-  PROVIDER_REGISTRY,
+  procStat,
   runJanitor,
 } from '@broject/core';
-import type {
-  BdCompat,
-  BdProbe,
-  ConfigDiagnostic,
-  DoltHeadHealth,
-  DoltRemote,
-  ProviderEntry,
-  ProviderSurface,
-} from '@broject/core';
-import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
 import {
   assertSonarHostTrusted,
   assertTokenSafeHost,
@@ -67,19 +70,20 @@ import {
   resolveSonarProject,
   SourceSkipped,
 } from '@broject/debt';
-import { judgeConfig, synthesizedProviders } from '@broject/judge';
 import type { JudgeConfig } from '@broject/judge';
-import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
-import { pluginRows } from './plugins.ts';
-import { daemonProbe, readDriveMarker } from './daemon.ts';
-import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
+import { judgeConfig, synthesizedProviders } from '@broject/judge';
+import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
 import {
+  type AgentConnectorEnv,
+  type BudgetSnapshot,
   budgetLines,
   budgetSnapshotFor,
   loadAgentEnv,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from '../agent-connectors.ts';
+import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
+import { daemonProbe, readDriveMarker } from './daemon.ts';
+import { pluginRows } from './plugins.ts';
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -605,21 +609,94 @@ function selfDistChecks(): DoctorCheck[] {
 // running daemon's resolved entry — /proc cmdline — against this repo's
 // dist and, outside a bro checkout, the entry `bro` resolves to.
 
+/** A foreign process's argv — /proc cmdline on linux, `ps args`/
+ *  `command` spellings on darwin. undefined when the platform can't
+ *  name it (raced exit, `node -e`, no /proc). */
+function procArgv(pid: number): string[] | undefined {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        .split('\0')
+        .filter(t => t !== '');
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === 'darwin') {
+    return darwinArgv(pid);
+  }
+  return undefined;
+}
+
+function darwinArgv(pid: number): string[] | undefined {
+  let out: string;
+  try {
+    out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-ww', '-o', 'args=', '-p', String(pid)],
+      {
+        encoding: 'utf8',
+        timeout: 500,
+      }
+    );
+  } catch {
+    try {
+      out = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-ww', '-o', 'command=', '-p', String(pid)],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
+    } catch {
+      return undefined;
+    }
+  }
+  // ps space-joins the vector — re-glue fragments of a spaced absolute
+  // path (a daemon's entry must exist on disk, its split halves don't)
+  // so scriptArg/daemonEntry see the real argv boundary.
+  const tokens = psRegroupPaths(psTokenize(out.replace(/\r?\n$/, '')));
+  return tokens.length > 0 ? tokens : undefined;
+}
+
+/** The process's cwd — /proc link on linux, lsof on darwin (doctor's
+ *  own cwd when the pid reports none). null when unreadable. */
+function procCwd(pid: number): string | null {
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
+      const cline = lout.split('\n').find(l => l.startsWith('n'));
+      return cline ? cline.slice(1) : process.cwd();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** The daemon process's resolved entry script — argv[1] under a
  *  node-ish runtime, argv[0] when the process IS the program. Relative
  *  spellings resolve against the process's own cwd, never doctor's.
  *  null when /proc can't name a file (non-/proc platform, raced exit,
  *  `node -e`). */
 function daemonEntry(pid: number): string | null {
-  let argv: string[];
-  try {
-    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-      .split('\0')
-      .filter(t => t !== '');
-  } catch {
-    return null;
-  }
-  if (argv.length === 0) {
+  const argv = procArgv(pid);
+  if (argv === undefined || argv.length === 0) {
     return null;
   }
   const runtime = basename(argv[0]!);
@@ -628,10 +705,11 @@ function daemonEntry(pid: number): string | null {
     return null;
   }
   try {
-    const abs = candidate.startsWith('/')
-      ? candidate
-      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
-    return realpathSync(abs);
+    if (candidate.startsWith('/')) {
+      return realpathSync(candidate);
+    }
+    const cwd = procCwd(pid);
+    return cwd === null ? null : realpathSync(join(cwd, candidate));
   } catch {
     return null;
   }
@@ -683,16 +761,37 @@ function scriptArg(argv: string[]): string | undefined {
  *  null off-linux or on a raced exit; callers read null as unverifiable,
  *  never as stale. */
 function procStartMs(pid: number): number | null {
-  try {
-    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
-    const st = procStat(pid);
-    if (st === null || st.start === '') {
+  if (process.platform === 'linux') {
+    try {
+      const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // start is field 22 (jiffies) on linux
+      return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
+    } catch {
       return null;
     }
-    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
-  } catch {
-    return null;
   }
+  if (process.platform === 'darwin') {
+    try {
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // procStat on darwin may prefix with pid; try to parse as date
+      const startStr = st.start.replace(/^\d+\s+/, '');
+      const ms = Date.parse(startStr);
+      if (!Number.isNaN(ms) && ms > 0) {
+        return ms;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** Two dirs inside the same repository — linked worktrees share the
@@ -1174,17 +1273,41 @@ function bdChecks(
     out.push(check('bd-backend', 'ok', 'dolt remotes reachable'));
   }
   if (beadsDir) {
-    const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
-    out.push(
-      list.code === 0
-        ? check('bd-store', 'ok', 'beads store readable')
-        : check(
-            'bd-store',
-            'fail',
-            'beads store present but `bd list` failed',
-            list.err || 'inspect the store or re-run `bd init`'
-          )
-    );
+    // GitHub serves tasks AND compat already proved bd or its store
+    // unusable — a second `bd list` only repeats a 15s stall on a
+    // backend nothing routes to.
+    if (
+      githubTasksHealthy &&
+      (compat.broken || compat.missing || !compat.ok || compat.store === 'error')
+    ) {
+      out.push(
+        check(
+          'bd-store',
+          'warn',
+          'beads store probe skipped — bd unusable',
+          'GitHub Issues serves tasks (connectors.tasks=github)'
+        )
+      );
+    } else {
+      const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
+      out.push(
+        list.code === 0
+          ? check('bd-store', 'ok', 'beads store readable')
+          : githubTasksHealthy
+            ? check(
+                'bd-store',
+                'warn',
+                'beads store present but `bd list` failed',
+                `${list.err || 'inspect the store'} — GitHub Issues serves tasks (connectors.tasks=github)`
+              )
+            : check(
+                'bd-store',
+                'fail',
+                'beads store present but `bd list` failed',
+                list.err || 'inspect the store or re-run `bd init`'
+              )
+      );
+    }
   } else if (beadsActive) {
     out.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'));
   }
@@ -1663,11 +1786,73 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
   return undefined;
 }
 
+/** `KEY=VALUE` token list → env map (proc environ's NUL-split, ps
+ *  eww's arg-trailing tokens — same shape once split). */
+function environMap(tokens: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const kv of tokens) {
+    const eq = kv.indexOf('=');
+    if (eq > 0) {
+      out[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
+  }
+  return out;
+}
+
+/** The running server's env: `/proc/<pid>/environ` on linux, darwin
+ *  `ps eww` tokens otherwise; {} when neither leg can read. */
+function readServeEnviron(pid: number): Record<string, string> {
+  try {
+    const out = environMap(readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0'));
+    if (Object.keys(out).length > 0) {
+      return out;
+    }
+  } catch {
+    // unreadable — raced exit or a platform without /proc
+  }
+  return process.platform === 'darwin' ? environMap(psEwwEnvTokens(pid)) : {};
+}
+
+/** same-process env — CURRENT process.env is the truth: the /proc
+ *  snapshot predates anything the caller set after start (test
+ *  fixtures mutate process.env mid-run) */
+function ownEnviron(): Record<string, string> | undefined {
+  const own: Record<string, string> = {};
+  for (const k of Object.keys(process.env)) {
+    const v = process.env[k];
+    if (typeof v === 'string') {
+      own[k] = v;
+    }
+  }
+  return Object.keys(own).length > 0 ? own : undefined;
+}
+
+/** The running server's env, once — `/proc/<pid>/environ` is the
+ *  authoritative leg for "what did this serve boot with"; on darwin
+ *  `ps eww` carries the same data (env tokens trail the arg vector —
+ *  psEwwEnvTokens separates them). undefined when neither leg can
+ *  read it. */
+function serveEnviron(
+  serve: { url: string; pid: number } | undefined
+): Record<string, string> | undefined {
+  if (serve === undefined) {
+    return undefined;
+  }
+  if (serve.pid === process.pid) {
+    return ownEnviron();
+  }
+  const env = readServeEnviron(serve.pid);
+  return Object.keys(env).length > 0 ? env : undefined;
+}
+
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
- *  the same env hosts the serve), else the running server's /proc
- *  environ. Non-/proc platforms can't read a foreign env — the
- *  client-side wire evidence below then decides the row alone. */
-function serveBackendName(serve: { url: string; pid: number } | undefined): string | undefined {
+ *  the same env hosts the serve), else the running server's env.
+ *  Non-/proc platforms can't read a foreign env — the client-side wire
+ *  evidence below then decides the row alone. */
+function serveBackendName(
+  serve: { url: string; pid: number } | undefined,
+  env: Record<string, string> | undefined
+): string | undefined {
   const own = process.env.BRO_PROVIDER_BACKEND?.trim();
   if (own !== undefined && own !== '') {
     return own;
@@ -1675,19 +1860,60 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
   if (serve === undefined) {
     return undefined;
   }
-  try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-        const v = kv.slice(eq + 1).trim();
-        return v === '' ? undefined : v;
-      }
-    }
-  } catch {
-    // unreadable — raced exit or a platform without /proc
+  const v = env?.BRO_PROVIDER_BACKEND?.trim();
+  return v === undefined || v === '' ? undefined : v;
+}
+
+/** The upstream key names providerConfig resolves — presence in the
+ *  server's env is what arms the conductor's fast lane (bro-6asnu). */
+const UPSTREAM_KEY_ENVS = [
+  'BRO_PROVIDER_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+] as const;
+
+/** Is the fast lane armed on this serve — an upstream key in the
+ *  server's env and no FAST_LANE off. Doctor's own env is leg one
+ *  (a serve spawned from the same shell inherits it); the server's env
+ *  decides when the two differ. Values are only inspected for
+ *  presence/flag, never surfaced. */
+function fastLaneArmed(
+  env: Record<string, string> | undefined,
+  serveLane?: boolean,
+  sameProcess?: boolean,
+  /** the file layer's serve.apiKeyEnv — an upstream key can live in
+   *  a config-named var beyond the three hardcoded ones */
+  apiKeyEnv?: string
+): boolean {
+  // the config escape hatch — serve.fastLane:false disables the lane
+  // regardless of env evidence, exactly as resolveFastLane honors it
+  if (serveLane === false) {
+    return false;
   }
-  return undefined;
+  const flagsOff = (v: string | undefined): boolean => {
+    const f = v?.trim().toLowerCase();
+    return f === 'off' || f === '0' || f === 'false';
+  };
+  const nonBlank = (v: string | undefined): boolean => v !== undefined && v.trim() !== '';
+  // server env wins when present; the process.env fallback exists only
+  // for legs doctor shares — a missing /proc read or OUR OWN process.
+  // A foreign server's env must never be padded with doctor's own:
+  // its missing key means the lane is unarmed there even if doctor's
+  // shell carries one.
+  const ownEnv = env === undefined || sameProcess === true;
+  const get = (k: string): string | undefined => {
+    const v = env?.[k];
+    if (v !== undefined && v !== '') {
+      return v;
+    }
+    return ownEnv ? (process.env as Record<string, string | undefined>)[k] : undefined;
+  };
+  const hasKey = (): boolean =>
+    UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k))) ||
+    // the file layer names its own key var — providerConfig resolves
+    // it for the lane, so doctor's arming check must see it too
+    (apiKeyEnv !== undefined && nonBlank(get(apiKeyEnv)));
+  return hasKey() && !flagsOff(get('BRO_PROVIDER_FAST_LANE'));
 }
 
 /** The model ids an acp entry can serve: the pinned `model` field plus
@@ -1788,6 +2014,34 @@ interface ClassifierCtx {
   ids: Map<string, string[]>;
   acpNames: Set<string>;
   nonAcpNames: Set<string>;
+  /** the serve's env proves the fast lane armed (bro-6asnu) — the
+   *  conductor routes classifier calls upstream itself. */
+  fastArmed?: boolean;
+  /** the resolved fast-model pin (BRO_PROVIDER_FAST_MODEL →
+   *  serve.fastModel) — without it a conductor-only classifier id
+   *  forwards verbatim and the upstream rejects it. */
+  fastModel?: string;
+}
+
+/** A `<acp-name>/<id>` pin — conductor vocabulary the upstream cannot
+ *  serve verbatim. Split on the slash and test whole segments: a bare
+ *  model id that merely contains a '/' is not a prefix pin. */
+function isConductorPin(v: string, acpNames: Set<string>): boolean {
+  const slash = v.indexOf('/');
+  return slash > 0 && v.slice(slash + 1) !== '' && acpNames.has(v.slice(0, slash));
+}
+
+/** First non-blank value, trimmed — resolveFastLane's model chain
+ *  semantics: a set-but-empty env pin falls through to the file layer
+ *  instead of winning the ?? chain. */
+function firstTrimmed(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    const t = v?.trim();
+    if (t !== undefined && t !== '') {
+      return t;
+    }
+  }
+  return undefined;
 }
 
 /** One client source → its warn row(s). A live-endpoint hit outranks
@@ -1807,6 +2061,34 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
     base !== undefined &&
     endpointKey(base) === endpointKey(ctx.serve.url)
   ) {
+    // the serve's fast lane (bro-6asnu) already routes classifier calls
+    // upstream — the warn only stands while no upstream key arms it
+    if (
+      ctx.fastArmed === true &&
+      (ctx.fastModel !== undefined ||
+        !classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames)))
+    ) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            (hits.length > 0 ? ` — ${hits.join('; ')}` : '') +
+            ' — fast lane armed: classifier calls route to the direct upstream'
+        ),
+      ];
+    }
+    if (ctx.fastArmed === true) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            ` — ${hits.join('; ')} — the lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
@@ -1815,17 +2097,44 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
           (hits.length > 0
             ? ` — ${hits.join('; ')}`
             : ' — the client\u2019s safety classifier rides it too'),
-        'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
+        'every permission check pays a full session/new and fail-closes — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
     ];
   }
   if (hits.length > 0) {
+    // the ok needs evidence the client actually reaches an armed
+    // conductor — a bare pin plus an armed env elsewhere is no routing
+    const armedHere = ctx.fastArmed === true && ctx.conductor !== undefined;
+    // a `<name>/<id>` pin is conductor vocabulary no upstream serves —
+    // without the model pin it forwards verbatim and fails there
+    const needsModelPin =
+      ctx.fastModel === undefined &&
+      classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames));
+    if (armedHere && !needsModelPin) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ${hits.join('; ')} — on an armed conductor the fast lane routes them to the direct upstream`
+        ),
+      ];
+    }
+    if (armedHere) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ${hits.join('; ')} — the fast lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
         'warn',
         `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
-        'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
+        'session-grade wires deadlock interactive approvals — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
     ];
   }
@@ -1845,7 +2154,10 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   );
   const nonAcpNames = new Set(Object.keys(providers).filter(n => !acpNames.has(n)));
   const serve = liveServeEndpoint(dir);
-  const backend = serveBackendName(serve);
+  const env = serveEnviron(serve);
+  const sameProcess = serve?.pid === process.pid;
+  const fileServe = loadConfig(dir).serve;
+  const backend = serveBackendName(serve, env);
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
   const ctx: ClassifierCtx = {
     serve,
@@ -1853,6 +2165,12 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
+    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess, fileServe.apiKeyEnv),
+    fastModel:
+      firstTrimmed(
+        env?.BRO_PROVIDER_FAST_MODEL,
+        env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined
+      ) ?? fileServe.fastModel,
   };
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
   const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));

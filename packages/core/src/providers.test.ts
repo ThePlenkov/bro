@@ -1,9 +1,11 @@
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpDir } from './testtmp.ts';
 import { loadConfig } from './config.ts';
+import { providersSection } from './config.ts';
+import { validateSchemaValue } from './schema-validator.ts';
 import {
   getProvider,
   isEnvName,
@@ -19,16 +21,11 @@ import {
   type ProviderEntry,
 } from './providers.ts';
 
+import { scrubEnv } from './testkit.ts';
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
 // (config.test.ts runs the same guard)
-const XDG = tmpDir('bro-xdg-');
-const prevXdg = process.env.XDG_CONFIG_HOME;
-process.env.XDG_CONFIG_HOME = XDG;
-process.on('exit', () => {
-  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-  else process.env.XDG_CONFIG_HOME = prevXdg;
-});
+after(scrubEnv());
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = tmpDir('bro-providers-');
@@ -440,6 +437,34 @@ describe('parseProviderEntry', () => {
   test('autoApprove on a kind without the knob is stripped like any unknown key', () => {
     const e = parseProviderEntry('p', { type: 'cli', command: 'devin -p', autoApprove: true });
     assert.deepEqual(e, { type: 'cli', command: 'devin -p' });
+  });
+
+  test('a key in the config is refused — the config names a source, never a value', () => {
+    const e = parseProviderEntry('p', {
+      type: 'api',
+      baseUrl: 'https://api.example',
+      models: { m: 'openai-compat' },
+      apiKey: 'sk-pasted',
+    });
+    assert.equal(e, null);
+  });
+
+  test('the schema refuses a key too — the config file cannot hold one', () => {
+    const schema = providersSection.jsonSchema;
+    assert.notEqual(schema, undefined);
+    const errors = validateSchemaValue(
+      {
+        p: {
+          type: 'api',
+          baseUrl: 'https://api.example',
+          models: { m: 'openai-compat' },
+          apiKey: 'sk-pasted',
+        },
+      },
+      schema!,
+      'providers'
+    );
+    assert.ok(errors.length > 0);
   });
 
   test('returns null on non-object and bad type', () => {
