@@ -1152,7 +1152,12 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
   if (err instanceof SpawnError && err.kind === 'cap') {
     const wall = laneWall(ctx, m.lane.provider);
     if (wall !== undefined) {
-      const untilMs = wall.until === undefined ? Number.NaN : Date.parse(wall.until);
+      // a hold needs the provider's own reset — a `bound` until is our
+      // derived cooldown horizon (bro-uswqn), not an advertised end:
+      // waiting it out would park nothing and hold pushes for the
+      // whole cooldown (the e2e-shaped 60s hang on #728)
+      const untilMs =
+        wall.until === undefined || wall.bound === true ? Number.NaN : Date.parse(wall.until);
       if (Number.isFinite(untilMs) && untilMs > Date.now()) {
         // clamp to the 10-year cap so a far-future reset never holds
         // pushes indefinitely (bro-36bhc review)
