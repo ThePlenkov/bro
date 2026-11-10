@@ -652,6 +652,9 @@ export {
   markerOwner,
   pidAlive,
   procStat,
+  psEwwEnvTokens,
+  psRegroupPaths,
+  psTokenize,
   scanProc,
 } from './proc.ts';
 export type { ProcEntry } from './proc.ts';
@@ -694,6 +697,7 @@ export type {
   BusWake,
 } from './bus.ts';
 export {
+  DARWIN_SCAN_BUDGET_MS,
   pickOrphanProcs,
   readProcRows,
   sweepOrphanProcs,
