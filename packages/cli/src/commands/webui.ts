@@ -22,7 +22,7 @@
  * Style note for editors: the page is a template literal — client JS
  * must not contain backticks or `${` sequences.
  */
-import { createHash } from 'node:crypto'
+import { createHash } from 'node:crypto';
 
 const PAGE_STYLE = `
   :root { color-scheme: dark; }
@@ -49,7 +49,7 @@ const PAGE_STYLE = `
   #logpanel .sum a { margin-left: .6rem; }
   #logpane { background: #161b22; border: 1px solid #30363d; padding: .4rem .8rem; margin: .3rem 0 0; max-height: 22rem; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .85rem; }
   #logauth input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; font: inherit; padding: .1rem .4rem; }
-`
+`;
 
 // String.raw — the script ships regex literals; raw keeps `\[` written
 // once instead of doubly escaped for the template
@@ -734,10 +734,10 @@ document.getElementById('logtoken').addEventListener('keydown', function (ev) {
 window.addEventListener('pagehide', closeLog);
 
 tick();
-`
+`;
 
 function cspHash(s: string): string {
-  return createHash('sha256').update(s).digest('base64')
+  return createHash('sha256').update(s).digest('base64');
 }
 
 /** CSP for the HTML response — hash-pinned inline script/style (the
@@ -745,7 +745,7 @@ function cspHash(s: string): string {
  *  forgets the pin fails closed), same-origin fetch, nothing else. A
  *  smuggled title can't execute or load anything even if markup
  *  injection ever slips through. */
-export const WEBUI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(PAGE_SCRIPT)}'; style-src 'sha256-${cspHash(PAGE_STYLE)}'; connect-src 'self'`
+export const WEBUI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(PAGE_SCRIPT)}'; style-src 'sha256-${cspHash(PAGE_STYLE)}'; connect-src 'self'`;
 
 export const FLEET_PAGE = `<!doctype html>
 <html lang="en">
@@ -822,4 +822,4 @@ export const FLEET_PAGE = `<!doctype html>
 <script>${PAGE_SCRIPT}</script>
 </body>
 </html>
-`
+`;

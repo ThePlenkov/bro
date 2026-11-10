@@ -428,7 +428,7 @@ function worktreeListMain(dir: string, common: string, real: (p: string) => stri
  *  `../bro--fix-x`. The linked-worktree naming convention every surface
  *  shares — pure path math, the git reads live around it. */
 export function worktreePathFor(mainRoot: string, slug: string): string {
-  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
+  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`);
 }
 
 /** Every worktree checkout's root — `git worktree list` records, main

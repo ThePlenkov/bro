@@ -648,7 +648,7 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       argv.some(
         a =>
           a.startsWith('--json=') &&
-          !['false', '0'].includes(a.slice('--json='.length).trim().toLowerCase()),
+          !['false', '0'].includes(a.slice('--json='.length).trim().toLowerCase())
       );
     const code = await runRigNext(cwd, pos[1], jsonEnabled);
     if (code !== 0) {
