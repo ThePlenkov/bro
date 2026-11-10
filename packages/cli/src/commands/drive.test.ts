@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import {
   patchAgentRegistry,
+  localLeaseStore,
   procStat,
+  projectId,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
   type AgentInfo,
@@ -19,11 +21,13 @@ import {
   buildCiFixerPrompt,
   buildFixerPrompt,
   buildRebaseFixerPrompt,
+  type BaseTip,
   buildSastFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
   ensureFixerWorktree,
+  fetchBaseTip,
   fixerAttemptSpent,
   fixerBeadFor,
   fixerRef,
@@ -34,9 +38,12 @@ import {
   occupied,
   occupancyProofs,
   processesRootedIn,
+  projectorKicker,
+  projectorWatcher,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
+  runDriveCommand,
   supervisedBy,
   supervisorFresh,
   worktreeClaim,
@@ -44,7 +51,7 @@ import {
   type WorkEntry,
 } from './drive.ts';
 import { driveSection } from './drive-config.ts';
-import { git, initRepo, inside } from './testrepo.ts';
+import { git, initRepo, inside, insideAsync, installFakeBd, scrubEnv } from './testrepo.ts';
 
 const agent = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   id: 'native-aaa',
@@ -81,6 +88,57 @@ describe('driveArgs', () => {
     // the floor fleet already enforces — below it is a busy loop
     assert.equal(driveArgs(['--every', '0.1']).everySec, 0.1);
   });
+});
+
+test('drive removes its exit listener when role-lease acquisition is aborted', async () => {
+  const { root, main } = initRepo('bro-drive-lease-abort-');
+  const { binDir, db } = installFakeBd(root);
+  const stateHome = mkdtempSync(join(tmpdir(), 'bro-drive-lease-state-'));
+  const path = process.env.PATH ?? '';
+  const restoreEnv = scrubEnv(['PATH', 'HOME', 'XDG_STATE_HOME', 'FAKE_BD_DB']);
+  try {
+    process.env.PATH = `${binDir}:${path}`;
+    process.env.HOME = root;
+    process.env.XDG_STATE_HOME = stateHome;
+    process.env.FAKE_BD_DB = db;
+    await insideAsync(main, root, async () => {
+      const store = localLeaseStore(projectId(main));
+      assert.equal(
+        store.acquire('role/drive', { host: 'other-host', pid: 1, rig: 'other' }, 60_000).ok,
+        true
+      );
+
+      const listenersBefore = {
+        exit: process.listenerCount('exit'),
+        sigint: new Set(process.listeners('SIGINT')),
+        sigterm: process.listenerCount('SIGTERM'),
+      };
+      const originalKill = process.kill;
+      process.kill = ((pid, signal) => {
+        if (pid === process.pid && signal === 'SIGINT') return true;
+        return originalKill(pid, signal);
+      }) as typeof process.kill;
+      try {
+        const running = runDriveCommand([]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const abortHandler = process
+          .listeners('SIGINT')
+          .find(listener => !listenersBefore.sigint.has(listener));
+        assert.ok(abortHandler, 'drive SIGINT listener was not installed');
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit + 1);
+        abortHandler.call(process, 'SIGINT');
+        await assert.rejects(running, /aborted/i);
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit);
+        assert.equal(process.listenerCount('SIGINT'), listenersBefore.sigint.size);
+        assert.equal(process.listenerCount('SIGTERM'), listenersBefore.sigterm);
+      } finally {
+        process.kill = originalKill;
+      }
+    });
+  } finally {
+    restoreEnv();
+    rmSync(stateHome, { recursive: true, force: true });
+  }
 });
 
 describe('driveSection', () => {
@@ -911,6 +969,10 @@ describe('registryEntryState', () => {
       // the way adoptNativeHandle reads it
       const e = entry({ agentId: 'a1', runId: 'r1', spawnedAt: '2000-01-01T00:00:00Z' });
       assert.equal(registryEntryState(home, e), 'running');
+      // a published identity that no longer matches the pid is a
+      // recycled pid — the handle must stop proving the worker
+      writeFileSync(join(home, 'a1.r1.handle'), `${process.pid} 1`);
+      assert.equal(registryEntryState(home, e), 'lost');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -1039,13 +1101,23 @@ describe('buildFixerPrompt', () => {
 });
 
 describe('buildRebaseFixerPrompt', () => {
+  const remoteTip = (sha = 'abc1234'): BaseTip => ({
+    ref: 'origin/main',
+    sha,
+    remote: true,
+    origin: true,
+  });
+
   test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
     const p = buildRebaseFixerPrompt({
       pr: 42,
       link: '[#42](https://github.com/o/r/pull/42)',
       branch: 'work/bro-a',
       base: 'main',
+      baseTip: remoteTip(),
       worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
     });
     assert.match(p, /#42.*pull\/42/);
     assert.match(p, /work\/bro-a/);
@@ -1053,11 +1125,126 @@ describe('buildRebaseFixerPrompt', () => {
     assert.match(p, /merge conflicts with its base branch `main`/);
     // the work order fetches the PR branch too — a stale local tip would
     // rebase without the remote's newer commits and drop them on push
-    assert.match(p, /fetch origin work\/bro-a main/);
+    assert.match(p, /fetch origin work\/bro-a/);
     assert.match(p, /rebase origin\/work\/bro-a/);
     assert.match(p, /git rebase origin\/main/);
     assert.match(p, /--force-with-lease/);
     assert.match(p, /NEVER merge/);
+  });
+
+  test('names the fetched base tip and orders the work fetch → verify → re-check → rebase', () => {
+    // bro-by8d3: the base tip bro fetched is the target, and the fixer
+    // must notice the base moving under it instead of rebasing blind
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: remoteTip(),
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+    });
+    assert.match(p, /abc1234/);
+    assert.match(p, /must still read `abc1234`/);
+    assert.match(p, /Fetch the base AGAIN, immediately before the rebase/);
+    assert.match(p, /gh pr view\s+42 --json mergeable/);
+    assert.match(p, /MERGEABLE means the conflict dissolved — STOP/);
+    // the fetch lands BEFORE the rebase in the order of work
+    assert.ok(p.indexOf('Fetch the base AGAIN') < p.indexOf('git rebase origin/main'));
+  });
+
+  test('a gitlab reviews connector gets the glab api read — never gh', () => {
+    // the fixer must be able to RUN the re-check it is told to run
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: remoteTip(),
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+    });
+    assert.match(p, /glab api projects\/o%2Fr\/merge_requests\/42/);
+    assert.match(p, /detailed_merge_status/);
+    assert.doesNotMatch(p, /gh pr view/);
+  });
+
+  test('a LOCAL base is rebase-able: no remote fetch, no invented remote ref', () => {
+    // the base lives only locally — the work order must not send the
+    // fixer after a remote ref that does not exist
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: { ref: 'main', sha: 'abc1234', remote: false, origin: false },
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+    });
+    assert.match(p, /resolved the base to `main`/);
+    assert.match(p, /git rebase main/);
+    assert.match(p, /This base is a LOCAL branch/);
+    assert.doesNotMatch(p, /git rebase origin\/main/);
+    // no remote at all — there is nothing to fetch, and the order says so
+    assert.doesNotMatch(p, /git fetch origin/);
+  });
+});
+
+describe('fetchBaseTip', () => {
+  test('fetches the base and reads its tip — a stale tracking ref is refreshed', () => {
+    const { root, main } = initRepo('bro-drive-base-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-qu', 'origin', 'main'], main);
+      // the remote advances; the local tracking ref stays behind
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main'], main);
+      const tip = git(['-C', main, 'rev-parse', 'HEAD'], main).trim();
+      git(['update-ref', '-d', 'refs/remotes/origin/main'], main);
+
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip?.sha, tip);
+      assert.equal(r.tip?.ref, 'origin/main');
+      assert.equal(r.tip?.remote, true);
+      assert.equal(r.err, undefined);
+      assert.equal(git(['-C', main, 'rev-parse', 'origin/main'], main).trim(), tip);
+    });
+  });
+
+  test('a repo with no origin remote resolves the LOCAL base', () => {
+    const { root, main } = initRepo('bro-drive-basen-');
+    inside(main, root, () => {
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip?.ref, 'main');
+      assert.equal(r.tip?.remote, false);
+      assert.equal(r.tip?.origin, false);
+      assert.equal(r.err, undefined);
+    });
+  });
+
+  test('a base that exists nowhere is an error — the spawn is refused', () => {
+    const { root, main } = initRepo('bro-drive-basex-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      const r = fetchBaseTip(main, 'nope');
+      assert.equal(r.tip, undefined);
+      assert.match(r.err ?? '', /no branch or remote-tracking ref named nope/);
+    });
+  });
+
+  test('a broken remote is an error — not a silently skipped base', () => {
+    const { root, main } = initRepo('bro-drive-baseb-');
+    inside(main, root, () => {
+      git(['remote', 'add', 'origin', join(root, 'nope.git')], main);
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip, undefined);
+      assert.ok((r.err ?? '').length > 0);
+    });
   });
 });
 
@@ -1133,6 +1320,26 @@ describe('ensureFixerWorktree', () => {
       const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
       assert.notEqual(tip, stale);
       assert.equal(tip, git(['-C', dir, 'rev-parse', 'origin/work/bro-a'], main).trim());
+    });
+  });
+
+  test('an occupied checkout is never refreshed — the guard answers before the move', () => {
+    // bro-by8d3: the branch of a live session is not moved, not even by
+    // a fast-forward. The guard is asked BEFORE the refresh.
+    const { root, main } = initRepo('bro-drive-wto-');
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main);
+      // the remote advances — a refresh would fast-forward the branch
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main);
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main);
+      const before = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
+      const r = ensureFixerWorktree(main, 'work/bro-a', {
+        guard: () => 'session armed work on work/bro-a',
+      });
+      assert.equal(r.path, undefined);
+      assert.equal(r.occupied, 'session armed work on work/bro-a');
+      assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), before);
     });
   });
 
@@ -1381,5 +1588,120 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
       att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att;
       assert.deepEqual(att, { head: 'h2', spent: [], current: 'sast' });
     });
+  });
+});
+
+describe('projectorKicker — the event-kick coalescer (bro-xmd9l)', () => {
+  const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+  test('a burst of kicks lands exactly one fire', async () => {
+    let n = 0;
+    const kick = projectorKicker(() => {
+      n += 1;
+    }, 40);
+    kick();
+    kick();
+    kick();
+    await wait(80);
+    assert.equal(n, 1);
+  });
+
+  test('a kick after the cooldown fires again — events are not eaten', async () => {
+    let n = 0;
+    const kick = projectorKicker(() => {
+      n += 1;
+    }, 30);
+    kick();
+    await wait(70);
+    kick();
+    await wait(70);
+    assert.equal(n, 2);
+  });
+
+  test('a kick inside the cooldown trails its end instead of leading', async () => {
+    const firedAt: number[] = [];
+    const kick = projectorKicker(() => {
+      firedAt.push(Date.now());
+    }, 60);
+    const t0 = Date.now();
+    kick();
+    await wait(30);
+    kick(); // pending-cooldown kick — schedules at the cooldown end
+    await wait(120);
+    assert.equal(firedAt.length, 2);
+    // the second fire lands at/after the first fire + kickMs, not at t0+30
+    assert.ok(firedAt[1]! - firedAt[0]! >= 55, `gap ${firedAt[1]! - firedAt[0]!}ms < 55ms`);
+    assert.ok(firedAt[1]! - t0 >= 55);
+  });
+});
+
+describe('projectorWatcher — the write-point fast path (bro-9me97)', () => {
+  const waitFor = async (cond: () => boolean, ms = 3000): Promise<boolean> => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (cond()) return true;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return false;
+  };
+
+  test('a matching filename kicks, a non-matching one stays quiet', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'projwatch-'));
+    let n = 0;
+    const ws = projectorWatcher(
+      [{ dir, hit: name => name === 'agents.json' || name.endsWith('.exit') }],
+      () => {
+        n += 1;
+      }
+    );
+    try {
+      assert.equal(ws.length, 1);
+      // inotify registration lag is unbounded on a loaded runner —
+      // poke at a sane interval until the kick lands rather than
+      // trusting one settle window (a 25ms-cadence storm starves the
+      // loop and delayed the first run's own delivery past timeout)
+      let lastWrite = 0;
+      const kicked = await waitFor(() => {
+        if (n === 0 && Date.now() - lastWrite > 300) {
+          lastWrite = Date.now();
+          writeFileSync(join(dir, 'native-x.1.exit'), '1\n');
+        }
+        return n >= 1;
+      }, 8000);
+      assert.ok(kicked, 'no kick on .exit');
+      // drain before the baseline — an .exit write fires rename AND
+      // change, and a retried poke can still be in flight; snapshot
+      // only once n holds still past the poke cadence or late kicks
+      // land inside the quiet window below
+      // n must hold across fourteen 25ms polls (~350ms, past the
+      // 300ms poke cadence) before it counts as drained
+      let stable = 0;
+      let last = -1;
+      const drained = await waitFor(() => {
+        if (n !== last) {
+          last = n;
+          stable = 0;
+          return false;
+        }
+        return ++stable >= 14;
+      }, 8000);
+      assert.ok(drained, 'kick stream never settled');
+      const before = n;
+      writeFileSync(join(dir, 'other.log'), 'noise\n');
+      writeFileSync(join(dir, 'state.tmp'), 'noise\n');
+      const quiet = await waitFor(() => n > before, 400);
+      assert.equal(quiet, false, 'a non-matching write must not kick');
+    } finally {
+      for (const w of ws) w.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an absent dir yields no watcher — a no-watch, not a failure', () => {
+    const ws = projectorWatcher(
+      [{ dir: join(tmpdir(), 'projwatch-absent-does-not-exist'), hit: () => true }],
+      () => {}
+    );
+    assert.equal(ws.length, 0);
   });
 });

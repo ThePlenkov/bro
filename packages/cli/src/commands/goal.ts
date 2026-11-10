@@ -72,15 +72,18 @@ const SESSION_ENV = [
  *  visible to the session running in another. Null outside a git dir. */
 function goalDir(dir: string): string | null {
   try {
-    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-      // NOSONAR
+    // PATH-resolved git is the contract for a user-installed CLI — the
+    // NOSONAR must share the callee's line (biome reflows a trailing one)
+    const gd = /* NOSONAR */ execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd: dir,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
+    if (gd === '') return null;
     // rev-parse answers relative to the CWD it ran in — resolve against
     // `dir` so callers (tests, hooks in worktrees) get an absolute path
-    return gd ? join(isAbsolute(gd) ? gd : resolve(dir, gd), 'bro', 'hooks', 'goal') : null;
+    const abs = isAbsolute(gd) ? gd : resolve(dir, gd);
+    return join(abs, 'bro', 'hooks', 'goal');
   } catch {
     return null;
   }
@@ -382,13 +385,19 @@ interface GoalArgs {
   asJson: boolean;
   /** Non-flag argv after consuming --session/--turns values. */
   positional: string[];
+  /** When true, tail after -- must be treated verbatim (no verb dispatch). */
+  verbatim: boolean;
 }
 
 function parseGoalArgs(argv: string[]): GoalArgs {
-  const si = argv.indexOf('--session');
-  const ti = argv.indexOf('--turns');
+  const sep = argv.indexOf('--');
+  const head = sep === -1 ? argv : argv.slice(0, sep);
+  const tail = sep === -1 ? [] : argv.slice(sep + 1);
+
+  const si = head.indexOf('--session');
+  const ti = head.indexOf('--turns');
   const valueOf = (i: number, flag: string): string => {
-    const v = argv[i + 1];
+    const v = head[i + 1];
     if (v === undefined || v.startsWith('--')) {
       console.error(`error: ${flag} requires a value`);
       process.exit(2);
@@ -400,18 +409,22 @@ function parseGoalArgs(argv: string[]): GoalArgs {
     const n = Number(valueOf(ti, '--turns'));
     if (!Number.isInteger(n) || n < 0) {
       console.error(
-        `error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`
+        `error: --turns expects a non-negative integer — got ${JSON.stringify(head[ti + 1])}`
       );
       process.exit(2);
     }
     turns = n;
   }
   const valueIdx = new Set([si, ti].filter(i => i >= 0).map(i => i + 1));
+  const verbatim = tail.length > 0;
   return {
     session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
     turns,
-    asJson: argv.includes('--json'),
-    positional: argv.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    asJson: head.includes('--json'),
+    positional: verbatim
+      ? [...head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)), ...tail]
+      : head.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+    verbatim,
   };
 }
 
@@ -498,27 +511,23 @@ export function runGoalCommand(argv: string[]): void {
     );
   }
   const dir = process.cwd();
-  const { session, turns, asJson, positional } = parseGoalArgs(argv);
+  const { session, turns, asJson, positional, verbatim } = parseGoalArgs(argv);
   const target = session ?? SEED;
   const verb = positional[0];
   // a session-scoped verb binds the session's materialized goal — the
   // seed is consumed, not left behind to re-seed the next session
   const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target));
 
-  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
+  if (!verbatim && verb !== undefined && CLEAR_ALIASES.has(verb)) {
     withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson));
     return;
   }
-  if (verb === 'pause' || verb === 'resume') {
+  if (!verbatim && (verb === 'pause' || verb === 'resume')) {
     withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson));
     return;
   }
-  if (verb === 'status' || verb === undefined) {
+  if (!verbatim && (verb === 'status' || verb === undefined)) {
     printStatus(verbGoal(), target, asJson);
-    return;
-  }
-  if (verb === 'set') {
-    setGoal(dir, target, positional.slice(1).join(' '), turns, asJson);
     return;
   }
   setGoal(dir, target, positional.join(' '), turns, asJson);

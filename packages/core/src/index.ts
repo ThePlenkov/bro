@@ -8,9 +8,11 @@ export {
   ghTryAsync,
   issueLink,
   prLink,
+  prRefs,
   resolveRepo,
   resolveRepoAsync,
 } from './gh.ts';
+export type { PrRef } from './gh.ts';
 export {
   git,
   gitTry,
@@ -29,6 +31,7 @@ export {
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
+  worktreePathFor,
   worktreeGitDir,
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
@@ -67,12 +70,15 @@ export {
   DEFAULT_GLOBAL_BEADS_DIR,
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+  brouterSection,
   defineConfig,
   fleetSection,
   globalConfigDir,
+  isIntegerIndexKey,
   js,
   loadConfig,
   loadConfigLayers,
+  MAX_TIMER_MS,
   mcpSection,
   meshSection,
   mirrorSection,
@@ -91,7 +97,14 @@ export {
   sweepSection,
   syncSection,
 } from './config.ts';
-export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts';
+export type {
+  IgnoreCheckEntry,
+  IgnoreCheckRule,
+  ServeClientConfig,
+  ServeClients,
+  SinkDef,
+  SinkType,
+} from './config.ts';
 export {
   API_WIRES,
   cliCommandModel,
@@ -102,6 +115,7 @@ export {
   modelBase,
   parseProviderEntry,
   providerCallGrade,
+  providerAccount,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -125,14 +139,31 @@ export {
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
+  fleetLeases,
+  fleetWalls,
+  deriveAccountWalls,
+  DEFAULT_FLEET_LEASE_TTLS,
   ON_WALL,
+  providerWallOwners,
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
+  walkChain,
   wallText,
 } from './routing.ts';
+export {
+  clearLedgerWalls,
+  readLedgerWalls,
+  recordWall,
+  wallLedgerPath,
+} from './wall-ledger.ts';
+export type { WallLedgerOptions, WallObservation } from './wall-ledger.ts';
 export type {
   ChainEntry,
+  ChainWalk,
+  AccountWall,
+  FleetLeaseTtls,
+  FleetWallTtls,
   FleetRouter,
   OnWall,
   ProviderWall,
@@ -140,6 +171,36 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
+export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
+export {
+  BrouterConfigError,
+  brouterStaticCatalog,
+  isQualifiedRouteId,
+  parseBrouter,
+  resolveModelRoute,
+} from './brouter.ts';
+export type {
+  BrouterConfig,
+  BrouterModels,
+  BrouterRoute,
+  ModelRoute,
+} from './brouter.ts';
+export { healthKey } from './router-health.ts';
+export type { HealthReason, HealthSnapshot, HealthVerdict } from './router-health.ts';
+export {
+  EXPLAIN_SLICES,
+  explainFlag,
+  explainSlicesOrExit,
+  parseExplainSlices,
+  renderExplanation,
+  sliceFacts,
+  sliceNames,
+  unknownFact,
+  withSlice,
+} from './router-explain.ts';
+export type { ExplainFact, ExplainSlice, Explanation } from './router-explain.ts';
+export { estimateTokens } from './tokens.ts';
 export {
   DATA_REF,
   dataRefCommit,
@@ -231,7 +292,10 @@ export type {
   LifecycleKind,
   LifecycleRead,
 } from './lifecycle.ts';
+export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
+export { parseTaskSpecBody, taskSpecFacade } from './taskspec.ts';
+export type { TaskSpec, TaskSpecFacade } from './taskspec.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
@@ -303,6 +367,7 @@ export {
   preToolVerdicts,
   promptContextLines,
   registerConnector,
+  unregisterConnector,
   reviewHost,
   specStore,
   sessionPinnedClaims,
@@ -312,11 +377,23 @@ export {
   sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
+  taskFinishProbes,
+  remoteUrl,
   tasksAsync,
   tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
+export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts';
+export type {
+  HoldRoleLeaseOptions,
+  Lease,
+  LeaseAcquire,
+  LeaseHolder,
+  LeaseStore,
+  LocalLeaseStoreOptions,
+} from './leases.ts';
+export { normalizeRemote, projectId } from './project-id.ts';
 export {
   GUARD_DEFAULT_BUDGET,
   GUARD_EVENTS,
@@ -401,6 +478,7 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
+  TaskFinishReport,
 } from './connectors.ts';
 export {
   AgentNotFound,
@@ -415,14 +493,19 @@ export {
   classifyExitCauseParts,
   commandCliName,
   entryRunId,
+  INSTANT_DEATH_MS,
   isAgentCause,
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
   probeStep,
+  RATE_BACKOFF_BASE_MS,
+  RATE_BACKOFF_CAP_MS,
+  rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
   rebindStep,
+  RESET_MARK_MARGIN_MS,
   SpawnError,
   stepParent,
   withAgentRegistryLock,
@@ -437,6 +520,7 @@ export type {
   AgentState,
   ExitClassification,
   ListResult,
+  PipelineProvenance,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
@@ -452,6 +536,7 @@ export {
   reserveSessionSlot,
   reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
@@ -465,7 +550,21 @@ export type {
   SessionQuota,
 } from './session-planes.ts';
 export {
+  clearExternalPlanes,
+  externalPlanes,
+  ownedEnviron,
+  registerExternalPlane,
+} from './external-planes.ts';
+export type {
+  ExternalActivity,
+  ExternalActivityPlane,
+  ExternalProbeCtx,
+} from './external-planes.ts';
+export {
+  admitSessionStart,
+  admitSessionStartAsync,
   planeStartingSessions,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -473,7 +572,11 @@ export {
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts';
-export type { SessionCapView } from './session-cap.ts';
+export type {
+  SessionCapView,
+  SessionStartAdmission,
+  SessionStartAdmissionArgs,
+} from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -502,6 +605,7 @@ export type {
 } from './planes.ts';
 export {
   acquireFileLock,
+  acquireFileLockYielding,
   awaitFileLock,
   holdFileLock,
   lockHolderPid,
@@ -529,9 +633,27 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
-export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export {
+  EXIT,
+  EXIT_CODES,
+  hasHelpFlag,
+  passthroughExitCode,
+  printUsage,
+  usageWriter,
+} from './exits.ts';
+export { deprecatedFlag, flag, flagAll, flagValue, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
-export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export { CommandError, isCommandError } from './errors.ts';
+export {
+  groupMemberAlive,
+  handleOwner,
+  markerLive,
+  markerOwner,
+  pidAlive,
+  procStat,
+  scanProc,
+} from './proc.ts';
+export type { ProcEntry } from './proc.ts';
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
@@ -545,6 +667,7 @@ export {
   busProbe,
   busPublish,
   busSocketPath,
+  busSocketPathForCommon,
   busStatePath,
   busStatus,
   busSubscribe,

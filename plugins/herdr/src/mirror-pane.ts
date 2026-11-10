@@ -6,6 +6,7 @@
 import { basename } from 'node:path';
 import {
   type HerdrPane,
+  herdrOk,
   herdrTry,
   type MirrorRec,
   type PluginState,
@@ -90,8 +91,7 @@ function mirrorRecOf(a: MirrorSource, ctx: MirrorCtx, paneId: string, keep?: Mir
  *  unarmed, and a later pass retries through the orphan path. */
 function armMirrorPane(a: MirrorSource, paneId: string, ctx: MirrorCtx): boolean {
   herdrTry(['pane', 'rename', paneId, `bro: ${a.id}`]);
-  const ran = herdrTry(['pane', 'run', paneId, mirrorCommand(a)]);
-  if (ran === undefined) return false;
+  if (!herdrOk(['pane', 'run', paneId, mirrorCommand(a)])) return false;
   ctx.state.mirrors[a.id] = mirrorRecOf(a, ctx, paneId);
   return true;
 }

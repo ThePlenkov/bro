@@ -1,10 +1,10 @@
 ---
 
 title: "bro trace"
-description: "OTLP export of the session trace journals — export [--session|--dry-run|--json]"
+description: "<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals"
 ---
 
-**`bro trace`** — OTLP export of the session trace journals — export [--session|--dry-run|--json]
+**`bro trace`** — &lt;ref&gt; → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals
 
 |            |                                        |
 | ---------- | -------------------------------------- |
