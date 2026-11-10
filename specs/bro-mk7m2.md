@@ -3,6 +3,7 @@
 ## Problem
 
 From `specs/bro-j1kk2/coverage-audit.md` (2026-10-15):
+
 - Gaps (user-facing surface, no docs page): `bro mesh`, `bro fleet mcp`, `bro fleet provider` / `provider serve` host story, `bro work goal`, `bro trace` (OTLP export).
 - Registry drift: `mesh` ships `skills/mesh/SKILL.md` but the registry entry carries no `skill:` field — client adapters never emit it. Must wire `skill: 'mesh'`.
 - Also need to "generate the command index from the contract" (j1kk2.8) — the generator reads from the contract/registry and emits `site/content/docs/reference/*` pages + grouped `meta.json`. The generator and check gate exist; they must stay correct and cover gaps.
