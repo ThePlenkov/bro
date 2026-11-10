@@ -176,10 +176,7 @@ export class AcpDeadLoopGuard {
 
   /** The peer's half of the charge — the tally it was counted in and the
    *  window it stood at. Undefined for a target with no peer. */
-  private chargePeer(
-    target: AcpTarget,
-    now: number
-  ): { tally: Tally; since: number } | undefined {
+  private chargePeer(target: AcpTarget, now: number): { tally: Tally; since: number } | undefined {
     if (target.peer === undefined) {
       return undefined;
     }
@@ -191,10 +188,7 @@ export class AcpDeadLoopGuard {
   /** The charge the caller settles when the session's turn completes —
    *  the scope's own debt and the peer's, each in the window it was
    *  counted in. */
-  private charge(
-    tally: Tally,
-    peer: { tally: Tally; since: number } | undefined
-  ): AcpCharge {
+  private charge(tally: Tally, peer: { tally: Tally; since: number } | undefined): AcpCharge {
     // the window the charge was counted in — a rolled window already
     // wrote this charge off, so resolve() checks it before freeing
     const since = tally.since;

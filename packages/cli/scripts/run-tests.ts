@@ -8,11 +8,11 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function isE2eTest(name: string): boolean {
-  return name.endsWith('.e2e.test.ts');
+  return name.endsWith('.e2e.test.ts') || name.endsWith('.e2e.test.tsx');
 }
 
 function shouldInclude(name: string, wantE2e: boolean): boolean {
-  if (!/\.test\.ts$/.test(name)) return false;
+  if (!/\.test\.tsx?$/.test(name)) return false;
   const isE2e = isE2eTest(name);
   if (wantE2e) return isE2e;
   return !isE2e;

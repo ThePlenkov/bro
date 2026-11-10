@@ -21,11 +21,13 @@ import {
   buildCiFixerPrompt,
   buildFixerPrompt,
   buildRebaseFixerPrompt,
+  type BaseTip,
   buildSastFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
   ensureFixerWorktree,
+  fetchBaseTip,
   fixerAttemptSpent,
   fixerBeadFor,
   fixerRef,
@@ -1099,13 +1101,23 @@ describe('buildFixerPrompt', () => {
 });
 
 describe('buildRebaseFixerPrompt', () => {
+  const remoteTip = (sha = 'abc1234'): BaseTip => ({
+    ref: 'origin/main',
+    sha,
+    remote: true,
+    origin: true,
+  });
+
   test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
     const p = buildRebaseFixerPrompt({
       pr: 42,
       link: '[#42](https://github.com/o/r/pull/42)',
       branch: 'work/bro-a',
       base: 'main',
+      baseTip: remoteTip(),
       worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
     });
     assert.match(p, /#42.*pull\/42/);
     assert.match(p, /work\/bro-a/);
@@ -1113,11 +1125,126 @@ describe('buildRebaseFixerPrompt', () => {
     assert.match(p, /merge conflicts with its base branch `main`/);
     // the work order fetches the PR branch too — a stale local tip would
     // rebase without the remote's newer commits and drop them on push
-    assert.match(p, /fetch origin work\/bro-a main/);
+    assert.match(p, /fetch origin work\/bro-a/);
     assert.match(p, /rebase origin\/work\/bro-a/);
     assert.match(p, /git rebase origin\/main/);
     assert.match(p, /--force-with-lease/);
     assert.match(p, /NEVER merge/);
+  });
+
+  test('names the fetched base tip and orders the work fetch → verify → re-check → rebase', () => {
+    // bro-by8d3: the base tip bro fetched is the target, and the fixer
+    // must notice the base moving under it instead of rebasing blind
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: remoteTip(),
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+    });
+    assert.match(p, /abc1234/);
+    assert.match(p, /must still read `abc1234`/);
+    assert.match(p, /Fetch the base AGAIN, immediately before the rebase/);
+    assert.match(p, /gh pr view\s+42 --json mergeable/);
+    assert.match(p, /MERGEABLE means the conflict dissolved — STOP/);
+    // the fetch lands BEFORE the rebase in the order of work
+    assert.ok(p.indexOf('Fetch the base AGAIN') < p.indexOf('git rebase origin/main'));
+  });
+
+  test('a gitlab reviews connector gets the glab api read — never gh', () => {
+    // the fixer must be able to RUN the re-check it is told to run
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: remoteTip(),
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+    });
+    assert.match(p, /glab api projects\/o%2Fr\/merge_requests\/42/);
+    assert.match(p, /detailed_merge_status/);
+    assert.doesNotMatch(p, /gh pr view/);
+  });
+
+  test('a LOCAL base is rebase-able: no remote fetch, no invented remote ref', () => {
+    // the base lives only locally — the work order must not send the
+    // fixer after a remote ref that does not exist
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      baseTip: { ref: 'main', sha: 'abc1234', remote: false, origin: false },
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+    });
+    assert.match(p, /resolved the base to `main`/);
+    assert.match(p, /git rebase main/);
+    assert.match(p, /This base is a LOCAL branch/);
+    assert.doesNotMatch(p, /git rebase origin\/main/);
+    // no remote at all — there is nothing to fetch, and the order says so
+    assert.doesNotMatch(p, /git fetch origin/);
+  });
+});
+
+describe('fetchBaseTip', () => {
+  test('fetches the base and reads its tip — a stale tracking ref is refreshed', () => {
+    const { root, main } = initRepo('bro-drive-base-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      git(['push', '-qu', 'origin', 'main'], main);
+      // the remote advances; the local tracking ref stays behind
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main'], main);
+      const tip = git(['-C', main, 'rev-parse', 'HEAD'], main).trim();
+      git(['update-ref', '-d', 'refs/remotes/origin/main'], main);
+
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip?.sha, tip);
+      assert.equal(r.tip?.ref, 'origin/main');
+      assert.equal(r.tip?.remote, true);
+      assert.equal(r.err, undefined);
+      assert.equal(git(['-C', main, 'rev-parse', 'origin/main'], main).trim(), tip);
+    });
+  });
+
+  test('a repo with no origin remote resolves the LOCAL base', () => {
+    const { root, main } = initRepo('bro-drive-basen-');
+    inside(main, root, () => {
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip?.ref, 'main');
+      assert.equal(r.tip?.remote, false);
+      assert.equal(r.tip?.origin, false);
+      assert.equal(r.err, undefined);
+    });
+  });
+
+  test('a base that exists nowhere is an error — the spawn is refused', () => {
+    const { root, main } = initRepo('bro-drive-basex-');
+    inside(main, root, () => {
+      git(['init', '-q', '--bare', join(root, 'origin.git')], root);
+      git(['remote', 'add', 'origin', join(root, 'origin.git')], main);
+      const r = fetchBaseTip(main, 'nope');
+      assert.equal(r.tip, undefined);
+      assert.match(r.err ?? '', /no branch or remote-tracking ref named nope/);
+    });
+  });
+
+  test('a broken remote is an error — not a silently skipped base', () => {
+    const { root, main } = initRepo('bro-drive-baseb-');
+    inside(main, root, () => {
+      git(['remote', 'add', 'origin', join(root, 'nope.git')], main);
+      const r = fetchBaseTip(main, 'main');
+      assert.equal(r.tip, undefined);
+      assert.ok((r.err ?? '').length > 0);
+    });
   });
 });
 
@@ -1193,6 +1320,26 @@ describe('ensureFixerWorktree', () => {
       const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
       assert.notEqual(tip, stale);
       assert.equal(tip, git(['-C', dir, 'rev-parse', 'origin/work/bro-a'], main).trim());
+    });
+  });
+
+  test('an occupied checkout is never refreshed — the guard answers before the move', () => {
+    // bro-by8d3: the branch of a live session is not moved, not even by
+    // a fast-forward. The guard is asked BEFORE the refresh.
+    const { root, main } = initRepo('bro-drive-wto-');
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main);
+      // the remote advances — a refresh would fast-forward the branch
+      git(['commit', '-qm', 'remote', '--allow-empty'], main);
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main);
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main);
+      const before = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim();
+      const r = ensureFixerWorktree(main, 'work/bro-a', {
+        guard: () => 'session armed work on work/bro-a',
+      });
+      assert.equal(r.path, undefined);
+      assert.equal(r.occupied, 'session armed work on work/bro-a');
+      assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), before);
     });
   });
 

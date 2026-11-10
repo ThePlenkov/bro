@@ -39,7 +39,16 @@ function exits(fn: () => unknown): { code: number; err: string[]; out: string[] 
     fn();
     return { code: -1, err, out };
   } catch (e) {
-    return { code: e instanceof Exit ? e.code : -1, err, out };
+    if (e instanceof Exit) {
+      return { code: e.code, err, out };
+    }
+    // CommandError is the dispatcher contract — its code is the exit
+    if (e !== null && typeof e === 'object' && (e as { name?: unknown }).name === 'CommandError') {
+      const ce = e as { code?: unknown; message?: unknown };
+      if (ce.message) err.push(String(ce.message));
+      return { code: typeof ce.code === 'number' ? ce.code : 1, err, out };
+    }
+    return { code: -1, err, out };
   } finally {
     process.exit = origExit;
     console.error = origErr;

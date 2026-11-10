@@ -61,7 +61,10 @@ function titleSegments(pattern: string): TitleSegment[] {
 
 /** The pattern's literal text — the parts that match themselves. */
 function literalText(segments: TitleSegment[]): string {
-  return segments.filter(isLiteral).map((seg) => seg.text).join('');
+  return segments
+    .filter(isLiteral)
+    .map(seg => seg.text)
+    .join('');
 }
 
 /** The literal at the pattern's edge — '' when the edge is a wildcard,
@@ -113,7 +116,7 @@ function anchoredMatch(m: TitleMatch): boolean {
 
 /** Does the title match the pattern's segments? */
 function segmentsMatch(m: TitleMatch): boolean {
-  if (!m.segments.some((seg) => !isLiteral(seg))) {
+  if (!m.segments.some(seg => !isLiteral(seg))) {
     // no free part: the title is the pattern, exactly
     return m.title === literalText(m.segments);
   }

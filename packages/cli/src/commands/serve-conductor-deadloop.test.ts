@@ -6,11 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  clearSessionPlanes,
-  registerSessionPlane,
-  type SessionPlane,
-} from '@broject/core';
+import { clearSessionPlanes, registerSessionPlane, type SessionPlane } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';

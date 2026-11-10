@@ -1666,6 +1666,19 @@
       },
       "additionalProperties": false
     },
+    "spawn": {
+      "type": "object",
+      "properties": {
+        "externalBlock": {
+          "type": "boolean"
+        },
+        "externalIdleSec": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "stack": {
       "type": "object",
       "properties": {

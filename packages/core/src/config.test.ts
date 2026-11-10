@@ -16,7 +16,6 @@ import { scrubEnv, testGit } from './testkit.ts';
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
-
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
 const XDG = tmpDir('bro-xdg-');

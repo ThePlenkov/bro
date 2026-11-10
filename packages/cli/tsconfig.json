@@ -5,7 +5,11 @@
     // >=22.18) has it; the base target stays ES2022 for emit. DOM stays
     // in the set because the default lib for the target includes it, and
     // dropping it would retype every DOM global the tests touch.
-    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    // opencode-tui-v2.tsx — Solid/OpenTUI JSX; the opencode host resolves
+    // the runtime, devDeps only type it
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid"
   },
-  "include": ["src/**/*.ts", "tsdown.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tsdown.config.ts"]
 }

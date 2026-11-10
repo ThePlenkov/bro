@@ -21,6 +21,7 @@ const main = defineConfig({
     'src/config-schema.ts',
     'src/opencode.ts',
     'src/opencode-tui.ts',
+    'src/opencode-tui-v2.tsx',
     'src/kilo.ts',
   ],
   format: ['esm'],
