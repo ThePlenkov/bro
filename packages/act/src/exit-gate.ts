@@ -2,8 +2,8 @@
  * Exit gate — the act loop's "can I stop?" as code instead of prompt text.
  * ok=false carries named blockers so an agent loop can decide, not guess.
  */
-import type { ExitGate, PrActState } from './types.ts'
-import type { ReopenedThread } from './reopened.ts'
+import type { ExitGate, PrActState } from './types.ts';
+import type { ReopenedThread } from './reopened.ts';
 
 /** Thread blocker text — the cap-hit variant mandates debt-defer, the
  *  plain one just counts. */
@@ -15,36 +15,36 @@ function threadsBlocker(state: PrActState): string {
       `fix-round cap hit (${state.fixRounds}>${state.maxRounds}` +
       `${state.docsOnly ? ', docs-only PR' : ''}) — ` +
       `defer the ${state.openThreads} remaining thread(s) to debt beads and resolve, do not fix inline`
-    )
+    );
   }
-  return `${state.openThreads} unresolved review thread(s)`
+  return `${state.openThreads} unresolved review thread(s)`;
 }
 
 /** The reopened threads on a state — tolerant of a record written
  *  by an older bro, which has no such field. */
 function reopenedThreadsOf(state: PrActState): ReopenedThread[] {
-  return state.reopenedThreads ?? []
+  return state.reopenedThreads ?? [];
 }
 
 /** The reopened-thread cycle-guard report lines — extracted so the
  *  gate function stays under the cognitive-complexity ceiling. */
 function reopenedBlockers(state: PrActState): string[] {
-  const out: string[] = []
+  const out: string[] = [];
   // a thread that was resolved and then commented on again: the earlier
   // resolution was wrong, and a blind re-resolve hides that — the user
   // confirms instead
   for (const t of reopenedThreadsOf(state)) {
-    out.push(`reopened thread ${t.id} — resolved before, commented on again by ${t.author}`)
+    out.push(`reopened thread ${t.id} — resolved before, commented on again by ${t.author}`);
   }
-  return out
+  return out;
 }
 
 /** Why the approval probe failed — a ternary the gate need not own. */
 function approvalReason(state: PrActState): string {
   if (state.humanApproval === false) {
-    return state.humanApprovalReason ?? 'not approved'
+    return state.humanApprovalReason ?? 'not approved';
   }
-  return 'approval probe unanswerable'
+  return 'approval probe unanswerable';
 }
 
 export function evaluateExitGate(
@@ -71,22 +71,22 @@ export function evaluateExitGate(
     alerts: state.alerts,
     // reopened threads DO block — the count rides along for the report
     reopened_threads: reopenedThreadsOf(state).length,
-  }
+  };
   if (state.state !== 'OPEN') {
-    return { ok: true, blockers: [], ...base }
+    return { ok: true, blockers: [], ...base };
   }
-  const blockers: string[] = []
+  const blockers: string[] = [];
   if (state.openThreads > 0) {
-    blockers.push(threadsBlocker(state))
+    blockers.push(threadsBlocker(state));
   }
   if (state.ciPending > 0) {
-    blockers.push(`${state.ciPending} pending check(s)`)
+    blockers.push(`${state.ciPending} pending check(s)`);
   }
   if (state.ciFailing > 0) {
-    blockers.push(`${state.ciFailing} failing check(s)`)
+    blockers.push(`${state.ciFailing} failing check(s)`);
   }
   if (state.reviewersPending > 0) {
-    blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`)
+    blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`);
   }
   // a *failed* reviewer check is infrastructure (crash/quota/service
   // outage) — the reviewer's actual findings arrive as threads, which DO
@@ -94,28 +94,38 @@ export function evaluateExitGate(
   // never holds the gate; pending reviewers still wait since they may
   // post findings.
   if (state.sastPending > 0) {
-    blockers.push(`${state.sastPending} SAST finding(s)`)
+    blockers.push(`${state.sastPending} SAST finding(s)`);
   }
   if (state.sastUnknown > 0) {
-    blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
+    blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`);
   }
   // The reopened-thread cycle-guard rides the report (see
   // reopenedBlockers) — it blocks, and its lines are part of blockers
-  blockers.push(...reopenedBlockers(state))
+  blockers.push(...reopenedBlockers(state));
   if (state.mergeable === 'CONFLICTING') {
-    blockers.push('merge conflicts')
+    blockers.push('merge conflicts');
   }
   if (state.mergeable === 'UNKNOWN') {
-    blockers.push('mergeability still computing — recheck')
+    blockers.push('mergeability still computing — recheck');
   }
   // BEHIND means the merge can't proceed without an update; BLOCKED is not
   // listed — required-review blocks are intentionally bypassed via --admin,
   // and UNSTABLE overlaps the all-checks ci_pending count
   if (state.mergeState === 'BEHIND') {
-    blockers.push('branch is behind the base — update it')
+    blockers.push('branch is behind the base — update it');
   }
   if (state.isDraft) {
-    blockers.push('PR is a draft')
+    blockers.push('PR is a draft');
+  }
+  // reviewDecision is a third axis beside threads and checks: a
+  // standing CHANGES_REQUESTED vetoes the merge on the host even when
+  // every thread resolved (bro-n1foa — #931 refused with
+  // open_threads=0). A review whose threads all resolved is stale and
+  // dismissible; anything else waits on the reviewer's re-review.
+  if (state.reviewDecision === 'CHANGES_REQUESTED') {
+    blockers.push(
+      'reviewDecision=CHANGES_REQUESTED — a reviewer veto stands; dismiss a stale review or wait for re-review'
+    );
   }
   // act.requireApproval — the hostile-input hardening: agent output
   // never auto-lands without a trusted human's approving review on the
@@ -130,7 +140,7 @@ export function evaluateExitGate(
       `no trusted human approval on the current head — act.requireApproval ` +
         `requires a human's approving review on the latest head ` +
         `(${approvalReason(state)})`
-    )
+    );
   }
-  return { ok: blockers.length === 0, blockers, ...base }
+  return { ok: blockers.length === 0, blockers, ...base };
 }

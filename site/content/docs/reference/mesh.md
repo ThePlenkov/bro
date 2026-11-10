@@ -11,5 +11,7 @@ description: "Inter-rig work federation: me|peers|pull|inbox|request|claim|done|
 | --- | --- |
 | group | `mesh` |
 | npm latest | `0.2.5` |
+| skill | `mesh` |
 | config | `mesh` in bro.config |
+| guide | [commands/mesh](/docs/commands/mesh) |
 
