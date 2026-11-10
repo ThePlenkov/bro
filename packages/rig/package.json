@@ -1,6 +1,10 @@
 {
   "name": "@broject/rig",
   "version": "0.2.5",
+  "bro": {
+    "kind": "core",
+    "status": "beta"
+  },
   "type": "module",
   "exports": {
     ".": {
