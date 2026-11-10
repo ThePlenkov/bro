@@ -26,6 +26,16 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
+import {
+  cacheKey,
+  hookCacheDir,
+  isJsonData,
+  probesHold,
+  readCacheFile,
+  statProbe,
+  writeCacheFile,
+  type FileProbe,
+} from './hook-cache.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
@@ -2094,39 +2104,187 @@ export function loadConfigLayers(
   only?: readonly ConfigLayerName[]
 ): ConfigLayersResult {
   const base = resolve(cwd);
+  // the hook-path cache (spec bro-gwh2a): one record per (resolved cwd,
+  // layer) under <git-common>/bro/hooks/cache — null outside a repo or
+  // under BRO_HOOK_CACHE=0, both meaning "scan live" (status quo)
+  const cacheDir = hookCacheDir(base);
   // Linked worktrees share the main checkout's machine-local config —
   // bro.config.local.* is gitignored, so a fresh `git worktree add`
   // otherwise loses act.ignoreChecks and store choices (a bare `act
   // wait` stalls on a flaky reviewer the main checkout knows to ignore).
   // mainWorktreeRoot returns an absolute path, so a relative cwd must be
   // absolute too or the Set dedupe compares 'foo' against '/abs/foo'.
-  const projectDirs = [
-    ...new Set(
-      [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
-    ),
-  ];
+  // Resolved lazily — a cache hit on the repo layers must not pay for a
+  // worktree-root probe the scan never needed.
+  let projectDirs: string[] | null = null;
+  const dirs = (): string[] =>
+    (projectDirs ??= [
+      ...new Set(
+        [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
+      ),
+    ]);
   const layers: ConfigLayerHit[] = [];
   const broken: string[] = [];
   const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
-  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
-  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);
-  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken);
+  for (const layer of CONFIG_LAYERS) {
+    if (!want(layer)) {
+      continue;
+    }
+    const record = readLayerRecord(cacheDir, base, layer);
+    if (record !== undefined) {
+      if (record.hit !== null) {
+        layers.push(record.hit);
+      }
+      broken.push(...record.broken);
+      continue;
+    }
+    // miss — run the real scan with a probe recorder, then persist it.
+    // Layer-local buffers keep `layers`/`broken` ordering identical to
+    // the sequential scan (global → project → local).
+    const layerHits: ConfigLayerHit[] = [];
+    const layerBroken: string[] = [];
+    const probes: FileProbe[] = [];
+    scanConfigLayer(
+      layer,
+      layer === 'global' ? [globalConfigDir()] : dirs(),
+      layerHits,
+      layerBroken,
+      probes
+    );
+    layers.push(...layerHits);
+    broken.push(...layerBroken);
+    writeLayerRecord(cacheDir, base, layer, probes, layerHits[0] ?? null, layerBroken);
+  }
   return { layers, broken };
+}
+
+// --- layer record cache (spec bro-gwh2a) -------------------------------------
+//
+// One JSON record per (resolved cwd, layer): the probe list is the
+// fingerprint — every candidate the scan touched, with existence and
+// mtime/size. A hit replays the cached {hit, broken} without a single
+// file read or warning; a flip anywhere in the probe set rescans. `.ts`
+// files may evaluate dynamically, so a scan that touched an existing
+// `.ts` is recorded with a TTL only when its raw is JSON data — the
+// record still serves N calls, but staleness is bounded.
+
+interface LayerRecord {
+  v: 1;
+  dir: string;
+  layer: ConfigLayerName;
+  /** Write time — TTL anchor for .ts-tainted records (absent = mtime
+   *  fingerprint alone, .json files are pure data). */
+  ts?: number;
+  probes: FileProbe[];
+  hit: ConfigLayerHit | null;
+  broken: string[];
+}
+
+/** `.ts` configs can compute — a tainted record refreshes this often;
+ *  .json-only scans have no expiry (the fingerprint IS the content). */
+const TS_LAYER_RECORD_TTL_MS = 60_000;
+
+function layerRecordFile(cacheDir: string, dirHash: string, layer: ConfigLayerName): string {
+  return join(cacheDir, `config-layer-${layer}-${dirHash}.json`);
+}
+
+function readLayerRecord(
+  cacheDir: string | null,
+  base: string,
+  layer: ConfigLayerName
+): { hit: ConfigLayerHit | null; broken: string[] } | undefined {
+  if (cacheDir === null) {
+    return undefined;
+  }
+  try {
+    const file = layerRecordFile(cacheDir, cacheKey(base), layer);
+    const rec = readCacheFile(file);
+    if (rec === undefined || rec.v !== 1 || rec.dir !== base || rec.layer !== layer) {
+      return undefined;
+    }
+    if (!Array.isArray(rec.probes) || !Array.isArray(rec.broken)) {
+      return undefined;
+    }
+    // TTL only bounds records whose scan touched .ts — everything else
+    // lives purely on the mtime/size fingerprint
+    if (typeof rec.ts === 'number' && Date.now() - rec.ts >= TS_LAYER_RECORD_TTL_MS) {
+      return undefined;
+    }
+    if (!probesHold(rec.probes as FileProbe[])) {
+      return undefined;
+    }
+    const hit = rec.hit as Partial<ConfigLayerHit> | null;
+    // a hand-edited or version-stale record must not feed a malformed
+    // hit to the merge — prove the fields the result contract needs
+    if (
+      hit !== null &&
+      (typeof hit !== 'object' ||
+        Array.isArray(hit) ||
+        hit.layer !== layer ||
+        typeof hit.dir !== 'string' ||
+        typeof hit.file !== 'string' ||
+        !isJsonData(hit.raw))
+    ) {
+      return undefined;
+    }
+    return { hit: hit as ConfigLayerHit | null, broken: rec.broken as string[] };
+  } catch {
+    return undefined; // any cache failure → live scan (fail-open)
+  }
+}
+
+function writeLayerRecord(
+  cacheDir: string | null,
+  base: string,
+  layer: ConfigLayerName,
+  probes: FileProbe[],
+  hit: ConfigLayerHit | null,
+  broken: string[]
+): void {
+  if (cacheDir === null) {
+    return;
+  }
+  // a scan that touched an existing .ts may have evaluated code — the
+  // record is still written (parse once per TTL window) but only when
+  // the parsed shapes serialize losslessly; functions/cycles would
+  // silently corrupt on the way back
+  const tsTainted = probes.some(p => p.exists && p.path.endsWith('.ts'));
+  if (
+    hit !== null &&
+    (!isJsonData(hit.raw) || (hit.pluginsRaw !== undefined && !isJsonData(hit.pluginsRaw)))
+  ) {
+    return;
+  }
+  const record: LayerRecord = {
+    v: 1,
+    dir: base,
+    layer,
+    ...(tsTainted ? { ts: Date.now() } : {}),
+    probes,
+    hit,
+    broken,
+  };
+  writeCacheFile(layerRecordFile(cacheDir, cacheKey(base), layer), record, 'config-layer-');
 }
 
 /** One candidate config file — 'missing' lets the next name try,
  *  'broken' retires the dir (a parse failure already warned inside
  *  readConfigFile; a non-object root warns here), 'loaded' settles the
- *  layer. */
+ *  layer. `probes`, when passed, records the stat fingerprint of every
+ *  candidate looked at — the layer record cache's invalidation set
+ *  (spec bro-gwh2a). */
 function probeLayerCandidate(
   layer: ConfigLayerName,
   dir: string,
   name: string,
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): 'missing' | 'broken' | 'loaded' {
   const path = join(dir, name);
-  if (!existsSync(path)) {
+  const probe = statProbe(path);
+  probes?.push(probe);
+  if (!probe.exists) {
     return 'missing';
   }
   const raw = readConfigFile(name, path);
@@ -2163,10 +2321,11 @@ function scanConfigLayerDir(
   layer: ConfigLayerName,
   dir: string,
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): boolean {
   for (const name of CONFIG_LAYER_FILES[layer]) {
-    const verdict = probeLayerCandidate(layer, dir, name, layers, broken);
+    const verdict = probeLayerCandidate(layer, dir, name, layers, broken, probes);
     if (verdict !== 'missing') {
       return verdict === 'loaded';
     }
@@ -2178,10 +2337,11 @@ function scanConfigLayer(
   layer: ConfigLayerName,
   dirs: string[],
   layers: ConfigLayerHit[],
-  broken: string[]
+  broken: string[],
+  probes?: FileProbe[]
 ): void {
   for (const dir of dirs) {
-    if (scanConfigLayerDir(layer, dir, layers, broken)) {
+    if (scanConfigLayerDir(layer, dir, layers, broken, probes)) {
       return;
     }
   }
