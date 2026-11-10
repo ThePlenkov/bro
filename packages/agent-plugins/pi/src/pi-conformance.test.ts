@@ -116,7 +116,7 @@ void _wholeAdapterConforms;
 
 // --- the pinned release -------------------------------------------------------
 
-const cliPkgDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const cliPkgDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('the pi type fixture is pinned to the supported release', () => {
   const pkg = JSON.parse(readFileSync(join(cliPkgDir, 'package.json'), 'utf8')) as {
@@ -138,7 +138,7 @@ test('the pi type fixture is pinned to the supported release', () => {
   );
   const installed = JSON.parse(
     readFileSync(
-      join(cliPkgDir, '../../node_modules/@earendil-works/pi-coding-agent/package.json'),
+      join(cliPkgDir, '../../../node_modules/@earendil-works/pi-coding-agent/package.json'),
       'utf8'
     )
   ) as { version: string };
