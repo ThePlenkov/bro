@@ -41,16 +41,27 @@ function remoteParts(url: string): { host: string; path: string } | null {
   return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') }
 }
 
-function resolveProjectPath(dir: string, positional: string[] = []): string {
+interface ResolvedProject {
+  path: string
+  name: string
+}
+
+function resolveProject(dir: string, positional: string[] = []): ResolvedProject {
   if (positional.length > 0) {
-    return positional.join('/')
+    return { path: positional.join('/'), name: positional[positional.length - 1]! }
   }
   const url = remoteUrl(dir)
   const path = url === undefined ? null : remoteParts(url)?.path
   if (!path) {
     throw new Error('no GitLab remote — pass GROUP/PROJECT or add an origin remote')
   }
-  return path
+  // A remote URL carries the project name only as the path's last segment, so
+  // the split happens here at the parse boundary — callers get it structured.
+  return { path, name: path.split('/').pop()! }
+}
+
+function resolveProjectPath(dir: string, positional: string[] = []): string {
+  return resolveProject(dir, positional).path
 }
 
 function api(projectPath: string, path: string): string {
@@ -111,14 +122,18 @@ function assigneesOf(i: GitLabIssue): string[] {
   return (i.assignees ?? []).map((a) => a.username).filter((x): x is string => typeof x === 'string')
 }
 
+function isInteger(v: unknown): v is number {
+  return Number.isInteger(v)
+}
+
 function isBlocked(i: GitLabIssue, labels: string[]): boolean {
   if (labels.includes(BLOCKED_LABEL)) {
     return true
   }
-  if (typeof i.blocking_issues_count === 'number' && i.blocking_issues_count > 0) {
+  if (isInteger(i.blocking_issues_count) && i.blocking_issues_count > 0) {
     return true
   }
-  if (typeof i.blocked_issues_count === 'number' && i.blocked_issues_count > 0) {
+  if (isInteger(i.blocked_issues_count) && i.blocked_issues_count > 0) {
     return true
   }
   if (i.has_blocked_issues === true) {
@@ -156,7 +171,7 @@ function priorityOf(labels: string[], meta: Record<string, unknown>): number {
     }
   }
   const p = meta.priority
-  return typeof p === 'number' ? p : DEFAULT_PRIORITY
+  return isInteger(p) ? p : DEFAULT_PRIORITY
 }
 
 function toRow(i: GitLabIssue, projectPath: string, baseProjectPath?: string): TaskRow {
@@ -592,8 +607,7 @@ export function gitlabTasks(dir: string): TaskStore {
     link: (from, to, rel = 'related') => linkSync(dir, from, to, rel),
     prefix: () => {
       try {
-        const p = resolveProjectPath(dir)
-        return p.split('/').pop()
+        return resolveProject(dir).name
       } catch {
         return undefined
       }
@@ -616,6 +630,6 @@ export function gitlabTasksAsync(dir: string): TaskStoreAsync {
     neighbors: async () => {
       throw new Error('gitlab tasks: neighbors not supported')
     },
-    actor: async () => (sync.actor ? sync.actor() : ''),
+    actor: async () => (sync.actor === undefined ? '' : sync.actor()),
   }
 }
