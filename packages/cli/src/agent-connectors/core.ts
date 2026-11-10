@@ -1586,8 +1586,8 @@ export function providerWallsFor(
     ensureExitCause(dir, home, molStep, entry, env.fleet?.walls);
   }
   const walls = [
-    ...deriveProviderWalls(registry),
-    ...deriveAccountWalls(registry).map(w => ({
+    ...deriveProviderWalls(registry, Date.now(), env.providers),
+    ...deriveAccountWalls(registry, Date.now(), env.providers).map(w => ({
       provider: w.provider ?? w.account,
       account: w.account,
       cause: w.cause,
@@ -1625,7 +1625,7 @@ export function fleetWallRowsFor(
     ensureExitCause(dir, home, step, entry, env.fleet?.walls);
   }
   const now = Date.now();
-  const local = deriveAccountWalls(registry, now).map(wall => ({
+  const local = deriveAccountWalls(registry, now, env.providers).map(wall => ({
     ...wall,
     source: 'registry' as const,
     provider: wall.provider ?? wall.account,
@@ -1985,9 +1985,9 @@ function spawnWalls(
   env: AgentConnectorEnv,
   candidates: Array<{ provider: string; account: string }>
 ): ProviderWall[] {
-  const walls = deriveProviderWalls(registry, now);
+  const walls = deriveProviderWalls(registry, now, env.providers);
   const accounts = [
-    ...deriveAccountWalls(registry, now),
+    ...deriveAccountWalls(registry, now, env.providers),
     ...readLedgerWalls(now, env.fleet?.walls),
   ];
   const byProvider = new Map(walls.map(wall => [wall.provider, wall]));
@@ -2564,6 +2564,10 @@ function outgoingAttemptOf(
     ...(existing.model === undefined ? {} : { model: existing.model }),
     ...(existing.cause === undefined ? {} : { cause: existing.cause }),
     ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
+    // the death stamp — without it a mark-less rate death anchors at the
+    // original spawn, so a long-running worker's fresh wall lifts instantly
+    // (bro-uswqn review: the bound must start at the death, not the birth)
+    ...(existing.observedAt === undefined ? {} : { observedAt: existing.observedAt }),
     ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
     ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
   };

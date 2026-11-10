@@ -14,7 +14,13 @@
  * (project / type / effort / tags) stay board-local.
  */
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
-import { MESH_VERSION, priorityTerm, type MeshEnvelope, type MeshRef } from './envelope.ts';
+import {
+  MESH_VERSION,
+  type MeshEnvelope,
+  type MeshKind,
+  type MeshRef,
+  priorityTerm,
+} from './envelope.ts';
 import { formatRigUri, parseRigUri } from './identity.ts';
 
 export interface WlResult {
@@ -182,7 +188,7 @@ export function projectWanted(input: { row: WantedRow; selfRig?: string }): {
   return {
     envelopes: [
       projectRequest({ row, ctx, selfRig: self }),
-      ...projectClaim({ row, ctx }),
+      ...projectClaim({ ctx }),
       ...projectCompletion({ row, ctx }),
     ],
     errors,
@@ -195,6 +201,28 @@ interface BoardCtx {
   base: BoardBase;
   poster: string;
   claimer: string | null;
+}
+
+/** Every record past the request shares the row's base — the id gains
+ *  a `#<suffix>` and only kind / parties / evidence differ. */
+function ctxRecord(input: {
+  ctx: BoardCtx;
+  suffix: string;
+  kind: MeshKind;
+  from: string;
+  to: string;
+  evidence?: MeshRef[];
+}): MeshEnvelope {
+  const { ctx, suffix, kind, from, to, evidence } = input;
+  const env: MeshEnvelope = {
+    ...ctx.base,
+    id: `${ctx.base.thread}#${suffix}`,
+    kind,
+    from,
+    to,
+    terms: {},
+  };
+  return evidence === undefined ? env : { ...env, evidence };
 }
 
 /** The open-row request — `to` is the projection's only judgement:
@@ -214,80 +242,54 @@ function projectRequest(input: { row: WantedRow; ctx: BoardCtx; selfRig?: string
   };
 }
 
-function projectClaim(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
-  const { row, ctx } = input;
+function projectClaim(input: { ctx: BoardCtx }): MeshEnvelope[] {
+  const { ctx } = input;
   if (ctx.claimer === null) {
     return [];
   }
-  return [
-    {
-      ...ctx.base,
-      id: `${row.id}#claim`,
-      kind: 'claim' as const,
-      from: ctx.claimer,
-      to: ctx.poster,
-      terms: {},
-    },
-  ];
+  return [ctxRecord({ ctx, suffix: 'claim', kind: 'claim', from: ctx.claimer, to: ctx.poster })];
+}
+
+function hasEvidence(c: { evidence?: string }): boolean {
+  return typeof c.evidence === 'string' && c.evidence !== '';
 }
 
 function firstEvidence(completions: NonNullable<WantedRow['completions']>): string | undefined {
-  for (const c of completions) {
-    if (typeof c.evidence === 'string' && c.evidence !== '') {
-      return c.evidence;
-    }
-  }
-  return undefined;
+  return completions.find(hasEvidence)?.evidence;
 }
 
-function projectResult(input: {
-  row: WantedRow;
-  ctx: BoardCtx;
-  evidence: string | undefined;
-}): MeshEnvelope[] {
-  const { row, ctx, evidence } = input;
+function projectResult(input: { ctx: BoardCtx; evidence: string | undefined }): MeshEnvelope[] {
+  const { ctx, evidence } = input;
   if (evidence === undefined || ctx.claimer === null) {
     return [];
   }
   return [
-    {
-      ...ctx.base,
-      id: `${row.id}#result`,
-      kind: 'result' as const,
+    ctxRecord({
+      ctx,
+      suffix: 'result',
+      kind: 'result',
       from: ctx.claimer,
       to: ctx.poster,
-      terms: {},
-      evidence: [{ kind: 'url' as const, ref: evidence }],
-    },
+      evidence: [{ kind: 'url', ref: evidence }],
+    }),
   ];
 }
 
 function projectExplicitVerdict(input: {
-  row: WantedRow;
   ctx: BoardCtx;
   verdict: NonNullable<WantedRow['completions']>[number];
 }): MeshEnvelope[] {
-  const { row, ctx, verdict } = input;
+  const { ctx, verdict } = input;
   const kind = verdict.state === 'accepted' ? 'accept' : 'reject';
-  const to = ctx.claimer ?? ctx.poster;
-  return [{ ...ctx.base, id: `${row.id}#${kind}`, kind, from: ctx.poster, to, terms: {} }];
+  return [ctxRecord({ ctx, suffix: kind, kind, from: ctx.poster, to: ctx.claimer ?? ctx.poster })];
 }
 
 function projectImplicitAccept(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
   const { row, ctx } = input;
-  if (row.status === 'completed' && ctx.claimer !== null) {
-    return [
-      {
-        ...ctx.base,
-        id: `${row.id}#accept`,
-        kind: 'accept' as const,
-        from: ctx.poster,
-        to: ctx.claimer,
-        terms: {},
-      },
-    ];
+  if (row.status !== 'completed' || ctx.claimer === null) {
+    return [];
   }
-  return [];
+  return [ctxRecord({ ctx, suffix: 'accept', kind: 'accept', from: ctx.poster, to: ctx.claimer })];
 }
 
 /** The post-claim rows: a completion carrying evidence is the result
@@ -296,7 +298,7 @@ function projectImplicitAccept(input: { row: WantedRow; ctx: BoardCtx }): MeshEn
 function projectCompletion(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[] {
   const { row, ctx } = input;
   const evidence = firstEvidence(row.completions ?? []);
-  const result = projectResult({ row, ctx, evidence });
+  const result = projectResult({ ctx, evidence });
   return [...result, ...projectVerdict({ row, ctx })];
 }
 
@@ -308,7 +310,7 @@ function projectVerdict(input: { row: WantedRow; ctx: BoardCtx }): MeshEnvelope[
     c => c.state === 'accepted' || c.state === 'rejected'
   );
   if (verdict !== undefined) {
-    return projectExplicitVerdict({ row, ctx, verdict });
+    return projectExplicitVerdict({ ctx, verdict });
   }
   return projectImplicitAccept({ row, ctx });
 }
@@ -334,26 +336,57 @@ export interface WlTarget {
 
 const REFS_SENTINEL = '<!-- mesh/1 refs -->';
 
+/** one marker line per ref — a ref carrying a line break would split
+ *  into extra marker lines and come back as different refs, so an
+ *  unembeddable value is rejected rather than serialized */
+function embeddableRefs(refs: MeshRef[] | undefined): MeshRef[] {
+  return (refs ?? []).filter(r => r.ref !== '' && !/[\r\n]/.test(r.ref));
+}
+
+function refsTrailer(refs: MeshRef[]): string[] {
+  return refs.length === 0
+    ? []
+    : ['', REFS_SENTINEL, ...refs.map(r => `mesh:ref:${r.kind}:${r.ref}`)];
+}
+
 function embedRefs(body: string | undefined, refs: MeshRef[] | undefined): string | undefined {
   const parts: string[] = [];
   if (body !== undefined && body !== '') {
     parts.push(body);
   }
-  // one marker line per ref — a ref carrying a line break would split
-  // into extra marker lines and come back as different refs, so an
-  // unembeddable value is rejected rather than serialized
-  const safe = (refs ?? []).filter(r => r.ref !== '' && !/[\r\n]/.test(r.ref));
-  if (safe.length > 0) {
-    parts.push('');
-    parts.push(REFS_SENTINEL);
-    for (const r of safe) {
-      parts.push(`mesh:ref:${r.kind}:${r.ref}`);
+  parts.push(...refsTrailer(embeddableRefs(refs)));
+  return parts.length === 0 ? undefined : parts.join('\n');
+}
+
+/** Marker line tri-state: a parsed ref, `'skip'` for a marker with an
+ *  empty ref (dropped, the block continues), or `'end'` for a
+ *  non-marker line — the first of those ends the metadata block. */
+function parseRefLine(line: string): MeshRef | 'skip' | 'end' {
+  const m = /^mesh:ref:(bead|url|pr):(.*)$/.exec(line);
+  if (m === null) {
+    return 'end';
+  }
+  return (m[2] ?? '') === '' ? 'skip' : { kind: m[1] as MeshRef['kind'], ref: m[2] as string };
+}
+
+function parseRefBlock(lines: string[]): MeshRef[] {
+  const refs: MeshRef[] = [];
+  for (const line of lines) {
+    // trimEnd eats the CR a CRLF-stored row leaves on the marker —
+    // a bare capture would keep it and the ref would never match
+    const l = line.trimEnd();
+    if (l === '') {
+      continue;
+    }
+    const parsed = parseRefLine(l);
+    if (parsed === 'end') {
+      break; // the first non-marker line ends the metadata block
+    }
+    if (parsed !== 'skip') {
+      refs.push(parsed);
     }
   }
-  if (parts.length === 0) {
-    return undefined;
-  }
-  return parts.join('\n');
+  return refs;
 }
 
 /** A board description splits at the refs sentinel — only `mesh:ref:`
@@ -369,22 +402,7 @@ function splitEmbeddedRefs(text: string | undefined): { body: string; refs: Mesh
   if (idx === -1) {
     return { body: text, refs: [] };
   }
-  const refs: MeshRef[] = [];
-  for (const line of text.slice(idx + REFS_SENTINEL.length).split('\n')) {
-    // trimEnd eats the CR a CRLF-stored row leaves on the marker —
-    // a bare capture would keep it and the ref would never match
-    const l = line.trimEnd();
-    if (l === '') {
-      continue;
-    }
-    const m = /^mesh:ref:(bead|url|pr):(.*)$/.exec(l);
-    if (m === null) {
-      break; // the first non-marker line ends the metadata block
-    }
-    if ((m[2] ?? '') !== '') {
-      refs.push({ kind: m[1] as MeshRef['kind'], ref: m[2] as string });
-    }
-  }
+  const refs = parseRefBlock(text.slice(idx + REFS_SENTINEL.length).split('\n'));
   // the emitter pads exactly one blank line before the sentinel — lift
   // the separator back out so the body round-trips verbatim
   const body = text.slice(0, idx).replace(/(?:\r?\n){1,2}$/, '');
@@ -431,49 +449,37 @@ export function postWanted(input: {
   return id !== undefined ? { id } : { error: 'wl post returned no wanted id' };
 }
 
+/** Every lifecycle verb is `wl <verb> <id>` plus at most one flag —
+ *  the runner owns the args and the shared error line. */
+function runVerb(verb: string, t: WlTarget, extra: string[] = []): { error?: string } {
+  const r = wl({ args: [...remoteArgs(t.remote), verb, t.id, ...extra] });
+  return r.code === 0 ? {} : { error: `wl ${verb} ${t.id} failed — ${r.err || r.out}` };
+}
+
 export function claimWanted(t: WlTarget): { error?: string } {
-  const r = wl({ args: [...remoteArgs(t.remote), 'claim', t.id] });
-  return r.code === 0 ? {} : { error: `wl claim ${t.id} failed — ${r.err || r.out}` };
+  return runVerb('claim', t);
+}
+
+function isUsableEvidence(e: MeshRef): boolean {
+  return (e.kind === 'url' || e.kind === 'pr') && typeof e.ref === 'string' && e.ref !== '';
 }
 
 function findEvidenceRef(evidence: MeshRef[] | undefined): string | undefined {
-  if (!Array.isArray(evidence)) {
-    return undefined;
-  }
-  for (const e of evidence) {
-    if ((e.kind === 'url' || e.kind === 'pr') && typeof e.ref === 'string' && e.ref !== '') {
-      return e.ref;
-    }
-  }
-  return undefined;
+  return Array.isArray(evidence) ? evidence.find(isUsableEvidence)?.ref : undefined;
 }
 
 export function completeWanted(t: WlTarget & { evidence?: MeshRef[] }): { error?: string } {
-  const args = [...remoteArgs(t.remote), 'done', t.id];
   const ev = findEvidenceRef(t.evidence);
-  if (ev !== undefined) {
-    args.push('--evidence', ev);
-  }
-  const r = wl({ args });
-  return r.code === 0 ? {} : { error: `wl done ${t.id} failed — ${r.err || r.out}` };
+  return runVerb('done', t, ev === undefined ? [] : ['--evidence', ev]);
 }
 
 export function acceptWanted(t: WlTarget): { error?: string } {
-  const r = wl({ args: [...remoteArgs(t.remote), 'accept', t.id] });
-  return r.code === 0 ? {} : { error: `wl accept ${t.id} failed — ${r.err || r.out}` };
-}
-
-function addRejectReason(args: string[], body: string | undefined): void {
-  if (body !== undefined && body !== '') {
-    args.push('--reason', body);
-  }
+  return runVerb('accept', t);
 }
 
 export function rejectWanted(t: WlTarget & { body?: string }): { error?: string } {
-  const args = [...remoteArgs(t.remote), 'reject', t.id];
-  addRejectReason(args, t.body);
-  const r = wl({ args });
-  return r.code === 0 ? {} : { error: `wl reject ${t.id} failed — ${r.err || r.out}` };
+  const extra = t.body !== undefined && t.body !== '' ? ['--reason', t.body] : [];
+  return runVerb('reject', t, extra);
 }
 
 function extractWantedRows(data: WantedRow[] | { rows?: WantedRow[] } | undefined): WantedRow[] {
