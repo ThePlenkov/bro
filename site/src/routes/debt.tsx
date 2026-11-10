@@ -68,58 +68,64 @@ interface Data {
 }
 
 interface CachedSnapshot {
-  fetched_at: string
-  sha: string
-  summary: Summary
-  rows: Row[]
-  findings: Finding[]
+  fetched_at: string;
+  sha: string;
+  summary: Summary;
+  rows: Row[];
+  findings: Finding[];
 }
 
 type LoadError =
-  | { kind: 'rate_limited'; status: number; retryAfter?: string | null; reset?: string | null; message: string }
+  | {
+      kind: 'rate_limited';
+      status: number;
+      retryAfter?: string | null;
+      reset?: string | null;
+      message: string;
+    }
   | { kind: 'ref_missing'; message: string }
   | { kind: 'summary_failed'; message: string }
-  | { kind: 'unknown'; message: string }
+  | { kind: 'unknown'; message: string };
 
-type CacheReason = 'rate_limited' | 'ref_missing' | 'summary_failed' | 'network' | 'unknown' | null
+type CacheReason = 'rate_limited' | 'ref_missing' | 'summary_failed' | 'network' | 'unknown' | null;
 
 function isRateLimitedStatus(status: number, res?: Response, body?: string) {
-  if (status === 429) return true
+  if (status === 429) return true;
   if (status === 403) {
-    const remaining = res?.headers?.get('x-ratelimit-remaining')
-    if (remaining === '0') return true
-    if (body && /rate limit/i.test(body)) return true
-    return false
+    const remaining = res?.headers?.get('x-ratelimit-remaining');
+    if (remaining === '0') return true;
+    if (body && /rate limit/i.test(body)) return true;
+    return false;
   }
-  return false
+  return false;
 }
 
 function getRateLimitHeaders(res: Response) {
-  const remaining = res.headers.get('x-ratelimit-remaining')
-  const reset = res.headers.get('x-ratelimit-reset')
-  const retryAfter = res.headers.get('retry-after')
-  return { remaining, reset, retryAfter }
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  const reset = res.headers.get('x-ratelimit-reset');
+  const retryAfter = res.headers.get('retry-after');
+  return { remaining, reset, retryAfter };
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
+  return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 function readSnapshot(): CachedSnapshot | null {
-  if (typeof window === 'undefined') return null
+  if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(SNAPSHOT_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
+    const raw = window.localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
     if (
       !isPlainObject(parsed) ||
       typeof parsed.fetched_at !== 'string' ||
       typeof parsed.sha !== 'string' ||
       !isPlainObject(parsed.summary)
     ) {
-      return null
+      return null;
     }
-    const summary = parsed.summary
+    const summary = parsed.summary;
     if (
       typeof summary.generated_at !== 'string' ||
       typeof summary.open_count !== 'number' ||
@@ -136,43 +142,89 @@ function readSnapshot(): CachedSnapshot | null {
           !Array.isArray((d as any).prs) ||
           (d as any).prs.some((pr: unknown) => typeof pr !== 'number' || !Number.isFinite(pr))
       ) ||
-      Object.values(summary.by_area as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v)) ||
-      Object.values(summary.by_author as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v))
+      Object.values(summary.by_area as Record<string, unknown>).some(
+        v => typeof v !== 'number' || !Number.isFinite(v)
+      ) ||
+      Object.values(summary.by_author as Record<string, unknown>).some(
+        v => typeof v !== 'number' || !Number.isFinite(v)
+      )
     ) {
-      return null
+      return null;
     }
     if (summary.oldest_open !== null && typeof summary.oldest_open !== 'string') {
-      return null
+      return null;
     }
     if (
       !Array.isArray(parsed.rows) ||
       parsed.rows.some((r: unknown) => {
-        if (!isPlainObject(r)) return true
-        if (typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string') return true
-        if ((r as Row).fix_pr !== null && (typeof (r as Row).fix_pr !== 'number' || !Number.isFinite((r as Row).fix_pr))) return true
-        if ((r as Row).fixed_at !== null && typeof (r as Row).fixed_at !== 'string') return true
-        if ((r as Row).notes !== null && typeof (r as Row).notes !== 'string') return true
-        return false
+        if (!isPlainObject(r)) return true;
+        if (typeof (r as Row).thread_id !== 'string' || typeof (r as Row).status !== 'string')
+          return true;
+        if (
+          (r as Row).fix_pr !== null &&
+          (typeof (r as Row).fix_pr !== 'number' || !Number.isFinite((r as Row).fix_pr))
+        )
+          return true;
+        if ((r as Row).fixed_at !== null && typeof (r as Row).fixed_at !== 'string') return true;
+        if ((r as Row).notes !== null && typeof (r as Row).notes !== 'string') return true;
+        return false;
       }) ||
       !Array.isArray(parsed.findings) ||
       parsed.findings.some((f: unknown) => {
-        if (!isPlainObject(f)) return true
-        if (typeof (f as Finding).thread_id !== 'string' || typeof (f as Finding).status !== 'string') return true
-        if (typeof (f as Finding).source_pr !== 'number' || !Number.isFinite((f as Finding).source_pr)) return true
-        if ((f as Finding).thread_url !== undefined && typeof (f as Finding).thread_url !== 'string') return true
-        if ((f as Finding).priority !== undefined && typeof (f as Finding).priority !== 'string') return true
-        if ((f as Finding).source_pr_title !== undefined && typeof (f as Finding).source_pr_title !== 'string') return true
-        if ((f as Finding).path !== undefined && typeof (f as Finding).path !== 'string') return true
-        if ((f as Finding).line !== undefined && (f as Finding).line !== null && (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))) return true
-        if ((f as Finding).author !== undefined && typeof (f as Finding).author !== 'string') return true
-        if ((f as Finding).body_preview !== undefined && typeof (f as Finding).body_preview !== 'string') return true
-        if ((f as Finding).area !== undefined && typeof (f as Finding).area !== 'string') return true
-        if ((f as Finding).fingerprint !== undefined && typeof (f as Finding).fingerprint !== 'string') return true
-        if ((f as Finding).harvested_at !== undefined && typeof (f as Finding).harvested_at !== 'string') return true
-        return false
+        if (!isPlainObject(f)) return true;
+        if (
+          typeof (f as Finding).thread_id !== 'string' ||
+          typeof (f as Finding).status !== 'string'
+        )
+          return true;
+        if (
+          typeof (f as Finding).source_pr !== 'number' ||
+          !Number.isFinite((f as Finding).source_pr)
+        )
+          return true;
+        if (
+          (f as Finding).thread_url !== undefined &&
+          typeof (f as Finding).thread_url !== 'string'
+        )
+          return true;
+        if ((f as Finding).priority !== undefined && typeof (f as Finding).priority !== 'string')
+          return true;
+        if (
+          (f as Finding).source_pr_title !== undefined &&
+          typeof (f as Finding).source_pr_title !== 'string'
+        )
+          return true;
+        if ((f as Finding).path !== undefined && typeof (f as Finding).path !== 'string')
+          return true;
+        if (
+          (f as Finding).line !== undefined &&
+          (f as Finding).line !== null &&
+          (typeof (f as Finding).line !== 'number' || !Number.isFinite((f as Finding).line))
+        )
+          return true;
+        if ((f as Finding).author !== undefined && typeof (f as Finding).author !== 'string')
+          return true;
+        if (
+          (f as Finding).body_preview !== undefined &&
+          typeof (f as Finding).body_preview !== 'string'
+        )
+          return true;
+        if ((f as Finding).area !== undefined && typeof (f as Finding).area !== 'string')
+          return true;
+        if (
+          (f as Finding).fingerprint !== undefined &&
+          typeof (f as Finding).fingerprint !== 'string'
+        )
+          return true;
+        if (
+          (f as Finding).harvested_at !== undefined &&
+          typeof (f as Finding).harvested_at !== 'string'
+        )
+          return true;
+        return false;
       })
     ) {
-      return null
+      return null;
     }
     return {
       fetched_at: parsed.fetched_at,
@@ -180,16 +232,16 @@ function readSnapshot(): CachedSnapshot | null {
       summary: summary as Summary,
       rows: parsed.rows as Row[],
       findings: parsed.findings as Finding[],
-    }
+    };
   } catch {
-    return null
+    return null;
   }
 }
 
 function writeSnapshot(snapshot: CachedSnapshot) {
-  if (typeof window === 'undefined') return
+  if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot))
+    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
   } catch {
     // ignore quota/errors
   }
@@ -197,31 +249,31 @@ function writeSnapshot(snapshot: CachedSnapshot) {
 
 function formatAge(iso: string): string {
   try {
-    const ts = Date.parse(iso)
-    if (Number.isNaN(ts)) return 'unknown age'
-    const diffMs = Date.now() - ts
-    if (diffMs < 0) return 'just now'
-    const minutes = Math.floor(diffMs / 60000)
-    if (minutes < 1) return 'just now'
-    if (minutes < 60) return `${minutes}m ago`
-    const hours = Math.floor(minutes / 60)
-    if (hours < 24) return `${hours}h ago`
-    const days = Math.floor(hours / 24)
-    if (days < 30) return `${days}d ago`
-    const date = new Date(ts)
-    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    const ts = Date.parse(iso);
+    if (Number.isNaN(ts)) return 'unknown age';
+    const diffMs = Date.now() - ts;
+    if (diffMs < 0) return 'just now';
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d ago`;
+    const date = new Date(ts);
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   } catch {
-    return 'unknown age'
+    return 'unknown age';
   }
 }
 
 function formatDateTime(iso: string): string {
   try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
   } catch {
-    return iso
+    return iso;
   }
 }
 
@@ -476,7 +528,13 @@ async function load(): Promise<{
     const findings = harvestRes.findings;
     const data: Data = { summary, rows: parseJsonl<Row>(ledgerText), findings };
     const fetchedAt = new Date().toISOString();
-    writeSnapshot({ fetched_at: fetchedAt, sha, summary, rows: data.rows, findings: data.findings });
+    writeSnapshot({
+      fetched_at: fetchedAt,
+      sha,
+      summary,
+      rows: data.rows,
+      findings: data.findings,
+    });
     return { data, source: 'live', fetchedAt, sha };
   } catch (err) {
     if ((err as LoadError)?.kind) {
@@ -628,7 +686,10 @@ function DebtDashboard() {
               {errorKind === 'rate_limited' && (
                 <>
                   {' '}
-                  <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">GitHub rate limits</a> apply to unauthenticated requests.
+                  <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api">
+                    GitHub rate limits
+                  </a>{' '}
+                  apply to unauthenticated requests.
                 </>
               )}
             </p>
@@ -637,21 +698,28 @@ function DebtDashboard() {
         {source === 'cache' && data !== null && (
           <section className="debt-empty">
             <p>
-              Showing last available snapshot{fetchedAt ? ` from ${formatDateTime(fetchedAt)} (${formatAge(fetchedAt)})` : ''}.
+              Showing last available snapshot
+              {fetchedAt ? ` from ${formatDateTime(fetchedAt)} (${formatAge(fetchedAt)})` : ''}.
               {sha ? (
                 <>
-                  {' '}Saved snapshot is pinned to commit{' '}
+                  {' '}
+                  Saved snapshot is pinned to commit{' '}
                   <a href={`${GITHUB}/commit/${sha}`}>
                     <code>{sha.slice(0, 7)}</code>
                   </a>
                   .
                 </>
               ) : null}{' '}
-              {cacheReason === 'rate_limited' && 'Live data may be temporarily unavailable due to GitHub API limits.'}
-              {cacheReason === 'ref_missing' && 'Live data may be temporarily unavailable — the review-debt ref could not be resolved.'}
-              {cacheReason === 'summary_failed' && 'Live data may be temporarily unavailable — the review-debt summary could not be loaded.'}
-              {cacheReason === 'network' && 'Live data may be temporarily unavailable due to a network issue.'}
-              {(cacheReason === 'unknown' || cacheReason === null) && 'Live data may be temporarily unavailable.'}
+              {cacheReason === 'rate_limited' &&
+                'Live data may be temporarily unavailable due to GitHub API limits.'}
+              {cacheReason === 'ref_missing' &&
+                'Live data may be temporarily unavailable — the review-debt ref could not be resolved.'}
+              {cacheReason === 'summary_failed' &&
+                'Live data may be temporarily unavailable — the review-debt summary could not be loaded.'}
+              {cacheReason === 'network' &&
+                'Live data may be temporarily unavailable due to a network issue.'}
+              {(cacheReason === 'unknown' || cacheReason === null) &&
+                'Live data may be temporarily unavailable.'}
             </p>
           </section>
         )}

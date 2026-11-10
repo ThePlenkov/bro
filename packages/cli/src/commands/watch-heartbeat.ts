@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
+import { CLOCK_SKEW_MS } from './watch-clock.ts';
 
 /** `<git-common>/bro/heartbeat.json`; null outside a repository — the
  *  same boundary the mailbox has: no shared state dir, no heartbeat. */
@@ -45,6 +46,15 @@ export function writeHeartbeat(dir: string, snap: unknown): boolean {
 export interface HeartbeatSummary {
   ts: string;
   ageMs: number;
+  /** `ts` sits this far ahead of the reader's clock — past
+   *  CLOCK_SKEW_MS it's writer-clock skew, not freshness (bro-i7t3b:
+   *  clamping a future stamp to age 0 reads "just now", exactly the
+   *  masking the incident showed) */
+  futureMs?: number;
+  /** the writer's own tick flagged `clock.skewed` — a behind-skewed
+   *  writer stamps old times that no reader-side check can catch, so
+   *  the persisted verdict is the only signal. */
+  writerSkewed?: boolean;
   /** size of the snapshot's attention list — the rig's open decisions */
   attention: number;
 }
@@ -62,14 +72,18 @@ export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary |
     const raw = JSON.parse(readFileSync(file, 'utf8')) as {
       ts?: unknown;
       attention?: unknown;
+      clock?: { skewed?: unknown };
     };
     const ms = typeof raw.ts === 'string' ? Date.parse(raw.ts) : Number.NaN;
     if (!Number.isFinite(ms) || !Array.isArray(raw.attention)) {
       return null;
     }
+    const ahead = ms - now;
     return {
       ts: raw.ts as string,
       ageMs: Math.max(0, now - ms),
+      ...(ahead > CLOCK_SKEW_MS ? { futureMs: ahead } : {}),
+      ...(raw.clock?.skewed === true ? { writerSkewed: true } : {}),
       attention: raw.attention.length,
     };
   } catch {
@@ -96,12 +110,20 @@ export function heartbeatAge(ageMs: number): string {
 
 /** The shared one-liner — "last tick 4m ago — quiet" /
  *  "last tick 9h ago — 2 attention". Freshness and the open-decision
- *  count are the whole signal; no verdict lives here. */
+ *  count are the whole signal; no verdict lives here. A future-dated
+ *  `ts` renders the skew verdict — a stamp the writer's clock forged
+ *  must not pass for "just now". */
 export function heartbeatLine(dir: string): string | null {
   const h = readHeartbeat(dir);
   if (h === null) {
     return null;
   }
   const tail = h.attention === 0 ? 'quiet' : `${h.attention} attention`;
+  if (h.futureMs !== undefined) {
+    return `last tick stamped ${heartbeatAge(h.futureMs)} in the future — writer or reader clock skew — ${tail}`;
+  }
+  if (h.writerSkewed === true) {
+    return `last tick ${heartbeatAge(h.ageMs)} ago — writer clock skew — ${tail}`;
+  }
   return `last tick ${heartbeatAge(h.ageMs)} ago — ${tail}`;
 }

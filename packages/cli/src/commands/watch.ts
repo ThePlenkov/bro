@@ -42,6 +42,7 @@ import {
   busSocketPath,
   dropMailbox,
   emitWorkerSilent,
+  facadeName,
   git,
   gitTry,
   janitorDidWork,
@@ -85,6 +86,7 @@ import { installWatch, uninstallWatch } from './watch-install.ts';
 import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts';
 import { daemonProbe, readDriveMarker } from './daemon.ts';
 import { writeHeartbeat } from './watch-heartbeat.ts';
+import { clockPlane, clockSkewText, type WatchClock } from './watch-clock.ts';
 import { watchSection, type WatchConfig } from './watch-config.ts';
 import { agentEventLine } from '../planes/events.ts';
 
@@ -190,6 +192,11 @@ export interface WatchSnapshot {
    *  idle or broker-less repo reads compact, never a false wall of
    *  silence-reporting. */
   activity?: WatchActivity;
+  /** The tick's own clock check — local wall time diffed against the
+   *  review host's HTTP Date header (spec bro-i7t3b). Absent when no
+   *  github host serves this rig — there is no external clock to
+   *  check; `skewed`/`error` mean this tick's stamps are unverifiable. */
+  clock?: WatchClock;
 }
 
 export interface WatchActivity {
@@ -266,12 +273,9 @@ function agentAttention(rows: FleetRow[]): string[] {
  *  `worker.silent` bus emit (bro-294hf); null when the run is dead,
  *  unverifiable, or still under the bound. */
 export function silentRunMin(loop: WatchLoop, r: LoopRunView): number | null {
-  return loop.stallMin > 0 &&
-    r.state !== 'dead' &&
-    r.silentMs !== null &&
-    r.silentMs >= loop.stallMin * 60_000
+  return loop.stallMin > 0 && r.state !== 'dead' && r.silentMs !== null && r.silentMs >= loop.stallMin * 60_000
     ? Math.floor(r.silentMs / 60_000)
-    : null;
+    : null
 }
 
 /** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
@@ -314,30 +318,30 @@ function prAttention(prs: WatchPrGate[]): string[] {
  *  agentId resolves best-effort off the registry; a run the registry
  *  never claimed still emits keyed on its beadId. */
 function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
-  pruneSilentSeen(snap.loop.runs, seen);
-  let reg: ReturnType<typeof readAgentRegistry> | undefined;
+  pruneSilentSeen(snap.loop.runs, seen)
+  let reg: ReturnType<typeof readAgentRegistry> | undefined
   const registry = (): ReturnType<typeof readAgentRegistry> => {
     if (reg === undefined) {
       try {
-        reg = readAgentRegistry(dir);
+        reg = readAgentRegistry(dir)
       } catch {
-        reg = {}; // a wedged registry is no agentId, never a dead tick
+        reg = {} // a wedged registry is no agentId, never a dead tick
       }
     }
-    return reg;
-  };
+    return reg
+  }
   for (const r of snap.loop.runs) {
-    trackSilentTransition(dir, snap.loop, r, seen, registry);
+    trackSilentTransition(dir, snap.loop, r, seen, registry)
   }
 }
 
 /** A run that ended while silent leaves no row to re-clear its entry —
  *  prune gone beads or a respawn on the same bead can never emit again. */
 function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
-  const live = new Set(runs.map(r => r.beadId));
+  const live = new Set(runs.map(r => r.beadId))
   for (const beadId of seen) {
     if (!live.has(beadId)) {
-      seen.delete(beadId);
+      seen.delete(beadId)
     }
   }
 }
@@ -351,16 +355,16 @@ function trackSilentTransition(
   seen: Set<string>,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const silentMin = silentRunMin(loop, r);
+  const silentMin = silentRunMin(loop, r)
   if (silentMin === null) {
-    seen.delete(r.beadId);
-    return;
+    seen.delete(r.beadId)
+    return
   }
   if (seen.has(r.beadId)) {
-    return;
+    return
   }
-  seen.add(r.beadId);
-  emitRunSilent(dir, r, silentMin, registry);
+  seen.add(r.beadId)
+  emitRunSilent(dir, r, silentMin, registry)
 }
 
 /** One run past its silence bound → a keyed `worker.silent` envelope.
@@ -372,21 +376,30 @@ function emitRunSilent(
   silentMin: number,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const entry = registry()[r.beadId];
+  const entry = registry()[r.beadId]
   emitWorkerSilent(dir, {
     bead: r.beadId,
     silentMin,
-    ...(typeof entry?.agentId === 'string' && entry.agentId !== ''
-      ? { agentId: entry.agentId }
-      : {}),
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
     ...(r.log !== undefined ? { log: r.log } : {}),
-  });
+  })
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every
- *  re-emits only on transitions; a heartbeat reports change, not noise. */
+ *  re-emits only on transitions; a heartbeat reports change, not noise.
+ *  The clock's readings (local/remote/skewMs) move every tick — the key
+ *  keeps the verdict fields so only a skew/unverified transition mails,
+ *  never the routine re-read. */
 export function snapshotKey(s: WatchSnapshot): string {
-  return JSON.stringify({ ...s, ts: '' });
+  const clock =
+    s.clock === undefined ? undefined : { skewed: s.clock.skewed, error: s.clock.error };
+  // clockAttention's lines embed the moving readings too (local/host
+  // stamps, skewMs) — strip them; the normalized `clock` field above is
+  // what keys the skew/unverified transition
+  const attention = s.attention.filter(
+    l => !l.startsWith('clock skew ') && !l.startsWith('clock unverified — ')
+  );
+  return JSON.stringify({ ...s, ts: '', clock, attention });
 }
 
 /** One atomic mailbox file — tmp+rename (dropMailbox in core) so a
@@ -642,13 +655,17 @@ function molsPlane(): { mols: WatchMol[]; error?: string } {
 interface ResolvedHost {
   rev?: ReviewFacade;
   repo: string;
+  /** the serving reviews connector — set only when the facade AND the
+   *  repo resolved; the clock plane probes `gh` off this name, so a
+   *  github-named host whose gh is dead never spawns a doomed probe */
+  name?: string;
   reason?: string;
 }
 
 function hostPlane(dir: string): ResolvedHost {
   try {
     const rev = reviewHost(dir);
-    return { rev, repo: rev.resolveRepo([]) };
+    return { rev, repo: rev.resolveRepo([]), name: facadeName('reviews', { dir }) };
   } catch (err) {
     return { repo: '', reason: errText(err) };
   }
@@ -751,6 +768,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const loop = loopPlane(dir);
   const daemon = daemonPlane(dir);
   const activity = await activityPlane(dir);
+  const clock = await clockPlane(dir, host);
 
   const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs, fleet.walls ?? [], loop);
   // fleet prErrors and gates lookupErrors can name the same failure
@@ -765,27 +783,16 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
       attention.push(line);
     }
   }
-  if (gates.error !== undefined) {
-    attention.push(`gates probe failed — ${gates.error}`);
-  }
-  if (fleet.error !== undefined) {
-    attention.push(`fleet plane failed — ${fleet.error}`);
-  }
-  if (molsPlane_.error !== undefined) {
-    attention.push(`mols plane failed — ${molsPlane_.error}`);
-  }
-  if (loop.error !== undefined) {
-    attention.push(`loop plane failed — ${loop.error}`);
-  }
-  if (daemon.error !== undefined) {
-    attention.push(`daemon plane failed — ${daemon.error}`);
-  } else if (!daemon.live && (daemon.recorded || daemon.installed)) {
-    attention.push(
-      daemon.installed
-        ? `drive supervisor installed but dead — the next session checkpoint rearms it`
-        : `daemon recorded but dead — 'bro daemon up' restarts`
-    );
-  }
+  attention.push(
+    ...planeErrorLines([
+      ['gates probe', gates.error],
+      ['fleet plane', fleet.error],
+      ['mols plane', molsPlane_.error],
+      ['loop plane', loop.error],
+    ]),
+    ...daemonAttention(daemon),
+    ...clockAttention(clock)
+  );
 
   return {
     ts: new Date().toISOString(),
@@ -797,7 +804,54 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     loop,
     daemon,
     ...(activity !== undefined ? { activity } : {}),
+    ...(clock !== undefined ? { clock } : {}),
   };
+}
+
+/** `<label> failed — <err>` per throwing plane. Labels differ per
+ *  plane, so the caller carries them. */
+function planeErrorLines(
+  planes: ReadonlyArray<readonly [label: string, error: string | undefined]>
+): string[] {
+  const lines: string[] = [];
+  for (const [label, error] of planes) {
+    if (error !== undefined) {
+      lines.push(`${label} failed — ${error}`);
+    }
+  }
+  return lines;
+}
+
+/** The daemon's verdict — a throwing probe degrades the plane; a
+ *  recorded/installed-but-dead supervisor is attention on its own (the
+ *  record says someone armed a watchdog that isn't running). */
+function daemonAttention(daemon: WatchDaemon): string[] {
+  if (daemon.error !== undefined) {
+    return [`daemon plane failed — ${daemon.error}`];
+  }
+  if (daemon.live || (!daemon.recorded && !daemon.installed)) {
+    return [];
+  }
+  return [
+    daemon.installed
+      ? `drive supervisor installed but dead — the next session checkpoint rearms it`
+      : `daemon recorded but dead — 'bro daemon up' restarts`,
+  ];
+}
+
+/** The tick's own clock check — skew past the bound or an unverified
+ *  probe both name themselves on the headline; a verified clock and an
+ *  absent plane stay quiet. */
+function clockAttention(clock: WatchClock | undefined): string[] {
+  if (clock === undefined) {
+    return [];
+  }
+  if (clock.skewed) {
+    return [
+      `clock skew ${clockSkewText(clock.skewMs ?? 0)} (local ${clock.local} vs host ${clock.remote}) — reported times unverifiable`,
+    ];
+  }
+  return clock.error !== undefined ? [`clock unverified — ${clock.error}`] : [];
 }
 
 /** The 'agent' bus tail — one probe over the ring narrowed to the
@@ -957,11 +1011,21 @@ function daemonLines(daemon: WatchDaemon): string[] {
   return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down'];
 }
 
+/** The headline's clock caveat — a skewed or unverified tick's `ts`
+ *  (and every "Nm ago" derived from it) can't be trusted; the flag
+ *  rides the first line so the mailbox drop carries it too. */
+function clockTag(clock: WatchClock | undefined): string {
+  if (clock?.skewed === true) {
+    return ` · clock skew ${clockSkewText(clock.skewMs ?? 0)}`;
+  }
+  return clock?.error !== undefined ? ' · clock unverified' : '';
+}
+
 /** Text render — attention first; an empty list is the "fleet is quiet"
  *  answer, printed as such rather than omitted. */
 export function renderSnapshot(s: WatchSnapshot): string {
   return [
-    `bro watch — ${s.ts}`,
+    `bro watch — ${s.ts}${clockTag(s.clock)}`,
     '',
     'attention',
     ...attentionLines(s.attention),
