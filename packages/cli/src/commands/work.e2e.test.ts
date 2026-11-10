@@ -7,8 +7,17 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { pidAlive, procStat } from '@broject/core';
 import {
   FAKE_BEAD,
@@ -23,6 +32,7 @@ import {
   writeBeads,
   writeHostState,
 } from './testrepo.ts';
+import { isNxDaemonCmd } from './work.ts';
 
 function workFixture(): { root: string; main: string } {
   return initRepo('bro-work-e2e-');
@@ -52,15 +62,21 @@ const envOf = (binDir: string, db: string) => ({
  *  occupancy plane roots it on, the same shape a dead fixer's
  *  orphaned daemon leaves (bro-7dgu3). */
 const fakeNxDaemon = (wt: string): number => {
-  const p = spawn(
-    process.execPath,
-    [
-      '-e',
-      'setInterval(() => {}, 1e9)',
-      join(wt, 'node_modules/nx/dist/src/daemon/server/start.js'),
-    ],
-    { cwd: wt, detached: true, stdio: 'ignore' }
+  // the real daemon's argv is `node <…>/nx/dist/src/daemon/server/
+  // start.js` — the script must exist or node exits instantly, and it
+  // must live OUTSIDE the worktree or the untracked file would read as
+  // dirty and veto the reap the test exists to prove
+  const script = join(
+    mkdtempSync(join(tmpdir(), 'nx-fake-')),
+    'node_modules/nx/dist/src/daemon/server/start.js'
   );
+  mkdirSync(dirname(script), { recursive: true });
+  writeFileSync(script, 'setInterval(() => {}, 1e9)\n');
+  const p = spawn(process.execPath, [script], {
+    cwd: wt,
+    detached: true,
+    stdio: 'ignore',
+  });
   p.unref();
   return p.pid!;
 };
@@ -748,6 +764,17 @@ describe('bro work e2e — prune --loop ghost dirs (bro-ho09d)', () => {
 });
 
 describe('bro work e2e — prune --loop stale nx daemons (bro-7dgu3)', () => {
+  test('isNxDaemonCmd — the script position is the daemon shape, not argv data', () => {
+    const script = '/wt/node_modules/nx/dist/src/daemon/server/start.js';
+    assert.equal(isNxDaemonCmd(`node ${script}`), true);
+    assert.equal(isNxDaemonCmd(`/usr/bin/node --max-old-space-size=4096 ${script}`), true);
+    // the path riding as DATA in a foreign argv must never be signalled
+    assert.equal(isNxDaemonCmd(`vim ${script}`), false);
+    assert.equal(isNxDaemonCmd(`node -e "require('x')" ${script}`), false);
+    assert.equal(isNxDaemonCmd('sleep 300'), false);
+    assert.equal(isNxDaemonCmd(''), false);
+  });
+
   test('a tree pinned only by nx daemons reaps after they are killed', () => {
     const { root, main } = workFixture();
     const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-nx', status: 'closed' }]);

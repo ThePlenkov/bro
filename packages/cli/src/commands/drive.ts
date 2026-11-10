@@ -2760,6 +2760,11 @@ function litterSweepTick(ctx: Ctx): LitterReap {
       stackPrefix: 'stack/',
       parkedKeep: ctx.loop.parkedKeep,
       parkedTtlDays: ctx.loop.parkedTtlDays,
+      // --every is the supervisor's async loop — the nx-kill wait must
+      // never block it (a still-dying daemon pins its tree one extra
+      // sweep, which is exactly what the cadence exists for). --once is
+      // a foreground pass — the default bound reaps in-pass.
+      nxKillWaitMs: ctx.everySec === undefined ? undefined : 0,
     });
   } finally {
     console.log = log;

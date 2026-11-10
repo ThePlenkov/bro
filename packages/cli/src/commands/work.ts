@@ -1259,6 +1259,10 @@ export interface LitterReapOpts {
    *  they skip claim release but their trees still pool. A later sweep
    *  judges them fresh — the loop that parked them is gone by then. */
   keepClaims?: ReadonlySet<string>;
+  /** forwarded to reapStaleNxDaemons — 0 means signal-and-go (the
+   *  daemon tick: never block the event loop, next sweep reaps);
+   *  undefined = the interactive same-pass bound */
+  nxKillWaitMs?: number;
   dryRun?: boolean;
   now?: number;
 }
@@ -2015,10 +2019,21 @@ function reapParkedCand(
  *  on every /proc occupancy plane all the same, so a dead fixer's
  *  orphaned daemon pins the tree "live" and a safe reap reads as
  *  occupied (bro-7dgu3 — verified live: trees held by nothing else). */
-const NX_DAEMON_RE = /nx[/\\]dist[/\\]src[/\\]daemon[/\\]/;
+const NX_DAEMON_SCRIPT_RE = /nx[/\\]dist[/\\]src[/\\]daemon[/\\]server[/\\]start\.js$/;
 
+/** argv[0] is a node binary (`node`, `…/node`, `node.exe`) AND its
+ *  script argument is the daemon's start.js — a flattened-argv
+ *  substring match would SIGTERM any process merely carrying the path
+ *  as data (`vim <path>`, `cp <path> …`); the script position is the
+ *  daemon's shape (codeant, #975). */
 export function isNxDaemonCmd(cmd: string): boolean {
-  return NX_DAEMON_RE.test(cmd);
+  const argv = cmd.split(' ').filter(Boolean);
+  const exe = argv[0]?.split(/[/\\]/).pop() ?? '';
+  if (!/^node(\.\w+)?$/.test(exe)) {
+    return false;
+  }
+  const script = argv.slice(1).find(t => !t.startsWith('-'));
+  return script !== undefined && NX_DAEMON_SCRIPT_RE.test(script);
 }
 
 /** Bound the SIGTERM→exit wait — the reap's own rooted-scan must see a
@@ -2033,6 +2048,11 @@ export interface NxDaemonReapOpts {
   /** Injectable signal/liveness — tests never signal real pids. */
   kill?: (pid: number) => void;
   alive?: (pid: number) => boolean;
+  /** Bound on the post-SIGTERM wait — interactive callers keep the
+   *  default so this pass's verdict scan sees the ghosts gone; the
+   *  drive daemon passes 0 (a sync wait would freeze its event loop —
+   *  the next sweep's scan reaps once the daemons exit). */
+  waitMs?: number;
 }
 
 /** Kill stale nx daemons rooted in the candidate trees — bounded to
@@ -2070,9 +2090,13 @@ export function reapStaleNxDaemons(worktrees: string[], opts: NxDaemonReapOpts =
     }
   }
   // let the SIGTERMs land before the verdicts' own rooted-scans — a
-  // still-dying daemon would pin its tree for one more sweep
-  const deadline = Date.now() + NX_KILL_WAIT_MS;
-  while (pids.some(pid => alive(pid)) && Date.now() < deadline) {
+  // still-dying daemon would pin its tree for one more sweep. Skipped
+  // at waitMs:0 — the caller chose the next sweep's scan over blocking
+  // this thread (the drive loop's async lane; Atomics.wait stalls every
+  // pending promise for the bound, amazon-q on #975)
+  const waitMs = opts.waitMs ?? NX_KILL_WAIT_MS;
+  const deadline = Date.now() + waitMs;
+  while (waitMs > 0 && pids.some(pid => alive(pid)) && Date.now() < deadline) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
   }
   return killed;
@@ -2097,7 +2121,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   rep.killed.push(
     ...reapStaleNxDaemons(
       found.cands.flatMap(c => (c.w === undefined ? [] : [c.w.path])),
-      { dryRun: opts.dryRun }
+      { dryRun: opts.dryRun, waitMs: opts.nxKillWaitMs }
     )
   );
   const bySlug = litterBeads(opts, rep);
