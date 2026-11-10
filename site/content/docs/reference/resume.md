@@ -8,6 +8,7 @@ description: "Post-restart recovery — rearm dead watches, revive the daemon, a
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `resume` |
 | guide | [commands/fleet](/docs/commands/fleet) |
 

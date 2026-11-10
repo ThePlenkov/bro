@@ -17,29 +17,29 @@
  *   retargets the next MR on each merge — bro never retargets there.
  * - plain git: everything is local — rebase and merge are plain git.
  */
-import { gitTry } from './git.ts'
-import type { MergeOpts, ReviewFacade } from './review.ts'
+import { gitTry } from './git.ts';
+import type { MergeOpts, ReviewFacade } from './review.ts';
 
 /** A value rendered into a copy-paste shell hint (`openHint`). Safe ref
  *  characters pass bare — `stack/s/1-a` stays readable; anything else is
  *  single-quoted so a branch name can't smuggle `$(…)` or `;` into the
  *  command the human runs. */
 export function shQuote(s: string): string {
-  return /^[\w./-]+$/.test(s) ? s : `'${s.replaceAll("'", String.raw`'\''`)}'`
+  return /^[\w./-]+$/.test(s) ? s : `'${s.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 /** One link in the chain as a merge/sync op needs it — ordered
  *  bottom→top. `pr` absent means the member carries no open review
  *  (forge-less repo, or the member never opened one). */
 export interface StackChainMember {
-  branch: string
+  branch: string;
   /** The branch this member lands on — the trunk for every member of
    *  a whole-chain merge. */
-  base: string
-  pr?: number
+  base: string;
+  pr?: number;
   /** Tip sha the gate evaluated — merge pins it, so a head that moved
    *  since collection fails closed inside mergePr. */
-  headSha?: string
+  headSha?: string;
 }
 
 /** Which post-merge cascade steps the platform owns above a merged
@@ -48,23 +48,23 @@ export interface StackChainMember {
  *  complement is fetch + `git rebase` onto the remote tip, never a
  *  rebase+force-push that would double the platform's rewrite). */
 export interface StackCascade {
-  retarget: boolean
-  rebase: boolean
+  retarget: boolean;
+  rebase: boolean;
 }
 
 /** The pre-facade behavior — the caller performs both steps itself. */
-export const MANUAL_CASCADE: StackCascade = { retarget: false, rebase: false }
+export const MANUAL_CASCADE: StackCascade = { retarget: false, rebase: false };
 
 export interface StackMergeOpts {
-  method: MergeOpts['method']
-  admin?: boolean
+  method: MergeOpts['method'];
+  admin?: boolean;
 }
 
 export interface StackMergeReport {
-  lines: string[]
+  lines: string[];
   /** Member branches that actually landed — the caller retires their
    *  edges and local branches. */
-  merged: string[]
+  merged: string[];
 }
 
 /** A member's registration in the host's server-side stack object.
@@ -72,33 +72,30 @@ export interface StackMergeReport {
  *  number — the `gh stack link <id>` grow arg); `position`/`size`
  *  locate the member in the chain when the host reports them. */
 export interface StackMembership {
-  id: number
-  position?: number
-  size?: number
+  id: number;
+  position?: number;
+  size?: number;
 }
 
 export interface StackFacade {
   /** The host's "open a review for this member" command — push's hint
    *  line. Undefined → no review surface (plain git): push prints
    *  nothing. */
-  openHint?(member: { branch: string; base: string }): string | undefined
+  openHint?(member: { branch: string; base: string }): string | undefined;
   /** Cascade ownership above a member — probed per member, since one
    *  connector answers differently for a platform-tracked chain PR vs
    *  a plain one (GitHub's `.stack` field). Absent → MANUAL_CASCADE. */
-  cascade?(member: { branch: string; pr?: number }): StackCascade
+  cascade?(member: { branch: string; pr?: number }): StackCascade;
   /** Merge the chain through the host's native mechanism — atomic where
    *  the platform has it. Undefined → the caller falls back to
    *  mergeChainPerLayer (the GitLab flow: per-layer is the platform
    *  mechanism, so no `mergeChain` is honest there). */
-  mergeChain?(
-    members: StackChainMember[],
-    opts: StackMergeOpts
-  ): StackMergeReport | undefined
+  mergeChain?(members: StackChainMember[], opts: StackMergeOpts): StackMergeReport | undefined;
   /** The host stack object this member sits in — null when unstacked,
    *  unreadable, or the member carries no PR. Optional — hosts without
    *  stack objects (GitLab's platform-detected chains, plain git)
    *  leave it absent; a probe is advisory, never a gate input. */
-  membership?(member: { branch: string; pr?: number }): StackMembership | null
+  membership?(member: { branch: string; pr?: number }): StackMembership | null;
   /** Register members as the host's stack object, ordered bottom→top —
    *  the connector's native stack tool (`gh stack link`) creates or
    *  grows it and keeps members already inside. Absent → the host has
@@ -106,14 +103,14 @@ export interface StackFacade {
    *  plain git). Throws on refusal — a broken chain or rejected member
    *  is a real error; returns the bottom member's post-publish
    *  membership when the host reports one. */
-  publish?(members: StackChainMember[]): StackMembership | null
+  publish?(members: StackChainMember[]): StackMembership | null;
 }
 
 /** Sync nap — merge paths are commands, not hook probes; same primitive
  *  filelock uses to block on a lock. */
 const sleepSync = (ms: number): void => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 
 /** Wait out a platform's server-side rebase of a dependent: after the
  *  member below merged, a `rebase`-owning host force-pushes a new head
@@ -126,13 +123,13 @@ function settleRemoteHead(
   t: { repo: string; pr: number },
   staleSha: string
 ): { headSha: string; baseRef: string; state: string } {
-  const deadline = Date.now() + 30_000
-  let meta = rev.prMeta(t)
+  const deadline = Date.now() + 30_000;
+  let meta = rev.prMeta(t);
   while (meta.headSha === staleSha && Date.now() < deadline) {
-    sleepSync(1_000)
-    meta = rev.prMeta(t)
+    sleepSync(1_000);
+    meta = rev.prMeta(t);
   }
-  return meta
+  return meta;
 }
 
 /** Per-layer merge — the fallback where no atomic chain merge exists,
@@ -150,61 +147,61 @@ export function mergeChainPerLayer(
   opts: StackMergeOpts,
   cascade: (m: StackChainMember) => StackCascade = () => MANUAL_CASCADE
 ): StackMergeReport {
-  const lines: string[] = []
-  const merged: string[] = []
+  const lines: string[] = [];
+  const merged: string[] = [];
   // the settle exists to wait out the platform's rewrite of a member
   // whose LOWER member just merged in this call — before the first
   // landing nothing is pending, and polling there just burns the 30s
   // deadline on the bottom member
-  let landedBelow = false
+  let landedBelow = false;
   for (const m of members) {
     if (m.pr === undefined) {
-      lines.push(`  ${m.branch} has no open review — stopping the merge here`)
-      break
+      lines.push(`  ${m.branch} has no open review — stopping the merge here`);
+      break;
     }
-    const t = { repo, pr: m.pr }
-    const link = rev.prLink(repo, m.pr)
+    const t = { repo, pr: m.pr };
+    const link = rev.prLink(repo, m.pr);
     let meta =
       landedBelow && cascade(m).rebase && m.headSha !== undefined
         ? settleRemoteHead(rev, t, m.headSha)
-        : rev.prMeta(t)
+        : rev.prMeta(t);
     if (meta.state !== 'OPEN') {
       // a member read back MERGED means an earlier merge/async landing
       // covered it — count it and keep climbing
       if (meta.state === 'MERGED') {
-        lines.push(`  ${link} already merged`)
-        merged.push(m.branch)
-        continue
+        lines.push(`  ${link} already merged`);
+        merged.push(m.branch);
+        continue;
       }
-      lines.push(`  ${link} is ${meta.state} — stopping the merge here`)
-      break
+      lines.push(`  ${link} is ${meta.state} — stopping the merge here`);
+      break;
     }
     if (meta.baseRef !== m.base) {
-      const ok = rev.retargetPr?.(t, m.base) ?? false
+      const ok = rev.retargetPr?.(t, m.base) ?? false;
       if (!ok) {
         lines.push(
           `  ${link} still targets ${meta.baseRef} and the host refused the retarget to ${m.base} — stopping`
-        )
-        break
+        );
+        break;
       }
-      lines.push(`  ${link} retargeted → ${m.base}`)
+      lines.push(`  ${link} retargeted → ${m.base}`);
     }
     const after = rev.mergePr(t, {
       method: opts.method,
       expectedHeadSha: meta.headSha,
       admin: opts.admin,
-    })
+    });
     if (after !== 'MERGED') {
       lines.push(
         `  ${link} accepted but state=${after} — a merge queue still owns it; re-run \`bro stack merge\` to continue`
-      )
-      break
+      );
+      break;
     }
-    lines.push(`  merged ${link}`)
-    merged.push(m.branch)
-    landedBelow = true
+    lines.push(`  merged ${link}`);
+    merged.push(m.branch);
+    landedBelow = true;
   }
-  return { lines, merged }
+  return { lines, merged };
 }
 
 // --- plain-git connector implementation -----------------------------------------
@@ -214,18 +211,39 @@ export function mergeChainPerLayer(
  *  on the trunk refuses — a merge must never surprise the human's
  *  in-flight edit. */
 function primaryWorktree(dir: string): { path: string; branch?: string } | undefined {
-  const first = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']).out.split('\n\n')[0]
-  const path = first?.split('\n').find((l) => l.startsWith('worktree '))?.slice(9).trim()
+  const first = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']).out.split('\n\n')[0];
+  const path = first
+    ?.split('\n')
+    .find(l => l.startsWith('worktree '))
+    ?.slice(9)
+    .trim();
   if (!path) {
-    return undefined
+    return undefined;
   }
   const branch = first
     .split('\n')
-    .find((l) => l.startsWith('branch '))
+    .find(l => l.startsWith('branch '))
     ?.slice(7)
     .replace(/^refs\/heads\//, '')
-    .trim()
-  return { path, branch: branch === '' ? undefined : branch }
+    .trim();
+  return { path, branch: branch === '' ? undefined : branch };
+}
+
+/** Merge commits inside a `fork..head` rev range. The rebase replay
+ *  can't preserve merge resolutions, so any nonzero count refuses;
+ *  `undefined` means git itself couldn't count (bad range, repo error)
+ *  — also a refusal, worded by the caller.
+ *
+ *  Exported (bro-dz0u9): the stack SYNC path rewrites a member with a
+ *  plain rebase too, and it must refuse the same history with the same
+ *  counter — not a second implementation of the same question. */
+export function countMergesInRange(path: string, range: string): number | undefined {
+  const r = gitTry(['-C', path, 'rev-list', '--merges', '--count', range]);
+  if (r.code !== 0 || r.out.trim() === '') {
+    return undefined;
+  }
+  const n = Number(r.out.trim());
+  return Number.isInteger(n) ? n : undefined;
 }
 
 /** The plain-git stacks facade — the same verbs with no forge at all:
@@ -238,73 +256,165 @@ export function gitStacks(dir: string): StackFacade {
       // a member carrying a review must land through its host — merging
       // the branch locally would strand the open PR. Decline so the
       // caller's per-layer merge drives the review facade instead.
-      if (members.some((m) => m.pr !== undefined)) {
-        return undefined
+      if (members.some(m => m.pr !== undefined)) {
+        return undefined;
       }
-      const lines: string[] = []
-      const merged: string[] = []
-      const trunk = members[0]?.base
-      const main = primaryWorktree(dir)
+      const lines: string[] = [];
+      const merged: string[] = [];
+      const trunk = members[0]?.base;
+      const main = primaryWorktree(dir);
       if (trunk === undefined || main === undefined) {
-        lines.push('  no trunk or worktree resolvable — merge aborted')
-        return { lines, merged }
+        lines.push('  no trunk or worktree resolvable — merge aborted');
+        return { lines, merged };
       }
       if (main.branch !== trunk) {
-        lines.push(`  primary worktree is on ${main.branch ?? 'detached HEAD'}, not ${trunk} — merge aborted`)
-        return { lines, merged }
+        lines.push(
+          `  primary worktree is on ${main.branch ?? 'detached HEAD'}, not ${trunk} — merge aborted`
+        );
+        return { lines, merged };
       }
-      const dirty = gitTry(['-C', main.path, 'status', '--porcelain']).out.trim() !== ''
+      const dirty = gitTry(['-C', main.path, 'status', '--porcelain']).out.trim() !== '';
       if (dirty) {
-        lines.push(`  ${main.path} has uncommitted changes — merge aborted`)
-        return { lines, merged }
+        lines.push(`  ${main.path} has uncommitted changes — merge aborted`);
+        return { lines, merged };
       }
       for (const m of members) {
         if (opts.method === 'rebase') {
           // rebase-merge replays the member's commits onto the trunk tip —
           // cherry-pick is the local equivalent: `git rebase` would move
-          // the member's ref, and a worktree may be holding it. --empty=drop
-          // skips commits the trunk already carries patch-for-patch.
-          const fork = gitTry(['-C', main.path, 'merge-base', trunk, m.branch]).out.trim()
-          const r =
-            fork === ''
-              ? { code: 1, out: '', err: `no merge-base with ${trunk}` }
-              : gitTry(['-C', main.path, 'cherry-pick', '--empty=drop', `${fork}..${m.branch}`])
+          // the member's ref, and a worktree may be holding it. The replay
+          // walks the whole fork..branch range oldest-first and merge-free
+          // — a patch-id filter (git cherry) would also drop commits a
+          // revert still needs, so --empty=drop's semantics ride the pick
+          // loop instead (that flag needs a git new enough to parse it):
+          // a pick that fails with nothing staged and nothing unmerged
+          // went empty mid-range — patch-identical to trunk, an
+          // --allow-empty, a duplicate inside the branch — and is skipped;
+          // any other failure aborts the replay and reports like before.
+          //
+          // Merge commits carry conflict resolutions that aren't replayable
+          // by cherry-picking parents alone — refuse rather than silently
+          // drop them.
+          // Pin the branch tip once — `m.branch` is a moving ref, so re-reading
+          // it between merge-base / count / enumerate / replay can drift.
+          const head = gitTry(['-C', main.path, 'rev-parse', m.branch]).out.trim();
+          if (head === '') {
+            lines.push(`  ${m.branch} — could not resolve branch tip; merge aborted`);
+            break;
+          }
+          const fork = gitTry(['-C', main.path, 'merge-base', trunk, head]).out.trim();
+          if (fork === '') {
+            lines.push(`  ${m.branch} has no merge-base with ${trunk}`);
+            break;
+          }
+          const mergeCount = countMergesInRange(main.path, `${fork}..${head}`);
+          if (mergeCount === undefined || mergeCount > 0) {
+            lines.push(
+              mergeCount === undefined
+                ? `  ${m.branch} — could not count merge commits in range; merge aborted`
+                : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
+            );
+            break;
+          }
+          const pickResult = gitTry([
+            '-C',
+            main.path,
+            'rev-list',
+            '--topo-order',
+            '--reverse',
+            '--no-merges',
+            `${fork}..${head}`,
+          ]);
+          if (pickResult.code !== 0) {
+            lines.push(`  ${m.branch} — could not enumerate commits in range; merge aborted`);
+            break;
+          }
+          const picks = pickResult.out.split('\n').filter(Boolean);
+          // Guard against the branch advancing between the pinned tip and now:
+          // the replay list is pinned to `head`, so an advanced branch would
+          // leave its new commits unlanded. Abort (do not retire) rather than
+          // silently drop them — a re-run converges from the new tip.
+          const tipNow = gitTry(['-C', main.path, 'rev-parse', m.branch]).out.trim();
+          if (tipNow !== head) {
+            lines.push(
+              `  ${m.branch} advanced during replay (${head.slice(0, 7)} → ${tipNow.slice(0, 7)}) — not retiring; re-run to land the new tip`
+            );
+            break;
+          }
+          // Re-check for merge commits in the pinned range (defensive).
+          const mergeCountAfter = countMergesInRange(main.path, `${fork}..${head}`);
+          if (mergeCountAfter === undefined || mergeCountAfter > 0) {
+            lines.push(
+              mergeCountAfter === undefined
+                ? `  ${m.branch} — could not re-validate merge commits; merge aborted`
+                : `  ${m.branch} contains merge commits — rebase mergeChain cannot preserve merge resolutions; use merge or squash`
+            );
+            break;
+          }
+          let r = { code: 0, out: '', err: '' };
+          for (const sha of picks) {
+            const p = gitTry(['-C', main.path, 'cherry-pick', sha]);
+            if (p.code === 0) {
+              continue;
+            }
+            const wentEmpty =
+              gitTry(['-C', main.path, 'diff', '--cached', '--quiet']).code === 0 &&
+              gitTry(['-C', main.path, 'ls-files', '-u']).out.trim() === '';
+            if (wentEmpty) {
+              // a one-commit sequence — abort is the skip (HEAD never moved)
+              gitTry(['-C', main.path, 'cherry-pick', '--abort']);
+              continue;
+            }
+            r = { code: p.code, out: p.out, err: p.err };
+            break;
+          }
           if (r.code !== 0) {
-            gitTry(['-C', main.path, 'cherry-pick', '--abort'])
+            gitTry(['-C', main.path, 'cherry-pick', '--abort']);
             lines.push(
               `  ${m.branch} rebase onto ${trunk} failed — ${r.err.trim() || 'conflict'}; resolve by hand`
-            )
-            break
+            );
+            break;
           }
-          lines.push(`  merged ${m.branch} into ${trunk}`)
-          merged.push(m.branch)
-          continue
+          // Guard retirement: if the branch advanced during replay, do not
+          // retire it (its new commits were not landed). A re-run converges.
+          const tipAfter = gitTry(['-C', main.path, 'rev-parse', m.branch]).out.trim();
+          if (tipAfter !== head) {
+            lines.push(
+              `  ${m.branch} advanced during replay (${head.slice(0, 7)} → ${tipAfter.slice(0, 7)}) — not retiring; re-run to land the new tip`
+            );
+            break;
+          }
+          lines.push(`  merged ${m.branch} into ${trunk}`);
+          merged.push(m.branch);
+          continue;
         }
         // squash lands the member as one commit; merge lets git pick
         // ff-vs-merge-commit per layer — a linear chain fast-forwards
         const args =
           opts.method === 'squash'
             ? ['-C', main.path, 'merge', '--squash', m.branch]
-            : ['-C', main.path, 'merge', '--ff', '-m', `merge ${m.branch} into ${trunk}`, m.branch]
-        const r = gitTry(args)
+            : ['-C', main.path, 'merge', '--ff', '-m', `merge ${m.branch} into ${trunk}`, m.branch];
+        const r = gitTry(args);
         if (r.code !== 0) {
           // --squash writes no MERGE_HEAD, so `merge --abort` can't clean
           // a conflicted squash — reset --merge covers both paths
-          gitTry(['-C', main.path, 'reset', '--merge'])
-          lines.push(`  ${m.branch} merge into ${trunk} failed — ${r.err.trim() || 'conflict'}; resolve by hand`)
-          break
+          gitTry(['-C', main.path, 'reset', '--merge']);
+          lines.push(
+            `  ${m.branch} merge into ${trunk} failed — ${r.err.trim() || 'conflict'}; resolve by hand`
+          );
+          break;
         }
         if (opts.method === 'squash') {
-          const c = gitTry(['-C', main.path, 'commit', '-qm', `merge ${m.branch} into ${trunk}`])
+          const c = gitTry(['-C', main.path, 'commit', '-qm', `merge ${m.branch} into ${trunk}`]);
           if (c.code !== 0) {
-            lines.push(`  ${m.branch} squash-commit failed — ${c.err.trim()}`)
-            break
+            lines.push(`  ${m.branch} squash-commit failed — ${c.err.trim()}`);
+            break;
           }
         }
-        lines.push(`  merged ${m.branch} into ${trunk}`)
-        merged.push(m.branch)
+        lines.push(`  merged ${m.branch} into ${trunk}`);
+        merged.push(m.branch);
       }
-      return { lines, merged }
+      return { lines, merged };
     },
-  }
+  };
 }

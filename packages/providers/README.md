@@ -16,7 +16,7 @@ consume by name.
 npm i @broject/providers
 ```
 
-Requires Node ≥ 22. ESM only.
+Requires Node ≥ 22.18. ESM only.
 
 ## Surface
 

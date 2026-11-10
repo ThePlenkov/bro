@@ -1,9 +1,9 @@
 {
   "name": "@broject/convoy",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "dependencies": {
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.3.0"
   },
   "exports": {
     ".": {
@@ -25,7 +25,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "license": "MIT",
   "repository": {
@@ -45,5 +45,9 @@
     "agent",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }

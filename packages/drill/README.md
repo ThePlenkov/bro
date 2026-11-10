@@ -15,7 +15,7 @@ mandatory result + prevention memo so a problem can't silently recur.
 npm i @broject/drill
 ```
 
-Requires Node ≥ 22 and `bd` (frames are beads). ESM only.
+Requires Node ≥ 22.18 and `bd` (frames are beads). ESM only.
 
 ## Surface
 

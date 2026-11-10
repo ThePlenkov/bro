@@ -40,6 +40,7 @@ import {
   withMeta,
 } from '@broject/core'
 import type {
+  ClaimCapability,
   DepOpts,
   PublishResult,
   TaskDepEdge,
@@ -698,10 +699,23 @@ function linkSync(dir: string, from: string, to: string, rel: string): void {
   throw new Error(`github tasks: link rel '${rel}' has no GitHub analogue (blocked | parent)`)
 }
 
+/** The remote claim's honest capability (spec specs/bro-l8c4f.12):
+ *  assign→verify-reread is a marker, never a lease — a residual
+ *  interleaving window can seat two winners, and every worker behind
+ *  the viewer credential claims as the same identity. */
+const CLAIM_CAPABILITY = {
+  strength: 'best-effort',
+  identity: 'viewer',
+  authority: 'service',
+} as const satisfies ClaimCapability
+
 /** claim = addAssignees(me) → verify → bro:claimed label. The label is
  *  the commit flag: it lands only after the assignee verified. A
  *  contested assignee set resolves to the lowest login — the loser
- *  unassigns and throws. */
+ *  unassigns and throws. That settles a race the verify OBSERVED —
+ *  it cannot promise a single winner: a loser's re-read can still
+ *  snapshot the pre-write state and pass, so the capability stays
+ *  best-effort, never a lease. */
 function claimSync(dir: string, id: string): void {
   const n = queryIssueSync(dir, issueNumber(dir, id))
   if (n === undefined) {
@@ -1068,6 +1082,7 @@ export function githubTasks(dir: string): TaskStore {
     create: (i) => pub(createSync(dir, i)) as never,
     update: (id, patch) => updateSync(dir, id, patch),
     claim: (id) => claimSync(dir, id),
+    claimCapability: () => CLAIM_CAPABILITY,
     actor: () => ghActor(dir),
     reopen: (id) => reopenSync(dir, id),
     close: (id, reason) => {

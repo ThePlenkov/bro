@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/agents-status.schema.json",
+  "title": "bro agents status --json",
+  "type": "object",
+  "additionalProperties": true,
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "occupancy",
+        "sessions",
+        "backends"
+      ],
+      "properties": {
+        "occupancy": {},
+        "sessions": {},
+        "backends": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "molStep",
+        "backend",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "spawnedAt": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "number"
+        },
+        "molStep": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "resetAt": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "class": {
+          "type": "string"
+        },
+        "delegatedBy": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        },
+        "log": {
+          "type": "string"
+        },
+        "stderrLog": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

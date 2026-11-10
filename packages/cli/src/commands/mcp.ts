@@ -8,27 +8,27 @@
  *  Plane exposure rides `mcp.planes`: absent/empty `mcp` section =
  *  every read plane (spawning the server IS the consent), `[]` = none,
  *  a list = allowlist. Backend selection stays on `connectors.*`. */
-import { planes } from '@broject/core'
+import { hasHelpFlag, planes, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { catalogTools, serveMcp } from '@broject/mcp'
 import '../planes/index.ts'
 import { loadBroConfig } from '../plugins.ts'
 import { VERSION } from '../version.ts'
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro mcp                 stdio MCP server over the read planes
                           (register it in any MCP-capable client:
                           Windsurf, Zed, Goose, Gemini CLI, Copilot,
                           Claude Desktop — tools appear as bro_<plane>_<read>)
   bro mcp --tools         print the generated tools/list payload and exit
                           (capability-gated, same as a client's view)
-  bro mcp --help`)
-  process.exit(2)
+  bro mcp --help`, exitCode)
 }
 
 export async function runMcpCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const dir = process.cwd()
   const cfg = loadBroConfig(dir)

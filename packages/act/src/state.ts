@@ -7,29 +7,43 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
-} from '@broject/core'
+} from '@broject/core';
 import type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   IgnoreCheckEntry,
   IgnoreCheckRule,
   PrTarget,
   ReviewFacade,
   ReviewThread,
-} from '@broject/core'
-import type { CheckHistory } from './check-history.ts'
-import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
-import type { PrStateCache } from './state-cache.ts'
-import type { PrActState } from './types.ts'
+} from '@broject/core';
+import type { CheckHistory } from './check-history.ts';
+import { docsOnlyPr, effectiveMaxRounds } from './docs.ts';
+import type { PrStateCache } from './state-cache.ts';
+import { detectReopenedThreads } from './reopened.ts';
+import type { ResolveLedger } from './resolve-log.ts';
+import type { PrActState } from './types.ts';
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
 // "kilometer-tests") is not an AI reviewer.
-const AI_REVIEWER_RE = /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i
+const AI_REVIEWER_RE =
+  /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i;
 
+/** Static-scanner check-name stems — the must-fix set BY DEFAULT. A
+ *  scanner's failed job or error annotation is a real project finding,
+ *  not reviewer flake — the proof-of-life model does not apply to it.
+ *  An explicit act.ignoreChecks entry overrides this default (the
+ *  operator named the scanner advisory; advisoryFilter's rule lookup
+ *  runs first for exactly that reason). */
 const SAST_NAMES = [
   'sonarcloud',
   'sonarqube',
   'codacy',
   'codescene',
+  'codeclimate',
+  'codefactor',
+  'deepsource',
   'codeql',
   'semgrep',
   'opengrep',
@@ -41,15 +55,27 @@ const SAST_NAMES = [
   'kics',
   'tfsec',
   'gitleaks',
-]
+];
 
 export function isSast(name: string): boolean {
-  const lower = name.toLowerCase()
-  return SAST_NAMES.some((s) => lower.includes(s))
+  const lower = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return SAST_NAMES.some(s => lower.includes(s));
 }
 
-const isLiveSast = (c: CheckInfo): boolean =>
-  isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+/** A check name, normalized for matching: case-folded, every run of
+ *  non-alphanumerics collapsed to one space. 'act-gate', 'Act Gate' and
+ *  'act_gate' are the same name — a self-check setting that missed its
+ *  own check would restore the deadlock it exists to prevent. */
+function normalizeCheckName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// SKIPPED means the run never produced output — every other conclusion
+// (SUCCESS, NEUTRAL included) can still carry failure-level annotations
+const isLiveSast = (c: CheckInfo): boolean => isSast(c.name) && c.state !== 'SKIPPED';
 
 /** The gate's ci set — non-reviewer checks that aren't pass/skipped/
  *  neutral. Exported so drive's CI-fail fixer names exactly the checks
@@ -57,24 +83,24 @@ const isLiveSast = (c: CheckInfo): boolean =>
  *  post-ignore list — advisory checks never gate. */
 export function gatedCiChecks(checks: CheckInfo[]): CheckInfo[] {
   return checks.filter(
-    (c) =>
+    c =>
       c.bucket !== 'pass' &&
       c.state !== 'SKIPPED' &&
       c.state !== 'NEUTRAL' &&
       !AI_REVIEWER_RE.test(c.name)
-  )
+  );
 }
 
 /** The ci_failing set — gatedCi that settled red. */
 export function failingCiChecks(checks: CheckInfo[]): CheckInfo[] {
-  return gatedCiChecks(checks).filter((c) => c.bucket === 'fail')
+  return gatedCiChecks(checks).filter(c => c.bucket === 'fail');
 }
 
 /** Non-skipped SAST checks — the annotation-inspection set the gate
- *  reads, green runs included (a SUCCESS conclusion can still carry
- *  failure-level annotations). */
+ *  reads, green and NEUTRAL runs included (a SUCCESS or NEUTRAL
+ *  conclusion can still carry failure-level annotations). */
 export function liveSastChecks(checks: CheckInfo[]): CheckInfo[] {
-  return checks.filter(isLiveSast)
+  return checks.filter(isLiveSast);
 }
 
 function countFindings(
@@ -84,16 +110,16 @@ function countFindings(
   out: { pending: number; unknown: number }
 ): void {
   for (const check of checks) {
-    const count = annotations.get(check.name)
+    const count = annotations.get(check.name);
     if (count === undefined) {
-      continue
+      continue;
     }
     if (count === null) {
       if (requiredNames.has(check.name)) {
-        out.unknown += 1
+        out.unknown += 1;
       }
     } else {
-      out.pending += count
+      out.pending += count;
     }
   }
 }
@@ -102,59 +128,48 @@ function countFindings(
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
- *  annotations endpoint stays infra noise). An advisory-ignored SAST
- *  check never gates — but one carrying failure annotations earns an
- *  alert: quietly dropping real findings is not what ignore is for. */
+ *  annotations endpoint stays infra noise). The input set here is
+ *  already advisory-filtered — a scanner survives into these counts
+ *  unless the operator explicitly named it in act.ignoreChecks —
+ *  findings on surviving checks are must-fix. */
 async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
   checks: CheckInfo[],
-  ignored: CheckInfo[],
   requiredNames: Set<string>,
-  headSha: string,
-  alerts: string[]
+  headSha: string
 ): Promise<{ pending: number; unknown: number }> {
-  const out = { pending: 0, unknown: 0 }
-  const sastChecks = liveSastChecks(checks)
-  const ignoredSast = liveSastChecks(ignored)
-  if (sastChecks.length === 0 && ignoredSast.length === 0) {
-    return out
+  const out = { pending: 0, unknown: 0 };
+  const sastChecks = liveSastChecks(checks);
+  if (sastChecks.length === 0) {
+    return out;
   }
-  let annotations: Map<string, number | null>
+  let annotations: Map<string, number | null>;
   try {
     // only these names are ever read below — the unfiltered scan fetches
     // annotations for every check-run on the commit, one host call each
     // (a 40-run suite fanned a gh child per run into one cgroup, the
     // bro-2l7r9 OOM)
-    const wanted = new Set([...sastChecks, ...ignoredSast].map((c) => c.name))
+    const wanted = new Set(sastChecks.map(c => c.name));
     annotations =
       rev.checkAnnotationsAsync === undefined
         ? rev.checkAnnotations(target.repo, headSha, wanted)
-        : await rev.checkAnnotationsAsync(target.repo, headSha, wanted)
+        : await rev.checkAnnotationsAsync(target.repo, headSha, wanted);
   } catch {
     // a transient check-runs failure must not sink the whole gate
     // state — every gated SAST check reads as "unknown" (required
-    // ones count below); ignored checks stay silent — their alert
-    // would claim findings we never saw
-    annotations = new Map(sastChecks.map((c) => [c.name, null]))
+    // ones count below)
+    annotations = new Map(sastChecks.map(c => [c.name, null]));
   }
-  countFindings(sastChecks, annotations, requiredNames, out)
-  for (const check of ignoredSast) {
-    const count = annotations.get(check.name)
-    if (typeof count === 'number' && count > 0) {
-      alerts.push(
-        `ignored SAST check "${check.name}" carries ${count} failure annotation(s) — suppressed by act.ignoreChecks, review manually`
-      )
-    }
-  }
-  return out
+  countFindings(sastChecks, annotations, requiredNames, out);
+  return out;
 }
 
 /** Ignore entries reach here already normalized by the config schema —
  *  this second pass keeps direct callers (tests, embedders) on the same
  *  contract: a bare string is a rule with default thresholds. */
 function ignoreRules(entries: IgnoreCheckEntry[]): IgnoreCheckRule[] {
-  const rules: IgnoreCheckRule[] = []
+  const rules: IgnoreCheckRule[] = [];
   for (const e of entries) {
     const rule: IgnoreCheckRule =
       typeof e === 'string'
@@ -163,13 +178,13 @@ function ignoreRules(entries: IgnoreCheckEntry[]): IgnoreCheckRule[] {
             consecutiveFailures: DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
             threadWindowDays: DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
           }
-        : e
+        : e;
     // an empty substring would match EVERY check name
     if (rule.name.trim() !== '') {
-      rules.push(rule)
+      rules.push(rule);
     }
   }
-  return rules
+  return rules;
 }
 
 /** Does this PR carry fresh thread output BY the ignored check's bot —
@@ -182,20 +197,20 @@ function hasFreshThreadActivity(
   ruleName: string,
   windowDays: number
 ): boolean {
-  const stem = ruleName.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const stem = ruleName.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (stem === '') {
-    return false
+    return false;
   }
-  const cutoff = Date.now() - windowDays * 86_400_000
-  return threads.some((t) => {
-    const c = t.comment
+  const cutoff = Date.now() - windowDays * 86_400_000;
+  return threads.some(t => {
+    const c = t.comment;
     if (c === null) {
-      return false
+      return false;
     }
-    const author = c.author.toLowerCase().replace(/[^a-z0-9]/g, '')
-    const ts = Date.parse(c.createdAt)
-    return author.includes(stem) && Number.isFinite(ts) && ts >= cutoff
-  })
+    const author = c.author.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const ts = Date.parse(c.createdAt);
+    return author.includes(stem) && Number.isFinite(ts) && ts >= cutoff;
+  });
 }
 
 /** Advisory checks (act.ignoreChecks) never gate — but a *failing* one
@@ -213,9 +228,15 @@ function advisoryFilter(
   headSha: string,
   alerts: string[]
 ): boolean {
-  const rule = rules.find((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
+  const rule = rules.find(r => c.name.toLowerCase().includes(r.name.toLowerCase()));
   if (rule === undefined) {
-    return true
+    // a static scanner is must-fix BY DEFAULT: a failed job or an error
+    // annotation IS the finding, not reviewer flake — so a SAST-named
+    // check gates unless an explicit act.ignoreChecks entry overrides.
+    // The override is deliberate operator policy: naming a scanner is
+    // never a silent no-op, and a failing one still surfaces as an
+    // alert until proven flaky and alive (below).
+    return true;
   }
   history?.record({
     repo: target.repo,
@@ -223,23 +244,23 @@ function advisoryFilter(
     sha: headSha,
     name: c.name,
     bucket: c.bucket,
-  })
+  });
   // only 'fail' is judged — pending/pass/cancel stay quietly ignored;
   // shielding a stuck pending state is the option's original purpose
   if (c.bucket !== 'fail') {
-    return false
+    return false;
   }
-  const streak = history?.consecutiveFailures(c.name) ?? 0
-  const alive = hasFreshThreadActivity(threads, rule.name, rule.threadWindowDays)
+  const streak = history?.consecutiveFailures(c.name) ?? 0;
+  const alive = hasFreshThreadActivity(threads, rule.name, rule.threadWindowDays);
   if (streak >= rule.consecutiveFailures && alive) {
-    return false // proven flaky and still producing findings — quiet ignore
+    return false; // proven flaky and still producing findings — quiet ignore
   }
   alerts.push(
     alive
       ? `advisory check "${c.name}" failing (${streak}/${rule.consecutiveFailures} consecutive) — not yet proven flaky`
       : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
-  )
-  return false
+  );
+  return false;
 }
 
 /** Resolve an async facade method, falling back to its sync twin when
@@ -252,32 +273,89 @@ const orSync = <T, A extends unknown[]>(
   syncFn: (...a: A) => T,
   ...args: A
 ): Promise<T> =>
-  asyncFn === undefined ? Promise.resolve().then(() => syncFn(...args)) : asyncFn(...args)
+  asyncFn === undefined ? Promise.resolve().then(() => syncFn(...args)) : asyncFn(...args);
 
 export interface FetchPrActStateOpts {
-  ignoreChecks?: IgnoreCheckEntry[]
-  checkHistory?: CheckHistory | null
-  maxRounds?: number
-  docsPaths?: string[]
-  docsMaxRounds?: number
+  ignoreChecks?: IgnoreCheckEntry[];
+  /** The check that IS the gate (act.selfCheck) — a name substring. The
+   *  gate never counts itself: a gate published as a required check is
+   *  pending while it runs, and a gate that waits for its own check can
+   *  never go green. */
+  selfCheck?: string;
+  checkHistory?: CheckHistory | null;
+  maxRounds?: number;
+  docsPaths?: string[];
+  docsMaxRounds?: number;
   /** act.requireApproval — when true the gate also requires an
    *  approving review verdict before auto-merge may land (bro-3vy93). */
-  requireApproval?: boolean
+  requireApproval?: boolean;
+  /** act.approvers — trusted reviewer logins; the approval probe counts
+   *  only these when non-empty (any human actor when empty). */
+  approvers?: readonly string[];
   /** The shared gate-state feed (bro-0tcrl): observe-path callers pass
    *  `prStateCache(dir)` so concurrent pollers share one fetch per
    *  target per TTL window instead of each paying the full 5-7 host
    *  calls. Decision points (merge gates, post-merge re-probes) omit
    *  it — they act on the state, so it must be this fetch's own. */
-  stateCache?: PrStateCache | null
+  stateCache?: PrStateCache | null;
+  /** The resolve ledger — the source of "this thread was resolved
+   *  before", which the reopened-thread cycle-guard needs. Null when the
+   *  caller has no ledger (no git dir): the guard then detects nothing
+   *  (fail-open). */
+  resolveLedger?: ResolveLedger | null;
 }
 
-/** In-flight fetches by `repo#pr` — same-process concurrency (a
- *  Promise.all sweep, overlapping hook probes) shares the one running
- *  fetch rather than duplicating it. Keyed on the target only: two
- *  callers asking for the same PR at the same instant want the same
- *  state — an opts delta between them is config-level, which is
- *  repo-shared anyway. */
-const inflight = new Map<string, Promise<PrActState>>()
+/** In-flight fetches by `repo#pr` + approval-probe inputs — same-process
+ *  concurrency (a Promise.all sweep, overlapping hook probes) shares
+ *  the one running fetch rather than duplicating it. The probe inputs
+ *  ride the key: requireApproval/approvers decide whether the probe ran
+ *  and under which trust set, so a verdict probed for different
+ *  gate semantics must never serve this caller. Other opts stay
+ *  outside the key — they're config-level and repo-shared. */
+const inflight = new Map<string, Promise<PrActState>>();
+
+/** The humanApproved probe's generation — bump on any semantic change
+ *  (what counts as an approver, how reviews fold). Cached/in-flight
+ *  verdicts from another generation answered a different question and
+ *  never serve. */
+const APPROVAL_PROBE_VERSION = '2';
+
+/** The inflight/cache identity of an approval probe — normalized so
+ *  ['a','B'] and ['B','a'] share a fetch. */
+const approvalProbeKey = (opts?: FetchPrActStateOpts): string =>
+  opts?.requireApproval === true
+    ? `+${[...(opts.approvers ?? [])]
+        .map(a => a.toLowerCase())
+        .sort((a, b) => a.localeCompare(b))
+        .join(',')}`
+    : '';
+
+/** A cached entry serves only when it answers what the caller asked —
+ *  requireApproval needs the humanApproval probe run under the SAME
+ *  allowlist; an entry fetched without it carries no verdict (the
+ *  probe is lazy). */
+const entryUsable = (s: PrActState, probeKey: string): boolean => {
+  if (probeKey === '') {
+    return true;
+  }
+  if (s.humanApproval === undefined) {
+    return false;
+  }
+  // provenance: a verdict from another probe generation answered a
+  // different question; a verdict bound to a head that isn't this
+  // snapshot's was answered against a different head — neither serves
+  if (s.humanApprovalProbe !== APPROVAL_PROBE_VERSION) {
+    return false;
+  }
+  if (s.humanApprovalHeadSha !== undefined && s.humanApprovalHeadSha !== s.headSha) {
+    return false;
+  }
+  const theirs = [...(s.humanApprovalApprovers ?? [])]
+    .map(a => a.toLowerCase())
+    .sort((a, b) => a.localeCompare(b))
+    .join(',');
+  return theirs === probeKey.slice(1);
+};
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
@@ -285,26 +363,22 @@ export async function fetchPrActState(
   target: PrTarget,
   opts?: FetchPrActStateOpts
 ): Promise<PrActState> {
-  const cache = opts?.stateCache ?? null
-  // a cached entry serves only when it answers what THIS caller asked —
-  // requireApproval needs the humanApproval probe, and an entry fetched
-  // without it carries no verdict (the probe is lazy)
-  const usable = (s: PrActState): boolean =>
-    !(opts?.requireApproval === true && s.humanApproval === undefined)
-  const hit = cache?.read(target)
-  if (hit != null && usable(hit)) {
-    return hit
+  const cache = opts?.stateCache ?? null;
+  const probeKey = approvalProbeKey(opts);
+  const hit = cache?.read(target);
+  if (hit != null && entryUsable(hit, probeKey)) {
+    return hit;
   }
-  const key = `${target.repo}#${target.pr}`
-  const flying = inflight.get(key)
+  const key = `${target.repo}#${target.pr}${probeKey}`;
+  const flying = inflight.get(key);
   if (flying !== undefined) {
-    return flying
+    return flying;
   }
   const p = fetchShared(rev, target, opts, cache).finally(() => {
-    inflight.delete(key)
-  })
-  inflight.set(key, p)
-  return p
+    inflight.delete(key);
+  });
+  inflight.set(key, p);
+  return p;
 }
 
 /** The fetch side of the feed — one process's fetch publishes for
@@ -318,29 +392,26 @@ async function fetchShared(
   opts: FetchPrActStateOpts | undefined,
   cache: PrStateCache | null
 ): Promise<PrActState> {
-  const release = (await cache?.acquireAsync(target)) ?? null
+  const release = (await cache?.acquireAsync(target)) ?? null;
   try {
     if (release !== null && cache !== null) {
-      const hit = cache.read(target)
-      if (
-        hit != null &&
-        !(opts?.requireApproval === true && hit.humanApproval === undefined)
-      ) {
-        return hit
+      const hit = cache.read(target);
+      if (hit != null && entryUsable(hit, approvalProbeKey(opts))) {
+        return hit;
       }
     }
-    const state = await fetchState(rev, target, opts)
-    cache?.write(target, state)
-    return state
+    const state = await fetchState(rev, target, opts);
+    cache?.write(target, state);
+    return state;
   } finally {
-    release?.()
+    release?.();
   }
 }
 
 async function fetchState(
   rev: ReviewFacade,
   target: PrTarget,
-  opts?: FetchPrActStateOpts
+  opts: FetchPrActStateOpts | undefined
 ): Promise<PrActState> {
   // The reads are independent — overlap them. Inside a hook sweep each
   // sync variant would serialize AND block the probe-timeout timers.
@@ -350,7 +421,7 @@ async function fetchState(
       (t: PrTarget, req?: boolean) => rev.checks(t, req),
       target,
       requiredOnly
-    )
+    );
   const [meta, threads, checksAll, required, shas] = await Promise.all([
     orSync(rev.prMetaAsync?.bind(rev), (t: PrTarget) => rev.prMeta(t), target),
     rev.reviewThreads(target),
@@ -360,28 +431,47 @@ async function fetchState(
     orSync(rev.reviewedShasAsync?.bind(rev), (t: PrTarget) => rev.reviewedShas(t), target).catch(
       (): string[] => []
     ),
-  ])
-  const rules = ignoreRules(opts?.ignoreChecks ?? [])
-  const alerts: string[] = []
-  const history = opts?.checkHistory ?? null
-  const ignored: CheckInfo[] = []
-  const checks = checksAll.filter((c) => {
-    const gated = advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
-    if (!gated) {
-      ignored.push(c)
+  ]);
+  const rules = ignoreRules(opts?.ignoreChecks ?? []);
+  const alerts: string[] = [];
+  const history = opts?.checkHistory ?? null;
+  // The gate's own check is not part of the gate's input — a gate that
+  // publishes itself as a required check is pending while it runs, and
+  // waiting for it means the gate can never settle green. Matched by
+  // NAME (act.selfCheck): the normalized name must BE the gate's name,
+  // or end with it as the job segment of a composite 'workflow / job'
+  // name. A substring match would drop unrelated checks from the gate —
+  // the one thing the gate must never do (Kody rule: no substring
+  // checks as semantic tests).
+  const selfName = opts?.selfCheck;
+  const isSelf = (c: CheckInfo): boolean => {
+    // absent is not the same as empty: a missing setting means "this
+    // project has no gate check", an empty one means "the gate names
+    // nothing" — neither excludes a check, and neither is a sentinel
+    // for the other (Kody rule: discriminate on presence).
+    if (selfName === undefined) {
+      return false;
     }
-    return gated
-  })
+    const self = normalizeCheckName(selfName);
+    if (self === '') {
+      return false;
+    }
+    const name = normalizeCheckName(c.name);
+    return name === self || name.endsWith(` ${self}`);
+  };
+  const checks = checksAll.filter(
+    c => !isSelf(c) && advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+  );
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
   // SAST annotation fetch failure counts as unknown below.
-  const requiredNames = new Set(required.map((c) => c.name))
+  const requiredNames = new Set(required.map(c => c.name));
   // Pending and failing split here: pending is worth
   // waiting out (act wait), failing is a settled verdict to act on.
-  const ciChecks = gatedCiChecks(checks)
-  const ciPending = ciChecks.filter((c) => c.bucket === 'pending').length
-  const ciFailing = failingCiChecks(checks).length
+  const ciChecks = gatedCiChecks(checks);
+  const ciPending = ciChecks.filter(c => c.bucket === 'pending').length;
+  const ciFailing = failingCiChecks(checks).length;
 
   // A pending AI reviewer can still open threads — declaring the gate OK
   // while one is running invites exactly the "threads after OK" surprise.
@@ -389,49 +479,70 @@ async function fetchState(
   // findings arrive as threads regardless, so the count is reported for
   // visibility but the gate does not block on it.
   const reviewersPending = checks.filter(
-    (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'pending'
-  ).length
+    c => AI_REVIEWER_RE.test(c.name) && c.bucket === 'pending'
+  ).length;
   const reviewersFailing = checks.filter(
-    (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'fail'
-  ).length
+    c => AI_REVIEWER_RE.test(c.name) && c.bucket === 'fail'
+  ).length;
 
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending.
-  const sast = await sastCounts(
-    rev,
-    target,
-    checks,
-    ignored,
-    requiredNames,
-    meta.headSha,
-    alerts
-  )
-  const sastPending = sast.pending
-  const sastUnknown = sast.unknown
+  const sast = await sastCounts(rev, target, checks, requiredNames, meta.headSha);
+  const sastPending = sast.pending;
+  const sastUnknown = sast.unknown;
 
   // The approval verdict is lazy: prMeta carries it for free on hosts
-  // that expose it (GitHub), and the separate approvals probe (GitLab)
-  // only pays its call when the gate is on (bro-3vy93)
-  const requireApproval = opts?.requireApproval === true
-  const reviewDecision =
-    meta.reviewDecision ??
-    (requireApproval
-      ? await orSync(
-          rev.reviewDecisionAsync?.bind(rev),
-          (t: PrTarget) => rev.reviewDecision?.(t),
-          target
-        ).catch((): undefined => undefined)
-      : undefined)
-  // the human-approval probe — a bot-only APPROVED verdict must not
-  // satisfy act.requireApproval; unanswerable stays undefined, which
-  // the gate reads as "not approved" (never a pass)
-  const humanApproval = requireApproval
+  // that expose it (GitHub), and the approvals probe only pays its call
+  // when the gate is on (bro-3vy93). One probe answers both questions —
+  // `hostApproved` is the host's aggregate verdict, so a host where the
+  // two share an endpoint (GitLab approvals) never pays a second call.
+  // the human-approval probe — the verdict behind act.requireApproval:
+  // a trusted human's approval on the current head, latest review per
+  // reviewer. A host without the probe is 'unanswerable' — undefined,
+  // which the gate reads as "not approved" (never a pass)
+  const requireApproval = opts?.requireApproval === true;
+  const rawProbe = requireApproval
     ? await orSync(
         rev.humanApprovedAsync?.bind(rev),
-        (t: PrTarget) => rev.humanApproved?.(t) ?? false,
-        target
+        (t: PrTarget, o?: ApprovalProbeOpts): ApprovalVerdict | boolean | undefined =>
+          rev.humanApproved?.(t, o),
+        target,
+        { approvers: opts?.approvers ?? [] }
       ).catch((): undefined => undefined)
-    : undefined
+    : undefined;
+  // the #561 contract answered a bare boolean — the union type keeps
+  // those connectors compiling; normalize it away here
+  const verdict: ApprovalVerdict | undefined =
+    rawProbe === undefined
+      ? undefined
+      : typeof rawProbe === 'boolean'
+        ? { approved: rawProbe }
+        : rawProbe;
+  const reviewDecision =
+    meta.reviewDecision ?? (verdict?.hostApproved === true ? 'APPROVED' : undefined);
+  // a verdict is only as fresh as the head it was read against — the
+  // probe binds to ITS fetch's head; when that isn't meta's head a push
+  // landed mid-fetch and the verdict answers a different question.
+  // Refuse it (fail closed) — the next pass re-probes the moved head. A
+  // probe that can't report its head can't be checked; the host's own
+  // boundary applies there.
+  const staleProbe =
+    verdict !== undefined && verdict.headSha !== undefined && verdict.headSha !== meta.headSha;
+  const approvalProbe: ApprovalVerdict | undefined = staleProbe
+    ? {
+        approved: false,
+        reason: 'the head moved while the approval probe ran — re-probe on the next pass',
+      }
+    : verdict;
+  const humanApproval = approvalProbe?.approved;
+  const humanApprovalReason = approvalProbe?.reason;
+  // the allowlist the verdict was probed under — cached entries must
+  // not serve a caller trusting a different set (usable() compares)
+  const humanApprovalApprovers = requireApproval ? [...(opts?.approvers ?? [])] : undefined;
+  // provenance pins the verdict to this snapshot's head and this probe
+  // generation — cached/in-flight reuse checks both before serving
+  const humanApprovalHeadSha = requireApproval ? approvalProbe?.headSha : undefined;
+  const humanApprovalProbe = requireApproval ? APPROVAL_PROBE_VERSION : undefined;
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -440,19 +551,29 @@ async function fetchState(
   // it is one round of the fix loop. Reviews exist without threads
   // (approvals), so this isn't gated on threads. `shas` already carries
   // the reviews fetch — a flaky endpoint degraded to [] above.
-  const fixRounds = Math.max(0, shas.length - 1)
+  const fixRounds = Math.max(0, shas.length - 1);
+
+  // The cycle-guard's reopened-thread signal: a thread the resolve ledger
+  // says bro resolved before and that is open now. The ledger — not the
+  // state cache — is the source of "before": the cache TTL is 30s, so
+  // its entry is gone between polls (see reopened.ts).
+  const reopenedThreads = detectReopenedThreads(
+    opts?.resolveLedger ?? null,
+    target.repo,
+    target.pr,
+    threads
+  );
 
   // A docs-only PR churns reviewer threads on every push — the tighter
   // docsMaxRounds cap moves the tail to debt sooner. The file list is
   // only probed while threads are open: that's the cap's sole consumer,
   // and it keeps a per-poll host call off a quiet PR.
-  const isDocsOnly =
-    threads.some((t) => !t.resolved) && (await docsOnlyPr(rev, target, opts))
+  const isDocsOnly = threads.some(t => !t.resolved) && (await docsOnlyPr(rev, target, opts));
   const maxRounds = effectiveMaxRounds(
     opts?.maxRounds ?? 0,
     isDocsOnly,
     opts?.docsMaxRounds ?? DEFAULT_CONFIG.act.docsMaxRounds
-  )
+  );
 
   return {
     pr: target.pr,
@@ -463,8 +584,9 @@ async function fetchState(
     isDraft: meta.isDraft,
     mergeable: meta.mergeable,
     mergeState: meta.mergeState,
-    openThreads: threads.filter((t) => !t.resolved).length,
+    openThreads: threads.filter(t => !t.resolved).length,
     threads,
+    reopenedThreads,
     ciPending,
     ciFailing,
     reviewersPending,
@@ -476,6 +598,11 @@ async function fetchState(
     docsOnly: isDocsOnly,
     alerts,
     reviewDecision,
+    mergedBy: meta.mergedBy,
     humanApproval,
-  }
+    humanApprovalReason,
+    humanApprovalApprovers,
+    humanApprovalHeadSha,
+    humanApprovalProbe,
+  };
 }

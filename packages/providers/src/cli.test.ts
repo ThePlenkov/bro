@@ -11,20 +11,20 @@ const ENTRY: CliEntry = { type: 'cli', command: 'cat {promptFile}', model: 'devi
 const DEADLINE = () => Date.now() + 10_000
 
 describe('expandPromptFile', () => {
-  test('{promptFile} expands to the quoted path', () => {
-    assert.equal(expandPromptFile('devin -p --prompt-file {promptFile} -x', '/tmp/p.md'), "devin -p --prompt-file '/tmp/p.md' -x")
+  test('{promptFile} expands to "$BRO_PROMPT_FILE" — the path never enters the line', () => {
+    assert.equal(
+      expandPromptFile('devin -p --prompt-file {promptFile} -x'),
+      'devin -p --prompt-file "$BRO_PROMPT_FILE" -x'
+    )
   })
 
-  test('no placeholder appends the quoted path as the last arg', () => {
-    assert.equal(expandPromptFile('my-agent run', '/tmp/p.md'), "my-agent run '/tmp/p.md'")
+  test('no placeholder appends the env reference as the last arg', () => {
+    assert.equal(expandPromptFile('my-agent run'), 'my-agent run "$BRO_PROMPT_FILE"')
   })
 
-  test('a quote in the path escapes shell-style', () => {
-    assert.equal(expandPromptFile('cat {promptFile}', "/tmp/it's.md"), "cat '/tmp/it'\\''s.md'")
-  })
-
-  test('$ tokens in the path substitute literally, not as replaceAll patterns', () => {
-    assert.equal(expandPromptFile('cat {promptFile}', '/tmp/$&-$`.md'), "cat '/tmp/$&-$`.md'")
+  test('the expansion is a fixed token — no path characters reach the command line', () => {
+    // whatever the mkdtemp path holds, the command line only ever sees "$BRO_PROMPT_FILE"
+    assert.equal(expandPromptFile('cat {promptFile}'), 'cat "$BRO_PROMPT_FILE"')
   })
 })
 
@@ -70,6 +70,19 @@ describe('cliChat', () => {
   test('a template without {promptFile} gets the path appended', async () => {
     const res = await cliChat('provider:local', { type: 'cli', command: 'cat' })('stdin-style', DEADLINE())
     assert.equal(res.content, 'stdin-style')
+  })
+
+  test('a nested sh -c still reaches the prompt — the path travels via env', async () => {
+    const res = await cliChat('provider:local', {
+      type: 'cli',
+      command: `sh -c 'cat {promptFile}'`,
+    })('nested-body', DEADLINE())
+    assert.equal(res.content, 'nested-body')
+  })
+
+  test('argv stays empty — the path arrives via env, not positionals', async () => {
+    const res = await cliChat('provider:local', { type: 'cli', command: 'echo -n "$#"; cat {promptFile}' })('p', DEADLINE())
+    assert.equal(res.content, '0p')
   })
 
   test('model reports the pin; an unhonorable override is a config error; unpinned is honest unknown', async () => {

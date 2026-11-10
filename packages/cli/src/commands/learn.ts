@@ -13,7 +13,7 @@
  *   capture [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
  *   probe <question> [--lesson "…" --on … --match-… …] [--session ID] [--json]
  */
-import { checkBeads } from '@broject/core'
+import { checkBeads, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import {
   CAPTURE_SOURCES,
   captureLessons,
@@ -43,8 +43,8 @@ import type {
 } from '@broject/learn'
 import { flag, flagAll, positionals } from './args.ts'
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro learn <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro learn <command> [args…]
 
 Commands:
   add      Store a lesson — --lesson and ≥1 --evidence required
@@ -73,8 +73,7 @@ probe flags:
                        newest live session marker, else 'cli')
   --json               machine-readable phase-1 result
   --lesson/--on/--match-…/--budget/--evidence  phase 2 — as add, but
-                       --evidence is optional (session + question auto-record)`)
-  process.exit(exitCode)
+                       --evidence is optional (session + question auto-record)`, exitCode)
 }
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -519,14 +518,14 @@ function cmdProbe(argv: string[]): void {
 export function runLearnCommand(argv: string[]): void {
   const [cmd, ...rest] = argv
   if (cmd === undefined || cmd === '--help' || cmd === '-h') {
-    usage(cmd === undefined ? 1 : 0)
+    usage(cmd === undefined ? 2 : 0)
   }
   // own-key lookup — an inherited key like `toString` is not a subcommand
   if (!Object.hasOwn(KNOWN_FLAGS, cmd)) {
     console.error(`error: unknown learn command "${cmd}"`)
     usage()
   }
-  if (rest.includes('--help') || rest.includes('-h')) {
+  if (hasHelpFlag(rest)) {
     usage(0)
   }
   rejectUnknownFlags(cmd, rest)

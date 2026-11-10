@@ -34,6 +34,7 @@ const stateFor = (pr: number, headSha = 'a'.repeat(40)): PrActState => ({
   mergeState: 'CLEAN',
   openThreads: 0,
   threads: [],
+  reopenedThreads: [],
   ciPending: 0,
   ciFailing: 0,
   reviewersPending: 0,

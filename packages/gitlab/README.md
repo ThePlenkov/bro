@@ -15,7 +15,7 @@ connector: built-in today, but nothing GitLab-specific lives in core.
 npm i @broject/gitlab
 ```
 
-Requires Node ≥ 22 and an authenticated `glab`. ESM only.
+Requires Node ≥ 22.18 and an authenticated `glab`. ESM only.
 
 ## Surface
 

@@ -22,35 +22,52 @@
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
+ * `/bro` is the one dispatcher command every client ships: the canonical
+ * content is skills/bro/SKILL.md (devin skills ARE slash commands, and
+ * every skills/-linked client resolves the same file); Claude's native
+ * surface is commands/bro.md, generated here from that body so
+ * `check:plugins` catches drift.
+ *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join, relative, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { CURSOR_SELF_TOOL_MATCHER } from '../packages/cli/src/cursor-hook.ts'
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CURSOR_SELF_TOOL_MATCHER } from '../packages/cli/src/cursor-hook.ts';
+import { bundleAdapter } from './bundle-adapter.ts';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const CHECK = process.argv.includes('--check')
-const SYNC_VERSION = process.argv.includes('--sync-version')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const CHECK = process.argv.includes('--check');
+const SYNC_VERSION = process.argv.includes('--sync-version');
 if (SYNC_VERSION && CHECK) {
-  console.error('--sync-version writes files — cannot combine with --check')
-  process.exit(1)
+  console.error('--sync-version writes files — cannot combine with --check');
+  process.exit(1);
 }
 
 function readJson(rel) {
   try {
-    return JSON.parse(readFileSync(join(ROOT, rel), 'utf8'))
+    return JSON.parse(readFileSync(join(ROOT, rel), 'utf8'));
   } catch (err) {
-    console.error(
-      `${rel}: failed to read or parse — ${err instanceof Error ? err.message : err}`
-    )
-    process.exit(1)
+    console.error(`${rel}: failed to read or parse — ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
   }
 }
 
 // the published CLI version is the release truth — every manifest must match
-const cliVersion = readJson('packages/cli/package.json').version
+const cliVersion = readJson('packages/cli/package.json').version;
 
 // release bumps packages/*/package.json only; --sync-version stamps that
 // version into every hand-maintained manifest BEFORE the equality checks,
@@ -58,47 +75,52 @@ const cliVersion = readJson('packages/cli/package.json').version
 const MARKETPLACES = [
   '.claude-plugin/marketplace.json',
   '.agents/plugins/marketplace.json',
-]
+  '.omp-plugin/marketplace.json',
+];
 if (SYNC_VERSION) {
   // surgical replace — reserializing churns unrelated formatting
   for (const f of ['plugin.json', ...MARKETPLACES]) {
-    const p = join(ROOT, f)
-    const text = readFileSync(p, 'utf8')
-    const synced = text.replace(
-      /"version":\s*"[^"]+"/g,
-      () => `"version": "${cliVersion}"`
-    )
+    const p = join(ROOT, f);
+    const text = readFileSync(p, 'utf8');
+    const synced = text.replace(/"version":\s*"[^"]+"/g, () => `"version": "${cliVersion}"`);
     if (synced !== text) {
-      writeFileSync(p, synced)
+      writeFileSync(p, synced);
     }
   }
 }
 
-const manifest = readJson('plugin.json')
+const manifest = readJson('plugin.json');
 // null/array/index signature all index cleanly per-field — only a plain
 // object may reach the field checks below
 if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
-  console.error('plugin.json: top-level value must be an object')
-  process.exit(1)
+  console.error('plugin.json: top-level value must be an object');
+  process.exit(1);
 }
 
 // agent-plugins 1.0 shape — hand-rolled check (no ajv dep): a malformed
 // manifest currently only fails at `devin plugins install` time
-const REQUIRED_STRING_FIELDS = ['name', 'version', 'description']
+const REQUIRED_STRING_FIELDS = ['name', 'version', 'description'];
 const KNOWN_TOP_LEVEL = new Set([
-  '$schema', 'name', 'version', 'description', 'author', 'homepage',
-  'repository', 'license', 'keywords',
-])
+  '$schema',
+  'name',
+  'version',
+  'description',
+  'author',
+  'homepage',
+  'repository',
+  'license',
+  'keywords',
+]);
 for (const f of REQUIRED_STRING_FIELDS) {
   if (typeof manifest[f] !== 'string' || manifest[f].trim() === '') {
-    console.error(`plugin.json: "${f}" must be a non-empty string`)
-    process.exit(1)
+    console.error(`plugin.json: "${f}" must be a non-empty string`);
+    process.exit(1);
   }
 }
 for (const k of Object.keys(manifest)) {
   if (!KNOWN_TOP_LEVEL.has(k)) {
     // warn only — the spec can add fields; typos surface here too
-    console.error(`plugin.json: warning — unknown top-level field "${k}"`)
+    console.error(`plugin.json: warning — unknown top-level field "${k}"`);
   }
 }
 // trim guard first — JS $ matches before a trailing \n, so "bro\n" would
@@ -107,46 +129,46 @@ if (
   manifest.name !== manifest.name.trim() ||
   !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(manifest.name)
 ) {
-  console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
-  process.exit(1)
+  console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`);
+  process.exit(1);
 }
 // semver.org rules — one monolithic regex trips complexity gates, so
 // split: numeric fields forbid leading zeros; prerelease/build are
 // dot-separated identifiers (prerelease ids can't be all-digit-with-zero)
-const SEMVER_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
-const SEMVER_PRE_ID = /^(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)$/
-const SEMVER_BUILD_ID = /^[0-9a-zA-Z-]+$/
+const SEMVER_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const SEMVER_PRE_ID = /^(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)$/;
+const SEMVER_BUILD_ID = /^[0-9a-zA-Z-]+$/;
 function isSemver(v) {
-  const [head, build, ...extra] = v.split('+')
+  const [head, build, ...extra] = v.split('+');
   if (
     extra.length > 0 ||
-    (build !== undefined && !build.split('.').every((s) => SEMVER_BUILD_ID.test(s)))
+    (build !== undefined && !build.split('.').every(s => SEMVER_BUILD_ID.test(s)))
   ) {
-    return false
+    return false;
   }
-  const dash = head.indexOf('-')
-  const core = dash === -1 ? head : head.slice(0, dash)
-  const pre = dash === -1 ? undefined : head.slice(dash + 1)
+  const dash = head.indexOf('-');
+  const core = dash === -1 ? head : head.slice(0, dash);
+  const pre = dash === -1 ? undefined : head.slice(dash + 1);
   return (
     SEMVER_CORE.test(core) &&
-    (pre === undefined || pre.split('.').every((s) => SEMVER_PRE_ID.test(s)))
-  )
+    (pre === undefined || pre.split('.').every(s => SEMVER_PRE_ID.test(s)))
+  );
 }
 if (!isSemver(manifest.version)) {
-  console.error(`plugin.json: version "${manifest.version}" is not semver`)
-  process.exit(1)
+  console.error(`plugin.json: version "${manifest.version}" is not semver`);
+  process.exit(1);
 }
 if (manifest.version !== cliVersion) {
-  console.error(
-    `plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`
-  )
-  process.exit(1)
+  console.error(`plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`);
+  process.exit(1);
 }
 for (const m of MARKETPLACES) {
   for (const p of readJson(m).plugins ?? []) {
     if (p.version !== cliVersion) {
-      console.error(`${m}: plugin "${p.name}" version ${p.version} != packages/cli version ${cliVersion}`)
-      process.exit(1)
+      console.error(
+        `${m}: plugin "${p.name}" version ${p.version} != packages/cli version ${cliVersion}`
+      );
+      process.exit(1);
     }
   }
 }
@@ -154,57 +176,65 @@ for (const m of MARKETPLACES) {
 // Cursor's marketplace schema rejects a per-entry version, so this file
 // is not in MARKETPLACES (nothing to stamp). The source path is the
 // contract check:plugins can still enforce.
-const cursorMarketplace = readJson('.cursor-plugin/marketplace.json')
-const cursorEntry = (cursorMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
-const codexMarketplace = readJson('.agents/plugins/marketplace.json')
-const codexEntry = (codexMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+const cursorMarketplace = readJson('.cursor-plugin/marketplace.json');
+const cursorEntry = (cursorMarketplace.plugins ?? []).find(p => p?.name === 'bro');
+const codexMarketplace = readJson('.agents/plugins/marketplace.json');
+const codexEntry = (codexMarketplace.plugins ?? []).find(p => p?.name === 'bro');
 if (codexEntry?.source !== '.') {
   console.error(
     '.agents/plugins/marketplace.json: bro source must be "." — the repo root is the Agent Plugin'
-  )
-  process.exit(1)
+  );
+  process.exit(1);
 }
-const claudeMarketplace = readJson('.claude-plugin/marketplace.json')
-const claudeEntry = (claudeMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+const claudeMarketplace = readJson('.claude-plugin/marketplace.json');
+const claudeEntry = (claudeMarketplace.plugins ?? []).find(p => p?.name === 'bro');
 if (claudeEntry?.source !== './') {
   console.error(
     '.claude-plugin/marketplace.json: bro source must be "./" — the repo root is the plugin'
-  )
-  process.exit(1)
+  );
+  process.exit(1);
 }
 if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/bro') {
-  console.error(
-    '.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"'
-  )
-  process.exit(1)
+  console.error('.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"');
+  process.exit(1);
 }
 if (cursorEntry.version !== undefined && cursorEntry.version !== cliVersion) {
   console.error(
     `.cursor-plugin/marketplace.json: version ${cursorEntry.version} != packages/cli version ${cliVersion}`
-  )
-  process.exit(1)
+  );
+  process.exit(1);
+}
+// omp's marketplace points at the plugin package, not the repo root —
+// the omp plugin carries its own manifest and skills tree.
+const ompMarketplace = readJson('.omp-plugin/marketplace.json');
+const ompEntry = (ompMarketplace.plugins ?? []).find(p => p?.name === 'bro');
+if (ompEntry?.source !== './plugins/omp/bro') {
+  console.error(
+    '.omp-plugin/marketplace.json: bro source must be "./plugins/omp/bro" — the omp plugin is its own package'
+  );
+  process.exit(1);
 }
 
 /** Claude/Codex manifests reuse the agent-plugins fields minus $schema. */
 function clientManifest(extra = {}) {
-  const { $schema: _drop, ...fields } = manifest
-  return `${JSON.stringify({ ...fields, ...extra }, null, 2)}\n`
+  const { $schema: _drop, ...fields } = manifest;
+  return `${JSON.stringify({ ...fields, ...extra }, null, 2)}\n`;
 }
 
 function cursorAuthorName(author) {
   if (typeof author === 'string') {
-    return author.trim()
+    return author.trim();
   }
   if (author && typeof author === 'object' && typeof author.name === 'string') {
-    return author.name.trim()
+    return author.name.trim();
   }
-  return ''
+  return '';
 }
 
 /** Cursor's plugin schema is additionalProperties:false and its own
  * field set — don't spread agent-plugins fields it doesn't know. */
 function cursorManifest() {
-  const authorName = cursorAuthorName(manifest.author)
+  const authorName = cursorAuthorName(manifest.author);
   const body = {
     name: manifest.name,
     displayName: 'bro',
@@ -218,29 +248,27 @@ function cursorManifest() {
     category: 'developer-tools',
     skills: './skills/',
     hooks: './hooks/hooks.json',
-  }
-  return `${JSON.stringify(body, null, 2)}\n`
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
 }
 
 /** ${CURSOR_PLUGIN_ROOT} is a bare token so Cursor expands it before the
  * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
- * PATH, then the version-pinned package. Always exit 0. */
+ * PATH. Always exit 0. */
 function cursorHookCommand(event) {
   // events are code-owned literals today; keep that a checked invariant —
   // the string lands in a shell command, so a future caller passing
   // metachars must fail here, not in the generated hooks.json
   if (!/^[a-z-]+$/.test(event)) {
-    throw new Error(`invalid hook event name: ${event}`)
+    throw new Error(`invalid hook event name: ${event}`);
   }
-  const pin = `@broject/bro@${manifest.version}`
-  // the `bro hooks` capability probe runs with stdin closed — a bare
-  // invocation must not consume the payload stdin still holds for the
-  // real `bro hooks ${event}` call that follows
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
+  const noOpinion =
+    event === 'permission' ? String.raw`else printf '%s\n' '{"permission":"ask"}'; ` : '';
+  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; ${noOpinion}fi; exit 0`;
 }
 
 function cursorHook(event, timeout, extra = {}) {
-  return { command: cursorHookCommand(event), timeout, ...extra }
+  return { command: cursorHookCommand(event), timeout, ...extra };
 }
 
 /** sessionStart is absent on cloud agents, and a loaded repo's
@@ -257,12 +285,70 @@ function cursorHooksJson() {
       postToolUse: [cursorHook('post-tool', 10, { matcher: '^Shell$' })],
       postToolUseFailure: [cursorHook('post-tool', 10, { matcher: '^Shell$' })],
       stop: [cursorHook('stop', 25, { loop_limit: 1 })],
-      beforeShellExecution: [
-        cursorHook('permission', 10, { matcher: CURSOR_SELF_TOOL_MATCHER }),
-      ],
+      beforeShellExecution: [cursorHook('permission', 10, { matcher: CURSOR_SELF_TOOL_MATCHER })],
     },
-  }
-  return `${JSON.stringify(body, null, 2)}\n`
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
+}
+
+/** Devin's hook manifest is generated, not hand-written: the event map,
+ * matchers, timeouts, and the bounded fallback live here so check:plugins
+ * detects any drift instead of linting a JSON file. The command calls
+ * `${DEVIN_PLUGIN_ROOT}/hooks/run.sh` directly — the shared launcher owns
+ * root resolution AND the watchdog. The fallback (P unset, e.g. an older
+ * client that never exported the root var) is a `bro hooks` bounded by a
+ * sleep/kill watcher pair — portable where GNU `timeout` is absent
+ * (stock macOS), never able to outlive the hook budget. */
+function devinHooksJson() {
+  // fallback anatomy (all three review findings):
+  //  1. `cmd &` under POSIX without job control reads stdin from /dev/null —
+  //     `bro hooks` takes its session payload from fd 0, so the stop gate
+  //     would go blind; fd3 preserves the payload into the async child.
+  //  2. the watcher polls kill -0 once a second and exits on its own the
+  //     tick after bro dies — `wait $w` reaps it with no orphan sleep; fds
+  //     off the hook pipe so a host reading to EOF doesn't eat the budget.
+  //  3. TERM at 8s, `pkill -TERM -P` sweeps bro's direct probe children
+  //     (bd/git) while still attached, KILL at 9s — under the 10s minimum
+  //     hook timeout; pkill absent degrades to the c-only kill.
+  const cmd = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then "$P/hooks/run.sh" ${event} || true; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `( exec 3<&0; bro hooks ${event} <&3 3<&- & c=$!; ` +
+    `( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; ` +
+    `kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; ` +
+    `wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; exit 0`;
+  // post-tool is fire-and-forget telemetry — it must never block the
+  // agent's next turn, so neither path may keep the foreground waiting:
+  // stdin is captured to a tempfile first (a detached child cannot read
+  // the parent's pipe once the shell exits), then the hook runs in a
+  // detached subshell. A mktemp or cat failure drops the event: stdin
+  // has already been consumed by cat, so no fallback can replay the
+  // payload. The subshell is redirected off the hook's pipes so a host
+  // reading the hook pipe to EOF is not blocked by the detached work.
+  const cmdDetached = event =>
+    `P="\${DEVIN_PLUGIN_ROOT}"; ` +
+    `if [ -x "$P/hooks/run.sh" ]; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `("$P/hooks/run.sh" ${event} < "$_f"; rm -f "$_f") </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else "$P/hooks/run.sh" ${event} >/dev/null 2>&1 || true; fi; ` +
+    `elif command -v bro >/dev/null 2>&1; then ` +
+    `if _f=$(mktemp 2>/dev/null) && [ -n "$_f" ]; then if cat > "$_f"; then ` +
+    `( bro hooks ${event} < "$_f" >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null; rm -f "$_f" ) </dev/null >/dev/null 2>&1 & else rm -f "$_f"; fi; ` +
+    `else ( exec 3<&0; bro hooks ${event} <&3 3<&- >/dev/null 2>&1 & c=$!; ( for i in 1 2 3 4 5 6 7 8; do kill -0 "$c" 2>/dev/null || exit 0; sleep 1; done; kill "$c" 2>/dev/null; pkill -TERM -P "$c" 2>/dev/null; sleep 1; kill -9 "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$c" 2>/dev/null; wait "$w" 2>/dev/null ) || true; fi; fi; exit 0`;
+  const hook = (event, timeout, matcher = '', command = cmd) => ({
+    matcher,
+    hooks: [{ type: 'command', command: command(event), timeout }],
+  });
+  const body = {
+    SessionStart: [hook('session-start', 20)],
+    PostCompaction: [hook('post-compaction', 20)],
+    UserPromptSubmit: [hook('prompt-submit', 15)],
+    PostToolUse: [hook('post-tool', 10, '^exec$', cmdDetached)],
+    Stop: [hook('stop', 25)],
+    PermissionRequest: [hook('permission', 10, '^exec$')],
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
 }
 
 function opencodeReadme() {
@@ -275,34 +361,48 @@ module (node builtins only) generated by \`npm run gen:plugins\`;
 \`check:plugins\` fails when it drifts. It serves opencode V1
 (\`server\` → the classic hook map) and V2 (\`id\` + \`setup(ctx)\` —
 context/compaction/prompt session hooks, tool guard + result
-enrichment, permission evaluate, shell env, the bro tool namespace,
-the \`/bro\` command, and the public event stream's stop gate).
+enrichment, permission evaluate, shell env, the bro tool namespace
+(\`bro_status\`, \`bro_convoy_status\`, \`bro_act_status\`, \`bro_fleet\`,
+\`bro_next\`, \`bro_drill_status\`, \`bro_review_threads\`), the \`/bro\`
+command, and the public event stream's stop gate. Enhanced compaction
+hooks inject bro context during compaction and log decisions; server
+logging surfaces important events.
 
-\`cli.ts\` is the TUI half — a verbatim copy of
+\`cli.ts\` is the V1 TUI half — a verbatim copy of
 \`packages/cli/src/opencode-tui.ts\` (\`./tui\` in the npm package).
 It adds a \`bro.status\` palette/slash command that runs \`bro status\`
-and shows the board as a toast, plus toasts on \`permission.asked\` and
-\`session.error\`.
+and shows the board as a toast, plus richer toasts on
+\`permission.asked\` and \`session.error\`.
+
+\`tui.tsx\` is the V2 TUI half — a verbatim copy of
+\`packages/cli/src/opencode-tui-v2.tsx\`, a SolidJS/OpenTUI module that
+opencode v2 discovers as a plugin *directory*: installed as
+\`plugins/bro/tui.tsx\` (v2 ignores the loose \`bro-cli.ts\` file — the
+V2 plugin carries the same \`/bro\` command and toasts). On top of that
+it claims the \`sidebar.content\` slot: a collapsible \`bro\` board —
+in-work beads, the backlog top, live fleet agents, watch heartbeat —
+fed by a 15s \`bro status --json\` poll plus session-event refreshes.
+Outside a bro rig the widget renders nothing.
 
 ## Install
 
 \`\`\`sh
 bro plugins install opencode            # both scopes
-bro plugins install opencode --global   # ~/.config/opencode/plugins/{bro.ts,bro-cli.ts}
-bro plugins install opencode --local    # <repo>/.opencode/plugins/{bro.ts,bro-cli.ts}
+bro plugins install opencode --global   # ~/.config/opencode/plugins/{bro.ts,bro-cli.ts,bro/tui.tsx}
+bro plugins install opencode --local    # <repo>/.opencode/plugins/{bro.ts,bro-cli.ts,bro/tui.tsx}
 \`\`\`
 
 Repo-distributed: this directory inside a bro clone is itself the
 adapter — point opencode at it, or let \`bro plugins install --local\`
-copy \`bro.ts\` + \`cli.ts\` (as \`bro-cli.ts\`) into the project's
-\`.opencode/plugins/\`.
+copy \`bro.ts\`, \`cli.ts\` (as \`bro-cli.ts\`) and \`tui.tsx\` (into
+\`plugins/bro/\`) into the project's \`.opencode/plugins/\`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
 on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
 @broject/bro@${manifest.version}\`. Every hook call is async and
 fail-open — a missing CLI means no context, never an error.
-`
+`;
 }
 
 function kiloReadme() {
@@ -333,7 +433,7 @@ The module resolves the CLI as the checkout's
 \`packages/cli/dist/index.js\` found walking up, then \`bro\` on PATH.
 Every hook call is fail-open — a missing CLI means no context, never an
 error.
-`
+`;
 }
 
 function piReadme() {
@@ -341,8 +441,9 @@ function piReadme() {
 
 Agent's sidekick for pi: the live project board on pi's TUI plus the
 same lifecycle mechanics the shell adapters carry, over pi's in-process
-extension API. \`bro.ts\` is a verbatim copy of \`packages/cli/src/pi.ts\`
-— a self-contained module (node builtins only) generated by
+extension API. \`bro.ts\` is generated from
+\`packages/cli/src/adapter/pi.ts\` — the shared adapter core folded into
+one self-contained module (node builtins only) by
 \`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
 
 ## What it wires
@@ -371,13 +472,109 @@ Pi discovers extensions from \`<cwd>/.pi/extensions/\` and
 \`~/.pi/agent/extensions/\` (jiti loads the raw .ts — no build needed),
 or load it ad hoc: \`pi --extension <path>/bro.ts\`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
 on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
 @broject/bro@${manifest.version}\`. Every call is async and fail-open —
 a missing CLI or a non-bro directory means no widget and no context,
 never an error.
-`
+`;
+}
+
+/** The omp plugin manifest — the `omp.extensions` entry point plus the
+ *  metadata omp's plugin manager and marketplace show. */
+function ompManifest() {
+  return `${JSON.stringify(
+    {
+      name: 'bro',
+      version: manifest.version,
+      description:
+        "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
+      author: { name: 'Petr Plenkov' },
+      homepage: 'https://broject.dev',
+      repository: {
+        type: 'git',
+        url: 'git+https://github.com/ThePlenkov/bro.git',
+        directory: 'plugins/omp/bro',
+      },
+      license: 'MIT',
+      keywords: [
+        'agent-rig',
+        'orchestration',
+        'fleet',
+        'convoy',
+        'mesh',
+        'pr-review',
+        'merge-gate',
+        'review-debt',
+        'beads',
+        'agent-workflow',
+      ],
+      omp: { extensions: ['./bro.ts'] },
+    },
+    null,
+    2
+  )}\n`;
+}
+
+function ompReadme() {
+  return `# bro — omp plugin
+
+Agent's sidekick for omp: the live project board on omp's TUI plus the
+same lifecycle mechanics the shell adapters carry, over omp's in-process
+extension API. \`bro.ts\` is generated from
+\`packages/cli/src/adapter/omp.ts\` — the shared adapter core folded into
+one self-contained module (node builtins only) by
+\`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
+
+## What it wires
+
+- **board widget** — \`bro status --json\` rendered via
+  \`ctx.ui.setWidget\`/\`setStatus\`, refreshed on session start, turn
+  end, and after a gate.
+- **lifecycle** — omp events → \`bro hooks <event>\`: session-start and
+  post-compaction rehydration injected once as a hidden context message,
+  pre-compact carried across, prompt-submit nudges, post-tool arming,
+  and \`session_stop\` → the stop gate.
+- **the stop gate is native** — omp's \`session_stop\` accepts
+  \`{decision:"block", reason}\` and re-fires with
+  \`stop_hook_active: true\`. bro's gate maps straight onto it, and
+  omp's flag goes straight back into bro's hook payload. No synthetic
+  re-prompt, no hand-rolled continuation.
+- **\`/bro\`** — bare refreshes the board; \`/bro act|next|fleet|…\`
+  runs the CLI and drops the output into the transcript.
+- **\`bro_status\` tool** — the board JSON as a model-callable read.
+
+## The mode bridges
+
+omp already has Plan, Goal, Vibe, Prewalk and Advisor. bro does not
+reimplement them — it supplies the state they cannot have. See
+\`modes.ts\` for the full mapping; the short version:
+
+| omp mode | what bro adds |
+| --- | --- |
+| Plan | the bead and spec the plan must answer, plus the claims in flight |
+| Goal | the bead the objective belongs to, and the judge that says "met" |
+| Vibe | the claims — who owns which bead, so two workers never edit one |
+| Prewalk | the provider routing that says which model is fast *here* |
+| Advisor | \`WATCHDOG.md\` — bro's review priorities, plus the debt ledger |
+
+## Install
+
+\`\`\`sh
+omp plugin install ./plugins/omp/bro     # from a checkout
+omp plugin install bro@bro               # from the marketplace
+\`\`\`
+
+Or load it ad hoc: \`omp --extension ./plugins/omp/bro/bro.ts\`.
+
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
+checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
+on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
+@broject/bro@${manifest.version}\`. Every call is async and fail-open —
+a missing CLI or a non-bro directory means no widget and no context,
+never an error.
+`;
 }
 
 function cursorReadme() {
@@ -426,7 +623,7 @@ A chained command (\`bro act status && …\`) is not auto-approved.
 
 Requires Node ≥ 22.18. The hook resolves a built checkout, then \`bro\` on
 PATH, then \`npx -y @broject/bro@${manifest.version}\`.
-`
+`;
 }
 
 /** Per-adapter opt-outs — opencode plugins are bare modules: no skills
@@ -435,18 +632,24 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
+  // omp loads hook modules, not the shell launcher: the omp plugin's
+  // hook is hooks/pre/permission.ts, and omp discovers .ts/.js children
+  // of hooks/pre and hooks/post. A run.sh there is dead weight.
+  'plugins/omp/bro': { runSh: false },
   // Claude and Codex install the repo root. A skills entry in the
   // adapter would be a second package. Claude's hook map stays in the
   // adapter; the shared hooks/ dir is only run.sh.
   'plugins/codex/bro': { skills: false },
   'plugins/claude/bro': { skills: false, runSh: false },
-}
+};
 
-// files written per adapter — value is source path, or [text] literal content
+// files written per adapter — value is source path, [text] literal
+// content, or null for a hand-written file that must already exist
 const ADAPTERS = {
   'plugins/opencode/bro': {
     'bro.ts': 'packages/cli/src/opencode.ts',
     'cli.ts': 'packages/cli/src/opencode-tui.ts',
+    'tui.tsx': 'packages/cli/src/opencode-tui-v2.tsx',
     'README.md': [opencodeReadme()],
   },
   'plugins/kilo/bro': {
@@ -454,12 +657,27 @@ const ADAPTERS = {
     'README.md': [kiloReadme()],
   },
   'plugins/pi/bro': {
-    'bro.ts': 'packages/cli/src/pi.ts',
+    // BUNDLED, not copied: the adapter imports the shared core
+    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // alone — jiti loads it with no node_modules to resolve against.
+    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/pi.ts')],
     'README.md': [piReadme()],
+  },
+  'plugins/omp/bro': {
+    // BUNDLED, not copied: the adapter imports the shared core
+    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // alone — the host loads it with no node_modules to resolve
+    // against. The bundle folds the core in; see scripts/bundle-adapter.ts.
+    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/omp.ts')],
+    'modes.ts': 'packages/cli/src/adapter/omp-modes.ts',
+    'package.json': [ompManifest()],
+    'WATCHDOG.md': 'packages/cli/src/adapter/omp-assets/WATCHDOG.md',
+    'hooks/pre/permission.ts': 'packages/cli/src/adapter/omp-hook.ts',
+    'README.md': [ompReadme()],
   },
   'plugins/devin/bro': {
     'plugin.json': 'plugin.json',
-    'hooks.json': 'hooks.json',
+    'hooks.json': [devinHooksJson()],
   },
   'plugins/claude/bro': {
     // hand-written (Claude event names). Not hooks/hooks.json: that path
@@ -476,9 +694,9 @@ const ADAPTERS = {
     '.cursor-plugin/plugin.json': [cursorManifest()],
     'hooks/hooks.json': [cursorHooksJson()],
     'README.md': [cursorReadme()],
-    'LICENSE': 'LICENSE',
+    LICENSE: 'LICENSE',
   },
-}
+};
 
 // the npx fallback pin always equals plugin.json's version — rewrite it in
 // the hook sources so a version bump can't leave a stale pin behind
@@ -489,51 +707,91 @@ const VERSIONED_SOURCES = [
   // the materialized opencode modules carry the npx fallback pin
   'packages/cli/src/opencode.ts',
   'packages/cli/src/opencode-tui.ts',
-  // the pi extension carries the same pin
-  'packages/cli/src/pi.ts',
-]
-const PIN_RE = /@broject\/bro@[\w.:-]+/g
+  'packages/cli/src/opencode-tui-v2.tsx',
+  // the pi and omp extensions carry the same pin
+  'packages/cli/src/adapter/pi.ts',
+  'packages/cli/src/adapter/omp.ts',
+];
+const PIN_RE = /@broject\/bro@[\w.:-]+/g;
 
-const drift = []
+const drift = [];
+
+/** Remove symlinked path components above `path` so generated writes can't
+ *  follow a link outside the checkout. Returns true when drift was recorded
+ *  (check mode) so the caller can skip. */
+function guardSymlinkedParents(path) {
+  const parts = path.split(/[\\/]/);
+  let cur = ROOT;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    let pst: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pst = lstatSync(cur);
+    } catch {
+      pst = undefined;
+    }
+    if (!pst?.isSymbolicLink()) {
+      continue;
+    }
+    if (CHECK) {
+      drift.push(path);
+      return true;
+    }
+    rmSync(cur, { recursive: true, force: true });
+  }
+  return false;
+}
 
 function emit(path, content) {
-  const p = join(ROOT, path)
+  const p = join(ROOT, path);
+  // Guard every path component: if any parent (or the file itself) is a
+  // symlink, the write/read would follow it and could touch a file outside
+  // the checkout. Treat a symlinked component as stale drift in check mode
+  // and remove + recreate it as a real directory in write mode.
+  if (guardSymlinkedParents(path)) {
+    return;
+  }
   // lstat, not exists/stat: a stale directory or symlink where a file is
   // expected must be REPLACED — readFileSync would crash on the dir and
   // writeFileSync would write through the link to an external target
-  let st
+  let st;
   try {
-    st = lstatSync(p)
+    st = lstatSync(p);
   } catch {
-    st = undefined
+    st = undefined;
   }
-  const stale = st !== undefined && (st.isDirectory() || st.isSymbolicLink())
+  const stale = st !== undefined && (st.isDirectory() || st.isSymbolicLink());
   if (CHECK) {
     if (st === undefined || stale || readFileSync(p, 'utf8') !== content) {
-      drift.push(path)
+      drift.push(path);
     }
-    return
+    return;
   }
   if (stale) {
-    rmSync(p, { recursive: true, force: true })
+    rmSync(p, { recursive: true, force: true });
   }
-  mkdirSync(dirname(p), { recursive: true })
-  writeFileSync(p, content)
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content);
 }
+
+// the devin hook manifest is generated like every other artifact — the
+// root file and the adapter copy both emit from devinHooksJson(), so a
+// hand-edit to either surfaces as drift here, not as a separate lint
+emit('hooks.json', devinHooksJson());
 
 // keep every `@broject/bro@…` npx pin equal to plugin.json's version
 for (const src of VERSIONED_SOURCES) {
-  const p = join(ROOT, src)
+  const p = join(ROOT, src);
   if (!existsSync(p)) {
-    drift.push(src)
-    continue
+    drift.push(src);
+    continue;
   }
-  const text = readFileSync(p, 'utf8')
-  const synced = text.replace(PIN_RE, `@broject/bro@${manifest.version}`)
+  const text = readFileSync(p, 'utf8');
+  const synced = text.replace(PIN_RE, `@broject/bro@${manifest.version}`);
   if (CHECK ? synced !== text : false) {
-    drift.push(src)
+    drift.push(src);
   } else if (!CHECK && synced !== text) {
-    writeFileSync(p, synced)
+    writeFileSync(p, synced);
   }
 }
 
@@ -541,24 +799,24 @@ for (const src of VERSIONED_SOURCES) {
 // — rewrite every skills/*/SKILL.md pin to plugin.json's major so the
 // version-bump commit flips the whole tree at once and a hand-edited
 // foreign major surfaces as check:plugins drift
-const PIN_MAJOR_RE = /@broject\/bro@\d+/g
-const skillsRoot = join(ROOT, 'skills')
+const PIN_MAJOR_RE = /@broject\/bro@\d+/g;
+const skillsRoot = join(ROOT, 'skills');
 for (const name of readdirSync(skillsRoot).sort()) {
-  const p = join(skillsRoot, name, 'SKILL.md')
+  const p = join(skillsRoot, name, 'SKILL.md');
   if (!existsSync(p)) {
-    continue
+    continue;
   }
-  const text = readFileSync(p, 'utf8')
-  const synced = text.replace(PIN_MAJOR_RE, `@broject/bro@${manifest.version.split('.')[0]}`)
+  const text = readFileSync(p, 'utf8');
+  const synced = text.replace(PIN_MAJOR_RE, `@broject/bro@${manifest.version.split('.')[0]}`);
   if (CHECK ? synced !== text : false) {
-    drift.push(`skills/${name}/SKILL.md`)
+    drift.push(`skills/${name}/SKILL.md`);
   } else if (!CHECK && synced !== text) {
     // a symlinked SKILL.md is a pointer managed elsewhere — writing
     // through it could land outside this checkout; report, don't write
     if (lstatSync(p).isSymbolicLink()) {
-      drift.push(`skills/${name}/SKILL.md (symlink — skipped)`)
+      drift.push(`skills/${name}/SKILL.md (symlink — skipped)`);
     } else {
-      writeFileSync(p, synced)
+      writeFileSync(p, synced);
     }
   }
 }
@@ -566,33 +824,54 @@ for (const name of readdirSync(skillsRoot).sort()) {
 /** plugins/<client>/bro/skills → the one repo skills/ tree. Forward
  * slashes so the git symlink is the same on every OS. */
 function skillsLinkTarget(adapterRel) {
-  return relative(join(ROOT, adapterRel), join(ROOT, 'skills')).split(sep).join('/')
+  return relative(join(ROOT, adapterRel), join(ROOT, 'skills')).split(sep).join('/');
 }
 
 function skillsLinkFresh(adapterRel) {
-  const link = join(ROOT, adapterRel, 'skills')
+  const link = join(ROOT, adapterRel, 'skills');
   try {
-    const st = lstatSync(link)
-    return st.isSymbolicLink() && readlinkSync(link) === skillsLinkTarget(adapterRel)
+    const st = lstatSync(link);
+    if (!st.isSymbolicLink()) {
+      return false;
+    }
+    // Windows junctions (mklink /J) report as symlinks but resolve
+    // readlink() to an absolute path, so compare realpath trees too.
+    try {
+      return realpathSync(link) === realpathSync(join(ROOT, 'skills'));
+    } catch {
+      return readlinkSync(link) === skillsLinkTarget(adapterRel);
+    }
+
   } catch {
-    return false
+    return false;
   }
 }
 
 function ensureSkillsLink(adapterRel) {
   if (skillsLinkFresh(adapterRel)) {
-    return
+    return;
   }
-  const link = join(ROOT, adapterRel, 'skills')
-  rmSync(link, { recursive: true, force: true })
-  mkdirSync(join(ROOT, adapterRel), { recursive: true })
-  symlinkSync(skillsLinkTarget(adapterRel), link)
+  const link = join(ROOT, adapterRel, 'skills');
+  // recursive+force removes every stale shape — a real skills dir, an
+  // empty one, a symlink, a junction; rmSync lstat()s the entry so a
+  // link goes, never the tree it points at
+  rmSync(link, { recursive: true, force: true });
+  mkdirSync(join(ROOT, adapterRel), { recursive: true });
+  try {
+    // a junction stores an ABSOLUTE target — the relative link string
+    // would resolve against the reader's cwd, not the repo's
+    const target =
+      process.platform === 'win32' ? join(ROOT, 'skills') : skillsLinkTarget(adapterRel);
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : undefined);
+  } catch {
+    symlinkSync(skillsLinkTarget(adapterRel), link);
+  }
 }
 
 emit(
   '.claude-plugin/plugin.json',
   clientManifest({ hooks: './plugins/claude/bro/hooks/hooks.json' })
-)
+);
 
 emit(
   '.codex-plugin/plugin.json',
@@ -601,71 +880,126 @@ emit(
     skills: './skills/',
     hooks: './plugins/codex/bro/hooks/hooks.json',
   })
-)
+);
+
+// `/bro` — one dispatcher command across clients. skills/bro/SKILL.md is
+// the canonical content: devin resolves skills as slash commands, codex
+// and every skills/-linked adapter read the same file. Claude's native
+// surface is commands/bro.md; opencode's is .opencode/commands/bro.md —
+// derived from the skill body here so a hand edit on either side surfaces
+// as check:plugins drift. (Codex has no custom prompt surface: it reads
+// the canonical skills/bro/SKILL.md.) opencode's /bro is also native
+// (opencode-tui.ts), but the command file ships too.
+const BRO_SKILL = 'skills/bro/SKILL.md';
+if (!existsSync(join(ROOT, BRO_SKILL))) {
+  // same convention as the `null` adapter entries: generation can't
+  // create a missing hand-written source — error in write mode, drift
+  // in check mode
+  if (!CHECK) {
+    console.error(`required canonical file missing: ${BRO_SKILL}`);
+    process.exit(1);
+  }
+  drift.push(BRO_SKILL);
+} else {
+  const skillText = readFileSync(join(ROOT, BRO_SKILL), 'utf8');
+  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(skillText);
+  if (fm === null) {
+    console.error(`${BRO_SKILL}: no YAML frontmatter — cannot derive commands/bro.md`);
+    process.exit(1);
+  }
+  const body = skillText.slice(fm[0].length);
+  // the skill's leading H1 must come first — markdownlint MD041 wants a
+  // top-level heading before any text, so the `$ARGUMENTS` note follows
+  // the title instead of preceding it (that order also produced the
+  // double blank line MD012 flagged)
+  const trimmed = body.replace(/^\s+/, '');
+  if (!/^#(?:\s|$)/.test(trimmed)) {
+    console.error(`${BRO_SKILL}: body must start with a level-one heading`);
+    process.exit(1);
+  }
+  const h1End = trimmed.indexOf('\n');
+  const h1 = h1End === -1 ? trimmed : trimmed.slice(0, h1End);
+  // one blank line between the $ARGUMENTS note and the body — the skill's
+  // own leading blank run would land as consecutive blanks (MD012); the
+  // emit template already ends the note's line, so rest carries one \n
+  const rest = (h1End === -1 ? '' : trimmed.slice(h1End)).replace(/^(\r?\n)+/, '\n');
+  // the npx fallback pin tracks the release line (major.minor) the skill
+  // advertises — the grouped `bro review`/`bro flow` surface needs 0.3+
+  const broReleaseLine = cliVersion.split('.').slice(0, 2).join('.');
+  emit(
+    'commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\nallowed-tools: Bash(bro *), Bash(npx -y @broject/bro@${broReleaseLine} *)\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+  // opencode command dir (plural) — same body, opencode frontmatter.
+  emit(
+    '.opencode/commands/bro.md',
+    `---\ndescription: bro dispatcher — orient on the board, then hand off to the named bro family and its skill\n---\n\n<!-- GENERATED from ${BRO_SKILL} — edit the skill, then \`npm run gen:plugins\` -->\n\n${h1}\n\nThe user invoked \`/bro\` with arguments: \`$ARGUMENTS\`\n${rest}`
+  );
+}
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
   // A symlinked adapter dir is replaced before any write. emit() only
   // notices a symlink at the file itself; a link at the directory would
   // let mkdir/writeFile follow it and modify a tree outside the checkout.
-  const dirPath = join(ROOT, dir)
-  let dirStat
+  const dirPath = join(ROOT, dir);
+  let dirStat;
   try {
-    dirStat = lstatSync(dirPath)
+    dirStat = lstatSync(dirPath);
   } catch {
-    dirStat = undefined
+    dirStat = undefined;
   }
   if (dirStat !== undefined && !dirStat.isDirectory()) {
     if (CHECK) {
-      drift.push(dir)
-      continue
+      drift.push(dir);
+      continue;
     }
-    rmSync(dirPath, { recursive: true, force: true })
-    dirStat = undefined
+    rmSync(dirPath, { recursive: true, force: true });
+    dirStat = undefined;
   }
-  const opts = ADAPTER_OPTS[dir] ?? {}
-  const linkSkills = opts.skills !== false
-  const wantRunSh = opts.runSh !== false
+  const opts = ADAPTER_OPTS[dir] ?? {};
+  const linkSkills = opts.skills !== false;
+  const wantRunSh = opts.runSh !== false;
   // expected file set: declared entries + the skills symlink + hooks/run.sh.
   // A copied skills tree lists every file so the stale sweep can see them.
-  const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
+  const expected = new Set(Object.keys(files).map(rel => `${dir}/${rel}`));
   for (const [rel, src] of Object.entries(files)) {
     if (src === null) {
       // hand-written source — generation can't create it, so its absence
       // is an error in write mode too, not just check drift
       if (!existsSync(join(ROOT, `${dir}/${rel}`))) {
         if (!CHECK) {
-          console.error(`required hand-written file missing: ${dir}/${rel}`)
-          process.exit(1)
+          console.error(`required hand-written file missing: ${dir}/${rel}`);
+          process.exit(1);
         }
-        drift.push(`${dir}/${rel}`)
+        drift.push(`${dir}/${rel}`);
       }
-      continue
+      continue;
     }
-    emit(
-      `${dir}/${rel}`,
-      Array.isArray(src) ? src[0] : readFileSync(join(ROOT, src), 'utf8')
-    )
+    emit(`${dir}/${rel}`, Array.isArray(src) ? src[0] : readFileSync(join(ROOT, src), 'utf8'));
   }
-  const skillsOut = `${dir}/skills`
-  const runShOut = `${dir}/hooks/run.sh`
+  const skillsOut = `${dir}/skills`;
+  const runShOut = `${dir}/hooks/run.sh`;
   if (linkSkills) {
-    expected.add(skillsOut)
+    expected.add(skillsOut);
   }
   if (wantRunSh) {
-    expected.add(runShOut)
+    expected.add(runShOut);
   }
   if (!CHECK) {
     if (linkSkills) {
-      ensureSkillsLink(dir)
+      ensureSkillsLink(dir);
     }
   } else if (linkSkills && !skillsLinkFresh(dir)) {
-    drift.push(skillsOut)
+    drift.push(skillsOut);
   }
   if (CHECK) {
     if (wantRunSh) {
-      const wantSh = readFileSync(join(ROOT, 'hooks/run.sh'), 'utf8')
-      if (!existsSync(join(ROOT, runShOut)) || readFileSync(join(ROOT, runShOut), 'utf8') !== wantSh) {
-        drift.push(runShOut)
+      const wantSh = readFileSync(join(ROOT, 'hooks/run.sh'), 'utf8');
+      if (
+        !existsSync(join(ROOT, runShOut)) ||
+        readFileSync(join(ROOT, runShOut), 'utf8') !== wantSh
+      ) {
+        drift.push(runShOut);
       }
     }
     // stale leftovers — files on disk that generation no longer produces
@@ -675,10 +1009,10 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
         // the link itself. Adapters without skills get no carve-out: a
         // `skills` entry there IS the drift.
         if (linkSkills && (f === 'skills' || f.startsWith('skills/'))) {
-          continue
+          continue;
         }
         if (!expected.has(`${dir}/${f}`)) {
-          drift.push(`${dir}/${f}`)
+          drift.push(`${dir}/${f}`);
         }
       }
     }
@@ -689,35 +1023,48 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     if (dirStat !== undefined) {
       for (const f of walk(join(ROOT, dir))) {
         if (!expected.has(`${dir}/${f}`)) {
-          rmSync(join(ROOT, dir, f))
+          rmSync(join(ROOT, dir, f));
         }
       }
     }
     if (wantRunSh) {
-      mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true })
-      cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut))
+      // run.sh is a real file, never a symlink: remove a stale link/dir
+      // first so cpSync cannot follow it outside the checkout
+      let rsh: ReturnType<typeof lstatSync> | undefined;
+      try {
+        rsh = lstatSync(join(ROOT, runShOut));
+      } catch {
+        rsh = undefined;
+      }
+      if (rsh?.isSymbolicLink() || rsh?.isDirectory()) {
+        rmSync(join(ROOT, runShOut), { recursive: true, force: true });
+      }
+      mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true });
+      cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut));
     }
   }
 }
 
 function* walk(dir, prefix = '') {
   for (const e of readdirSync(dir)) {
-    const p = join(dir, e)
-    const rel = prefix ? `${prefix}/${e}` : e
+    const p = join(dir, e);
+    const rel = prefix ? `${prefix}/${e}` : e;
     // lstat — a symlinked directory is a LEAF: recursing through it would
     // surface external paths that the stale-cleanup then deletes outside
     // the repo. rmSync on the yielded link removes the link, not the target.
-    const st = lstatSync(p)
+    const st = lstatSync(p);
     if (st.isDirectory() && !st.isSymbolicLink()) {
-      yield* walk(p, rel)
+      yield* walk(p, rel);
     } else {
-      yield rel
+      yield rel;
     }
   }
 }
 
 if (CHECK && drift.length > 0) {
-  console.error(`plugin adapters out of date — run \`npm run gen:plugins\`:\n  ${[...new Set(drift)].join('\n  ')}`)
-  process.exit(1)
+  console.error(
+    `plugin adapters out of date — run \`npm run gen:plugins\`:\n  ${[...new Set(drift)].join('\n  ')}`
+  );
+  process.exit(1);
 }
-console.log(CHECK ? 'plugin adapters fresh' : 'plugin adapters generated')
+console.log(CHECK ? 'plugin adapters fresh' : 'plugin adapters generated');

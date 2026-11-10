@@ -40,6 +40,15 @@ Developing bro itself: see CONTRIBUTING.md.
   skill + config section. bro is a plugin system on top of beads (and more):
   agents orchestrate by pushing work into shared, schema-validated plans
   and workflows rather than re-deriving mechanics in prompts.
+- **Provider-agnostic core** — bro is a general agent framework; every
+  agent kind is an interchangeable provider plugin. Naming a provider
+  in a comment, doc, or config example is fine; what must never sit in
+  shared paths is provider-specific LOGIC — branching on a kind, a
+  kind's CLI flags/session semantics, its cloud API, its rate-limit
+  shape. Those live in the provider package (`@broject/devin`, …);
+  core calls the generic seam. Env constants (`DEVIN_SESSION_ID`, …)
+  and kind-namespaced config keys (`agents.<kind>.*`) are integration
+  facts, not violations. The cleanup epic is bro-751ah.
 - **One portable package** — the product is an
   [Agent Plugin](https://agent-plugins.org/) whose skills are
   [Agent Skills](https://agentskills.io/): root `plugin.json` plus
@@ -66,15 +75,18 @@ Developing bro itself: see CONTRIBUTING.md.
   `bro review act threads` are the only verdict.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
-  (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
+  (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check
   is pure infra — its findings arrive as threads, which block on their
-  own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
+  own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
-  currently `"github-advanced-security"`, `"kilo"` (rate limits;
-  advisory, may still be read — `check:docs` fails if this quote rots).
+  currently `"github-advanced-security"`, `"kilo"`, `"sonarcloud"`,
+  `"codescene"` (rate limits / structural deltas; advisory, may still
+  be read — `check:docs` fails if this quote rots; naming a static
+  scanner overrides its must-fix default: findings still read,
+  verdicts don't gate).
   The
   ignore is conditional: a failing ignored check is dropped quietly
-  only after `consecutiveFailures` failing heads in a row *with*
+  only after `consecutiveFailures` failing heads in a row _with_
   thread activity inside `threadWindowDays` — a failing check with no
   recent thread output surfaces as an alert (advisory, never a
   blocker), because a reviewer producing nothing is down, not flaky.
@@ -87,8 +99,39 @@ Developing bro itself: see CONTRIBUTING.md.
   mirrors the merge target: draft iff a human merges (`merge=human`);
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
+- **Auto-merge is armed at PR creation** — `gh pr merge --auto
+  --squash` right after `gh pr create`, every PR: it lands the merge
+  once GitHub's required checks pass. What auto-merge does NOT see:
+  unresolved review threads — the act gate owns that loop
+  (`bro review act` drives fixes/resolves per thread until the gate
+  is green). `bro review act wait <PR> --merge --cleanup --bead <id>
+  --detach` is the watcher of record: default `--timeout 45` minutes,
+  it does NOT re-arm itself — `bro review act rearm` resurrects a dead
+  watcher only (a timed-out one has already dropped its marker; arm a
+  fresh `act wait`). Auto-merge and the watcher are complementary:
+  whichever sees green first merges. When the watcher merges it runs
+  the post-merge cleanup itself; when GitHub auto-merge wins, cleanup
+  is NOT guaranteed — branch deletion and bead closure fall to
+  `bro review drive` or the operator.
+- **Never delete the working directory of a live session** — a session's
+  cwd is pinned by its harness: removing that directory (or the worktree
+  that holds it) does not error, it kills the session — the next shell
+  call comes back `Working directory does not exist` and the agent is
+  done until the path is recreated by hand. So cleanup of a merged
+  worktree is never the session's own job: another session (or the
+  operator) removes it, and automated cleanup (`act wait --cleanup`, the
+  drive/loop reapers) must skip any worktree a live session's cwd sits
+  in — "it is only cleanup" is exactly how a session deletes itself. To
+  leave a finished tree, detach in place (`git checkout --detach`) and
+  leave the directory alone; re-adding a path that still exists fails
+  with `already exists`, so a path is re-added only after it has been
+  removed, from another directory. Before any `rm`/`mv`/`rmdir`/trash/
+  worktree-removal, check the target against `pwd` and the session's
+  worktree — if they intersect, the command is wrong, not the session.
+  The rule is in the global agent file too, so it reaches every client
+  on the box.
 - **One executor per unit of work** — an interactive session (opencode,
-  claude, a terminal) owns what it plans and executes it *there*; bro is
+  claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
   batch lane that takes only work nobody owns. The occupancy plane skips
   a worktree a live session armed (`green-occupied — session armed work
@@ -100,6 +143,18 @@ Developing bro itself: see CONTRIBUTING.md.
   budget is shared too — the batch lane spends the account's allowance,
   so it takes only what the operator's own sessions do not need
   (`agents.<kind>.maxBatchWorkers`; spec bro-9h86l).
+- **No spawning beside a foreign agent** — `prepareSpawn` refuses
+  `external agent active` on every spawn path (loop, drive fixers,
+  `bro fleet agents up`, convoy, all backends) while an agent this rig
+  does not own is actively working on the host. External-activity
+  planes (`external-planes.ts` in core) answer per ecosystem: devin
+  session locks minus `BRO_AGENT_ID`/`BRO_HOOKS=0`-badged sessions,
+  opencode `/proc` procs, copilot remote tasks minus this registry's
+  taskIds, live foreign-owned `.work`/`.task` markers. A session is
+  active while its proven stamps sit inside `spawn.externalIdleSec`
+  (default 480s); `spawn.externalBlock: false` is the explicit opt-out.
+  The session-quota lanes and provider walls refuse independently —
+  the exclusion is a second guard, not a replacement (spec bro-eqi2d).
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops
@@ -119,6 +174,13 @@ Developing bro itself: see CONTRIBUTING.md.
   requester's own store — never wire `external:` deps on these
   planes (bd can't resolve a github issue or board row), and never
   patch the foreign repo's code in place.
+- **Merged ≠ live for the daemon** — a merged change only protects the
+  fleet once the binary the supervisor exec'd is rebuilt AND the daemon
+  restarted (a running process never reloads dist): `npm run build` for
+  a dist-backed daemon, rebuild + reinstall for a published install,
+  then `bro fleet daemon down && bro fleet daemon up`. `bro doctor`'s
+  `daemon` row compares the running binary against the repo, so protections
+  live only after the CLI the daemon runs is rebuilt and the daemon restarted.
 
 ## Convoy fan-out — detach + pins
 
@@ -140,18 +202,20 @@ nohup: an unregistered worker has no claim, no `.exit` record, no
   orphaned green PRs merge. Prompts and logs land in
   `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
   never world-readable `/tmp`.
-- **Pin the handles at spawn.** pid, log path, claimed step. The
+- **Pin the handles at spawn.** pid, run id, log path, claimed step. The
   registry writes them to `<git-common>/bro/agents.json` plus
-  `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
-  claim into the shared beads store — `bro fleet agents status`, `down`, and
-  respawn all key off that entry.
+  `<git-common>/bro/agents/<agentId>.{prompt.md,log,stderr}` and the
+  attempt-scoped `<agentId>.<runId>.{handle,go,exit}` — the worker
+  publishes `handle` itself and holds on the launcher's `go` stamp, so
+  an unadmitted survivor can never double a respawn — `bro fleet agents
+  status`, `down`, and respawn all key off that entry.
 - **Monitor by point checks, never by waiting.** `bro fleet agents status`,
   `bro fleet`, `bro review watch`, a fresh `bro flow convoy next` — between turns,
   not in a blocking loop. A synchronous `get_output` or `sleep` wait on
   detached work blocks the conversation and buys nothing (retro
   bro-lmdj).
 - **Completion is detected, not awaited.** `bro fleet agents status` →
-  `exited`/`blocked`, then read the exit record — `<agentId>.exit`
+  `exited`/`blocked`, then read the exit record — `<agentId>.<runId>.exit`
   holds the code, the entry's `cause`/`resetAt` the why. `bro flow convoy
   run` already supervises its own spawns to a verdict — hand a mol list
   to it instead of babysitting. Never promise "I'll report when it

@@ -1,6 +1,6 @@
 {
   "name": "@broject/bro-pack",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -23,10 +23,11 @@
   "files": [
     "dist",
     "skills",
-    "formulas"
+    "formulas",
+    "pack.json"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "license": "MIT",
   "repository": {
@@ -44,5 +45,9 @@
     "skills",
     "agent"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }

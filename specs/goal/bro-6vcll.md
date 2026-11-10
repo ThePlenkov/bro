@@ -62,8 +62,9 @@ bro goal pause|resume     suspend / reactivate (resume resets evals)
 ```
 
 Session resolution: `--session` > env
-(`BRO_SESSION_ID`, `DEVIN_SESSION_ID`, `CLAUDE_SESSION_ID`,
-`CODEX_SESSION_ID`, `OPENCODE_SESSION_ID`) > repo seed (`_default`).
+(`BRO_SESSION_ID`, `DEVIN_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`,
+`CLAUDE_SESSION_ID`, `CODEX_SESSION_ID`, `OPENCODE_SESSION_ID`) > repo
+seed (`_default`).
 The seed path is how `bro goal "empty bd ready"` on a bare shell becomes
 the next session's objective — Codex's "persisted thread state" without
 the thread existing yet.
@@ -84,9 +85,15 @@ the thread existing yet.
   - `not_met` → `evals++`; over `maxTurns` → `status: budget`; else
     context "goal turn N/M — not yet met: <condition> — keep going".
   - judge throw / low confidence → plain reminder (fail-open, like
-    every hook probe — a wedged judge must never stall a session).
+    every hook probe — a wedged judge must never stall a session),
+    emitted only after re-reading the record: a pause/clear landing
+    mid-eval stays silent.
   - no judge → plain reminder "goal: <condition> — verify before
     reporting done".
+- The post-`decide()` recheck+write runs under the session's
+  `<goal>.lock` (the shared filelock), and mutating CLI verbs take the
+  same lock — a `bro goal pause`/`clear` mid-eval is merged, never
+  clobbered by the eval's stale snapshot.
 
 ### `/goal` — the agent surface
 
