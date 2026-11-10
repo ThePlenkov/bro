@@ -4,19 +4,89 @@
  * alone lies twice: it answers for zombies (nobody polling) and can't
  * tell a reused pid from the process that recorded it.
  */
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+
+/** one `ps -p <pid> -o <fields>` row, trimmed — undefined when ps
+ *  fails or prints nothing. env pins TZ/LC so lstart spellings stay
+ *  environment-independent. */
+function psStatRow(pid: number, fields: string, env: NodeJS.ProcessEnv): string | undefined {
+  try {
+    const out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(pid), '-o', fields],
+      { encoding: 'utf8', timeout: 1000, env }
+    );
+    return out.trim().split('\n').filter(Boolean)[0]?.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** a `ps` stat row → {state, start} — whitespace-split so no
+ *  backtracking regex ever sees the freeform lstart tail; `hasPid`
+ *  skips a leading pid column when the spelling emitted one. Null
+ *  when either field is absent. */
+function statRowToProc(line: string, hasPid: boolean): { state: string; start: string } | null {
+  const tokens = line.split(/\s+/);
+  const off = hasPid && /^\d+$/.test(tokens[0] ?? '') ? 1 : 0;
+  const stateTok = tokens[off] ?? '';
+  const start = tokens
+    .slice(off + 1)
+    .join(' ')
+    .trim();
+  if (stateTok === '' || start === '') {
+    return null;
+  }
+  return { state: stateTok[0] ?? '', start };
+}
 
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
  *  unreaped zombie) and starttime (field 22). Post-comm fields split
  *  from index 0 = field 3. Null where /proc is absent or unreadable. */
 export function procStat(pid: number): { state: string; start: string } | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return { state: rest[0] ?? '', start: rest[19] ?? '' };
-  } catch {
-    return null;
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return { state: rest[0] ?? '', start: rest[19] ?? '' };
+    } catch {
+      return null;
+    }
   }
+  if (
+    process.platform === 'darwin' ||
+    process.platform === 'freebsd' ||
+    process.platform === 'openbsd'
+  ) {
+    // lstart is formatted in the process's timezone+locale — a marker
+    // written and re-checked under different environments would print a
+    // different start string for the same live owner and read as dead.
+    // Pinning TZ/LC makes the identity environment-independent while
+    // staying a lstart Date.parse can still epoch-convert for doctor.
+    const env = { ...process.env, TZ: 'UTC', LC_ALL: 'C', LC_TIME: 'C' };
+    const first = psStatRow(pid, 'state=,lstart=', env);
+    if (first === undefined) {
+      return null;
+    }
+    const parsed = statRowToProc(first, false);
+    if (parsed !== null) {
+      return parsed;
+    }
+    // lstart didn't parse — retry with the pid column so the fields
+    // disambiguate on a reused-pid row
+    const second = psStatRow(pid, 'pid=,state=,lstart=', env);
+    const retried = second === undefined ? null : statRowToProc(second, true);
+    if (retried !== null) {
+      return retried;
+    }
+    // last resort — a bare state byte still attests the owner lives;
+    // the `state=` read outlives lstart parse failures
+    const bare = psStatRow(pid, 'state=', env);
+    const state = bare?.[0] ?? first[0] ?? '';
+    return { state, start: '' };
+  }
+  return null;
 }
 
 /** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live
@@ -49,11 +119,127 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   if (st?.state === 'Z') {
     return false;
   }
-  return pidStart === undefined || st === null || st.start === '' || st.start === pidStart;
+  if (pidStart === undefined) {
+    return true;
+  }
+  if (st === null || st.start === '') {
+    return true;
+  }
+  // pidStart may be stored as "pid start" or just "start" for compatibility
+  if (st.start === pidStart) {
+    return true;
+  }
+  // If stored as "<pid> <start>" match suffix
+  const parts = pidStart.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    const startOnly = pidStart.trim().replace(/^\S+\s+/, '');
+    if (startOnly === st.start || st.start === startOnly) {
+      return true;
+    }
+  }
+  return false;
 }
 
-/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
- *  procStat does (index 0 = state/field 3). */
+/** Whitespace/quote tokenization of a `ps` args line — the vector
+ *  arrives space-joined on platforms without /proc, so quote runs are
+ *  honored to keep quoted fragments glued where ps does emit them. */
+export function psTokenize(s: string): string[] {
+  const trimmed = s.replace(/\r?\n$/, '');
+  if (trimmed === '') return [];
+  const m = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  if (m && m.length > 0) {
+    return m.map(t => t.replace(/^["']|["']$/g, ''));
+  }
+  return trimmed.split(/\s+/).filter(Boolean);
+}
+
+/** Tokens that only resolve joined — `ps` space-joins the arg vector,
+ *  so a path argument containing spaces (`/Users/x/My Tools/app.js`)
+ *  arrives pre-split and no fragment ever resolves on disk. Re-glue
+ *  consecutive absolute-path fragments until the join exists: an
+ *  executable or script arg must be on disk to run, so resolution is
+ *  the boundary oracle. A fragment that never resolves (raced delete,
+ *  a relative spelling) keeps its original split — never worse than
+ *  the raw tokenize. Bounded so a bad guess can't swallow the line. */
+export function psRegroupPaths(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const merged = t.startsWith('/') && !existsSync(t) ? mergePathFragment(tokens, i) : null;
+    i += merged?.count ?? 0;
+    out.push(merged?.text ?? t);
+  }
+  return out;
+}
+
+/** tokens[i..j] rejoined until the join exists on disk — the boundary
+ *  oracle for a `ps`-split path. null when no rejoin resolves (raced
+ *  delete, relative spelling) — the caller keeps the original token. */
+function mergePathFragment(tokens: string[], i: number): { text: string; count: number } | null {
+  const bound = Math.min(tokens.length - 1, i + 8);
+  for (let j = i + 1; j <= bound; j++) {
+    if (tokens[j]!.startsWith('-')) break;
+    const acc = tokens.slice(i, j + 1).join(' ');
+    if (existsSync(acc)) return { text: acc, count: j - i };
+  }
+  return null;
+}
+
+/** `ps <args> -p <pid>` — the darwin/BSD stand-in for /proc reads.
+ *  Throws like execFileSync does; callers own the fallback chain. */
+function psOut(pid: number, args: string[]): string {
+  return execFileSync(
+    'ps', // NOSONAR — PATH lookup is the contract
+    [...args, '-p', String(pid)],
+    {
+      encoding: 'utf8',
+      timeout: 1000,
+    }
+  );
+}
+
+/** Environment entries out of `ps eww` on darwin/BSD — the eww row is
+ *  `PID TT STAT TIME <args> <env>`: args and env ride one space-joined
+ *  column with no marker between them, so any `KEY=VAL` shape filter
+ *  alone lets an ARGUMENT like `AI_AGENT=1` impersonate an env badge.
+ *  Both halves come from the same kernel buffer under the same join
+ *  rule: tokenize `ps -o args=` identically, consume that exact token
+ *  run off the row's head, and everything past it is genuinely the
+ *  environment. When the prefix can't be proven — a raced exit, a
+ *  truncated row — nothing is env; an argument can never masquerade
+ *  upward (a truncated env only under-reports, which fails closed for
+ *  badge detection). */
+export function psEwwEnvTokens(pid: number): string[] {
+  for (const ewwArgs of [['eww'], ['e']]) {
+    const tokens = psEwwEnvTry(pid, ewwArgs);
+    if (tokens !== null) return tokens;
+  }
+  return [];
+}
+
+/** One `ps e` spelling of the env read — null on any failure so the
+ *  caller walks the spelling chain; [] when the env boundary can't be
+ *  proven (an argument must never masquerade upward). */
+function psEwwEnvTry(pid: number, ewwArgs: string[]): string[] | null {
+  let argTokens: string[];
+  let row: string;
+  try {
+    argTokens = psTokenize(psOut(pid, ['-ww', '-o', 'args=']));
+    row =
+      psOut(pid, ewwArgs)
+        .split('\n')
+        .find(l => l.trim().split(/\s+/)[0] === String(pid)) ?? '';
+  } catch {
+    return null;
+  }
+  const rowTokens = psTokenize(row);
+  // row = PID TT STAT TIME <argTokens> <envTokens>
+  const head = 4 + argTokens.length;
+  if (rowTokens.length < head) return null;
+  if (!argTokens.every((t, i) => rowTokens[4 + i] === t)) return null;
+  return rowTokens.slice(head).filter(t => /^[A-Za-z_]\w*=/.test(t));
+}
+
 export interface ProcEntry {
   pid: number;
   state: string;
@@ -156,13 +342,18 @@ export function groupMemberAlive(pgid: number, minStart?: string): boolean {
  *  so callers stay fail-open the way pidAlive documents. Null when no
  *  positive integer pid is there at all. */
 export function handleOwner(text: string): { pid: number; start?: string } | null {
-  const parts = text.trim().split(/\s+/);
+  const s = text.trim();
+  const parts = s.split(/\s+/);
   const pid = Number(parts[0]);
   if (!Number.isInteger(pid) || pid <= 0) {
     return null;
   }
-  const start = parts[1];
-  return start === undefined || start === '' ? { pid } : { pid, start };
+  if (parts.length < 2) {
+    return { pid };
+  }
+  // start may contain spaces (e.g. BSD/macOS lstart); slice after the pid token
+  const start = s.slice(parts[0].length).trim();
+  return start === '' ? { pid } : { pid, start };
 }
 
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
@@ -171,9 +362,17 @@ export function handleOwner(text: string): { pid: number; start?: string } | nul
  *  a reuse-blind owner would suppress the mtime fallback while still
  *  trusting a recycled pid — the worst of both planes. */
 export function markerOwner(firstLine: string | undefined): { pid: number; start: string } | null {
-  const parts = (firstLine ?? '').trim().split(' ');
-  const pid = Number(parts[1]);
-  const start = parts[2] ?? '';
+  const s = (firstLine ?? '').trim();
+  // Parse positionally to avoid regex backtracking (CodeQL polynomial regex).
+  // Separators are any whitespace — a tab-spaced marker is still owned.
+  const firstSpace = s.search(/\s/);
+  if (firstSpace === -1) return null;
+  const rest = s.slice(firstSpace + 1).trimStart();
+  const secondSpace = rest.search(/\s/);
+  if (secondSpace === -1) return null;
+  const pidStr = rest.slice(0, secondSpace).trim();
+  const start = rest.slice(secondSpace + 1).trim();
+  const pid = Number(pidStr);
   return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null;
 }
 

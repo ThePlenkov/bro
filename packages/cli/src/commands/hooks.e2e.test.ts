@@ -96,7 +96,7 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
     if (Date.now() >= deadline) {
       throw new Error(`timed out waiting for ${path}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
 }
 
@@ -154,7 +154,9 @@ interface SpoolScenario {
 }
 
 function linkCommand(bin: string, command: string): void {
-  const source = process.env.PATH?.split(':').map((dir) => join(dir, command)).find(existsSync);
+  const source = process.env.PATH?.split(':')
+    .map(dir => join(dir, command))
+    .find(existsSync);
   assert.ok(source, `${command} must be available for the no-cli fixture`);
   symlinkSync(source, join(bin, command));
 }
@@ -182,11 +184,7 @@ function prepareSpoolCase(root: string, scenario: SpoolScenario) {
   return { bin, pluginRoot, spool };
 }
 
-function assertSpoolCase(
-  scenario: SpoolScenario,
-  shell: string,
-  spool: string
-): void {
+function assertSpoolCase(scenario: SpoolScenario, shell: string, spool: string): void {
   if (scenario.outcome === null) {
     assert.equal(existsSync(spool), false, `${shell} ${scenario.name} wrote a spool`);
     return;
@@ -194,9 +192,9 @@ function assertSpoolCase(
   const records = readFileSync(spool, 'utf8')
     .trim()
     .split('\n')
-    .map((line) => line.split('\t'));
-  const startRecord = records.find((record) => record.at(2) === 'start');
-  const endRecord = records.find((record) => record.at(2) === 'end');
+    .map(line => line.split('\t'));
+  const startRecord = records.find(record => record.at(2) === 'start');
+  const endRecord = records.find(record => record.at(2) === 'end');
   assert.equal(records.length, scenario.outcome === 'no-cli' ? 1 : 2);
   const hostRecord = startRecord ?? endRecord;
   assert.equal(hostRecord?.at(4), scenario.client === 'none' ? 'unknown' : scenario.client);
@@ -1188,6 +1186,50 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     }
   });
 
+  test('run.sh skips the spool when no home resolves; XDG alone still resolves', () => {
+    for (const shell of ['/bin/dash', '/bin/bash']) {
+      const f = hookFixture();
+      inside(f.main, f.root, () => {
+        const bin = join(f.root, 'bin');
+        const pluginRoot = join(f.root, 'plugin');
+        mkdirSync(bin);
+        mkdirSync(pluginRoot);
+        const bro = join(bin, 'bro');
+        writeFileSync(bro, '#!/bin/sh\nprintf "candidate output\\n"\n');
+        chmodSync(bro, 0o755);
+        // e2eEnv carries HOME and pins BRO_HOOK_SPOOL=0 — strip both so
+        // the shell lands on the unresolvable branch: with no home and
+        // no explicit pin there is no state dir the reader shares.
+        const env = e2eEnv({ PATH: `${bin}:${process.env.PATH}`, PLUGIN_ROOT: pluginRoot });
+        delete env.HOME;
+        delete env.XDG_STATE_HOME;
+        delete env.BRO_HOOK_SPOOL;
+        const homeless = spawnSync(shell, [RUN_SH, 'spool-test'], {
+          cwd: f.main,
+          input: 'payload\n',
+          env,
+          encoding: 'utf8',
+          timeout: 2_500,
+        });
+        assert.equal(homeless.status, 0, `${shell}: ${homeless.stderr}`);
+        assert.equal(homeless.stdout, 'candidate output\n', `${shell} homeless stdout`);
+        const spool = join(f.root, 'xdg', 'bro', 'hooks.spool');
+        const xdg = spawnSync(shell, [RUN_SH, 'spool-test'], {
+          cwd: f.main,
+          input: 'payload\n',
+          env: { ...env, XDG_STATE_HOME: join(f.root, 'xdg') },
+          encoding: 'utf8',
+          timeout: 2_500,
+        });
+        assert.equal(xdg.status, 0, `${shell}: ${xdg.stderr}`);
+        const rows = readFileSync(spool, 'utf8').trim().split('\n');
+        assert.equal(rows.length, 2, `${shell} XDG-only rows`);
+        assert.equal(rows.at(0)?.split('\t').at(2), 'start');
+        assert.equal(rows.at(1)?.split('\t').at(2), 'end');
+      });
+    }
+  });
+
   test('SIGKILL of the launcher leaves a start-only record classified as killed', async () => {
     for (const shell of ['/bin/dash', '/bin/bash']) {
       const f = hookFixture();
@@ -1219,7 +1261,7 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
         try {
           await waitForFile(pidFile, 5_000);
           candidatePid = Number(readFileSync(pidFile, 'utf8'));
-          const exit = new Promise<NodeJS.Signals | null>((resolve) => {
+          const exit = new Promise<NodeJS.Signals | null>(resolve => {
             launcher.once('exit', (_code, signal) => resolve(signal));
           });
           launcher.kill('SIGKILL');

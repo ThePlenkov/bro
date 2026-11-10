@@ -681,7 +681,21 @@ HOOK_SPOOL_STARTED=0
 
 hook_spool_prepare() {
   [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
-  HOOK_SPOOL=${BRO_HOOK_SPOOL:-${XDG_STATE_HOME:-${HOME:-}/.local/state}/bro/hooks.spool}
+  if [ -n "${BRO_HOOK_SPOOL:-}" ]; then
+    HOOK_SPOOL=$BRO_HOOK_SPOOL
+  elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    HOOK_SPOOL=$XDG_STATE_HOME/bro/hooks.spool
+  elif [ -n "${HOME:-}" ]; then
+    HOOK_SPOOL=$HOME/.local/state/bro/hooks.spool
+  else
+    # No XDG_STATE_HOME/HOME and no explicit pin — Node resolves the OS
+    # home via the passwd db, which the shell cannot (same doubt-defers
+    # rule as the mailbox probe above); a guessed root-level path only
+    # fails mkdir or lands where the reader never looks. Empty
+    # HOOK_SPOOL tells the writers to skip the row.
+    HOOK_SPOOL=
+    return 0
+  fi
   case "$HOOK_SPOOL" in
     */*) HOOK_SPOOL_DIR=${HOOK_SPOOL%/*}; [ -n "$HOOK_SPOOL_DIR" ] || HOOK_SPOOL_DIR=/ ;;
     *) HOOK_SPOOL_DIR=. ;;
@@ -707,6 +721,7 @@ hook_spool_start() {
   HOOK_SPOOL_STARTED=1
   [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
   hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
   hook_spool_identity
   printf 'v1\t%s\tstart\t%s\t%s\t%s\t%s\n' \
     "$BRO_HOOK_T0" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "${PWD:-}" \
@@ -717,6 +732,7 @@ hook_spool_start() {
 hook_spool_end() {
   [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
   hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
   hook_spool_identity
   _hook_spool_ts=$(date +%s 2>/dev/null) || _hook_spool_ts=$BRO_HOOK_T0
   printf 'v1\t%s\tend\t%s\t%s\t%s\t%s\t%s\t%s\n' \

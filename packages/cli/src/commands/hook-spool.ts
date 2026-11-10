@@ -101,18 +101,20 @@ export function resolveHookSpoolPath(env: NodeJS.ProcessEnv = process.env): stri
 }
 
 export function rotateHookSpool(env: NodeJS.ProcessEnv = process.env): void {
-  const path = resolveHookSpoolPath(env);
-  if (path === null) {
-    return;
-  }
   try {
+    const path = resolveHookSpoolPath(env);
+    if (path === null) {
+      return;
+    }
     if (statSync(path).size <= MAX_SPOOL_BYTES) {
       return;
     }
     rmSync(`${path}.1`, { force: true });
     renameSync(path, `${path}.1`);
   } catch {
-    // Spool rotation is best-effort.
+    // Spool rotation is best-effort — a host with no resolvable home
+    // (os.homedir throws when neither $HOME nor a passwd entry exists)
+    // or an unwritable spool must not break the hook it guards.
   }
 }
 
@@ -363,7 +365,7 @@ export function readHookSpool(
 }
 
 function parseDurationMs(value: string): number | undefined {
-  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value);
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value.trim());
   const amountText = match?.at(1);
   const unit = match?.at(2);
   if (amountText === undefined || unit === undefined) {

@@ -524,5 +524,5 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   });
 }
 
-export { NEVER_CLAIM_LABELS, readyBeads, storeFor } from '@broject/rig'
-export type { ReadyBead } from '@broject/rig'
+export { NEVER_CLAIM_LABELS, readyBeads, storeFor } from '@broject/rig';
+export type { ReadyBead } from '@broject/rig';
