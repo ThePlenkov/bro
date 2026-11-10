@@ -31,13 +31,13 @@ omp already has Plan, Goal, Vibe, Prewalk and Advisor. bro does not
 reimplement them — it supplies the state they cannot have. See
 `modes.ts` for the full mapping; the short version:
 
-| omp mode | what bro adds                                                     |
-| -------- | ----------------------------------------------------------------- |
-| Plan     | the bead and spec the plan must answer, plus the claims in flight |
-| Goal     | the bead the objective belongs to, and the judge that says "met"  |
-| Vibe     | the claims — who owns which bead, so two workers never edit one   |
-| Prewalk  | the provider routing that says which model is fast _here_         |
-| Advisor  | `WATCHDOG.md` — bro's review priorities, plus the debt ledger     |
+| omp mode | what bro adds |
+| --- | --- |
+| Plan | the bead and spec the plan must answer, plus the claims in flight |
+| Goal | the bead the objective belongs to, and the judge that says "met" |
+| Vibe | the claims — who owns which bead, so two workers never edit one |
+| Prewalk | the provider routing that says which model is fast *here* |
+| Advisor | `WATCHDOG.md` — bro's review priorities, plus the debt ledger |
 
 ## Install
 
