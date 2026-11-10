@@ -526,8 +526,18 @@ function renderTicks(t) {
     parts.push('no heartbeat — no watch has ticked here');
     cls += ' muted';
   } else {
-    parts.push('last tick ' + age(t.heartbeat.ageMs) + ' ago — ' + (t.heartbeat.attention === 0 ? 'quiet' : t.heartbeat.attention + ' attention'));
-    if (t.heartbeat.ageMs > 30 * 60 * 1000) cls += ' warn';
+    var hb = t.heartbeat;
+    var htail = hb.attention === 0 ? 'quiet' : hb.attention + ' attention';
+    if (hb.futureMs !== undefined) {
+      parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer or reader clock skew — ' + htail);
+      cls += ' warn';
+    } else if (hb.writerSkewed) {
+      parts.push('last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail);
+      cls += ' warn';
+    } else {
+      parts.push('last tick ' + age(hb.ageMs) + ' ago — ' + htail);
+      if (hb.ageMs > 30 * 60 * 1000) cls += ' warn';
+    }
   }
   var d = t.drive || { pid: null, alive: false };
   if (d.pid === null || d.pid === undefined) {

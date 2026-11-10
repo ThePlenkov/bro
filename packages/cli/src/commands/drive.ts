@@ -63,6 +63,7 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
+import { spawn } from 'node:child_process';
 import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -149,14 +150,18 @@ import {
   deleteMergedLocalBranch,
   mainWorktree,
   parseWorktreePorcelain,
+  reapLoopLitter,
   removeMergedWorktree,
   worktreeClaimInfo,
   worktreeIdleMs,
   worktreePathFor,
+  type LitterReap,
   type WorktreeClaimInfo,
 } from './work.ts';
+import { type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
 import { rigNext, type RigNext } from './rig-next.ts';
+import { SELF_ENTRY } from './self-entry.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts';
 
@@ -964,6 +969,15 @@ interface Ctx {
    *  also what turns on watch heartbeats; a --once pass is a report,
    *  not supervision. */
   everySec?: number;
+  /** The loop-litter sweep state (bro-7dgu3) — the pass reaps
+   *  provably-done worktrees on the `drive.litterSweepSec` cadence so
+   *  merges landing without a cleanup caller (GitHub auto-merge, UI
+   *  merges) stop stranding trees. `lastAt` throttles across passes;
+   *  0 means the first pass sweeps — a --once invocation always does. */
+  litter: { sweepSec: number; lastAt: number };
+  /** The parked resume-cache bounds — the sweep's pool knobs ride the
+   *  loop section, same as the closeout and `work prune --loop` read. */
+  loop: LoopConfig;
   env: AgentConnectorEnv;
   store: TaskStore;
 }
@@ -2723,10 +2737,130 @@ function lanePauseTick(ctx: Ctx): void {
   }
 }
 
+/** The pass's litter sweep (spec bro-7dgu3) — isolated in a child
+ *  process: reapLoopLitter's rooted scans and per-candidate lookups are
+ *  synchronous, so in-pass they'd stall the supervisor's event loop and
+ *  could let the drive role lease lapse on a repo with many candidates.
+ *  `bro work prune --loop` IS the same sweep — the child carries the
+ *  full nx-kill wait budget while this process stays responsive. The
+ *  awaited close still lands before the pass's enumeration, so a reaped
+ *  branch never reaches openFleetPrs — only the event loop is freed,
+ *  not the ordering. */
+async function litterSweep(ctx: Ctx): Promise<void> {
+  const entry = SELF_ENTRY;
+  if (entry === null) {
+    // imported by a test harness — no CLI argv to respawn; run in-pass
+    sayLitterSweep(ctx, litterSweepTick(ctx));
+    return;
+  }
+  await new Promise<void>(resolvePromise => {
+    const child = spawn(process.execPath, [entry, 'work', 'prune', '--loop'], {
+      cwd: ctx.mainRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout?.on('data', (c: Buffer) => {
+      out += c.toString();
+    });
+    child.stderr?.on('data', (c: Buffer) => {
+      out += c.toString();
+    });
+    const done = (warn?: string): void => {
+      for (const line of out.split('\n')) {
+        const t = line.trim();
+        // kept lines are the sweep's noise floor — same policy as
+        // sayLitterSweep: relay actions, warnings, and the tally only
+        if (t !== '' && !t.startsWith('kept ')) {
+          say(ctx, `drive litter: ${t}`);
+        }
+      }
+      if (warn !== undefined) {
+        say(ctx, `warning: litter sweep — ${warn}`);
+      }
+      resolvePromise();
+    };
+    child.on('error', err => done(errText(err)));
+    child.on('close', code => done(code === 0 ? undefined : `exit ${code ?? '?'}`));
+  });
+}
+
+/** The in-pass sweep primitive — the same reapLoopLitter the loop
+ *  closeout and `bro work prune --loop` run: merges landing without a
+ *  cleanup caller (GitHub auto-merge, UI merges) strand their worktrees
+ *  otherwise, and dead fixers' orphaned nx daemons keep the trees
+ *  "occupied" on every /proc plane until the sweep kills them. Only
+ *  reached when SELF_ENTRY is unset (test harness) — the supervisor
+ *  path sweeps in a child so the scans never touch the event loop. */
+function litterSweepTick(ctx: Ctx): LitterReap {
+  // the sweep's git helpers narrate via console.log — under --json
+  // route them to stderr like the loop audit does, or the verdict
+  // stream corrupts
+  const log = console.log;
+  if (ctx.json) {
+    console.log = console.error;
+  }
+  try {
+    return reapLoopLitter({
+      root: ctx.mainRoot,
+      tasks: ctx.store,
+      rev: { repo: ctx.repo, facade: ctx.rev },
+      // the daemon has no current stack — sweep every stack's members,
+      // `work prune --loop`'s own scope
+      stackPrefix: 'stack/',
+      parkedKeep: ctx.loop.parkedKeep,
+      parkedTtlDays: ctx.loop.parkedTtlDays,
+      // --every is the supervisor's async loop — the nx-kill wait must
+      // never block it (a still-dying daemon pins its tree one extra
+      // sweep, which is exactly what the cadence exists for). --once is
+      // a foreground pass — the default bound reaps in-pass.
+      nxKillWaitMs: ctx.everySec === undefined ? undefined : 0,
+    });
+  } finally {
+    console.log = log;
+  }
+}
+
+/** The sweep's pass-side reporting — action lines and errors; kept
+ *  verdicts are the sweep's noise floor at pass cadence. */
+function sayLitterSweep(ctx: Ctx, rep: LitterReap): void {
+  for (const k of rep.killed) {
+    say(ctx, `drive litter: killed ${k}`);
+  }
+  for (const r of rep.released) {
+    say(ctx, `drive litter: released claim ${r}`);
+  }
+  for (const g of rep.repaired) {
+    say(ctx, `drive litter: re-registered ${g}`);
+  }
+  for (const r of rep.reaped) {
+    say(ctx, `drive litter: reaped ${r}`);
+  }
+  for (const b of rep.branches) {
+    say(ctx, `drive litter: deleted branch ${b}`);
+  }
+  for (const e of rep.errors) {
+    say(ctx, `warning: litter sweep — ${e}`);
+  }
+  say(ctx, `drive litter: ${rep.reaped.length} reaped, ${rep.kept.length} kept`);
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
   await emitLaneUsage(ctx);
   lanePauseTick(ctx);
+  // the litter sweep (bro-7dgu3) — provably-done trees ride the
+  // drive.litterSweepSec cadence throttled across passes; sweeping
+  // BEFORE the enumeration means a reaped branch never reaches
+  // openFleetPrs and a just-killed daemon ghost stops pinning the
+  // pass's occupancy verdicts
+  if (ctx.litter.sweepSec > 0 && Date.now() - ctx.litter.lastAt >= ctx.litter.sweepSec * 1000) {
+    ctx.litter.lastAt = Date.now();
+    try {
+      await litterSweep(ctx);
+    } catch (err) {
+      say(ctx, `warning: litter sweep failed — ${errText(err)}`);
+    }
+  }
   const { byStep, degraded } = await collectAgents(ctx.mainRoot);
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`);
@@ -3174,6 +3308,10 @@ async function runDrive(
     connector: args.connector,
     occTtlMs: drive.occupancyTtlSec * 1000,
     everySec: args.everySec,
+    litter: { sweepSec: drive.litterSweepSec, lastAt: 0 },
+    // loadBroConfig runs every registered section schema — loop is
+    // always normalized (parkedKeep/parkedTtlDays defaults included)
+    loop: (broCfg as Record<string, unknown>).loop as LoopConfig,
     env: loadAgentEnv(mainPath),
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
   };

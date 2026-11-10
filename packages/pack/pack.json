@@ -54,8 +54,5 @@
     "work",
     "wtf"
   ],
-  "formulas": [
-    "debt-pipeline.formula.toml",
-    "ship-bead.formula.toml"
-  ]
+  "formulas": ["debt-pipeline.formula.toml", "ship-bead.formula.toml"]
 }

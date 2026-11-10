@@ -195,17 +195,184 @@ describe('routeStepClass', () => {
 describe('deriveProviderWalls', () => {
   const now = Date.parse('2026-01-02T00:00:00Z');
 
-  test('rate_limited walls until resetAt — indefinitely without one', () => {
+  test('rate_limited walls until resetAt — a missing mark bounds at the death + cooldown', () => {
     const w = deriveProviderWalls(
       {
         a: entry({ provider: 'kilo', cause: 'rate_limited', resetAt: '2026-01-03T00:00:00Z' }),
-        b: entry({ provider: 'devin', cause: 'rate_limited' }),
+        b: entry({
+          provider: 'devin',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T23:50:00Z',
+        }),
       },
       now
     );
     assert.deepEqual(w, [
-      { provider: 'devin', account: 'devin', cause: 'rate_limited' },
-      { provider: 'kilo', account: 'kilo', cause: 'rate_limited', until: '2026-01-03T00:00:00Z' },
+      {
+        provider: 'devin',
+        account: 'devin',
+        cause: 'rate_limited',
+        // no rateGate configured → spawnedAt + the 30m default cooldown
+        until: '2026-01-02T00:20:00.000Z',
+      },
+      // the provider's mark is honored but ISO-normalized like every bound
+      {
+        provider: 'kilo',
+        account: 'kilo',
+        cause: 'rate_limited',
+        until: '2026-01-03T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  test('an unparseable resetAt bounds the same as a missing one', () => {
+    const w = deriveProviderWalls(
+      {
+        a: entry({
+          provider: 'devin',
+          cause: 'rate_limited',
+          resetAt: 'soon-ish',
+          observedAt: '2026-01-01T23:45:00Z',
+        }),
+      },
+      now
+    );
+    // observedAt is the death stamp — the bound anchors there, not at spawn
+    assert.deepEqual(w, [
+      {
+        provider: 'devin',
+        account: 'devin',
+        cause: 'rate_limited',
+        until: '2026-01-02T00:15:00.000Z',
+      },
+    ]);
+  });
+
+  test('a bound horizon already past is the proof of lift too', () => {
+    const w = deriveProviderWalls(
+      {
+        // died at spawn 24h ago with no mark — the 30m bound has long run out
+        a: entry({ provider: 'devin', cause: 'rate_limited' }),
+      },
+      now
+    );
+    assert.deepEqual(w, []);
+  });
+
+  test('the lane rateGate sets the mark-less cooldown — spawnCost regen at requestsPerHour', () => {
+    const gated: Record<string, ProviderEntry> = {
+      kilo: {
+        type: 'cli',
+        command: 'kilo run {promptFile}',
+        rateGate: { requestsPerHour: 240, spawnCost: 120 }, // 30m per spawn
+      },
+      openrouter: {
+        type: 'cli',
+        command: 'openrouter {promptFile}',
+        rateGate: { requestsPerHour: 60, spawnCost: 90 }, // 90m per spawn
+      },
+    };
+    const w = deriveProviderWalls(
+      {
+        a: entry({ provider: 'kilo', cause: 'rate_limited', spawnedAt: '2026-01-01T23:50:00Z' }),
+        b: entry({
+          provider: 'openrouter',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T23:30:00Z',
+        }),
+      },
+      now,
+      gated
+    );
+    assert.deepEqual(w, [
+      {
+        provider: 'kilo',
+        account: 'kilo',
+        cause: 'rate_limited',
+        until: '2026-01-02T00:20:00.000Z',
+      },
+      {
+        provider: 'openrouter',
+        account: 'openrouter',
+        cause: 'rate_limited',
+        until: '2026-01-02T01:00:00.000Z',
+      },
+    ]);
+  });
+
+  test('a degenerate rateGate falls back to the default cooldown', () => {
+    const gated: Record<string, ProviderEntry> = {
+      infinite: {
+        type: 'cli',
+        command: 'x',
+        rateGate: { requestsPerHour: 0, spawnCost: 100 }, // ÷0 → Infinity
+      },
+      instant: {
+        type: 'cli',
+        command: 'x',
+        rateGate: { requestsPerHour: 60, spawnCost: 0 }, // ≤0 → lifts at once
+      },
+      negative: {
+        type: 'cli',
+        command: 'x',
+        rateGate: { requestsPerHour: -5, spawnCost: 10 },
+      },
+    };
+    const w = deriveProviderWalls(
+      {
+        a: entry({
+          provider: 'infinite',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T23:50:00Z',
+        }),
+        b: entry({
+          provider: 'instant',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T23:50:00Z',
+        }),
+        c: entry({
+          provider: 'negative',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T23:50:00Z',
+        }),
+      },
+      now,
+      gated
+    );
+    // every degenerate gate degrades to the 30m default — never Infinity,
+    // never instant lift
+    const expected = ['infinite', 'instant', 'negative'].map(provider => ({
+      provider,
+      account: provider,
+      cause: 'rate_limited' as const,
+      until: '2026-01-02T00:20:00.000Z',
+    }));
+    assert.deepEqual(w, expected);
+  });
+
+  test('a fresh death on a stale-spawned record walls from observedAt', () => {
+    // a long-running worker's retained attempt carries the original
+    // spawnedAt; the bound anchors at the death stamp, not the birth —
+    // else a 6h-old spawn's fresh rate death lifts instantly and the
+    // respawn walks straight back into the walled provider
+    const w = deriveProviderWalls(
+      {
+        a: entry({
+          provider: 'devin',
+          cause: 'rate_limited',
+          spawnedAt: '2026-01-01T00:00:00Z', // spawned 24h ago…
+          observedAt: '2026-01-01T23:58:00Z', // …died 2m before the read
+        }),
+      },
+      now
+    );
+    assert.deepEqual(w, [
+      {
+        provider: 'devin',
+        account: 'devin',
+        cause: 'rate_limited',
+        until: '2026-01-02T00:28:00.000Z', // observedAt + 30m
+      },
     ]);
   });
 
@@ -261,13 +428,20 @@ describe('deriveProviderWalls', () => {
         a: entry({
           provider: 'devin',
           attempts: [
-            { provider: 'kilo', cause: 'rate_limited', spawnedAt: '2026-01-01T00:00:00Z' },
+            { provider: 'kilo', cause: 'rate_limited', spawnedAt: '2026-01-01T23:50:00Z' },
           ],
         }),
       },
       now
     );
-    assert.deepEqual(w, [{ provider: 'kilo', account: 'kilo', cause: 'rate_limited' }]);
+    assert.deepEqual(w, [
+      {
+        provider: 'kilo',
+        account: 'kilo',
+        cause: 'rate_limited',
+        until: '2026-01-02T00:20:00.000Z',
+      },
+    ]);
   });
 
   test('a stopped attempt clears with its entry; a live quota attempt dominates', () => {
@@ -356,7 +530,7 @@ describe('deriveAccountWalls', () => {
         account: 'kilo',
         provider: 'kiloB',
         cause: 'rate_limited',
-        until: '2026-01-04T00:00:00Z',
+        until: '2026-01-04T00:00:00.000Z',
         step: 'second',
         observedAt: '2026-01-01T12:00:00Z',
       },
@@ -368,6 +542,40 @@ describe('deriveAccountWalls', () => {
         observedAt: '2026-01-01T00:00:00Z',
       },
     ]);
+  });
+
+  test('a mark-less rate death bounds the account wall too — never indefinite', () => {
+    const walls = deriveAccountWalls(
+      {
+        step: entry({
+          provider: 'kilo-cli',
+          account: 'kilo',
+          cause: 'rate_limited',
+          observedAt: '2026-01-01T23:40:00Z',
+        }),
+        gated: entry({
+          provider: 'openrouter',
+          account: 'openrouter',
+          cause: 'rate_limited',
+          observedAt: '2026-01-01T23:30:00Z',
+        }),
+      },
+      Date.parse('2026-01-02T00:00:00Z'),
+      {
+        openrouter: {
+          type: 'cli',
+          command: 'openrouter {promptFile}',
+          rateGate: { requestsPerHour: 60, spawnCost: 60 }, // 60m per spawn
+        },
+      }
+    );
+    assert.deepEqual(
+      walls.map(w => ({ account: w.account, until: w.until })),
+      [
+        { account: 'kilo', until: '2026-01-02T00:10:00.000Z' }, // 30m default
+        { account: 'openrouter', until: '2026-01-02T00:30:00.000Z' }, // gate-derived 60m
+      ]
+    );
   });
 
   test('a stopped entry scans empty — down lifts the account wall its attempts held', () => {
