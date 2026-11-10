@@ -162,58 +162,57 @@ describe('dead-workspace reaper', () => {
 });
 
 describe('renderer panes', () => {
-  test('managed workspace gets one event-tail pane on an idle pane', () => {
+  test('managed workspace gets the session pane — the ONE human pane', () => {
     reset({ panes: [{ pane_id: 'p1' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
+    // every managed tree arms the session view — a record-less tree
+    // renders its honest empty state; the technical panes are plugin
+    // plumbing that never takes the user's screen
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 1);
     assert.equal(runs[0]![2], 'p1');
-    assert.match(runs[0]![3]!, /bus subscribe/);
-    assert.match(runs[0]![3]!, /--topic worker/);
-    assert.deepEqual(called('pane', 'rename', 'p1', 'bro: events').length, 1);
-    assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
-    // the status pane converges in the same pass — p1 is busy now,
-    // so it takes a fresh split; a non-acp lane carries no session
-    // pane (spec bro-l8wqu)
-    assert.match(runs[1]![3]!, /herdr status-view/);
-    assert.equal(loadState(scope).statuses[tree]?.pane_id, runs[1]![2]);
-    assert.equal(loadState(scope).sessions[tree], undefined);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.deepEqual(called('pane', 'rename', 'p1', 'bro: session').length, 1);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p1');
+    assert.equal(loadState(scope).renderers[tree], undefined);
+    assert.equal(loadState(scope).statuses[tree], undefined);
   });
 
   test('busy panes split instead of stealing the foreground', () => {
     reset({ panes: [{ pane_id: 'p1' }], busyPanes: ['p1'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
-    // renderer + status splits — all hang off the one busy pane
-    assert.equal(called('pane', 'split', 'p1').length, 2);
+    // the session pane splits off the busy pane — exactly one pane
+    assert.equal(called('pane', 'split', 'p1').length, 1);
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 1);
     assert.match(runs[0]![2]!, /^pSplit/);
-    assert.match(runs[0]![3]!, /bus subscribe/);
-    assert.match(runs[1]![3]!, /herdr status-view/);
+    assert.match(runs[0]![3]!, /herdr session-view/);
   });
 
-  test('an orphan pane carrying our label is adopted, not duplicated', () => {
+  test('a tech-labeled orphan folds under the session pane, not adopted', () => {
     reset({
-      panes: [{ pane_id: 'pTail', label: 'bro: events' }],
-      paneIds: ['pTail'],
-      busyPanes: ['pTail'],
+      panes: [{ pane_id: 'pTail', label: 'bro: events' }, { pane_id: 'pX' }],
+      paneIds: ['pTail', 'pX'],
     });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
-    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pGone' };
+    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pTail' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the renderer adopts the orphan; the status role needs its own
-    // slot — one split, off the only live pane (non-acp lane: no
-    // session pane)
-    assert.equal(called('pane', 'split').length, 1);
-    assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
+    // the events tail is plumbing — the session pane folds it away
+    // and takes the free pane
+    assert.equal(called('pane', 'close', 'pTail').length, 1);
+    assert.equal(loadState(scope).renderers[tree], undefined);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pX');
   });
 
-  test('a live mirror retires the fallback tail', () => {
-    reset({ panes: [{ pane_id: 'pTail' }], paneIds: ['pTail', 'pMirror'] });
+  test('a live mirror folds under the session pane like the tail does', () => {
+    reset({
+      panes: [{ pane_id: 'pTail' }, { pane_id: 'pMirror' }, { pane_id: 'pX' }],
+      paneIds: ['pTail', 'pMirror', 'pX'],
+    });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     // a live agent keeps the mirror unmarked — markExitedMirrors runs first
     const p = armedTree(tree);
@@ -237,12 +236,16 @@ describe('renderer panes', () => {
     s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pTail' };
     saveState(scope, s);
     converge(p);
+    // both technical surfaces fold — the session pane is the one pane
     assert.equal(called('pane', 'close', 'pTail').length, 1);
+    assert.equal(called('pane', 'close', 'pMirror').length, 1);
     assert.equal(loadState(scope).renderers[tree], undefined);
+    assert.equal(loadState(scope).mirrors['step-1'], undefined);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pX');
   });
 
-  test('an exited (marked) mirror does not suppress the fallback tail', () => {
-    reset({ panes: [{ pane_id: 'pTail' }], paneIds: ['pTail', 'pMirror'] });
+  test('an exited (marked) mirror stays an exit marker beside the session pane', () => {
+    reset({ panes: [{ pane_id: 'pMirror' }, { pane_id: 'pX' }], paneIds: ['pMirror', 'pX'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
     s.mirrors['step-1'] = {
@@ -255,40 +258,40 @@ describe('renderer panes', () => {
     };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the dead mirror is an exit marker, not a renderer — the tail
-    // arms, and the status pane converges beside it (non-acp lane:
-    // no session pane)
-    assert.equal(called('pane', 'run').length, 2);
-    assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
-    assert.ok(loadState(scope).statuses[tree]?.pane_id !== undefined);
-    assert.equal(loadState(scope).sessions[tree], undefined);
+    // the dead mirror is an exit marker the session view renders —
+    // the session pane arms as the one pane, no tech fallback
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(loadState(scope).renderers[tree], undefined);
+    assert.equal(loadState(scope).statuses[tree], undefined);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pX');
   });
 
-  test('a dead tail on a live pane re-arms in place', () => {
+  test('a dead session view on a live pane re-arms in place', () => {
     reset({ panes: [{ pane_id: 'p1' }], paneIds: ['p1'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
-    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
+    s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
     saveState(scope, s);
     converge(armedTree(tree));
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 1);
     assert.equal(runs[0]![2], 'p1');
-    assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p1');
   });
 
-  test('a recorded pane still running the tail is left alone', () => {
+  test('a recorded pane still running the session view is left alone', () => {
     reset({ panes: [{ pane_id: 'p1' }], paneIds: ['p1'], busyPanes: ['p1'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
-    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
+    s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the tail is untouched; the status pane converges (a split) —
-    // a non-acp lane carries no session pane
-    const runs = called('pane', 'run');
-    assert.equal(runs.length, 1);
-    assert.match(runs[0]![3]!, /herdr status-view/);
+    // a live session pane is untouched — and no tech pane appears
+    assert.equal(called('pane', 'run').length, 0);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p1');
   });
 
   test('a stale managed record cannot pane a user-reopened workspace', () => {
@@ -321,56 +324,41 @@ describe('renderer panes', () => {
   });
 });
 
-describe('status panes (spec bro-idsat)', () => {
-  test('a spare idle pane becomes the status view', () => {
+describe('status + events panes — plugin plumbing, folded everywhere', () => {
+  test('the tech panes never arm — the session pane is the one pane', () => {
     reset({ panes: [{ pane_id: 'p1' }, { pane_id: 'p2' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
-    // renderer takes the first idle pane; the status view takes p2 —
-    // a NORMAL pane: rename + pane run, never an overlay
-    assert.deepEqual(called('pane', 'rename', 'p2', 'bro: status').length, 1);
-    const runs = called('pane', 'run', 'p2');
+    // one pane only, and it is the session view — no bus tail, no
+    // status strip: a record-less tree renders its empty state there
+    const runs = called('pane', 'run');
     assert.equal(runs.length, 1);
-    assert.match(runs[0]![3]!, /herdr status-view/);
-    assert.match(runs[0]![3]!, new RegExp(tree.replace(/[\\/.]/g, '\\$&')));
-    assert.equal(loadState(scope).statuses[tree]?.pane_id, 'p2');
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(
+      called('pane', 'run').filter(r => /bus subscribe|status-view/.test(r[3] ?? '')).length,
+      0
+    );
+    assert.equal(loadState(scope).statuses[tree], undefined);
+    assert.equal(loadState(scope).renderers[tree], undefined);
   });
 
-  test('a recorded live status pane is left alone', () => {
-    reset({ panes: [{ pane_id: 'pS' }], paneIds: ['pS'], busyPanes: ['pS'] });
+  test('recorded status + events panes fold when the session pane arms', () => {
+    reset({
+      panes: [{ pane_id: 'pS' }, { pane_id: 'pE' }, { pane_id: 'pX' }],
+      paneIds: ['pS', 'pE', 'pX'],
+    });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const s = loadState(scope);
     s.statuses[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pS' };
+    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pE' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the renderer still converges (a split), but nothing re-arms pS
-    assert.ok(called('pane', 'run', 'pS').length === 0);
-    assert.equal(loadState(scope).statuses[tree]?.pane_id, 'pS');
-  });
-
-  test('a dead status view on a live pane re-arms in place', () => {
-    reset({ panes: [{ pane_id: 'pS' }], paneIds: ['pS'] });
-    const tree = mkdtempSync(join(TMP, 'tree-'));
-    const s = loadState(scope);
-    s.statuses[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pS' };
-    saveState(scope, s);
-    converge(armedTree(tree));
-    const runs = called('pane', 'run', 'pS');
-    assert.equal(runs.length, 1);
-    assert.match(runs[0]![3]!, /herdr status-view/);
-    assert.equal(loadState(scope).statuses[tree]?.pane_id, 'pS');
-  });
-
-  test('an orphan pane carrying the status label is adopted', () => {
-    reset({ panes: [{ pane_id: 'pOrph', label: 'bro: status' }], paneIds: ['pOrph'] });
-    const tree = mkdtempSync(join(TMP, 'tree-'));
-    converge(armedTree(tree));
-    // the only split is the renderer's — the status role never steals
-    // a pane for itself while a labeled orphan exists to adopt
-    const runs = called('pane', 'run', 'pOrph');
-    assert.equal(runs.length, 1);
-    assert.match(runs[0]![3]!, /herdr status-view/);
-    assert.equal(loadState(scope).statuses[tree]?.pane_id, 'pOrph');
+    assert.equal(called('pane', 'close', 'pS').length, 1);
+    assert.equal(called('pane', 'close', 'pE').length, 1);
+    const st = loadState(scope);
+    assert.equal(st.statuses[tree], undefined);
+    assert.equal(st.renderers[tree], undefined);
+    assert.equal(st.sessions[tree]?.pane_id, 'pX');
   });
 
   test('a stale record pointing at a closed workspace is dropped', () => {
@@ -394,8 +382,9 @@ describe('status panes (spec bro-idsat)', () => {
     converge(p);
     const st = loadState(scope);
     assert.equal(st.statuses[join(TMP, 'old-tree')], undefined);
-    // and the live workspace got its own status pane
-    assert.ok(st.statuses[tree]?.pane_id !== undefined);
+    // and the live workspace got its session pane — the one pane
+    assert.ok(st.sessions[tree]?.pane_id !== undefined);
+    assert.equal(st.statuses[tree], undefined);
   });
 });
 
@@ -512,7 +501,7 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
     assert.equal(st.statuses[tree], undefined);
   });
 
-  test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
+  test('a lane flip OFF acp keeps the session pane — the view, not the lane', () => {
     reset({
       panes: [{ pane_id: 'pV', label: 'bro: session' }, { pane_id: 'pX' }],
       paneIds: ['pV', 'pX'],
@@ -522,14 +511,13 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
     saveState(scope, s);
     converge(armedTree(tree));
-    assert.equal(called('pane', 'close', 'pV').length, 1);
+    // losing the acp lane never folds the human pane — the view is
+    // armed on every managed tree now; no tech pane appears either
+    assert.equal(called('pane', 'close', 'pV').length, 0);
     const st = loadState(scope);
-    assert.equal(st.sessions[tree], undefined);
-    // events + status re-arm on the surviving pane
-    const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
-    assert.match(runs[0]![3]!, /bus subscribe/);
-    assert.match(runs[1]![3]!, /herdr status-view/);
+    assert.equal(st.sessions[tree]?.pane_id, 'pV');
+    assert.equal(st.renderers[tree], undefined);
+    assert.equal(st.statuses[tree], undefined);
   });
 
   test('a live native agent gets no mirror — the lane yields exactly one pane', () => {

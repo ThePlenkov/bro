@@ -352,7 +352,19 @@ export async function runTui(argv: string[]): Promise<void> {
     const v =
       target === undefined
         ? { led: { state: 'unknown' } as PaneLed, mode: 'waiting for projector' }
-        : eventsVerdict(target.workerLed, rowV);
+        : cur === undefined
+          ? target.events === undefined && target.session === undefined && target.log === undefined
+            ? {
+                // nothing armed and nothing to arm — the impl never
+                // leaves 'replaying' on its own and the LED would lie
+                // 'working' forever on an empty tree
+                led: target.workerLed,
+                mode: 'no session recorded',
+              }
+            : // a feed exists this shell cannot ride (log/acp legs) —
+              // report the worker posture, not a phantom 'replaying'
+              eventsVerdict(target.workerLed, undefined)
+          : eventsVerdict(target.workerLed, rowV);
     const agent = sessionAgentOf(target);
     const mark = `${v.led.state}|${v.mode}|${agent}`;
     if (mark === lastReport) return;
