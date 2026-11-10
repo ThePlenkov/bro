@@ -14,7 +14,7 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/pi.ts --format esm --dts --clean --no-external /^@broject\\//"
+    "build": "tsdown src/pi.ts --format esm --dts --clean --no-external=/^@broject\\//"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",

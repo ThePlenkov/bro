@@ -11,7 +11,7 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/kilo.ts --format esm --dts --clean --no-external /^@broject\\//"
+    "build": "tsdown src/kilo.ts --format esm --dts --clean --no-external=/^@broject\\//"
   },
   "devDependencies": {
     "@kilocode/plugin": "^7.8.3",
