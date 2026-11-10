@@ -436,6 +436,32 @@ describe('planeParityProblems', () => {
     ];
     assert.deepEqual(planeParityProblems(twinned, live), []);
   });
+
+  test('a stubbed descriptor reports its factory failure — empty op lists are not clean', () => {
+    const stub = [fakePlane({ name: 'broken', buildError: 'kaboom' })];
+    assert.deepEqual(
+      planeParityProblems(stub, live).map(p => [p.kind, p.path]),
+      [['breaking', 'planes.broken']]
+    );
+  });
+
+  test('an allowlist entry outside verbs is breaking — REST/MCP can never serve it', () => {
+    const catalog = [
+      fakePlane({
+        name: 'p',
+        verbs: ['shown'],
+        mcpVerbs: ['shown'],
+        restVerbs: ['shown', 'ghost'],
+        cli: { shown: 'doctor', ghost: 'doctor' },
+      }),
+    ];
+    const problems = planeParityProblems(catalog, live);
+    assert.deepEqual(
+      problems.map(p => [p.kind, p.path]),
+      [['breaking', 'planes.p.ghost']]
+    );
+    assert.match(problems[0]!.message, /not a declared verb/);
+  });
 });
 
 describe('parseBreaking', () => {

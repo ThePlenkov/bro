@@ -33,8 +33,10 @@ function filterOf(query: Record<string, string>): PlaneFilter {
   if (status !== undefined) {
     filter.status = status;
   }
+  // blank `?limit=` is an absent value, not an explicit zero — Number('')
+  // is 0, which would otherwise read as "return no rows"
   const n = Number(limit);
-  if (limit !== undefined && Number.isInteger(n) && n >= 0) {
+  if (limit !== undefined && limit !== '' && Number.isInteger(n) && n >= 0) {
     filter.limit = n;
   }
   return filter;

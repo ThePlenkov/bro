@@ -95,6 +95,11 @@ export interface PlaneDescriptor {
    *  check` fails on an op with no CLI twin, so the transport surface
    *  can never outgrow the CLI contract (spec bro-xiq2m). */
   cli?: Record<string, string>;
+  /** set only on a descriptor that replaced a throwing factory — every
+   *  op stubs to PlaneUnavailable and the op lists are empty, so gates
+   *  must read this marker (an empty catalog entry is not a clean one)
+   *  rather than skip the plane. */
+  buildError?: string;
   /** live-evaluated — presence means probed-capable, not configured.
    *  `read: false` hides every tool for the plane. */
   capabilities(): Promise<Record<string, boolean>>;
@@ -297,6 +302,7 @@ function stubPlane(name: string, err: unknown): PlaneDescriptor {
   const detail = err instanceof Error ? err.message : String(err);
   return {
     name,
+    buildError: detail,
     reads: [],
     verbs: [],
     capabilities: async () => ({ read: false, error: true }),

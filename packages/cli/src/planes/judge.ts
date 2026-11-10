@@ -11,7 +11,7 @@ import {
   type VerdictRow,
 } from '@broject/core';
 import { computeStats, journalPath, judgeFacade, readJournal } from '@broject/judge';
-import { argString, dispatchRead } from './helpers.ts';
+import { argNumber, argString, dispatchRead } from './helpers.ts';
 
 const VERBS = ['decide'];
 
@@ -79,8 +79,15 @@ export function judgePlane(ctx: PlaneCtx): PlaneDescriptor {
     },
     list: async f => {
       const all = rows().map((r, i) => toRow(r, i));
-      const limit = typeof f?.limit === 'number' ? f.limit : undefined;
-      return limit === undefined ? all : all.slice(-limit);
+      // limit is a requested maximum on the newest rows: absent means
+      // unbounded, but a present value that is non-finite or non-positive
+      // reads as zero rows — never as a tail-slice inversion (slice(-n)
+      // of a negative n drops rows from the FRONT and slice(-0) is all).
+      if (f?.limit === undefined) {
+        return all;
+      }
+      const limit = argNumber(f, 'limit');
+      return limit === undefined || limit <= 0 ? [] : all.slice(-Math.floor(limit));
     },
     get: async ref =>
       rows()

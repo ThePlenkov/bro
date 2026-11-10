@@ -26,6 +26,28 @@ export function planeParityProblems(
 ): ContractProblem[] {
   const problems: ContractProblem[] = [];
   for (const plane of catalog) {
+    // a stubbed descriptor has no ops to check — the failure itself is
+    // the gate error, or a throwing factory would pass green silently
+    if (plane.buildError !== undefined) {
+      problems.push({
+        kind: 'breaking',
+        path: `planes.${plane.name}`,
+        message: `plane factory failed — ${plane.buildError}`,
+      });
+      continue;
+    }
+    // an allowlist entry naming an undeclared verb is dead config —
+    // REST rejects the POST as undeclared before the allowlist is read
+    // (MCP emits no tool for it either), so the gate flags it here
+    for (const v of new Set([...(plane.mcpVerbs ?? []), ...(plane.restVerbs ?? [])])) {
+      if (!plane.verbs.includes(v)) {
+        problems.push({
+          kind: 'breaking',
+          path: `planes.${plane.name}.${v}`,
+          message: `transport allowlist names '${v}' which is not a declared verb — declare it in verbs or drop the entry`,
+        });
+      }
+    }
     for (const op of exposedOps(plane)) {
       const twin = plane.cli?.[op];
       const path = `planes.${plane.name}.${op}`;

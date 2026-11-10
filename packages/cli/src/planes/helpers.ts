@@ -70,14 +70,19 @@ export function argString(
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
 }
 
-/** `limit` on a locally-collected row set — undefined means unbounded;
- *  a non-positive or fractional value must not turn slice(0, n) into a
- *  tail-chop (slice(0,-n) drops rows from the END, an arbitrary partial
- *  list). Floored and floored-at-zero, so a bad limit reads as "no
- *  rows", never as misordered data. */
+/** `limit` on a locally-collected row set — absent means unbounded;
+ *  a non-positive, fractional, or non-finite value must not turn
+ *  slice(0, n) into a tail-chop (slice(0,-n) drops rows from the END,
+ *  an arbitrary partial list). Floored and floored-at-zero, so a bad
+ *  limit reads as "no rows", never as misordered data — and a present
+ *  key that fails numeric coercion (NaN, '', 'abc') is a bad limit,
+ *  not an absent one. */
 export function sliceLimited<T>(rows: T[], args: Record<string, unknown> | undefined): T[] {
+  if (args?.['limit'] === undefined) {
+    return rows;
+  }
   const limit = argNumber(args, 'limit');
-  return limit === undefined ? rows : rows.slice(0, Math.max(0, Math.floor(limit)));
+  return limit === undefined ? [] : rows.slice(0, Math.max(0, Math.floor(limit)));
 }
 
 export function argBool(

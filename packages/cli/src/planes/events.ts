@@ -9,6 +9,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   addressedTo,
+  BUS_RING_LIMIT,
   busProbe,
   busSocketPath,
   busStatus,
@@ -193,9 +194,10 @@ function lifecycleRows(
 export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
   const dir = ctx.dir;
   const socket = () => busSocketPath(dir);
-  const tail = async (a?: Record<string, unknown>) => {
-    const limit = argLimit(a, 'limit', 64, 512);
-    const since = argNumber(a, 'since');
+  /** Collect merged rows for a caller-supplied window. `tail` clamps to
+   *  the list bound; `get` widens to the retained ring — a ref is a
+   *  lookup, not a page, so it must see every row the bus still holds. */
+  const collect = async (limit: number, since: number | undefined) => {
     const sock = socket();
     let gapped = false;
     let reason: string | undefined;
@@ -225,6 +227,8 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       ...(reason === undefined ? {} : { reason }),
     };
   };
+  const tail = (a?: Record<string, unknown>) =>
+    collect(argLimit(a, 'limit', 64, 512), argNumber(a, 'since'));
   /** The durable bead→land timeline alone — the read a metrics view
    *  (cycle-time, fix-rounds, WIP curve) is built on. `since` is an
    *  ISO timestamp here (unlike tail's bus-seq cursor). */
@@ -352,7 +356,7 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       return events;
     },
     get: async ref => {
-      const { events } = await tail({ limit: 512 });
+      const { events } = await collect(BUS_RING_LIMIT, undefined);
       return events.find(e => e.id === ref);
     },
     read: (name, args) => dispatchRead('events', reads, name, args),
