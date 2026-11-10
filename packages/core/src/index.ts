@@ -548,6 +548,17 @@ export type {
   SessionQuota,
 } from './session-planes.ts';
 export {
+  clearExternalPlanes,
+  externalPlanes,
+  ownedEnviron,
+  registerExternalPlane,
+} from './external-planes.ts';
+export type {
+  ExternalActivity,
+  ExternalActivityPlane,
+  ExternalProbeCtx,
+} from './external-planes.ts';
+export {
   admitSessionStart,
   admitSessionStartAsync,
   planeStartingSessions,

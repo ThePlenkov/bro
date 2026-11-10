@@ -12,6 +12,7 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  clearExternalPlanes,
   localLeaseStore,
   projectId,
   readAgentRegistry,
@@ -26,10 +27,15 @@ import {
   agentConnectorNames,
   fleetOccupancyFor,
   makeCopilotConnector,
+  primeCopilotForExternalGuard,
   type AgentConnectorEnv,
 } from './agent-connectors.ts';
 import { copilotCountFile } from './session-planes/copilot.ts';
 import { initRepo, installFakeBd, readBeads } from './commands/testrepo.ts';
+
+// real host planes would flake spawn tests — fixtures opt out via
+// spawn.externalBlock; the registry clear is the belt
+clearExternalPlanes();
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -184,7 +190,11 @@ function fixture(
     main,
     beadsDir,
     ghDb,
-    env: { agents: { copilot: { ...knobs } }, connectors: {} },
+    env: {
+      agents: { copilot: { ...knobs } },
+      connectors: {},
+      spawn: { externalBlock: false, externalIdleSec: 480 },
+    },
     prevPath,
     rows: () => readBeads(db),
     gh: () => JSON.parse(readFileSync(ghDb, 'utf8')),
@@ -698,6 +708,40 @@ describe('copilot session plane', () => {
       const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
       assert.equal(info.backend, 'copilot');
       assert.equal(readAgentRegistry(fx.main)['fx-1']!.sessionKind, 'copilot');
+    } finally {
+      cleanup(fx);
+    }
+  });
+
+  test('the armed external guard primes the inventory — a copilot-unarmed quota still refreshes', () => {
+    const fx = fixture(
+      [],
+      { repo: 'octo/repo' },
+      {
+        tasks: [{ id: 't-foreign', state: 'in_progress', repo: 'octo/repo' }],
+        seq: 1,
+      }
+    );
+    try {
+      const resDir = planeSlots(fx);
+      // no copilot quota armed — the guard alone must fetch, or the
+      // remote plane could never see a foreign task (spec bro-eqi2d)
+      const armed: AgentConnectorEnv = {
+        ...fx.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
+      };
+      primeCopilotForExternalGuard(fx.main, armed);
+      assert.deepEqual(readCount(resDir).ids, ['t-foreign']);
+      // a fresh cache is trusted — the store changed but no fetch ran
+      const db = fx.gh();
+      db.tasks = [{ id: 't-other', state: 'in_progress', repo: 'octo/repo' }];
+      fx.saveGh(db);
+      primeCopilotForExternalGuard(fx.main, armed);
+      assert.deepEqual(readCount(resDir).ids, ['t-foreign']);
+      // the guard disarmed never fetches
+      rmSync(copilotCountFile(resDir));
+      primeCopilotForExternalGuard(fx.main, fx.env); // externalBlock: false
+      assert.equal(existsSync(copilotCountFile(resDir)), false);
     } finally {
       cleanup(fx);
     }
