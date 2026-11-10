@@ -33,11 +33,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Exit codes — 0 green, 1 a check failed, 2 usage, 3 preflight/merge. */
+/** Exit codes — 0 green, 1 a check failed, 2 usage, 3 preflight/merge,
+ *  4 the push failed (stable is advanced locally, the remote is not). */
 const EXIT_OK = 0;
 const EXIT_CHECK_FAILED = 1;
 const EXIT_USAGE = 2;
 const EXIT_PREFLIGHT = 3;
+const EXIT_PUSH_FAILED = 4;
 
 interface Check {
   /** the label printed in the summary and the failing-check report */
@@ -86,7 +88,8 @@ function usage(): string {
     '  --skip-e2e  skip the flaky test:e2e target (escape hatch, logged)',
     '  --help      print this text and exit',
     '',
-    'Only --sync mutates anything; without it the script prints this text.',
+    'Only --sync mutates anything: --dry-run prints the plan and exits,',
+    'and with no flag at all the script prints this text.',
     'Without --push the sync never touches the network: the merge and the',
     'checks are local, and stable advances only when all checks pass.',
   ].join('\n');
@@ -412,7 +415,7 @@ function pushStable(): void {
     console.error(
       'sync-stable: push failed — stable is advanced locally, the remote is unchanged.'
     );
-    process.exit(EXIT_CHECK_FAILED);
+    process.exit(EXIT_PUSH_FAILED);
   }
   console.log('push:     ok');
 }
