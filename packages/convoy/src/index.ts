@@ -10,7 +10,7 @@ export {
   stepInputs,
   stepKind,
   stepsOf,
-} from './molecule.ts'
+} from './molecule.ts';
 export {
   declAsIssue,
   GATE_POLICIES,
@@ -18,7 +18,7 @@ export {
   parseConvoyPlan,
   PLAN_KIND,
   PLAN_VERSION as CONVOY_PLAN_VERSION,
-} from './plan.ts'
+} from './plan.ts';
 export type {
   ConvoyInline,
   ConvoyMolecule,
@@ -26,7 +26,7 @@ export type {
   ConvoyPour,
   ConvoyStepDecl,
   GatePolicy,
-} from './plan.ts'
+} from './plan.ts';
 export type {
   ConvoyNext,
   ConvoyState,
@@ -37,4 +37,12 @@ export type {
   StepInput,
   StepKind,
   StepState,
-} from './types.ts'
+} from './types.ts';
+export {
+  mergeClaimTarget,
+  mergeCloseReason,
+  MERGE_STEP_TYPE,
+  verifyMergeClose,
+} from './verify.ts';
+export type { MergeClaim, MergeProbe, MergeTarget, MergeVerdict } from './verify.ts';
+export { titleMatches } from './title.ts';

@@ -24,6 +24,8 @@ function fixture(): {
   localPath: string;
   globalCliPath: string;
   localCliPath: string;
+  globalV2Path: string;
+  localV2Path: string;
 } {
   const cwd = tmpDir('bro-plugins-cwd-');
   const xdg = tmpDir('bro-plugins-xdg-');
@@ -46,6 +48,8 @@ function fixture(): {
     localPath: join(cwd, '.opencode', 'plugins', 'bro.ts'),
     globalCliPath: join(xdg, 'opencode', 'plugins', 'bro-cli.ts'),
     localCliPath: join(cwd, '.opencode', 'plugins', 'bro-cli.ts'),
+    globalV2Path: join(xdg, 'opencode', 'plugins', 'bro', 'tui.tsx'),
+    localV2Path: join(cwd, '.opencode', 'plugins', 'bro', 'tui.tsx'),
   };
 }
 
@@ -133,8 +137,10 @@ describe('plugins install/uninstall/list', () => {
       [
         `installed:${f.globalPath}`,
         `installed:${f.globalCliPath}`,
+        `installed:${f.globalV2Path}`,
         `installed:${f.localPath}`,
         `installed:${f.localCliPath}`,
+        `installed:${f.localV2Path}`,
       ]
     );
     // materialized content is the shipped adapter source verbatim
@@ -146,13 +152,15 @@ describe('plugins install/uninstall/list', () => {
       join(repoRoot, 'packages/agent-plugins/opencode/src/opencode-tui.ts'),
       'utf8'
     );
+    const shippedV2 = readFileSync(new URL('../opencode-tui-v2.tsx', import.meta.url), 'utf8');
     assert.equal(readFileSync(f.globalPath, 'utf8'), shipped);
     assert.equal(readFileSync(f.globalCliPath, 'utf8'), shippedCli);
+    assert.equal(readFileSync(f.globalV2Path, 'utf8'), shippedV2);
 
     const again = installClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       again.map(o => o.action),
-      ['current', 'current', 'current', 'current']
+      ['current', 'current', 'current', 'current', 'current', 'current']
     );
   });
 
@@ -196,7 +204,9 @@ describe('plugins install/uninstall/list', () => {
       [
         'opencode:global:stale',
         'opencode:global:absent',
+        'opencode:global:absent',
         'opencode:local:stale',
+        'opencode:local:absent',
         'opencode:local:absent',
       ]
     );
@@ -215,7 +225,7 @@ describe('plugins install/uninstall/list', () => {
         .filter(r => r.client === 'opencode')
         .map(r => `${r.scope}:${r.state}`)
         .join(','),
-      'global:installed,global:installed,local:stale,local:absent'
+      'global:installed,global:installed,global:installed,local:stale,local:absent,local:absent'
     );
   });
 
@@ -235,12 +245,21 @@ describe('plugins install/uninstall/list', () => {
     const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true });
     assert.deepEqual(
       out.map(o => o.action),
-      ['would-install', 'would-install', 'would-install', 'would-install']
+      [
+        'would-install',
+        'would-install',
+        'would-install',
+        'would-install',
+        'would-install',
+        'would-install',
+      ]
     );
     assert.ok(!existsSync(f.globalPath));
     assert.ok(!existsSync(f.localPath));
     assert.ok(!existsSync(f.globalCliPath));
     assert.ok(!existsSync(f.localCliPath));
+    assert.ok(!existsSync(f.globalV2Path));
+    assert.ok(!existsSync(f.localV2Path));
   });
 
   test('install refuses a foreign file at our slot without --force', () => {
@@ -262,9 +281,9 @@ describe('plugins install/uninstall/list', () => {
     const refused = uninstallClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       refused.map(o => o.action),
-      // global bro.ts removed, global bro-cli.ts installed→removed, then
-      // the foreign local bro.ts refuses and its sibling is absent
-      ['removed', 'removed', 'refused', 'absent']
+      // global bro.ts + bro-cli.ts + bro/tui.tsx removed, then
+      // the foreign local bro.ts refuses and its siblings are absent
+      ['removed', 'removed', 'removed', 'refused', 'absent', 'absent']
     );
     assert.ok(!existsSync(f.globalPath));
     assert.ok(existsSync(f.localPath));
@@ -276,7 +295,7 @@ describe('plugins install/uninstall/list', () => {
     const gone = uninstallClient('opencode', ['global', 'local'], f.opts);
     assert.deepEqual(
       gone.map(o => o.action),
-      ['absent', 'absent', 'absent', 'absent']
+      ['absent', 'absent', 'absent', 'absent', 'absent', 'absent']
     );
   });
 
@@ -300,6 +319,8 @@ describe('plugins install/uninstall/list', () => {
     assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
       'opencode:global:absent',
+      'opencode:global:absent',
+      'opencode:local:absent',
       'opencode:local:absent',
       'opencode:local:absent',
     ]);
@@ -308,6 +329,8 @@ describe('plugins install/uninstall/list', () => {
     assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
       'opencode:global:absent',
+      'opencode:global:absent',
+      'opencode:local:installed',
       'opencode:local:installed',
       'opencode:local:installed',
     ]);

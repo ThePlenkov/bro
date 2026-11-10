@@ -29,7 +29,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitTry, hasHelpFlag, printUsage, type BroPlugin } from '@broject/core';
+import { gitTry, hasHelpFlag, printUsage, CommandError, EXIT, type BroPlugin } from '@broject/core';
 import { positionals } from './args.ts';
 
 export type PluginScope = 'global' | 'local';
@@ -155,6 +155,25 @@ function opencodeTuiArtifact(cwd: string): string | null {
   ]);
 }
 
+/** The V2 TUI half's ladder — opencode v2 discovers TUI plugins only as
+ *  `plugins/<dir>/{tui}.{ts,tsx,js}` entries, so the target is a
+ *  directory and the installed filename tracks the artifact's own
+ *  extension (source .tsx vs bundled .js). */
+function opencodeTuiV2Artifact(cwd: string): string | null {
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
+  return firstExisting([
+    pkg === null ? null : join(pkg, 'src', 'opencode-tui-v2.tsx'),
+    pkg === null ? null : join(pkg, 'dist', 'opencode-tui-v2.js'),
+    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'tui.tsx'),
+  ]);
+}
+
+/** `plugins/bro/tui.<ext>` — the v2 TUI directory entry. */
+function opencodeTuiV2Target(dir: string, artifact: string): string {
+  return join(dir, 'plugins', 'bro', `tui.${artifact.endsWith('.js') ? 'js' : 'tsx'}`);
+}
+
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
 }
@@ -175,12 +194,13 @@ function readKiloManifest(env: NodeJS.ProcessEnv): Record<string, unknown> {
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    console.error(`plugins: ${path} is not plain JSON — edit the "plugin" array by hand`);
-    process.exit(1);
+    throw new CommandError(
+      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`,
+      EXIT.error
+    );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    console.error(`plugins: ${path} must be a JSON object — edit it by hand`);
-    process.exit(1);
+    throw new CommandError(`plugins: ${path} must be a JSON object — edit it by hand`, EXIT.error);
   }
   return parsed as Record<string, unknown>;
 }
@@ -296,20 +316,27 @@ const CLIENTS: Record<string, ClientSpec> = {
       ),
       local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro.ts'),
     }),
-    extras: (cwd, env) => [
-      {
-        artifact: opencodeTuiArtifact(cwd),
-        targets: {
-          global: join(
-            env.XDG_CONFIG_HOME || join(homedir(), '.config'),
-            'opencode',
-            'plugins',
-            'bro-cli.ts'
-          ),
-          local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro-cli.ts'),
+    extras: (cwd, env) => {
+      const v2 = opencodeTuiV2Artifact(cwd);
+      const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
+      const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
+      return [
+        {
+          artifact: opencodeTuiArtifact(cwd),
+          targets: {
+            global: join(configDir, 'opencode', 'plugins', 'bro-cli.ts'),
+            local: join(localDir, 'plugins', 'bro-cli.ts'),
+          },
         },
-      },
-    ],
+        {
+          artifact: v2,
+          targets: {
+            global: opencodeTuiV2Target(join(configDir, 'opencode'), v2 ?? 'tui.tsx'),
+            local: opencodeTuiV2Target(localDir, v2 ?? 'tui.tsx'),
+          },
+        },
+      ];
+    },
   },
   kilo: {
     artifact: kiloArtifact,
@@ -457,8 +484,10 @@ export interface Outcome {
 function knownClient(name: string): ClientSpec {
   const client = CLIENTS[name];
   if (client === undefined) {
-    console.error(`plugins: unknown client "${name}" — known: ${clientNames().join(', ')}`);
-    process.exit(2);
+    throw new CommandError(
+      `plugins: unknown client "${name}" — known: ${clientNames().join(', ')}`,
+      EXIT.usage
+    );
   }
   return client;
 }
@@ -467,8 +496,10 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
   const client = knownClient(name);
   const artifact = client.artifact(opts.cwd);
   if (artifact === null) {
-    console.error(`plugins install: cannot resolve the ${name} adapter module`);
-    process.exit(1);
+    throw new CommandError(
+      `plugins install: cannot resolve the ${name} adapter module`,
+      EXIT.error
+    );
   }
   const content = readFileSync(artifact, 'utf8');
   const targets = client.targets(opts.cwd, opts.env);
@@ -660,10 +691,10 @@ function printOutcomes(outcomes: Outcome[]): void {
 function clientArg(rest: string[]): string {
   const pos = positionals(rest, new Set());
   if (pos.length !== 1) {
-    console.error(
-      `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`
+    throw new CommandError(
+      `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`,
+      EXIT.usage
     );
-    process.exit(2);
   }
   return pos[0]!;
 }
@@ -741,11 +772,11 @@ export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
       const outcomes = mutate(name, scopesOf(rest), opts);
       printOutcomes(outcomes);
       if (outcomes.some(o => o.action === 'refused')) {
-        process.exit(1);
+        throw new CommandError('plugins: refused', EXIT.error);
       }
       return;
     }
     default:
-      printUsage(PLUGINS_USAGE, 2);
+      throw new CommandError(PLUGINS_USAGE, EXIT.usage);
   }
 }
