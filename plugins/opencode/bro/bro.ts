@@ -500,8 +500,8 @@ function makeCore(input: BroCoreInput) {
   let command: Promise<Command | null> | undefined;
 
   const notify = (level: Level, message: string): void => {
-    log(level, message).catch(() => {})
-  }
+    log(level, message).catch(() => {});
+  };
 
   const probe = async (
     event: string,
@@ -589,19 +589,24 @@ function makeCore(input: BroCoreInput) {
       return pending;
     }
     notify('debug', `bro hydrate starting for session=${sessionID} event=${event}`);
-    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(control => {
-      // evict only our own failed entry — a compaction may have already
-      // replaced it with a newer probe, which must not be deleted out
-      // from under the session that owns it
-      if (control === null && rehydration.get(sessionID) === started) {
-        rehydration.delete(sessionID);
+    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(
+      control => {
+        // evict only our own failed entry — a compaction may have already
+        // replaced it with a newer probe, which must not be deleted out
+        // from under the session that owns it
+        if (control === null && rehydration.get(sessionID) === started) {
+          rehydration.delete(sessionID);
+        }
+        const ctx = contextOf(control);
+        if (ctx) {
+          notify(
+            'debug',
+            `bro hydrate injected context for session=${sessionID} len=${ctx.length}`
+          );
+        }
+        return ctx;
       }
-      const ctx = contextOf(control);
-      if (ctx) {
-        notify('debug', `bro hydrate injected context for session=${sessionID} len=${ctx.length}`);
-      }
-      return ctx;
-    });
+    );
     rehydration.set(sessionID, started);
     return started;
   };
@@ -828,7 +833,6 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
       }
     },
 
-
     async 'experimental.session.compacting'(hookInput, output) {
       const text = contextOf(
         await probe('pre-compact', { session_id: hookInput.sessionID }, REHYDRATION_TIMEOUT_MS)
@@ -865,8 +869,6 @@ export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<
         output.output = `${output.output}\n\n${text}`;
       }
     },
-
-
 
     async 'permission.ask'(hookInput, output) {
       const command = permissionCommand(hookInput);

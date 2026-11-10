@@ -542,11 +542,11 @@ export function registerConnector(c: Connector): void {
  *  (beads, git) are not removable through this. */
 export function unregisterConnector(name: string): void {
   if (builtinConnectorNames.has(name)) {
-    return
+    return;
   }
-  const idx = registry.findIndex((x) => x.name === name)
+  const idx = registry.findIndex(x => x.name === name);
   if (idx >= 0) {
-    registry.splice(idx, 1)
+    registry.splice(idx, 1);
   }
 }
 

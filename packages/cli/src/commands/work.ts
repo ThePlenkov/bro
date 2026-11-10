@@ -154,7 +154,7 @@ export function isLinkedGitDir(gitDir: string): boolean {
 
 // worktreePathFor lives in @broject/core next to mainWorktreeRoot —
 // the sibling-checkout convention is git-plane plumbing (bro-jamp7).
-export { worktreePathFor }
+export { worktreePathFor };
 
 /** A worktree's real git dir — a linked worktree's `.git` is a FILE
  *  naming `<common>/worktrees/<name>`; the main checkout's `.git` is the

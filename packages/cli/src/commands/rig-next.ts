@@ -1,53 +1,53 @@
-import type { TaskStore } from '@broject/core'
-import { rigNext, type RigNext } from '@broject/rig'
+import type { TaskStore } from '@broject/core';
+import { rigNext, type RigNext } from '@broject/rig';
 
 // Re-export the engine symbols so consumers (drive.ts, etc.) that
 // historically imported them from this adapter keep resolving.
-export { rigNext, type RigNext }
+export { rigNext, type RigNext };
 
 export async function runRigNext(
   dir: string = process.cwd(),
   item?: string | { json?: boolean; cwd?: string; dir?: string; store?: TaskStore },
   json?: boolean
 ): Promise<number> {
-  let resolvedDir = dir
-  let resolvedItem: string | undefined
-  let resolvedJson = json ?? false
-  let store: TaskStore | undefined
+  let resolvedDir = dir;
+  let resolvedItem: string | undefined;
+  let resolvedJson = json ?? false;
+  let store: TaskStore | undefined;
   if (typeof item === 'object' && item !== null) {
-    resolvedDir = item.dir ?? item.cwd ?? dir
-    resolvedJson = item.json ?? resolvedJson
-    store = item.store
-    resolvedItem = undefined
+    resolvedDir = item.dir ?? item.cwd ?? dir;
+    resolvedJson = item.json ?? resolvedJson;
+    store = item.store;
+    resolvedItem = undefined;
   } else {
-    resolvedItem = item
+    resolvedItem = item;
   }
 
-  const verdict = rigNext(resolvedDir, resolvedItem, { store })
+  const verdict = rigNext(resolvedDir, resolvedItem, { store });
   if (resolvedJson) {
-    console.log(JSON.stringify(verdict, null, 2))
-    return exitCode(verdict)
+    console.log(JSON.stringify(verdict, null, 2));
+    return exitCode(verdict);
   }
   // keep byte-identical to the pre-extraction CLI output
-  console.log(formatVerdict(verdict))
-  return exitCode(verdict)
+  console.log(formatVerdict(verdict));
+  return exitCode(verdict);
 }
 
 function formatVerdict(v: RigNext): string {
-  const verdict = v.verdict
-  const id = v.id
-  const detail = v.detail
-  let line = `rig next: ${verdict}`
+  const verdict = v.verdict;
+  const id = v.id;
+  const detail = v.detail;
+  let line = `rig next: ${verdict}`;
   if (id !== undefined) {
-    line += ` ${id}`
+    line += ` ${id}`;
   }
   if (detail !== undefined) {
-    line += ` — ${detail}`
+    line += ` — ${detail}`;
   }
-  return line
+  return line;
 }
 
 function exitCode(v: RigNext): number {
-  if (v.verdict === 'blocked') return 1
-  return 0
+  if (v.verdict === 'blocked') return 1;
+  return 0;
 }

@@ -4,9 +4,9 @@ The bro lifecycle engine as a library — one state machine per work item
 (spec `bro-oy3k1.1`), re-entered through a single verb:
 
 ```ts
-import { rigNext } from '@broject/rig'
+import { rigNext } from '@broject/rig';
 
-const verdict = rigNext(dir, item) // → step | gate | wait | done | blocked
+const verdict = rigNext(dir, item); // → step | gate | wait | done | blocked
 ```
 
 `rigNext` recomputes from durable state on every call — beads claims,
