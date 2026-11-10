@@ -58,9 +58,10 @@ import {
   acpSessionRetain,
   AcpDeadLoopError,
   AcpDeadLoopGuard,
+  ACP_COOLDOWN_DEFAULT_MS,
   AcpLaneCooldown,
   AcpCooldownError,
-  acpWallOf,
+  armWallFromError,
   otelEvent,
   otelJournal,
   otelParent,
@@ -139,6 +140,11 @@ export interface ConductorConfig {
    *  stays closed after the account refused a request. 0 disables the
    *  cooldown (the lane spawns through walls as before). */
   acpCooldownMs?: number;
+  /** The lane's wall cooldown — SHARED between the surfaces that ride
+   *  the same account: the conductor's default lane and the brokered
+   *  transport (/api/v1/acp). A wall that closed one must close the
+   *  other, or the retry storm simply moves to the other surface. */
+  cooldown?: AcpLaneCooldown;
   /** The idle window — the pooled peer is released after it (spec
    *  bro-7ira8). 0 disables the release; the /api/v1/acp transport keeps
    *  its peer (the client owns that conversation's lifetime). */
@@ -458,9 +464,15 @@ export function conductorConfig(
     acpStallMs: stallWindow(env, cfg.serve?.acpStallMs ?? 300_000),
     // the wall cooldown (spec bro-i6811) — the env pin wins over the
     // file, and 0 is a deliberate "off"
-    acpCooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? 60_000),
+    acpCooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
     idleReleaseMs: idleWindow(env, cfg.serve?.idleReleaseMs ?? 300_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
+    // the wall cooldown (spec bro-i6811) — ONE instance for the whole
+    // conductor: the default lane and the brokered transport ride the
+    // same account, so a wall that closed one must close the other.
+    cooldown: new AcpLaneCooldown({
+      cooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
+    }),
   };
 }
 
@@ -1831,11 +1843,6 @@ const AVAIL = /unavailable|timeout|timed out/i;
  *  schedule, never on a 5xx hunch. */
 const RATE = /rate.?limit|too many|quota|429/i;
 
-/** The wall cooldown's default (spec bro-i6811) — a lane that the
- *  account refused waits a minute before it spends another session on
- *  the same wall. */
-const ACP_COOLDOWN_DEFAULT_MS = 60_000;
-
 /** text-char + image-wire token estimate — an image's true cost is
  *  dimension-based, not size-based; base64-length/4 is the rough wire
  *  proxy so usage reporting doesn't silently zero a large payload
@@ -2457,7 +2464,10 @@ function requestModelOf(body: MessagesRequest): string | undefined {
  *  the NEXT request is refused BEFORE a peer is spawned. Only the
  *  account's own "no" closes the lane: a timeout, a bad model name or a
  *  broken peer is a failure of this turn, not proof that the account is
- *  under a wall. */
+ *  under a wall.
+ *
+ *  The arming POLICY lives in the provider layer (`armWallFromError`),
+ *  so the conductor and the brokered transport cannot drift apart. */
 function armWall(lane: ProviderLane, err: unknown): void {
   // the refusal is not a wall — re-arming on it would extend the wait
   // forever, one client request at a time
@@ -2471,26 +2481,17 @@ function armWall(lane: ProviderLane, err: unknown): void {
     });
     return;
   }
-  const wall = acpWallOf(err);
-  if (wall === undefined) {
+  const armed = armWallFromError(lane.cooldown, err);
+  if (armed === undefined) {
     return;
   }
-  // the account's own words (a quota wall, an explicit 429) close the
-  // lane at once; a generic provider failure is a failed TURN — the
-  // second one in the window is what says the account is struggling.
-  // Without this threshold the cooldown would answer every provider
-  // hiccup and the churn guard (spec bro-b961a) would never get to
-  // see the churn it exists to stop.
-  const seen = lane.cooldown.wallCount();
-  const arm = wall.immediate || seen > 0;
-  lane.cooldown.noteWall(wall.reason, { retryAfterSec: wall.retryAfterSec, arm });
   otelEvent('conductor.cooldown', {
     backend: lane.entry,
-    reason: wall.reason,
-    retry_after: wall.retryAfterSec,
+    reason: armed.wall.reason,
+    retry_after: armed.wall.retryAfterSec,
     walls: lane.cooldown.wallCount(),
     refused: false,
-    armed: arm,
+    armed: armed.armed,
   });
 }
 
@@ -4956,7 +4957,12 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     entry: string,
     entryCfg: AcpEntry,
     laneCfg: ConductorConfig,
-    laneOpts: ProviderWireOpts
+    laneOpts: ProviderWireOpts,
+    // the lane's wall cooldown (spec bro-i6811) — the DEFAULT lane shares
+    // the conductor's instance with the brokered transport: the two
+    // surfaces ride the SAME account, so a wall that closed one must
+    // close the other. An exposed provider lane is its own account.
+    shared?: AcpLaneCooldown
   ): void => {
     // warm pool: one acp child serves every turn of its lane — spawn +
     // initialize is paid once per provider per listener; session/new
@@ -4992,9 +4998,11 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // the lane's wall cooldown (spec bro-i6811) — a rate wall closes the
     // spawn path: the next request is refused BEFORE a peer is spawned,
     // so a retry storm costs no session and no quota.
-    const cooldown = new AcpLaneCooldown({
-      cooldownMs: laneCfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
-    });
+    const cooldown =
+      shared ??
+      new AcpLaneCooldown({
+        cooldownMs: laneCfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
+      });
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -5011,10 +5019,16 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       cooldown,
     });
   };
-  addLane(cfg.backend, cfg.entry, cfg, {
-    ...wireOpts,
-    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
-  });
+  addLane(
+    cfg.backend,
+    cfg.entry,
+    cfg,
+    {
+      ...wireOpts,
+      acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+    },
+    cfg.cooldown
+  );
   for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to

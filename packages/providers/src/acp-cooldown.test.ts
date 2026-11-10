@@ -60,15 +60,39 @@ describe('acp lane cooldown (bro-i6811)', () => {
 
   test('repeated walls escalate — a lane the account cannot serve backs off', () => {
     const cooldown = new AcpLaneCooldown({ cooldownMs: 1_000, maxCooldownMs: 4_000 });
+    // each wall arrives AFTER the previous cooldown ended — a wall
+    // during an active cooldown is the same wall, not a new one
     cooldown.noteWall('wall', { now: 0 });
     assert.equal(cooldown.refusal(0)?.retryAfterSec, 1);
     cooldown.noteWall('wall', { now: 1_000 });
     assert.equal(cooldown.refusal(1_000)?.retryAfterSec, 2);
-    cooldown.noteWall('wall', { now: 2_000 });
-    assert.equal(cooldown.refusal(2_000)?.retryAfterSec, 4);
-    // the escalation stops at the ceiling
     cooldown.noteWall('wall', { now: 3_000 });
     assert.equal(cooldown.refusal(3_000)?.retryAfterSec, 4);
+    // the escalation stops at the ceiling
+    cooldown.noteWall('wall', { now: 7_000 });
+    assert.equal(cooldown.refusal(7_000)?.retryAfterSec, 4);
+  });
+
+  test('a wall during an active cooldown does not escalate it', () => {
+    // several turns were in flight when the account said no, and each
+    // of them fails with the same refusal — one wall, not five
+    const cooldown = new AcpLaneCooldown({ cooldownMs: 1_000, maxCooldownMs: 60_000 });
+    cooldown.noteWall('wall', { now: 0 });
+    for (let i = 1; i <= 5; i++) {
+      cooldown.noteWall('wall', { now: i * 10 });
+    }
+    // the wait is still the base window — the wall did not escalate
+    assert.equal(cooldown.refusal(0)?.retryAfterSec, 1);
+    assert.equal(cooldown.refusal(500)?.retryAfterSec, 1);
+  });
+
+  test('a wall during an active cooldown never shortens it', () => {
+    const cooldown = new AcpLaneCooldown({ cooldownMs: 60_000 });
+    cooldown.noteWall('wall', { now: 0, retryAfterSec: 600 });
+    assert.equal(cooldown.refusal(0)?.retryAfterSec, 600);
+    // a later wall with a shorter wait must not pull the deadline in
+    cooldown.noteWall('wall', { now: 1_000, retryAfterSec: 5 });
+    assert.equal(cooldown.refusal(1_000)?.retryAfterSec, 599);
   });
 
   test("the provider's own retry-after is a floor under the wait", () => {
@@ -149,7 +173,27 @@ describe('the wall classifier (bro-i6811)', () => {
   test('an HTTP status is a wall', () => {
     const err = Object.assign(new Error('nope'), { status: 429 });
     assert.ok(acpWallOf(err) !== undefined);
-    assert.ok(acpWallOf(Object.assign(new Error('nope'), { status: 529 })) !== undefined);
+    const cap = acpWallOf(Object.assign(new Error('nope'), { status: 529 }));
+    assert.ok(cap !== undefined);
+    // a 529 is a CAPACITY wall — the message class is non-immediate too,
+    // so the two spellings agree
+    assert.equal(cap.immediate, false);
+  });
+
+  test("the provider's own retry-after is read when the failure carries one", () => {
+    const err = Object.assign(new Error('rate limit exceeded'), { retryAfter: 90 });
+    assert.equal(acpWallOf(err)?.retryAfterSec, 90);
+    const header = Object.assign(new Error('rate limit exceeded'), {
+      headers: { 'retry-after': '45' },
+    });
+    assert.equal(acpWallOf(header)?.retryAfterSec, 45);
+  });
+
+  test('the status outranks the message — a local cap carrying a 429 is a wall', () => {
+    const err = Object.assign(new Error('session quota reached — 1 live + 1 starting > 1'), {
+      status: 429,
+    });
+    assert.ok(acpWallOf(err) !== undefined);
   });
 
   test("bro's own session cap is NOT the account's wall", () => {

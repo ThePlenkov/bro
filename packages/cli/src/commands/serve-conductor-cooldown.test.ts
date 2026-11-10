@@ -6,6 +6,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeAcpAgent } from '@broject/providers/testkit';
+import { AcpLaneCooldown } from '@broject/providers';
 import { conductorProxy } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
@@ -167,6 +168,33 @@ describe('serve /v1/messages — the wall cooldown (bro-i6811)', () => {
       assert.equal(second.status, 429);
       assert.ok(second.headers.get('retry-after') !== null);
       assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+    }
+  });
+
+  test('the lane and the brokered transport share ONE cooldown', async () => {
+    // the two surfaces ride the SAME account: a wall that closed one
+    // must close the other, or the retry storm simply moves to the
+    // other surface
+    const shared = new AcpLaneCooldown({ cooldownMs: 60_000 });
+    const cfg: ConductorConfig = { ...CFG, cooldown: shared };
+    const fake = fakeAcpAgent({ failPrompt: 'rate-limit' });
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    );
+    try {
+      const post = () =>
+        fetch(`${url}/v1/messages`, {
+          method: 'POST',
+          headers: { ...authHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify(BODY),
+        });
+      await post();
+      // the wall closed the SHARED instance — the transport's lane rides
+      // the same account, so it is closed too
+      assert.ok(shared.refusal() !== undefined);
+      assert.equal(shared.wallCount(), 1);
     } finally {
       await close();
     }

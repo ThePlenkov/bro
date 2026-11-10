@@ -44,9 +44,10 @@ import {
   acpSessionRetain,
   AcpDeadLoopError,
   AcpDeadLoopGuard,
+  ACP_COOLDOWN_DEFAULT_MS,
   AcpLaneCooldown,
   AcpCooldownError,
-  acpWallOf,
+  armWallFromError,
   otelEvent,
   otelParent,
   otelSpan,
@@ -146,10 +147,6 @@ const DEAD_LOOP = -32003;
  *  retry-after the message names and comes back. */
 const COOLDOWN = -32004;
 
-/** The wall cooldown's default — a lane the account refused waits a
- *  minute before it spends another session on the same wall. */
-const ACP_COOLDOWN_DEFAULT_MS = 60_000;
-
 /** A brokered turn is session-scoped — thinking, tool calls, subagents
  *  routinely run past the per-request `timeoutMs` the conductor gives
  *  one Messages-API call. The floor keeps a wedged agent from parking
@@ -214,31 +211,33 @@ export function acpTransport(
   // the SAME account as the conductor, so a wall that closed the
   // conductor's lane closes this one too: the refusal happens before
   // the session opens, and costs no quota
-  const cooldown = new AcpLaneCooldown({
-    cooldownMs: cfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
-  });
+  // the SHARED instance when the conductor handed one over: the two
+  // surfaces ride the same account, so a wall that closed one must close
+  // the other — a private cooldown here would just move the retry
+  // storm to the other surface.
+  const cooldown =
+    cfg.cooldown ??
+    new AcpLaneCooldown({
+      cooldownMs: cfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
+    });
   /** The account said no — close the lane so the next session is
    * refused instead of bought. */
   const armWall = (err: unknown): void => {
     if (err instanceof AcpCooldownError) {
       return;
     }
-    const wall = acpWallOf(err);
-    if (wall === undefined) {
+    // the arming POLICY lives in the provider layer — the conductor and
+    // this transport cannot drift apart
+    const armed = armWallFromError(cooldown, err);
+    if (armed === undefined) {
       return;
     }
-    // the account's own words close the lane at once; a generic
-    // provider failure is a failed TURN — the second one in the window
-    // is what says the account is struggling
-    const seen = cooldown.wallCount();
-    const arm = wall.immediate || seen > 0;
-    cooldown.noteWall(wall.reason, { retryAfterSec: wall.retryAfterSec, arm });
     otelEvent('acp.cooldown', {
       backend: cfg.backend,
-      reason: wall.reason,
-      retry_after: wall.retryAfterSec,
+      reason: armed.wall.reason,
+      retry_after: armed.wall.retryAfterSec,
       walls: cooldown.wallCount(),
-      armed: arm,
+      armed: armed.armed,
     });
   };
   /** The lane is cooling down — the refusal costs no session. */
