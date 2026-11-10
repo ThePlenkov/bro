@@ -1592,12 +1592,14 @@ export function providerWallsFor(
       account: w.account,
       cause: w.cause,
       ...(w.until === undefined ? {} : { until: w.until }),
+      ...(w.bound === true ? { bound: true as const } : {}),
     })),
     ...readLedgerWalls(Date.now(), env.fleet?.walls).map(w => ({
       provider: w.provider ?? w.account,
       account: w.account,
       cause: w.cause,
       until: w.until,
+      ...(w.bound === true ? { bound: true as const } : {}),
     })),
   ];
   return [
@@ -2001,6 +2003,7 @@ function spawnWalls(
       account: candidate.account,
       cause: accountWall.cause,
       ...(accountWall.until === undefined ? {} : { until: accountWall.until }),
+      ...(accountWall.bound === true ? { bound: true as const } : {}),
     };
     // a registry wall on the provider and a ledger wall on the
     // candidate's account coexist — the wall that holds longer is the
