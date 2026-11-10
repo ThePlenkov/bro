@@ -67,6 +67,43 @@ describe('scopesOf', () => {
   });
 });
 
+describe('the client argument', () => {
+  test('a mistyped flag is a usage error, not a silent drop', () => {
+    // `--locla` used to vanish: every flag was dropped while the client
+    // name was read, so the command ran with the wrong scope and said
+    // nothing about the typo
+    assert.throws(
+      () => runPluginsCommand(['install', 'opencode', '--locla'], []),
+      (err: unknown) => {
+        const e = err as { code?: number; message?: string };
+        assert.equal(e.code, 2);
+        assert.match(String(e.message), /unknown option --locla/);
+        return true;
+      }
+    );
+  });
+
+  test('the known flags are accepted', () => {
+    const f = fixture();
+    const cwd = process.cwd();
+    const xdg = process.env.XDG_CONFIG_HOME;
+    process.chdir(f.cwd);
+    process.env.XDG_CONFIG_HOME = join(f.cwd, 'xdg');
+    try {
+      // a dry run mutates nothing, so the command returns without writing
+      runPluginsCommand(['install', 'opencode', '--dry-run', '--global'], []);
+    } finally {
+      process.chdir(cwd);
+      if (xdg === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = xdg;
+      }
+    }
+    assert.equal(existsSync(join(f.cwd, 'xdg')), false);
+  });
+});
+
 describe('isBroAdapter', () => {
   test('recognizes the shipped module (source and bundle shape)', () => {
     const src = join(repoRoot, 'packages/agent-plugins/opencode/src/opencode.ts');
