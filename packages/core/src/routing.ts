@@ -359,8 +359,10 @@ export interface ProviderWall {
   provider: string;
   account?: string;
   cause: 'rate_limited' | 'quota';
-  /** rate_limited only — the provider-reported reset the wall holds
-   *  until; absent when none was reported (indefinite). */
+  /** rate_limited always carries one — the provider-reported reset
+   *  when it parsed, else the death stamp + the lane's cooldown (a
+   *  missing mark never reads as indefinite, bro-uswqn). `quota`
+   *  walls carry none: a quota death holds until it is stopped. */
   until?: string;
 }
 
@@ -484,7 +486,62 @@ function wallable(e: WallRecord): e is WallRecord & { provider: string } {
 }
 
 function stamp(e: WallRecord): string {
-  return typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+  // the death stamp when the record carries one — the newest DEATH
+  // dominates the fold, and a retained attempt's spawn is older than
+  // its death (observedAt rides along since bro-uswqn)
+  const s = typeof e.observedAt === 'string' ? e.observedAt : e.spawnedAt;
+  return typeof s === 'string' ? s : '';
+}
+
+/** The fallback horizon a `rate_limited` death with no usable `resetAt`
+ *  holds to when the lane declares no `rateGate` — unknown reset never
+ *  means infinite wall (bro-uswqn: an unreported mark walled a healthy
+ *  provider for hours, refusing every batch spawn). */
+export const DEFAULT_RATE_WALL_COOLDOWN_MS = 30 * 60_000;
+
+const parseTs = (v: unknown): number | undefined => {
+  const t = typeof v === 'string' && v !== '' ? Date.parse(v) : Number.NaN;
+  return Number.isFinite(t) ? t : undefined;
+};
+
+/** The lane's cooldown after a mark-less rate death — the token
+ *  bucket's regen time for one spawn's cost (`spawnCost` requests at
+ *  `requestsPerHour`, spec bro-y3jvd) when `providers.<name>.rateGate`
+ *  is armed, else `DEFAULT_RATE_WALL_COOLDOWN_MS`. */
+function rateWallCooldownMs(
+  providers: Record<string, ProviderEntry> | undefined,
+  provider: string
+): number {
+  const entry = providers?.[provider];
+  const gate = entry !== undefined && 'rateGate' in entry ? entry.rateGate : undefined;
+  if (gate === undefined) {
+    return DEFAULT_RATE_WALL_COOLDOWN_MS;
+  }
+  const ms = (gate.spawnCost / gate.requestsPerHour) * 3_600_000;
+  // a degenerate gate (requestsPerHour ≤ 0, spawnCost ≤ 0, NaN) must not
+  // defeat the bound — Infinity would re-create the indefinite wall and a
+  // non-positive regen would lift it instantly; both fall back to the default
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_RATE_WALL_COOLDOWN_MS;
+}
+
+/** The horizon a `rate_limited` record walls until — `null` when the
+ *  wall has already lifted. The provider's own `resetAt` wins: a
+ *  parseable future mark is its word, a passed one is the proof of
+ *  lift. A missing or unparseable mark BOUNDS at the death's stamp
+ *  (`observedAt`, then `spawnedAt`) + the lane's cooldown — a death
+ *  that named no reset still walls, but never indefinitely. A record
+ *  carrying no parseable stamp at all anchors at the read: bounded
+ *  per snapshot rather than honestly anchored (pathological — spawn
+ *  stamps `spawnedAt` unconditionally). */
+function rateDeathUntil(e: WallRecord, cooldownMs: number, now: number): string | null {
+  const mark = parseTs(e.resetAt);
+  if (mark !== undefined) {
+    // horizons are ISO-normalized so `until` values compare uniformly
+    return mark <= now ? null : new Date(mark).toISOString();
+  }
+  const anchor = parseTs(e.observedAt) ?? parseTs(e.spawnedAt) ?? now;
+  const until = anchor + cooldownMs;
+  return until <= now ? null : new Date(until).toISOString();
 }
 
 /** One entry's wall-scannable records — the live fields plus each
@@ -527,10 +584,16 @@ function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
 }
 
 /** One provider's verdict — quota dominates; otherwise the newest
- *  rate_limited walls until its resetAt (indefinitely when none or an
- *  unparseable one was reported); a passed resetAt is the proof of
- *  lift. */
-function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | undefined {
+ *  rate_limited walls until its resetAt, or its death stamp + the
+ *  lane's cooldown when the provider reported none (a missing mark
+ *  never walls indefinitely, bro-uswqn); a passed horizon is the
+ *  proof of lift. */
+function accWall(
+  provider: string,
+  acc: WallAcc,
+  now: number,
+  providers?: Record<string, ProviderEntry>
+): ProviderWall | undefined {
   if (acc.quota !== undefined) {
     const account = typeof acc.quota.account === 'string' ? acc.quota.account : acc.quota.provider;
     return { provider, account, cause: 'quota' };
@@ -539,23 +602,16 @@ function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | un
   if (e === undefined) {
     return undefined; // unreachable — a non-quota acc exists only via a rate death
   }
-  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined;
-  const t = until === undefined ? Number.NaN : Date.parse(until);
-  if (until !== undefined && Number.isFinite(t) && t <= now) {
+  const until = rateDeathUntil(e, rateWallCooldownMs(providers, provider), now);
+  if (until === null) {
     return undefined;
   }
-  return until === undefined
-    ? {
-        provider,
-        account: typeof e.account === 'string' ? e.account : e.provider,
-        cause: 'rate_limited',
-      }
-    : {
-        provider,
-        account: typeof e.account === 'string' ? e.account : e.provider,
-        cause: 'rate_limited',
-        until,
-      };
+  return {
+    provider,
+    account: typeof e.account === 'string' ? e.account : e.provider,
+    cause: 'rate_limited',
+    until,
+  };
 }
 
 /** Derive walls from registry entries — `rate_limited`/`quota` deaths
@@ -566,14 +622,18 @@ function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | un
  *  quota dominates: ANY unstopped quota death walls until every
  *  quota-caused entry on the provider is stopped. Otherwise the
  *  newest unstopped `rate_limited` death (spawnedAt — a respawn
- *  re-stamps it) walls until its `resetAt`, indefinitely when none
- *  was reported; a passed resetAt is the proof of lift. Deliberately
- *  pessimistic — one worker's rate limit may not be the provider's,
- *  but routing around a healthy provider costs seconds while a
- *  retry-storm burns the budget the taxonomy protects. */
+ *  re-stamps it) walls until its `resetAt`; a missing or unparseable
+ *  mark bounds at the death stamp + the lane's `rateGate` cooldown
+ *  (`providers` — `DEFAULT_RATE_WALL_COOLDOWN_MS` when the lane arms
+ *  no gate), never indefinite (bro-uswqn). A passed horizon is the
+ *  proof of lift. Deliberately pessimistic — one worker's rate limit
+ *  may not be the provider's, but routing around a healthy provider
+ *  costs seconds while a retry-storm burns the budget the taxonomy
+ *  protects. */
 export function deriveProviderWalls(
   registry: Record<string, AgentRegistryEntry>,
-  now = Date.now()
+  now = Date.now(),
+  providers?: Record<string, ProviderEntry>
 ): ProviderWall[] {
   const byProvider = new Map<string, WallAcc>();
   for (const e of Object.values(registry)) {
@@ -587,7 +647,7 @@ export function deriveProviderWalls(
     }
   }
   return [...byProvider]
-    .map(([provider, acc]) => accWall(provider, acc, now))
+    .map(([provider, acc]) => accWall(provider, acc, now, providers))
     .filter((w): w is ProviderWall => w !== undefined)
     .sort((a, b) => a.provider.localeCompare(b.provider));
 }
@@ -618,14 +678,15 @@ function foldAccountWallRecord(
 function accountWallFrom(
   account: string,
   { acc }: AccountWallAccumulator,
-  now: number
+  now: number,
+  providers?: Record<string, ProviderEntry>
 ): AccountWall | undefined {
   const source = acc.quota ?? acc.rate;
   if (source === undefined) {
     return undefined;
   }
   const cause = acc.quota === undefined ? 'rate_limited' : 'quota';
-  const until = accountWallUntil(source, cause, now);
+  const until = accountWallUntil(source, cause, now, providers);
   if (until === null) {
     return undefined;
   }
@@ -638,23 +699,19 @@ function accountWallFrom(
   };
 }
 
+/** Quota holds open-ended (a genuine exhaustion lifts by the operator's
+ *  hand); a rate death shares `rateDeathUntil`'s bounded horizon —
+ *  the cooldown reads the observing provider's `rateGate`. */
 function accountWallUntil(
   source: WallRecord & { provider: string },
   cause: AccountWall['cause'],
-  now: number
+  now: number,
+  providers?: Record<string, ProviderEntry>
 ): string | null | undefined {
   if (cause === 'quota') {
     return undefined;
   }
-  const resetAt = source.resetAt;
-  if (typeof resetAt !== 'string' || resetAt === '') {
-    return undefined;
-  }
-  const resetMs = Date.parse(resetAt);
-  if (Number.isFinite(resetMs) && resetMs <= now) {
-    return null;
-  }
-  return resetAt;
+  return rateDeathUntil(source, rateWallCooldownMs(providers, source.provider), now);
 }
 
 function accountWallMetadata(
@@ -675,7 +732,8 @@ function accountWallMetadata(
 
 export function deriveAccountWalls(
   registry: Record<string, AgentRegistryEntry>,
-  now = Date.now()
+  now = Date.now(),
+  providers?: Record<string, ProviderEntry>
 ): AccountWall[] {
   const byAccount = new Map<string, AccountWallAccumulator>();
   for (const [step, entry] of Object.entries(registry)) {
@@ -688,7 +746,7 @@ export function deriveAccountWalls(
     }
   }
   return [...byAccount]
-    .map(([account, row]) => accountWallFrom(account, row, now))
+    .map(([account, row]) => accountWallFrom(account, row, now, providers))
     .filter((wall): wall is AccountWall => wall !== undefined)
     .sort((a, b) => a.account.localeCompare(b.account));
 }

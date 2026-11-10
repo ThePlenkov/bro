@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { Socket } from 'node:net';
 
 const live = new Set<ChildProcess>();
@@ -155,11 +156,20 @@ export function pickOrphanProcs(
     .map(r => r.pid);
 }
 
-/** Read the rows pickOrphanProcs needs out of /proc — linux-only;
- *  anything else returns []. Races are the norm: a pid vanishing
- *  mid-scan just drops out. */
+/** Read the rows pickOrphanProcs needs out of /proc — linux reads the
+ *  fs, darwin shells out to ps/lsof; anything else returns []. Races
+ *  are the norm: a pid vanishing mid-scan just drops out. */
 export function readProcRows(procDir = '/proc'): ProcRow[] {
-  if (process.platform !== 'linux') return [];
+  if (process.platform === 'linux') {
+    return readProcRowsLinux(procDir);
+  }
+  if (process.platform === 'darwin') {
+    return readProcRowsDarwin();
+  }
+  return [];
+}
+
+function readProcRowsLinux(procDir: string): ProcRow[] {
   let uptimeSec = 0;
   try {
     uptimeSec = Number(readFileSync(`${procDir}/uptime`, 'utf8').split(' ')[0]);
@@ -200,6 +210,218 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
     }
   }
   return rows;
+}
+
+/** One valid `pid=,ppid=,lstart=,comm=` line as its leading pair —
+ *  null for header/short/garbage rows. */
+function psPidPpid(line: string): { pid: number; ppid: number; parts: string[] } | null {
+  const parts = line.replace(/^\s+/, '').split(/\s+/);
+  if (parts.length < 3) return null;
+  const pid = Number(parts[0]);
+  const ppid = Number(parts[1]);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return { pid, ppid, parts };
+}
+
+/** The lstart/comm split of a ps row — lstart is 4 tokens (no year)
+ *  or 5 (with year), so scan for the first 5-or-4-token run that
+ *  Date.parse accepts; comm is whatever tokens remain. The token-join
+ *  (not a regex on the raw line) keeps comm free of pattern escapes. */
+function lstartComm(parts: string[]): { lstart: string; comm: string } | null {
+  for (let start = 2; start <= parts.length - 1; start++) {
+    for (let len = 5; len >= 4 && start + len <= parts.length; len--) {
+      const candidate = parts.slice(start, start + len).join(' ');
+      if (!Number.isNaN(Date.parse(candidate))) {
+        return {
+          lstart: candidate,
+          comm: parts
+            .slice(start + len)
+            .join(' ')
+            .trim(),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/** basename of a comm spelling — `ps` may print the full path. */
+function commBase(comm: string): string {
+  return (comm.includes('/') ? (comm.split('/').pop() ?? comm) : comm) || '';
+}
+
+/** one `lsof -Fn` batch → `p<pid>`/`n<path>` rows folded into the
+ *  cwd map — the row parser, split out so the chunk loop stays flat */
+function lsofCwdRows(lout: string, cwdMap: Map<number, string>): void {
+  let currentPid: number | null = null;
+  for (const l of lout.split('\n')) {
+    if (l.startsWith('p')) {
+      const v = Number(l.slice(1));
+      currentPid = Number.isInteger(v) ? v : null;
+      continue;
+    }
+    if (l.startsWith('n') && currentPid !== null) {
+      cwdMap.set(currentPid, l.slice(1));
+    }
+  }
+}
+
+/** pid → cwd for every live pid, batched through chunked
+ *  `lsof -d cwd` runs (a single -p list would blow argv on a busy
+ *  box). A failed chunk just leaves its pids to the per-pid fallback. */
+function lsofCwdMap(pids: number[]): Map<number, string> {
+  const cwdMap = new Map<number, string>();
+  const chunkSize = 200;
+  for (let i = 0; i < pids.length; i += chunkSize) {
+    const chunk = pids.slice(i, i + chunkSize);
+    try {
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
+        }
+      );
+      lsofCwdRows(lout, cwdMap);
+    } catch {
+      // continue to next chunk — per-pid fallback covers the gap
+    }
+  }
+  return cwdMap;
+}
+
+/** Whole-scan budget for the darwin readers — each pid missing from
+ *  the batched lsof answer otherwise gets its own timeout, so a slow
+ *  batch can stack hundreds of 500ms fallbacks into a ~100s stall that
+ *  delays watch heartbeats or holds an occupancy lock. Past the
+ *  deadline a pid keeps its batched answer (or none — a null cwd reads
+ *  as a raced pid, the same contract the sweep already handles). */
+export const DARWIN_SCAN_BUDGET_MS = 4000;
+
+/** One pid's cwd — batched answer first, then a per-pid lsof bounded
+ *  by the scan deadline; null when neither names a directory. */
+function darwinCwd(pid: number, cwdMap: Map<number, string>, deadline: number): string | null {
+  const batched = cwdMap.get(pid);
+  if (batched !== undefined && batched !== '') return batched;
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
+  try {
+    const lout = execFileSync(
+      'lsof', // NOSONAR — PATH lookup is the contract
+      ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+      {
+        encoding: 'utf8',
+        timeout: Math.min(500, left),
+      }
+    );
+    const cline = lout.split('\n').find(l => l.startsWith('n'));
+    return cline === undefined ? null : cline.slice(1);
+  } catch {
+    return null;
+  }
+}
+
+/** ppid → parent comm for every unique non-init parent, in one ps. */
+function batchParentComms(ppids: number[]): Map<number, string | null> {
+  const parentComms = new Map<number, string | null>();
+  if (ppids.length === 0) return parentComms;
+  try {
+    const pout = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', ppids.join(','), '-o', 'pid=,comm='],
+      {
+        encoding: 'utf8',
+        timeout: 1000,
+      }
+    );
+    for (const l of pout.split('\n').filter(Boolean)) {
+      const t = l.trim().split(/\s+/);
+      if (t.length >= 2) {
+        parentComms.set(Number(t[0]), commBase(t.slice(1).join(' ')) || null);
+      }
+    }
+  } catch {
+    // per-pid fallback covers the gap
+  }
+  return parentComms;
+}
+
+/** A row's parent comm — 'launchd' for pid-1 children, the batched
+ *  answer when ps had it, else a per-pid ps bounded by the scan
+ *  deadline (same stall class as the lsof fallback). */
+function darwinParentComm(
+  ppid: number,
+  parentComms: Map<number, string | null>,
+  deadline: number
+): string | null {
+  if (ppid === 1) return 'launchd';
+  if (ppid <= 0) return null;
+  const batched = parentComms.get(ppid);
+  if (batched !== undefined && batched !== null) return batched;
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
+  try {
+    const pout = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-p', String(ppid), '-o', 'comm='],
+      {
+        encoding: 'utf8',
+        timeout: Math.min(500, left),
+      }
+    );
+    return commBase(pout.trim()) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** One ps line → a ProcRow, or null when the line has no parseable
+ *  lstart (weird rows drop out like a raced pid does on linux). */
+function darwinRow(
+  line: string,
+  cwdMap: Map<number, string>,
+  parentComms: Map<number, string | null>,
+  deadline: number
+): ProcRow | null {
+  const lead = psPidPpid(line);
+  if (lead === null) return null;
+  const parsed = lstartComm(lead.parts);
+  if (parsed === null) return null;
+  return {
+    pid: lead.pid,
+    comm: commBase(parsed.comm),
+    ppid: lead.ppid,
+    parentComm: darwinParentComm(lead.ppid, parentComms, deadline),
+    cwd: darwinCwd(lead.pid, cwdMap, deadline),
+    startMs: Date.parse(parsed.lstart),
+  };
+}
+
+function readProcRowsDarwin(): ProcRow[] {
+  let lines: string[];
+  try {
+    const out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-axo', 'pid=,ppid=,lstart=,comm='],
+      {
+        encoding: 'utf8',
+        timeout: 2000,
+        env: { ...process.env, LC_ALL: 'C', LC_TIME: 'C' },
+      }
+    );
+    lines = out.split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+  const deadline = Date.now() + DARWIN_SCAN_BUDGET_MS;
+  const leads = lines.map(psPidPpid).filter((l): l is NonNullable<typeof l> => l !== null);
+  const cwdMap = lsofCwdMap(leads.map(l => l.pid));
+  const uniquePpids = new Set(leads.filter(l => l.ppid > 0 && l.ppid !== 1).map(l => l.ppid));
+  const parentComms = batchParentComms(Array.from(uniquePpids));
+  return lines
+    .map(line => darwinRow(line, cwdMap, parentComms, deadline))
+    .filter((r): r is ProcRow => r !== null);
 }
 
 export interface OrphanSweepReport {

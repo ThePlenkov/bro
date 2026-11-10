@@ -677,29 +677,127 @@ cursor_permission_ask() {
   printf '%s\n' '{"permission":"ask"}'
 }
 
+HOOK_SPOOL_STARTED=0
+
+hook_spool_prepare() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  if [ -n "${BRO_HOOK_SPOOL:-}" ]; then
+    HOOK_SPOOL=$BRO_HOOK_SPOOL
+  elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    HOOK_SPOOL=$XDG_STATE_HOME/bro/hooks.spool
+  elif [ -n "${HOME:-}" ]; then
+    HOOK_SPOOL=$HOME/.local/state/bro/hooks.spool
+  else
+    # No XDG_STATE_HOME/HOME and no explicit pin — Node resolves the OS
+    # home via the passwd db, which the shell cannot (same doubt-defers
+    # rule as the mailbox probe above); a guessed root-level path only
+    # fails mkdir or lands where the reader never looks. Empty
+    # HOOK_SPOOL tells the writers to skip the row.
+    HOOK_SPOOL=
+    return 0
+  fi
+  case "$HOOK_SPOOL" in
+    */*) HOOK_SPOOL_DIR=${HOOK_SPOOL%/*}; [ -n "$HOOK_SPOOL_DIR" ] || HOOK_SPOOL_DIR=/ ;;
+    *) HOOK_SPOOL_DIR=. ;;
+  esac
+  if [ ! -d "$HOOK_SPOOL_DIR" ]; then
+    mkdir -p "$HOOK_SPOOL_DIR" 2>/dev/null || :
+  fi
+}
+
+hook_spool_identity() {
+  HOOK_SPOOL_HOST=unknown
+  if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=cursor
+  elif [ -n "${DEVIN_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=devin
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=claude
+  fi
+  HOOK_SPOOL_ID=$$-$BRO_HOOK_T0
+}
+
+hook_spool_start() {
+  HOOK_SPOOL_STARTED=1
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
+  hook_spool_identity
+  printf 'v1\t%s\tstart\t%s\t%s\t%s\t%s\n' \
+    "$BRO_HOOK_T0" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
+hook_spool_end() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  [ -n "${HOOK_SPOOL:-}" ] || return 0
+  hook_spool_identity
+  _hook_spool_ts=$(date +%s 2>/dev/null) || _hook_spool_ts=$BRO_HOOK_T0
+  printf 'v1\t%s\tend\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$_hook_spool_ts" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "$1" "$2" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
-  _rc=$?
+  _rc=0
+  hook_spool_start
+  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" || _rc=$?
   # BRO_HOOKS_NO_FALLBACK=1 — the latency bench pins it so the in-tree
   # dist result IS the measurement: a nonzero exit or an expired
   # deadline is the error, never a PATH-bro swap. Never set it on a
-  # live session: it weakens the fail-open contract.
+  # live session: it weakens the fail-open contract. The end row still
+  # lands — a pinned exit without it reads as a host kill in the spool.
   if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
-    { [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; } && exit 1
+    if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+      hook_spool_end "$_rc" watchdog
+      exit 1
+    fi
+    if [ "$_rc" -ne 0 ]; then
+      hook_spool_end "$_rc" nonzero
+      exit 1
+    fi
+    hook_spool_end "$_rc" ok
     exit 0
   fi
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
-  [ "$_rc" -eq 0 ] && exit 0
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    hook_spool_end "$_rc" watchdog
+    cursor_permission_ask
+    exit 0
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    hook_spool_end "$_rc" ok
+    exit 0
+  fi
 fi
 # same pin when dist or node is missing — the PATH fallback must not
 # hide it either
 [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
 if command -v bro >/dev/null 2>&1; then
-  run_bounded bro hooks "$@" || true
-  # run_bounded already journaled the kill — a second row here would
-  # double-count one expiry (kody: two killed.jsonl rows per kill)
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
+  _rc=0
+  [ "$HOOK_SPOOL_STARTED" = 1 ] || hook_spool_start
+  run_bounded bro hooks "$@" || _rc=$?
+  # run_bounded already journaled the kill into killed.jsonl — the
+  # spool end rows here are the start/end pairing, not a second kill
+  # row (kody: two killed.jsonl rows per kill)
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    hook_spool_end "$_rc" watchdog
+    cursor_permission_ask
+    exit 0
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    hook_spool_end "$_rc" ok
+  else
+    hook_spool_end "$_rc" nonzero
+  fi
 else
+  if [ "$HOOK_SPOOL_STARTED" = 1 ]; then
+    hook_spool_end "$_rc" nonzero
+  else
+    hook_spool_end 0 no-cli
+  fi
   cursor_permission_ask
 fi
 exit 0
