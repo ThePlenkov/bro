@@ -117,6 +117,16 @@ export function evaluateExitGate(
   if (state.isDraft) {
     blockers.push('PR is a draft')
   }
+  // reviewDecision is a third axis beside threads and checks: a
+  // standing CHANGES_REQUESTED vetoes the merge on the host even when
+  // every thread resolved (bro-n1foa — #931 refused with
+  // open_threads=0). A review whose threads all resolved is stale and
+  // dismissible; anything else waits on the reviewer's re-review.
+  if (state.reviewDecision === 'CHANGES_REQUESTED') {
+    blockers.push(
+      'reviewDecision=CHANGES_REQUESTED — a reviewer veto stands; dismiss a stale review or wait for re-review'
+    )
+  }
   // act.requireApproval — the hostile-input hardening: agent output
   // never auto-lands without a trusted human's approving review on the
   // CURRENT head (latest review per reviewer; a standing
