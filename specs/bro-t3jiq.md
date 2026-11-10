@@ -61,10 +61,28 @@ against that branch. The root is read from the stack, not from the merge
 state: layer 1 stays a member after it merges, so the sync keeps using
 `feat/router-routes` as the chain's base.
 
+**...until that root is GONE.** The rule above reads the stack, not the
+merge state, and a merged member's edge names a branch that the platform
+deleted. The root therefore must be a branch that still exists
+(spec `bro-pax1l`, PR [#951](https://github.com/ThePlenkov/bro/pull/951)):
+
+- the first member MERGED → the chain stands on the default branch — the
+  same answer the plan gives the member above it ("the nearest lower
+  member still open, or the default branch");
+- the first member's edge names a branch that no longer exists (the arc's
+  own base merged before the layer above it did) → the chain falls back
+  to the default branch too, where that work landed.
+
+So after layer 1 merges, `bro stack sync router` retargets the layers
+against `main`, not against `feat/router-routes` — the merged arc's work
+is in `main` already, and planning onto the deleted branch is what made
+the sync refuse to move the members still in the chain.
+
 **Check the recorded root before syncing.** The root the sync uses is the
-chain's first member's RECORDED EDGE, and `bro stack list` shows the PR's
-declared base when a PR exists — the two can differ, and the list can look
-right while the sync targets another branch. The edge is a file per branch
+chain's first member's RECORDED EDGE — when that branch still exists —
+and `bro stack list` shows the PR's declared base when a PR exists — the
+two can differ, and the list can look right while the sync targets
+another branch. The edge is a file per branch
 under `<git-common-dir>/bro/stack/` (the file's name is the branch,
 url-encoded); read it directly:
 
@@ -82,6 +100,12 @@ that is gone — the next sync reads the base, cannot find it, and skips that
 member with a reason. The recovery is manual: re-record the edge under
 `<git-common-dir>/bro/stack/<branch>` with the base the member should stand
 on, or delete that file and let the base fall back to the PR's own base.
+
+Since `bro-pax1l` the CHAIN ROOT no longer stumbles on that: a dead edge
+is never a base, so the root falls back to the default branch and the sync
+keeps moving the members that are still in the chain. The per-member edge
+above still needs the manual repair — the root is one branch, the edge is
+the member's own base.
 
 ### The rules
 

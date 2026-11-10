@@ -104,9 +104,22 @@ entirely (a warn line says so): every bead runs the literal template.
 Other `loop` keys: `bootstrap` (runs once per worktree),
 `stallMin` (advisory output-silence flag at check-in — never a kill),
 `mergeTimeoutMin`, `fixRounds`, `maxItems`, `maxOpen` — the gate stack's
-open-PR cap (default 3) — `worktreeMb` / `diskMinSlots`, the disk
+open-PR cap (default 1) — `maxOpenTotal` (default 10, total fleet PRs),
+`worktreeWarn` (default 40), `worktreeMb` / `diskMinSlots`, the disk
 floor below — and `batch` / `batchMinPriority`, the clump
 knobs below.
+
+**Spawn guard invariant (spec bro-eqi2d)** — every spawn the loop
+prepares passes the external-agent exclusion first: while an agent this
+rig does not own is actively working on the host (an interactive devin
+or opencode session, a foreign worker, a live copilot task, a session
+that armed `.work`/`.task` markers here), the pass refuses `cap` —
+`external agent active — <kind>: <detail>` — and holds for the next
+tick. The session goes idle after `spawn.externalIdleSec` (default
+480s) of no proven activity; `spawn.externalBlock: false` opts out.
+The quota lanes (`agents.<kind>.maxSessions/maxWorkers/
+maxBatchWorkers`) and provider walls refuse on their own — the two
+guards are independent, both must hold.
 
 ## Commands
 
@@ -115,6 +128,7 @@ knobs below.
 | `bro flow loop`                         | Run the queue until idle or gated                                                                                                                                                                                                                                       |
 | `bro flow loop --max N`                 | At most N beads this run                                                                                                                                                                                                                                                |
 | `bro flow loop --max-open N`            | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot                                                                                                                                                                             |
+| `bro flow loop --max-open-total N`      | Hard ceiling on total open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-`) — claims held while >= ceiling; 0 = off (default 10)                                                                                                                                         |
 | `bro flow loop --disk-min-slots N`      | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables)                                                                                                                                |
 | `bro flow loop --dry-run`               | Print the top item's plan (claim, worktree, agent cmd) — changes nothing                                                                                                                                                                                                |
 | `bro flow loop --agent '<tpl>'`         | One-off agent override — a provider name resolves through the registry                                                                                                                                                                                                  |
@@ -168,11 +182,14 @@ knobs below.
   deferred snooze for `loop.parkedWakeMin` (default 2h — then it wakes
   to `open` on the next ready read; `0` ices it until `bd undefer`),
   and the worktree stays as the resume cache.
-- **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
-  many gates sit on the stack; a full stack services gates only until a
-  merge frees a slot. Independent branches drift against shared files
-  fast — keep the cap tight rather than wide, or run `--stack` so
-  members chain onto each other and conflicts surface at rebase-time.
+- **The open-PR set is bounded** — `loop.maxOpen` (default 1, serial) caps how
+  many gates sit on the stack; `loop.maxOpenTotal` (default 10) is a hard
+  ceiling on all open fleet PRs (`work/`,`loop/`,`stack/`,`fix/bro-`). When
+  at ceiling, claims hold — only gate service and stale-orphan reconcile
+  run. A full stack services gates only until a merge frees a slot.
+  Independent branches drift against shared files fast — keep the cap
+  tight rather than wide, or run `--stack` so members chain onto each
+  other and conflicts surface at rebase-time.
 - **Pushes also hold on the disk floor** — a slot is priced at
   `loop.worktreeMb` (default 400 MB: worktree + bootstrap/agent
   litter); while free disk on the worktree parent or tmpdir drops

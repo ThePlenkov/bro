@@ -14,51 +14,58 @@ import {
   refKind,
   taskStore,
   taskStoreAsync,
-} from '@broject/core'
-import type { TaskDepEdge } from '@broject/core'
-import { writeReport } from './report.ts'
-import type { DrillReportInput } from './report.ts'
-import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
+} from '@broject/core';
+import type { TaskDepEdge, TaskStore } from '@broject/core';
+import { writeReport } from './report.ts';
+import type { DrillReportInput } from './report.ts';
+import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts';
 
-const DRILL_LABEL = 'drill'
-const PREVENTION_LABEL = 'prevention'
+const DRILL_LABEL = 'drill';
+const PREVENTION_LABEL = 'prevention';
 /** bro-oy3k1.3 — the interrupter state: a waiting frame parks with a
  *  wake predicate in its notes and leaves the active set until a wake
  *  pops it back (stack-of-queues, LIFO). A label, never a process. */
-export const WAITING_LABEL = 'waiting'
+export const WAITING_LABEL = 'waiting';
 
 function isWaiting(row: DrillRow): boolean {
-  return row.labels?.includes(WAITING_LABEL) ?? false
+  return row.labels?.includes(WAITING_LABEL) ?? false;
 }
 
 function isDrill(row: DrillRow): boolean {
-  return row.labels?.includes(DRILL_LABEL) ?? false
+  return row.labels?.includes(DRILL_LABEL) ?? false;
 }
 
 function isOpen(row: DrillRow): boolean {
-  return row.status !== 'closed' && row.status !== 'done'
+  return row.status !== 'closed' && row.status !== 'done';
 }
 
-export function listDrills(): DrillRow[] {
-  const persistent = taskStore().list<DrillRow>({
+/** `dir` anchors the read at another checkout; `opts.store` pins the
+ *  tasks backend outright — a caller that already resolved one probes
+ *  the same rows it will judge. Wisps stay dir-anchored regardless:
+ *  ephemeral frames live in the checkout's bd plane, a pinned tasks
+ *  store does not relocate them. */
+export function listDrills(dir?: string, opts?: { store?: TaskStore }): DrillRow[] {
+  const persistent = (opts?.store ?? taskStore(dir)).list<DrillRow>({
     labels: [DRILL_LABEL],
     all: true,
     limit: 0,
-  })
+  });
   // ephemeral frames live in the wisp namespace, outside `bd list`
-  let wisps: DrillRow[] = []
-  try {
-    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'])
-    wisps = (out.wisps ?? []).filter(isDrill)
-  } catch (err) {
-    // tolerate only an explicitly unsupported command (older bd) — a
-    // failed or malformed listing must not silently hide live wisps
-    const msg = err instanceof Error ? err.message : String(err)
-    if (!/unknown command|unrecognized command/i.test(msg)) {
-      throw err
+  let wisps: DrillRow[] = [];
+  if (opts?.store === undefined) {
+    try {
+      const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir);
+      wisps = (out.wisps ?? []).filter(isDrill);
+    } catch (err) {
+      // tolerate only an explicitly unsupported command (older bd) — a
+      // failed or malformed listing must not silently hide live wisps
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/unknown command|unrecognized command/i.test(msg)) {
+        throw err;
+      }
     }
   }
-  return [...persistent, ...wisps]
+  return [...persistent, ...wisps];
 }
 
 /** Async listDrills — the probe-path twin; the wisp and persistent
@@ -71,67 +78,74 @@ export async function listDrillsAsync(dir?: string): Promise<DrillRow[]> {
         all: true,
         limit: 0,
       })
-      .then((rows) => rows as DrillRow[]),
+      .then(rows => rows as DrillRow[]),
     (async (): Promise<DrillRow[]> => {
       try {
-        const out = await bdJsonAsync<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir)
-        return (out.wisps ?? []).filter(isDrill)
+        const out = await bdJsonAsync<{ wisps?: DrillRow[] }>(
+          ['mol', 'wisp', 'list', '--all'],
+          dir
+        );
+        return (out.wisps ?? []).filter(isDrill);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = err instanceof Error ? err.message : String(err);
         if (!/unknown command|unrecognized command/i.test(msg)) {
-          throw err
+          throw err;
         }
-        return []
+        return [];
       }
     })(),
-  ])
-  return [...persistent, ...wisps]
+  ]);
+  return [...persistent, ...wisps];
 }
 
 export function childrenOf(id: string): DrillRow[] {
-  return taskStore().children<DrillRow>(id)
+  return taskStore().children<DrillRow>(id);
 }
 
 /** Descent path [root, …, id] for reports — cycle-safe (a broken dep
  *  graph must not hang the walk). */
 export function drillChain(id: string): string[] {
-  const { parents } = drillRelations(listDrills())
-  const chain = [id]
-  const seen = new Set(chain)
-  let cur = id
+  const { parents } = drillRelations(listDrills());
+  const chain = [id];
+  const seen = new Set(chain);
+  let cur = id;
   for (;;) {
-    const parent = parents.get(cur)
+    const parent = parents.get(cur);
     if (parent === undefined || seen.has(parent)) {
-      break
+      break;
     }
-    chain.unshift(parent)
-    seen.add(parent)
-    cur = parent
+    chain.unshift(parent);
+    seen.add(parent);
+    cur = parent;
   }
-  return chain
+  return chain;
 }
 
-type DepEdge = TaskDepEdge
+type DepEdge = TaskDepEdge;
 
 /** One `bd dep list` sweep: parent→kids and kid→parent in a single call
  * (was N+1 `bd children`). kids holds DRILL children only — every
  * consumer filters on isDrill anyway; drillUp's any-child close check
  * still uses childrenOf directly. */
-function drillRelations(rows: DrillRow[]): {
-  kids: Map<string, DrillRow[]>
-  parents: Map<string, string>
+function drillRelations(
+  rows: DrillRow[],
+  dir?: string,
+  opts?: { store?: TaskStore }
+): {
+  kids: Map<string, DrillRow[]>;
+  parents: Map<string, string>;
 } {
-  const kids = new Map<string, DrillRow[]>()
-  const parents = new Map<string, string>()
+  const kids = new Map<string, DrillRow[]>();
+  const parents = new Map<string, string>();
   if (rows.length === 0) {
-    return { kids, parents }
+    return { kids, parents };
   }
-  const byId = new Map(rows.map((r) => [r.id, r]))
-  const edges = taskStore().deps<DepEdge>(
-    rows.map((r) => r.id),
+  const byId = new Map(rows.map(r => [r.id, r]));
+  const edges = (opts?.store ?? taskStore(dir)).deps<DepEdge>(
+    rows.map(r => r.id),
     { rel: 'parent' }
-  )
-  return foldDepEdges(rows, byId, edges)
+  );
+  return foldDepEdges(rows, byId, edges);
 }
 
 function foldDepEdges(
@@ -139,18 +153,18 @@ function foldDepEdges(
   byId: Map<string, DrillRow>,
   edges: DepEdge[]
 ): { kids: Map<string, DrillRow[]>; parents: Map<string, string> } {
-  const kids = new Map<string, DrillRow[]>()
-  const parents = new Map<string, string>()
+  const kids = new Map<string, DrillRow[]>();
+  const parents = new Map<string, string>();
   for (const e of edges) {
-    const kid = byId.get(e.issue_id)
-    const parent = byId.get(e.depends_on_id)
+    const kid = byId.get(e.issue_id);
+    const parent = byId.get(e.depends_on_id);
     if (e.type !== 'parent' || !kid || !parent) {
-      continue // only drill↔drill edges — same as the old per-row sweep
+      continue; // only drill↔drill edges — same as the old per-row sweep
     }
-    kids.set(parent.id, [...(kids.get(parent.id) ?? []), kid])
-    parents.set(kid.id, parent.id)
+    kids.set(parent.id, [...(kids.get(parent.id) ?? []), kid]);
+    parents.set(kid.id, parent.id);
   }
-  return { kids, parents }
+  return { kids, parents };
 }
 
 async function drillRelationsAsync(
@@ -158,14 +172,14 @@ async function drillRelationsAsync(
   dir?: string
 ): Promise<{ kids: Map<string, DrillRow[]>; parents: Map<string, string> }> {
   if (rows.length === 0) {
-    return { kids: new Map(), parents: new Map() }
+    return { kids: new Map(), parents: new Map() };
   }
-  const byId = new Map(rows.map((r) => [r.id, r]))
+  const byId = new Map(rows.map(r => [r.id, r]));
   const edges = await taskStoreAsync(dir).deps<DepEdge>(
-    rows.map((r) => r.id),
+    rows.map(r => r.id),
     { rel: 'parent' }
-  )
-  return foldDepEdges(rows, byId, edges)
+  );
+  return foldDepEdges(rows, byId, edges);
 }
 
 /**
@@ -173,24 +187,24 @@ async function drillRelationsAsync(
  * deepest path. Ties break on most-recently-updated — the frame the agent
  * touched last is almost always the live one.
  */
-export function currentFrame(): DrillFrame | undefined {
-  const rows = listDrills().filter(isOpen)
+export function currentFrame(dir?: string, opts?: { store?: TaskStore }): DrillFrame | undefined {
+  const rows = listDrills(dir, opts).filter(isOpen);
   if (rows.length === 0) {
-    return undefined
+    return undefined;
   }
-  const { kids, parents } = drillRelations(rows)
-  return pickLeaf(rows, kids, parents)
+  const { kids, parents } = drillRelations(rows, dir, opts);
+  return pickLeaf(rows, kids, parents);
 }
 
 /** Async currentFrame — the lifecycle probes' read path; bd spawns
  *  overlap with the rest of the sweep instead of freezing it. */
 export async function currentFrameAsync(dir?: string): Promise<DrillFrame | undefined> {
-  const rows = (await listDrillsAsync(dir)).filter(isOpen)
+  const rows = (await listDrillsAsync(dir)).filter(isOpen);
   if (rows.length === 0) {
-    return undefined
+    return undefined;
   }
-  const { kids, parents } = await drillRelationsAsync(rows, dir)
-  return pickLeaf(rows, kids, parents)
+  const { kids, parents } = await drillRelationsAsync(rows, dir);
+  return pickLeaf(rows, kids, parents);
 }
 
 function pickLeaf(
@@ -199,38 +213,38 @@ function pickLeaf(
   parents: Map<string, string>
 ): DrillFrame | undefined {
   const depthOf = (id: string): number => {
-    let d = 0
-    let cur: string | undefined = id
+    let d = 0;
+    let cur: string | undefined = id;
     while ((cur = parents.get(cur)) !== undefined) {
-      d += 1
+      d += 1;
     }
-    return d
-  }
+    return d;
+  };
   // leaf = no open DRILL child. A drill frame with an open non-drill child
   // is still the active frame — close eligibility (any open child) is
   // enforced separately in drillUp. A waiting frame is suspended: the
   // interrupter hands the session to the next active leaf.
   const leaves = rows.filter(
-    (r) => !isWaiting(r) && !(kids.get(r.id) ?? []).some((k) => isOpen(k) && isDrill(k))
-  )
+    r => !isWaiting(r) && !(kids.get(r.id) ?? []).some(k => isOpen(k) && isDrill(k))
+  );
   leaves.sort((a, b) => {
-    const d = depthOf(b.id) - depthOf(a.id)
-    return d !== 0 ? d : (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
-  })
-  const leaf = leaves[0]
+    const d = depthOf(b.id) - depthOf(a.id);
+    return d !== 0 ? d : (b.updated_at ?? '').localeCompare(a.updated_at ?? '');
+  });
+  const leaf = leaves[0];
   if (!leaf) {
-    return undefined
+    return undefined;
   }
-  return { ...leaf, parentId: parents.get(leaf.id), depth: depthOf(leaf.id) }
+  return { ...leaf, parentId: parents.get(leaf.id), depth: depthOf(leaf.id) };
 }
 
 /** The bead must be an open drill frame, or an explicit selector is wrong. */
 function requireOpenDrill(id: string, flag: string): DrillRow {
-  const row = taskStore().get<DrillRow>(id)
+  const row = taskStore().get<DrillRow>(id);
   if (!row || !isDrill(row) || !isOpen(row)) {
-    throw new Error(`${flag} ${id} is not an open drill frame`)
+    throw new Error(`${flag} ${id} is not an open drill frame`);
   }
-  return row
+  return row;
 }
 
 /** Record the claim provenance; on failure, delete the frame — an
@@ -249,29 +263,29 @@ function claimFrame(id: string): void {
       'bro drill down',
       '--at',
       new Date().toISOString(),
-    ])
+    ]);
   } catch (err) {
     try {
-      taskStore().remove(id)
+      taskStore().remove(id);
     } catch (cleanupErr) {
       throw new Error(
         `claim failed: ${err instanceof Error ? err.message : err}; ` +
           `cleanup of ${id} also failed (frame left unclaimed): ` +
           `${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`
-      )
+      );
     }
-    throw err
+    throw err;
   }
 }
 
 /** Descend: create a child frame under `opts.under` or the current leaf;
  *  `opts.root` forces a parentless frame even when a leaf is open. */
 export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
-  let parent: string | undefined
+  let parent: string | undefined;
   if (opts.under) {
-    parent = requireOpenDrill(opts.under, '--under').id
+    parent = requireOpenDrill(opts.under, '--under').id;
   } else if (!opts.root) {
-    parent = currentFrame()?.id
+    parent = currentFrame()?.id;
   }
   const row = taskStore().create<DrillRow>({
     title,
@@ -281,15 +295,15 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     type: opts.type,
     priority: opts.priority,
     description: opts.description,
-  })
+  });
   if (!opts.ephemeral) {
     // wisp semantics: ephemeral frames get no audit trail
-    claimFrame(row.id)
+    claimFrame(row.id);
   }
-  return row
+  return row;
 }
 
-export { refKind }
+export { refKind };
 
 /** Open prevention beads already discovered-from this frame — the
  * dedupe set that makes prevention creation retry-safe. Throws when bd
@@ -300,9 +314,9 @@ function priorPreventionRows(frameId: string): DrillRow[] {
   const rows = taskStore().neighbors<DrillRow>(frameId, {
     direction: 'up',
     rel: 'discovered',
-  })
-  assertHydratedRows(rows, `store neighbors for ${frameId}`)
-  return rows
+  });
+  assertHydratedRows(rows, `store neighbors for ${frameId}`);
+  return rows;
 }
 
 /** Fail loudly when a bd listing returns rows without `id`/`title`/`status` —
@@ -317,23 +331,23 @@ export function assertHydratedRows(rows: DrillRow[], context: string): void {
     ) {
       throw new Error(
         `${context} returned an unexpected row shape ` +
-          `(expected hydrated issue rows): ${JSON.stringify(row).slice(0, 160)}`,
-      )
+          `(expected hydrated issue rows): ${JSON.stringify(row).slice(0, 160)}`
+      );
     }
   }
 }
 
 export interface PreventionPlan {
   /** Normalized item key (`titleKey`) → existing bead id. */
-  reuse: Map<string, string>
+  reuse: Map<string, string>;
   /** Item titles needing a new bead, in order, deduped, trimmed. */
-  create: string[]
+  create: string[];
 }
 
 /** Same-title dedupe key: "handle race" and "  Handle Race " are the
  * same prevention — exact-match would duplicate the bead on retry. */
 function titleKey(title: string): string {
-  return title.trim().toLowerCase()
+  return title.trim().toLowerCase();
 }
 
 /** Fold `--prevent` items against what the frame already recorded: an
@@ -342,24 +356,24 @@ function titleKey(title: string): string {
  * retry-safety core of drillUp: a mid-flight failure followed by a
  * retry converges instead of duplicating. */
 export function planPreventions(items: string[], prior: DrillRow[]): PreventionPlan {
-  const reuse = new Map<string, string>()
+  const reuse = new Map<string, string>();
   for (const row of prior) {
-    const key = titleKey(row.title ?? '')
+    const key = titleKey(row.title ?? '');
     if (key && isOpen(row) && row.labels?.includes(PREVENTION_LABEL) && !reuse.has(key)) {
-      reuse.set(key, row.id)
+      reuse.set(key, row.id);
     }
   }
-  const seen = new Set<string>()
-  const create: string[] = []
+  const seen = new Set<string>();
+  const create: string[] = [];
   for (const item of items) {
-    const key = titleKey(item)
+    const key = titleKey(item);
     if (!key || reuse.has(key) || seen.has(key)) {
-      continue
+      continue;
     }
-    seen.add(key)
-    create.push(item.trim())
+    seen.add(key);
+    create.push(item.trim());
   }
-  return { create, reuse }
+  return { create, reuse };
 }
 
 /** One prevention bead per item — discovered-from, not --parent:
@@ -367,46 +381,43 @@ export function planPreventions(items: string[], prior: DrillRow[]): PreventionP
  * block the parent's own close. `--title` keeps a `--`-leading item as
  * data, not a flag. `created` holds only beads this call made — the
  * compensation set; `ids` is the full per-item result (reused + new). */
-function createPreventions(
-  frameId: string,
-  items: string[],
-): { created: string[]; ids: string[] } {
-  const { create, reuse } = planPreventions(items, priorPreventionRows(frameId))
-  const created: string[] = []
-  const newIds = new Map<string, string>()
+function createPreventions(frameId: string, items: string[]): { created: string[]; ids: string[] } {
+  const { create, reuse } = planPreventions(items, priorPreventionRows(frameId));
+  const created: string[] = [];
+  const newIds = new Map<string, string>();
   for (const item of create) {
     const row = taskStore().create<DrillRow>({
       title: item,
       labels: [PREVENTION_LABEL],
       noInheritLabels: true,
       deps: [`discovered:${frameId}`],
-    })
-    created.push(row.id)
-    newIds.set(titleKey(item), row.id)
+    });
+    created.push(row.id);
+    newIds.set(titleKey(item), row.id);
   }
-  const ids: string[] = []
+  const ids: string[] = [];
   for (const item of items) {
-    const key = titleKey(item)
+    const key = titleKey(item);
     if (!key) {
-      continue
+      continue;
     }
-    const id = reuse.get(key) ?? newIds.get(key)
+    const id = reuse.get(key) ?? newIds.get(key);
     if (!id) {
-      throw new Error(`internal error: no bead id for prevention item "${item}"`)
+      throw new Error(`internal error: no bead id for prevention item "${item}"`);
     }
-    ids.push(id)
+    ids.push(id);
   }
-  return { created, ids }
+  return { created, ids };
 }
 
 /** `bd note` appends — check the stored notes first so a retry after a
  * later failure can't duplicate the memo. */
 function noteOnce(frameId: string, memo: string): void {
-  const current = taskStore().get<DrillRow>(frameId)
+  const current = taskStore().get<DrillRow>(frameId);
   if (current?.notes?.includes(memo)) {
-    return
+    return;
   }
-  taskStore().note(frameId, memo)
+  taskStore().note(frameId, memo);
 }
 
 /** Evidence refs + handoff event — skipped for wisps (no audit trail).
@@ -414,7 +425,7 @@ function noteOnce(frameId: string, memo: string): void {
  * handoff gets a fresh `--at` each run, so skip it when already logged. */
 function recordHandoff(frame: DrillRow, evidence: string[]): void {
   for (const ref of evidence) {
-    const kind = refKind(ref)
+    const kind = refKind(ref);
     bd([
       'provenance',
       'record',
@@ -428,15 +439,11 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
       ref,
       '--ref-kind',
       kind,
-    ])
+    ]);
   }
-  const logged = bdJson<Array<{ kind?: string; source?: string }>>([
-    'provenance',
-    'log',
-    frame.id,
-  ])
-  if (logged.some((e) => e.kind === 'handoff' && e.source === 'bro drill up')) {
-    return
+  const logged = bdJson<Array<{ kind?: string; source?: string }>>(['provenance', 'log', frame.id]);
+  if (logged.some(e => e.kind === 'handoff' && e.source === 'bro drill up')) {
+    return;
   }
   bd([
     'provenance',
@@ -449,7 +456,7 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
     'bro drill up',
     '--at',
     new Date().toISOString(),
-  ])
+  ]);
 }
 
 /** The frame `up` closes — explicit `--id` or the current leaf, always
@@ -457,13 +464,13 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
  *  `ephemeral`; `bd show` gives the full row. */
 function upTarget(id: string | undefined): DrillRow {
   if (id) {
-    return requireOpenDrill(id, '--id')
+    return requireOpenDrill(id, '--id');
   }
-  const leaf = currentFrame()
+  const leaf = currentFrame();
   if (!leaf) {
-    throw new Error('no open drill frame — nothing to ascend from')
+    throw new Error('no open drill frame — nothing to ascend from');
   }
-  return requireOpenDrill(leaf.id, '--id')
+  return requireOpenDrill(leaf.id, '--id');
 }
 
 /** bd has no transactions — the ordering + idempotency contract is the
@@ -477,37 +484,37 @@ function closeFrame(
   frame: DrillRow,
   memo: string,
   prevents: string[],
-  evidence: string[],
+  evidence: string[]
 ): string[] {
-  let created: string[] = []
+  let created: string[] = [];
   try {
-    noteOnce(frame.id, memo)
-    const prev = createPreventions(frame.id, prevents)
-    created = prev.created
+    noteOnce(frame.id, memo);
+    const prev = createPreventions(frame.id, prevents);
+    created = prev.created;
     if (!frame.ephemeral) {
-      recordHandoff(frame, evidence)
+      recordHandoff(frame, evidence);
     }
-    taskStore().close(frame.id, 'drill up — result handed to parent')
-    return prev.ids
+    taskStore().close(frame.id, 'drill up — result handed to parent');
+    return prev.ids;
   } catch (err) {
-    const orphans: string[] = []
+    const orphans: string[] = [];
     for (const id of created) {
       try {
-        taskStore().remove(id)
+        taskStore().remove(id);
       } catch {
-        orphans.push(id)
+        orphans.push(id);
       }
     }
     // clean cleanup → rethrow the original (same convention as claimFrame);
     // orphans force a new message — keep the failure debuggable via cause
     if (orphans.length === 0) {
-      throw err
+      throw err;
     }
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
       `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`,
-      { cause: err },
-    )
+      { cause: err }
+    );
   }
 }
 
@@ -518,12 +525,12 @@ function closeFrame(
 function reportSafely(
   dir: string,
   input: Omit<DrillReportInput, 'preventionIds' | 'date'>,
-  preventionIds: string[],
+  preventionIds: string[]
 ): { reportPath?: string; reportError?: string } {
   try {
-    return { reportPath: writeReport(dir, { ...input, preventionIds }) }
+    return { reportPath: writeReport(dir, { ...input, preventionIds }) };
   } catch (err) {
-    return { reportError: err instanceof Error ? err.message : String(err) }
+    return { reportError: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -535,27 +542,27 @@ function reportSafely(
  */
 export function drillUp(opts: UpOptions): UpResult {
   if (!opts.result.trim()) {
-    throw new Error('drill up requires --result — a frame must return a curated finding')
+    throw new Error('drill up requires --result — a frame must return a curated finding');
   }
-  const frame = upTarget(opts.id)
+  const frame = upTarget(opts.id);
   // bd refuses to close a parent with ANY open children — check before
   // writing the memo so a later failure can't leave partial state.
-  const openKids = childrenOf(frame.id).filter(isOpen)
+  const openKids = childrenOf(frame.id).filter(isOpen);
   if (openKids.length > 0) {
     throw new Error(
-      `frame ${frame.id} has open child issue(s): ${openKids.map((k) => k.id).join(', ')} — close them first`
-    )
+      `frame ${frame.id} has open child issue(s): ${openKids.map(k => k.id).join(', ')} — close them first`
+    );
   }
 
   // one normalized list for memo + beads — a whitespace-only item must
   // not appear in the memo claiming prevention work it never filed
-  const prevents = (opts.prevent ?? []).map((p) => p.trim()).filter((p) => p !== '')
+  const prevents = (opts.prevent ?? []).map(p => p.trim()).filter(p => p !== '');
   const memo = [
     '## Result',
     '',
     opts.result,
-    ...(prevents.length ? ['', '## Prevention', '', ...prevents.map((p) => `- ${p}`)] : []),
-  ].join('\n')
+    ...(prevents.length ? ['', '## Prevention', '', ...prevents.map(p => `- ${p}`)] : []),
+  ].join('\n');
 
   // gather report data while the frame is still open — a closed wisp can
   // drop out of wisp listings, taking its edges with it
@@ -568,21 +575,21 @@ export function drillUp(opts: UpOptions): UpResult {
         prevention: prevents,
         evidence: opts.evidence ?? [],
       }
-    : undefined
+    : undefined;
 
-  const preventionIds = closeFrame(frame, memo, prevents, opts.evidence ?? [])
-  const rep = reportInput ? reportSafely(opts.reportDir!, reportInput, preventionIds) : {}
-  return { closed: frame.id, preventionIds, ...rep }
+  const preventionIds = closeFrame(frame, memo, prevents, opts.evidence ?? []);
+  const rep = reportInput ? reportSafely(opts.reportDir!, reportInput, preventionIds) : {};
+  return { closed: frame.id, preventionIds, ...rep };
 }
 
 /** The wait stack — open waiting frames, most-recently-touched first
  *  (LIFO is the interrupter's resume order). */
 export function waitingFrames(): DrillRow[] {
   return listDrills()
-    .filter((r) => isOpen(r) && isDrill(r) && isWaiting(r))
+    .filter(r => isOpen(r) && isDrill(r) && isWaiting(r))
     .sort((a, b) =>
       (b.updated_at ?? b.created_at ?? '').localeCompare(a.updated_at ?? a.created_at ?? '')
-    )
+    );
 }
 
 /** Suspend a frame: `waiting` label + the wake predicate in notes.
@@ -591,22 +598,22 @@ export function waitingFrames(): DrillRow[] {
  *  payload). Idempotent — parking twice appends nothing. */
 export function parkFrame(id: string | undefined, wake: string): DrillRow {
   if (!wake.trim()) {
-    throw new Error('park requires a wake predicate — a parked frame owes a resume condition')
+    throw new Error('park requires a wake predicate — a parked frame owes a resume condition');
   }
-  const frame = id === undefined ? currentFrame() : requireOpenDrill(id, '--id')
+  const frame = id === undefined ? currentFrame() : requireOpenDrill(id, '--id');
   if (!frame) {
-    throw new Error('no open drill frame — nothing to park')
+    throw new Error('no open drill frame — nothing to park');
   }
-  const row = taskStore().get<DrillRow>(frame.id)!
+  const row = taskStore().get<DrillRow>(frame.id)!;
   if (isWaiting(row)) {
-    return row
+    return row;
   }
   // note lands first: a crash between the writes leaves a stray
   // WAKE: line on an unparked frame (harmless provenance) rather
   // than a waiting frame with no resume predicate
-  taskStore().note(frame.id, `WAKE: ${wake.trim()}`)
-  taskStore().update(frame.id, { 'add-label': WAITING_LABEL })
-  return { ...row, labels: [...(row.labels ?? []), WAITING_LABEL] }
+  taskStore().note(frame.id, `WAKE: ${wake.trim()}`);
+  taskStore().update(frame.id, { 'add-label': WAITING_LABEL });
+  return { ...row, labels: [...(row.labels ?? []), WAITING_LABEL] };
 }
 
 /** Release a waiting frame: no id pops the stack top, an explicit id
@@ -614,40 +621,40 @@ export function parkFrame(id: string | undefined, wake: string): DrillRow {
  *  no-op — it would mask a mistyped resume). */
 export function wakeFrame(id?: string): DrillRow {
   if (id !== undefined) {
-    const row = requireOpenDrill(id, 'wake')
+    const row = requireOpenDrill(id, 'wake');
     if (!isWaiting(row)) {
-      throw new Error(`${id} is not waiting — nothing to release`)
+      throw new Error(`${id} is not waiting — nothing to release`);
     }
-    taskStore().update(id, { 'remove-label': WAITING_LABEL })
-    return { ...row, labels: row.labels?.filter((l) => l !== WAITING_LABEL) }
+    taskStore().update(id, { 'remove-label': WAITING_LABEL });
+    return { ...row, labels: row.labels?.filter(l => l !== WAITING_LABEL) };
   }
-  const top = waitingFrames()[0]
+  const top = waitingFrames()[0];
   if (!top) {
-    throw new Error('no waiting frames')
+    throw new Error('no waiting frames');
   }
-  taskStore().update(top.id, { 'remove-label': WAITING_LABEL })
-  return { ...top, labels: top.labels?.filter((l) => l !== WAITING_LABEL) }
+  taskStore().update(top.id, { 'remove-label': WAITING_LABEL });
+  return { ...top, labels: top.labels?.filter(l => l !== WAITING_LABEL) };
 }
 
 /** Root frames + rendered tree (indented, roots first). */
 export function drillTree(): string {
-  const rows = listDrills()
+  const rows = listDrills();
   if (rows.length === 0) {
-    return 'no drill frames'
+    return 'no drill frames';
   }
-  const { kids, parents } = drillRelations(rows)
-  const roots = rows.filter((r) => !parents.has(r.id))
-  const lines: string[] = []
+  const { kids, parents } = drillRelations(rows);
+  const roots = rows.filter(r => !parents.has(r.id));
+  const lines: string[] = [];
   const walk = (row: DrillRow, depth: number): void => {
-    const mark = isOpen(row) ? (isWaiting(row) ? '◌' : '●') : '○'
-    const state = isWaiting(row) ? 'waiting' : row.status
-    lines.push(`${'  '.repeat(depth)}${mark} ${row.id} ${row.title} [${state}]`)
+    const mark = isOpen(row) ? (isWaiting(row) ? '◌' : '●') : '○';
+    const state = isWaiting(row) ? 'waiting' : row.status;
+    lines.push(`${'  '.repeat(depth)}${mark} ${row.id} ${row.title} [${state}]`);
     for (const kid of (kids.get(row.id) ?? []).filter(isDrill)) {
-      walk(kid, depth + 1)
+      walk(kid, depth + 1);
     }
-  }
+  };
   for (const root of roots) {
-    walk(root, 0)
+    walk(root, 0);
   }
-  return lines.join('\n')
+  return lines.join('\n');
 }

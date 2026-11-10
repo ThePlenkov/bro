@@ -30,6 +30,14 @@ export interface PrMeta {
    *  can't say — an approval gate treats absent as "not approved",
    *  never as a pass (bro-3vy93). */
   reviewDecision?: string;
+  /** Who landed the PR — the host's merge record. undefined when the
+   *  host can't say (or the PR isn't merged): the ledger then has no
+   *  actor to stand behind. */
+  mergedBy?: string;
+  /** The merge commit's sha — what actually landed on the base branch
+   *  (the squashed commit for a squash merge). undefined when the PR
+   *  isn't merged. */
+  mergeSha?: string;
 }
 
 /** One status check on the PR head — name + settled verdict. */
@@ -228,6 +236,9 @@ export interface ReviewFacade {
    *  leaves callers on the prsForBranch scan. Connector-bounded (one
    *  listing page); a repo past the cap under-counts, never errors. */
   openPrs?(repo: string): { pr: number; headRef: string }[];
+  /** Close a PR/MR without merging it (orphan/reconcile cleanup).
+   *  Optional — hosts without it report once and skip the action. */
+  closePr?(t: PrTarget): void;
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text
    *  names none. */

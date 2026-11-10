@@ -20,7 +20,10 @@ test('a slice is asked for once, however often it is named', () => {
 });
 
 test('an unknown slice is an error naming the known ones', () => {
-  assert.throws(() => parseExplainSlices('nope'), /unknown explain slice "nope".*route, model, health, cost/s);
+  assert.throws(
+    () => parseExplainSlices('nope'),
+    /unknown explain slice "nope".*route, model, health, cost/s
+  );
 });
 
 test('the flag without a value is the whole story', () => {
@@ -61,7 +64,10 @@ test('an unknown says unknown — never a zero', () => {
     source: 'the agent',
   });
   assert.equal(fact.value, 'unknown');
-  assert.match(renderExplanation(withSlice({ slices: {} }, 'cost', [fact]), ['cost']), /cost: unknown/);
+  assert.match(
+    renderExplanation(withSlice({ slices: {} }, 'cost', [fact]), ['cost']),
+    /cost: unknown/
+  );
 });
 
 test('a slice with no facts is absent — the renderer says nothing', () => {

@@ -84,3 +84,13 @@ exclude_paths:
   # computed path as uncontrolled data; the same shapes ship on main
   # unflagged.
   - 'scripts/claude-code-live-check.ts'
+
+  # The title matcher walks a formula's title PATTERN — a string, split
+  # into literal spans and `{{var}}` wildcards. There is no object and no
+  # key anywhere in the file: the pattern is a title, the walk slices it,
+  # and the segments are plain records. Codacy's object-injection rule
+  # reads the pattern's computed slices as a keyed lookup on a
+  # user-controlled object — the rule's subject does not exist in this
+  # file, and the same walk shape (a string scan with computed slices) in
+  # this PR's own markdown-link scanner is not flagged.
+  - 'packages/convoy/src/title.ts'

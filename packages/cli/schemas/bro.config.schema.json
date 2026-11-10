@@ -44,6 +44,11 @@
             ]
           }
         },
+        "selfCheck": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
         "maxRounds": {
           "type": "integer",
           "minimum": 0
@@ -873,6 +878,14 @@
           "type": "number",
           "minimum": 1
         },
+        "maxOpenTotal": {
+          "type": "number",
+          "minimum": 0
+        },
+        "worktreeWarn": {
+          "type": "number",
+          "minimum": 0
+        },
         "worktreeMb": {
           "type": "number",
           "minimum": 1
@@ -1598,6 +1611,30 @@
             },
             "additionalProperties": false
           }
+        },
+        "fastModel": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "fastLane": {
+          "type": "boolean"
+        },
+        "idleReleaseMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acpMaxOpens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpMaxAbandoned": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpStallMs": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -1625,6 +1662,19 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "spawn": {
+      "type": "object",
+      "properties": {
+        "externalBlock": {
+          "type": "boolean"
+        },
+        "externalIdleSec": {
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       },
       "additionalProperties": false

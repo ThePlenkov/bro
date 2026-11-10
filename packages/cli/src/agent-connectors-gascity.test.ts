@@ -12,6 +12,7 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  clearExternalPlanes,
   localLeaseStore,
   projectId,
   readAgentRegistry,
@@ -27,6 +28,9 @@ import {
 } from './agent-connectors.ts';
 import { initRepo } from './commands/testrepo.ts';
 
+// real host planes would flake spawn tests — fixtures opt out via
+// spawn.externalBlock; the registry clear is the belt
+clearExternalPlanes();
 // work leases are TTL-governed foreign stamps now — a spawn's row
 // stays live past a dead spawner pid until expiry, so fixtures must
 // never write into the real state dir: a leftover row would collide
@@ -207,6 +211,7 @@ function fixture(
     city,
     env: {
       agents: { gascity: { command: 'fake-agent', configDir: city, ...knobs } },
+      spawn: { externalBlock: false, externalIdleSec: 480 },
       connectors: {},
     },
     prevPath,
@@ -607,115 +612,111 @@ describe('gascity connector', () => {
     }
   });
 
-  test(
-    'conformance: versioned real-gc evidence (opt-in)',
-    { skip: process.env.BRO_REAL_GC !== '1' },
-    async () => {
-      const { spawnSync } = await import('node:child_process');
-      const { mkdirSync, writeFileSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      // every probe is bounded — a hung real gc must fail the check,
-      // never stall the suite without a verdict
-      const GC_TIMEOUT = 15_000;
-      // a probe counts as responding when stdout parses as the expected
-      // document — a substring match could hide in an error dump and
-      // misclassify a malformed response as valid. The connector reads
-      // object envelopes ({schema_version}, {sessions}, {rigs}), so a
-      // bare array is incompatible even when it parses.
-      const jsonHas = (out: string, key: string): boolean => {
-        try {
-          const doc: unknown = JSON.parse(out);
-          return (
-            typeof doc === 'object' && doc !== null && !Array.isArray(doc) && key in doc
-          );
-        } catch {
-          return false;
-        }
-      };
-      const v = spawnSync('gc', ['--version'], { encoding: 'utf8', timeout: GC_TIMEOUT });
-      assert.equal(v.status, 0, 'gc --version must succeed');
-      const version = (v.stdout || v.stderr || '').trim();
-      assert.ok(version.length > 0);
+  test('conformance: versioned real-gc evidence (opt-in)', {
+    skip: process.env.BRO_REAL_GC !== '1',
+  }, async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    // every probe is bounded — a hung real gc must fail the check,
+    // never stall the suite without a verdict
+    const GC_TIMEOUT = 15_000;
+    // a probe counts as responding when stdout parses as the expected
+    // document — a substring match could hide in an error dump and
+    // misclassify a malformed response as valid. The connector reads
+    // object envelopes ({schema_version}, {sessions}, {rigs}), so a
+    // bare array is incompatible even when it parses.
+    const jsonHas = (out: string, key: string): boolean => {
+      try {
+        const doc: unknown = JSON.parse(out);
+        return typeof doc === 'object' && doc !== null && !Array.isArray(doc) && key in doc;
+      } catch {
+        return false;
+      }
+    };
+    const v = spawnSync('gc', ['--version'], { encoding: 'utf8', timeout: GC_TIMEOUT });
+    assert.equal(v.status, 0, 'gc --version must succeed');
+    const version = (v.stdout || v.stderr || '').trim();
+    assert.ok(version.length > 0);
 
-      // Run minimal conformance fixtures against real gc and preserve versioned evidence
-      const evidenceDir = join(process.cwd(), '.artifacts');
-      // no catch — a directory we can't create must fail here, not
-      // surface as a misleading ENOENT at the writeFileSync below
-      mkdirSync(evidenceDir, { recursive: true });
-      const safeVersion = version.replace(/[^a-zA-Z0-9._-]+/g, '_');
-      const evidencePath = join(evidenceDir, `gascity-real-conformance-${safeVersion}.json`);
+    // Run minimal conformance fixtures against real gc and preserve versioned evidence
+    const evidenceDir = join(process.cwd(), '.artifacts');
+    // no catch — a directory we can't create must fail here, not
+    // surface as a misleading ENOENT at the writeFileSync below
+    mkdirSync(evidenceDir, { recursive: true });
+    const safeVersion = version.replace(/[^a-zA-Z0-9._-]+/g, '_');
+    const evidencePath = join(evidenceDir, `gascity-real-conformance-${safeVersion}.json`);
 
-      const checks: Array<{ name: string; ok: boolean; detail?: string; stdout?: string }> = [];
+    const checks: Array<{ name: string; ok: boolean; detail?: string; stdout?: string }> = [];
 
-      // Check basic help/commands exist
-      const help = spawnSync('gc', ['--help'], { encoding: 'utf8', timeout: GC_TIMEOUT });
-      checks.push({
-        name: 'gc --help',
-        ok: help.status === 0,
-        stdout: (help.stdout || '').slice(0, 200),
-      });
+    // Check basic help/commands exist
+    const help = spawnSync('gc', ['--help'], { encoding: 'utf8', timeout: GC_TIMEOUT });
+    checks.push({
+      name: 'gc --help',
+      ok: help.status === 0,
+      stdout: (help.stdout || '').slice(0, 200),
+    });
 
-      // Try to get supervisor status if supported
-      const sup = spawnSync('gc', ['supervisor', 'status', '--json'], {
-        encoding: 'utf8',
-        timeout: GC_TIMEOUT,
-      });
-      checks.push({
-        name: 'gc supervisor status --json',
-        ok: sup.status === 0 && jsonHas(sup.stdout || '', 'schema_version'),
-        stdout: (sup.stdout || sup.stderr || '').slice(0, 200),
-      });
+    // Try to get supervisor status if supported
+    const sup = spawnSync('gc', ['supervisor', 'status', '--json'], {
+      encoding: 'utf8',
+      timeout: GC_TIMEOUT,
+    });
+    checks.push({
+      name: 'gc supervisor status --json',
+      ok: sup.status === 0 && jsonHas(sup.stdout || '', 'schema_version'),
+      stdout: (sup.stdout || sup.stderr || '').slice(0, 200),
+    });
 
-      // Try session list
-      const slist = spawnSync('gc', ['session', 'list', '--json'], {
-        encoding: 'utf8',
-        timeout: GC_TIMEOUT,
-      });
-      checks.push({
-        name: 'gc session list --json',
-        ok: slist.status === 0 && jsonHas(slist.stdout || '', 'sessions'),
-        stdout: (slist.stdout || slist.stderr || '').slice(0, 200),
-      });
+    // Try session list
+    const slist = spawnSync('gc', ['session', 'list', '--json'], {
+      encoding: 'utf8',
+      timeout: GC_TIMEOUT,
+    });
+    checks.push({
+      name: 'gc session list --json',
+      ok: slist.status === 0 && jsonHas(slist.stdout || '', 'sessions'),
+      stdout: (slist.stdout || slist.stderr || '').slice(0, 200),
+    });
 
-      // Try rig list
-      const rlist = spawnSync('gc', ['rig', 'list', '--json'], {
-        encoding: 'utf8',
-        timeout: GC_TIMEOUT,
-      });
-      checks.push({
-        name: 'gc rig list --json',
-        ok: rlist.status === 0 && jsonHas(rlist.stdout || '', 'rigs'),
-        stdout: (rlist.stdout || rlist.stderr || '').slice(0, 200),
-      });
+    // Try rig list
+    const rlist = spawnSync('gc', ['rig', 'list', '--json'], {
+      encoding: 'utf8',
+      timeout: GC_TIMEOUT,
+    });
+    checks.push({
+      name: 'gc rig list --json',
+      ok: rlist.status === 0 && jsonHas(rlist.stdout || '', 'rigs'),
+      stdout: (rlist.stdout || rlist.stderr || '').slice(0, 200),
+    });
 
-      const evidence = {
-        bead: 'bro-l8c4f.10',
-        binary: 'gc',
-        version,
-        timestamp: new Date().toISOString(),
-        checks,
-        passed: checks.every(c => c.ok),
-        // probes only — version/help/status/list verify the binary and
-        // JSON contracts; no lifecycle fixture (session new/submit/
-        // close) has run, so coverage stays unclaimed until one does
-        fixtureCoverage: false,
-        evidenceType: 'versioned-real-gc-conformance',
-      };
-      writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
-      // Also log for CI capture
-      console.log(`GASCITY_REAL_CONFORMANCE_EVIDENCE=${evidencePath}`);
-      console.log(JSON.stringify(evidence));
+    const evidence = {
+      bead: 'bro-l8c4f.10',
+      binary: 'gc',
+      version,
+      timestamp: new Date().toISOString(),
+      checks,
+      passed: checks.every(c => c.ok),
+      // probes only — version/help/status/list verify the binary and
+      // JSON contracts; no lifecycle fixture (session new/submit/
+      // close) has run, so coverage stays unclaimed until one does
+      fixtureCoverage: false,
+      evidenceType: 'versioned-real-gc-conformance',
+    };
+    writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
+    // Also log for CI capture
+    console.log(`GASCITY_REAL_CONFORMANCE_EVIDENCE=${evidencePath}`);
+    console.log(JSON.stringify(evidence));
 
-      // Version captured and EVERY probed command responsive — the
-      // recorded evidence computes passed as every(); asserting some()
-      // would let green CI ship evidence that records passed:false
-      assert.ok(version.length > 0, 'gc version must be recorded');
-      assert.ok(
-        checks.every(c => c.ok),
-        `real gc must pass every probed command (conformance evidence): ${JSON.stringify(
-          checks.filter(c => !c.ok).map(c => c.name)
-        )}`
-      );
-    }
-  );
+    // Version captured and EVERY probed command responsive — the
+    // recorded evidence computes passed as every(); asserting some()
+    // would let green CI ship evidence that records passed:false
+    assert.ok(version.length > 0, 'gc version must be recorded');
+    assert.ok(
+      checks.every(c => c.ok),
+      `real gc must pass every probed command (conformance evidence): ${JSON.stringify(
+        checks.filter(c => !c.ok).map(c => c.name)
+      )}`
+    );
+  });
 });

@@ -716,9 +716,10 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
         // `sort=desc` makes the facade's most-recently-updated-first
         // order explicit instead of riding the API default
         api(repo, 'merge_requests?state=opened&order_by=updated_at&sort=desc'),
-        // bounded like github's `--limit 500` — the facade contract is
-        // one listing page, never an unbounded page loop on a big repo
-        { ...gopts(), limit: 500 }
+        // the fleet ceiling and orphan reconcile count this listing as
+        // complete — bound it high enough that a real fleet never hits
+        // the cap (still bounded, never an unbounded page loop)
+        { ...gopts(), limit: 10_000 }
       ).map(m => ({ pr: m.iid, headRef: m.source_branch ?? '' }));
     },
     parsePrRef(text) {
@@ -900,6 +901,12 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           ],
           gopts()
         ).code === 0
+      );
+    },
+    closePr(t) {
+      glab(
+        ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', 'state_event=close'],
+        gopts()
       );
     },
     updateBranch(t, expectedHeadSha) {
