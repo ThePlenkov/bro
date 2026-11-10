@@ -63,6 +63,17 @@ describe('evaluateExitGate', () => {
     assert.equal(evaluateExitGate(open({ isDraft: true })).ok, false)
   })
 
+  it('blocks on a standing CHANGES_REQUESTED review decision', () => {
+    // bro-n1foa — #931: all threads resolved yet gh refused the merge;
+    // the host veto is a third axis beside threads and checks
+    const g = evaluateExitGate(open({ reviewDecision: 'CHANGES_REQUESTED', openThreads: 0 }))
+    assert.equal(g.ok, false)
+    assert.match(g.blockers[0]!, /CHANGES_REQUESTED/)
+    // APPROVED and a missing decision never block
+    assert.equal(evaluateExitGate(open({ reviewDecision: 'APPROVED' })).ok, true)
+    assert.equal(evaluateExitGate(open()).ok, true)
+  })
+
   it('is not blocked by stale pending statuses on a merged PR', () => {
     const g = evaluateExitGate(
       open({ state: 'MERGED', sastPending: 1, reviewersPending: 1, mergeable: 'UNKNOWN' }),
