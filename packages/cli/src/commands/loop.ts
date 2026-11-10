@@ -2062,7 +2062,10 @@ interface WorkerRef {
  *  no-PR outcome settles inline exactly as the serial loop did. */
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
-  | { kind: 'done'; result: ItemResult }
+  /** settled — the leave() lifecycle row already ran inside
+   *  serviceWorker; settleOutcome still tallies/parks the claims but
+   *  must not emit a second park row for the same beads */
+  | { kind: 'done'; result: ItemResult; settled?: true }
   /** untilMs — a provider wall's reset: pushes hold until the wall
    *  lifts instead of re-probing every interval (bro-36bhc). */
   | { kind: 'hold'; why: string; untilMs?: number };
@@ -2253,7 +2256,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       // armed watch marker takes custody at the settle.
       return { kind: 'member', member };
     }
-    return { kind: 'done', result: verdict };
+    return { kind: 'done', result: verdict, settled: true };
   }
   // raw-template arm: route through the same session-quota admission as
   // the registry spawn so the fleet/session planes agree on live workers
@@ -2520,7 +2523,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       parkBeads(
         ctx,
         m.beads,
-        `loop: worker ${w.agentId} ${cause} without a PR — worktree ${m.item.worktreeDir}`
+        `loop: ${prRef(ctx, m.pr)} round worker ${w.agentId} hit a provider wall (${cause}) — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
     }
@@ -4716,15 +4719,19 @@ function settleOutcome(
     for (const id of ids) {
       q.parkedClaims.add(id);
     }
-    emitLifecycle(ctx.root, {
-      kind: 'park',
-      bead: ids[0],
-      to: 'parked',
-      detail: {
-        via: 'loop',
-        ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
-      },
-    });
+    // a done outcome serviceWorker already left() skips the row —
+    // two park rows for the same beads would double-count telemetry
+    if (out.settled !== true) {
+      emitLifecycle(ctx.root, {
+        kind: 'park',
+        bead: ids[0],
+        to: 'parked',
+        detail: {
+          via: 'loop',
+          ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
+        },
+      });
+    }
   }
   if (ctx.json) {
     console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }));
@@ -5190,7 +5197,12 @@ async function runQueue(ctx: Ctx): Promise<void> {
         // on the next tick, not an interval late (waitForGate's own
         // sleep was deadline-capped). A worker-pending member has NO
         // merge deadline — its lifetime is unbounded (bro-9lpn3).
-        const gated = q.stack.filter(m => m.worker === undefined);
+        // wall-waiting members are excluded from the merge-deadline
+        // term: the wall check short-circuits them before the deadline
+        // park, so a deadline that passed DURING the wait would only
+        // compute a past wake → sleep(0) → a full fleet reconcile per
+        // spin until the reset (coderabbit #728)
+        const gated = q.stack.filter(m => m.worker === undefined && m.wallWaitUntil === undefined);
         const wake = Math.min(
           ...q.stack.map(m => m.nextPollAt ?? Number.POSITIVE_INFINITY),
           ...gated.map(m => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
