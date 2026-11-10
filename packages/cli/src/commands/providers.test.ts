@@ -315,13 +315,22 @@ describe('bro providers add', () => {
     await insideAsync(main, dir, async () => {
       const home = join(dir, 'home');
       const origHome = process.env.HOME;
+      const origXdg = process.env.XDG_CONFIG_HOME;
       process.env.HOME = home;
+      // globalConfigDir prefers XDG_CONFIG_HOME over HOME — an ambient
+      // XDG set by the runner would route the write elsewhere (CI fix)
+      process.env.XDG_CONFIG_HOME = join(home, '.config');
       try {
         await runProvidersCommand(['add', 'kilo', '--global']);
         const cfg = JSON.parse(readFileSync(join(home, '.config', 'bro', 'config.json'), 'utf8'));
         assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
       } finally {
         process.env.HOME = origHome;
+        if (origXdg === undefined) {
+          delete process.env.XDG_CONFIG_HOME;
+        } else {
+          process.env.XDG_CONFIG_HOME = origXdg;
+        }
       }
     });
   });
