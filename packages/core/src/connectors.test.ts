@@ -15,6 +15,7 @@ import {
   sessionStartLines,
   stopGateContributions,
   tasksAsync,
+  unregisterConnector,
 } from './connectors.ts'
 import type { Connector } from './connectors.ts'
 import { bdActor } from './tasks.ts'
@@ -125,6 +126,16 @@ describe('connectors', () => {
     const before = connectors().length
     registerConnector({ name: 'beads' })
     assert.equal(connectors().length, before)
+  })
+
+  test('unregisterConnector refuses built-ins but removes plugins', () => {
+    unregisterConnector('beads')
+    unregisterConnector('git')
+    assert.ok(connectors().some((c) => c.name === 'beads'))
+    assert.ok(connectors().some((c) => c.name === 'git'))
+    registerConnector({ name: 'acme-unreg' })
+    unregisterConnector('acme-unreg')
+    assert.ok(!connectors().some((c) => c.name === 'acme-unreg'))
   })
 
   test('registerConnector adds providers; prefer picks by name', () => {

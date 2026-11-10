@@ -24,6 +24,7 @@ import { Readable, Writable } from 'node:stream';
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
   ActiveSession,
+  ClientApp,
   ClientCapabilities,
   ClientContext,
   ClientRequestHandler,
@@ -40,12 +41,14 @@ import type {
   StopReason,
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk';
-import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { isSystemoneFamily, JudgeUnavailable, MAX_TIMER_MS, modelBase } from '@broject/core';
+import { JUDGE_PROMPT_MARK } from '@broject/acp-session';
 import { agentTurnPlane } from './acp-events.ts';
-import { otelSpan } from './otel.ts';
+import { otelEvent, otelSpan } from './otel.ts';
 import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
+import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
 import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
@@ -136,22 +139,76 @@ function stderrTail(child: ChildProcess): () => string {
   return () => tail.trim();
 }
 
+/** A denied/unserved agent→client call announces itself — one stderr
+ *  line for whoever tails the process, plus an `acp.denied_call`
+ *  journal/OTLP row for the store-side evidence trail (spec bro-mfruo).
+ *  Silent denial is the trap, and the why differs per case: a
+ *  permission prompt means the agent's env dropped its non-interactive
+ *  pin, while an unserved method was never advertised — method-not-found
+ *  is the honest answer, and blaming the pin there sends the operator
+ *  to the wrong config. */
+function deniedCall(by: string, method: string, what: string): void {
+  const why =
+    method === 'session/request_permission'
+      ? 'the agent is prompting, so its non-interactive pin is missing from the provider command/env'
+      : 'never advertised by this client — method-not-found by design';
+  process.stderr.write(`${by}: ${method} (${what}) denied — ${why}\n`);
+  otelEvent('acp.denied_call', { by, method, what });
+}
+
 /** A judge call has no user to ask — default-deny: take a reject
- *  option when the agent offers one, else cancel the request. */
-const denyPermission: ClientRequestHandler<
-  RequestPermissionRequest,
-  RequestPermissionResponse
-> = ctx => {
-  const reject = ctx.params.options.find(
-    o => o.kind === 'reject_once' || o.kind === 'reject_always'
-  );
-  return {
-    outcome:
-      reject === undefined
-        ? { outcome: 'cancelled' }
-        : { outcome: 'selected', optionId: reject.optionId },
+ *  option when the agent offers one, else cancel the request. Loud,
+ *  not silent: the denial line is what turns "the agent stalled" into
+ *  "the agent's permission mode is prompting" (spec bro-mfruo). */
+const denyPermission =
+  (by: string): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> =>
+  ctx => {
+    const what =
+      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'unspecified tool';
+    deniedCall(by, 'session/request_permission', String(what));
+    const reject = ctx.params.options.find(
+      o => o.kind === 'reject_once' || o.kind === 'reject_always'
+    );
+    return {
+      outcome:
+        reject === undefined
+          ? { outcome: 'cancelled' }
+          : { outcome: 'selected', optionId: reject.optionId },
+    };
   };
-};
+
+/** Agent→client methods an unbridged client never serves — fs is
+ *  advertised false at initialize, elicitation and the mcp relay are
+ *  never negotiated. (`terminal/*` IS served — `AcpTerminals` registers
+ *  real handlers.) Same rule as acp-worker's UNADVERTISED_METHODS: a
+ *  registered logger announces the attempt, then answers
+ *  method-not-found — capability honesty beats partial emulation. */
+const UNSERVED_METHODS = [
+  'fs/read_text_file',
+  'fs/write_text_file',
+  'elicitation/create',
+  'mcp/message',
+] as const;
+
+/** The shared unbridged client registration for one-shot (`withAcp`)
+ *  and pooled (`acpOpen`) ACP links — one handler set, so the two
+ *  paths can never drift apart on what they deny or how loudly they
+ *  say it. A bridged link never gets this: every client-bound call
+ *  forwards to the real client, whose answer is the honest one. */
+function wiredClient(terminals: AcpTerminals, by: string): ClientApp {
+  const app = client({ name: 'bro' }).onRequest('session/request_permission', denyPermission(by));
+  for (const m of UNSERVED_METHODS) {
+    app.onRequest<unknown, never>(
+      m,
+      p => p,
+      (): never => {
+        deniedCall(by, m, 'unadvertised capability');
+        throw RequestError.methodNotFound(m);
+      }
+    );
+  }
+  return terminals.register(app);
+}
 
 /** The whole call under the caller's budget — a peer that outlives it
  *  is fail-open, and the process kill in the caller's finally is the
@@ -289,6 +346,35 @@ interface AcpReply {
   usage?: DecideResult['usage'];
 }
 
+/** The turn's token usage — the agent's OWN numbers, when it reports any.
+ *  The ACP protocol carries usage on the prompt response; an agent that
+ *  reports none leaves this undefined, and an undefined usage is NOT a
+ *  zero (a free turn and an unreported one are different facts). */
+export interface AcpUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+/** The usage of a prompt response — the reported numbers, or nothing. */
+function acpUsage(response: PromptResponse): AcpUsage | undefined {
+  const usage = response.usage;
+  if (usage === undefined || usage === null) {
+    return undefined;
+  }
+  const out: AcpUsage = {};
+  if (Number.isSafeInteger(usage.inputTokens)) {
+    out.inputTokens = usage.inputTokens;
+  }
+  if (Number.isSafeInteger(usage.outputTokens)) {
+    out.outputTokens = usage.outputTokens;
+  }
+  if (Number.isSafeInteger(usage.totalTokens)) {
+    out.totalTokens = usage.totalTokens;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** The initialize handshake — once per connection, not per session.
  *  `req(d)` mints per-request cancel options against ANY deadline so a
  *  pooled caller's per-turn budget is what bounds its requests.
@@ -364,13 +450,20 @@ async function acpSessionOpen(
   opts: ProviderWireOpts,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
-  sessionRequest?: NewSessionRequest
+  sessionRequest?: NewSessionRequest,
+  gc?: AcpGuardCtx
 ) {
+  // the dead-loop guard speaks BEFORE the session opens: a refused
+  // scope costs no session and no quota (spec bro-b961a). The charge
+  // it hands back is THIS session's debt — the caller resolves it on
+  // the first completed turn; a failed open leaves it counted (that
+  // is the churn the budgets measure).
+  const charge = gc?.guard.open(gc);
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError);
-  return session;
+  return { session, charge };
 }
 
 async function acpSession(
@@ -380,7 +473,7 @@ async function acpSession(
   deadline: number
 ) {
   const { asAuthError, req, caps } = await acpInit(ctx, by, deadline);
-  const session = await acpSessionOpen(ctx, opts, asAuthError, req);
+  const { session } = await acpSessionOpen(ctx, opts, asAuthError, req);
   return { session, asAuthError, req, caps };
 }
 
@@ -423,18 +516,27 @@ async function acpOp(
     if (r.stopReason !== 'end_turn') {
       throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`);
     }
-    const usage = r.response.usage;
+    const usage = acpUsage(r.response);
     return {
       text: r.text,
       model,
-      usage:
-        usage != null && Number.isSafeInteger(usage.inputTokens)
-          ? { inputTokens: usage.inputTokens }
-          : undefined,
+      usage: usage?.inputTokens === undefined ? undefined : { inputTokens: usage.inputTokens },
     };
   } finally {
     session.dispose();
   }
+}
+
+/** The in-process agent this op talks to — the seam names it outright
+ *  or resolves it per spawn label, so a multi-provider gateway hands
+ *  each lane its own agent. */
+function seamPeer(
+  opts: ProviderWireOpts,
+  by: string
+): import('@agentclientprotocol/sdk').AgentApp | undefined {
+  const peer = opts.acp?.peer;
+  if (peer === undefined) return undefined;
+  return typeof peer === 'function' ? peer(by) : peer;
 }
 
 /** One connected ACP operation — `opts.acp.peer` is the in-process
@@ -449,10 +551,8 @@ async function withAcp<T>(
   op: (ctx: ClientContext) => Promise<T>
 ): Promise<T> {
   const terminals = new AcpTerminals();
-  const app = terminals.register(
-    client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
-  );
-  const peer = opts.acp?.peer;
+  const app = wiredClient(terminals, by);
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   let spawnError: string | undefined;
@@ -557,7 +657,7 @@ export async function acpConverse(
   onUpdate: (update: SessionUpdate) => void,
   deadline = Date.now() + 120_000,
   signal?: AbortSignal
-): Promise<{ stopReason: StopReason; text: string; model: string }> {
+): Promise<{ stopReason: StopReason; text: string; model: string; usage?: AcpUsage }> {
   const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' });
   return withAcp(by, entry, opts, deadline, async ctx => {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
@@ -581,7 +681,8 @@ export async function acpConverse(
         signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
@@ -589,7 +690,7 @@ export async function acpConverse(
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
       });
-      return { ...r, model };
+      return { ...r, model, usage: acpUsage(r.response) };
     } catch (err) {
       sessSpan.end({ error: errMsg(err) }, 'error');
       span.end({ error: errMsg(err) }, 'error');
@@ -673,6 +774,90 @@ function tracedUpdates(
  *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
  *  so the plane observer is attached once, not per transport. `cwd`
  *  anchors the bus socket + the per-agent .events.jsonl archive. */
+/** `string | ContentBlock[]` → the journaled prompt text. Text blocks
+ *  carry their text, links and embedded resources their URI, media a
+ *  `[type]` marker — the archive row says what was asked, it is not a
+ *  byte-exact request echo. */
+export const promptText = (prompt: string | ContentBlock[]): string => {
+  if (typeof prompt === 'string') return prompt;
+  return prompt
+    .map(b => {
+      switch (b.type) {
+        case 'text':
+          return b.text;
+        case 'resource_link':
+          return b.uri;
+        case 'resource':
+          return b.resource.uri;
+        default:
+          return `[${b.type}]`;
+      }
+    })
+    .join('\n');
+};
+
+/** A peer refusal breaks the peer — the loop may live inside the child,
+ *  and a fresh child is the only cure for a loop that survived in the
+ *  old one. The child dies with the link; the pool respawns on the next
+ *  request. A scope refusal leaves the peer alone. */
+function breakPeer(err: unknown, peer: AcpPeer): void {
+  if (!(err instanceof AcpDeadLoopError) || err.kind !== 'peer') {
+    return;
+  }
+  try {
+    peer.close();
+  } catch {
+    // the kill is the point — one stubborn peer can't block the rest
+  }
+}
+
+/** A failed turn — the peer's own churn may now be systemic: the loop
+ *  can live inside the child, and a fresh child is the only cure for a
+ *  loop that survived in the old one. Over the peer's budget the child
+ *  dies HERE — waiting for the next open to refuse it leaves the
+ *  loop's host alive between requests. The trip is thrown in place of
+ *  the failure: it names what actually went wrong. A healthy peer is
+ *  left alone. */
+function guardFail(gc: AcpGuardCtx | undefined, peer: AcpPeer): void {
+  if (gc?.peer === undefined) {
+    return;
+  }
+  const trip = gc.guard.peerTrip(gc);
+  if (trip === undefined) {
+    return;
+  }
+  breakPeer(trip, peer);
+  throw trip;
+}
+
+/** The stall bound — a turn that produces no `session/update` for this
+ *  long is ended (spec bro-b961a). The promise rejects; the caller
+ *  cancels the turn. */
+function stallWatchdog(ms: number, by: string): { promise: Promise<never>; cancel: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new JudgeUnavailable(
+            `acp ${by} unavailable — turn stalled: no session/update for ${ms}ms`
+          )
+        ),
+      ms
+    );
+    // the watchdog must not hold the event loop open
+    timer.unref?.();
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 export async function pumpTurn(
   session: ActiveSession,
   prompt: string | ContentBlock[],
@@ -682,11 +867,16 @@ export async function pumpTurn(
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx,
-  cwd?: string
+  cwd?: string,
+  drainTimeoutMs?: number,
+  // the silence bound — a direct caller that omits it gets the default
+  // five minutes, so a turn that never reports cannot hang forever. An
+  // explicit 0 still disables the watchdog.
+  stallMs = 300_000
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
-  plane.start();
+  plane.start(promptText(prompt));
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
@@ -704,12 +894,29 @@ export async function pumpTurn(
   let text = '';
   try {
     for (;;) {
-      const msg: ActiveSessionMessage = await Promise.race([
+      // the silence bound — a turn that reports nothing for stallMs is
+      // ended (spec bro-b961a). The window resets on every update, so a
+      // long tool call that reports itself is untouched.
+      // a window above Node's timer ceiling wraps and fires at once —
+      // clamp it: late is honest, instant is a stall watchdog that never
+      // waited
+      const watchdog =
+        stallMs <= 0 ? undefined : stallWatchdog(Math.min(stallMs, MAX_TIMER_MS), by);
+      const race: Array<Promise<ActiveSessionMessage>> = [
         // prompt failures surface on the queue itself — classify the
         // rejection through asAuthError the same as a direct throw
         session.nextUpdate().catch(asAuthError),
         aborted,
-      ]);
+      ];
+      if (watchdog !== undefined) {
+        race.push(watchdog.promise);
+      }
+      let msg: ActiveSessionMessage;
+      try {
+        msg = await Promise.race(race);
+      } finally {
+        watchdog?.cancel();
+      }
       if (msg.kind === 'stop') {
         traced.flush('ok');
         plane.stop(msg.stopReason, { replyLen: text.length });
@@ -729,7 +936,7 @@ export async function pumpTurn(
   } finally {
     // the acp-worker driver exits right after the turn — settle the
     // queued publishes first or the turn's last events die with it
-    await plane.drain();
+    await plane.drain(drainTimeoutMs);
   }
 }
 
@@ -781,15 +988,16 @@ const BRIDGED_METHODS = [
 ] as const;
 
 /** The client app for a pooled link — deny-permission posture by
- *  default (bro-5hx1.1 §7); `opts.acp.bridge` flips it to passthrough,
+ *  default (bro-5hx1.1 §7), announced loudly (bro-mfruo);
+ *  `opts.acp.bridge` flips it to passthrough,
  *  forwarding every client-bound call to the delegate. Unbridged links
  *  also register the local terminal registry — a bridged link forwards
  *  terminal/* to the real client instead, so it must not shadow it. */
-function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
+function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals, by: string) {
   const bridge = opts.acp?.bridge;
   const app = client({ name: 'bro' });
   if (bridge === undefined) {
-    return terminals.register(app.onRequest('session/request_permission', denyPermission));
+    return wiredClient(terminals, by);
   }
   for (const m of BRIDGED_METHODS) {
     app.onRequest<Record<string, unknown>, unknown>(
@@ -845,7 +1053,10 @@ function spawnAcpChild(
   if (bin === undefined) {
     fail(new AcpConfigError(`${by}: acp command is empty`));
   }
-  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() });
+  // detached: the child leads its own process group — the pool's close
+  // must take the whole group: a backend that forked children holding
+  // an account lane frees it only when every descendant dies
+  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv(), detached: true });
   proc.unref();
   for (const s of proc.stdio) {
     (s as unknown as { unref?: () => void } | null)?.unref?.();
@@ -908,8 +1119,8 @@ export async function acpOpen(
     return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`);
   }
   const terminals = new AcpTerminals();
-  const app = pooledClientApp(opts, terminals);
-  const peer = opts.acp?.peer;
+  const app = pooledClientApp(opts, terminals, by);
+  const peer = seamPeer(opts, by);
   let child: ChildProcess | undefined;
   let tail = (): string => '';
   // spawn's 'error' event is async — the getter reads it whenever the
@@ -928,7 +1139,17 @@ export async function acpOpen(
   const close = (): void => {
     conn.close();
     terminals.dispose();
-    child?.kill('SIGKILL');
+    if (child === undefined) {
+      return;
+    }
+    try {
+      // detached at spawn: the child leads its own group — kill the
+      // group so descendants it forked (and the lanes they hold) die
+      // with it; a group signal miss falls back to the child alone
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
   };
   // a dead transport is itself a close: pooled callers only drop their
   // peer refs on abort — without this, terminals the agent spawned (and
@@ -1118,6 +1339,13 @@ export interface PooledTurnOpts {
    *  (spec bro-ymbq1) passes the downstream client's cwd/mcpServers/
    *  _meta through instead of the synthesized {cwd, mcpServers:[]}. */
   sessionRequest?: NewSessionRequest;
+  /** The dead-loop guard (spec bro-b961a) — the conversation scope this
+   *  session belongs to and the peer behind it. Absent = the caller
+   *  does not attribute its sessions (a one-shot flow opens one). */
+  guard?: AcpGuardCtx;
+  /** The silence bound for the turn, ms — a turn that produces no
+   *  `session/update` for this long is ended (spec bro-b961a). 0 = off. */
+  stallMs?: number;
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1146,7 +1374,14 @@ export async function acpPooledTurn(
   };
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const { session, charge } = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
       sessSpan.end({ 'acp.session_id': session.sessionId, ...a });
     try {
@@ -1171,8 +1406,13 @@ export async function acpPooledTurn(
         turn.signal,
         by,
         sessSpan.ctx,
-        opts.acp?.cwd
+        opts.acp?.cwd,
+        3_000,
+        turn.stallMs
       );
+      // the turn answered — the session's own charge settles (spec
+      // bro-b961a); a failed turn leaves it counted as abandoned
+      charge?.resolve();
       endSession();
       end({
         'acp.session_id': session.sessionId,
@@ -1192,6 +1432,15 @@ export async function acpPooledTurn(
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
     end({ error: errMsg(err) }, 'error');
+    if (err instanceof AcpDeadLoopError) {
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
+      throw err;
+    }
+    // a stalled or failed turn counts against the peer the same — over
+    // budget the loop lives in the child: kill it BEFORE the failure
+    // surfaces, or further requests keep opening sessions on it
+    guardFail(turn.guard, peer);
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
@@ -1248,7 +1497,14 @@ export async function acpSessionRetain(
     { parent: turn.parent }
   );
   try {
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const { session, charge } = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest,
+      turn.guard
+    );
     const configOptions = session.newSessionResponse.configOptions ?? [];
     const base = opts.model ?? entry.model;
     // the RAW requested id (possibly a composite like 'swe-2-max') —
@@ -1297,7 +1553,11 @@ export async function acpSessionRetain(
      *  JudgeUnavailable naming the backend and the last transport
      *  lines. */
     const classifyWire = (err: unknown): Error => {
-      if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      if (
+        err instanceof JudgeUnavailable ||
+        err instanceof AcpConfigError ||
+        err instanceof AcpDeadLoopError
+      ) {
         return err;
       }
       const tail = peer.tail();
@@ -1352,8 +1612,16 @@ export async function acpSessionRetain(
             r2,
             t.signal,
             by,
-            t.parent
+            t.parent,
+            undefined,
+            undefined,
+            t.stallMs ?? turn.stallMs
           );
+          // the session opened once — its own charge settles on the
+          // first turn that answers. resolve() is idempotent: a later
+          // prompt must not decrement another session's charge (spec
+          // bro-b961a)
+          charge?.resolve();
           return { ...r, model: effective };
         } catch (err) {
           // a failed turn leaves the session's context in doubt — the
@@ -1364,6 +1632,12 @@ export async function acpSessionRetain(
           } catch {
             // already gone — the drop is the point
           }
+          if (err instanceof AcpDeadLoopError) {
+            breakPeer(err, peer);
+          } else {
+            // the peer's churn may now be systemic — kill it and name it
+            guardFail(turn.guard, peer);
+          }
           throw classifyWire(err);
         }
       },
@@ -1373,6 +1647,14 @@ export async function acpSessionRetain(
     };
   } catch (err) {
     span.end({ error: errMsg(err) }, 'error');
+    if (err instanceof AcpDeadLoopError) {
+      // the refusal cost no session — a peer refusal breaks the peer
+      breakPeer(err, peer);
+      throw err;
+    }
+    // the peer's churn may now be systemic — a failed retain still
+    // counts against it (the open was measured): kill it and name it
+    guardFail(turn.guard, peer);
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err;
     }
@@ -1410,7 +1692,7 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
  *  even ran tools in dogfooding). The preamble states the shapes
  *  mapAnswer validates — field names are the wire's, not aliases. */
 const TYPED_PREAMBLE = [
-  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  `You are a ${JUDGE_PROMPT_MARK}. The user message below is a JSON body {state, questions}.`,
   'Reply with STRICT JSON only — no prose, no markdown fences:',
   '{"answers": {"<question-id>": <answer>, ...}}',
   'Answer shape per question type — copy the question\'s "type":',

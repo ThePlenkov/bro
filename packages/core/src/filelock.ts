@@ -820,6 +820,41 @@ export async function awaitFileLock(
   }
 }
 
+/** Bounded acquire that yields the event loop between slices — the
+ *  sync acquire's `Atomics.wait` parks the calling thread for the whole
+ *  wait, which a caller ON the event loop (the conductor's request
+ *  path) cannot afford: a contended hold would stall every request,
+ *  timer, and stream behind it. Each attempt blocks at most
+ *  `ACQUIRE_SLICE_MS`; between attempts the loop turns. The wait bound
+ *  and the `LockTimeout` semantics match `acquireFileLock`'s — the
+ *  caller's degradation contract is unchanged. */
+export async function acquireFileLockYielding(
+  lock: string,
+  opts: FileLockOptions = {}
+): Promise<() => void> {
+  const { waitMs = LOCK_WAIT_MS, label = 'file lock' } = opts;
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new RangeError(`${label}: waitMs must be a finite non-negative number — got ${waitMs}`);
+  }
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new LockTimeout(`${label} held over ${waitMs / 1000}s`);
+    }
+    try {
+      return acquireFileLock(lock, { waitMs: Math.min(ACQUIRE_SLICE_MS, remaining), label });
+    } catch (err) {
+      if (!(err instanceof LockTimeout)) {
+        throw err;
+      }
+      // the slice already burned inside acquireFileLock — a macrotask
+      // here lets pending requests/timers run before the next attempt
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+}
+
 /** Would a contender steal the instance at `lock`? Dead owner, junk
  *  only, aged-empty, or a live hold past the abandoned bound — the
  *  system's own staleness test over both instance shapes, exported so

@@ -15,3 +15,10 @@ npm run typecheck
 ```
 
 Edit the agent-terminal use cases in `src/scenarios.ts`.
+
+The hub links `/cli`, `/skills`, `/plugins`, `/brouter` and `/marketplace`.
+The root shell owns navigation and the work-in-progress banner, including
+on docs and debt. Vite's `bro-marketplace` plugin builds a virtual catalog
+from public `packages/*/package.json` metadata; private packages are excluded.
+`planned-connectors.json` is only for unpackaged plans. Run
+`npm --prefix .. run check:docs` to check metadata with the same validator.

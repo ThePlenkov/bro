@@ -59,7 +59,12 @@ const save = (): void => {
 };
 
 const busyPanes = new Set([...((scenario.busyPanes ?? []) as string[]), ...local.busy]);
-const paneIds = new Set([...((scenario.paneIds ?? []) as string[]), ...local.spawned]);
+const paneIds = new Set([
+  // a listed pane is gettable — the real herdr knows every pane it lists
+  ...((scenario.panes ?? []) as { pane_id: string }[]).map(p => p.pane_id),
+  ...((scenario.paneIds ?? []) as string[]),
+  ...local.spawned,
+]);
 const livePanes = [
   ...((scenario.panes ?? []) as { pane_id: string; label?: string }[]),
   ...local.spawned.map(pane_id => ({ pane_id })),
@@ -114,6 +119,11 @@ if (verb === 'pane list') {
 } else if (verb === 'worktree open') {
   const ws = (scenario.openWorkspaceId ?? 'wOpened') as string;
   out({ workspace_id: ws, workspace: { workspace_id: ws } });
+} else if (verb === 'workspace close') {
+  const id = args[2] ?? args[args.indexOf('close') + 1] ?? '';
+  local.gone.push(id);
+  save();
+  out({});
 } else {
   out({});
 }

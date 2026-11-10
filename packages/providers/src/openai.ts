@@ -9,7 +9,7 @@
  * owns protocol knowledge only: endpoint, auth env, model, retry
  * contract.
  */
-import { isEnvName, JudgeUnavailable } from '@broject/core'
+import { isEnvName, JudgeUnavailable } from '@broject/core';
 import {
   apiVersionedBase,
   mapUsage,
@@ -17,65 +17,78 @@ import {
   postJson,
   runKeyCommand,
   type HttpResult,
-} from './http.ts'
-import type { ProviderChat, ProviderChatResult } from './registry.ts'
-import type { ApiTarget, ProviderWireOpts } from './systemone.ts'
+} from './http.ts';
+import type { ProviderChat, ProviderChatResult } from './registry.ts';
+import type { ApiTarget, ProviderWireOpts } from './systemone.ts';
 
 /** The openai-compat wire needs baseUrl — the api kind's host root. */
-type OpenAiCompatEntry = ApiTarget & { baseUrl: string }
+type OpenAiCompatEntry = ApiTarget & { baseUrl: string };
 
-/** Auth headers from the configured env var — a non-NAME apiKeyEnv is
- *  a config bug (throws, never echoed); a missing var is fail-open,
- *  and its message names the config FIELD, never the value — an
- *  all-caps pasted key passes isEnvName and would echo the secret
- *  verbatim. */
+/** The runtime key — an EMPTY string is no key: the request carried
+ *  none, and an empty Bearer would go out as a malformed credential
+ *  instead of the configured one. */
+function runtimeKey(entry: ApiTarget): string | undefined {
+  return entry.apiKey === undefined || entry.apiKey === '' ? undefined : entry.apiKey;
+}
+
+/** Auth headers from the entry — the runtime key wins (it was handed to
+ *  THIS call on purpose), then the secret-store command, then the
+ *  configured env var; a non-NAME apiKeyEnv is a config bug (throws,
+ *  never echoed); a missing var is fail-open, and its message names the
+ *  config FIELD, never the value — an all-caps pasted key passes
+ *  isEnvName and would echo the secret verbatim. */
 function authHeaders(
   entry: OpenAiCompatEntry,
   keyField: string,
   deadline: number
 ): Record<string, string> {
+  const runtime = runtimeKey(entry);
+  if (runtime !== undefined) {
+    return { authorization: `Bearer ${runtime}` };
+  }
   if (entry.apiKeyCommand !== undefined) {
-    return { authorization: `Bearer ${runKeyCommand(entry.apiKeyCommand, keyField, deadline)}` }
+    return { authorization: `Bearer ${runKeyCommand(entry.apiKeyCommand, keyField, deadline)}` };
   }
   if (entry.apiKeyEnv === undefined) {
-    return {}
+    return {};
   }
   if (!isEnvName(entry.apiKeyEnv)) {
-    throw new Error(`${keyField} is not a valid environment variable name`)
+    throw new Error(`${keyField} is not a valid environment variable name`);
   }
-  const key = process.env[entry.apiKeyEnv]
-  if (key === undefined || key === '') {
-    throw new JudgeUnavailable(`the env var named by ${keyField} is not set — export it for the provider`)
+  const key = process.env[entry.apiKeyEnv];
+  if (!key) {
+    throw new JudgeUnavailable(
+      `the env var named by ${keyField} is not set — export it for the provider`
+    );
   }
-  return { authorization: `Bearer ${key}` }
+  return { authorization: `Bearer ${key}` };
 }
 
 /** chat-completions error contract → throw. 400/404 are caller bugs;
  *  everything else (incl. 401/403 — an unprovisioned endpoint is
  *  "unavailable", not a gate input) is JudgeUnavailable. */
 function throwForStatus(res: HttpResult): never {
-  const err = objOr(res.body).error
-  const errObj = objOr(err)
-  const msg =
-    typeof errObj.message === 'string' ? errObj.message : `HTTP ${res.status}`
+  const err = objOr(res.body).error;
+  const errObj = objOr(err);
+  const msg = typeof errObj.message === 'string' ? errObj.message : `HTTP ${res.status}`;
   if (res.status === 400 || res.status === 404) {
-    throw new Error(`openai-compat provider rejected the request — ${msg}`)
+    throw new Error(`openai-compat provider rejected the request — ${msg}`);
   }
-  throw new JudgeUnavailable(`openai-compat provider unavailable — ${msg}`)
+  throw new JudgeUnavailable(`openai-compat provider unavailable — ${msg}`);
 }
 
 /** choices[0].message.content — a missing/typed-wrong reply is "no
  *  verdict", not a gate input. */
 function replyContent(body: unknown): string {
-  const choices = objOr(body).choices
+  const choices = objOr(body).choices;
   const content =
     Array.isArray(choices) && choices.length > 0
       ? (choices[0] as { message?: { content?: unknown } }).message?.content
-      : undefined
+      : undefined;
   if (typeof content !== 'string') {
-    throw new JudgeUnavailable('openai-compat provider returned no message content')
+    throw new JudgeUnavailable('openai-compat provider returned no message content');
   }
-  return content
+  return content;
 }
 
 /** The raw prose call surface for an `openai-compat` entry — prompt
@@ -84,11 +97,11 @@ export function openaiCompatChat(
   entry: OpenAiCompatEntry,
   opts: ProviderWireOpts = {}
 ): ProviderChat {
-  const keyField = opts.keyField ?? 'apiKeyEnv'
-  const model = opts.model ?? entry.model
+  const keyField = opts.keyField ?? 'apiKeyEnv';
+  const model = opts.model ?? entry.model;
   // the api entry's baseUrl is the HOST root — the openai wire mounts
   // /v1 on it, unless the author already versioned the path
-  const endpoint = `${apiVersionedBase(entry.baseUrl)}/chat/completions`
+  const endpoint = `${apiVersionedBase(entry.baseUrl)}/chat/completions`;
   return async (prompt, deadline): Promise<ProviderChatResult> => {
     const res = await postJson(
       endpoint,
@@ -100,17 +113,17 @@ export function openaiCompatChat(
       },
       authHeaders(entry, keyField, deadline),
       deadline,
-      (s) => s === 429 || s >= 500,
+      s => s === 429 || s >= 500,
       opts.fetch
-    )
+    );
     if (res.status !== 200) {
-      throwForStatus(res)
+      throwForStatus(res);
     }
-    const body = objOr(res.body)
+    const body = objOr(res.body);
     return {
       content: replyContent(body),
       model: typeof body.model === 'string' ? body.model : model,
       usage: mapUsage(body, 'prompt_tokens'),
-    }
-  }
+    };
+  };
 }
