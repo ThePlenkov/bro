@@ -125,6 +125,7 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
       // answer before any hook trusts it
       child = spawn(cmd, args, {
         stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
         detached: process.platform !== 'win32',
       }); // NOSONAR typescript:S4036
     } catch {
@@ -245,6 +246,7 @@ function callHook(
         cwd: directory,
         stdio: ['pipe', 'pipe', 'ignore'],
         // own process group so killAfter can take spawned children down too
+        windowsHide: true,
         detached: process.platform !== 'win32',
       });
     } catch {
@@ -404,6 +406,7 @@ function makeCore(input: BroCoreInput) {
           child = spawn(resolved.cmd, [...resolved.args, ...args], {
             cwd: directory,
             stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
             detached: process.platform !== 'win32',
           });
         } catch {

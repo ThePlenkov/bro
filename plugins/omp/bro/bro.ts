@@ -69,6 +69,7 @@ async function exitsZero(cmd, args) {
   try {
     child = spawn(cmd, args, {
       stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
@@ -132,6 +133,7 @@ async function callHook(command, event, payload, cwd, timeoutMs) {
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
       cwd,
       stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
@@ -217,6 +219,7 @@ async function statusJson(command, cwd) {
     child = spawn(command.cmd, [...command.args, 'status', '--json'], {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
@@ -671,6 +674,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
     child = spawn(command.cmd, [...command.args, ...args], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
