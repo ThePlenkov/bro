@@ -231,7 +231,12 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
       `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
-      `reopened_threads=${gate.reopened_threads}`
+      `reopened_threads=${gate.reopened_threads}` +
+      // the host veto axis — a CHANGES_REQUESTED blocks merges with
+      // zero open threads; surface it only when it says something
+      (state.reviewDecision === undefined || state.reviewDecision === 'APPROVED'
+        ? ''
+        : ` review_decision=${state.reviewDecision}`)
   );
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`);
   const live = listWatches(process.cwd()).filter(l => l.alive && l.watch.pr === state.pr);

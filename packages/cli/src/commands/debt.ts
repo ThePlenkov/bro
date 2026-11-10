@@ -387,7 +387,9 @@ function maybeResolveGoneRecords(
   records: DebtRecord[],
   dupedIds: Set<string>
 ): void {
-  const gone = resolvedThreadIds(readDebtRecords(), source, records).filter(id => !dupedIds.has(id));
+  const gone = resolvedThreadIds(readDebtRecords(), source, records).filter(
+    id => !dupedIds.has(id)
+  );
   if (gone.length === 0) {
     return;
   }

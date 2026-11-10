@@ -363,7 +363,30 @@ function supervisionProcs(dir: string, kind?: 'drive' | 'loop'): number[] {
  *  unverifiable candidate is spared, never killed. */
 function procRepoCommon(pid: number): string | null {
   try {
-    return gitCommonDir(readlinkSync(`/proc/${pid}/cwd`));
+    if (process.platform === 'linux') {
+      return gitCommonDir(readlinkSync(`/proc/${pid}/cwd`));
+    }
+    if (process.platform === 'darwin') {
+      try {
+        const out = execFileSync(
+          'lsof', // NOSONAR — PATH lookup is the contract
+          ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+          {
+            encoding: 'utf8',
+            timeout: 500,
+          }
+        );
+        const cline = out.split('\n').find(l => l.startsWith('n'));
+        if (cline) {
+          const cwd = cline.slice(1);
+          return gitCommonDir(cwd);
+        }
+      } catch {
+        // fall through
+      }
+      return null;
+    }
+    return null;
   } catch {
     return null;
   }

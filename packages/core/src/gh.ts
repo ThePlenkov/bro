@@ -3,7 +3,7 @@
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { spawnCollect } from './live-procs.ts';
+import { killGroup, spawnCollect } from './live-procs.ts';
 
 /** Node's `spawnSync` caps a child's output at 1 MiB and KILLS it with
  *  ENOBUFS past that — `status` goes null, and the caller cannot tell a
@@ -126,16 +126,35 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   };
 }
 
+/** Ceiling for a bare `gh` spawn — generous for slow networks, still
+ *  guarantees the probe contract: a wedged child is killed, never a
+ *  silent hang. */
+export const GH_TRY_TIMEOUT_MS = 30_000;
+
 /** Async ghTry — same exit-code contract without the event-loop block.
  *  The act-gate probe path stacks several gh calls; spawnSync would
  *  serialize them AND starve every other probe's timeout timer. */
 export function ghTryAsync(
   args: string[],
-  cwd?: string
+  cwd?: string,
+  /** a probe deadline — the child group is SIGKILL'd past it and the
+   *  result reports the timeout, never a silent hang */
+  timeoutMs: number = GH_TRY_TIMEOUT_MS
 ): Promise<{ code: number; out: string; err: string }> {
   return ghChild(() => {
-    const { done } = spawnCollect('gh', args, cwd);
-    return done.then(r => ({ code: r.code ?? 1, out: r.out, err: r.err }));
+    // own process group — killGroup can then reach every descendant,
+    // so a wedged grandchild holding the pipe can't outlive the deadline
+    const { proc, done } = spawnCollect('gh', args, cwd, undefined, { detached: true });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(proc);
+    }, timeoutMs);
+    return done.then(r => {
+      clearTimeout(timer);
+      const err = timedOut ? `gh timed out after ${timeoutMs}ms` : r.err;
+      return { code: r.code ?? 1, out: r.out, err };
+    });
   });
 }
 

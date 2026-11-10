@@ -11,4 +11,5 @@ description: "<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export —
 | npm latest | unreleased — lands in `0.3.0` |
 | skill | `trace` |
 | config | `telemetry` in bro.config |
+| guide | [commands/trace](/docs/commands/trace) |
 

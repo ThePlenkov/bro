@@ -10,7 +10,7 @@
  * failure; warnings pass. Probes are read-only — a broken tool reports as
  * a failing check, never as a crash.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import {
   existsSync,
   readdirSync,
@@ -55,6 +55,9 @@ import {
   pidAlive,
   printUsage,
   probeBdCompat,
+  psEwwEnvTokens,
+  psRegroupPaths,
+  psTokenize,
   probeDoltRemote,
   procStat,
   runJanitor,
@@ -606,21 +609,94 @@ function selfDistChecks(): DoctorCheck[] {
 // running daemon's resolved entry — /proc cmdline — against this repo's
 // dist and, outside a bro checkout, the entry `bro` resolves to.
 
+/** A foreign process's argv — /proc cmdline on linux, `ps args`/
+ *  `command` spellings on darwin. undefined when the platform can't
+ *  name it (raced exit, `node -e`, no /proc). */
+function procArgv(pid: number): string[] | undefined {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        .split('\0')
+        .filter(t => t !== '');
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === 'darwin') {
+    return darwinArgv(pid);
+  }
+  return undefined;
+}
+
+function darwinArgv(pid: number): string[] | undefined {
+  let out: string;
+  try {
+    out = execFileSync(
+      'ps', // NOSONAR — PATH lookup is the contract
+      ['-ww', '-o', 'args=', '-p', String(pid)],
+      {
+        encoding: 'utf8',
+        timeout: 500,
+      }
+    );
+  } catch {
+    try {
+      out = execFileSync(
+        'ps', // NOSONAR — PATH lookup is the contract
+        ['-ww', '-o', 'command=', '-p', String(pid)],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
+    } catch {
+      return undefined;
+    }
+  }
+  // ps space-joins the vector — re-glue fragments of a spaced absolute
+  // path (a daemon's entry must exist on disk, its split halves don't)
+  // so scriptArg/daemonEntry see the real argv boundary.
+  const tokens = psRegroupPaths(psTokenize(out.replace(/\r?\n$/, '')));
+  return tokens.length > 0 ? tokens : undefined;
+}
+
+/** The process's cwd — /proc link on linux, lsof on darwin (doctor's
+ *  own cwd when the pid reports none). null when unreadable. */
+function procCwd(pid: number): string | null {
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const lout = execFileSync(
+        'lsof', // NOSONAR — PATH lookup is the contract
+        ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+        {
+          encoding: 'utf8',
+          timeout: 500,
+        }
+      );
+      const cline = lout.split('\n').find(l => l.startsWith('n'));
+      return cline ? cline.slice(1) : process.cwd();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** The daemon process's resolved entry script — argv[1] under a
  *  node-ish runtime, argv[0] when the process IS the program. Relative
  *  spellings resolve against the process's own cwd, never doctor's.
  *  null when /proc can't name a file (non-/proc platform, raced exit,
  *  `node -e`). */
 function daemonEntry(pid: number): string | null {
-  let argv: string[];
-  try {
-    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-      .split('\0')
-      .filter(t => t !== '');
-  } catch {
-    return null;
-  }
-  if (argv.length === 0) {
+  const argv = procArgv(pid);
+  if (argv === undefined || argv.length === 0) {
     return null;
   }
   const runtime = basename(argv[0]!);
@@ -629,10 +705,11 @@ function daemonEntry(pid: number): string | null {
     return null;
   }
   try {
-    const abs = candidate.startsWith('/')
-      ? candidate
-      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
-    return realpathSync(abs);
+    if (candidate.startsWith('/')) {
+      return realpathSync(candidate);
+    }
+    const cwd = procCwd(pid);
+    return cwd === null ? null : realpathSync(join(cwd, candidate));
   } catch {
     return null;
   }
@@ -684,16 +761,37 @@ function scriptArg(argv: string[]): string | undefined {
  *  null off-linux or on a raced exit; callers read null as unverifiable,
  *  never as stale. */
 function procStartMs(pid: number): number | null {
-  try {
-    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
-    const st = procStat(pid);
-    if (st === null || st.start === '') {
+  if (process.platform === 'linux') {
+    try {
+      const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // start is field 22 (jiffies) on linux
+      return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
+    } catch {
       return null;
     }
-    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
-  } catch {
-    return null;
   }
+  if (process.platform === 'darwin') {
+    try {
+      const st = procStat(pid);
+      if (st === null || st.start === '') {
+        return null;
+      }
+      // procStat on darwin may prefix with pid; try to parse as date
+      const startStr = st.start.replace(/^\d+\s+/, '');
+      const ms = Date.parse(startStr);
+      if (!Number.isNaN(ms) && ms > 0) {
+        return ms;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** Two dirs inside the same repository — linked worktrees share the
@@ -1688,41 +1786,63 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
   return undefined;
 }
 
+/** `KEY=VALUE` token list → env map (proc environ's NUL-split, ps
+ *  eww's arg-trailing tokens — same shape once split). */
+function environMap(tokens: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const kv of tokens) {
+    const eq = kv.indexOf('=');
+    if (eq > 0) {
+      out[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
+  }
+  return out;
+}
+
+/** The running server's env: `/proc/<pid>/environ` on linux, darwin
+ *  `ps eww` tokens otherwise; {} when neither leg can read. */
+function readServeEnviron(pid: number): Record<string, string> {
+  try {
+    const out = environMap(readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0'));
+    if (Object.keys(out).length > 0) {
+      return out;
+    }
+  } catch {
+    // unreadable — raced exit or a platform without /proc
+  }
+  return process.platform === 'darwin' ? environMap(psEwwEnvTokens(pid)) : {};
+}
+
+/** same-process env — CURRENT process.env is the truth: the /proc
+ *  snapshot predates anything the caller set after start (test
+ *  fixtures mutate process.env mid-run) */
+function ownEnviron(): Record<string, string> | undefined {
+  const own: Record<string, string> = {};
+  for (const k of Object.keys(process.env)) {
+    const v = process.env[k];
+    if (typeof v === 'string') {
+      own[k] = v;
+    }
+  }
+  return Object.keys(own).length > 0 ? own : undefined;
+}
+
 /** The running server's env, once — `/proc/<pid>/environ` is the
- *  authoritative leg for "what did this serve boot with". undefined on
- *  non-/proc platforms or a raced exit. */
+ *  authoritative leg for "what did this serve boot with"; on darwin
+ *  `ps eww` carries the same data (env tokens trail the arg vector —
+ *  psEwwEnvTokens separates them). undefined when neither leg can
+ *  read it. */
 function serveEnviron(
   serve: { url: string; pid: number } | undefined
 ): Record<string, string> | undefined {
   if (serve === undefined) {
     return undefined;
   }
-  const out: Record<string, string> = {};
-  try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0) {
-        out[kv.slice(0, eq)] = kv.slice(eq + 1);
-      }
-    }
-  } catch {
-    // unreadable — raced exit or a platform without /proc
-  }
-  // same-process serves: the CURRENT process.env is the truth — the
-  // /proc snapshot predates any env the caller set or deleted after
-  // start (test fixtures mutate process.env mid-run)
   if (serve.pid === process.pid) {
-    const own: Record<string, string> = {};
-    for (const k of Object.keys(process.env)) {
-      const v = process.env[k];
-      if (typeof v === 'string') {
-        own[k] = v;
-      }
-    }
-    return Object.keys(own).length > 0 ? own : undefined;
+    return ownEnviron();
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  const env = readServeEnviron(serve.pid);
+  return Object.keys(env).length > 0 ? env : undefined;
 }
 
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when

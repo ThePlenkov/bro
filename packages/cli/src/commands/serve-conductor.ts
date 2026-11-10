@@ -733,7 +733,7 @@ const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g;
 /** A live conversation: the retained session plus just enough client
  *  state to slice the next delta and to replay the last reply when a
  *  resent history carries nothing new. */
-interface ConvSession {
+export interface ConvSession {
   live: AcpRetainedSession;
   peer: AcpPeer;
   /** body.messages count fully accounted for — sent user turns AND
@@ -776,7 +776,20 @@ interface ReplyView {
 }
 
 const CONV_TTL_MS = 10 * 60_000;
+/** Named (h:) sessions asked for persistence explicitly — a probe or
+ *  live-check that names itself wants reuse across its own cadence,
+ *  which routinely exceeds the anonymous TTL (bro-5xm9g: ~16min probe
+ *  cadence vs 10min TTL → every probe paid a fresh session/new, ~11k
+ *  input tokens of system+tool re-ingest each). An hour covers several
+ *  probe rounds while CONV_CAP still bounds the pool. */
+const CONV_TTL_NAMED_MS = 60 * 60_000;
 const CONV_CAP = 32;
+
+/** The telemetry namespace of a conversation key — `session_key_ns` on
+ *  conductor.turn splits named reuse traffic from anonymous probes so
+ *  quota burn is attributable (bro-5xm9g). */
+const keyNs = (k: string | undefined): 'named' | 'fingerprint' | 'none' =>
+  k === undefined ? 'none' : k.startsWith('h:') ? 'named' : 'fingerprint';
 
 /** What the fingerprint/history proofs hash: the canonical turn text
  *  PLUS a digest of any image payload — `serTurn` collapses images to
@@ -835,7 +848,7 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
  *  `size` can't shrink the size-branch mid-iteration. The map is
  *  insertion-ordered and hits re-insert, so front-to-back IS
  *  least-recently-used — overflow evicts the coldest entries. */
-function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
+export function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
   let overflow = Math.max(0, sessions.size - CONV_CAP);
   for (const [k, s] of sessions) {
     // a session mid-turn is off-limits — disposing a live handle would
@@ -843,7 +856,10 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
     if (s.busy) {
       continue;
     }
-    if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
+    if (
+      now - s.lastSeen > (k.startsWith('h:') ? CONV_TTL_NAMED_MS : CONV_TTL_MS) ||
+      overflow-- > 0
+    ) {
       sessions.delete(k);
       disposeQuiet(s.live);
       releaseClaim(s);
@@ -2905,6 +2921,7 @@ async function messages(
     stop_reason: view.stopReason,
     stream: body.stream !== false,
     session_reused: out.reused,
+    session_key_ns: keyNs(key),
     input_tokens: inputTokens,
     output_tokens: live?.outputTokens() ?? estimateTokens(reply.text),
     duration_ms: Date.now() - t0,
@@ -3925,6 +3942,7 @@ function responsesDeliver(
     stop_reason: wireReason,
     stream: d.rreq.stream === true,
     session_reused: d.out.reused,
+    session_key_ns: keyNs(d.key),
     input_tokens: inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,
@@ -4523,6 +4541,7 @@ function chatDeliver(
     stop_reason: stopReason,
     stream: d.creq.stream === true,
     session_reused: d.out.reused,
+    session_key_ns: keyNs(d.key),
     input_tokens: o.inputTokens,
     output_tokens: outTokens,
     duration_ms: Date.now() - d.t0,

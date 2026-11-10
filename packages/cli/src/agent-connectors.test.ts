@@ -3553,6 +3553,7 @@ describe('fleet chain walk spawn integration', () => {
   const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
   const future = '2099-01-01T00:00:00Z';
   const oldSpawn = '2026-10-20T00:00:00Z';
+  const oldDeath = '2026-10-20T06:00:00Z';
   const routeFor = (onWall: 'park' | 'fallthrough'): NonNullable<SpawnSpec['route']> => ({
     class: 'free',
     onWall,
@@ -3619,6 +3620,9 @@ describe('fleet chain walk spawn integration', () => {
     agentId: `native-${provider.toLowerCase()}-dead`,
     backend: 'native',
     spawnedAt: oldSpawn,
+    // the classifier stamps the death's own mark — a retained attempt
+    // anchors its wall there, not at the original spawn
+    observedAt: oldDeath,
     provider,
     model: `model-${provider}`,
     cause: 'rate_limited',
@@ -3647,6 +3651,7 @@ describe('fleet chain walk spawn integration', () => {
         model: 'model-A',
         cause: 'rate_limited',
         resetAt: future,
+        observedAt: oldDeath,
         spawnedAt: oldSpawn,
         stopped: false,
       });

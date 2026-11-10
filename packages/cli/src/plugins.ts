@@ -946,6 +946,7 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
     run: runMeshCommand,
+    skill: 'mesh',
     configKey: 'mesh',
     configSchema: meshSection,
   }),
