@@ -8,7 +8,7 @@ mid-task. The store was mid-outage (the dolt remote moved; `bd sync`
 was failing its pre-push integrity check), and the tail of the run log
 was:
 
-```
+```text
 warning: bridge publish .beads/dolt-mirror-origin.git failed
   — remote: This repository moved. Please use the new location:
 spawnSync timeout ETIMEDOUT
