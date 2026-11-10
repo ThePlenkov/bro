@@ -49,7 +49,7 @@ code nobody edits by hand.
   helpers for tools bro itself invokes (`gh.ts`, `git.ts`) are plumbing,
   not facades, and stay in scope as their own modules.
 - **A spec is the yardstick, and the code is judged against it.** Every
-  claim in a spec's *Design* section that names a mechanism — a call
+  claim in a spec's _Design_ section that names a mechanism — a call
   site, a failure mode, a package, a knob — must exist in the diff, and
   every mechanism in the diff that a spec names must behave as the spec
   says. A missing call site, a fail-open where the spec says fail-closed,
@@ -61,6 +61,12 @@ code nobody edits by hand.
   inherits that facade — it does not re-implement it. The same vendor
   logic split across the CLI, the core and a plugin is **major**: the
   duplicate drifts, and the drift is invisible until the vendor moves.
+- `packages/rig` is the lifecycle engine — usable by planes/ACP without
+  a CLI spawn. An import of `plugins.ts` or `commands/*`, or a
+  `process.exit`/`console.log` call in `packages/rig` is a **major**
+  finding — argv, stdout, and exit codes are the adapter's job and live
+  in `packages/cli`. Connector resolution goes through core's
+  `facade` + `loadConfig` only.
 
 ## Verification expectations
 

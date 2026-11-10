@@ -25,13 +25,17 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
+  checkSkillLock,
   CONFIG_SCHEMA_URL,
   hasHelpFlag,
   initBeadsStealth,
   PERSONALITIES,
   printUsage,
+  readSkillLock,
   withFileLock,
   type BroConfig,
+  type LockedSkill,
+  type SkillDrift,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import {
@@ -341,6 +345,12 @@ interface SetupArgs {
   /** --pack without a value means "the configured/default pack". */
   pack: false | string;
   personality?: string;
+  /** Materialise the locked external skills (skills-lock.json). */
+  lock: boolean;
+  /** Report what --lock would do, without installing. */
+  dryRun: boolean;
+  /** Verify the installed skills against the lock, without installing. */
+  checkOnly: boolean;
 }
 
 function parseSetupArgs(argv: string[]): SetupArgs {
@@ -366,6 +376,9 @@ function parseSetupArgs(argv: string[]): SetupArgs {
     skills: argv.includes('--skills'),
     pack,
     personality: pVal,
+    lock: argv.includes('--lock'),
+    dryRun: argv.includes('--dry-run'),
+    checkOnly: argv.includes('--check'),
   };
 }
 
@@ -398,53 +411,88 @@ function checkPrereqs(needBeads: boolean): void {
   }
 }
 
-export async function runSetupCommand(argv: string[]): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    printUsage(
-      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>]',
-      0
+/**
+ * Materialise the locked external skills — the ones bro does not own.
+ *
+ * The lockfile says which skill came from where and what its content hash
+ * was. bro does not re-implement the fetching: `npx skills` already produces
+ * this lockfile, so bro drives the same CLI and then checks the installed
+ * copies against the lock. A copy whose hash drifted is reported, not
+ * silently updated.
+ *
+ * Fail-open: no lockfile means nothing to do, no `npx` means the install is
+ * skipped with a line saying so, and one unreachable upstream does not stop
+ * the rest.
+ */
+/** A lockfile is still external input: a `--flag`-shaped `source` or
+ *  `name` would be parsed by npx/skills as an option instead of a
+ *  positional — a path to arbitrary-code install, not just a failed
+ *  add. Admit only plain tokens (no leading dash, no whitespace); `--`
+ *  cannot sit mid-argv here because real flags follow the positional. */
+const SKILL_ARG = /^(?!-)[^\s]+$/;
+
+function installOneLockedSkill(dir: string, skill: LockedSkill): void {
+  // `npx skills add` owns the fetch, the symlink and the lockfile
+  // update; bro only decides what to ask for.
+  if (!SKILL_ARG.test(skill.source) || !SKILL_ARG.test(skill.name)) {
+    console.error(`  ${skill.name}: lock entry has an unsafe source/name — skipped`);
+    return;
+  }
+  try {
+    execFileSync(
+      'npx', // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
+      ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
+      { cwd: dir, stdio: 'pipe' }
+    );
+  } catch {
+    // one unreachable upstream does not stop the rest
+    console.error(`  ${skill.name}: could not fetch from ${skill.source}`);
+  }
+}
+
+function installLockedSkills(dir: string, locked: Map<string, LockedSkill>): void {
+  if (!hasBin('npx')) {
+    console.error('  npx not on PATH — skipping the locked skills');
+    return;
+  }
+  for (const skill of locked.values()) {
+    installOneLockedSkill(dir, skill);
+  }
+}
+
+function reportSkillDrift(locked: Map<string, LockedSkill>, drift: SkillDrift[]): void {
+  if (drift.length === 0) {
+    console.error(`  ${locked.size} locked skill(s) match the lock`);
+    return;
+  }
+  for (const d of drift) {
+    console.error(
+      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
     );
   }
-  const { beads, skills, pack, personality } = parseSetupArgs(argv);
-  // A malformed config file must fail BEFORE any mutation (bd init,
-  // file installs) — readExistingConfig exits on a parse error; loadConfig
-  // alone would silently fall back to defaults and setup would init beads
-  // on top of a broken config.
-  // …but a .ts shadows the .json in the same layer — validating the
-  // inert file would fail setup on a config that isn't even effective.
-  if (!existsSync(join(process.cwd(), 'bro.config.ts'))) {
-    readExistingConfig(join(process.cwd(), 'bro.config.json'));
-  }
-  if (!existsSync(join(process.cwd(), 'bro.config.local.ts'))) {
-    readExistingConfig(join(process.cwd(), 'bro.config.local.json'));
-  }
-  // beads is a default store — setup needs bd whenever the effective config
-  // keeps it on, not only when --beads was passed explicitly.
-  const wantsBeads = beads || loadBroConfig().stores.includes('beads');
-  // Validate the pack BEFORE beads init/config/skills mutate anything —
-  // a bad spec must fail setup on a clean tree, not a half-written one.
-  const packDir =
-    pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK);
-  checkPrereqs(wantsBeads);
+}
 
-  // bd init + formulas land BEFORE the config write — if beads setup fails,
-  // no config claiming store=both is left behind.
-  if (wantsBeads) {
-    setupBeads();
+function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): void {
+  const locked = readSkillLock(dir);
+  if (locked.size === 0) {
+    console.error('  no skills-lock.json — nothing locked');
+    return;
+  }
+  const skillsDir = join(dir, '.agents', 'skills');
+
+  if (!checkOnly && !dryRun) {
+    installLockedSkills(dir, locked);
   }
 
-  console.error(`  ${writeConfig({ beads, personality })}`);
+  // Compare against the original committed lock snapshot, not a re-read:
+  // `npx skills add` rewrites the lockfile with the freshly fetched hash,
+  // so re-reading it would make that new hash the expected value and
+  // silently advance the lock instead of reporting drift.
+  const drift = checkSkillLock(locked, { skillsDir });
+  reportSkillDrift(locked, drift);
+}
 
-  if (skills) {
-    if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
-      console.error('  skills already installed and current');
-    }
-  }
-
-  if (packDir !== null) {
-    setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads);
-  }
-
+function installGitHooks(): void {
   // git hooks ride setup — a repo that opts into bro gets both
   // without a second step; `bro hooks uninstall` is the opt-out:
   //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
@@ -469,6 +517,78 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     console.error(`  note: post-merge hook not installed — ${fresh.err}`);
   } else if (fresh.state !== 'already') {
     console.error(`  ${fresh.state} post-merge hook (${fresh.path})`);
+  }
+}
+
+interface SetupMutations {
+  beads: boolean;
+  skills: boolean;
+  pack: string | false;
+  personality: string | undefined;
+  packDir: string | null;
+  wantsBeads: boolean;
+}
+
+function runSetupMutations(m: SetupMutations): void {
+  // bd init + formulas land BEFORE the config write — if beads setup fails,
+  // no config claiming store=both is left behind.
+  if (m.wantsBeads) {
+    setupBeads();
+  }
+
+  console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`);
+
+  if (m.skills) {
+    if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
+      console.error('  skills already installed and current');
+    }
+  }
+
+  if (m.packDir !== null) {
+    setupPack(m.packDir, m.pack || loadBroConfig().pack || DEFAULT_PACK, m.wantsBeads);
+  }
+
+  installGitHooks();
+}
+
+export async function runSetupCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>] [--lock] [--dry-run] [--check]',
+      0
+    );
+  }
+  const { beads, skills, pack, personality, lock, dryRun, checkOnly } = parseSetupArgs(argv);
+  // A malformed config file must fail BEFORE any mutation (bd init,
+  // file installs) — readExistingConfig exits on a parse error; loadConfig
+  // alone would silently fall back to defaults and setup would init beads
+  // on top of a broken config.
+  // …but a .ts shadows the .json in the same layer — validating the
+  // inert file would fail setup on a config that isn't even effective.
+  if (!existsSync(join(process.cwd(), 'bro.config.ts'))) {
+    readExistingConfig(join(process.cwd(), 'bro.config.json'));
+  }
+  if (!existsSync(join(process.cwd(), 'bro.config.local.ts'))) {
+    readExistingConfig(join(process.cwd(), 'bro.config.local.json'));
+  }
+  // beads is a default store — setup needs bd whenever the effective config
+  // keeps it on, not only when --beads was passed explicitly.
+  const wantsBeads = beads || loadBroConfig().stores.includes('beads');
+  // Validate the pack BEFORE beads init/config/skills mutate anything —
+  // a bad spec must fail setup on a clean tree, not a half-written one.
+  const packDir =
+    pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK);
+  checkPrereqs(wantsBeads);
+
+  // In --check / --dry-run mode we verify without mutating: no beads
+  // init, no config write, no skill/pack installs, no hook installs.
+  // Only the locked-skill drift check (setupLockedSkills) runs.
+  if (!checkOnly && !dryRun) {
+    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads });
+  }
+
+  if (lock) {
+    setupLockedSkills(process.cwd(), dryRun, checkOnly);
   }
 
   console.error(
