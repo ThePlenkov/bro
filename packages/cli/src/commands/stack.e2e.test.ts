@@ -686,6 +686,36 @@ describe('bro stack e2e', () => {
     });
   });
 
+  test('the platform follow refuses a member with a merge commit too', () => {
+    // bro-dz0u9: `git rebase FETCH_HEAD` linearizes exactly like the
+    // local rebase — the platform's path must refuse the same history
+    const f = stackFixture([], { connectors: { stacks: 'fakehost' } });
+    inside(f.main, f.root, () => {
+      const { wb } = pushedMergedStack(f);
+      // the member's own history grows a merge commit
+      git(['merge', '-q', '--no-ff', '-m', 'merge main', 'origin/main'], wb);
+      const tip = git(['rev-parse', 'stack/s/2-fx-b'], wb).trim();
+      // ...and the platform rewrote member 2's remote
+      const clone = join(f.root, 'clone');
+      git(['clone', '-q', join(f.root, 'origin.git'), clone], f.root);
+      git(['config', 'user.email', 't@t'], clone);
+      git(['config', 'user.name', 't'], clone);
+      git(['checkout', '-q', 'stack/s/2-fx-b'], clone);
+      git(['rebase', '-q', '--onto', 'origin/main', 'origin/stack/s/1-fx-a'], clone);
+      git(['push', '-q', '--force', 'origin', 'stack/s/2-fx-b'], clone);
+      mergedBottomPrs(f, { cascade: { retarget: true, rebase: true } });
+
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        /stack\/s\/2-fx-b contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash/
+      );
+      // the local branch is untouched — the merge commit and its resolution stand
+      assert.equal(git(['rev-parse', 'stack/s/2-fx-b'], wb).trim(), tip);
+    });
+  });
+
   test('retarget-only platform cascade still rebases the branch locally', () => {
     const f = stackFixture([], { connectors: { stacks: 'fakehost' } });
     inside(f.main, f.root, () => {
@@ -890,6 +920,65 @@ describe('bro stack e2e', () => {
       const r = f.run(['publish', 's']);
       assert.equal(r.code, 1);
       assert.match(r.stderr, /no connector serves stack publish/);
+    });
+  });
+  test('a member with a merge commit in its range is refused — never silently linearized', () => {
+    // bro-dz0u9: a plain rebase drops the merge commits in the replayed
+    // range, and with them the conflict resolutions they carry. The
+    // member is skipped, the branch is NOT rewritten.
+    const f = stackFixture();
+    inside(f.main, f.root, () => {
+      const { wb } = pushedMergedStack(f);
+      // the member's own history grows a merge commit — a resolution
+      // only the merge commit carries
+      git(['merge', '-q', '--no-ff', '-m', 'merge main', 'origin/main'], wb);
+      const tip = git(['rev-parse', 'stack/s/2-fx-b'], wb).trim();
+      mergedBottomPrs(f);
+
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        /stack\/s\/2-fx-b contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash/
+      );
+      // the branch is untouched — the merge commit and its resolution stand
+      assert.equal(git(['rev-parse', 'stack/s/2-fx-b'], wb).trim(), tip);
+      assert.equal(
+        git(['log', '--merges', '--format=%s', 'stack/s/2-fx-b'], wb).trim(),
+        'merge main'
+      );
+    });
+  });
+
+  test('a default branch that lives only as origin/main still syncs', () => {
+    // bro-yi9sz: the checkout never created the default branch locally.
+    // The base is not dead — it is one ref away, and the sync must ride
+    // it instead of skipping every member.
+    const f = gitStackFixture();
+    inside(f.main, f.root, () => {
+      // the remote's default branch names the trunk
+      git(['remote', 'set-head', 'origin', 'main'], f.main);
+      // the member under the stack, checked out in its own worktree
+      const wa = join(f.root, 'main--fx-a');
+      git(['worktree', 'add', '-q', wa, '-b', 'stack/s/1-fx-a', 'origin/main'], f.main);
+      commitIn(wa, 'a.txt');
+      // the trunk moves on the remote — the member must ride it
+      git(['checkout', '-q', '-b', 'scratch'], f.main);
+      commitIn(f.main, 'trunk.txt');
+      git(['push', '-q', 'origin', 'scratch:main'], f.main);
+      // and the local default branch is gone: the checkout never had it
+      git(['branch', '-D', 'main'], f.main);
+
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /does not exist; nothing to sync onto/);
+      assert.doesNotMatch(r.stdout, /the head of main cannot be read/);
+      // the member rode the new trunk tip
+      assert.match(r.stdout, /stack\/s\/1-fx-a rebased onto main/);
+      assert.equal(
+        git(['merge-base', 'origin/main', 'stack/s/1-fx-a'], f.main).trim(),
+        git(['rev-parse', 'origin/main'], f.main).trim()
+      );
     });
   });
 });
