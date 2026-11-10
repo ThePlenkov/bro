@@ -33,7 +33,7 @@ import {
   type ToolCallItem,
 } from '@broject/acp-model';
 import type { ArchiveRow, PaneLed } from '../archive/index.ts';
-import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../model/fmt.ts';
+import { fmtUsage, fmtWhen, headBy, isInternalBy, TimeGutter } from '../wire/fmt.ts';
 import {
   dumpContent,
   dumpItems,

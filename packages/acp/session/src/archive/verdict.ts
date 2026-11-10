@@ -2,7 +2,7 @@
  *  by every frontend that paints an LED off the journal. */
 import type { PaneLed } from './led.ts';
 import type { ArchiveRow } from './rows.ts';
-import { fmtWhen } from '../model/fmt.ts';
+import { fmtWhen } from '../wire/fmt.ts';
 
 /** Terminal postures carry the status-entry stamp — "since" is the
  *  question a finished/blocked row must answer. */
