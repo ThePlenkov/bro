@@ -10,4 +10,5 @@ description: "Stdio MCP server over the read planes — bro_<plane>_<read> tools
 | group | `fleet` |
 | npm latest | unreleased — lands in `0.3.0` |
 | skill | `mcp` |
+| guide | [commands/mcp](/docs/commands/mcp) |
 
