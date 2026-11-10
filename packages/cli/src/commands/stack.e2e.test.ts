@@ -686,6 +686,36 @@ describe('bro stack e2e', () => {
     });
   });
 
+  test('the platform follow refuses a member with a merge commit too', () => {
+    // bro-dz0u9: `git rebase FETCH_HEAD` linearizes exactly like the
+    // local rebase — the platform's path must refuse the same history
+    const f = stackFixture([], { connectors: { stacks: 'fakehost' } });
+    inside(f.main, f.root, () => {
+      const { wb } = pushedMergedStack(f);
+      // the member's own history grows a merge commit
+      git(['merge', '-q', '--no-ff', '-m', 'merge main', 'origin/main'], wb);
+      const tip = git(['rev-parse', 'stack/s/2-fx-b'], wb).trim();
+      // ...and the platform rewrote member 2's remote
+      const clone = join(f.root, 'clone');
+      git(['clone', '-q', join(f.root, 'origin.git'), clone], f.root);
+      git(['config', 'user.email', 't@t'], clone);
+      git(['config', 'user.name', 't'], clone);
+      git(['checkout', '-q', 'stack/s/2-fx-b'], clone);
+      git(['rebase', '-q', '--onto', 'origin/main', 'origin/stack/s/1-fx-a'], clone);
+      git(['push', '-q', '--force', 'origin', 'stack/s/2-fx-b'], clone);
+      mergedBottomPrs(f, { cascade: { retarget: true, rebase: true } });
+
+      const r = f.run(['sync', 's']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        /stack\/s\/2-fx-b contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash/
+      );
+      // the local branch is untouched — the merge commit and its resolution stand
+      assert.equal(git(['rev-parse', 'stack/s/2-fx-b'], wb).trim(), tip);
+    });
+  });
+
   test('retarget-only platform cascade still rebases the branch locally', () => {
     const f = stackFixture([], { connectors: { stacks: 'fakehost' } });
     inside(f.main, f.root, () => {

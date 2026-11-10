@@ -137,7 +137,8 @@ export function baseRef(dir: string, base: string): string | undefined {
 }
 
 /** The configured remotes, `origin` first — the conventional remote is
- *  the one a default branch tracks. */function remotesOf(dir: string): string[] {
+ *  the one a default branch tracks. */
+function remotesOf(dir: string): string[] {
   const names = gitTry(['-C', dir, 'remote'])
     .out.split('\n')
     .map(r => r.trim())
@@ -597,7 +598,14 @@ function baseTip(root: string, base: string): string | undefined {
   if (ref === undefined) {
     return undefined;
   }
-  const sha = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).out.trim();
+  const sha = gitTry([
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${ref}^{commit}`,
+  ]).out.trim();
   return sha === '' ? undefined : sha;
 }
 
@@ -800,6 +808,25 @@ export function forkFor(
   return '';
 }
 
+/** The merge commits in the range a rebase would replay — the refusal
+ *  line, or undefined when the range is clean.
+ *
+ *  A plain rebase LINEARIZES: the merge commits in the range are
+ *  dropped, and with them the conflict resolutions they carry (the
+ *  corruption class `stack merge --rebase` refuses, PR #872). An
+ *  unreadable count is a refusal too: an unknown truth is not "no
+ *  merges". */
+function mergeCommitRefusal(path: string, range: string, branch: string): string | undefined {
+  const count = countMergesInRange(path, range);
+  if (count === undefined) {
+    return `  ${branch} skipped — the merge commits in its range cannot be counted; owner resolves on enter`;
+  }
+  if (count > 0) {
+    return `  ${branch} contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash`;
+  }
+  return undefined;
+}
+
 /** Rebase a member's branch onto its new base and force-push the result
  *  when a PR rides it. The fork point is the base's tip AS THE PLAN SAW
  *  IT — a SHA captured before the cascade moved any ref. A branch name
@@ -825,19 +852,39 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
   // member comes out rewritten and the sync says "rebased" — the
   // content is gone. Same corruption class as `stack merge --rebase`,
   // which refuses it (bro-dz0u9, PR #872) — the same counter, the same
-  // wording. The tip is PINNED: `m.branch` is a moving ref, and the
+  // wording. The tip is PINNED: the branch is a moving ref, and the
   // count, the range and the rebase must speak about the same commits.
-  const head = gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', m.branch]).out.trim();
+  const head = gitTry([
+    '-C',
+    wt.path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${m.branch}`,
+  ]).out.trim();
   if (head === '') {
     lines.push(`  ${m.branch} skipped — its tip cannot be read; owner resolves on enter`);
     return false;
   }
-  const merges = countMergesInRange(wt.path, `${fork}..${head}`);
-  if (merges === undefined || merges > 0) {
+  const refusal = mergeCommitRefusal(wt.path, `${fork}..${head}`, m.branch);
+  if (refusal !== undefined) {
+    lines.push(refusal);
+    return false;
+  }
+  // the branch must not have moved between the count and the rebase: a
+  // commit that landed meanwhile — a MERGE commit — would be replayed
+  // uncounted, and its resolution dropped
+  const headNow = gitTry([
+    '-C',
+    wt.path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${m.branch}`,
+  ]).out.trim();
+  if (headNow !== head) {
     lines.push(
-      merges === undefined
-        ? `  ${m.branch} skipped — the merge commits in its range cannot be counted; owner resolves on enter`
-        : `  ${m.branch} contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash`
+      `  ${m.branch} moved during the merge check (${head.slice(0, 7)} → ${headNow.slice(0, 7)}) — not rebased; re-run to land the new tip`
     );
     return false;
   }
@@ -926,6 +973,20 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     return false;
   }
   const before = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim();
+  // the platform's rewrite is a rebase too: the range it replays must be
+  // free of merge commits, or their resolutions are dropped (bro-dz0u9)
+  const fork = gitTry(['-C', wt.path, 'merge-base', 'FETCH_HEAD', 'HEAD']).out.trim();
+  if (fork === '' || before === '') {
+    lines.push(
+      `  ${m.branch} skipped — the rewritten remote's fork cannot be read; owner resolves on enter`
+    );
+    return false;
+  }
+  const refusal = mergeCommitRefusal(wt.path, `${fork}..${before}`, m.branch);
+  if (refusal !== undefined) {
+    lines.push(refusal);
+    return false;
+  }
   const rb = gitTry(['-C', wt.path, 'rebase', 'FETCH_HEAD']);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
