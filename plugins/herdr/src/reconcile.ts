@@ -360,28 +360,19 @@ function archiveBinds(
   return bindByTree;
 }
 
-/** Where a session pane SHOULD live — the acp lane's attach OR any
- *  worktree whose agent journal resolves; every other surface (mirror
- *  tail, events renderer, status strip) folds on this eligibility.
- *  Managed trees only: a path outside wsForPath can never arm, so
- *  letting it mark the set retires its mirror into a gap. A live pid
- *  whose journal is not written yet is likewise not eligible — the
- *  lane becomes viewable once the archive exists on disk. An archived
- *  bind counts the same as a live one: 'in progress' vs 'done' is a
- *  status the view renders, not a visibility gate — a finished or
- *  crashed worker's journal is still the pane's feed. */
-function sessionEligibility(
-  p: Planes,
-  wsForPath: Map<string, string>,
-  bindByTree: Map<string, { id: string; events: string }>
-): Set<string> {
+/** Where a session pane SHOULD live — every managed worktree. The
+ *  session view is THE human pane (user ruling 10.11): a session
+ *  record binds its archive or live wire, a record-less tree renders
+ *  the honest empty state ('no session recorded' + the projector's
+ *  status), and the technical surfaces (mirror tail, events renderer,
+ *  status strip) are plugin plumbing that always folds under it — an
+ *  empty tech pane is never worth a human's screen. */
+function sessionEligibility(p: Planes, wsForPath: Map<string, string>): Set<string> {
   const armed = new Set<string>();
   for (const [path, lane] of Object.entries(p.lanes)) {
     if (lane === 'acp' && wsForPath.has(path)) armed.add(path);
   }
-  for (const [key, a] of bindByTree) {
-    if (wsForPath.has(key) && existsSync(a.events)) armed.add(key);
-  }
+  for (const key of wsForPath.keys()) armed.add(key);
   return armed;
 }
 
@@ -902,7 +893,7 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
     liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
   const bindByTree = archiveBinds(base, p.main, liveByTree);
-  const sessionArmed = sessionEligibility(p, wsForPath, bindByTree);
+  const sessionArmed = sessionEligibility(p, wsForPath);
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes. The
   // retire set is pane-LIVE, not eligibility: an arm that never
