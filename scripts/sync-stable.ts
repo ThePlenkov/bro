@@ -417,8 +417,9 @@ function pushStable(): void {
   console.log('push:     ok');
 }
 
-function main(): void {
-  const argv = process.argv.slice(2);
+/** The options, or the usage and the exit — a parse that fails is a
+ *  usage error, and the script says so in one place. */
+function parseOrExit(argv: string[]): Options {
   let opts: Options;
   try {
     opts = parseArgs(argv);
@@ -439,6 +440,40 @@ function main(): void {
     console.error(usage());
     process.exit(EXIT_USAGE);
   }
+  return opts;
+}
+
+/** The plan needs nothing done — a dry run, or `stable` already
+ *  contains main. */
+function planIsDone(plan: Plan, opts: Options): boolean {
+  if (opts.dryRun) {
+    console.log('\ndry run — nothing was merged, stable is untouched.');
+    return true;
+  }
+  if (plan.ahead === '0') {
+    console.log('\nstable already contains main — nothing to merge, stable unchanged.');
+    return true;
+  }
+  return false;
+}
+
+/** The summary the operator reads at the end. */
+function printSummary(plan: Plan): void {
+  const newStable = head('stable') as string;
+  console.log('\n=== sync-stable summary ===');
+  console.log('branch:   stable');
+  console.log(
+    `commits:  ${plan.ahead} from main (${shortSha(plan.stableSha)} → ${shortSha(newStable)})`
+  );
+  console.log(`checks:   ${plan.checks.length}/${plan.checks.length} passed`);
+  console.log(`stable:   ${shortSha(newStable)}`);
+  if (plan.behind !== '0') {
+    console.log(`note:     ${plan.behind} commit(s) on stable are not in main`);
+  }
+}
+
+function main(): void {
+  const opts = parseOrExit(process.argv.slice(2));
   if (git(['rev-parse', '--git-dir']).code !== 0) {
     console.error('sync-stable: not a git repository');
     process.exit(EXIT_PREFLIGHT);
@@ -447,12 +482,7 @@ function main(): void {
   // --- plan (read-only) ----------------------------------------------------
   const plan = planOf(opts);
   printPlan(plan, opts);
-  if (opts.dryRun) {
-    console.log('\ndry run — nothing was merged, stable is untouched.');
-    process.exit(EXIT_OK);
-  }
-  if (plan.ahead === '0') {
-    console.log('\nstable already contains main — nothing to merge, stable unchanged.');
+  if (planIsDone(plan, opts)) {
     process.exit(EXIT_OK);
   }
 
@@ -474,18 +504,7 @@ function main(): void {
   // the throwaway branch is still checked out here — restore() puts us
   // back without forcing, so an edit made during the checks survives
   merge.restore();
-
-  const newStable = head('stable') as string;
-  console.log('\n=== sync-stable summary ===');
-  console.log('branch:   stable');
-  console.log(
-    `commits:  ${plan.ahead} from main (${shortSha(plan.stableSha)} → ${shortSha(newStable)})`
-  );
-  console.log(`checks:   ${plan.checks.length}/${plan.checks.length} passed`);
-  console.log(`stable:   ${shortSha(newStable)}`);
-  if (plan.behind !== '0') {
-    console.log(`note:     ${plan.behind} commit(s) on stable are not in main`);
-  }
+  printSummary(plan);
 
   if (!opts.push) {
     console.log('push:     skipped (no --push)');
