@@ -28,7 +28,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -112,32 +112,40 @@ export class UnknownOption extends Error {
 export function parseArgs(argv: string[]): Options {
   const opts: Options = { sync: false, dryRun: false, push: false, skipE2e: false, help: false };
   for (const arg of argv) {
-    switch (arg) {
-      case '--sync':
-        opts.sync = true;
-        break;
-      case '--dry-run':
-        opts.dryRun = true;
-        break;
-      case '--push':
-        opts.push = true;
-        break;
-      case '--skip-e2e':
-        opts.skipE2e = true;
-        break;
-      case '--help':
-      case '-h':
-        opts.help = true;
-        break;
-      default:
-        // the caller prints the usage — a parse that exits would take
-        // the whole process with it (a test importing this module would
-        // die on an unknown option)
-        throw new UnknownOption(arg);
+    const set = OPTIONS[arg];
+    // the caller prints the usage — a parse that exits would take the
+    // whole process with it (a test importing this module would die on
+    // an unknown option)
+    if (set === undefined) {
+      throw new UnknownOption(arg);
     }
+    set(opts);
   }
   return opts;
 }
+
+/** The option table — one entry per flag, so the parse stays a table
+ *  walk instead of a branch per flag. */
+const OPTIONS: Record<string, (opts: Options) => void> = {
+  '--sync': o => {
+    o.sync = true;
+  },
+  '--dry-run': o => {
+    o.dryRun = true;
+  },
+  '--push': o => {
+    o.push = true;
+  },
+  '--skip-e2e': o => {
+    o.skipE2e = true;
+  },
+  '--help': o => {
+    o.help = true;
+  },
+  '-h': o => {
+    o.help = true;
+  },
+};
 
 interface GitResult {
   ok: boolean;
@@ -223,10 +231,190 @@ function stableCheckedOutElsewhere(): boolean {
       continue;
     }
     if (line.startsWith('branch ') && line.slice('branch '.length).trim() === 'refs/heads/stable') {
-      return current !== ROOT;
+      // both sides are canonicalised: git reports the path as the
+      // filesystem gave it, ROOT is built by join() — a raw comparison
+      // would refuse the main worktree over a trailing slash
+      return resolve(current) !== resolve(ROOT);
     }
   }
   return false;
+}
+
+/** The plan — the refs the sync works on and the checks it will run.
+ *  Read-only: nothing moves while a plan is made. */
+interface Plan {
+  mainSha: string;
+  stableSha: string;
+  /** The commits main has that stable does not. */
+  ahead: string;
+  /** The commits stable has that main does not. */
+  behind: string;
+  checks: Check[];
+}
+
+/** The plan — read the two refs and count the commits between them.
+ *  Exits when a ref is missing: there is nothing to sync against. */
+function planOf(opts: Options): Plan {
+  const mainSha = mainRef();
+  if (mainSha === undefined) {
+    console.error(
+      'sync-stable: no `main` ref (neither origin/main nor a local main) — nothing to sync'
+    );
+    process.exit(EXIT_PREFLIGHT);
+  }
+  const stableSha = head('stable');
+  if (stableSha === undefined) {
+    console.error('sync-stable: no local `stable` branch — create it first:');
+    console.error('sync-stable:   git branch stable main');
+    process.exit(EXIT_PREFLIGHT);
+  }
+  return {
+    mainSha,
+    stableSha,
+    ahead: git(['rev-list', '--count', `${stableSha}..${mainSha}`]).out || '0',
+    behind: git(['rev-list', '--count', `${mainSha}..${stableSha}`]).out || '0',
+    checks: opts.skipE2e ? CHECKS.filter(c => c.name !== FLAKY_CHECK) : CHECKS,
+  };
+}
+
+/** The plan, printed — what the operator reads before deciding. */
+function printPlan(plan: Plan, opts: Options): void {
+  const source = head('origin/main') === plan.mainSha ? 'origin/main' : 'local main';
+  console.log(`main    ${shortSha(plan.mainSha)}  (${source})`);
+  console.log(`stable  ${shortSha(plan.stableSha)}`);
+  console.log(`commits to merge from main: ${plan.ahead}`);
+  const mergeList = git([
+    'log',
+    '--oneline',
+    '--no-decorate',
+    `${plan.stableSha}..${plan.mainSha}`,
+  ]).out;
+  if (mergeList !== '') {
+    console.log(mergeList);
+  }
+  if (opts.skipE2e) {
+    console.log(`\nnote: skipping ${FLAKY_CHECK} (--skip-e2e)`);
+  }
+  console.log('\nchecks to run:');
+  for (const check of plan.checks) {
+    console.log(`  - ${check.name}`);
+  }
+}
+
+/** The preflight — the last read-only gate before anything moves. A
+ *  dirty worktree aborts: the script never stashes, resets, or
+ *  discards anyone's uncommitted work. */
+function preflight(): void {
+  if (git(['status', '--porcelain']).out !== '') {
+    console.error('\nsync-stable: the worktree has uncommitted changes — commit them or stash');
+    console.error('sync-stable: them yourself. This script never stashes or discards work.');
+    process.exit(EXIT_PREFLIGHT);
+  }
+  if (stableCheckedOutElsewhere()) {
+    console.error('\nsync-stable: `stable` is checked out in another worktree — advance it there');
+    console.error('sync-stable: instead, so no session is left pointing at a moved branch.');
+    process.exit(EXIT_PREFLIGHT);
+  }
+}
+
+/** The throwaway branch the merge runs on, and the way back. */
+interface Merge {
+  /** The merge commit — what `stable` advances to. */
+  sha: string;
+  /** back to where we started, throwaway branch gone. */
+  restore(): void;
+}
+
+/** Merge main into a throwaway branch in THIS worktree — the checks
+ *  then run against the MERGED tree while `stable` itself is untouched. */
+function mergeOnThrowaway(plan: Plan): Merge {
+  const stamp = Date.now().toString(36);
+  const tmpBranch = `bro/stable-sync-${stamp}`;
+  const originalBranch = currentBranch();
+  const originalSha = head('HEAD') as string;
+
+  const created = git(['checkout', '-b', tmpBranch, plan.stableSha]);
+  if (!created.ok) {
+    console.error(`sync-stable: could not create the throwaway branch ${tmpBranch}`);
+    process.exit(EXIT_PREFLIGHT);
+  }
+
+  /**
+   * Back to where we started, throwaway branch gone.
+   *
+   * The checkout is NOT forced: the checks take minutes, and an edit
+   * made in this worktree while they ran must never be discarded. A
+   * plain checkout refuses to move when it would overwrite local
+   * changes — and then the throwaway branch stays checked out, with
+   * the operator's work intact, and the script says so.
+   */
+  const restore = (): void => {
+    const back = git(['checkout', originalBranch === '' ? originalSha : originalBranch]);
+    if (!back.ok) {
+      console.error(
+        `sync-stable: could not return to ${originalBranch || originalSha} — the worktree has ` +
+          'changes made while the checks ran. They are NOT discarded: the throwaway branch ' +
+          `${tmpBranch} is still checked out, and nothing was reset.`
+      );
+      console.error(
+        'sync-stable: commit or stash them yourself, then delete the throwaway branch.'
+      );
+      return;
+    }
+    git(['branch', '-D', tmpBranch]);
+  };
+
+  console.log(`\nmerging main into ${tmpBranch} …`);
+  const merge = git([
+    'merge',
+    '--no-ff',
+    '--no-edit',
+    '-m',
+    'chore(stable): merge main into stable',
+    plan.mainSha,
+  ]);
+  if (!merge.ok) {
+    console.error('sync-stable: the merge conflicted — stable is untouched.');
+    git(['merge', '--abort']);
+    restore();
+    process.exit(EXIT_PREFLIGHT);
+  }
+  const sha = head('HEAD') as string;
+  console.log(`merge commit ${shortSha(sha)}`);
+  return { sha, restore };
+}
+
+/** Run the checks — the name of the first one that failed, or
+ *  undefined when they all passed. */
+function verify(checks: Check[]): string | undefined {
+  for (const check of checks) {
+    if (!runCheck(check)) {
+      return check.name;
+    }
+  }
+  return undefined;
+}
+
+/** Advance `stable` onto the merge commit — a compare-and-swap, so a
+ *  `stable` that moved meanwhile is never clobbered. */
+function advanceStable(mergeSha: string, stableSha: string): void {
+  if (!git(['update-ref', 'refs/heads/stable', mergeSha, stableSha]).ok) {
+    console.error('sync-stable: stable moved while the checks ran — refusing to overwrite it');
+    process.exit(EXIT_PREFLIGHT);
+  }
+}
+
+/** Push `stable` to its remote — plain, never forced. */
+function pushStable(): void {
+  const remote = stableRemote();
+  console.log(`\npushing stable → ${remote} …`);
+  if (!git(['push', remote, 'stable:stable']).ok) {
+    console.error(
+      'sync-stable: push failed — stable is advanced locally, the remote is unchanged.'
+    );
+    process.exit(EXIT_CHECK_FAILED);
+  }
+  console.log('push:     ok');
 }
 
 function main(): void {
@@ -251,160 +439,59 @@ function main(): void {
     console.error(usage());
     process.exit(EXIT_USAGE);
   }
-
   if (git(['rev-parse', '--git-dir']).code !== 0) {
     console.error('sync-stable: not a git repository');
     process.exit(EXIT_PREFLIGHT);
   }
 
   // --- plan (read-only) ----------------------------------------------------
-  const mainSha = mainRef();
-  if (mainSha === undefined) {
-    console.error(
-      'sync-stable: no `main` ref (neither origin/main nor a local main) — nothing to sync'
-    );
-    process.exit(EXIT_PREFLIGHT);
-  }
-  const stableSha = head('stable');
-  if (stableSha === undefined) {
-    console.error('sync-stable: no local `stable` branch — create it first:');
-    console.error('sync-stable:   git branch stable main');
-    process.exit(EXIT_PREFLIGHT);
-  }
-
-  const ahead = git(['rev-list', '--count', `${stableSha}..${mainSha}`]).out || '0';
-  const behind = git(['rev-list', '--count', `${mainSha}..${stableSha}`]).out || '0';
-  const mergeList = git(['log', '--oneline', '--no-decorate', `${stableSha}..${mainSha}`]).out;
-  const checks = opts.skipE2e ? CHECKS.filter(c => c.name !== FLAKY_CHECK) : CHECKS;
-
-  console.log(
-    `main    ${shortSha(mainSha)}  (${head('origin/main') === mainSha ? 'origin/main' : 'local main'})`
-  );
-  console.log(`stable  ${shortSha(stableSha)}`);
-  console.log(`commits to merge from main: ${ahead}`);
-  if (mergeList !== '') {
-    console.log(mergeList);
-  }
-  if (opts.skipE2e) {
-    console.log(`\nnote: skipping ${FLAKY_CHECK} (--skip-e2e)`);
-  }
-  console.log('\nchecks to run:');
-  for (const check of checks) {
-    console.log(`  - ${check.name}`);
-  }
-
+  const plan = planOf(opts);
+  printPlan(plan, opts);
   if (opts.dryRun) {
     console.log('\ndry run — nothing was merged, stable is untouched.');
     process.exit(EXIT_OK);
   }
-
-  if (ahead === '0') {
+  if (plan.ahead === '0') {
     console.log('\nstable already contains main — nothing to merge, stable unchanged.');
     process.exit(EXIT_OK);
   }
 
   // --- preflight (mutating from here on) -----------------------------------
-  const dirty = git(['status', '--porcelain']).out;
-  if (dirty !== '') {
-    console.error('\nsync-stable: the worktree has uncommitted changes — commit them or stash');
-    console.error('sync-stable: them yourself. This script never stashes or discards work.');
-    process.exit(EXIT_PREFLIGHT);
-  }
-  if (stableCheckedOutElsewhere()) {
-    console.error('\nsync-stable: `stable` is checked out in another worktree — advance it there');
-    console.error('sync-stable: instead, so no session is left pointing at a moved branch.');
-    process.exit(EXIT_PREFLIGHT);
-  }
+  preflight();
 
-  // --- merge on a throwaway branch -----------------------------------------
-  const stamp = Date.now().toString(36);
-  const tmpBranch = `bro/stable-sync-${stamp}`;
-  const originalBranch = currentBranch();
-  const originalSha = head('HEAD') as string;
-
-  const created = git(['checkout', '-b', tmpBranch, stableSha]);
-  if (!created.ok) {
-    console.error(`sync-stable: could not create the throwaway branch ${tmpBranch}`);
-    process.exit(EXIT_PREFLIGHT);
-  }
-
-  /** back to where we started, throwaway branch gone */
-  const restore = (): void => {
-    git(['checkout', '--force', originalBranch === '' ? originalSha : originalBranch]);
-    git(['branch', '-D', tmpBranch]);
-  };
-
-  console.log(`\nmerging main into ${tmpBranch} …`);
-  const merge = git([
-    'merge',
-    '--no-ff',
-    '--no-edit',
-    '-m',
-    'chore(stable): merge main into stable',
-    mainSha,
-  ]);
-  if (!merge.ok) {
-    console.error('sync-stable: the merge conflicted — stable is untouched.');
-    git(['merge', '--abort']);
-    restore();
-    process.exit(EXIT_PREFLIGHT);
-  }
-  const mergeSha = head('HEAD') as string;
-  console.log(`merge commit ${shortSha(mergeSha)}`);
-
-  // --- verify ---------------------------------------------------------------
-  let failedCheck: string | undefined;
-  for (const check of checks) {
-    if (!runCheck(check)) {
-      failedCheck = check.name;
-      break;
-    }
-  }
-
+  // --- merge, verify, advance ----------------------------------------------
+  const merge = mergeOnThrowaway(plan);
+  const failedCheck = verify(plan.checks);
   if (failedCheck !== undefined) {
     console.error(
-      `\nsync-stable: check "${failedCheck}" failed — stable stays at ${shortSha(stableSha)}`
+      `\nsync-stable: check "${failedCheck}" failed — stable stays at ${shortSha(plan.stableSha)}`
     );
-    restore();
+    merge.restore();
     console.error('sync-stable: the merge commit was dropped; nothing was pushed.');
     process.exit(EXIT_CHECK_FAILED);
   }
-
-  // --- advance stable (compare-and-swap, fast-forward only) ----------------
-  const advanced = git(['update-ref', 'refs/heads/stable', mergeSha, stableSha]);
-  if (!advanced.ok) {
-    console.error('sync-stable: stable moved while the checks ran — refusing to overwrite it');
-    restore();
-    process.exit(EXIT_PREFLIGHT);
-  }
-  git(['checkout', '--force', originalBranch === '' ? originalSha : originalBranch]);
-  git(['branch', '-D', tmpBranch]);
+  advanceStable(merge.sha, plan.stableSha);
+  // the throwaway branch is still checked out here — restore() puts us
+  // back without forcing, so an edit made during the checks survives
+  merge.restore();
 
   const newStable = head('stable') as string;
   console.log('\n=== sync-stable summary ===');
   console.log('branch:   stable');
-  console.log(`commits:  ${ahead} from main (${shortSha(stableSha)} → ${shortSha(newStable)})`);
-  console.log(`checks:   ${checks.length}/${checks.length} passed`);
+  console.log(
+    `commits:  ${plan.ahead} from main (${shortSha(plan.stableSha)} → ${shortSha(newStable)})`
+  );
+  console.log(`checks:   ${plan.checks.length}/${plan.checks.length} passed`);
   console.log(`stable:   ${shortSha(newStable)}`);
-  if (behind !== '0') {
-    console.log(`note:     ${behind} commit(s) on stable are not in main`);
+  if (plan.behind !== '0') {
+    console.log(`note:     ${plan.behind} commit(s) on stable are not in main`);
   }
 
   if (!opts.push) {
     console.log('push:     skipped (no --push)');
     process.exit(EXIT_OK);
   }
-
-  const remote = stableRemote();
-  console.log(`\npushing stable → ${remote} …`);
-  const push = git(['push', remote, 'stable:stable']);
-  if (!push.ok) {
-    console.error(
-      'sync-stable: push failed — stable is advanced locally, the remote is unchanged.'
-    );
-    process.exit(EXIT_CHECK_FAILED);
-  }
-  console.log('push:     ok');
+  pushStable();
   process.exit(EXIT_OK);
 }
 
