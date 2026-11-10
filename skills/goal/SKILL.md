@@ -1,6 +1,7 @@
 ---
+
 name: goal
-description: "Use when the session needs a persistent completion condition it keeps working toward across turns — `/goal <condition>` sets it, the stop hook reminds (or judge-verdicts) whether it was reached. For hosts without a native goal command (devin). Requires `bro` (npx -y @broject/bro@0)."
+description: "Use when the session needs a persistent completion condition it keeps working toward across turns — `/goal <condition>` sets it, the stop hook reminds (or judge-verdicts) whether it was reached. `bro work goal` is the scriptable, cross-host surface (CI, spawned workers, hosts without a native command). Requires `bro` (npx -y @broject/bro@0)."
 ---
 
 # /goal (bro)
@@ -28,8 +29,8 @@ this repo materializes it as its own. That is how
 (Bare `bro work goal` without a condition only shows status — it writes
 nothing.)
 
-Hosts with a **native** `/goal` (Claude Code) — use it; `bro work goal`
-stays the scriptable, cross-host, worker-spawnable surface.
+Hosts with a **native** `/goal` — use it; `bro work goal` stays the
+scriptable, cross-host, worker-spawnable surface.
 
 ## Writing a condition
 

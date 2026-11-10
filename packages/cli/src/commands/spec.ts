@@ -36,16 +36,25 @@
  * bro.config.json `sdd.mode` (off|remind|gate — default off, so the
  * policy is opt-in per repo and committed, not per machine). Probes
  * delegate to the resolved spec connector — enforcement speaks the
- * project's own tool language.
+ * project's own tool language. The nudge scope is own claims MINUS
+ * delegated ones — a bead a NEWER live sibling-session marker also
+ * claims belongs to the executor, not this session — and the missing
+ * set reports once per change, stamped in the session's marker area,
+ * never on every prompt (spec bro-6a3dq).
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import {
   facade,
   getTasks,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDirAsync,
   isOwnClaim,
   loadConfig,
   hasHelpFlag,
+  markerLive,
+  markerOwner,
   printUsage,
   sessionTaskClaimsAsync,
   specStore,
@@ -139,12 +148,160 @@ function tasksProbe(dir: string): TaskStoreAsync {
   return tasksAsync(dir, loadConfig(dir).connectors);
 }
 
+/** The hooks dir all session-claim state lives under — the COMMON git
+ *  dir, so linked worktrees resolve to the same marker area. null
+ *  outside a repository: the probe degrades, never throws. */
+async function sddHooksDir(ctx: ConnectorCtx): Promise<string | null> {
+  const common = await gitCommonDirAsync(ctx.dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'hooks');
+}
+
+/** A sibling .task marker's live window when it carries no resolvable
+ *  owner — the armed-work nudge's horizon (LIVE_SESSION_MS /
+ *  proc-owner LIVE_MARKER_MS). */
+const LIVE_CLAIM_MS = 24 * 60 * 60 * 1000;
+
+/** One marker's side of the claim ledger: this agent's when the file
+ *  is this session's own or is stamped by this agent's process tree
+ *  (rotated session ids fold in, bro-7022c); otherwise foreign, and
+ *  only while live — a dead session's claim is residue, not an owner. */
+function claimMarkerSide(
+  file: string,
+  stampLine: string,
+  mtime: number,
+  safe: string,
+  self: { pid: number; start: string } | null | undefined,
+  now: number
+): 'own' | 'foreign' | null {
+  const owner = markerOwner(stampLine);
+  if (
+    file === `${safe}.task` ||
+    (self != null && owner !== null && owner.pid === self.pid && owner.start === self.start)
+  ) {
+    return 'own';
+  }
+  return markerLive(stampLine, mtime, LIVE_CLAIM_MS, now) ? 'foreign' : null;
+}
+
+/** Detail lines of one claim marker (line 0 is the stamp), its claim
+ *  stamp, and its liveness mtime — null when the marker cannot be
+ *  read. The claim stamp is the file's BIRTH time when the fs reports
+ *  one (mtime otherwise): armSession rewrites line 0 and mtime on
+ *  every arm, so under mtime-order a session claiming fresh unrelated
+ *  work would silently reorder an older shared claim — birth never
+ *  moves. Filesystems without statx-btime degrade to the old mtime
+ *  order (Node reports ctime/epoch there; a nonzero stamp is still
+ *  usable only when it predates mtime, i.e. real creation). */
+function claimMarker(path: string): { lines: string[]; stamp: number; mtime: number } | null {
+  try {
+    const st = statSync(path);
+    const birth = st.birthtimeMs;
+    const stamp = birth > 0 && birth <= st.mtimeMs ? birth : st.mtimeMs;
+    return { lines: readFileSync(path, 'utf8').split('\n'), stamp, mtime: st.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/** Fold one marker's claimed ids into `stamps` — newest claim stamp
+ *  per id. */
+function foldMarkerStamps(stamps: Map<string, number>, lines: string[], stamp: number): void {
+  for (const d of lines) {
+    const id = d.trim();
+    if (id !== '') {
+      stamps.set(id, Math.max(stamps.get(id) ?? 0, stamp));
+    }
+  }
+}
+
+/** Ids this session's claims share with a NEWER live claim of another
+ *  session — delegated work: the executor's fresher marker owns the
+ *  bead and its spec, so the delegator's copy is foreign. The scan is
+ *  the session-start 'armed work' nudge's mechanism applied to `.task`
+ *  markers. Per-bead claim times are not recorded, so the marker's
+ *  claim stamp is the granularity — newer claim marker wins, and a
+ *  later re-arm (which rewrites a marker's stamp line and mtime)
+ *  cannot reorder it. Read failures are empty: a lost marker never
+ *  masks a nudge. */
+function delegatedTaskClaims(
+  hooks: string,
+  mine: Set<string>,
+  ctx: ConnectorCtx,
+  now: number = Date.now()
+): Set<string> {
+  const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
+  const ownStamp = new Map<string, number>();
+  const foreignStamp = new Map<string, number>();
+  let files: string[];
+  try {
+    files = readdirSync(hooks);
+  } catch {
+    return new Set();
+  }
+  for (const f of files) {
+    if (!f.endsWith('.task')) {
+      continue;
+    }
+    const marker = claimMarker(join(hooks, f));
+    if (marker === null) {
+      continue;
+    }
+    const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.mtime, safe, ctx.owner, now);
+    if (side === 'own') {
+      foldMarkerStamps(ownStamp, marker.lines.slice(1), marker.stamp);
+    } else if (side === 'foreign') {
+      foldMarkerStamps(foreignStamp, marker.lines.slice(1), marker.stamp);
+    }
+  }
+  const out = new Set<string>();
+  for (const id of mine) {
+    const foreign = foreignStamp.get(id);
+    if (foreign !== undefined && foreign > (ownStamp.get(id) ?? 0)) {
+      out.add(id);
+    }
+  }
+  return out;
+}
+
+/** Record the missing set this session was just told; true when it
+ *  differs from the last record. The stamp sits in `hinted/` beside
+ *  the hook's other dedup marks — never flat beside the markers,
+ *  where readArmed would scan `<session>.*` as a gate aspect — and
+ *  `sdd-missing` cannot collide with the `sdd` skill-cite mark. An
+ *  empty set records too, so a resolved-then-reclaimed claim reports
+ *  again. Fail-open like stopHintsChanged: a session we cannot stamp
+ *  always reports. */
+function sddSetChanged(hooks: string | null, ctx: ConnectorCtx, ids: string[]): boolean {
+  const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
+  if (hooks === null || safe === '') {
+    return true;
+  }
+  const path = join(hooks, 'hinted', `${safe}.sdd-missing`);
+  const digest = createHash('sha256')
+    .update([...ids].sort((a, b) => a.localeCompare(b)).join('\n'))
+    .digest('hex');
+  try {
+    if (readFileSync(path, 'utf8').trim() === digest) {
+      return false;
+    }
+  } catch {
+    /* absent or unreadable stamp — a set this session never saw */
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${digest}\n`);
+  } catch {
+    /* an unwritable stamp never blocks a nudge */
+  }
+  return true;
+}
+
 /** This session's claimed beads that lack a spec — the nudge scope is
  *  always own claims; foreign work is never this session's to spec.
  *  Fail-open: a dead task store must not eat the policy line. */
 async function ownClaimsMissingSpec(ctx: ConnectorCtx): Promise<TaskRow[]> {
   try {
-    const mine = await sessionTaskClaimsAsync(ctx);
+    const [mine, hooks] = await Promise.all([sessionTaskClaimsAsync(ctx), sddHooksDir(ctx)]);
     if (mine.size === 0) {
       return [];
     }
@@ -160,7 +317,12 @@ async function ownClaimsMissingSpec(ctx: ConnectorCtx): Promise<TaskRow[]> {
       store.list({ status: 'in_progress' }),
     ]);
     const spec = specs(ctx.dir);
-    return rows.filter(r => isOwnClaim(r, mine, me) && specState(r, spec) === 'missing');
+    // a bead ANOTHER live session claims under a newer marker is
+    // delegated work — the executor owns its spec, not this session
+    const delegated = hooks === null ? new Set<string>() : delegatedTaskClaims(hooks, mine, ctx);
+    return rows.filter(
+      r => isOwnClaim(r, mine, me) && !delegated.has(r.id) && specState(r, spec) === 'missing'
+    );
   } catch {
     return [];
   }
@@ -182,8 +344,16 @@ export const sddConnector: Connector = {
         return [];
       }
       const spec = specs(ctx.dir);
-      const missing = (await ownClaimsMissingSpec(ctx)).map(r => `  spec missing: ${fmt(r)}`);
-      return [`SDD (${mode}): ${spec.policy()}`, ...missing];
+      const missing = await ownClaimsMissingSpec(ctx);
+      // rehydrate re-reminds every start (post-compaction needs the
+      // signal back) — and records the set so a prompt does not
+      // repeat what the start already told
+      sddSetChanged(
+        await sddHooksDir(ctx),
+        ctx,
+        missing.map(r => r.id)
+      );
+      return [`SDD (${mode}): ${spec.policy()}`, ...missing.map(r => `  spec missing: ${fmt(r)}`)];
     },
     async promptSubmit(ctx) {
       const { mode } = loadConfig(ctx.dir).sdd;
@@ -191,7 +361,14 @@ export const sddConnector: Connector = {
         return [];
       }
       const missing = await ownClaimsMissingSpec(ctx);
-      if (missing.length === 0) {
+      // report the missing set once per change, not on every prompt —
+      // the stamp lives in the session's marker area
+      const changed = sddSetChanged(
+        await sddHooksDir(ctx),
+        ctx,
+        missing.map(r => r.id)
+      );
+      if (missing.length === 0 || !changed) {
         return [];
       }
       const spec = specs(ctx.dir);
@@ -204,7 +381,26 @@ export const sddConnector: Connector = {
       if (mode === 'off') {
         return [];
       }
-      const missing = await ownClaimsMissingSpec(ctx);
+      const [missing, hooks] = await Promise.all([ownClaimsMissingSpec(ctx), sddHooksDir(ctx)]);
+      // the gate reports truth every time — a 'gate' block must hold
+      // while the violation does — and records what it told so a
+      // later prompt does not re-nag the same set. A 'gate' block can
+      // be DROPPED by emitStopGateBody two ways — an unarmed 'task'
+      // aspect (pins, a rotated session's marker), or an armed
+      // drill/work/act block outranking 'task' in GATE_PRIORITY — and
+      // a connector cannot see the sibling contributions to tell.
+      // So gate mode stamps only the empty set (which can hide no
+      // nudge) and lets the next prompt re-report once rather than
+      // risk a tell nobody saw; remind's passive always lands as
+      // context, so it records
+      const told = missing.length === 0 || mode === 'remind';
+      if (told) {
+        sddSetChanged(
+          hooks,
+          ctx,
+          missing.map(r => r.id)
+        );
+      }
       if (missing.length === 0) {
         return [];
       }

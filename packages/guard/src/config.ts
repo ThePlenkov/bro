@@ -1,48 +1,44 @@
-import type { ConfigSection, Guard, JsonSchema } from '@broject/core'
-import { GUARD_EVENTS, guardProblems, js } from '@broject/core'
+import type { ConfigSection, Guard, JsonSchema } from '@broject/core';
+import { GUARD_EVENTS, guardProblems, js } from '@broject/core';
 
 export interface GuardConfig {
   /** Kill switch — off emits nothing. Default on: no guards declared
    *  means nothing fires anyway, so the flag exists to silence a live
    *  config, not to gate adoption. */
-  enabled: boolean
+  enabled: boolean;
   /** Cap on emitted guard lines per hook event — injection is a
    *  budget, not a dump. */
-  maxPerEvent: number
+  maxPerEvent: number;
   /** The repo's own guard declarations — malformed defs fail CLOSED:
    *  dropped with a warning at load, never half-parsed. */
-  defs: Guard[]
+  defs: Guard[];
 }
 
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
   enabled: true,
   maxPerEvent: 3,
   defs: [],
-}
+};
 
 /** bro.config.json `guard` section — bad scalars warn + fall back; a
  *  malformed def is dropped (the agent reads the warning, the guard
  *  never half-fires). */
-export const guardSection: ConfigSection<GuardConfig> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<
-    string,
-    unknown
-  >
+export const guardSection: ConfigSection<GuardConfig> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   const defs = (Array.isArray(obj.defs) ? obj.defs : []).filter((d): d is Guard => {
-    const problems = guardProblems(d)
+    const problems = guardProblems(d);
     if (problems.length > 0) {
-      const name = (d as { name?: unknown } | null)?.name
-      const label = typeof name === 'string' ? `'${name}'` : '<unnamed>'
+      const name = (d as { name?: unknown } | null)?.name;
+      const label = typeof name === 'string' ? `'${name}'` : '<unnamed>';
       console.error(
         `bro.config: guard.defs ${label} is malformed — dropped: ${problems.join('; ')}`
-      )
-      return false
+      );
+      return false;
     }
-    return true
-  })
+    return true;
+  });
   return {
-    enabled:
-      typeof obj.enabled === 'boolean' ? obj.enabled : DEFAULT_GUARD_CONFIG.enabled,
+    enabled: typeof obj.enabled === 'boolean' ? obj.enabled : DEFAULT_GUARD_CONFIG.enabled,
     maxPerEvent:
       typeof obj.maxPerEvent === 'number' &&
       Number.isInteger(obj.maxPerEvent) &&
@@ -50,8 +46,8 @@ export const guardSection: ConfigSection<GuardConfig> = (raw) => {
         ? obj.maxPerEvent
         : DEFAULT_GUARD_CONFIG.maxPerEvent,
     defs,
-  }
-}
+  };
+};
 
 // mirrors guardProblems — the two faces stay aligned (config defs fail
 // closed, the schema is what the agent validates against in an IDE)
@@ -75,10 +71,7 @@ const guardDefSchema: JsonSchema = js.obj(
           exists: js.strList,
           probes: {
             type: 'array',
-            items: js.obj(
-              { name: js.str, args: { type: 'object' } },
-              { required: ['name'] }
-            ),
+            items: js.obj({ name: js.str, args: { type: 'object' } }, { required: ['name'] }),
           },
         }),
         judge: js.obj(
@@ -92,10 +85,10 @@ const guardDefSchema: JsonSchema = js.obj(
     say: js.str,
   },
   { required: ['name', 'when', 'say'] }
-)
+);
 
 guardSection.jsonSchema = js.obj({
   enabled: js.bool,
   maxPerEvent: js.int(1),
   defs: { type: 'array', items: guardDefSchema },
-})
+});

@@ -10,15 +10,31 @@
  * failure; warnings pass. Probes are read-only — a broken tool reports as
  * a failing check, never as a crash.
  */
-import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { basename, delimiter, dirname, join, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import type {
+  BdCompat,
+  BdProbe,
+  ConfigDiagnostic,
+  DoltHeadHealth,
+  DoltRemote,
+  ProviderEntry,
+  ProviderSurface,
+} from '@broject/core';
 import {
   bdTry,
   CONFIG_SECTION_LAYERS,
-  connectors,
   CORE_CONFIG_SECTIONS,
+  connectors,
   displayUrl,
   doltDirHealth,
   doltRemoteSrc,
@@ -33,16 +49,16 @@ import {
   janitorDidWork,
   janitorLine,
   listDoltRemotes,
+  loadConfig,
   loadConfigLayers,
+  PROVIDER_REGISTRY,
   pidAlive,
   printUsage,
   probeBdCompat,
   probeDoltRemote,
-  PROVIDER_REGISTRY,
+  procStat,
   runJanitor,
-} from '@broject/core'
-import type { BdCompat, BdProbe, ConfigDiagnostic, DoltHeadHealth, DoltRemote, ProviderEntry, ProviderSurface } from '@broject/core'
-import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
+} from '@broject/core';
 import {
   assertSonarHostTrusted,
   assertTokenSafeHost,
@@ -50,79 +66,83 @@ import {
   resolveCodesceneProject,
   resolveSonarProject,
   SourceSkipped,
-} from '@broject/debt'
-import { judgeConfig, synthesizedProviders } from '@broject/judge'
-import type { JudgeConfig } from '@broject/judge'
-import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts'
-import { pluginRows } from './plugins.ts'
-import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
+} from '@broject/debt';
+import type { JudgeConfig } from '@broject/judge';
+import { judgeConfig, synthesizedProviders } from '@broject/judge';
+import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
 import {
+  type AgentConnectorEnv,
+  type BudgetSnapshot,
   budgetLines,
   budgetSnapshotFor,
   loadAgentEnv,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
-} from '../agent-connectors.ts'
+} from '../agent-connectors.ts';
+import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
+import { daemonProbe, readDriveMarker } from './daemon.ts';
+import { pluginRows } from './plugins.ts';
 
-export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip'
+export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
 export interface DoctorCheck {
-  name: string
-  status: DoctorStatus
-  detail: string
+  name: string;
+  status: DoctorStatus;
+  detail: string;
   /** remediation — only on warn/fail */
-  hint?: string
+  hint?: string;
 }
 
-const check = (
-  name: string,
-  status: DoctorStatus,
-  detail: string,
-  hint?: string
-): DoctorCheck => ({ name, status, detail, ...(hint ? { hint } : {}) })
+const check = (name: string, status: DoctorStatus, detail: string, hint?: string): DoctorCheck => ({
+  name,
+  status,
+  detail,
+  ...(hint ? { hint } : {}),
+});
 
 interface BinProbe {
-  found: boolean
+  found: boolean;
   /** true only on ENOENT — a binary that exists but can't spawn (EACCES)
    *  or times out is present-but-broken; reporting it "not found" would
    *  send the user reinstalling a tool that's actually installed */
-  missing?: boolean
-  version?: string
-  err?: string
+  missing?: boolean;
+  version?: string;
+  err?: string;
 }
 
 /** `--version` probe — the same PATH-is-the-contract lookup every bro
  *  shell-out uses. */
 function probeBin(name: string): BinProbe {
-  const p = spawnSync(name, ['--version'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+  // PATH lookup is the contract (same as gh/bd/git) — biome keeps the
+  // marker on the issue line only in the /* */-leading-statement form
+  /* NOSONAR */ const p = spawnSync(name, ['--version'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
-  })
+  });
   if (p.error) {
-    const code = (p.error as NodeJS.ErrnoException).code
-    return { found: false, missing: code === 'ENOENT', err: p.error.message }
+    const code = (p.error as NodeJS.ErrnoException).code;
+    return { found: false, missing: code === 'ENOENT', err: p.error.message };
   }
   if (p.status !== 0) {
-    return { found: false, err: (p.stderr ?? '').trim() || `exit ${p.status}` }
+    return { found: false, err: (p.stderr ?? '').trim() || `exit ${p.status}` };
   }
-  const m = /\d+(\.\d+)+/.exec(`${p.stdout ?? ''} ${p.stderr ?? ''}`)
-  return { found: true, version: m?.[0] }
+  const m = /\d+(\.\d+)+/.exec(`${p.stdout ?? ''} ${p.stderr ?? ''}`);
+  return { found: true, version: m?.[0] };
 }
 
 /** Present-but-broken vs absent — a spawn failure is never "not found". */
 function binProblem(p: BinProbe): string {
   if (p.missing === true) {
-    return 'not found'
+    return 'not found';
   }
-  const err = p.err ? ` (${p.err})` : ''
-  return `not usable${err}`
+  const err = p.err ? ` (${p.err})` : '';
+  return `not usable${err}`;
 }
 
 /** Repo root for dir, or null outside a worktree. */
 function repoRoot(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--show-toplevel'])
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
+  const r = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
 }
 
 function isDir(path: string): boolean {
@@ -130,9 +150,9 @@ function isDir(path: string): boolean {
     // throwIfNoEntry only swallows ENOENT — EACCES/ENOTDIR on a path
     // part still throws; an unreadable target is not a dir, never a
     // doctor abort
-    return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false
+    return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -141,32 +161,37 @@ function isDir(path: string): boolean {
 function checkNode(): DoctorCheck {
   // the real capability gate is type stripping (bro.config.ts loads via
   // createRequire), not the version number — same probe config.ts uses
-  const ts = (process.features as { typescript?: unknown }).typescript
+  const ts = (process.features as { typescript?: unknown }).typescript;
   if (ts) {
-    return check('node', 'ok', `v${process.versions.node}`)
+    return check('node', 'ok', `v${process.versions.node}`);
   }
   return check(
     'node',
     'warn',
     `v${process.versions.node} — no native type stripping`,
     'bro.config.ts needs Node ≥22.18 — bro.config.json still works'
-  )
+  );
 }
 
 function checkGh(): DoctorCheck {
-  const gh = probeBin('gh')
+  const gh = probeBin('gh');
   if (!gh.found) {
-    return check('gh', 'fail', binProblem(gh), 'install the GitHub CLI — https://cli.github.com')
+    return check('gh', 'fail', binProblem(gh), 'install the GitHub CLI — https://cli.github.com');
   }
-  const auth = spawnSync('gh', ['auth', 'status'], { // NOSONAR — PATH lookup is the contract
+  /* NOSONAR — PATH lookup is the contract */ const auth = spawnSync('gh', ['auth', 'status'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 15_000,
-  })
+  });
   if (auth.status !== 0) {
-    return check('gh', 'fail', `${gh.version ?? 'present'} not authenticated`, 'run `gh auth login`')
+    return check(
+      'gh',
+      'fail',
+      `${gh.version ?? 'present'} not authenticated`,
+      'run `gh auth login`'
+    );
   }
-  return check('gh', 'ok', `${gh.version ?? 'present'} authed`)
+  return check('gh', 'ok', `${gh.version ?? 'present'} authed`);
 }
 
 /** Hooks replay run.sh's resolution order: local dist walking up from the
@@ -175,29 +200,27 @@ function checkGh(): DoctorCheck {
  *  by design, so a broken chain degrades to silent no-ops, not errors. */
 function checkHooks(dir: string): DoctorCheck {
   const envRoot =
-    process.env.PLUGIN_ROOT ??
-    process.env.DEVIN_PLUGIN_ROOT ??
-    process.env.CLAUDE_PLUGIN_ROOT
-  let d = resolve(envRoot?.startsWith('/') ? envRoot : dir)
+    process.env.PLUGIN_ROOT ?? process.env.DEVIN_PLUGIN_ROOT ?? process.env.CLAUDE_PLUGIN_ROOT;
+  let d = resolve(envRoot?.startsWith('/') ? envRoot : dir);
   for (;;) {
-    const dist = join(d, 'packages', 'cli', 'dist', 'index.js')
+    const dist = join(d, 'packages', 'cli', 'dist', 'index.js');
     if (statSync(dist, { throwIfNoEntry: false })?.isFile()) {
-      return check('hooks', 'ok', `resolves via local dist — ${dist}`)
+      return check('hooks', 'ok', `resolves via local dist — ${dist}`);
     }
-    const parent = dirname(d)
+    const parent = dirname(d);
     if (parent === d) {
-      break
+      break;
     }
-    d = parent
+    d = parent;
   }
   if (probeBin('bro').found) {
     // `bro hooks` with no event is a silent no-op — same probe run.sh runs
-    const probe = spawnSync('bro', ['hooks'], { // NOSONAR — PATH lookup is the contract
+    /* NOSONAR — PATH lookup is the contract */ const probe = spawnSync('bro', ['hooks'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
-    })
+    });
     if (probe.status === 0) {
-      return check('hooks', 'ok', 'resolves via `bro` on PATH')
+      return check('hooks', 'ok', 'resolves via `bro` on PATH');
     }
   }
   if (probeBin('npx').found) {
@@ -206,14 +229,147 @@ function checkHooks(dir: string): DoctorCheck {
       'warn',
       'npx @broject/bro fallback only',
       'every lifecycle event pays the npx resolution — `npm i -g @broject/bro` or the agent plugin resolves locally'
-    )
+    );
   }
   return check(
     'hooks',
     'warn',
     'no resolution — lifecycle hooks silently no-op',
     'install @broject/bro or the agent plugin to get session-start context and the stop gate'
-  )
+  );
+}
+
+/** Devin's plugin lockfile — `<data>/devin/cli/plugins/lock.json`, the
+ *  resolved-install list `devin plugins` maintains; the same base
+ *  derivation devinLocksDir uses. An absent or unreadable file answers
+ *  "nothing resolved" — duplicate wiring is then unprovable. */
+function devinPluginLockfile(env: NodeJS.ProcessEnv): string {
+  const xdg = env['XDG_DATA_HOME'];
+  const base =
+    xdg !== undefined && xdg.trim() !== ''
+      ? xdg
+      : join(
+          env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir(),
+          '.local',
+          'share'
+        );
+  return join(base, 'devin', 'cli', 'plugins', 'lock.json');
+}
+
+/** A `bro` entry in the lockfile's resolved list — any source/scope
+ *  counts: a resolved plugin's hooks register in Devin sessions. */
+function broPluginResolved(lockfile: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(lockfile, 'utf8')) as { resolved?: unknown };
+    return (
+      Array.isArray(raw.resolved) && raw.resolved.some(r => isRecord(r) && r['name'] === 'bro')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Bro-launcher signature inside a Devin hook command — run.sh or a
+ *  `bro hooks …` invocation. Applied per event/handler so a chain that
+ *  also wires foreign tooling can be scoped instead of dropped
+ *  wholesale. */
+const DEVIN_BRO_HOOK = /hooks\/run\.sh|bro(?:\.exe|\.cmd)?\s+hooks[\s"']/;
+
+/** Every command a chain event's groups run — null when the shape is
+ *  off-schema (non-array event value, group without a hooks list),
+ *  which the caller counts as foreign rather than guess at what it
+ *  holds. */
+function devinChainCommands(groups: unknown): string[] | null {
+  if (!Array.isArray(groups)) {
+    return null;
+  }
+  const commands: string[] = [];
+  for (const group of groups) {
+    if (!isRecord(group) || !Array.isArray(group['hooks'])) {
+      return null;
+    }
+    for (const h of group['hooks']) {
+      const cmd = isRecord(h) ? h['command'] : undefined;
+      commands.push(typeof cmd === 'string' ? cmd : '');
+    }
+  }
+  return commands;
+}
+
+/** Which events carry a bro handler and whether the chain wires
+ *  anything else — the two facts that pick the remediation (drop the
+ *  file vs strip only the bro entries). Anything we cannot prove is a
+ *  bro handler counts as foreign, so the hint never advises deleting
+ *  handlers the check didn't recognize. null when the JSON won't
+ *  parse: the caller falls back to the file-level signature and the
+ *  safe hint. */
+function devinChainShape(text: string): { broEvents: string[]; foreign: boolean } | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const broEvents: string[] = [];
+  let foreign = false;
+  for (const [event, groups] of Object.entries(raw)) {
+    if (DEVIN_BRO_HOOK.test(JSON.stringify(groups))) {
+      broEvents.push(event);
+    }
+    const commands = devinChainCommands(groups);
+    if (commands === null || commands.some(c => !DEVIN_BRO_HOOK.test(c))) {
+      foreign = true;
+    }
+  }
+  return { broEvents, foreign };
+}
+
+/** Duplicate Devin hook wiring (bro-36sx7.5) — a project-local bro
+ *  chain plus a resolved `bro` plugin both register the same events, so
+ *  each wired event spawns two launchers (the plugin copy exits early
+ *  when the project chain owns the event — the spawn itself is the
+ *  overhead the hooks-perf epic kills). Only chains carrying a bro
+ *  signature collide: a .devin/hooks.v1.json wiring foreign tooling
+ *  fires alongside the plugin, not against it. Warn, never fail — a
+ *  lone project chain is legitimate wiring. The remediation preserves
+ *  unrelated handlers: drop-file only when the chain is all-bro,
+ *  strip-the-bro-entries otherwise. */
+function devinWiringCheck(root: string | null): DoctorCheck {
+  let text: string | null = null;
+  if (root !== null) {
+    try {
+      text = readFileSync(join(root, '.devin', 'hooks.v1.json'), 'utf8');
+    } catch {
+      // absent or unreadable — no project chain
+    }
+  }
+  if (text === null) {
+    return check('hooks-wiring', 'ok', 'no project-local Devin hook chain');
+  }
+  const shape = devinChainShape(text);
+  const hasBro = shape === null ? DEVIN_BRO_HOOK.test(text) : shape.broEvents.length > 0;
+  if (!hasBro) {
+    return check('hooks-wiring', 'ok', 'project-local Devin chain wires no bro hooks');
+  }
+  if (!broPluginResolved(devinPluginLockfile(process.env))) {
+    return check(
+      'hooks-wiring',
+      'ok',
+      '.devin/hooks.v1.json — sole bro wiring (no resolved bro plugin)'
+    );
+  }
+  const detail =
+    shape !== null
+      ? `.devin/hooks.v1.json + resolved bro plugin — two hook launchers on every bro-wired event (${shape.broEvents.join(', ')})`
+      : '.devin/hooks.v1.json + resolved bro plugin — two hook launchers on every bro-wired event';
+  const hint =
+    shape !== null && !shape.foreign
+      ? 'drop .devin/hooks.v1.json — the plugin already wires bro (run.sh defers to a project chain while one exists)'
+      : 'remove the bro hook entries from .devin/hooks.v1.json, keep the other handlers — the plugin already wires bro';
+  return check('hooks-wiring', 'warn', detail, hint);
 }
 
 // --- self-build staleness (bro-s7vgd) --------------------------------------
@@ -226,40 +382,40 @@ function checkHooks(dir: string): DoctorCheck {
 // or its upstream knows.
 
 interface DevDist {
-  checkout: string
-  distDir: string
-  entry: string
+  checkout: string;
+  distDir: string;
+  entry: string;
 }
 
 /** First `bro` executable PATH resolves — the binary spawns/hooks
  *  actually exec. Windows shims (.cmd/.exe) lead so the spawn target
  *  matches what a shell would pick. */
 function pathBroBin(): string | null {
-  const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro']
+  const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro'];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-    const hit = dir === '' ? undefined : names.map((name) => join(dir, name)).find(existsSync)
+    const hit = dir === '' ? undefined : names.map(name => join(dir, name)).find(existsSync);
     if (hit !== undefined) {
-      return hit
+      return hit;
     }
   }
-  return null
+  return null;
 }
 
 /** Realpath'd and deduped — a symlink into a dev checkout exposes
  *  itself; a dangling one contributes nothing. */
 function realpathDedup(paths: string[]): string[] {
-  const out: string[] = []
+  const out: string[] = [];
   for (const p of paths) {
     try {
-      const r = realpathSync(p)
+      const r = realpathSync(p);
       if (!out.includes(r)) {
-        out.push(r)
+        out.push(r);
       }
     } catch {
       // dangling symlink — nothing resolvable to inspect
     }
   }
-  return out
+  return out;
 }
 
 /** `bro` as PATH resolves it — the binary spawns/hooks actually exec —
@@ -267,16 +423,16 @@ function realpathDedup(paths: string[]): string[] {
  *  the dev symlink). Realpath'd so the symlink into the checkout exposes
  *  itself; deduped since the two usually converge on one file. */
 function broEntrypoints(): string[] {
-  const raw: string[] = []
-  const onPath = pathBroBin()
+  const raw: string[] = [];
+  const onPath = pathBroBin();
   if (onPath !== null) {
-    raw.push(onPath)
+    raw.push(onPath);
   }
-  const self = process.argv[1]
+  const self = process.argv[1];
   if (typeof self === 'string' && self !== '') {
-    raw.push(self)
+    raw.push(self);
   }
-  return realpathDedup(raw)
+  return realpathDedup(raw);
 }
 
 /** A file inside a bro dev checkout's packages/cli/dist, or null. The
@@ -284,53 +440,57 @@ function broEntrypoints(): string[] {
  *  from posing as bro, and the repo-root check keeps a vendored copy
  *  inside another repo from being compared against that repo's HEAD. */
 function devDistEntry(realPath: string): DevDist | null {
-  const distDir = dirname(realPath)
-  const cliDir = dirname(distDir)
-  const packagesDir = dirname(cliDir)
+  const distDir = dirname(realPath);
+  const cliDir = dirname(distDir);
+  const packagesDir = dirname(cliDir);
   if (
     basename(distDir) !== 'dist' ||
     basename(cliDir) !== 'cli' ||
     basename(packagesDir) !== 'packages'
   ) {
-    return null
+    return null;
   }
   try {
     const pkg = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) as {
-      name?: string
-    }
+      name?: string;
+    };
     if (pkg.name !== '@broject/bro') {
-      return null
+      return null;
     }
   } catch {
-    return null
+    return null;
   }
-  const checkout = dirname(packagesDir)
-  const root = repoRoot(checkout)
+  const checkout = dirname(packagesDir);
+  const root = repoRoot(checkout);
   try {
     if (root === null || realpathSync(root) !== realpathSync(checkout)) {
-      return null
+      return null;
     }
   } catch {
-    return null
+    return null;
   }
-  return { checkout, distDir, entry: realPath }
+  return { checkout, distDir, entry: realPath };
 }
 
 /** Freshest mtime across dist's top level — the moment the last build
  *  finished. 0 when nothing readable: a dist that can't be stat'd can't
  *  be trusted either. */
 function distStampMs(distDir: string): number {
-  let newest = 0
-  for (const f of readdirSync(distDir, { withFileTypes: true })) {
-    if (!f.isFile()) {
-      continue
+  let newest = 0;
+  try {
+    for (const f of readdirSync(distDir, { withFileTypes: true })) {
+      if (!f.isFile()) {
+        continue;
+      }
+      const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+      if (m > newest) {
+        newest = m;
+      }
     }
-    const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0
-    if (m > newest) {
-      newest = m
-    }
+  } catch {
+    return 0;
   }
-  return newest
+  return newest;
 }
 
 /** When this clone last moved a ref — the mtime of its reflog file.
@@ -341,51 +501,70 @@ function distStampMs(distDir: string): number {
  *  the file mtime is not). HEAD's log lives in the per-worktree git
  *  dir, ref logs in the common dir. 0 when the ref has no reflog. */
 function refMovedMs(checkout: string, ref: string): number {
-  const gd = gitTry(['-C', checkout, 'rev-parse', ref === 'HEAD' ? '--git-dir' : '--git-common-dir'])
+  const gd = gitTry([
+    '-C',
+    checkout,
+    'rev-parse',
+    ref === 'HEAD' ? '--git-dir' : '--git-common-dir',
+  ]);
   if (gd.code !== 0) {
-    return 0
+    return 0;
   }
   const name =
     ref === 'HEAD'
       ? 'HEAD'
-      : gitTry(['-C', checkout, 'rev-parse', '--symbolic-full-name', ref]).out.trim()
+      : gitTry(['-C', checkout, 'rev-parse', '--symbolic-full-name', ref]).out.trim();
   if (name === '') {
-    return 0
+    return 0;
   }
-  return statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
-    ?.mtimeMs ?? 0
+  try {
+    return (
+      statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
+        ?.mtimeMs ?? 0
+    );
+  } catch {
+    // an unreadable reflog (EACCES) is no evidence the ref moved —
+    // throwIfNoEntry only suppresses ENOENT; the caller reports 0 as
+    // unverifiable rather than aborting the whole doctor run
+    return 0;
+  }
 }
 
 function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
-  const stamp = distStampMs(distDir)
+  const stamp = distStampMs(distDir);
   if (stamp === 0) {
-    return check('bro-dist', 'warn', `${entry} — dist unreadable`, `rebuild: npm run build — ${checkout}`)
+    return check(
+      'bro-dist',
+      'warn',
+      `${entry} — dist unreadable`,
+      `rebuild: npm run build — ${checkout}`
+    );
   }
   // HEAD covers a pulled checkout; @{u} catches "dist built before the
   // merge landed" even when a fetch moved the tracking ref ahead
-  const refs = ['HEAD']
+  const refs = ['HEAD'];
   if (gitTry(['-C', checkout, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
-    refs.push('@{u}')
+    refs.push('@{u}');
   }
-  let newest: { ref: string; sha: string; ms: number } | null = null
+  let newest: { ref: string; sha: string; ms: number } | null = null;
   for (const ref of refs) {
-    const r = gitTry(['-C', checkout, 'show', '-s', '--format=%ct %h', ref])
+    const r = gitTry(['-C', checkout, 'show', '-s', '--format=%ct %h', ref]);
     if (r.code !== 0) {
-      continue
+      continue;
     }
-    const [ct, sha] = r.out.trim().split(' ')
-    const commitMs = Number(ct) * 1000
+    const [ct, sha] = r.out.trim().split(' ');
+    const commitMs = Number(ct) * 1000;
     if (!Number.isFinite(commitMs) || commitMs <= 0) {
-      continue
+      continue;
     }
     // ref-move time is the signal; %ct is the fallback for ref-less moves
-    const ms = refMovedMs(checkout, ref) || commitMs
+    const ms = refMovedMs(checkout, ref) || commitMs;
     if (newest === null || ms > newest.ms) {
-      newest = { ref, sha: sha ?? ref, ms }
+      newest = { ref, sha: sha ?? ref, ms };
     }
   }
   if (newest === null) {
-    return check('bro-dist', 'ok', `${checkout} — no resolvable commit, drift unproven`)
+    return check('bro-dist', 'ok', `${checkout} — no resolvable commit, drift unproven`);
   }
   if (newest.ms > stamp) {
     return check(
@@ -393,29 +572,350 @@ function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
       'warn',
       `${entry} predates ${newest.ref} ${newest.sha} — spawned agents/hooks run stale code`,
       `rebuild: npm run build — ${checkout}`
-    )
+    );
   }
-  return check('bro-dist', 'ok', `${entry} covers ${newest.ref} ${newest.sha}`)
+  return check('bro-dist', 'ok', `${entry} covers ${newest.ref} ${newest.sha}`);
 }
 
 /** One row per dev checkout found — PATH-bro and a self-run dist can be
  *  different checkouts. None at all → a single ok row: an installed
  *  package has no HEAD to drift from. */
 function selfDistChecks(): DoctorCheck[] {
-  const seen = new Set<string>()
-  const out: DoctorCheck[] = []
+  const seen = new Set<string>();
+  const out: DoctorCheck[] = [];
   for (const real of broEntrypoints()) {
-    const entry = devDistEntry(real)
+    const entry = devDistEntry(real);
     if (entry === null || seen.has(entry.checkout)) {
-      continue
+      continue;
     }
-    seen.add(entry.checkout)
-    out.push(devDistCheck(entry))
+    seen.add(entry.checkout);
+    out.push(devDistCheck(entry));
   }
   if (out.length === 0) {
-    out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'))
+    out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'));
   }
-  return out
+  return out;
+}
+
+// --- daemon binary drift (bro-kn6bq) ------------------------------------
+// The supervisor is only as live as the binary it exec'd: a daemon armed
+// under the published install kept respawning the fleet for a full day
+// without the protections merged into the repo (the provider wall —
+// published 0.2.5 equalled the repo's 0.2.5, so VERSION alone proved
+// nothing; the binary path is the discriminating signal). Compare the
+// running daemon's resolved entry — /proc cmdline — against this repo's
+// dist and, outside a bro checkout, the entry `bro` resolves to.
+
+/** The daemon process's resolved entry script — argv[1] under a
+ *  node-ish runtime, argv[0] when the process IS the program. Relative
+ *  spellings resolve against the process's own cwd, never doctor's.
+ *  null when /proc can't name a file (non-/proc platform, raced exit,
+ *  `node -e`). */
+function daemonEntry(pid: number): string | null {
+  let argv: string[];
+  try {
+    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      .split('\0')
+      .filter(t => t !== '');
+  } catch {
+    return null;
+  }
+  if (argv.length === 0) {
+    return null;
+  }
+  const runtime = basename(argv[0]!);
+  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime) ? scriptArg(argv) : argv[0];
+  if (candidate === undefined || candidate.startsWith('-')) {
+    return null;
+  }
+  try {
+    const abs = candidate.startsWith('/')
+      ? candidate
+      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
+    return realpathSync(abs);
+  } catch {
+    return null;
+  }
+}
+
+/** Runtime options whose value travels as the next argv token —
+ *  `-r`/`--require`, `--import`, loaders, eval strings, env files.
+ *  `=`-joined options need no entry: they never consume a token. An
+ *  option missing from the set degrades to today's behavior (its value
+ *  is probed as the entry and fails realpath), never to a wrong entry. */
+const RUNTIME_VALUE_OPTS = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '-e',
+  '--eval',
+  '-p',
+  '--print',
+  '-c',
+  '--check',
+  '--watch-path',
+  '--env-file',
+  '--env-file-if-exists',
+]);
+
+/** The entry script inside a runtime argv — the first operand after
+ *  the runtime's own options. `--` ends option parsing outright. */
+function scriptArg(argv: string[]): string | undefined {
+  let i = 1;
+  while (i < argv.length) {
+    const t = argv[i]!;
+    if (t === '--') {
+      return argv[i + 1];
+    }
+    if (!t.startsWith('-')) {
+      return t;
+    }
+    i += RUNTIME_VALUE_OPTS.has(t) ? 2 : 1;
+  }
+  return undefined;
+}
+
+/** The daemon process's start epoch in ms — /proc starttime jiffies off
+ *  /proc/uptime's boot estimate, the same conversion readProcRows uses.
+ *  null off-linux or on a raced exit; callers read null as unverifiable,
+ *  never as stale. */
+function procStartMs(pid: number): number | null {
+  try {
+    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+    const st = procStat(pid);
+    if (st === null || st.start === '') {
+      return null;
+    }
+    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/** Two dirs inside the same repository — linked worktrees share the
+ *  common dir, so an entry exec'd from any of them is this repo's code,
+ *  not a foreign binary. */
+function sameGitCommon(a: string, b: string): boolean {
+  const ca = gitCommonDir(a);
+  const cb = gitCommonDir(b);
+  try {
+    return ca !== null && cb !== null && realpathSync(ca) === realpathSync(cb);
+  } catch {
+    return false;
+  }
+}
+
+/** The checkout's resolved HEAD commit — null where HEAD won't
+ *  resolve (unborn branch, detached probe failure, not a repo). */
+function headSha(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
+}
+
+/** Same repository AND same HEAD — a linked worktree sitting on another
+ *  commit is a different build of the code, not this checkout's: its
+ *  binary can lack what this HEAD carries. An unresolved HEAD never
+ *  matches. */
+function sameCheckoutHead(a: string, b: string): boolean {
+  const ha = headSha(a);
+  return ha !== null && ha === headSha(b) && sameGitCommon(a, b);
+}
+
+/** The bro package version behind an entry — `<pkg>/dist/index.js` sits
+ *  two levels under package.json in dev checkouts, npm installs and the
+ *  npx cache alike. Versionless entries (a bare script) report none. */
+function broEntryVersion(entry: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** This repo's own bro version when the checkout builds bro —
+ *  `<root>/packages/cli/package.json` naming @broject/bro. A daemon
+ *  serving the bro repo must run this tree's dist (or an install
+ *  rebuilt from it) for merged protections to be live. */
+function broCheckoutVersion(root: string | null): string | null {
+  if (root === null) {
+    return null;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' && typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The daemon exec'd a bro dev checkout's dist. Same repo + same HEAD →
+ *  the bro-dist staleness verdict IS the binary verdict — a dist that
+ *  predates HEAD is protections-not-live. Anything else is a different
+ *  checkout's build. */
+function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): DoctorCheck[] {
+  if (!sameCheckoutHead(dev.checkout, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's dist`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ];
+  }
+  const c = devDistCheck(dev);
+  if (c.status === 'ok') {
+    // ...but devDistCheck only weighs the files on disk: the running
+    // process still holds what it exec'd, so a dist rebuilt after
+    // this daemon started is fresh on disk and stale in memory
+    const start = procStartMs(pid);
+    if (start !== null && distStampMs(dev.distDir) > start) {
+      return [
+        check(
+          'daemon',
+          'warn',
+          `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
+          'restart the daemon — the running process still holds the pre-build code'
+        ),
+      ];
+    }
+  }
+  return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)];
+}
+
+/** A non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
+ *  a tsx worker, a repo script) IS that checkout's code — node_modules
+ *  paths are vendored installs, never source. Only the drift question
+ *  remains: HEAD moving after the daemon spawned leaves the running
+ *  process behind the checkout. */
+function srcDaemonCheck(pid: number, entry: string, entryRoot: string, dir: string): DoctorCheck[] {
+  if (!sameCheckoutHead(entryRoot, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's source`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ];
+  }
+  const start = procStartMs(pid);
+  // HEAD covers a pulled checkout; @{u} catches "source built/loaded before
+  // the merge landed" even when a fetch moved the tracking ref ahead
+  const headMoved = refMovedMs(entryRoot, 'HEAD');
+  let moved = headMoved;
+  if (gitTry(['-C', entryRoot, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
+    const upstreamMoved = refMovedMs(entryRoot, '@{u}');
+    if (upstreamMoved > moved) moved = upstreamMoved;
+  }
+  // a missing HEAD reflog is unverifiable even when @{u} has one — the
+  // tracking ref's log cannot prove HEAD didn't move
+  if (headMoved === 0) moved = 0;
+  // no start time or no reflog = no evidence the process is current —
+  // unverifiable, never a silent ok (commit %ct is committer-declared,
+  // not a fallback)
+  if (start === null || moved === 0) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, drift unverifiable (${
+          start === null ? 'process start unreadable' : 'no reflog'
+        })`,
+        'restart the daemon — protections live only in the code the process loaded'
+      ),
+    ];
+  }
+  if (moved > start) {
+    // a moved HEAD means the process holds pre-move code; a still HEAD
+    // with a moved @{u} means the checkout itself is behind — pull first,
+    // a restart alone would reread the same stale code
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, ${
+          headMoved > start ? 'HEAD' : '@{u}'
+        } moved since it started`,
+        headMoved > start
+          ? 'restart the daemon — the running process loaded the pre-move code'
+          : 'git pull, then restart the daemon — the checkout lacks what @{u} already carries'
+      ),
+    ];
+  }
+  return [check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`)];
+}
+
+/** One row: supervisor liveness plus the binary-drift verdict. Down is
+ *  ordinary (installed = the checkpoint rearms); up compares the
+ *  running entry — this repo's dist borrows the bro-dist staleness
+ *  verdict, a foreign dist or an install in a bro checkout warns that
+ *  merged protections aren't live, and elsewhere the daemon's entry
+ *  must be the one `bro` resolves or a restart keeps the drift. */
+function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
+  const probe = daemonProbe(dir);
+  if (!probe.live) {
+    const installed =
+      readDriveMarker(dir) !== null ? ' · installed — the next session checkpoint rearms' : '';
+    return [
+      check(
+        'daemon',
+        'ok',
+        probe.recorded === null
+          ? `down — no supervisor${installed}`
+          : `down — recorded pid ${probe.recorded.pid} is dead${installed}`
+      ),
+    ];
+  }
+  const pid = probe.pid!;
+  const entry = daemonEntry(pid);
+  if (entry === null) {
+    return [check('daemon', 'skip', `up — pid ${pid} · binary unverifiable (no readable argv)`)];
+  }
+  const dev = devDistEntry(entry);
+  if (dev !== null) {
+    return devDaemonCheck(pid, entry, dev, dir);
+  }
+  const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry));
+  if (entryRoot !== null && broCheckoutVersion(entryRoot) !== null) {
+    return srcDaemonCheck(pid, entry, entryRoot, dir);
+  }
+  const v = broEntryVersion(entry);
+  const vs = v === undefined ? '' : ` (v${v})`;
+  const repoV = broCheckoutVersion(root);
+  if (repoV !== null) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry}${vs} — installed, not this repo's build (v${repoV})`,
+        "merged protections aren't live until the daemon's binary is rebuilt — npm run build + reinstall, or restart it on the repo's dist"
+      ),
+    ];
+  }
+  const eps = broEntrypoints();
+  if (eps.includes(entry)) {
+    return [check('daemon', 'ok', `up — pid ${pid} · ${entry}${vs}`)];
+  }
+  return [
+    check(
+      'daemon',
+      'warn',
+      `pid ${pid} runs ${entry}${vs} — \`bro\` resolves ${eps[0] ?? 'nothing'}`,
+      "the daemon's binary and the rearm path differ — restart it under the current bro"
+    ),
+  ];
 }
 
 /** Top-level keys bro knows — anything else in bro.config.json is almost
@@ -430,26 +930,26 @@ function knownConfigKeys(): Set<string> {
     'pack',
     ...CORE_CONFIG_SECTIONS,
     ...Object.keys(pluginConfigSections()),
-  ])
+  ]);
 }
 
 function jsonKeysVerdict(path: string, name: string): DoctorCheck {
-  let raw: Record<string, unknown>
+  let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
   } catch {
-    return check('config', 'ok', name) // probe already ok'd it — can't happen, stay honest anyway
+    return check('config', 'ok', name); // probe already ok'd it — can't happen, stay honest anyway
   }
-  const unknown = Object.keys(raw).filter((k) => !knownConfigKeys().has(k))
+  const unknown = Object.keys(raw).filter(k => !knownConfigKeys().has(k));
   if (unknown.length === 0) {
-    return check('config', 'ok', name)
+    return check('config', 'ok', name);
   }
   return check(
     'config',
     'warn',
     `${name} — unknown keys: ${unknown.join(', ')}`,
     'unknown sections silently no-op — check for typos'
-  )
+  );
 }
 
 /** Config probe: the effective layers plus per-section provenance and
@@ -457,26 +957,26 @@ function jsonKeysVerdict(path: string, name: string): DoctorCheck {
  *  loadConfigLayers — the same path loadConfig uses — so a file that
  *  throws during the real load reports broken here identically. */
 function checkConfig(dir: string): DoctorCheck[] {
-  const { layers, broken } = loadConfigLayers(dir)
-  const checks: DoctorCheck[] = broken.map((file) =>
+  const { layers, broken } = loadConfigLayers(dir);
+  const checks: DoctorCheck[] = broken.map(file =>
     check(
       'config',
       'fail',
       `${basename(file)} failed to load (${file})`,
       'fix or remove it — a broken config silently falls back to jsonl-only stores'
     )
-  )
+  );
   if (layers.length === 0) {
     checks.push(
       broken.length === 0
         ? check('config', 'ok', 'no bro.config — running on defaults')
         : check('config', 'warn', 'no usable config layer — running on defaults')
-    )
-    return checks
+    );
+    return checks;
   }
-  checks.push(...configLayerChecks(layers, broken.length))
-  checks.push(...configOwnershipChecks(layers))
-  return checks
+  checks.push(...configLayerChecks(layers, broken.length));
+  checks.push(...configOwnershipChecks(layers));
+  return checks;
 }
 
 /** Layer summary + unknown-key scan (.json only) + per-section
@@ -485,12 +985,12 @@ function configLayerChecks(
   layers: ReturnType<typeof loadConfigLayers>['layers'],
   brokenCount: number
 ): DoctorCheck[] {
-  const checks: DoctorCheck[] = []
+  const checks: DoctorCheck[] = [];
   for (const hit of layers) {
     if (hit.file.endsWith('.json')) {
-      const verdict = jsonKeysVerdict(hit.file, `${hit.layer} ${basename(hit.file)}`)
+      const verdict = jsonKeysVerdict(hit.file, `${hit.layer} ${basename(hit.file)}`);
       if (verdict.status !== 'ok') {
-        checks.push(verdict)
+        checks.push(verdict);
       }
     }
   }
@@ -498,22 +998,26 @@ function configLayerChecks(
     check(
       'config',
       'ok',
-      layers.map((l) => `${l.layer} ${basename(l.file)}`).join(' + ') +
+      layers.map(l => `${l.layer} ${basename(l.file)}`).join(' + ') +
         (brokenCount > 0 ? ' — broken file present' : '')
     )
-  )
-  const provenance = new Map<string, string>()
+  );
+  const provenance = new Map<string, string>();
   for (const hit of layers) {
     for (const key of Object.keys(hit.raw)) {
-      provenance.set(key, hit.layer)
+      provenance.set(key, hit.layer);
     }
   }
   if (provenance.size > 0) {
     checks.push(
-      check('config', 'ok', `sections: ${[...provenance.entries()].map((kv) => kv.join('←')).join(' · ')}`)
-    )
+      check(
+        'config',
+        'ok',
+        `sections: ${[...provenance.entries()].map(kv => kv.join('←')).join(' · ')}`
+      )
+    );
   }
-  return checks
+  return checks;
 }
 
 /** Operator config in the committed file leaks the user's subscription to
@@ -523,9 +1027,9 @@ function configOwnershipChecks(
   layers: ReturnType<typeof loadConfigLayers>['layers']
 ): DoctorCheck[] {
   const keys = (layer: string): string[] =>
-    layers.filter((l) => l.layer === layer).flatMap((l) => Object.keys(l.raw))
-  const checks: DoctorCheck[] = []
-  const committedOps = keys('project').filter((k) => CONFIG_SECTION_LAYERS[k] === 'operator')
+    layers.filter(l => l.layer === layer).flatMap(l => Object.keys(l.raw));
+  const checks: DoctorCheck[] = [];
+  const committedOps = keys('project').filter(k => CONFIG_SECTION_LAYERS[k] === 'operator');
   if (committedOps.length > 0) {
     checks.push(
       check(
@@ -534,20 +1038,20 @@ function configOwnershipChecks(
         `operator sections in committed config: ${committedOps.join(', ')}`,
         'move them to bro.config.local.json or ~/.config/bro/config.json'
       )
-    )
+    );
   }
-  const globalPolicy = keys('global').filter((k) => CONFIG_SECTION_LAYERS[k] === 'policy')
+  const globalPolicy = keys('global').filter(k => CONFIG_SECTION_LAYERS[k] === 'policy');
   if (globalPolicy.length > 0) {
     checks.push(
       check(
         'config',
         'warn',
         `policy sections in global config: ${globalPolicy.join(', ')}`,
-        'global policy applies to every project — move to the repo\'s bro.config.json'
+        "global policy applies to every project — move to the repo's bro.config.json"
       )
-    )
+    );
   }
-  return checks
+  return checks;
 }
 
 /** Schema-validation rows (spec: bro-d9dmx) — one row per layer FILE
@@ -555,26 +1059,26 @@ function configOwnershipChecks(
  *  failed schema look absent downstream (defaults substitute), so the
  *  default verdict is warn; `--strict` promotes to fail. */
 function configSchemaChecks(dir: string, strict: boolean): DoctorCheck[] {
-  const diags = broConfigDiagnostics(dir)
+  const diags = broConfigDiagnostics(dir);
   if (diags.length === 0) {
-    return [check('config-schema', 'ok', 'all layers validate')]
+    return [check('config-schema', 'ok', 'all layers validate')];
   }
-  const byFile = new Map<string, ConfigDiagnostic[]>()
+  const byFile = new Map<string, ConfigDiagnostic[]>();
   for (const d of diags) {
-    const list = byFile.get(d.file) ?? []
-    list.push(d)
-    byFile.set(d.file, list)
+    const list = byFile.get(d.file) ?? [];
+    list.push(d);
+    byFile.set(d.file, list);
   }
-  return [...byFile.values()].map((ds) => {
-    const first = ds[0] as ConfigDiagnostic
+  return [...byFile.values()].map(ds => {
+    const first = ds[0] as ConfigDiagnostic;
     return check(
       'config-schema',
       strict ? 'fail' : 'warn',
       `${first.layer} ${basename(first.file)} — ` +
-        ds.map((d) => `${d.path}: ${d.message}`).join('; '),
+        ds.map(d => `${d.path}: ${d.message}`).join('; '),
       'invalid values silently read as defaults — fix the file'
-    )
-  })
+    );
+  });
 }
 
 /** Compat probe — verifies the contract bro calls (read-path --json
@@ -587,15 +1091,15 @@ function bdCompatCheck(beadsActive: boolean, compat: BdCompat): DoctorCheck {
       beadsActive ? 'fail' : 'warn',
       compat.problems.join('; '),
       'bd moved past the contract bro speaks — upgrade/downgrade beads or set "stores": ["jsonl"]'
-    )
+    );
   }
-  const v = compat.version ?? '?'
+  const v = compat.version ?? '?';
   if (compat.store === 'error') {
     return check(
       'bd-compat',
       'warn',
       `v${v} — read contract unproven: ${compat.storeErr ?? 'probe failed'}`
-    )
+    );
   }
   return check(
     'bd-compat',
@@ -603,7 +1107,7 @@ function bdCompatCheck(beadsActive: boolean, compat: BdCompat): DoctorCheck {
     compat.store === 'reachable'
       ? `v${v} contract verified`
       : `v${v} — read contract unproven (no store)`
-  )
+  );
 }
 
 /** bd group: presence (fail only when beads is an active store), Dolt-era
@@ -614,52 +1118,122 @@ function bdChecks(
   bd: BinProbe,
   beadsDir: boolean,
   beadsActive: boolean,
-  compat: BdCompat
+  compat: BdCompat,
+  pins?: Record<string, string>
 ): DoctorCheck[] {
+  const prefer = pins ?? {};
+  const tasksPinned = prefer.tasks;
+  let tasksName: string | null = null;
+  try {
+    tasksName = facadeName('tasks', { dir }, { prefer });
+  } catch {
+    tasksName = null;
+  }
+  const githubTasksHealthy = tasksName === 'github' && tasksPinned === 'github';
   if (!bd.found) {
-    const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]'
+    const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]';
+    if (githubTasksHealthy) {
+      return [
+        check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks'),
+      ];
+    }
     return [
       beadsActive
         ? check('bd', 'fail', binProblem(bd), fix)
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
-    ]
+    ];
   }
-  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present'), bdCompatCheck(beadsActive, compat)]
-  const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
-  if (dolt.code !== 0) {
-    const err = dolt.err ? ` (${dolt.err})` : ''
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')];
+  if (githubTasksHealthy && (compat.broken || compat.missing || !compat.ok)) {
     out.push(
-      check('bd-backend', 'warn', '`bd dolt` failed', `bd predates the Dolt backend — upgrade beads${err}`)
-    )
+      check(
+        'bd-compat',
+        'warn',
+        compat.problems.length > 0
+          ? compat.problems.join('; ')
+          : compat.broken
+            ? 'bd unusable'
+            : 'bd not usable',
+        'beads broken but GitHub Issues serves tasks (connectors.tasks=github)'
+      )
+    );
   } else {
-    out.push(check('bd-backend', 'ok', 'dolt remotes reachable'))
+    out.push(bdCompatCheck(beadsActive, compat));
+  }
+  const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir);
+  if (dolt.code !== 0) {
+    const err = dolt.err ? ` (${dolt.err})` : '';
+    out.push(
+      check(
+        'bd-backend',
+        'warn',
+        '`bd dolt` failed',
+        `bd predates the Dolt backend — upgrade beads${err}`
+      )
+    );
+  } else {
+    out.push(check('bd-backend', 'ok', 'dolt remotes reachable'));
   }
   if (beadsDir) {
-    const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir)
-    out.push(
-      list.code === 0
-        ? check('bd-store', 'ok', 'beads store readable')
-        : check('bd-store', 'fail', 'beads store present but `bd list` failed', list.err || 'inspect the store or re-run `bd init`')
-    )
+    // GitHub serves tasks AND compat already proved bd or its store
+    // unusable — a second `bd list` only repeats a 15s stall on a
+    // backend nothing routes to.
+    if (
+      githubTasksHealthy &&
+      (compat.broken || compat.missing || !compat.ok || compat.store === 'error')
+    ) {
+      out.push(
+        check(
+          'bd-store',
+          'warn',
+          'beads store probe skipped — bd unusable',
+          'GitHub Issues serves tasks (connectors.tasks=github)'
+        )
+      );
+    } else {
+      const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
+      out.push(
+        list.code === 0
+          ? check('bd-store', 'ok', 'beads store readable')
+          : githubTasksHealthy
+            ? check(
+                'bd-store',
+                'warn',
+                'beads store present but `bd list` failed',
+                `${list.err || 'inspect the store'} — GitHub Issues serves tasks (connectors.tasks=github)`
+              )
+            : check(
+                'bd-store',
+                'fail',
+                'beads store present but `bd list` failed',
+                list.err || 'inspect the store or re-run `bd init`'
+              )
+      );
+    }
   } else if (beadsActive) {
-    out.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'))
+    out.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'));
   }
-  return out
+  return out;
 }
 
 /** The beads branch of the tasks row — mirrors the checkBeads command
  *  gate (binary + contract + store) so the serving backend never reads
  *  healthy on a store `bro next` would refuse. The bd rows carry the
  *  detail; this row only repeats the verdict + remediation. */
-function beadsTasksCheck(bd: BinProbe, beadsActive: boolean, compat: BdCompat, tag: string): DoctorCheck {
-  const sev: DoctorStatus = beadsActive ? 'fail' : 'warn'
+function beadsTasksCheck(
+  bd: BinProbe,
+  beadsActive: boolean,
+  compat: BdCompat,
+  tag: string
+): DoctorCheck {
+  const sev: DoctorStatus = beadsActive ? 'fail' : 'warn';
   if (!bd.found) {
     return check(
       'tasks',
       sev,
       `beads${tag} — bd ${binProblem(bd)}`,
       'install beads or pin connectors.tasks to another provider'
-    )
+    );
   }
   if (!compat.ok) {
     return check(
@@ -667,21 +1241,21 @@ function beadsTasksCheck(bd: BinProbe, beadsActive: boolean, compat: BdCompat, t
       sev,
       `beads${tag} — ${compat.problems.join('; ')}`,
       'fix the bd install or pin connectors.tasks to another provider'
-    )
+    );
   }
   if (compat.store !== 'reachable') {
     const detail =
       compat.store === 'error'
         ? compat.storeErr
-        : 'no store yet — `bd init` or `bro setup` creates one'
+        : 'no store yet — `bd init` or `bro setup` creates one';
     return check(
       'tasks',
       sev,
       `beads${tag} — ${detail}`,
       'the serving task store must answer before next/loop can use it'
-    )
+    );
   }
-  return check('tasks', 'ok', `beads${tag}`)
+  return check('tasks', 'ok', `beads${tag}`);
 }
 
 /** Which connector serves the `tasks` facade — the backend `bro next`,
@@ -696,40 +1270,42 @@ function tasksBackendCheck(
   beadsActive: boolean,
   compat: BdCompat
 ): DoctorCheck {
-  const prefer = pins ?? {}
-  const pinned = prefer.tasks
-  let name: string
+  const prefer = pins ?? {};
+  const pinned = prefer.tasks;
+  let name: string;
   try {
-    name = facadeName('tasks', { dir }, { prefer })
+    name = facadeName('tasks', { dir }, { prefer });
   } catch (err) {
     return check(
       'tasks',
       'fail',
       `unresolvable — ${err instanceof Error ? err.message : String(err)}`,
       pinned !== undefined ? `connector "${pinned}" cannot serve tasks here` : undefined
-    )
+    );
   }
-  const tag = pinned !== undefined ? ` (connectors.tasks=${pinned})` : ' (default)'
+  const tag = pinned !== undefined ? ` (connectors.tasks=${pinned})` : ' (default)';
   if (name === 'beads') {
-    return beadsTasksCheck(bd, beadsActive, compat, tag)
+    return beadsTasksCheck(bd, beadsActive, compat, tag);
   }
-  const auth = facadeAuth('tasks', { dir }, { prefer })
+  const auth = facadeAuth('tasks', { dir }, { prefer });
   if (auth !== null) {
-    return check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
+    return check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks');
   }
   // the claims plane's own word (spec bro-l8c4f.12): a best-effort
   // claim() is assignment, not a lease, and undeclared is unverified —
   // a competitive runner on this tracker needs an exclusive-claiming store
-  let capNote = ' — claim exclusivity undeclared'
+  let capNote = ' — claim exclusivity undeclared';
   try {
-    const cap = facade('tasks', { dir }, { prefer }).claimCapability?.()
+    const cap = facade('tasks', { dir }, { prefer }).claimCapability?.();
     if (cap?.strength === 'exclusive') {
-      capNote = ''
+      capNote = '';
     } else if (cap !== undefined) {
-      capNote = ' — claims best-effort (assignment, not a lease)'
+      capNote = ' — claims best-effort (assignment, not a lease)';
     }
-  } catch { /* resolution already proved by facadeName above */ }
-  return check('tasks', 'ok', `${name}${tag}${capNote}`)
+  } catch {
+    /* resolution already proved by facadeName above */
+  }
+  return check('tasks', 'ok', `${name}${tag}${capNote}`);
 }
 
 /** Remote group: the git remote `bro sync` pushes to, and the beads Dolt
@@ -742,26 +1318,31 @@ function remoteChecks(
   bdFound: boolean
 ): DoctorCheck[] {
   if (root === null) {
-    return []
+    return [];
   }
-  const remote = gitTry(['-C', dir, 'remote', 'get-url', syncRemote])
+  const remote = gitTry(['-C', dir, 'remote', 'get-url', syncRemote]);
   const out: DoctorCheck[] = [
     remote.code === 0
       ? check('git-remote', 'ok', `${syncRemote} → ${remote.out.trim()}`)
-      : check('git-remote', 'warn', `no "${syncRemote}" remote`, 'bro sync and beads replication stay local-only'),
-  ]
+      : check(
+          'git-remote',
+          'warn',
+          `no "${syncRemote}" remote`,
+          'bro sync and beads replication stay local-only'
+        ),
+  ];
   if (!beadsDir) {
-    return out
+    return out;
   }
   if (!bdFound) {
-    out.push(check('dolt-remote', 'skip', 'needs bd'))
-    return out
+    out.push(check('dolt-remote', 'skip', 'needs bd'));
+    return out;
   }
-  const probe: BdProbe = (a, ms) => bdTry(a, ms, dir)
-  const remotes = listDoltRemotes(probe)
+  const probe: BdProbe = (a, ms) => bdTry(a, ms, dir);
+  const remotes = listDoltRemotes(probe);
   if (remotes === null) {
-    out.push(check('dolt-remote', 'skip', '`bd dolt remote list` failed'))
-    return out
+    out.push(check('dolt-remote', 'skip', '`bd dolt remote list` failed'));
+    return out;
   }
   if (remotes.length === 0) {
     out.push(
@@ -771,16 +1352,16 @@ function remoteChecks(
         'none configured',
         'beads state is local-only — `bd dolt remote add` inside .beads syncs it across machines'
       )
-    )
-    return out
+    );
+    return out;
   }
   out.push(
-    check('dolt-remote', 'ok', remotes.map((r) => `${r.name} → ${displayUrl(r.url)}`).join(', '))
-  )
+    check('dolt-remote', 'ok', remotes.map(r => `${r.name} → ${displayUrl(r.url)}`).join(', '))
+  );
   for (const r of remotes) {
-    out.push(doltStoreCheck(r))
+    out.push(doltStoreCheck(r));
   }
-  return out
+  return out;
 }
 
 /** One remote's `dolt-store` row — the refs/dolt/data head verified:
@@ -789,7 +1370,7 @@ function remoteChecks(
  *  verifies in place; everything git-shaped probes over `doltRemoteSrc`
  *  (the bridge mirror's upstream, not its cache). */
 function doltStoreCheck(r: DoltRemote): DoctorCheck {
-  const target = fileTargetPath(r.url)
+  const target = fileTargetPath(r.url);
   if (
     target !== null &&
     isDir(target) &&
@@ -797,26 +1378,24 @@ function doltStoreCheck(r: DoltRemote): DoctorCheck {
     !existsSync(join(target, 'HEAD')) &&
     !existsSync(join(target, '.git'))
   ) {
-    return doltStoreRow(r.name, doltDirHealth(target))
+    return doltStoreRow(r.name, doltDirHealth(target));
   }
-  const src = doltRemoteSrc(r)
+  const src = doltRemoteSrc(r);
   if (src === null) {
-    return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`)
+    return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`);
   }
-  return doltStoreRow(r.name, probeDoltRemote(src))
+  return doltStoreRow(r.name, probeDoltRemote(src));
 }
 
 /** Health → row. `missing` fails — that head boots no replica (`bd
  *  bootstrap` → 'Blob not found'). `error` only warns: unreachable /
  *  unparseable is transport or format, not corruption. A healthy head
  *  reports the verified table count; a dir probe has no sha. */
-function doltStoreRow(
-  name: string,
-  h: DoltHeadHealth & { lastGood?: string },
-): DoctorCheck {
+function doltStoreRow(name: string, h: DoltHeadHealth & { lastGood?: string }): DoctorCheck {
   if (h.missing.length > 0) {
     const shown =
-      h.missing.slice(0, 3).join(', ') + (h.missing.length > 3 ? `, +${h.missing.length - 3} more` : '')
+      h.missing.slice(0, 3).join(', ') +
+      (h.missing.length > 3 ? `, +${h.missing.length - 3} more` : '');
     return check(
       'dolt-store',
       'fail',
@@ -825,15 +1404,19 @@ function doltStoreRow(
       'unbootstrappable store — re-push refs/dolt/data from a healthy replica' +
         (h.lastGood !== undefined ? ` or reset it to ${h.lastGood.slice(0, 12)}` : '') +
         ' (docs/restore.md)'
-    )
+    );
   }
   if (h.error !== undefined) {
-    return check('dolt-store', 'warn', `${name}: unverifiable — ${h.error}`)
+    return check('dolt-store', 'warn', `${name}: unverifiable — ${h.error}`);
   }
   if (h.head === '') {
-    return check('dolt-store', 'ok', `${name}: nothing published yet`)
+    return check('dolt-store', 'ok', `${name}: nothing published yet`);
   }
-  return check('dolt-store', 'ok', `${name}: ${h.head.slice(0, 12)} — ${h.tables} table(s) verified`)
+  return check(
+    'dolt-store',
+    'ok',
+    `${name}: ${h.head.slice(0, 12)} — ${h.tables} table(s) verified`
+  );
 }
 
 // --- providers (specs/bro-ribc.1.md milestone 6) ----------------------
@@ -845,30 +1428,30 @@ function doltStoreRow(
 /** The listing row — entries as `name (kind, model)`; an api host
  *  shows its default pin or the served-model count. */
 function providerListCheck(providers: Record<string, ProviderEntry>): DoctorCheck {
-  const names = Object.keys(providers)
+  const names = Object.keys(providers);
   if (names.length === 0) {
-    return check('providers', 'ok', 'none configured')
+    return check('providers', 'ok', 'none configured');
   }
   const label = (n: string): string => {
-    const e = providers[n]!
+    const e = providers[n]!;
     if (e.type === 'api') {
-      const keys = Object.keys(e.models)
-      const shown = e.model ?? (keys.length === 1 ? keys[0] : `${keys.length} models`)
-      return `${n} (api, ${shown})`
+      const keys = Object.keys(e.models);
+      const shown = e.model ?? (keys.length === 1 ? keys[0] : `${keys.length} models`);
+      return `${n} (api, ${shown})`;
     }
-    const model = 'model' in e && typeof e.model === 'string' ? `, ${e.model}` : ''
-    return `${n} (${e.type}${model})`
-  }
-  return check('providers', 'ok', `${names.length} configured: ${names.map(label).join(', ')}`)
+    const model = 'model' in e && typeof e.model === 'string' ? `, ${e.model}` : '';
+    return `${n} (${e.type}${model})`;
+  };
+  return check('providers', 'ok', `${names.length} configured: ${names.map(label).join(', ')}`);
 }
 
 /** One entry's auth env var — the NAME is config; the value is never
  *  echoed (an all-caps pasted key passes isEnvName), so messages name
  *  the config field only. */
 function providerAuthCheck(name: string, entry: ProviderEntry): DoctorCheck | null {
-  const keyName = 'apiKeyEnv' in entry ? entry.apiKeyEnv : undefined
+  const keyName = 'apiKeyEnv' in entry ? entry.apiKeyEnv : undefined;
   if (keyName === undefined) {
-    return null
+    return null;
   }
   if (!isEnvName(keyName)) {
     return check(
@@ -876,7 +1459,7 @@ function providerAuthCheck(name: string, entry: ProviderEntry): DoctorCheck | nu
       'warn',
       `providers.${name}.apiKeyEnv is not a valid env var name`,
       'name the variable holding the key (SCREAMING_SNAKE) — config never holds the key itself'
-    )
+    );
   }
   if (process.env[keyName] === undefined || process.env[keyName] === '') {
     return check(
@@ -884,12 +1467,12 @@ function providerAuthCheck(name: string, entry: ProviderEntry): DoctorCheck | nu
       'warn',
       `the env var named by providers.${name}.apiKeyEnv is not set`,
       'export it — the provider fails at first use without it'
-    )
+    );
   }
-  return check('providers', 'ok', `providers.${name} auth env set`)
+  return check('providers', 'ok', `providers.${name} auth env set`);
 }
 
-type ProviderRef = [field: string, name: string, surface: ProviderSurface]
+type ProviderRef = [field: string, name: string, surface: ProviderSurface];
 
 /** Every provider name a consumer config references — `judge.provider`
  *  (and `judge.fallback` — provider mode only: a connector-mode
@@ -903,16 +1486,15 @@ function providerRefs(jcfg: JudgeConfig, env: AgentConnectorEnv): ProviderRef[] 
     ...(jcfg.provider === undefined || jcfg.fallback === undefined || jcfg.fallback === ''
       ? []
       : ([['judge.fallback', jcfg.fallback, 'call']] as ProviderRef[])),
-    ...Object.entries(env.agents).flatMap(
-      ([b, a]): ProviderRef[] =>
-        typeof a.provider === 'string' && a.provider !== ''
-          ? [[`agents.${b}.provider`, a.provider, 'spawn']]
-          : []
+    ...Object.entries(env.agents).flatMap(([b, a]): ProviderRef[] =>
+      typeof a.provider === 'string' && a.provider !== ''
+        ? [[`agents.${b}.provider`, a.provider, 'spawn']]
+        : []
     ),
     ...Object.entries(env.fleet?.profiles ?? {}).map(
       ([p, f]): ProviderRef => [`fleet.profiles.${p}.provider`, f.provider, 'spawn']
     ),
-  ]
+  ];
 }
 
 /** One ref row → a warn when the name resolves to no entry, or to a
@@ -923,42 +1505,42 @@ function providerRefCheck(
   effective: Record<string, ProviderEntry>,
   [field, name, surface]: ProviderRef
 ): DoctorCheck | null {
-  const entry = effective[name]
+  const entry = effective[name];
   if (entry === undefined) {
     return check(
       'providers',
       'warn',
       `${field} names '${name}' — no such provider entry`,
       'add it under providers{} or fix the reference — use-time resolution errors out'
-    )
+    );
   }
-  const kind = PROVIDER_REGISTRY[entry.type]
+  const kind = PROVIDER_REGISTRY[entry.type];
   if (surface === 'call' ? kind.call === null : !kind.spawn) {
     return check(
       'providers',
       'warn',
       `${field} names '${name}' (${entry.type}) — no ${surface} surface`,
       'the kind lacks that surface — use-time resolution errors out'
-    )
+    );
   }
-  return null
+  return null;
 }
 
 function providerChecks(dir: string): DoctorCheck[] {
-  const env = loadAgentEnv(dir)
-  const providers = env.providers ?? {}
-  const { judge: jcfg } = judgeConfig(dir)
-  const effective = synthesizedProviders(jcfg, providers)
-  const present = (c: DoctorCheck | null): c is DoctorCheck => c !== null
+  const env = loadAgentEnv(dir);
+  const providers = env.providers ?? {};
+  const { judge: jcfg } = judgeConfig(dir);
+  const effective = synthesizedProviders(jcfg, providers);
+  const present = (c: DoctorCheck | null): c is DoctorCheck => c !== null;
   return [
     providerListCheck(providers),
     ...Object.entries(providers)
       .map(([n, e]) => providerAuthCheck(n, e))
       .filter(present),
     ...providerRefs(jcfg, env)
-      .map((r) => providerRefCheck(effective, r))
+      .map(r => providerRefCheck(effective, r))
       .filter(present),
-  ]
+  ];
 }
 
 // --- conductor classifier guard (bro-9ww2q) -------------------------------
@@ -973,41 +1555,41 @@ function providerChecks(dir: string): DoctorCheck[] {
 /** Env knobs a Claude-shaped client resolves its classifier lane through
  *  — dedicated small/fast pins first; unset, the main-model lane carries
  *  the check instead (and inherits the same endpoint). */
-const CLASSIFIER_KNOBS = ['ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'] as const
+const CLASSIFIER_KNOBS = ['ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'] as const;
 const MODEL_KNOBS = [
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
-] as const
+] as const;
 
 interface ClientSource {
-  label: string
-  env: Record<string, string>
+  label: string;
+  env: Record<string, string>;
   /** top-level `model` field — the main lane the classifier inherits. */
-  model?: string
+  model?: string;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** One client settings file → its env block + main model, or null when
  *  the file carries no client signal. */
 function readClientSource(path: string, label: string): ClientSource | null {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-    const env: Record<string, string> = {}
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const env: Record<string, string> = {};
     if (isRecord(raw.env)) {
       for (const [k, v] of Object.entries(raw.env)) {
         if (typeof v === 'string' && v.trim() !== '') {
-          env[k] = v.trim()
+          env[k] = v.trim();
         }
       }
     }
     const model =
-      typeof raw.model === 'string' && raw.model.trim() !== '' ? raw.model.trim() : undefined
-    return Object.keys(env).length > 0 || model !== undefined ? { label, env, model } : null
+      typeof raw.model === 'string' && raw.model.trim() !== '' ? raw.model.trim() : undefined;
+    return Object.keys(env).length > 0 || model !== undefined ? { label, env, model } : null;
   } catch {
-    return null // absent/malformed — not client evidence
+    return null; // absent/malformed — not client evidence
   }
 }
 
@@ -1016,35 +1598,35 @@ function readClientSource(path: string, label: string): ClientSource | null {
  *  the repo's .claude settings pair, and doctor's own process env (a
  *  live client session's knobs). */
 function claudeClientSources(dirs: string[]): ClientSource[] {
-  const home = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
+  const home = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
   const files: [path: string, label: string][] = [
     [join(home, 'settings.json'), `${home}/settings.json`],
     [join(home, 'settings.local.json'), `${home}/settings.local.json`],
-  ]
+  ];
   for (const d of new Set(dirs)) {
     files.push(
       [join(d, '.claude', 'settings.json'), '.claude/settings.json'],
       [join(d, '.claude', 'settings.local.json'), '.claude/settings.local.json']
-    )
+    );
   }
-  const out: ClientSource[] = []
+  const out: ClientSource[] = [];
   for (const [path, label] of files) {
-    const src = readClientSource(path, label)
+    const src = readClientSource(path, label);
     if (src !== null) {
-      out.push(src)
+      out.push(src);
     }
   }
-  const procEnv: Record<string, string> = {}
+  const procEnv: Record<string, string> = {};
   for (const k of [...CLASSIFIER_KNOBS, ...MODEL_KNOBS, 'ANTHROPIC_BASE_URL']) {
-    const v = process.env[k]
+    const v = process.env[k];
     if (v !== undefined && v.trim() !== '') {
-      procEnv[k] = v.trim()
+      procEnv[k] = v.trim();
     }
   }
   if (Object.keys(procEnv).length > 0) {
-    out.push({ label: 'process env', env: procEnv })
+    out.push({ label: 'process env', env: procEnv });
   }
-  return out
+  return out;
 }
 
 /** The knobs whose values the classifier resolves — the dedicated
@@ -1052,17 +1634,17 @@ function claudeClientSources(dirs: string[]): ClientSource[] {
 function classifierPins(src: ClientSource): [knob: string, value: string][] {
   const dedicated = CLASSIFIER_KNOBS.flatMap((k): [string, string][] =>
     src.env[k] !== undefined ? [[k, src.env[k]]] : []
-  )
+  );
   if (dedicated.length > 0) {
-    return dedicated
+    return dedicated;
   }
   const out = MODEL_KNOBS.flatMap((k): [string, string][] =>
     src.env[k] !== undefined ? [[k, src.env[k]]] : []
-  )
+  );
   if (src.model !== undefined) {
-    out.push(['model', src.model])
+    out.push(['model', src.model]);
   }
-  return out
+  return out;
 }
 
 /** Loopback hostnames — same vocabulary the serve host-header guard
@@ -1072,10 +1654,10 @@ function classifierPins(src: ClientSource): [knob: string, value: string][] {
  *  "live endpoint" evidence at an arbitrary host. */
 function loopbackUrlHost(url: string): string | undefined {
   try {
-    const h = new URL(url).hostname
-    return ['localhost', '127.0.0.1', '[::1]'].includes(h) ? h : undefined
+    const h = new URL(url).hostname;
+    return ['localhost', '127.0.0.1', '[::1]'].includes(h) ? h : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -1083,54 +1665,135 @@ function loopbackUrlHost(url: string): string | undefined {
  *  (readServeState + pidAlive); kept local so a state-file peek never
  *  loads the HTTP server's import graph into doctor. */
 function liveServeEndpoint(dir: string): { url: string; pid: number } | undefined {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir);
   if (common === null) {
-    return undefined
+    return undefined;
   }
   try {
     const v = JSON.parse(readFileSync(join(common, 'bro', 'serve.json'), 'utf8')) as {
-      pid?: unknown
-      url?: unknown
-    }
+      pid?: unknown;
+      url?: unknown;
+    };
     if (
       typeof v.pid === 'number' &&
       typeof v.url === 'string' &&
       loopbackUrlHost(v.url) !== undefined &&
       pidAlive(v.pid)
     ) {
-      return { url: v.url, pid: v.pid }
+      return { url: v.url, pid: v.pid };
     }
   } catch {
     // torn/absent state file — not a live endpoint
   }
-  return undefined
+  return undefined;
 }
 
-/** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
- *  the same env hosts the serve), else the running server's /proc
- *  environ. Non-/proc platforms can't read a foreign env — the
- *  client-side wire evidence below then decides the row alone. */
-function serveBackendName(serve: { url: string; pid: number } | undefined): string | undefined {
-  const own = process.env.BRO_PROVIDER_BACKEND?.trim()
-  if (own !== undefined && own !== '') {
-    return own
-  }
+/** The running server's env, once — `/proc/<pid>/environ` is the
+ *  authoritative leg for "what did this serve boot with". undefined on
+ *  non-/proc platforms or a raced exit. */
+function serveEnviron(
+  serve: { url: string; pid: number } | undefined
+): Record<string, string> | undefined {
   if (serve === undefined) {
-    return undefined
+    return undefined;
   }
+  const out: Record<string, string> = {};
   try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1')
+    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
     for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=')
-      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-        const v = kv.slice(eq + 1).trim()
-        return v === '' ? undefined : v
+      const eq = kv.indexOf('=');
+      if (eq > 0) {
+        out[kv.slice(0, eq)] = kv.slice(eq + 1);
       }
     }
   } catch {
     // unreadable — raced exit or a platform without /proc
   }
-  return undefined
+  // same-process serves: the CURRENT process.env is the truth — the
+  // /proc snapshot predates any env the caller set or deleted after
+  // start (test fixtures mutate process.env mid-run)
+  if (serve.pid === process.pid) {
+    const own: Record<string, string> = {};
+    for (const k of Object.keys(process.env)) {
+      const v = process.env[k];
+      if (typeof v === 'string') {
+        own[k] = v;
+      }
+    }
+    return Object.keys(own).length > 0 ? own : undefined;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
+ *  the same env hosts the serve), else the running server's env.
+ *  Non-/proc platforms can't read a foreign env — the client-side wire
+ *  evidence below then decides the row alone. */
+function serveBackendName(
+  serve: { url: string; pid: number } | undefined,
+  env: Record<string, string> | undefined
+): string | undefined {
+  const own = process.env.BRO_PROVIDER_BACKEND?.trim();
+  if (own !== undefined && own !== '') {
+    return own;
+  }
+  if (serve === undefined) {
+    return undefined;
+  }
+  const v = env?.BRO_PROVIDER_BACKEND?.trim();
+  return v === undefined || v === '' ? undefined : v;
+}
+
+/** The upstream key names providerConfig resolves — presence in the
+ *  server's env is what arms the conductor's fast lane (bro-6asnu). */
+const UPSTREAM_KEY_ENVS = [
+  'BRO_PROVIDER_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+] as const;
+
+/** Is the fast lane armed on this serve — an upstream key in the
+ *  server's env and no FAST_LANE off. Doctor's own env is leg one
+ *  (a serve spawned from the same shell inherits it); the server's env
+ *  decides when the two differ. Values are only inspected for
+ *  presence/flag, never surfaced. */
+function fastLaneArmed(
+  env: Record<string, string> | undefined,
+  serveLane?: boolean,
+  sameProcess?: boolean,
+  /** the file layer's serve.apiKeyEnv — an upstream key can live in
+   *  a config-named var beyond the three hardcoded ones */
+  apiKeyEnv?: string
+): boolean {
+  // the config escape hatch — serve.fastLane:false disables the lane
+  // regardless of env evidence, exactly as resolveFastLane honors it
+  if (serveLane === false) {
+    return false;
+  }
+  const flagsOff = (v: string | undefined): boolean => {
+    const f = v?.trim().toLowerCase();
+    return f === 'off' || f === '0' || f === 'false';
+  };
+  const nonBlank = (v: string | undefined): boolean => v !== undefined && v.trim() !== '';
+  // server env wins when present; the process.env fallback exists only
+  // for legs doctor shares — a missing /proc read or OUR OWN process.
+  // A foreign server's env must never be padded with doctor's own:
+  // its missing key means the lane is unarmed there even if doctor's
+  // shell carries one.
+  const ownEnv = env === undefined || sameProcess === true;
+  const get = (k: string): string | undefined => {
+    const v = env?.[k];
+    if (v !== undefined && v !== '') {
+      return v;
+    }
+    return ownEnv ? (process.env as Record<string, string | undefined>)[k] : undefined;
+  };
+  const hasKey = (): boolean =>
+    UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k))) ||
+    // the file layer names its own key var — providerConfig resolves
+    // it for the lane, so doctor's arming check must see it too
+    (apiKeyEnv !== undefined && nonBlank(get(apiKeyEnv)));
+  return hasKey() && !flagsOff(get('BRO_PROVIDER_FAST_LANE'));
 }
 
 /** The model ids an acp entry can serve: the pinned `model` field plus
@@ -1141,37 +1804,37 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
  *  serving it — the warn names them all rather than silently
  *  crediting whichever registered last. */
 function acpWireIds(providers: Record<string, ProviderEntry>): Map<string, string[]> {
-  const ids = new Map<string, string[]>()
+  const ids = new Map<string, string[]>();
   const add = (id: string, name: string): void => {
     if (id === '') {
-      return
+      return;
     }
-    const l = ids.get(id)
+    const l = ids.get(id);
     if (l === undefined) {
-      ids.set(id, [name])
+      ids.set(id, [name]);
     } else if (!l.includes(name)) {
-      l.push(name)
+      l.push(name);
     }
-  }
+  };
   for (const [name, e] of Object.entries(providers)) {
     if (e.type !== 'acp') {
-      continue
+      continue;
     }
     if (e.model !== undefined) {
-      add(e.model, name)
+      add(e.model, name);
     }
-    const toks = e.command.split(/\s+/).filter((t) => t !== '')
+    const toks = e.command.split(/\s+/).filter(t => t !== '');
     for (let i = 0; i < toks.length; i++) {
       if (toks[i] === '--model' && i + 1 < toks.length) {
-        add(toks[i + 1]!, name)
+        add(toks[i + 1]!, name);
       }
-      const eq = /^--model=(.+)$/.exec(toks[i]!)
+      const eq = /^--model=(.+)$/.exec(toks[i]!);
       if (eq !== null) {
-        add(eq[1]!, name)
+        add(eq[1]!, name);
       }
     }
   }
-  return ids
+  return ids;
 }
 
 /** A client-pinned model id → the acp providers serving that wire:
@@ -1186,18 +1849,18 @@ function acpWireProviders(
   acpNames: Set<string>,
   nonAcpNames: Set<string>
 ): string[] {
-  const slash = value.indexOf('/')
+  const slash = value.indexOf('/');
   if (slash > 0) {
-    const pfx = value.slice(0, slash)
+    const pfx = value.slice(0, slash);
     if (acpNames.has(pfx)) {
-      return [pfx]
+      return [pfx];
     }
     if (nonAcpNames.has(pfx)) {
-      return []
+      return [];
     }
-    return ids.get(value.slice(slash + 1)) ?? []
+    return ids.get(value.slice(slash + 1)) ?? [];
   }
-  return ids.get(value) ?? []
+  return ids.get(value) ?? [];
 }
 
 /** Host:port identity with the loopback aliases folded — `localhost`
@@ -1205,51 +1868,107 @@ function acpWireProviders(
  *  don't change which process answers the port. Unparseable values
  *  fall back to the plain string compare. */
 function endpointKey(u: string): string {
-  let t = u.trim()
+  let t = u.trim();
   while (t.endsWith('/')) {
-    t = t.slice(0, -1)
+    t = t.slice(0, -1);
   }
   for (const cand of [t, `http://${t}`]) {
     try {
-      const p = new URL(cand)
-      const host = ['localhost', '[::1]', '::1'].includes(p.hostname) ? '127.0.0.1' : p.hostname
+      const p = new URL(cand);
+      const host = ['localhost', '[::1]', '::1'].includes(p.hostname) ? '127.0.0.1' : p.hostname;
       if (host !== '') {
-        return `${host}:${p.port}`
+        return `${host}:${p.port}`;
       }
     } catch {
       // try the scheme-prefixed shape, then the plain string
     }
   }
-  return t.toLowerCase()
+  return t.toLowerCase();
 }
 
 /** Everything one client-source warn needs from the conductor probe —
  *  resolved once per doctor run, read-only for each source. */
 interface ClassifierCtx {
-  serve?: { url: string; pid: number }
-  conductor?: string
-  ids: Map<string, string[]>
-  acpNames: Set<string>
-  nonAcpNames: Set<string>
+  serve?: { url: string; pid: number };
+  conductor?: string;
+  ids: Map<string, string[]>;
+  acpNames: Set<string>;
+  nonAcpNames: Set<string>;
+  /** the serve's env proves the fast lane armed (bro-6asnu) — the
+   *  conductor routes classifier calls upstream itself. */
+  fastArmed?: boolean;
+  /** the resolved fast-model pin (BRO_PROVIDER_FAST_MODEL →
+   *  serve.fastModel) — without it a conductor-only classifier id
+   *  forwards verbatim and the upstream rejects it. */
+  fastModel?: string;
+}
+
+/** A `<acp-name>/<id>` pin — conductor vocabulary the upstream cannot
+ *  serve verbatim. Split on the slash and test whole segments: a bare
+ *  model id that merely contains a '/' is not a prefix pin. */
+function isConductorPin(v: string, acpNames: Set<string>): boolean {
+  const slash = v.indexOf('/');
+  return slash > 0 && v.slice(slash + 1) !== '' && acpNames.has(v.slice(0, slash));
+}
+
+/** First non-blank value, trimmed — resolveFastLane's model chain
+ *  semantics: a set-but-empty env pin falls through to the file layer
+ *  instead of winning the ?? chain. */
+function firstTrimmed(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    const t = v?.trim();
+    if (t !== undefined && t !== '') {
+      return t;
+    }
+  }
+  return undefined;
 }
 
 /** One client source → its warn row(s). A live-endpoint hit outranks
  *  bare pin hits: the classifier rides the same base url (no separate
  *  URL knob exists), so the conductor answer is the live one. */
 function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[] {
-  const base = src.env['ANTHROPIC_BASE_URL']
+  const base = src.env['ANTHROPIC_BASE_URL'];
   const hits = classifierPins(src).flatMap(([knob, v]) => {
     const names = acpWireProviders(v, ctx.ids, ctx.acpNames, ctx.nonAcpNames)
-      .map((n) => 'providers.' + n)
-      .join(', ')
-    return names === '' ? [] : [`${knob}=${v} → ${names}`]
-  })
+      .map(n => 'providers.' + n)
+      .join(', ');
+    return names === '' ? [] : [`${knob}=${v} → ${names}`];
+  });
   if (
     ctx.serve !== undefined &&
     ctx.conductor !== undefined &&
     base !== undefined &&
     endpointKey(base) === endpointKey(ctx.serve.url)
   ) {
+    // the serve's fast lane (bro-6asnu) already routes classifier calls
+    // upstream — the warn only stands while no upstream key arms it
+    if (
+      ctx.fastArmed === true &&
+      (ctx.fastModel !== undefined ||
+        !classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames)))
+    ) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            (hits.length > 0 ? ` — ${hits.join('; ')}` : '') +
+            ' — fast lane armed: classifier calls route to the direct upstream'
+        ),
+      ];
+    }
+    if (ctx.fastArmed === true) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            ` — ${hits.join('; ')} — the lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
@@ -1258,21 +1977,48 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
           (hits.length > 0
             ? ` — ${hits.join('; ')}`
             : ' — the client\u2019s safety classifier rides it too'),
-        'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
+        'every permission check pays a full session/new and fail-closes — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
-    ]
+    ];
   }
   if (hits.length > 0) {
+    // the ok needs evidence the client actually reaches an armed
+    // conductor — a bare pin plus an armed env elsewhere is no routing
+    const armedHere = ctx.fastArmed === true && ctx.conductor !== undefined;
+    // a `<name>/<id>` pin is conductor vocabulary no upstream serves —
+    // without the model pin it forwards verbatim and fails there
+    const needsModelPin =
+      ctx.fastModel === undefined &&
+      classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames));
+    if (armedHere && !needsModelPin) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ${hits.join('; ')} — on an armed conductor the fast lane routes them to the direct upstream`
+        ),
+      ];
+    }
+    if (armedHere) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ${hits.join('; ')} — the fast lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
         'warn',
         `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
-        'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
+        'session-grade wires deadlock interactive approvals — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
-    ]
+    ];
   }
-  return []
+  return [];
 }
 
 /** The guardrail row(s): warn when the endpoint is proven acp-backed
@@ -1280,32 +2026,45 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
  *  same endpoint — no separate URL knob exists), or when a classifier
  *  pin names a wire only an acp conductor serves. */
 function conductorClassifierChecks(dir: string, root: string | null): DoctorCheck[] {
-  const providers = loadAgentEnv(dir).providers ?? {}
+  const providers = loadAgentEnv(dir).providers ?? {};
   const acpNames = new Set(
     Object.entries(providers)
       .filter((kv): kv is [string, ProviderEntry & { type: 'acp' }] => kv[1].type === 'acp')
       .map(([n]) => n)
-  )
-  const nonAcpNames = new Set(Object.keys(providers).filter((n) => !acpNames.has(n)))
-  const serve = liveServeEndpoint(dir)
-  const backend = serveBackendName(serve)
-  const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined
+  );
+  const nonAcpNames = new Set(Object.keys(providers).filter(n => !acpNames.has(n)));
+  const serve = liveServeEndpoint(dir);
+  const env = serveEnviron(serve);
+  const sameProcess = serve?.pid === process.pid;
+  const fileServe = loadConfig(dir).serve;
+  const backend = serveBackendName(serve, env);
+  const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
   const ctx: ClassifierCtx = {
     serve,
     conductor,
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
-  }
-  const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
-  const warns = sources.flatMap((src) => classifierSrcWarns(src, ctx))
+    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess, fileServe.apiKeyEnv),
+    fastModel:
+      firstTrimmed(
+        env?.BRO_PROVIDER_FAST_MODEL,
+        env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined
+      ) ?? fileServe.fastModel,
+  };
+  const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
+  const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));
   if (warns.length > 0) {
-    return warns
+    return warns;
   }
   if (conductor !== undefined) {
     return [
-      check('conductor', 'ok', `acp conductor live (providers.${conductor}) — no classifier pins on its wires`),
-    ]
+      check(
+        'conductor',
+        'ok',
+        `acp conductor live (providers.${conductor}) — no classifier pins on its wires`
+      ),
+    ];
   }
   return [
     check(
@@ -1315,7 +2074,7 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
         ? `${acpNames.size} acp provider(s) — no classifier pins on their wires`
         : 'no acp-backed serve endpoint'
     ),
-  ]
+  ];
 }
 
 /** Build-stamp row (bro-fatja) — who last wrote this worktree's shared
@@ -1325,14 +2084,14 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
  *  guesses "not yours" — the detail still carries the attribution. */
 function buildStampChecks(dir: string, root: string | null): DoctorCheck[] {
   if (root === null) {
-    return []
+    return [];
   }
-  const stamp = readStamp(dir)
+  const stamp = readStamp(dir);
   if (stamp === null) {
-    return [check('build', 'ok', 'no stamped build')]
+    return [check('build', 'ok', 'no stamped build')];
   }
-  const who = `last write by ${stamp.session} (${stamp.via}) ${stampAgo(stamp.ts, Date.now())}`
-  const head = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+  const who = `last write by ${stamp.session} (${stamp.via}) ${stampAgo(stamp.ts, Date.now())}`;
+  const head = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
   if (stamp.head !== '' && head.code === 0 && stamp.head !== head.out.trim()) {
     return [
       check(
@@ -1341,9 +2100,9 @@ function buildStampChecks(dir: string, root: string | null): DoctorCheck[] {
         `${who} — behind HEAD`,
         'the recorded write predates this checkout — a stale build may have reverted newer work'
       ),
-    ]
+    ];
   }
-  const me = stampSession(dir, process.env)
+  const me = stampSession(dir, process.env);
   if (me !== undefined && me !== stamp.session) {
     return [
       check(
@@ -1352,27 +2111,27 @@ function buildStampChecks(dir: string, root: string | null): DoctorCheck[] {
         `${who} — another session rebuilt since your write`,
         'verify your changes to the output tree still stand — rebuild or reapply your hotpatch'
       ),
-    ]
+    ];
   }
-  return [check('build', 'ok', who)]
+  return [check('build', 'ok', who)];
 }
 
 /** Janitor probe — a dry run over `<git-common>/bro/` reporting the
  *  retention debris the next `bro watch` tick would reap. Probes stay
  *  read-only: this counts, it never unlinks (bro-f6zp). */
 function checkJanitor(dir: string): DoctorCheck | null {
-  let r
+  let r;
   try {
-    r = runJanitor(dir, { dryRun: true })
+    r = runJanitor(dir, { dryRun: true });
   } catch {
-    return check('janitor', 'ok', 'probe failed — reaping still runs on `bro watch` ticks')
+    return check('janitor', 'ok', 'probe failed — reaping still runs on `bro watch` ticks');
   }
   if (r === null || !janitorDidWork(r)) {
-    return check('janitor', 'ok', 'no retention debris')
+    return check('janitor', 'ok', 'no retention debris');
   }
   // pending debris is routine, not a defect — the line says what the
   // next watch tick removes
-  return check('janitor', 'ok', janitorLine(r))
+  return check('janitor', 'ok', janitorLine(r));
 }
 
 /** Client-adapter install state (specs/bro-1qpk.1.md) — informational:
@@ -1380,21 +2139,21 @@ function checkJanitor(dir: string): DoctorCheck | null {
  *  broken install ("I installed but hooks never fire") has a visible
  *  verdict. */
 function checkClientPlugins(dir: string): DoctorCheck {
-  const rows = pluginRows(dir)
-  const perClient = new Map<string, string[]>()
+  const rows = pluginRows(dir);
+  const perClient = new Map<string, string[]>();
   for (const r of rows) {
     if (r.state !== 'absent') {
       // a client with several module files (opencode's bro.ts + bro-cli.ts)
       // names the file after the scope
-      const file = basename(r.path)
-      const slot = file === 'bro.ts' ? r.scope : `${r.scope}(${file})`
-      perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${slot}:${r.state}`])
+      const file = basename(r.path);
+      const slot = file === 'bro.ts' ? r.scope : `${r.scope}(${file})`;
+      perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${slot}:${r.state}`]);
     }
   }
-  const detail = [...perClient.entries()].map(([c, s]) => `${c}: ${s.join(',')}`).join(' · ')
+  const detail = [...perClient.entries()].map(([c, s]) => `${c}: ${s.join(',')}`).join(' · ');
   return detail === ''
     ? check('plugins', 'ok', 'no client adapters installed', '`bro plugins install <client>`')
-    : check('plugins', 'ok', detail)
+    : check('plugins', 'ok', detail);
 }
 
 // --- query providers (specs/bro-14h8.1 milestone 6) -----------------
@@ -1404,26 +2163,26 @@ function checkClientPlugins(dir: string): DoctorCheck {
 
 /** connector name → binary it spawns — a vendor tool name in doctor's
  *  layer is the honest label (same as gh/bd/git rows). */
-const QUERY_CLI_BIN: Record<string, string> = { gitlab: 'glab', atlassian: 'atlassian' }
+const QUERY_CLI_BIN: Record<string, string> = { gitlab: 'glab', atlassian: 'atlassian' };
 
 function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorCheck[] {
-  const remote = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  const url = remote.code === 0 ? remote.out.trim() : ''
-  const out: DoctorCheck[] = []
+  const remote = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  const url = remote.code === 0 ? remote.out.trim() : '';
+  const out: DoctorCheck[] = [];
   for (const c of connectors()) {
     if (c.queries === undefined) {
-      continue
+      continue;
     }
-    const bin = QUERY_CLI_BIN[c.name]
+    const bin = QUERY_CLI_BIN[c.name];
     if (bin === undefined) {
-      continue
+      continue;
     }
-    const pinned = cfgPins['queries'] === c.name
-    const detected = url !== '' && c.matchRemote?.(url) === true
+    const pinned = cfgPins['queries'] === c.name;
+    const detected = url !== '' && c.matchRemote?.(url) === true;
     if (!pinned && !detected) {
-      continue
+      continue;
     }
-    const p = probeBin(bin)
+    const p = probeBin(bin);
     if (!p.found) {
       out.push(
         check(
@@ -1432,19 +2191,19 @@ function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorChe
           `${c.name} query plans need \`${bin}\` — ${binProblem(p)}`,
           `install ${bin} or drop the ${c.name} pin — query steps against it fail at run time`
         )
-      )
+      );
     }
   }
-  return out
+  return out;
 }
 
 /** Mesh group (specs/mesh): runs only when mesh is configured — an
  *  unconfigured repo has nothing to check. Rig addressability, peer
  *  binding sanity, and `dolt` for beads-remote replicas. */
 function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  const derived = origin.code === 0 ? rigFromRemoteUrl(origin.out.trim()) : null
-  const rig = pinned ?? (derived === null ? null : formatRigUri(derived))
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  const derived = origin.code === 0 ? rigFromRemoteUrl(origin.out.trim()) : null;
+  const rig = pinned ?? (derived === null ? null : formatRigUri(derived));
   return rig !== null && rig !== undefined
     ? check('mesh', 'ok', `rig ${rig}${pinned !== undefined ? ' (pinned)' : ''}`)
     : check(
@@ -1452,35 +2211,84 @@ function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
         'warn',
         'rig unaddressable — no mesh.rig pin, no derivable origin',
         'peers cannot address requests here — set "mesh": { "rig": "mesh://org/repo" } or a forge-url origin'
-      )
+      );
 }
 
 /** Peer census — every binding must parse; beads-remote peers are
- *  counted for the dolt probe. */
-function meshPeerChecks(aliases: string[], peers: Record<string, { rig: string; remote: string }>): { row: DoctorCheck; remotes: number } {
-  let remotes = 0
-  let bad = 0
+ *  counted for the dolt probe. GitHub-derived bindings need a `login`
+ *  (no explicit transport override) or the plane admits nothing after the
+ *  url-derivation flip. */
+function meshPeerChecks(
+  aliases: string[],
+  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
+): { row: DoctorCheck; remotes: number } {
+  let remotes = 0;
+  let bad = 0;
+  let missingLogin = 0;
   for (const alias of aliases) {
-    const p = parsePeer(alias, peers[alias])
+    const raw = peers[alias] as {
+      rig?: unknown;
+      remote?: unknown;
+      transport?: unknown;
+      login?: unknown;
+    };
+    const p = parsePeer(alias, peers[alias]);
     if (p === null) {
-      bad++
-      continue
+      bad++;
+      continue;
     }
     if (p.transport === 'beads-remote') {
-      remotes++
+      remotes++;
+    }
+    if (
+      p.transport === 'github' &&
+      (typeof raw.transport !== 'string' || raw.transport === '') &&
+      (p.login === undefined ||
+        p.login === '' ||
+        (typeof p.login === 'string' && p.login.trim() === ''))
+    ) {
+      missingLogin++;
     }
   }
-  const row =
-    bad === 0
-      ? check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`)
-      : check('mesh-peers', 'warn', `${bad}/${aliases.length} peer binding(s) unparseable`, 'each needs {"rig": "mesh://org/repo", "remote": "…"}')
-  return { row, remotes }
+  if (bad > 0 || missingLogin > 0) {
+    if (bad > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
+        missingLogin > 0
+          ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
+          : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
+      );
+      return { row, remotes };
+    }
+    if (missingLogin > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
+        'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+      );
+      return { row, remotes };
+    }
+  }
+  if (missingLogin > 0) {
+    const row = check(
+      'mesh-peers',
+      'warn',
+      `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
+      'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+    );
+    return { row, remotes };
+  }
+  const row = check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`);
+  return { row, remotes };
 }
 
 /** `dolt` availability — required only when beads-remote peers exist;
  *  its absence is a warn (replicas degrade to unreachable), not a fail. */
 function meshDoltCheck(): DoctorCheck {
-  const dolt = probeBin('dolt')
+  const dolt = probeBin('dolt');
   return dolt.found
     ? check('mesh-dolt', 'ok', dolt.version ?? 'present')
     : check(
@@ -1488,34 +2296,41 @@ function meshDoltCheck(): DoctorCheck {
         'warn',
         'beads-remote peers configured but `dolt` not found',
         'replica sync runs `dolt clone|pull` — install dolt or rebind to a local checkout'
-      )
+      );
 }
 
 /** Debt-source prerequisites (specs: bro-huy5o.4, bro-huy5o.5) — a
  *  configured source whose setup is incomplete reports here instead of
  *  being a surprise `skipped` line at collect. Unconfigured sources emit
  *  no row. */
-function debtSourceChecks(dir: string, debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
-  return [
-    ...debtSonarcloudCheck(dir, debt),
-    ...debtCodacyCheck(debt),
-    ...debtCodesceneCheck(debt),
-  ]
+function debtSourceChecks(
+  dir: string,
+  debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }
+): DoctorCheck[] {
+  return [...debtSonarcloudCheck(dir, debt), ...debtCodacyCheck(debt), ...debtCodesceneCheck(debt)];
 }
 
 /** Missing `curl` is a shared transport failure for the HTTP sources. */
 function curlCheck(name: string, detail: string): DoctorCheck | null {
-  const curl = probeBin('curl')
+  const curl = probeBin('curl');
   return curl.found
     ? null
-    : check(name, 'warn', `${detail} · curl ${binProblem(curl)}`, 'the debt-source transport needs curl on PATH')
+    : check(
+        name,
+        'warn',
+        `${detail} · curl ${binProblem(curl)}`,
+        'the debt-source transport needs curl on PATH'
+      );
 }
 
-function debtSonarcloudCheck(dir: string, debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+function debtSonarcloudCheck(
+  dir: string,
+  debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }
+): DoctorCheck[] {
   if (!debt.sources.includes('sonarcloud')) {
-    return []
+    return [];
   }
-  const token = process.env['SONAR_TOKEN']?.trim()
+  const token = process.env['SONAR_TOKEN']?.trim();
   if (token === undefined || token === '') {
     return [
       check(
@@ -1524,9 +2339,9 @@ function debtSonarcloudCheck(dir: string, debt: { sources: string[]; sourceConfi
         'sonarcloud debt source configured but SONAR_TOKEN is not set',
         'export SONAR_TOKEN — sonarcloud.io → My Account → Security → Generate Tokens'
       ),
-    ]
+    ];
   }
-  const project = resolveSonarProject(dir, debt.sourceConfig['sonarcloud'])
+  const project = resolveSonarProject(dir, debt.sourceConfig['sonarcloud']);
   if (project === null) {
     return [
       check(
@@ -1535,21 +2350,26 @@ function debtSonarcloudCheck(dir: string, debt: { sources: string[]; sourceConfi
         'SONAR_TOKEN set but no project key resolves',
         'set debt.sourceConfig.sonarcloud.project_key or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
       ),
-    ]
+    ];
   }
-  const noCurl = curlCheck('debt-sonarcloud', `project ${project.projectKey}`)
+  const noCurl = curlCheck('debt-sonarcloud', `project ${project.projectKey}`);
   if (noCurl !== null) {
-    return [noCurl]
+    return [noCurl];
   }
   try {
-    assertSonarHostTrusted(project)
+    assertSonarHostTrusted(project);
   } catch (err) {
     if (err instanceof SourceSkipped) {
       return [
-        check('debt-sonarcloud', 'warn', `project ${project.projectKey} · ${err.message}`, 'collect skips the source until the host is trusted')
-      ]
+        check(
+          'debt-sonarcloud',
+          'warn',
+          `project ${project.projectKey} · ${err.message}`,
+          'collect skips the source until the host is trusted'
+        ),
+      ];
     }
-    throw err
+    throw err;
   }
   return [
     check(
@@ -1557,20 +2377,23 @@ function debtSonarcloudCheck(dir: string, debt: { sources: string[]; sourceConfi
       'ok',
       `SONAR_TOKEN set · project ${project.projectKey} (${project.via})`
     ),
-  ]
+  ];
 }
 
-function debtCodacyCheck(debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+function debtCodacyCheck(debt: {
+  sources: string[];
+  sourceConfig: Record<string, Record<string, unknown>>;
+}): DoctorCheck[] {
   if (!debt.sources.includes('codacy')) {
-    return []
+    return [];
   }
-  const api = process.env['CODACY_API_TOKEN']?.trim()
-  const project = process.env['CODACY_PROJECT_TOKEN']?.trim()
-  let env: string | null = null
+  const api = process.env['CODACY_API_TOKEN']?.trim();
+  const project = process.env['CODACY_PROJECT_TOKEN']?.trim();
+  let env: string | null = null;
   if (api !== undefined && api !== '') {
-    env = 'CODACY_API_TOKEN'
+    env = 'CODACY_API_TOKEN';
   } else if (project !== undefined && project !== '') {
-    env = 'CODACY_PROJECT_TOKEN'
+    env = 'CODACY_PROJECT_TOKEN';
   }
   if (env === null) {
     return [
@@ -1580,32 +2403,40 @@ function debtCodacyCheck(debt: { sources: string[]; sourceConfig: Record<string,
         'codacy debt source configured but neither CODACY_API_TOKEN nor CODACY_PROJECT_TOKEN is set',
         'export CODACY_API_TOKEN — app.codacy.com → account → API tokens (or a repo-scoped Project API token)'
       ),
-    ]
+    ];
   }
-  const cfg = debt.sourceConfig['codacy']
-  const host = typeof cfg?.host === 'string' && cfg.host !== '' ? cfg.host : CODACY_HOST
+  const cfg = debt.sourceConfig['codacy'];
+  const host = typeof cfg?.host === 'string' && cfg.host !== '' ? cfg.host : CODACY_HOST;
   try {
-    assertTokenSafeHost(host, 'codacy')
+    assertTokenSafeHost(host, 'codacy');
   } catch (err) {
     if (err instanceof SourceSkipped) {
       return [
-        check('debt-codacy', 'warn', err.message, 'collect skips the source until the host is trusted')
-      ]
+        check(
+          'debt-codacy',
+          'warn',
+          err.message,
+          'collect skips the source until the host is trusted'
+        ),
+      ];
     }
-    throw err
+    throw err;
   }
-  const noCurl = curlCheck('debt-codacy', `${env} set`)
+  const noCurl = curlCheck('debt-codacy', `${env} set`);
   if (noCurl !== null) {
-    return [noCurl]
+    return [noCurl];
   }
-  return [check('debt-codacy', 'ok', `${env} set · ${new URL(host).host}`)]
+  return [check('debt-codacy', 'ok', `${env} set · ${new URL(host).host}`)];
 }
 
-function debtCodesceneCheck(debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+function debtCodesceneCheck(debt: {
+  sources: string[];
+  sourceConfig: Record<string, Record<string, unknown>>;
+}): DoctorCheck[] {
   if (!debt.sources.includes('codescene')) {
-    return []
+    return [];
   }
-  const token = process.env['CODESCENE_TOKEN']?.trim()
+  const token = process.env['CODESCENE_TOKEN']?.trim();
   if (token === undefined || token === '') {
     return [
       check(
@@ -1614,9 +2445,9 @@ function debtCodesceneCheck(debt: { sources: string[]; sourceConfig: Record<stri
         'codescene debt source configured but CODESCENE_TOKEN is not set',
         'export CODESCENE_TOKEN — codescene.io → Account → API tokens'
       ),
-    ]
+    ];
   }
-  const project = resolveCodesceneProject(debt.sourceConfig['codescene'])
+  const project = resolveCodesceneProject(debt.sourceConfig['codescene']);
   if (project === null) {
     return [
       check(
@@ -1625,21 +2456,26 @@ function debtCodesceneCheck(debt: { sources: string[]; sourceConfig: Record<stri
         'CODESCENE_TOKEN set but no project id resolves',
         'set debt.sourceConfig.codescene.project_id or CODESCENE_PROJECT_ID — the number in codescene.io/projects/<id>'
       ),
-    ]
+    ];
   }
   try {
-    assertTokenSafeHost(project.host, 'codescene')
+    assertTokenSafeHost(project.host, 'codescene');
   } catch (err) {
     if (err instanceof SourceSkipped) {
       return [
-        check('debt-codescene', 'warn', `project ${project.projectId} · ${err.message}`, 'collect skips the source until the host is trusted')
-      ]
+        check(
+          'debt-codescene',
+          'warn',
+          `project ${project.projectId} · ${err.message}`,
+          'collect skips the source until the host is trusted'
+        ),
+      ];
     }
-    throw err
+    throw err;
   }
-  const noCurl = curlCheck('debt-codescene', `project ${project.projectId}`)
+  const noCurl = curlCheck('debt-codescene', `project ${project.projectId}`);
   if (noCurl !== null) {
-    return [noCurl]
+    return [noCurl];
   }
   return [
     check(
@@ -1647,59 +2483,127 @@ function debtCodesceneCheck(debt: { sources: string[]; sourceConfig: Record<stri
       'ok',
       `CODESCENE_TOKEN set · project ${project.projectId} (${project.via})`
     ),
-  ]
+  ];
 }
 
-function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }): DoctorCheck[] {
-  const aliases = Object.keys(mesh.peers)
+function meshChecks(
+  dir: string,
+  mesh: {
+    rig?: string;
+    peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+  }
+): DoctorCheck[] {
+  const aliases = Object.keys(mesh.peers);
   if (mesh.rig === undefined && aliases.length === 0) {
-    return []
+    return [];
   }
-  const { row, remotes } = meshPeerChecks(aliases, mesh.peers)
-  const out = [meshRigCheck(dir, mesh.rig), row]
+  const { row, remotes } = meshPeerChecks(aliases, mesh.peers);
+  const out = [meshRigCheck(dir, mesh.rig), row];
   if (remotes > 0) {
-    out.push(meshDoltCheck())
+    out.push(meshDoltCheck());
   }
-  return out
+  return out;
+}
+
+function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
+  try {
+    const agents = cfg.agents ?? {};
+    // strict scope is OPT-IN (spec bro-l8c4f.6): getCredentialScope only
+    // enforces the allowlist when strictEnv/credentialScope says so —
+    // an envAllowlist alone stays trusted-host (inert), and reporting it
+    // as enabled would show an ok trust boundary that isn't enforced
+    const strictBackends: string[] = [];
+    const inertBackends: string[] = [];
+    for (const [backend, b] of Object.entries(agents)) {
+      const bb = b as any;
+      if (bb && typeof bb === 'object') {
+        if (bb.strictEnv === true || bb.credentialScope != null) {
+          strictBackends.push(backend);
+        } else if (Array.isArray(bb.envAllowlist)) {
+          inertBackends.push(backend);
+        }
+      }
+    }
+    const out: DoctorCheck[] = [];
+    if (strictBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope',
+          'ok',
+          `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
+        )
+      );
+    }
+    if (inertBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope-inert',
+          'warn',
+          `envAllowlist without strictEnv stays trusted-host (inert) on: ${inertBackends.join(', ')} — workers inherit ambient env`,
+          'set agents.<backend>.strictEnv: true to enforce the allowlist (bro-l8c4f.6)'
+        )
+      );
+    }
+    if (out.length === 0) {
+      out.push(
+        check(
+          'env-scope',
+          'warn',
+          'trusted-host mode (default) — workers inherit ambient env',
+          'set agents.<backend>.strictEnv: true and agents.<backend>.envAllowlist for explicit credential scope (bro-l8c4f.6)'
+        )
+      );
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 export function runDoctorChecks(
   dir: string = process.cwd(),
   opts: { strict?: boolean } = {}
 ): DoctorCheck[] {
-  const checks: DoctorCheck[] = [checkNode()]
+  const checks: DoctorCheck[] = [checkNode()];
 
-  const git = probeBin('git')
+  const git = probeBin('git');
   checks.push(
     git.found
       ? check('git', 'ok', git.version ?? 'present')
       : check('git', 'fail', binProblem(git), 'every bro command shells out to git')
-  )
+  );
 
-  const root = repoRoot(dir)
-  const cfg = loadBroConfig(dir)
+  const root = repoRoot(dir);
+  const cfg = loadBroConfig(dir);
   checks.push(
     root === null
-      ? check('repo', 'warn', 'not inside a git worktree', 'worktree/branch/sync commands need a repo')
+      ? check(
+          'repo',
+          'warn',
+          'not inside a git worktree',
+          'worktree/branch/sync commands need a repo'
+        )
       : check('repo', 'ok', `worktree root ${root} · stores: ${cfg.stores.join(', ')}`)
-  )
+  );
   // a store is live when .beads exists at the root OR BEADS_DIR pins one
   // (the loop harness runs worktrees against a shared store that way)
-  const envDir = process.env.BEADS_DIR
+  const envDir = process.env.BEADS_DIR;
   const beadsDir =
     (root !== null && isDir(join(root, '.beads'))) ||
-    (typeof envDir === 'string' && envDir !== '' && isDir(envDir))
-  const bd = probeBin('bd')
+    (typeof envDir === 'string' && envDir !== '' && isDir(envDir));
+  const bd = probeBin('bd');
   // one compat probe serves the bd row and the tasks row — the probe is
   // a spawn bundle, never run it twice per doctor pass
-  const compat = probeBdCompat(dir)
-  const janitor = checkJanitor(dir)
+  const compat = probeBdCompat(dir);
+  const janitor = checkJanitor(dir);
   checks.push(
     checkGh(),
     tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
-    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat, cfg.connectors),
     checkHooks(dir),
+    devinWiringCheck(root),
     ...selfDistChecks(),
+    ...daemonBinChecks(dir, root),
     ...checkConfig(dir),
     ...configSchemaChecks(dir, opts.strict === true),
     ...providerChecks(dir),
@@ -1712,17 +2616,18 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
-  )
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
+    ...credentialScopeChecks(dir, cfg)
+  );
 
-  return checks
+  return checks;
 }
 
 export function doctorExitCode(checks: DoctorCheck[]): number {
-  return checks.some((c) => c.status === 'fail') ? 1 : 0
+  return checks.some(c => c.status === 'fail') ? 1 : 0;
 }
 
-const ICONS: Record<DoctorStatus, string> = { ok: '✓', warn: '!', fail: '✗', skip: '-' }
+const ICONS: Record<DoctorStatus, string> = { ok: '✓', warn: '!', fail: '✗', skip: '-' };
 
 /** The budget section (specs/bro-7xgk.3.md) — bro's own registry as a
  *  local proxy for the provider's hourly window: live agents, spawns in
@@ -1731,53 +2636,53 @@ const ICONS: Record<DoctorStatus, string> = { ok: '✓', warn: '!', fail: '✗',
  *  registry degrades the section instead of crashing the run. */
 function readBudget(dir: string): { snap: BudgetSnapshot | null; err?: string } {
   try {
-    return { snap: budgetSnapshotFor(dir, loadAgentEnv(dir)) }
+    return { snap: budgetSnapshotFor(dir, loadAgentEnv(dir)) };
   } catch (err) {
-    return { snap: null, err: err instanceof Error ? err.message : String(err) }
+    return { snap: null, err: err instanceof Error ? err.message : String(err) };
   }
 }
 
 /** The text report — check lines, the budget section, the summary. */
 function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget>): void {
   for (const c of checks) {
-    console.log(`${ICONS[c.status]} ${c.name.padEnd(10)} ${c.detail}`)
+    console.log(`${ICONS[c.status]} ${c.name.padEnd(10)} ${c.detail}`);
     if (c.hint) {
-      console.log(`  ${' '.repeat(10)} → ${c.hint}`)
+      console.log(`  ${' '.repeat(10)} → ${c.hint}`);
     }
   }
-  console.log('\nbudget — local estimates (bro registry only, not provider quota data)')
+  console.log('\nbudget — local estimates (bro registry only, not provider quota data)');
   if (budget.snap === null) {
-    console.log(`  unreadable — ${budget.err ?? 'unknown error'}`)
+    console.log(`  unreadable — ${budget.err ?? 'unknown error'}`);
   } else {
     for (const l of budgetLines(budget.snap)) {
-      console.log(l)
+      console.log(l);
     }
   }
-  const fails = checks.filter((c) => c.status === 'fail').length
-  const warns = checks.filter((c) => c.status === 'warn').length
+  const fails = checks.filter(c => c.status === 'fail').length;
+  const warns = checks.filter(c => c.status === 'warn').length;
   console.log(
     fails === 0 && warns === 0
       ? '\nbro doctor: all checks pass'
       : `\nbro doctor: ${fails} failure(s), ${warns} warning(s)`
-  )
+  );
 }
 
 export function runDoctorCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
-    printUsage('usage: bro doctor [--json] [--strict]', 0)
+    printUsage('usage: bro doctor [--json] [--strict]', 0);
   }
-  const json = argv.includes('--json')
+  const json = argv.includes('--json');
   // --strict: schema violations are failures, not warnings — the CI gate
-  const strict = argv.includes('--strict')
-  const dir = process.cwd()
-  const checks = runDoctorChecks(dir, { strict })
-  const budget = readBudget(dir)
+  const strict = argv.includes('--strict');
+  const dir = process.cwd();
+  const checks = runDoctorChecks(dir, { strict });
+  const budget = readBudget(dir);
   if (json) {
     console.log(
       JSON.stringify({ ok: doctorExitCode(checks) === 0, checks, budget: budget.snap }, null, 2)
-    )
+    );
   } else {
-    printDoctor(checks, budget)
+    printDoctor(checks, budget);
   }
-  process.exit(doctorExitCode(checks))
+  process.exit(doctorExitCode(checks));
 }

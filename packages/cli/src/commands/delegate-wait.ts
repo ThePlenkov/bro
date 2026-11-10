@@ -2,35 +2,29 @@
  *  turn on a providers.<name> acp entry, bounded by --timeout, refused
  *  by provider walls before any spend. Reply text + provenance back;
  *  no registry entry. (spec bro-z8tng) */
-import {
-  acpOpen,
-  acpPooledTurn,
-  type ProviderWireOpts,
-} from '@broject/providers'
-import {
-  type AgentConnectorEnv,
-} from '../agent-connectors.ts'
-import { SpawnInputError } from './agents.ts'
-import { delegatePrompt } from './delegate-prompt.ts'
-import { acpEntry, refuseWalled, waitProviderName } from './delegate-provider.ts'
+import { acpOpen, acpPooledTurn, type ProviderWireOpts } from '@broject/providers';
+import { type AgentConnectorEnv } from '../agent-connectors.ts';
+import { SpawnInputError } from './agents.ts';
+import { delegatePrompt } from './delegate-prompt.ts';
+import { acpEntry, refuseWalled, waitProviderName } from './delegate-provider.ts';
 import {
   DEFAULT_TIMEOUT_SEC,
   MAX_TIMEOUT_SEC,
   type DelegateOpts,
   type DelegateSel,
   type DelegateWaitResult,
-} from './delegate.ts'
+} from './delegate.ts';
 
 function validTimeoutSec(sec: number): boolean {
-  return Number.isFinite(sec) && sec > 0 && sec <= MAX_TIMEOUT_SEC
+  return Number.isFinite(sec) && sec > 0 && sec <= MAX_TIMEOUT_SEC;
 }
 
 function waitDeadline(timeoutSec: number | undefined): number {
-  const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC
+  const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC;
   if (!validTimeoutSec(sec)) {
-    throw new SpawnInputError(`--timeout must be 1..${MAX_TIMEOUT_SEC} seconds`)
+    throw new SpawnInputError(`--timeout must be 1..${MAX_TIMEOUT_SEC} seconds`);
   }
-  return Date.now() + sec * 1000
+  return Date.now() + sec * 1000;
 }
 
 /** --wait — one pooled ACP turn. Provider walls refuse first: a
@@ -44,29 +38,29 @@ export async function delegateWait(
   sel: DelegateSel,
   opts: DelegateOpts
 ): Promise<DelegateWaitResult> {
-  const name = waitProviderName(sel.req, sel.routed)
-  const entry = acpEntry(env, name, sel.req.provider !== undefined)
-  refuseWalled(dir, name)
+  const name = waitProviderName(sel.req, sel.routed);
+  const entry = acpEntry(env, name, sel.req.provider !== undefined);
+  refuseWalled(dir, name);
   // resolve the prompt before the peer exists — a bad request must not
   // spawn (and then tear down) a provider process, nor burn the
   // shared deadline on acpOpen for an ask that can never run
-  const prompt = delegatePrompt(sel.req)
-  const deadline = waitDeadline(sel.req.timeoutSec)
-  const wire = waitWire(sel, dir, opts)
-  const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline)
-  const onExit = (): void => peer.close()
-  process.once('exit', onExit)
+  const prompt = delegatePrompt(sel.req);
+  const deadline = waitDeadline(sel.req.timeoutSec);
+  const wire = waitWire(sel, dir, opts);
+  const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline);
+  const onExit = (): void => peer.close();
+  process.once('exit', onExit);
   try {
     const r = await acpPooledTurn(peer, entry, wire, prompt, deadline, {
       by: 'delegate',
       requestModel: sel.req.model,
       signal: opts.acp?.signal,
       onUpdate: opts.acp?.onUpdate,
-    })
-    return waitResult(name, sel, r)
+    });
+    return waitResult(name, sel, r);
   } finally {
-    process.removeListener('exit', onExit)
-    peer.close()
+    process.removeListener('exit', onExit);
+    peer.close();
   }
 }
 
@@ -75,8 +69,8 @@ export async function delegateWait(
  *  (resolveTurnModel reports what the agent actually runs); a routed
  *  model only applies to an unpinned ask. */
 function waitWire(sel: DelegateSel, dir: string, opts: DelegateOpts): ProviderWireOpts {
-  const model = sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
-  return { model, acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir } }
+  const model = sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined);
+  return { model, acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir } };
 }
 
 /** The wait contract's result — class/delegatedBy ride as optional
@@ -94,5 +88,5 @@ function waitResult(
     stopReason: r.stopReason,
     text: r.text,
     ...(sel.delegatedBy !== undefined ? { delegatedBy: sel.delegatedBy } : {}),
-  }
+  };
 }

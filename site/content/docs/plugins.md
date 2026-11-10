@@ -1,4 +1,5 @@
 ---
+
 title: Plugins
 description: bro is a host — definePlugin, external loading, custom components.
 ---
@@ -7,17 +8,25 @@ bro is a plugin system on top of beads and `gh`. Every built-in command
 is a plugin in one registry; external plugins load from config and get
 the same contract — command, skill, config section, plan schema.
 
+There are three distinct seams: CLI extensions add commands, connectors
+bind external systems behind facades, and **agent plugins** install bro
+into clients. The portable Agent Plugin is one root `plugin.json` plus
+`skills/`; client-specific manifests and hooks package it for each client.
+See [agent plugins](/plugins) and the [connector marketplace](/marketplace).
+The separate “Claude Code on other agents” plugin lets Claude Code act as
+a CLI client over configured agents such as OpenCode and Devin.
+
 ## Client adapters
 
-`bro plugins` also installs bro *into* agent clients — the native-plugin
+`bro plugins` also installs bro _into_ agent clients — the native-plugin
 clients ship an adapter module the CLI writes to the client's own plugin
 directory:
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro plugins list [--json]` | Client × scope install matrix — `installed`, `stale`, `present`, `absent` |
-| `bro plugins install <client> [--global\|--local] [--dry-run]` | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
-| `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it |
+| Command                                                                    | What it does                                                                       |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `bro plugins list [--json]`                                                | Client × scope install matrix — `installed`, `stale`, `present`, `absent`          |
+| `bro plugins install <client> [--global\|--local] [--dry-run]`             | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
+| `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it                                                                          |
 
 Clients: `opencode` (global `$XDG_CONFIG_HOME/opencode/plugins/bro.ts` +
 the TUI `bro-cli.ts`, local `<repo>/.opencode/plugins/`), `kilo` (module
@@ -46,21 +55,23 @@ A plugin is a plain object — or typed via the side-effect-free
 
 ```ts
 // bro-memory.ts
-import { definePlugin } from '@broject/bro/plugin'
+import { definePlugin } from '@broject/bro/plugin';
 
 export default definePlugin({
-  name: 'memory',                    // → `bro memory <args>`
-  summary: 'remember what matters',  // shows in `bro plugins` + help
-  skill: 'memory',                   // skills/memory/SKILL.md
-  argvPrefix: ['mem'],               // aliases
-  configKey: 'memory',               // owns the `memory` config section
-  configSchema: (raw) => ({
+  name: 'memory', // → `bro memory <args>`
+  summary: 'remember what matters', // shows in `bro plugins` + help
+  skill: 'memory', // skills/memory/SKILL.md
+  argvPrefix: ['mem'], // aliases
+  configKey: 'memory', // owns the `memory` config section
+  configSchema: raw => ({
     dir: typeof raw?.dir === 'string' ? raw.dir : '.agents/memory',
   }),
-  planSchema: validateMemoryPlan,    // validates `kind = "memory"` plans
-  runPlan: runMemoryPlan,            // executes them via `bro plan run`
-  run: (argv) => { /* ... */ },
-})
+  planSchema: validateMemoryPlan, // validates `kind = "memory"` plans
+  runPlan: runMemoryPlan, // executes them via `bro plan run`
+  run: argv => {
+    /* ... */
+  },
+});
 ```
 
 Required: `name`, `summary`, `run`. Everything else is optional and
@@ -75,7 +86,7 @@ it never runs the CLI on import.
 // bro.config.ts
 export default {
   plugins: ['./bro-memory.ts', '@acme/bro-standup'],
-}
+};
 ```
 
 - Relative paths resolve from the repo root and **cannot escape it**
@@ -97,11 +108,11 @@ export default {
   name: 'memory',
   summary: 'project memory, my way',
   configKey: 'memory',
-  configSchema: (raw) => ({ dir: raw?.dir ?? '.memory' }),
-  run: async (argv) => {
+  configSchema: raw => ({ dir: raw?.dir ?? '.memory' }),
+  run: async argv => {
     // write/read whatever store you want — sqlite, files, a service
   },
-}
+};
 ```
 
 Artifacts that shouldn't touch the review surface go on the data ref —
