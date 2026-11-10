@@ -163,7 +163,9 @@ import {
 import { loadBroConfig } from '../plugins.ts';
 import {
   applyFleetRouter,
+  EMPTY_KEYS,
   fleetProfileOf,
+  liveSessionKeysByKind,
   loadAgentEnv,
   profileModelFor,
   providerWallsFor,
@@ -1643,7 +1645,9 @@ function admitCrossKindSessions(
   key: string,
   molStep: string,
   workerEnv: Record<string, string>,
-  out: string[]
+  out: string[],
+  scope: string,
+  liveByKind: Map<string, Set<string>>
 ): void {
   // a pre-flight refusal ahead of any claim; the authoritative count
   // re-runs inside each kind's admission mutex below
@@ -1664,6 +1668,8 @@ function admitCrossKindSessions(
         key,
         molStep,
         workerEnv,
+        scope,
+        liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
       });
       if (claimed !== undefined) {
         out.push(claimed);
@@ -1703,6 +1709,12 @@ function admitLaneSessions(
     templateCommand
   );
   const crossKind: string[] = [];
+  // the same budget facts the registry spawn derives — a raw-template
+  // lane scopes its ledger rows to this repo and prunes dead segments
+  // on every admission (codeant #972): an unscoped key would bury the
+  // spend under a shared '' scope where nothing can close it
+  const scope = projectId(ctx.root);
+  const liveByKind = liveSessionKeysByKind(readAgentRegistry(ctx.root));
   try {
     admitCrossKindSessions(
       ctx.env.agents,
@@ -1711,7 +1723,9 @@ function admitLaneSessions(
       key,
       spec.molStep,
       workerEnv,
-      crossKind
+      crossKind,
+      scope,
+      liveByKind
     );
     const reservation =
       templateQuota === undefined
@@ -1720,6 +1734,8 @@ function admitLaneSessions(
             key,
             molStep: spec.molStep,
             workerEnv,
+            scope,
+            liveKeys: liveByKind.get(templateQuota.plane.kind) ?? EMPTY_KEYS,
           });
     return { reservation, crossKind };
   } catch (err) {

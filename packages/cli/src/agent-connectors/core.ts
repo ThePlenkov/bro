@@ -1757,7 +1757,7 @@ export function sessionQuotaOf(
  *  bro-tdndq). "Live" is the cheap registry verdict — not stopped, no
  *  harvested exitStatus: a dead-but-unharvested entry stays counted
  *  (over-count is the safe direction for a shared account). */
-function liveSessionKeysByKind(
+export function liveSessionKeysByKind(
   registry: Record<string, AgentRegistryEntry>
 ): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
@@ -1774,6 +1774,11 @@ function liveSessionKeysByKind(
   }
   return out;
 }
+
+/** A kind with NO live workers — `liveByKind.get` misses it, but an
+ *  absent key must still mean "close every segment": undefined opts the
+ *  budget out of pruning entirely (closeDead needs a Set, even empty). */
+export const EMPTY_KEYS: ReadonlySet<string> = new Set();
 
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
@@ -2412,7 +2417,7 @@ function prepareSpawn(
             molStep: spec.molStep,
             workerEnv: spec.env,
             scope,
-            liveKeys: liveByKind.get(view.kind),
+            liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
@@ -2428,7 +2433,7 @@ function prepareSpawn(
             molStep: spec.molStep,
             workerEnv: spec.env,
             scope,
-            liveKeys: liveByKind.get(sessionQuota.plane.kind),
+            liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
           });
   } catch (err) {
     // every claim this spawn holds goes back — the caller never saw them

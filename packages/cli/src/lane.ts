@@ -405,6 +405,11 @@ function armedBudgets(env: AgentConnectorEnv): Map<string, LaneWorkBudget> {
   return out;
 }
 
+/** A kind with NO live workers — `liveByKind.get` misses it, but an
+ *  absent key must still mean "close every segment": undefined opts the
+ *  budget out of pruning entirely (closeDead needs a Set, even empty). */
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
+
 /** sessionKind → live agentIds — the registry's cheap liveness verdict
  *  the ledger prunes against (spec bro-tdndq). Same rule as the spawn
  *  path's liveSessionKeysByKind: stopped or exit-harvested is dead. */
@@ -452,7 +457,7 @@ function reconcile(
         laneBudgetCheck(kind, cfg, {
           now,
           scope,
-          liveKeys: liveByKind.get(kind),
+          liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
         }).spent
       ) {
         budgeted.add(kind);
@@ -601,7 +606,7 @@ export function laneStatus(dir: string, env: AgentConnectorEnv, now = Date.now()
       level = laneBudgetLevel(kind, cfg, {
         now,
         scope,
-        liveKeys: liveByKind.get(kind),
+        liveKeys: liveByKind.get(kind) ?? EMPTY_KEYS,
       });
     } catch {
       // an unreadable ledger renders as no row, not a broken status
