@@ -1,4 +1,5 @@
 ---
+
 name: act
 description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro review act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @broject/bro@0) and gh."
 ---
@@ -14,15 +15,15 @@ default store, so standard installs already have it).
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro review act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
-| `bro review act threads [PR]` | Unresolved review threads, TSV |
+| Command                                                                                              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro review act status [PR] [--json]`                                                                | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked                                                                                                                                                                                                                                                                                                                                   |
+| `bro review act threads [PR]`                                                                        | Unresolved review threads, TSV                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it); `--detach` re-spawns the wait as its own process group so the watch outlives the arming session (output on `<git-common>/bro/act-wait-<pr>.log`) |
-| `bro review act rearm [--dry-run] [--json]` | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs |
-| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land |
-| `bro review act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
-| `bro review act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
+| `bro review act rearm [--dry-run] [--json]`                                                          | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs                                                                                                                                                 |
+| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]`          | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land                                                                                                                    |
+| `bro review act resolve --thread ID [--comment T]`                                                   | Resolve a thread (reply first if comment given)                                                                                                                                                                                                                                                                                                                                                                                     |
+| `bro review act reply --thread ID --comment T`                                                       | Reply without resolving (`--file TSV` for batch)                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ## Policy
 
@@ -32,15 +33,20 @@ default store, so standard installs already have it).
   non-AI checks, not just required ones; a failing optional job is still
   a red box on the PR.
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED — it
-  may still post findings. A *failed* reviewer check (`reviewers_failing`)
+  may still post findings. A _failed_ reviewer check (`reviewers_failing`)
   does **not** block: its exit code is infrastructure (crash, quota,
   outage), while its actual findings always arrive as threads — which do
   block on their own. **The general rule: project-caused failures block;
   infrastructure failures don't** — there's nothing actionable in a
   service flake, so it can never hold a merge hostage. Reviewers that are
-  *reliably* flaky (stuck pending, always failing) go on the
+  _reliably_ flaky (stuck pending, always failing) go on the
   `act.ignoreChecks` list in bro.config.json so their pending state
-  doesn't block either.
+  doesn't block either. **Static scanners are never advisory** —
+  SAST-named checks (codacy, codescene, sonar, codeql, deepsource, …)
+  gate unconditionally: a failed job or an error-level annotation is a
+  real project finding, not reviewer flake, so `act.ignoreChecks` does
+  not shield them and a `neutral` conclusion still gets its annotations
+  inspected.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
@@ -125,7 +131,7 @@ default store, so standard installs already have it).
   reviewer asked. If a thread needs an explicit audit marker, pass
   `--comment <sha>` — a bare SHA, not prose.
 - **Resolving is not the gate — a fix push re-opens review.** After the
-  last `bro review act resolve` of a round, `bro review act status` on the *new head*
+  last `bro review act resolve` of a round, `bro review act status` on the _new head_
   decides: fresh findings land on every push, so the loop exits only on
   `exit_gate=OK` or hands off to `bro review act wait --merge`. Never report a
   PR as done from the resolve output alone.
@@ -146,7 +152,7 @@ default store, so standard installs already have it).
   ref exits non-zero, and `delete_branch_on_merge` removes it on merge).
   **Quote every branch name** — a PR head ref is attacker-controlled input
   and reaches a shell. `bro review act merge --cleanup` retires the
-  checkout and the local ref; the *remote* branch is still yours to
+  checkout and the local ref; the _remote_ branch is still yours to
   delete. Never touch another branch — another PR or session may own it.
   Report the cleanup in the closing summary.
 - **A pushed PR is merged, watched, or handed off — never unwatched.**
@@ -156,13 +162,13 @@ default store, so standard installs already have it).
   means the PR is still open, so start a fresh `bro review act wait --merge`
   (a timeout retires its marker on the way out, so `act rearm` has
   nothing to resurrect — re-arming there is manual). A watcher that
-  *died* with the host/session never ran that cleanup — its dead marker
+  _died_ with the host/session never ran that cleanup — its dead marker
   stays, the session-start nudge names it, and `bro review act rearm` puts the
   watch back up.
   **'Watcher armed' is never the end state.** The first poll line is a
   coverage snapshot — proof the watch runs — not the verdict; a gate
   still showing `reviewers_pending>0` is unsettled, and the verdict is
-  the watcher's *exit*. A non-zero BLOCKED exit is the next work list,
+  the watcher's _exit_. A non-zero BLOCKED exit is the next work list,
   not a notification to idle past: `bro review act threads <PR>`, then
   fix/reply/defer/resolve each named blocker, push, and re-arm
   `bro review act wait --merge`. A BLOCKED event surfacing after the arming

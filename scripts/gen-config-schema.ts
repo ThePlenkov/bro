@@ -10,37 +10,39 @@
  * Requires `npm run build` first — the registry is read from the built
  * `dist/config-schema.js` entry, never re-declared here.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const outFile = join(root, 'packages/cli/schemas/bro.config.schema.json')
-const entry = join(root, 'packages/cli/dist/config-schema.js')
-const check = process.argv.includes('--check')
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const outFile = join(root, 'packages/cli/schemas/bro.config.schema.json');
+const entry = join(root, 'packages/cli/dist/config-schema.js');
+const check = process.argv.includes('--check');
 
 if (!existsSync(entry)) {
-  console.error('packages/cli/dist/config-schema.js missing — run `npm run build` first')
-  process.exit(2)
+  console.error('packages/cli/dist/config-schema.js missing — run `npm run build` first');
+  process.exit(2);
 }
 
 // the specifier is a literal — resolves relative to this script and
 // (existsSync-gated above) always exists here; a computed specifier is
 // an "unsafe call to import" finding
 const { emitConfigSchemaJson } = (await import('../packages/cli/dist/config-schema.js')) as {
-  emitConfigSchemaJson: () => string
-}
-const content = emitConfigSchemaJson()
+  emitConfigSchemaJson: () => string;
+};
+const content = emitConfigSchemaJson();
 
 if (check) {
   if (!existsSync(outFile) || readFileSync(outFile, 'utf8') !== content) {
-    console.error('stale: packages/cli/schemas/bro.config.schema.json — run `npm run gen:config-schema`')
-    process.exit(1)
+    console.error(
+      'stale: packages/cli/schemas/bro.config.schema.json — run `npm run gen:config-schema`'
+    );
+    process.exit(1);
   }
 } else {
-  mkdirSync(dirname(outFile), { recursive: true })
+  mkdirSync(dirname(outFile), { recursive: true });
   if (!existsSync(outFile) || readFileSync(outFile, 'utf8') !== content) {
-    writeFileSync(outFile, content)
+    writeFileSync(outFile, content);
   }
-  console.log('packages/cli/schemas/bro.config.schema.json')
+  console.log('packages/cli/schemas/bro.config.schema.json');
 }

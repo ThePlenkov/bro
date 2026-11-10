@@ -8,5 +8,6 @@ description: "Activate another agent — sync ask (--wait, pooled ACP turn) or d
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `delegate` |
 

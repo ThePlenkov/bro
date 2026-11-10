@@ -1,18 +1,12 @@
 {
   "$schema": "https://unpkg.com/@broject/bro/schemas/bro.config.schema.json",
+  "loop": {
+    "autoMerge": true
+  },
   "act": {
-    "ignoreChecks": [
-      "kilo",
-      "github-advanced-security"
-    ],
-    "docsPaths": [
-      "*.md",
-      "*.mdx",
-      "*.rst",
-      "docs/",
-      "specs/",
-      "site/content/"
-    ]
+    "selfCheck": "act-gate",
+    "ignoreChecks": ["kilo", "github-advanced-security", "sonarcloud", "codescene"],
+    "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
   },
   "debt": {
     "sources": [
@@ -27,24 +21,20 @@
   "sdd": {
     "mode": "gate"
   },
+  "skills": {
+    "install": ["github:herdrdev/herdr/skills/herdr", "local:skills/bro-herdr"],
+    "agents": ["universal"]
+  },
   "guard": {
     "defs": [
       {
         "name": "test-coverage-on-stop",
         "when": {
-          "on": [
-            "stop"
-          ],
+          "on": ["stop"],
           "state": {
             "diff": {
-              "changed": [
-                "src/**",
-                "packages/*/src/**"
-              ],
-              "without": [
-                "**/*.test.*",
-                "**/*.spec.*"
-              ]
+              "changed": ["src/**", "packages/*/src/**"],
+              "without": ["**/*.test.*", "**/*.spec.*"]
             }
           }
         },
@@ -53,9 +43,7 @@
       {
         "name": "spec-drift-nkn6",
         "when": {
-          "on": [
-            "stop"
-          ],
+          "on": ["stop"],
           "state": {
             "probes": [
               {
@@ -72,14 +60,10 @@
       {
         "name": "core-vendor-boundary",
         "when": {
-          "on": [
-            "stop"
-          ],
+          "on": ["stop"],
           "state": {
             "diff": {
-              "changed": [
-                "packages/core/src/**"
-              ]
+              "changed": ["packages/core/src/**"]
             },
             "probes": [
               {
@@ -108,9 +92,7 @@
       {
         "name": "retro-on-stop",
         "when": {
-          "on": [
-            "stop"
-          ]
+          "on": ["stop"]
         },
         "say": "session ending \u2014 run the retro checklist (skills/retro): loose ends, hand-rolled mechanics \u2192 bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
@@ -122,7 +104,9 @@
     },
     "devin": {
       "maxSessions": 6,
-      "maxWorkers": 4
+      "maxWorkers": 4,
+      "type": "cli",
+      "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     }
   },
   "fleet": {
