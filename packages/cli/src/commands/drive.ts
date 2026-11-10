@@ -63,7 +63,8 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   acquireAgentRegistryLock,
@@ -79,6 +80,9 @@ import {
   facadeName,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
+  projectId,
   patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
@@ -132,7 +136,7 @@ import {
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
 import { collectAgents } from './fleet.ts';
-import { projectFleet } from './herdr-projector.ts';
+import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
   driveSection,
   MAX_INTERVAL_SEC,
@@ -700,6 +704,74 @@ function addFixerWorktree(
   return { err: retry.err || add.err };
 }
 
+/** The base the rebase must land on — the ref, its tip, and what the
+ *  fixer has to do about it (bro-by8d3). */
+export interface BaseTip {
+  /** The ref the fixer rebases onto — `origin/main` for a
+   *  remote-tracking ref, `main` for the local branch. */
+  ref: string;
+  /** Its tip, read after the fetch. */
+  sha: string;
+  /** The ref lives on a remote: the fixer must fetch it again right
+   *  before the rebase. */
+  remote: boolean;
+  /** The repo has an `origin` remote at all — the PR branch can be
+   *  fetched from it. */
+  origin: boolean;
+}
+
+/** The base's tip, fetched NOW (bro-by8d3). The rebase target is a
+ *  fact, not a guess: the repo's remote-tracking refs are as old as the
+ *  last fetch anybody in the repo ran, and the drive lane ran none — a
+ *  rebase onto that ref lands on a base that has already moved, and the
+ *  PR stays CONFLICTING after a whole fixer round (the 2026-11-07
+ *  incident: rebased onto 780fc295 while main was at 96fca6d1).
+ *
+ *  The base is resolved the way git can actually read it: `origin/<base>`
+ *  (fetched first), then another remote's tracking ref, then the local
+ *  branch. A base that exists nowhere is an error — the caller refuses
+ *  the spawn, because a rebase without a target is not a rebase. */
+export function fetchBaseTip(dir: string, base: string): { tip?: BaseTip; err?: string } {
+  const remotes = remoteList(dir);
+  const origin = remotes.includes('origin');
+  if (origin) {
+    const fetch = gitTry(['-C', dir, 'fetch', 'origin', base, '--quiet']);
+    if (
+      fetch.code !== 0 &&
+      !/couldn't find remote ref|remote ref does not exist|no such ref/i.test(fetch.err)
+    ) {
+      return { err: fetch.err.trim() || `git fetch origin ${base} failed` };
+    }
+    const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `origin/${base}`]);
+    if (tip.code === 0) {
+      return { tip: { ref: `origin/${base}`, sha: tip.out.trim(), remote: true, origin: true } };
+    }
+  }
+  for (const remote of remotes) {
+    if (remote === 'origin') {
+      continue;
+    }
+    const tip = gitTry(['-C', dir, 'rev-parse', '--verify', `refs/remotes/${remote}/${base}`]);
+    if (tip.code === 0) {
+      return { tip: { ref: `${remote}/${base}`, sha: tip.out.trim(), remote: true, origin } };
+    }
+  }
+  const local = gitTry(['-C', dir, 'rev-parse', '--verify', `refs/heads/${base}`]);
+  if (local.code === 0) {
+    return { tip: { ref: base, sha: local.out.trim(), remote: false, origin } };
+  }
+  return { err: `no branch or remote-tracking ref named ${base}` };
+}
+
+/** The configured remotes, `origin` first. */
+function remoteList(dir: string): string[] {
+  const names = gitTry(['-C', dir, 'remote'])
+    .out.split('\n')
+    .map(r => r.trim())
+    .filter(r => r !== '');
+  return [...names.filter(r => r === 'origin'), ...names.filter(r => r !== 'origin')];
+}
+
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
  *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
  *  caller can retire it when the work evaporates. A dir standing on
@@ -708,11 +780,26 @@ function addFixerWorktree(
  *  `<repo>--work-x` path instead of refusing as foreign. Either path is
  *  handed over only once it can reach origin/<branch>'s tip — a fixer
  *  rebasing a stale tip omits the commits pushed since, and the lease
- *  push drops them on the PR. */
+ *  push drops them on the PR.
+ *
+ *  `guard` is the occupancy answer for a candidate checkout (bro-by8d3):
+ *  a checkout a live session owns is never refreshed — the branch of
+ *  another writer is not moved, not even by a fast-forward. The guard
+ *  closes the window BEFORE the mutation; the spawn's locked re-check
+ *  closes it before the spawn. */
 export function ensureFixerWorktree(
   mainRoot: string,
-  branch: string
-): { path?: string; created?: boolean; err?: string } {
+  branch: string,
+  opts?: {
+    /** The occupancy answer for a candidate checkout — asked UNDER the
+     *  occupancy locks, right before the refresh (bro-by8d3). */
+    guard?: (dir: string) => string | undefined;
+    /** The occupancy locks — held across the guard AND the refresh, so
+     *  a claim cannot land between them (a claimant writes its registry
+     *  entry + .work marker under the same locks). */
+    lock?: (dir: string) => () => void;
+  }
+): { path?: string; created?: boolean; err?: string; occupied?: string } {
   // fetch first — an orphaned PR's remote head may be newer than ours;
   // a branch diverged from it is refused outright: no checkout of it
   // can keep both histories
@@ -723,9 +810,34 @@ export function ensureFixerWorktree(
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name);
     if (existsSync(dir)) {
-      const r = reuseFixerWorktree(dir, branch);
-      if (r !== undefined) {
-        return r;
+      // a dir standing on ANOTHER branch is not this branch's checkout:
+      // it is never clobbered, and it must not consume the occupancy
+      // guard either — the namespaced fallback still has to be tried
+      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim();
+      if (on !== branch) {
+        continue;
+      }
+      // the guard and the refresh share the occupancy locks: a session
+      // that claims this checkout after the guard would have its branch
+      // moved under it
+      let release: () => void = () => {};
+      try {
+        release = opts?.lock?.(dir) ?? (() => {});
+      } catch (err) {
+        // a lock we can't take is indistinguishable from an active claimer
+        return { occupied: `occupancy re-check failed — ${errText(err)}` };
+      }
+      try {
+        const owner = opts?.guard?.(dir);
+        if (owner !== undefined) {
+          return { occupied: owner };
+        }
+        const r = reuseFixerWorktree(dir, branch);
+        if (r !== undefined) {
+          return r;
+        }
+      } finally {
+        release();
       }
       continue;
     }
@@ -774,10 +886,12 @@ export function buildFixerPrompt(opts: {
     'Rules:',
     "- Read skills/act/SKILL.md first — it owns this loop's policy.",
     '- Fix valid findings on this branch; commit and push — the push is the verdict.',
+    '- For EVERY thread: fix+push OR reply with reason and resolve, OR explicitly defer to a follow-up bead and resolve. You MUST address all threads before stopping.',
+    '- You cannot exit cleanly with unresolved threads and no action taken on them.',
     '- Resolve fixed threads silently; reply + resolve with the reason on reject/defer.',
     '- Defer non-blocking nits (P2/P3) to debt beads — never chase a perfect PR.',
     '- NEVER merge — `bro drive` owns the merge on green.',
-    '- Exit when threads are zero or all deferred.',
+    '- Exit when threads are zero or all deferred/resolved with explanation.',
     '',
   ].join('\n');
 }
@@ -1184,7 +1298,24 @@ async function spawnFixer(
   let wt = worktree;
   let created = false;
   if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef);
+    const fresh = freshOccupancy(ctx.mainRoot, known);
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef, {
+      guard: dir =>
+        occupied({
+          agents: fresh.agents,
+          fixerBead: fixer?.id,
+          branch: state.headRef,
+          worktree: dir,
+          workDetails: fresh.workDetails,
+          scanProc: agentProcessesIn,
+          pr,
+          watches: fresh.watches,
+        }),
+      lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
+    });
+    if (ensured.occupied !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: ensured.occupied };
+    }
     if (ensured.path === undefined) {
       return { pr, link, verdict: 'no-worktree', detail: ensured.err };
     }
@@ -1246,14 +1377,69 @@ async function spawnFixer(
  *  conflict round (`buildRebasePrompt` in @broject/loop): the gate
  *  reports CONFLICTING, the fixer rebases the PR's branch onto its
  *  declared base and force-pushes. The rebase IS the fix: no thread
- *  work is owed on this spawn. */
+ *  work is owed on this spawn.
+ *
+ *  `baseSha` is the base tip bro fetched right before the spawn
+ *  (bro-by8d3). It travels into the work order because the base moves:
+ *  a rebase onto a stale tip is a rebase that stays conflicting, and
+ *  the PR goes back to CONFLICTING for another round. The order of
+ *  operations is fetch → verify the tip → re-check the PR → rebase. */
 export function buildRebaseFixerPrompt(opts: {
   pr: number;
   link: string;
   branch: string;
   base: string;
   worktree: string;
+  repo: string;
+  host: string;
+  /** The base bro resolved right before the spawn — the ref, its tip,
+   *  and whether it lives on a remote. */
+  baseTip: BaseTip;
 }): string {
+  // the merge-state read names the review host's own CLI — a GitLab
+  // repo gets the API call a fixer can actually run (the CI work order
+  // branches the same way).
+  const gitlab = opts.host === 'gitlab';
+  const encRepo = encodeURIComponent(opts.repo);
+  const mergeCmd = gitlab
+    ? `glab api projects/${encRepo}/merge_requests/${opts.pr}`
+    : `gh pr view ${opts.pr} --json mergeable`;
+  const mergeField = gitlab ? '`detailed_merge_status`' : '`mergeable`';
+  const dissolved = gitlab ? '`mergeable`' : 'MERGEABLE';
+  const conflicting = gitlab ? '`conflict`' : 'CONFLICTING';
+  const { ref, sha, remote } = opts.baseTip;
+  const target = `bro resolved the base to \`${ref}\` and it read \`${sha}\`. That is the base tip you rebase onto: a rebase onto a stale base is a rebase that stays conflicting.`;
+  // the remote-tracking ref must be re-read right before the rebase; a
+  // local branch cannot move under the fetch, but it can be rewritten by
+  // someone else — the same check, the same order
+  const verify = remote
+    ? [
+        '',
+        '  Fetch the base AGAIN, immediately before the rebase — `git rev-parse',
+        `  ${ref}\` must still read \`${sha}\`. If it moved, the base`,
+        `  advanced under you: re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
+        `  ${dissolved} means the conflict dissolved — STOP`,
+        `  and report that; do not rebase. ${conflicting} means rebase onto the new tip.`,
+      ].join('\n')
+    : [
+        '',
+        '  This base is a LOCAL branch (there is no remote ref to fetch).',
+        `  Before the rebase, \`git rev-parse ${ref}\` must still read \`${sha}\`.`,
+        `  If it moved, re-check the PR (\`${mergeCmd}\` — read ${mergeField}).`,
+        `  ${dissolved} means the conflict dissolved — STOP and report that;`,
+        `  do not rebase. ${conflicting} means rebase onto the new tip.`,
+      ].join('\n');
+  // the PR branch's own tip — a fetch, when there is a remote to fetch
+  // from: commits pushed since this checkout was made are invisible to a
+  // stale tip, and the base rebase drops them on the lease push
+  const branchFetch = opts.baseTip.origin
+    ? [
+        `- \`git fetch origin ${opts.branch}\` — the PR branch too:`,
+        '  commits pushed since this checkout was made are invisible to a stale',
+        `  tip. Fold them in first (\`git rebase origin/${opts.branch}\`) or the`,
+        '  base rebase drops them on the lease push.',
+      ]
+    : [];
   return [
     `# Rebase fixer — ${opts.link}`,
     '',
@@ -1263,11 +1449,10 @@ export function buildRebaseFixerPrompt(opts: {
     `This PR has merge conflicts with its base branch \`${opts.base}\`. The rebase`,
     'IS the work — no review-thread fixing is owed on this spawn.',
     '',
-    `- \`git fetch origin ${opts.branch} ${opts.base}\` — the PR branch too:`,
-    '  commits pushed since this checkout was made are invisible to a stale',
-    `  tip. Fold them in first (\`git rebase origin/${opts.branch}\`) or the`,
-    '  base rebase drops them on the lease push.',
-    `- \`git rebase origin/${opts.base}\` —`,
+    target + verify,
+    '',
+    ...branchFetch,
+    `- \`git rebase ${ref}\` —`,
     '  if a rebase is already in progress here, resolve it instead',
     '  (`git rebase --continue` / `--abort` and restart if the state is too',
     '  tangled).',
@@ -1565,11 +1750,78 @@ async function spawnRebaseFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'conflict-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase');
+  const lane = fixerLane(
+    ctx,
+    pr,
+    link,
+    state.headRef,
+    worktree,
+    fixer,
+    meta.headSha,
+    'rebase',
+    known
+  );
   if ('verdict' in lane) {
     return lane;
   }
   const wt = lane.wt;
+  // a dir this pass added and nobody claimed is litter: every path that
+  // ends the pass without handing the worktree to a fixer retires it
+  // (the same obligation `spawnFixer` carries on an empty thread list)
+  const retireCreated = async (): Promise<void> => {
+    if (lane.created !== true) {
+      return;
+    }
+    await retireIfOrphaned(ctx, pr, wt, state.headRef, fixer, known);
+  };
+  // the base tip, fetched NOW (bro-by8d3) — the remote-tracking refs are
+  // as old as the last fetch anybody in the repo ran, and the drive lane
+  // ran none. A fetch that failed for a real reason refuses the spawn:
+  // a rebase onto a known-stale base is a round that ends CONFLICTING.
+  const fetched = fetchBaseTip(wt, meta.baseRef);
+  if (fetched.tip === undefined) {
+    await retireCreated();
+    return { pr, link, verdict: 'rebase-base-unavailable', detail: fetched.err };
+  }
+  let base = meta.baseRef;
+  let baseTip = fetched.tip;
+  // the PR, re-checked against the tip just fetched: the base may have
+  // moved under the fetch, and a conflict that dissolved with it is not
+  // work — the pass ends green and drive merges it.
+  let after: PrMeta;
+  try {
+    after = await metaOf(ctx, pr);
+  } catch (err) {
+    await retireCreated();
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) };
+  }
+  if (after.state !== 'OPEN') {
+    await retireCreated();
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+    return { pr, link, verdict: 'settled', detail: after.state.toLowerCase() };
+  }
+  if (after.mergeable === 'MERGEABLE') {
+    await retireCreated();
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+    return {
+      pr,
+      link,
+      verdict: 'conflict-resolved',
+      detail: `base ${meta.baseRef} moved — ${baseTip.sha.slice(0, 8)}`,
+    };
+  }
+  // the PR was RETARGETED while we fetched: the base we resolved is not
+  // the base the PR wants — resolve the new one instead of pairing the
+  // old tip with the new name
+  if (after.baseRef !== meta.baseRef) {
+    const moved = fetchBaseTip(wt, after.baseRef);
+    if (moved.tip === undefined) {
+      await retireCreated();
+      return { pr, link, verdict: 'rebase-base-unavailable', detail: moved.err };
+    }
+    base = after.baseRef;
+    baseTip = moved.tip;
+  }
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
@@ -1579,8 +1831,11 @@ async function spawnRebaseFixer(
       pr,
       link,
       branch: state.headRef,
-      base: meta.baseRef,
+      base,
+      baseTip,
       worktree: wt,
+      repo: ctx.repo,
+      host: ctx.host,
     }),
     tag: 'rebase ',
     attempt: { head: meta.headSha, cls: 'rebase' },
@@ -1624,7 +1879,13 @@ async function freshOpen(
 
 /** The shared tail of every fixer spawn — the class attempt spent on
  *  this head → its verdict; no caller-held worktree → the branch
- *  checkout is ensured here (or no-worktree). */
+ *  checkout is ensured here (or no-worktree).
+ *
+ *  The ensure path may move the branch (a fast-forward to the remote
+ *  tip), so the occupancy ladder answers FIRST (bro-by8d3): a checkout
+ *  a live session owns is never refreshed. The verdict is 'occupied',
+ *  never 'no-worktree' — the worktree exists, it belongs to someone
+ *  else. */
 function fixerLane(
   ctx: Ctx,
   pr: number,
@@ -1633,8 +1894,9 @@ function fixerLane(
   worktree: string | undefined,
   fixer: TaskRow | undefined,
   headSha: string,
-  cls: string
-): { wt: string } | PrVerdict {
+  cls: string,
+  known: AgentInfo[]
+): { wt: string; created?: boolean } | PrVerdict {
   const spent = fixerSpent(ctx, pr, headSha, fixer, cls);
   if (spent !== undefined) {
     return spent;
@@ -1642,11 +1904,28 @@ function fixerLane(
   if (worktree !== undefined) {
     return { wt: worktree };
   }
-  const ensured = ensureFixerWorktree(ctx.mainRoot, branch);
+  const fresh = freshOccupancy(ctx.mainRoot, known);
+  const ensured = ensureFixerWorktree(ctx.mainRoot, branch, {
+    guard: dir =>
+      occupied({
+        agents: fresh.agents,
+        fixerBead: fixer?.id,
+        branch,
+        worktree: dir,
+        workDetails: fresh.workDetails,
+        scanProc: agentProcessesIn,
+        pr,
+        watches: fresh.watches,
+      }),
+    lock: dir => acquireOccupancyLocks(ctx.mainRoot, dir),
+  });
+  if (ensured.occupied !== undefined) {
+    return { pr, link, verdict: 'occupied', detail: ensured.occupied };
+  }
   if (ensured.path === undefined) {
     return { pr, link, verdict: 'no-worktree', detail: ensured.err };
   }
-  return { wt: ensured.path };
+  return { wt: ensured.path, created: ensured.created === true };
 }
 
 // --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------
@@ -1679,9 +1958,10 @@ function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
   if (rules.length === 0) {
     return checks;
   }
-  return checks.filter(
-    c => isSast(c.name) || !rules.some(r => c.name.toLowerCase().includes(r.name.toLowerCase()))
-  );
+  // An explicit rule excludes ANY matching check — SAST names included,
+  // matching advisoryFilter's precedence (the fixer must never be sent
+  // to repair a scanner the operator declared advisory).
+  return checks.filter(c => !rules.some(r => c.name.toLowerCase().includes(r.name.toLowerCase())));
 }
 
 /** The ci-fail fixer's work order — the failing check list at spawn
@@ -1854,7 +2134,7 @@ async function spawnCiFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'ci-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci');
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci', known);
   if ('verdict' in lane) {
     return lane;
   }
@@ -1919,7 +2199,17 @@ async function spawnSastFixer(
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
     return { pr, link, verdict: 'sast-resolved' };
   }
-  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast');
+  const lane = fixerLane(
+    ctx,
+    pr,
+    link,
+    state.headRef,
+    worktree,
+    fixer,
+    meta.headSha,
+    'sast',
+    known
+  );
   if ('verdict' in lane) {
     return lane;
   }
@@ -2503,6 +2793,9 @@ function herdrProjectorTick(ctx: Ctx): void {
   // the event trigger re-arms lazily here — a broker that came up since
   // the last pass restores event mode without a daemon restart
   void armProjectorEvents(ctx);
+  // and the write points without an envelope get their fs.watch fast
+  // path the same way — armed once, loop mode only
+  armProjectorWatches(ctx);
   try {
     const r = projectFleet(ctx.mainRoot);
     if (r.reachable !== herdrWasReachable) {
@@ -2567,8 +2860,15 @@ export function projectorKicker(fire: () => void, kickMs = PROJECTOR_KICK_MS): (
 }
 
 let projectorKickFn: (() => void) | undefined;
+/** Latest daemon ctx — rebound on every kick source call so a standby
+ *  takeover never fires the projector through the first invocation's
+ *  closure. */
+let projectorCtx: Ctx | undefined;
 function kickProjector(ctx: Ctx): void {
-  projectorKickFn ??= projectorKicker(() => herdrProjectorTick(ctx));
+  projectorCtx = ctx;
+  projectorKickFn ??= projectorKicker(() => {
+    if (projectorCtx !== undefined) herdrProjectorTick(projectorCtx);
+  });
   projectorKickFn();
 }
 
@@ -2622,6 +2922,86 @@ async function armProjectorEvents(ctx: Ctx): Promise<void> {
     }
   } finally {
     projectorArming = false;
+  }
+}
+
+// --- write-point watches (spec bro-9me97) -------------------------------------
+
+/** Filename-filtered dir watches kicking the projector on the write
+ *  points the bus does not cover: a `.exit` lands the instant a worker
+ *  dies but `agent-exit` only journals at the next harvest;
+ *  `agents.json` mutates outside lifecycle emits; plugin ledgers have
+ *  no bus path at all. Everything funnels into the same coalescing
+ *  kicker, and a missed/overflowed inotify event still has the tick
+ *  behind it — the watch is a fast path, never the only path.
+ *  Exported so tests drive it with injected dirs + kick. */
+export function projectorWatcher(
+  dirs: { dir: string; hit: (name: string) => boolean }[],
+  kick: () => void
+): FSWatcher[] {
+  const out: FSWatcher[] = [];
+  for (const { dir, hit } of dirs) {
+    try {
+      const w = watch(dir, (_e, name) => {
+        if (typeof name === 'string' && hit(name)) {
+          kick();
+        }
+      });
+      // an inotify limit or a dir removed mid-watch degrades to the
+      // tick — never a crash inside the supervisor loop
+      w.on('error', () => {});
+      w.unref?.();
+      out.push(w);
+    } catch {
+      // an absent dir (a ledger root the plugin never created) is a
+      // no-watch, not a failure
+    }
+  }
+  return out;
+}
+
+interface ProjectorWatchSlot {
+  dir: string;
+  hit: (name: string) => boolean;
+  w?: FSWatcher;
+}
+
+let projectorWatchSpec: ProjectorWatchSlot[] | undefined;
+function armProjectorWatches(ctx: Ctx): void {
+  if (ctx.everySec === undefined) {
+    return;
+  }
+  projectorCtx = ctx;
+  if (projectorWatchSpec === undefined) {
+    const common = gitCommonDir(ctx.mainRoot) ?? ctx.mainRoot;
+    projectorWatchSpec = [
+      // registry mutations the lifecycle mirror does not emit for
+      { dir: join(common, 'bro'), hit: name => name === 'agents.json' },
+      // death before the harvest — the wrapper's .exit write point
+      { dir: join(common, 'bro', 'agents'), hit: name => name.endsWith('.exit') },
+      // plugin workspace/status bindings — no bus coverage at all
+      ...pluginLedgerDirs().map(dir => ({ dir, hit: (name: string) => name.startsWith('state') })),
+    ];
+  }
+  // re-attach every slot that is not watched yet — `bro/agents` only
+  // exists after the first native spawn, ledger roots after the first
+  // plugin run; a one-shot arm would leave those points tick-bound
+  // forever (same lazy re-arm shape as armProjectorEvents)
+  for (const d of projectorWatchSpec) {
+    if (d.w !== undefined) {
+      continue;
+    }
+    const [w] = projectorWatcher([d], () => {
+      if (projectorCtx !== undefined) kickProjector(projectorCtx);
+    });
+    if (w !== undefined) {
+      const drop = (): void => {
+        d.w = undefined;
+      };
+      w.on('error', drop);
+      w.on('close', drop);
+      d.w = w;
+    }
   }
 }
 
@@ -2716,21 +3096,52 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   // the same PRs raced fixer spawns and merge probes overnight
   // (retro bro-l63ji). Taken before auth/facade planes so a standby
   // stays a cheap local wait.
-  const driveLock = driveLockPath(main.path);
-  const releaseSupervisor =
-    driveLock === null
-      ? () => {}
-      : await awaitFileLock(driveLock, {
-          label: 'drive supervisor lock',
-          onStandby: pid =>
-            console.error(
-              `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
-            ),
-        });
+  const env = loadAgentEnv(main.path);
+  const store = localLeaseStore(projectId(main.path));
+  const abort = new AbortController();
+  let roleLease: { release: () => void } | undefined;
+  let releaseSupervisor = () => {};
+  const releaseAll = (): void => {
+    releaseSupervisor();
+    roleLease?.release();
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort();
+    releaseAll();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.kill(process.pid, signal);
+  };
+  const onInt = (): void => onSignal('SIGINT');
+  const onTerm = (): void => onSignal('SIGTERM');
+  const onExit = (): void => releaseAll();
   try {
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    process.on('exit', onExit);
+    roleLease = await holdRoleLease(
+      store,
+      'drive',
+      { host: hostname(), pid: process.pid, rig: basename(main.path) },
+      (env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    );
+    const driveLock = driveLockPath(main.path);
+    if (driveLock !== null) {
+      releaseSupervisor = await awaitFileLock(driveLock, {
+        label: 'drive supervisor lock',
+        onStandby: pid =>
+          console.error(
+            `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+          ),
+      });
+    }
     await runDrive(main.path, broCfg, drive, args);
   } finally {
-    releaseSupervisor();
+    process.removeListener('SIGINT', onInt);
+    process.removeListener('SIGTERM', onTerm);
+    process.removeListener('exit', onExit);
+    releaseAll();
   }
 }
 

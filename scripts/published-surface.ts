@@ -196,46 +196,108 @@ export class Install {
 export interface TopHelp {
   /** name → summary line */
   commands: Map<string, string>;
+  /** flat member spellings — `bro act` for the `review` group's `act`.
+   *  The flat spelling dispatches on its own, so it is part of the
+   *  published surface the docs may name. */
+  members: string[];
   docNouns: string[];
   docVerbs: string[];
 }
 
-/** `bro --help` → the Commands: rows plus `doc types:`/`shorthand:`
- *  lines. Indentation-based: rows are `  name   summary`, the block
- *  ends at a blank line. */
+/** Block headers the top-level help uses for its command rows. The
+ *  flat help (≤0.2.5) prints `Commands:`; the grouped help (≥0.3.0)
+ *  prints `Groups:` (the groups) and `Top-level:` (the flat
+ *  commands). The published surface changes with every release, and a
+ *  reader that knows only the current shape sees an empty surface the
+ *  day it changes — so the reader knows every shape. The casing is not
+ *  uniform across the CLI (`bro pipeline` prints a lowercase
+ *  `commands:`), so the match is case-insensitive. */
+const TOP_BLOCK_HEADERS = /^\s*(?:commands|groups|top-level):\s*$/i;
+
+/** The one header whose rows carry a member list under them — the
+ *  groups block. */
+const GROUP_BLOCK_HEADER = /^\s*groups:\s*$/i;
+
+/** Block headers a command's own help uses for its subcommand rows —
+ *  `Commands:` for a plain command, `Members:` for a group. */
+const SUB_BLOCK_HEADERS = /^\s*(commands|members):\s*$/i;
+
+/** The member list of a group row — the flat spellings the group
+ *  dispatches, indented under the group's name. `wtf→retrospect` is
+ *  one member with an alias, so the arrow splits into two names. */
+function memberNames(list: string): string[] {
+  const out: string[] = [];
+  for (const token of list.trim().split(/\s+/)) {
+    for (const part of token.split('→')) {
+      if (/^[a-z][\w-]*$/.test(part)) {
+        out.push(part);
+      }
+    }
+  }
+  return out;
+}
+
+/** One line of a command block — a doc noun line, a doc verb line, a
+ *  command row, or a group's member list. Flat on purpose: the block
+ *  walk stays a walk, not a nest. */
+function readBlockLine(
+  line: string,
+  inGroups: boolean,
+  commands: Map<string, string>,
+  members: string[],
+  docNouns: string[],
+  docVerbs: string[]
+): void {
+  const dt = /^\s*doc types:\s+([^—]+)/.exec(line);
+  if (dt) {
+    docNouns.push(...dt[1]!.trim().split(/\s+/));
+    return;
+  }
+  const sh = /^\s*shorthand:\s+([^—]+)/.exec(line);
+  if (sh) {
+    docVerbs.push(...sh[1]!.trim().split(/\s+/));
+    return;
+  }
+  // the name is padded into a column — a name that fills the column
+  // exactly is followed by a single space, so the separator is one
+  // or more spaces, not two
+  const row = /^\s{2}([a-z][\w-]*)\s+(\S.*)$/.exec(line);
+  if (row) {
+    commands.set(row[1]!, row[2]!);
+    return;
+  }
+  // the group's members, indented past the name column
+  if (inGroups && /^\s{3,}\S/.test(line)) {
+    members.push(...memberNames(line.trim()));
+  }
+}
+
+/** `bro --help` → the command rows plus `doc types:`/`shorthand:`
+ *  lines. Indentation-based: rows are `  name <spaces> summary`, the
+ *  block ends at a blank line. */
 function parseTopLevelHelp(out: string): TopHelp {
   const commands = new Map<string, string>();
+  const members: string[] = [];
   const docNouns: string[] = [];
   const docVerbs: string[] = [];
   let inCmds = false;
+  let inGroups = false;
   for (const line of out.split('\n')) {
-    if (/^\s*Commands:\s*$/.test(line)) {
+    if (TOP_BLOCK_HEADERS.test(line)) {
       inCmds = true;
+      inGroups = GROUP_BLOCK_HEADER.test(line);
       continue;
     }
     if (!inCmds) {
       continue;
     }
-    const dt = /^\s*doc types:\s+([^—]+)/.exec(line);
-    if (dt) {
-      docNouns.push(...dt[1]!.trim().split(/\s+/));
-      continue;
-    }
-    const sh = /^\s*shorthand:\s+([^—]+)/.exec(line);
-    if (sh) {
-      docVerbs.push(...sh[1]!.trim().split(/\s+/));
-      continue;
-    }
-    const row = /^\s{2}([a-z][\w-]*)\s{2,}(\S.*)$/.exec(line);
-    if (row) {
-      commands.set(row[1]!, row[2]!);
-      continue;
-    }
+    readBlockLine(line, inGroups, commands, members, docNouns, docVerbs);
     if (line.trim() === '') {
       inCmds = false;
+      inGroups = false;
     }
   }
-  return { commands, docNouns, docVerbs };
+  return { commands, members, docNouns, docVerbs };
 }
 
 /** `a|b|c` alternation — the signature shape summaries embed
@@ -415,13 +477,13 @@ export class HelpDoc {
     }
   }
 
-  /** The `Commands:` block of a command's own help — each row's first
-   *  token is a confirmed subcommand. Same indentation walk as
-   *  parseTopLevelHelp, at one level down. */
+  /** The `Commands:`/`Members:` block of a command's own help — each
+   *  row's first token is a confirmed subcommand. Same indentation
+   *  walk as parseTopLevelHelp, at one level down. */
   private collectBlock(acc: Subs): void {
     let inCmds = false;
     for (const line of this.out.split('\n')) {
-      if (/^\s*Commands:\s*$/.test(line)) {
+      if (SUB_BLOCK_HEADERS.test(line)) {
         inCmds = true;
         continue;
       }

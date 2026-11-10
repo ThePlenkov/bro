@@ -122,6 +122,22 @@ export function ensureStatus(ctx: RenderCtx): void {
   armAndReport(ctx, pick.id, pick.adopted);
 }
 
+/** The acp lane folds the status strip into the session pane (spec
+ *  bro-l8wqu) — close the recorded or orphan-labeled `bro: status`
+ *  pane and drop the record. */
+export function retireStatus(ctx: RenderCtx): void {
+  const rec = ctx.state.statuses[ctx.path];
+  const stale =
+    rec !== undefined && paneExists(rec.pane_id)
+      ? rec.pane_id
+      : paneList(ctx.ws).find(x => x.label === STATUS_LABEL)?.pane_id;
+  if (stale !== undefined) {
+    herdrTry(['pane', 'close', stale]);
+    log(`retire status pane ${stale} — session pane folds it in (${ctx.ws})`);
+  }
+  delete ctx.state.statuses[ctx.path];
+}
+
 /** Workspaces that lost their arm get their status record dropped —
  *  the workspace itself is the caller's (or the reaper's) problem,
  *  the record is ours: a rec pointing at a closed workspace can never

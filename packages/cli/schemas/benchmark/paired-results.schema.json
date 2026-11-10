@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://bro.project/schemas/benchmark/paired-results.schema.json",
+  "title": "Bro benchmark paired results (JSONL line)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "revision",
+    "runId",
+    "variant",
+    "model",
+    "startedAt",
+    "finishedAt",
+    "timeToGreenMs",
+    "humanInterventions",
+    "controlPlaneCalls",
+    "tokens",
+    "duplicateWorkCount",
+    "abandonedWorkCount",
+    "mergedFindingsWithoutFollowup",
+    "outcome"
+  ],
+  "properties": {
+    "taskId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "variant": { "type": "string", "enum": ["native", "bro"] },
+    "model": { "type": "string", "minLength": 1 },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "timeToGreenMs": { "type": "integer", "minimum": 0 },
+    "humanInterventions": { "type": "integer", "minimum": 0 },
+    "controlPlaneCalls": { "type": "integer", "minimum": 0 },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cacheRead", "cacheWrite"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cacheRead": { "type": "integer", "minimum": 0 },
+        "cacheWrite": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "duplicateWorkCount": { "type": "integer", "minimum": 0 },
+    "abandonedWorkCount": { "type": "integer", "minimum": 0 },
+    "mergedFindingsWithoutFollowup": { "type": "integer", "minimum": 0 },
+    "outcome": { "type": "string", "enum": ["pass", "fail", "partial"] },
+    "notes": { "type": "string" }
+  }
+}

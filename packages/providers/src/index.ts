@@ -17,9 +17,12 @@ export {
   acpPooledTurn,
   acpSessionRetain,
   acpWorkerArgv,
+  promptText,
   isSystemoneFamily,
 } from './acp.ts';
-export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts';
+export type { AcpPeer, AcpRetainedSession, AcpUsage, PooledTurnOpts } from './acp.ts';
+export { AcpDeadLoopError, AcpDeadLoopGuard } from './acp-guard.ts';
+export type { AcpCharge, AcpDeadLoopOptions, AcpGuardCtx } from './acp-guard.ts';
 export { AcpTerminals } from './acp-terminal.ts';
 export type { TerminalFollow, TerminalFollower } from './acp-terminal.ts';
 export { AGENT_USAGE_THROTTLE_MS, agentTurnPlane, toolPayload } from './acp-events.ts';
@@ -42,8 +45,12 @@ export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts';
 export type { AcpWorkerSpec } from './acp-worker.ts';
 export { runAcpSessionView } from './acp-session-view.ts';
 export type { AcpSessionViewResult, AcpSessionViewSpec } from './acp-session-view.ts';
-export { AcpRenderer, safe } from './acp-render.ts';
-export type { PermissionRequestLike, RenderOpts, SessionUpdateLike } from './acp-render.ts';
+export { AcpRenderer, safe } from '@broject/acp-session';
+export type {
+  PermissionRequestLike,
+  RenderOpts,
+  SessionUpdateLike,
+} from '@broject/acp-session';
 export { acpProxy, runAcpProxy } from './acp-proxy.ts';
 export type { AcpProxyOptions, AcpProxySeam } from './acp-proxy.ts';
 export { cliChat, expandPromptFile } from './cli.ts';
