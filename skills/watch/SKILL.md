@@ -87,9 +87,9 @@ resets, queue refills), each inspection is a **bounded read-only tick** —
 usually a subagent handed the brief below — that reports facts and never
 acts. The session chains the ticks; the tick itself only reads.
 
-**Read-only contract.** `bro`/`gh`/`ls`/`tail`/`ps`/`stat`/`find` and
-`systemctl --user is-active|show` only. No kill, start, restart or
-respawn — not even on a rate-limit: the tick says `RATE-LIMIT: park
+**Read-only contract.** `bro`/`gh`/`ls`/`cat`/`tail`/`ps`/`stat`/`find`/
+`date`/`sleep` and `systemctl --user is-active|show` only. No kill,
+start, restart or respawn — not even on a rate-limit: the tick says `RATE-LIMIT: park
 (+reset …at HH:MM UTC)` quoting the reset time from the error text, and
 the _operator_ acts. A spawn that died into a wall is normal
 constatation, not a failure to fix.
@@ -100,21 +100,30 @@ per snapshot (`date -u` vs the `Date:` header of a `gh api` response).
 Merges, PR states and counts come only from gh output. The window's
 boundary is the timeout, not what the tick meant to see.
 
-**PR counting and classification.** Count with `gh pr list --state open
---json number --limit 100 --jq 'length'` — the default limit (30) and
-`gh api pulls` without `per_page` both undercount. Classify by
-`headRefName`: `loop/*` and `fix/bro-*` are ours (the fleet), everything
-else is foreign — report two numbers (fleet merges / total). A fleet
-merge counts only from gh's merged state, corroborated by the loop log's
-merge line — never from a branch disappearing.
+**PR counting and classification.** Count with `gh api
+'search/issues?q=repo:{owner}/{repo}+type:pr+state:open&per_page=1'
+--jq '.total_count'` — one call, exact even past 100 open PRs.
+`gh pr list` silently truncates at `--limit` and `gh api pulls`
+without `per_page` undercounts. Classify from `gh pr list --state open
+--json headRefName --limit 1000`: `work/*`, `loop/*`, `stack/*` and
+`fix/bro-*` are ours (the fleet — `FLEET_BRANCH_PREFIXES` in
+`packages/cli/src/commands/drive.ts`), everything else is foreign —
+report two numbers (fleet merges / total). A fleet merge counts only
+from gh's merged state, corroborated by the loop log's merge line —
+never from a branch disappearing.
 
 **Baselines at tick start.** Record before waiting: the exit-file
 boundary (`find <git-common>/bro/agents -name '*.exit' -newermt '<now>'`),
 the PR count, and the supervisor pids/unit. Worker logs are append-only —
 an old rate line is history; a fresh wall must be dated after the
-worker's spawn. Liveness is the pidfile or unit, never a grep over `ps`:
-`ps -p $(cat <git-common>/bro/loop.pid)`, `systemctl --user is-active
-<loop-unit>`; a climbing `NRestarts` means the auto-restart is working —
+worker's spawn. Liveness is the run record or unit, never a grep over `ps` and never a
+pidfile — the loop writes no `loop.pid`. Each
+`<git-common>/bro/loop/<slug>.json` carries `pid`/`pidStart`, so
+`ps -p <pid>` on the record's pid is the check (`bro review watch`
+renders this same read — a record whose pid is gone is a crashed run's
+residue). The supervisor itself holds `bro/loop.lock` (a lock, not a
+pid). `systemctl --user is-active <loop-unit>` covers a unit-managed
+loop; a climbing `NRestarts` means the auto-restart is working —
 constatation, not an alarm.
 
 **Bounded wait.** Poll 60–90 s (8–10 min across a long reset window)
