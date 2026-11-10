@@ -97,10 +97,13 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
   const git = (args: string[], cwd = process.cwd()): string =>
-    execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — PATH lookup is the contract
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    execFileSync(
+      // NOSONAR must sit on the program-name token's line — Sonar pins
+      // S4036 there; a comment on the options line does not reach it
+      'git', // NOSONAR — PATH lookup is the contract
+      ['-C', cwd, ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    ).trim();
   let root: string;
   try {
     root = git(['rev-parse', '--show-toplevel']);
@@ -124,9 +127,13 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], { // NOSONAR — git PATH lookup is the contract
-        stdio: 'ignore',
-      });
+      execFileSync(
+        // NOSONAR must sit on the program-name token's line — Sonar pins
+        // S4036 there; a comment on the options line does not reach it
+        'git', // NOSONAR — git PATH lookup is the contract
+        ['-C', process.cwd(), 'check-ignore', '-q', '--', name],
+        { stdio: 'ignore' }
+      );
       return true;
     } catch {
       return false;
@@ -171,10 +178,13 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], { // NOSONAR — git PATH lookup is the contract
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const tracked = execFileSync(
+      // NOSONAR must sit on the program-name token's line — Sonar pins
+      // S4036 there; a comment on the options line does not reach it
+      'git', // NOSONAR — git PATH lookup is the contract
+      ['-C', root, 'ls-files', '--', 'bro.config.local.*'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
     if (tracked !== '') {
       console.error(
         'warning: bro.config.local.* has tracked files — .git/info/exclude ' +
@@ -433,53 +443,53 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
       'npx', // NOSONAR — argv array, no shell; PATH lookup is the contract (same as gh)
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
       { cwd: dir, stdio: 'pipe' }
-    )
+    );
   } catch {
     // one unreachable upstream does not stop the rest
-    console.error(`  ${skill.name}: could not fetch from ${skill.source}`)
+    console.error(`  ${skill.name}: could not fetch from ${skill.source}`);
   }
 }
 
 function installLockedSkills(dir: string, locked: Map<string, LockedSkill>): void {
   if (!hasBin('npx')) {
-    console.error('  npx not on PATH — skipping the locked skills')
-    return
+    console.error('  npx not on PATH — skipping the locked skills');
+    return;
   }
   for (const skill of locked.values()) {
-    installOneLockedSkill(dir, skill)
+    installOneLockedSkill(dir, skill);
   }
 }
 
 function reportSkillDrift(locked: Map<string, LockedSkill>, drift: SkillDrift[]): void {
   if (drift.length === 0) {
-    console.error(`  ${locked.size} locked skill(s) match the lock`)
-    return
+    console.error(`  ${locked.size} locked skill(s) match the lock`);
+    return;
   }
   for (const d of drift) {
     console.error(
       `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
-    )
+    );
   }
 }
 
 function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): void {
-  const locked = readSkillLock(dir)
+  const locked = readSkillLock(dir);
   if (locked.size === 0) {
-    console.error('  no skills-lock.json — nothing locked')
-    return
+    console.error('  no skills-lock.json — nothing locked');
+    return;
   }
-  const skillsDir = join(dir, '.agents', 'skills')
+  const skillsDir = join(dir, '.agents', 'skills');
 
   if (!checkOnly && !dryRun) {
-    installLockedSkills(dir, locked)
+    installLockedSkills(dir, locked);
   }
 
   // Compare against the original committed lock snapshot, not a re-read:
   // `npx skills add` rewrites the lockfile with the freshly fetched hash,
   // so re-reading it would make that new hash the expected value and
   // silently advance the lock instead of reporting drift.
-  const drift = checkSkillLock(locked, { skillsDir })
-  reportSkillDrift(locked, drift)
+  const drift = checkSkillLock(locked, { skillsDir });
+  reportSkillDrift(locked, drift);
 }
 
 function installGitHooks(): void {
@@ -511,34 +521,34 @@ function installGitHooks(): void {
 }
 
 interface SetupMutations {
-  beads: boolean
-  skills: boolean
-  pack: string | false
-  personality: string | undefined
-  packDir: string | null
-  wantsBeads: boolean
+  beads: boolean;
+  skills: boolean;
+  pack: string | false;
+  personality: string | undefined;
+  packDir: string | null;
+  wantsBeads: boolean;
 }
 
 function runSetupMutations(m: SetupMutations): void {
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.
   if (m.wantsBeads) {
-    setupBeads()
+    setupBeads();
   }
 
-  console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`)
+  console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`);
 
   if (m.skills) {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
-      console.error('  skills already installed and current')
+      console.error('  skills already installed and current');
     }
   }
 
   if (m.packDir !== null) {
-    setupPack(m.packDir, m.pack || loadBroConfig().pack || DEFAULT_PACK, m.wantsBeads)
+    setupPack(m.packDir, m.pack || loadBroConfig().pack || DEFAULT_PACK, m.wantsBeads);
   }
 
-  installGitHooks()
+  installGitHooks();
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
@@ -546,9 +556,9 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     printUsage(
       'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>] [--lock] [--dry-run] [--check]',
       0
-    )
+    );
   }
-  const { beads, skills, pack, personality, lock, dryRun, checkOnly } = parseSetupArgs(argv)
+  const { beads, skills, pack, personality, lock, dryRun, checkOnly } = parseSetupArgs(argv);
   // A malformed config file must fail BEFORE any mutation (bd init,
   // file installs) — readExistingConfig exits on a parse error; loadConfig
   // alone would silently fall back to defaults and setup would init beads
@@ -556,28 +566,29 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   // …but a .ts shadows the .json in the same layer — validating the
   // inert file would fail setup on a config that isn't even effective.
   if (!existsSync(join(process.cwd(), 'bro.config.ts'))) {
-    readExistingConfig(join(process.cwd(), 'bro.config.json'))
+    readExistingConfig(join(process.cwd(), 'bro.config.json'));
   }
   if (!existsSync(join(process.cwd(), 'bro.config.local.ts'))) {
-    readExistingConfig(join(process.cwd(), 'bro.config.local.json'))
+    readExistingConfig(join(process.cwd(), 'bro.config.local.json'));
   }
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
-  const wantsBeads = beads || loadBroConfig().stores.includes('beads')
+  const wantsBeads = beads || loadBroConfig().stores.includes('beads');
   // Validate the pack BEFORE beads init/config/skills mutate anything —
   // a bad spec must fail setup on a clean tree, not a half-written one.
-  const packDir = pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK)
-  checkPrereqs(wantsBeads)
+  const packDir =
+    pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK);
+  checkPrereqs(wantsBeads);
 
   // In --check / --dry-run mode we verify without mutating: no beads
   // init, no config write, no skill/pack installs, no hook installs.
   // Only the locked-skill drift check (setupLockedSkills) runs.
   if (!checkOnly && !dryRun) {
-    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads })
+    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads });
   }
 
   if (lock) {
-    setupLockedSkills(process.cwd(), dryRun, checkOnly)
+    setupLockedSkills(process.cwd(), dryRun, checkOnly);
   }
 
   console.error(

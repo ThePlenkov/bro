@@ -44,6 +44,11 @@
             ]
           }
         },
+        "selfCheck": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
         "maxRounds": {
           "type": "integer",
           "minimum": 0
@@ -1614,6 +1619,22 @@
         },
         "fastLane": {
           "type": "boolean"
+        },
+        "idleReleaseMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acpMaxOpens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpMaxAbandoned": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acpStallMs": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -1641,6 +1662,19 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "spawn": {
+      "type": "object",
+      "properties": {
+        "externalBlock": {
+          "type": "boolean"
+        },
+        "externalIdleSec": {
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       },
       "additionalProperties": false

@@ -53,6 +53,8 @@ import {
   taskStoreAt,
   type AgentInfo,
   type ProviderEntry,
+  CommandError,
+  EXIT,
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
@@ -76,8 +78,7 @@ function usage(exitCode: ExitCode = 2): never {
 }
 
 function die(msg: string): never {
-  console.error(`error: ${msg}`);
-  process.exit(1);
+  throw new CommandError(`error: ${msg}`, EXIT.error);
 }
 
 /** `<git-common>/bro/dogfood/` — run ledger root. */

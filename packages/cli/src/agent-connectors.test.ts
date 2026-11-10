@@ -9,6 +9,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -23,6 +24,7 @@ import {
   agentExitFileName,
   agentRegistryPath,
   bdActor,
+  clearExternalPlanes,
   type ConnectorCtx,
   countSessionReservations,
   DEFAULT_CONFIG,
@@ -33,6 +35,7 @@ import {
   projectId,
   readLedgerWalls,
   recordWall,
+  registerExternalPlane,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -77,6 +80,11 @@ import {
   unregisterAgentConnector,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
+
+// the guard reads REAL host state — clear the registered external planes
+// so spawn-mechanics tests stay deterministic on any machine; the
+// exclusion block registers its own stubs
+clearExternalPlanes();
 import { VERSION } from './version.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -356,7 +364,7 @@ function fixture(
     beadsDir,
     binDir,
     db,
-    env: { agents, connectors: {} },
+    env: { agents, connectors: {}, spawn: { externalBlock: false, externalIdleSec: 480 } },
     prevPath,
     prevTmuxFakeHome,
     prevDockerFakeHome,
@@ -2400,6 +2408,65 @@ describe('budgetSnapshot', () => {
     }
   });
 
+  test('an instant rate death escalates the recorded hold — streak rides the registry (bro-9eeld)', () => {
+    const { root, main } = initRepo('bro-ratedeath-');
+    try {
+      const home = agentsHomeOf(main);
+      mkdirSync(home, { recursive: true });
+      const spawnedAt = '2026-10-27T18:05:33Z';
+      // the .exit mtime is the honest death stamp — 11s after spawn,
+      // inside the instant-death window
+      const died = new Date(Date.parse(spawnedAt) + 11_000);
+      const dead = (id: string, at: Date, runId?: string): AgentRegistryEntry => {
+        const f = join(home, agentExitFileName(id, runId));
+        writeFileSync(f, '1');
+        utimesSync(f, at, at);
+        const log = join(home, `${id}${runId === undefined ? '' : `.${runId}`}.log`);
+        // a RELATIVE reset — the classified deadline anchors to the
+        // .exit mtime, never to whenever the walk read the tail; an
+        // absolute ISO mark could not tell the two clocks apart
+        // a generic wall — 'Reached free model rate limit' would add the
+        // Devin grace beat and blur the streak arithmetic under test
+        writeFileSync(log, 'boom\nrate limit — try again in 10 minutes\n');
+        return { agentId: id, backend: 'native', spawnedAt, log, runId };
+      };
+      // a fresh step, and a step whose first instant death is already
+      // harvested before its respawn dies the same way
+      patchAgentRegistry(main, 'step-first', dead('native-a1', died));
+      patchAgentRegistry(main, 'step-second', dead('native-a2', died, 'r1'));
+      assert.equal(budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW).blocked, 2);
+      assert.equal(readAgentRegistry(main)['step-second']!.rateStreak, 1);
+      // the respawn re-stamps spawnedAt + runId and clears the death
+      // fields — the streak survives the registry merge as step history
+      const spawned2 = '2026-10-27T19:05:33Z';
+      const died2 = new Date(Date.parse(spawned2) + 11_000);
+      patchAgentRegistry(main, 'step-second', {
+        ...dead('native-a2', died2, 'r2'),
+        spawnedAt: spawned2,
+        exitStatus: undefined,
+        cause: undefined,
+        resetAt: undefined,
+      });
+      const snap = budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW);
+      assert.equal(snap.blocked, 2);
+      const first = readAgentRegistry(main)['step-first']!;
+      const second = readAgentRegistry(main)['step-second']!;
+      // the recorded hold is the exit-anchored reported mark PLUS the
+      // streak-scaled wait — 30s on the first instant death, 60s on the
+      // consecutive one; a read-time-anchored classifier lands nowhere
+      // near these values
+      const reported1 = died.getTime() + 10 * 60_000 + 90_000;
+      const reported2 = died2.getTime() + 10 * 60_000 + 90_000;
+      assert.equal(first.cause, 'rate_limited');
+      assert.equal(first.resetAt, new Date(reported1 + 30_000).toISOString());
+      assert.equal(first.rateStreak, 1);
+      assert.equal(second.resetAt, new Date(reported2 + 60_000).toISOString());
+      assert.equal(second.rateStreak, 2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('an unharvested death on an unknown backend frees the slot and classifies', () => {
     const { root, main } = initRepo('bro-budget-');
     try {
@@ -3946,6 +4013,122 @@ describe('fleet chain walk spawn integration', () => {
       if (info !== undefined) {
         await conn(f).stop(info.id);
       }
+      cleanup(f);
+    }
+  });
+});
+
+describe('external-agent exclusion (spec bro-eqi2d)', () => {
+  const ACTIVE: { kind: string; externalActivity: () => { active: boolean; detail: string } } = {
+    kind: 'stub',
+    externalActivity: () => ({ active: true, detail: "interactive session 'foreign-1'" }),
+  };
+  const nativeConn = (f: Fixture, env?: Partial<AgentConnectorEnv>) =>
+    makeNativeConnector({ dir: f.main }, { ...f.env, ...env });
+
+  /** Scripted devin state dirs pinning the quota lane to one live
+   *  session: a lock on process.pid whose scripted /proc reads argv0
+   *  devin and a BRO_AGENT_ID environ (live for the quota, owned for
+   *  the exclusion — the two planes judge the same pid differently). */
+  const devinDirs = (root: string): Record<string, unknown> => {
+    const lockDir = join(root, 'dv-locks');
+    const procDir = join(root, 'dv-proc');
+    const transcriptsDir = join(root, 'dv-trans');
+    const logsDir = join(root, 'dv-logs');
+    for (const d of [lockDir, procDir, transcriptsDir, logsDir]) {
+      mkdirSync(d, { recursive: true });
+    }
+    mkdirSync(join(procDir, String(process.pid), 'fd'), { recursive: true });
+    writeFileSync(join(procDir, String(process.pid), 'cmdline'), 'devin\0acp\0');
+    writeFileSync(join(procDir, String(process.pid), 'environ'), 'BRO_AGENT_ID=n-x\0');
+    writeFileSync(join(lockDir, 'w.lock'), String(process.pid));
+    return { lockDir, procDir, transcriptsDir, logsDir, sessionKind: undefined, maxSessions: 1 };
+  };
+
+  test('external active + quota ok → refused, reason names the external agent', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      await assert.rejects(
+        nativeConn(f, { spawn: { externalBlock: true, externalIdleSec: 480 } }).spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'true')
+        ),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /external agent active — stub: interactive session 'foreign-1'/.test(e.message) &&
+          /spawn of fx-1 refused/.test(e.message)
+      );
+      // no claim, no registry row — a refused spawn leaves no half-state
+      assert.equal(f.dbRows()[0]!.status, 'open');
+      assert.equal(readAgentRegistry(f.main)['fx-1'], undefined);
+    } finally {
+      clearExternalPlanes();
+      cleanup(f);
+    }
+  });
+
+  test('external active + quota full → the external refusal still wins the report', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      // the quota lane armed against a live scripted devin session — an
+      // independent refusal that must not mask the external one
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
+        agents: { ...f.env.agents, devin: { ...devinDirs(f.root), maxSessions: 1 } },
+      };
+      env.agents['native'] = { ...env.agents['native'], sessionKind: 'devin' };
+      await assert.rejects(
+        nativeConn(f, env).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        (e: unknown) => e instanceof SpawnError && /external agent active/.test(e.message)
+      );
+    } finally {
+      clearExternalPlanes();
+      cleanup(f);
+    }
+  });
+
+  test('external idle + quota full → the quota lane refuses on its own', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    try {
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
+        agents: {
+          ...f.env.agents,
+          devin: { ...devinDirs(f.root), maxSessions: 1 },
+        },
+      };
+      env.agents['native'] = { ...env.agents['native'], sessionKind: 'devin' };
+      await assert.rejects(
+        nativeConn(f, env).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /devin session quota reached/.test(e.message)
+      );
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('externalBlock:false admits past an active external report', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }]);
+    clearExternalPlanes();
+    registerExternalPlane(ACTIVE);
+    try {
+      const info = await nativeConn(f, {
+        spawn: { externalBlock: false, externalIdleSec: 480 },
+      }).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      assert.ok(pidAlive(info.pid!));
+      await nativeConn(f).stop(info.id);
+    } finally {
+      clearExternalPlanes();
       cleanup(f);
     }
   });

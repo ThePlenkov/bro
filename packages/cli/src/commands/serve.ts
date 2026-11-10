@@ -1592,27 +1592,32 @@ function followTerminalOutput(res: ServerResponse, reg: TerminalRegistry, id: st
     waitingDrain = false;
     pump();
   };
+  const writeNextFrame = (): boolean => {
+    if (queue.length === 0 || gone()) {
+      return false;
+    }
+    // write() never refuses the frame — `false` is advisory ("over
+    // high-water"), so the head is off the queue either way; on false
+    // we just stop feeding it more until 'drain'
+    const item = queue.shift()!;
+    const len = Buffer.byteLength(item.frame);
+    queued -= len;
+    liveQueued -= item.live ? len : 0;
+    if (res.write(item.frame)) {
+      return true;
+    }
+    if (!waitingDrain) {
+      waitingDrain = true;
+      res.once('drain', onDrain);
+    }
+    return false;
+  };
   const pump = (): void => {
     if (waitingDrain) {
       return;
     }
-    while (queue.length > 0 && !gone()) {
-      // write() never refuses the frame — `false` is advisory ("over
-      // high-water"), so the head is off the queue either way; on false
-      // we just stop feeding it more until 'drain'
-      const item = queue.shift()!;
-      const len = Buffer.byteLength(item.frame);
-      queued -= len;
-      liveQueued -= item.live ? len : 0;
-      if (res.write(item.frame)) {
-        continue;
-      }
-      if (waitingDrain) {
-        return;
-      }
-      waitingDrain = true;
-      res.once('drain', onDrain);
-      return;
+    while (writeNextFrame()) {
+      // continue
     }
     if (queue.length === 0 && endAfterQueue && !gone()) {
       res.end();
@@ -1647,9 +1652,26 @@ function followTerminalOutput(res: ServerResponse, reg: TerminalRegistry, id: st
       res.end();
     }
   };
+  const isHighSurrogate = (c: number): boolean => c >= 0xd800 && c <= 0xdbff;
+  const isLowSurrogate = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
+  const adjustForSurrogatePair = (chunk: string, i: number, end: number): number => {
+    if (end <= i || end >= chunk.length) {
+      return end;
+    }
+    const c1 = chunk.charCodeAt(end - 1);
+    const c2 = chunk.charCodeAt(end);
+    if (!isHighSurrogate(c1) || !isLowSurrogate(c2)) {
+      return end;
+    }
+    return end - 1 > i ? end - 1 : Math.min(end + 1, chunk.length);
+  };
   const sse = (chunk: string): void => {
-    for (let i = 0; i < chunk.length; i += SSE_SNAPSHOT_SLICE) {
-      enqueue(`data: ${JSON.stringify(chunk.slice(i, i + SSE_SNAPSHOT_SLICE))}\n\n`);
+    for (let i = 0; i < chunk.length; ) {
+      const end = adjustForSurrogatePair(chunk, i, Math.min(i + SSE_SNAPSHOT_SLICE, chunk.length));
+      enqueue(
+        `data: ${JSON.stringify(chunk.slice(i, end === i ? Math.min(i + 1, chunk.length) : end))}\n\n`
+      );
+      i = end === i ? Math.min(i + 1, chunk.length) : end;
     }
   };
   // headers before follow() — a registry that fires `exit` at subscribe
@@ -2501,7 +2523,9 @@ function logServePlanes(planes: {
   const { conductorCfg, providerCfg } = planes;
   if (conductorCfg !== undefined) {
     const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
-    console.log(`provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`);
+    console.log(
+      `provider: /v1/* → acp conductor (${conductorLanes(conductorCfg).join(', ')})${fast}`
+    );
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }

@@ -60,6 +60,8 @@ function prMeta(t: PrTarget): PrMeta {
           url: string;
           isDraft: boolean;
           reviewDecision?: string | null;
+          mergedBy?: { login?: string | null } | null;
+          mergeCommit?: { oid?: string | null } | null;
         };
       };
     };
@@ -68,7 +70,7 @@ function prMeta(t: PrTarget): PrMeta {
     'api',
     'graphql',
     '-f',
-    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision}}}`,
+    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision mergedBy{login} mergeCommit{oid}}}}`,
     '-f',
     `o=${owner}`,
     '-f',
@@ -89,6 +91,8 @@ function prMeta(t: PrTarget): PrMeta {
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
     reviewDecision: pr.reviewDecision ?? undefined,
+    mergedBy: pr.mergedBy?.login ?? undefined,
+    mergeSha: pr.mergeCommit?.oid ?? undefined,
   };
 }
 
@@ -794,6 +798,8 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
             url: string;
             isDraft: boolean;
             reviewDecision?: string | null;
+            mergedBy?: { login?: string | null } | null;
+            mergeCommit?: { oid?: string | null } | null;
           };
         };
       };
@@ -802,7 +808,7 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
       'api',
       'graphql',
       '-f',
-      `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision}}}`,
+      `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision mergedBy{login} mergeCommit{oid}}}}`,
       '-f',
       `o=${owner}`,
       '-f',
@@ -824,6 +830,8 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
     reviewDecision: pr.reviewDecision ?? undefined,
+    mergedBy: pr.mergedBy?.login ?? undefined,
+    mergeSha: pr.mergeCommit?.oid ?? undefined,
   };
 }
 

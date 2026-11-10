@@ -4,7 +4,8 @@
     "autoMerge": true
   },
   "act": {
-    "ignoreChecks": ["kilo", "github-advanced-security"],
+    "selfCheck": "act-gate",
+    "ignoreChecks": ["kilo", "github-advanced-security", "sonarcloud", "codescene"],
     "docsPaths": ["*.md", "*.mdx", "*.rst", "docs/", "specs/", "site/content/"]
   },
   "debt": {
@@ -103,7 +104,9 @@
     },
     "devin": {
       "maxSessions": 6,
-      "maxWorkers": 4
+      "maxWorkers": 4,
+      "type": "cli",
+      "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     }
   },
   "fleet": {

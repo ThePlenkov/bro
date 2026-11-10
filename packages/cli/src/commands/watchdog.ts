@@ -499,9 +499,7 @@ function readWorktrees(wd: ProbeDir): WatchdogWorktrees | Unavailable {
 
 /** daemon.log's age and ETIMEDOUT baseline — read apart from the record
  *  so each side stays under the complexity ceiling. */
-function readLogFacts(
-  lf: LogFileProbe
-): { logAgeSec: number | null; etimedout: number | null } {
+function readLogFacts(lf: LogFileProbe): { logAgeSec: number | null; etimedout: number | null } {
   if (lf.path === null || !lf.exists) {
     return { logAgeSec: null, etimedout: null };
   }
@@ -624,8 +622,7 @@ export function collectBaselines(probe: BaselineProbe): WatchdogBaselines {
 
 const gib = (g: { bytes: number }): string => `${(g.bytes / 1024 ** 3).toFixed(1)}G`;
 
-const secs = (s: { n: number }): string =>
-  s.n >= 90 ? `${Math.round(s.n / 60)}m` : `${s.n}s`;
+const secs = (s: { n: number }): string => (s.n >= 90 ? `${Math.round(s.n / 60)}m` : `${s.n}s`);
 
 const un = (v: Unavailable): string => `unavailable (${v.unavailable})`;
 
@@ -649,7 +646,8 @@ const formatDaemon = (v: WatchdogDaemon | Unavailable): string => {
   if (isUnavailable(v)) {
     return un(v);
   }
-  const head = v.pid === null ? 'no record' : `pid ${v.pid} ${describeLiveness({ alive: v.alive })}`;
+  const head =
+    v.pid === null ? 'no record' : `pid ${v.pid} ${describeLiveness({ alive: v.alive })}`;
   const facts = [
     v.logAgeSec === null ? 'log n/a' : `log age ${secs({ n: v.logAgeSec })}`,
     v.etimedout === null ? '' : `ETIMEDOUT ${v.etimedout}`,
@@ -716,8 +714,7 @@ const formatResidue = (residue: number | Unavailable): string | null => {
 /** The brief — also the prompt `/bro` feeds back into the session, so the
  *  launch steps are imperative and the facts are labelled as measurements. */
 export function renderWatchdogBrief(b: WatchdogBaselines): string {
-  const row = (r: { label: string; value: string }): string =>
-    `  ${r.label.padEnd(10)} ${r.value}`;
+  const row = (r: { label: string; value: string }): string => `  ${r.label.padEnd(10)} ${r.value}`;
   const residue = formatResidue(b.residue);
 
   return [
