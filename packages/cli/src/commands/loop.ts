@@ -3675,6 +3675,9 @@ function sayLoopAudit(
   for (const g of reap?.repaired ?? []) {
     say(ctx, `  re-registered: ${g}`);
   }
+  for (const k of reap?.killed ?? []) {
+    say(ctx, `  killed: ${k}`);
+  }
   for (const r of reap?.reaped ?? []) {
     say(ctx, `  reaped: ${r}`);
   }
