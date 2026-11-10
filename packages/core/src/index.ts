@@ -174,6 +174,17 @@ export type {
 export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
 export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
 export {
+  DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
+  laneBudgetAdmit,
+  laneBudgetCheck,
+  laneBudgetDir,
+  laneBudgetKey,
+  laneBudgetLevel,
+  laneBudgetPause,
+  laneBudgetResume,
+} from './lane-budget.ts';
+export type { LaneBudgetLevel, LaneBudgetOpts, LaneWorkBudget } from './lane-budget.ts';
+export {
   BrouterConfigError,
   brouterStaticCatalog,
   isQualifiedRouteId,

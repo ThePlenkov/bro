@@ -1,10 +1,12 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   agentRegistryPath,
+  laneBudgetAdmit,
+  laneBudgetKey,
   laneGateTake,
   procStat,
   scrubEnv,
@@ -377,5 +379,97 @@ describe('the lane status', () => {
     inside(main, root, () => {
       assert.deepEqual(laneStatus(main, env()), []);
     });
+  });
+});
+
+describe('the work budget pause (bro-tdndq)', () => {
+  /** Spend the kind's ledger directly — the reconcile only reads it. */
+  const spend = (kind: string, now: number, workerMin: number): void => {
+    laneBudgetAdmit(kind, laneBudgetKey('seed', 'x-1'), { minutes: 1, windowMinutes: 240 }, {
+      now: now - workerMin * 60_000,
+      scope: 'seed',
+    });
+    // the admit opened a segment — it accrues open until the caller's
+    // registry says the worker is dead; foreign scope keeps it alive
+  };
+
+  test('a spent budget freezes its kind’s live workers; the window’s decay thaws them', () => {
+    const { root, main } = initRepo('bro-lane-');
+    inside(main, root, () =>
+      withXdg(() => {
+        const s = sleeper();
+        try {
+          // 120 worker-minutes against a 30-minute budget — spent
+          spend('devin', Date.now(), 120);
+          writeRegistry(main, {
+            'fx-live': { ...liveEntry(s.pid, s.pidStart), sessionKind: 'devin' },
+          });
+          const budgetedEnv = (): AgentConnectorEnv => ({
+            agents: { devin: { workBudgetMinutes: 30, workBudgetWindowMinutes: 240 } },
+            connectors: {},
+            providers: { devin: { type: 'cli', command: 'x' } },
+          });
+          const r = reconcileLanePause(main, budgetedEnv());
+          assert.equal(r.paused, 1);
+          waitState(s.pid, 'T');
+          // the freeze is budget-tagged — a wall-free lane holds it
+          const pause = JSON.parse(
+            readFileSync(join(agentRegistryPath(main)!, '..', 'lane-pause.json'), 'utf8')
+          );
+          assert.equal(pause.paused[String(s.pid)].budgetKind, 'devin');
+          // decay the ledger: the seed segment's capped end slides out
+          // (240m window ⇒ gone at start+480m — instead drop the file)
+          rmSync(join(process.env.XDG_STATE_HOME!, 'bro', 'lane-budget'), {
+            recursive: true,
+            force: true,
+          });
+          const r2 = reconcileLanePause(main, budgetedEnv());
+          assert.equal(r2.thawed, 1);
+          waitState(s.pid, st => st !== 'T');
+        } finally {
+          s.kill();
+        }
+      })
+    );
+  });
+
+  test('a worker of an unbudgeted kind is left alone', () => {
+    const { root, main } = initRepo('bro-lane-');
+    inside(main, root, () =>
+      withXdg(() => {
+        const s = sleeper();
+        try {
+          spend('devin', Date.now(), 120);
+          writeRegistry(main, {
+            // the worker's kind is NOT the budgeted one
+            'fx-live': { ...liveEntry(s.pid, s.pidStart), sessionKind: 'opencode' },
+          });
+          const r = reconcileLanePause(main, {
+            agents: { devin: { workBudgetMinutes: 30 } },
+            connectors: {},
+          });
+          assert.equal(r.paused, 0);
+          assert.notEqual(procState(s.pid), 'T');
+        } finally {
+          s.kill();
+        }
+      })
+    );
+  });
+
+  test('the budget level renders on the kind’s status row', () => {
+    const { root, main } = initRepo('bro-lane-');
+    inside(main, root, () =>
+      withXdg(() => {
+        spend('devin', Date.now(), 40);
+        const rows = laneStatus(main, {
+          agents: { devin: { workBudgetMinutes: 30, workBudgetWindowMinutes: 240 } },
+          connectors: {},
+        });
+        const devin = rows.find(r => r.provider === 'devin');
+        assert.ok(devin?.budget !== undefined);
+        assert.equal(devin.budget[0]!.spentMin, 40);
+      })
+    );
   });
 });

@@ -29,20 +29,29 @@ import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   agentRegistryPath,
+  DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
   deriveProviderWalls,
   groupMemberAlive,
   isBatchSpawn,
+  laneBudgetCheck,
+  laneBudgetKey,
+  laneBudgetLevel,
+  laneBudgetPause,
+  laneBudgetResume,
   laneGateDir,
   laneGateLevel,
   laneGateTake,
   pidAlive,
   procStat,
+  projectId,
   readAgentRegistry,
   SpawnError,
   wallText,
   withFileLock,
   type AgentRegistryEntry,
+  type LaneBudgetLevel,
   type LaneRateGate,
+  type LaneWorkBudget,
   type ProviderEntry,
   type ProviderWall,
   type SpawnSpec,
@@ -135,6 +144,11 @@ export interface PauseRecord {
   agentId: string;
   pidStart?: string;
   pausedAt: string;
+  /** The session kind whose work budget this worker draws on (spec
+   *  bro-tdndq) — recorded whenever the kind arms a budget, so a thaw
+   *  knows to reopen its running-time segment AND so a spent budget
+   *  holds the freeze on its own. */
+  budgetKind?: string;
 }
 
 export interface PauseFile {
@@ -218,9 +232,10 @@ function entryStillOurs(rec: PauseRecord, registry: Record<string, AgentRegistry
   return cur.stopped !== true;
 }
 
-/** The one decision per freeze candidate — the wall covers this
- *  entry's provider, the entry is ours to stop, and the group is
- *  live. Returns the group pid to signal. `native` only: its `sh -c`
+/** The one decision per freeze candidate — a wall covers this entry's
+ *  provider OR a spent work budget covers its session kind (spec
+ *  bro-tdndq), the entry is ours to stop, and the group is live.
+ *  Returns the group pid to signal. `native` only: its `sh -c`
  *  wrapper is a detached process-group leader bro itself spawned —
  *  pid+pidStart identity pins it. Any other backend's `pid` may name
  *  a container shim or a REMOTE process — SIGSTOP on the host would
@@ -228,12 +243,16 @@ function entryStillOurs(rec: PauseRecord, registry: Record<string, AgentRegistry
 function freezablePid(
   entry: AgentRegistryEntry,
   walled: ReadonlyMap<string, ProviderWall>,
-  env: AgentConnectorEnv
+  env: AgentConnectorEnv,
+  budgeted?: ReadonlySet<string>
 ): number | undefined {
   if (entry.backend !== 'native' || entry.provider === undefined) {
     return undefined;
   }
-  if (!walled.has(entry.provider) || entry.stopped === true) {
+  const covered =
+    walled.has(entry.provider) ||
+    (entry.sessionKind !== undefined && budgeted !== undefined && budgeted.has(entry.sessionKind));
+  if (!covered || entry.stopped === true) {
     return undefined;
   }
   if (!pauseWanted(env, entry.provider) || typeof entry.pid !== 'number') {
@@ -251,14 +270,25 @@ function freezablePid(
  *  stopped — the caller's rollback list when the publish fails. */
 function freezeLane(
   registry: Record<string, AgentRegistryEntry>,
-  lane: { walled: ReadonlyMap<string, ProviderWall>; env: AgentConnectorEnv },
+  lane: {
+    walled: ReadonlyMap<string, ProviderWall>;
+    env: AgentConnectorEnv;
+    /** session kinds whose work budget is spent — the second freeze
+     *  trigger (spec bro-tdndq). */
+    budgeted: ReadonlySet<string>;
+    /** every kind with an armed budget — the record's budgetKind rides
+     *  for thaw bookkeeping whatever the freeze reason. */
+    armed: ReadonlySet<string>;
+    /** the repo scope the ledger keys this rig's workers under. */
+    scope: string;
+  },
   file: PauseFile,
   now: number
 ): Array<{ pid: number; pidStart?: string }> {
-  const { walled, env } = lane;
+  const { walled, env, budgeted, armed, scope } = lane;
   const stopped: Array<{ pid: number; pidStart?: string }> = [];
   for (const [molStep, entry] of Object.entries(registry)) {
-    const pid = freezablePid(entry, walled, env);
+    const pid = freezablePid(entry, walled, env, budgeted);
     if (pid === undefined || file.paused[String(pid)] !== undefined) {
       continue;
     }
@@ -267,13 +297,28 @@ function freezeLane(
       // else a live read — the record's pidStart is what keeps a
       // recycled pgid out of every later signal decision
       const pidStart = entryStart(entry) ?? procStat(pid)?.start;
+      const budgetKind =
+        entry.sessionKind !== undefined && armed.has(entry.sessionKind)
+          ? entry.sessionKind
+          : undefined;
       file.paused[String(pid)] = {
         provider: entry.provider as string,
         molStep,
         agentId: entry.agentId,
         pidStart,
         pausedAt: new Date(now).toISOString(),
+        ...(budgetKind === undefined ? {} : { budgetKind }),
       };
+      // a frozen worker stops spending the account — close its
+      // running-time segment or the spend it was frozen for would
+      // never decay and the lane could never thaw (spec bro-tdndq)
+      if (budgetKind !== undefined) {
+        try {
+          laneBudgetPause(budgetKind, laneBudgetKey(scope, entry.agentId), { now });
+        } catch {
+          // ledger hiccups must not cost the freeze
+        }
+      }
       stopped.push({ pid, pidStart });
     }
   }
@@ -299,7 +344,8 @@ function thawLane(
   paused: Record<string, PauseRecord>,
   walled: ReadonlyMap<string, ProviderWall>,
   env: AgentConnectorEnv,
-  registry: Record<string, AgentRegistryEntry>
+  registry: Record<string, AgentRegistryEntry>,
+  budget: { budgeted: ReadonlySet<string>; scope: string; now: number }
 ): { next: Record<string, PauseRecord>; thawed: number } {
   const next: Record<string, PauseRecord> = {};
   let thawed = 0;
@@ -308,16 +354,76 @@ function thawLane(
     if (!groupStillLive(pid, rec.pidStart)) {
       continue;
     }
-    const covered = walled.has(rec.provider) && pauseWanted(env, rec.provider);
+    // the freeze holds while EITHER gate covers it — a walled provider
+    // or a work budget still spent (spec bro-tdndq)
+    const covered =
+      (walled.has(rec.provider) && pauseWanted(env, rec.provider)) ||
+      (rec.budgetKind !== undefined && budget.budgeted.has(rec.budgetKind));
     if (covered && entryStillOurs(rec, registry)) {
       next[pidStr] = rec;
       continue;
     }
     if (sig(pid, 'SIGCONT')) {
       thawed++;
+      // running again — reopen the segment the freeze closed
+      if (rec.budgetKind !== undefined) {
+        try {
+          laneBudgetResume(rec.budgetKind, laneBudgetKey(budget.scope, rec.agentId), {
+            now: budget.now,
+          });
+        } catch {
+          // ledger hiccups must not cost the thaw
+        }
+      }
     }
   }
   return { next, thawed };
+}
+
+/** Every session kind with an armed work budget, from the env's
+ *  agents bag — `agents.<kind>.workBudgetMinutes` plus the optional
+ *  `workBudgetWindowMinutes` modifier (spec bro-tdndq). */
+function armedBudgets(env: AgentConnectorEnv): Map<string, LaneWorkBudget> {
+  const out = new Map<string, LaneWorkBudget>();
+  for (const [kind, bag] of Object.entries(env.agents ?? {})) {
+    if (bag === null || typeof bag !== 'object') {
+      continue;
+    }
+    const minutes = (bag as Record<string, unknown>).workBudgetMinutes;
+    if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0) {
+      continue;
+    }
+    const window = (bag as Record<string, unknown>).workBudgetWindowMinutes;
+    out.set(kind, {
+      minutes,
+      windowMinutes:
+        typeof window === 'number' && Number.isFinite(window) && window > 0
+          ? window
+          : DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
+    });
+  }
+  return out;
+}
+
+/** sessionKind → live agentIds — the registry's cheap liveness verdict
+ *  the ledger prunes against (spec bro-tdndq). Same rule as the spawn
+ *  path's liveSessionKeysByKind: stopped or exit-harvested is dead. */
+function liveKeysByKind(
+  registry: Record<string, AgentRegistryEntry>
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const e of Object.values(registry)) {
+    if (typeof e.sessionKind !== 'string' || e.stopped === true || e.exitStatus !== undefined) {
+      continue;
+    }
+    let set = out.get(e.sessionKind);
+    if (set === undefined) {
+      set = new Set<string>();
+      out.set(e.sessionKind, set);
+    }
+    set.add(e.agentId);
+  }
+  return out;
 }
 
 /** Assert the pause state the walls imply — freeze newly-walled live
@@ -328,17 +434,49 @@ function reconcile(
   env: AgentConnectorEnv,
   registry: Record<string, AgentRegistryEntry>,
   walls: ProviderWall[],
-  pass: { path: string; now: number; write: PauseWriter }
+  pass: { path: string; now: number; write: PauseWriter; dir: string }
 ): { paused: number; thawed: number } {
-  const { path, now, write } = pass;
+  const { path, now, write, dir } = pass;
   const walled = new Map(walls.map(w => [w.provider, w]));
+  // the work budget's own gate (spec bro-tdndq): each armed kind's
+  // spend is checked under ITS ledger lock — dead workers' segments
+  // close in passing (the registry is the liveness truth), a spent
+  // kind joins `walled` as the second freeze trigger
+  const scope = projectId(dir);
+  const armed = armedBudgets(env);
+  const liveByKind = liveKeysByKind(registry);
+  const budgeted = new Set<string>();
+  for (const [kind, cfg] of armed) {
+    try {
+      if (
+        laneBudgetCheck(kind, cfg, {
+          now,
+          scope,
+          liveKeys: liveByKind.get(kind),
+        }).spent
+      ) {
+        budgeted.add(kind);
+      }
+    } catch {
+      // an unwritable ledger never fabricates a freeze
+    }
+  }
   // the pause file is a shared read-modify-write — the drive pass and
   // a spawn-path refusal can reconcile at once, and a stale write
   // would drop records whose groups then stay frozen forever
   return withFileLock(`${path}.lock`, () => {
     const file = readPauseFile(path);
-    const stopped = freezeLane(registry, { walled, env }, file, now);
-    const { next, thawed } = thawLane(file.paused, walled, env, registry);
+    const stopped = freezeLane(
+      registry,
+      { walled, env, budgeted, armed: new Set(armed.keys()), scope },
+      file,
+      now
+    );
+    const { next, thawed } = thawLane(file.paused, walled, env, registry, {
+      budgeted,
+      scope,
+      now,
+    });
     // a present file always syncs — even all-drained; nothing to
     // write only when no records moved AND no file exists
     const settled = Object.keys(next).length === 0 && Object.keys(file.paused).length === 0;
@@ -378,7 +516,7 @@ function reconcileWith(
   if (path === null) {
     return NO_PAUSE;
   }
-  const { paused, thawed } = reconcile(env, registry, walls, { path, now, write });
+  const { paused, thawed } = reconcile(env, registry, walls, { path, now, write, dir });
   return { walled: walls, paused, thawed };
 }
 
@@ -419,6 +557,8 @@ export interface LaneStatusRow {
   wall?: ProviderWall;
   paused: number;
   gate?: Array<{ model: string; tokens: number; capacity: number }>;
+  /** armed work budgets — `[kind, spent, cap, window]` (spec bro-tdndq). */
+  budget?: Array<{ kind: string; spentMin: number; minutes: number; windowMinutes: number }>;
 }
 
 /** The lane section `bro agents status` renders: walled providers,
@@ -426,7 +566,8 @@ export interface LaneStatusRow {
  *  here — status never harvests causes (a read that writes is the
  *  spawn path's laziness, not a report's). */
 export function laneStatus(dir: string, env: AgentConnectorEnv, now = Date.now()): LaneStatusRow[] {
-  const walls = new Map(deriveProviderWalls(readRegistrySafe(dir), now).map(w => [w.provider, w]));
+  const registry = readRegistrySafe(dir);
+  const walls = new Map(deriveProviderWalls(registry, now).map(w => [w.provider, w]));
   const pausedBy = pauseCounts(lanePausePath(dir));
   const rows = new Map<string, LaneStatusRow>();
   const row = (p: string): LaneStatusRow => {
@@ -446,6 +587,35 @@ export function laneStatus(dir: string, env: AgentConnectorEnv, now = Date.now()
   }
   for (const [name, gate] of armedGates(env)) {
     row(name).gate = gateLevels(laneOf(name, gate), gate, now);
+  }
+  // work budgets park on the kind's row — spend reads live (dead
+  // segments prune in passing) so `agents status` shows the soft gate
+  // the same place it shows the hard walls (spec bro-tdndq)
+  const scope = projectId(dir);
+  const liveByKind = liveKeysByKind(registry);
+  for (const [kind, cfg] of armedBudgets(env)) {
+    let level: LaneBudgetLevel | null = null;
+    try {
+      level = laneBudgetLevel(kind, cfg, {
+        now,
+        scope,
+        liveKeys: liveByKind.get(kind),
+      });
+    } catch {
+      // an unreadable ledger renders as no row, not a broken status
+    }
+    if (level === null) {
+      continue;
+    }
+    const r = row(kind);
+    const list = r.budget ?? [];
+    r.budget = list;
+    list.push({
+      kind,
+      spentMin: level.spentMin,
+      minutes: cfg.minutes,
+      windowMinutes: level.windowMin,
+    });
   }
   return [...rows.values()].sort((a, b) => a.provider.localeCompare(b.provider));
 }
@@ -548,6 +718,13 @@ export function laneStatusLines(rows: LaneStatusRow[]): string[] {
     }
     for (const g of r.gate ?? []) {
       lines.push(`  ${r.provider}: gate ${g.model} — ${g.tokens}/${g.capacity} req budget`);
+    }
+    for (const b of r.budget ?? []) {
+      const state = b.spentMin >= b.minutes ? ' — spent, lane parked' : '';
+      lines.push(
+        `  ${r.provider}: work budget ${b.kind} — ${b.spentMin}/${b.minutes} ` +
+          `worker-min in ${b.windowMinutes}m${state}`
+      );
     }
   }
   return lines;
