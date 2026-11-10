@@ -2202,7 +2202,11 @@ function readLayerRecord(
     if (rec === undefined || rec.v !== 1 || rec.dir !== base || rec.layer !== layer) {
       return undefined;
     }
-    if (!Array.isArray(rec.probes) || !Array.isArray(rec.broken)) {
+    if (
+      !Array.isArray(rec.probes) ||
+      !Array.isArray(rec.broken) ||
+      !rec.broken.every(b => typeof b === 'string')
+    ) {
       return undefined;
     }
     // TTL only bounds records whose scan touched .ts — everything else
@@ -2223,7 +2227,11 @@ function readLayerRecord(
         hit.layer !== layer ||
         typeof hit.dir !== 'string' ||
         typeof hit.file !== 'string' ||
-        !isJsonData(hit.raw))
+        typeof hit.raw !== 'object' ||
+        hit.raw === null ||
+        Array.isArray(hit.raw) ||
+        !isJsonData(hit.raw) ||
+        (hit.pluginsRaw !== undefined && !isJsonData(hit.pluginsRaw)))
     ) {
       return undefined;
     }

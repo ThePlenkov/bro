@@ -141,6 +141,28 @@ describe('loadConfigLayers cache (spec bro-gwh2a)', () => {
     assert.ok(readCacheFile(join(cacheDirOf(dir), rec)) !== undefined);
   });
 
+  test('a well-formed record with malformed fields is refused — live scan answers', () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ marker: 'ok' }));
+    loadConfigLayers(dir);
+    const [rec] = records(dir, 'config-layer-project-');
+    const file = join(cacheDirOf(dir), rec!);
+    const good = readCacheFile(file)!;
+    const goodHit = good.hit as Record<string, unknown>;
+    // poison each field the read side must prove — every variant misses
+    for (const bad of [
+      { ...good, broken: [42] },
+      { ...good, broken: 'x' },
+      { ...good, probes: [{ path: 1 }] },
+      { ...good, hit: { ...goodHit, raw: 'not-an-object' } },
+      { ...good, hit: { ...goodHit, file: 7 } },
+    ]) {
+      writeFileSync(file, JSON.stringify(bad));
+      const { layers } = loadConfigLayers(dir);
+      assert.equal((layers[0]!.raw as { marker: string }).marker, 'ok');
+    }
+  });
+
   test('a .ts winner records with a TTL tag — .json layers stay pure-fingerprint', () => {
     const dir = repo();
     writeFileSync(join(dir, 'bro.config.ts'), 'export default { marker: "ts" }\n');
