@@ -22,7 +22,7 @@ and shows the board as a toast, plus richer toasts on
 
 `tui.tsx` is the V2 TUI half — a verbatim copy of
 `packages/cli/src/opencode-tui-v2.tsx`, a SolidJS/OpenTUI module that
-opencode v2 discovers as a plugin _directory_: installed as
+opencode v2 discovers as a plugin *directory*: installed as
 `plugins/bro/tui.tsx` (v2 ignores the loose `bro-cli.ts` file — the
 V2 plugin carries the same `/bro` command and toasts). On top of that
 it claims the `sidebar.content` slot: a collapsible `bro` board —
