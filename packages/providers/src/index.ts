@@ -22,6 +22,9 @@ export {
 } from './acp.ts';
 export type { AcpPeer, AcpRetainedSession, AcpUsage, PooledTurnOpts } from './acp.ts';
 export { AcpDeadLoopError, AcpDeadLoopGuard } from './acp-guard.ts';
+export { AcpLaneCooldown, acpWallOf } from './acp-cooldown.ts';
+export { AcpCooldownError } from './acp-cooldown.ts';
+export type { AcpCooldownOptions, AcpWallRefusal, AcpWallSignal } from './acp-cooldown.ts';
 export type { AcpCharge, AcpDeadLoopOptions, AcpGuardCtx } from './acp-guard.ts';
 export { AcpTerminals } from './acp-terminal.ts';
 export type { TerminalFollow, TerminalFollower } from './acp-terminal.ts';

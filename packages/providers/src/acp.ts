@@ -49,6 +49,7 @@ import type { OtelCtx } from './otel.ts';
 import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
 import { AcpTerminals } from './acp-terminal.ts';
 import { AcpDeadLoopError, type AcpGuardCtx } from './acp-guard.ts';
+import { AcpCooldownError } from './acp-cooldown.ts';
 import { objOr, remaining, splitShellWords } from './http.ts';
 import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
 import type { ProviderWireOpts } from './systemone.ts';
@@ -453,6 +454,14 @@ async function acpSessionOpen(
   sessionRequest?: NewSessionRequest,
   gc?: AcpGuardCtx
 ) {
+  // the wall cooldown speaks BEFORE the session opens (spec
+  // bro-i6811): the lane is under a provider wall, so this open would
+  // cost a session and a quota for nothing. The refusal is free — it
+  // happens before the spawn.
+  const wall = gc?.cooldown?.refusal();
+  if (wall !== undefined) {
+    throw new AcpCooldownError(wall);
+  }
   // the dead-loop guard speaks BEFORE the session opens: a refused
   // scope costs no session and no quota (spec bro-b961a). The charge
   // it hands back is THIS session's debt — the caller resolves it on
@@ -1437,6 +1446,12 @@ export async function acpPooledTurn(
       breakPeer(err, peer);
       throw err;
     }
+    if (err instanceof AcpCooldownError) {
+      // the refusal cost no session (spec bro-i6811) — and the peer is
+      // fine: the LANE is cooling down, not the transport. Nothing is
+      // broken and nothing is charged.
+      throw err;
+    }
     // a stalled or failed turn counts against the peer the same — over
     // budget the loop lives in the child: kill it BEFORE the failure
     // surfaces, or further requests keep opening sessions on it
@@ -1556,7 +1571,8 @@ export async function acpSessionRetain(
       if (
         err instanceof JudgeUnavailable ||
         err instanceof AcpConfigError ||
-        err instanceof AcpDeadLoopError
+        err instanceof AcpDeadLoopError ||
+        err instanceof AcpCooldownError
       ) {
         return err;
       }
@@ -1634,6 +1650,10 @@ export async function acpSessionRetain(
           }
           if (err instanceof AcpDeadLoopError) {
             breakPeer(err, peer);
+          } else if (err instanceof AcpCooldownError) {
+            // the lane is cooling down (spec bro-i6811) — the peer is
+            // healthy and no session was opened, so nothing is broken
+            // and no churn is charged
           } else {
             // the peer's churn may now be systemic — kill it and name it
             guardFail(turn.guard, peer);
@@ -1650,6 +1670,12 @@ export async function acpSessionRetain(
     if (err instanceof AcpDeadLoopError) {
       // the refusal cost no session — a peer refusal breaks the peer
       breakPeer(err, peer);
+      throw err;
+    }
+    if (err instanceof AcpCooldownError) {
+      // the refusal cost no session (spec bro-i6811) — the lane is
+      // cooling down, the peer is fine: nothing is broken, nothing is
+      // charged, and the refusal reaches the caller as itself
       throw err;
     }
     // the peer's churn may now be systemic — a failed retain still
