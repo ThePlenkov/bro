@@ -393,7 +393,13 @@ function emitRunSilent(
 export function snapshotKey(s: WatchSnapshot): string {
   const clock =
     s.clock === undefined ? undefined : { skewed: s.clock.skewed, error: s.clock.error };
-  return JSON.stringify({ ...s, ts: '', clock });
+  // clockAttention's lines embed the moving readings too (local/host
+  // stamps, skewMs) — strip them; the normalized `clock` field above is
+  // what keys the skew/unverified transition
+  const attention = s.attention.filter(
+    l => !l.startsWith('clock skew ') && !l.startsWith('clock unverified — ')
+  );
+  return JSON.stringify({ ...s, ts: '', clock, attention });
 }
 
 /** One atomic mailbox file — tmp+rename (dropMailbox in core) so a

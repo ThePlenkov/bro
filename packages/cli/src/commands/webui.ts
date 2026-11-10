@@ -494,7 +494,7 @@ function renderTicks(t) {
     var hb = t.heartbeat;
     var htail = hb.attention === 0 ? 'quiet' : hb.attention + ' attention';
     if (hb.futureMs !== undefined) {
-      parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer clock skew — ' + htail);
+      parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer or reader clock skew — ' + htail);
       cls += ' warn';
     } else if (hb.writerSkewed) {
       parts.push('last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail);
