@@ -116,6 +116,21 @@ export interface PreToolVerdict {
   input?: Record<string, unknown>;
 }
 
+/** What `bro exec` hands the taskFinish probes — one finished shell
+ *  command: the display string, its verdict, wall time, and a bounded
+ *  output tail. Side-effect probes (a pane report-back, a ledger entry)
+ *  consume this; line probes never see it. */
+export interface TaskFinishReport {
+  cmd: string;
+  /** Exit code; null when the child died on a signal. */
+  exitCode: number | null;
+  /** Signal name when exitCode is null. */
+  signal?: string;
+  durationMs: number;
+  /** Interleaved stdout+stderr tail, capped by the caller. */
+  tail?: string;
+}
+
 /** Context a connector contributes to the agent lifecycle — the
  *  per-connector answer to "what does this system know that the session
  *  must see". All probes are fail-open: a wedged system yields no lines,
@@ -145,6 +160,12 @@ export interface ConnectorHooks {
     ctx: ConnectorCtx,
     input: { tool: string; input: Record<string, unknown> }
   ): MaybePromise<PreToolVerdict[]>;
+  /** A `bro exec`-wrapped command finished — side-effect probe for
+   *  systems that report completion to a waiting party (the herdr
+   *  connector prompts the pane; agents without a native task-exit
+   *  wake get one). Not a context probe: returns nothing, the caller
+   *  discards output. */
+  taskFinish?(ctx: ConnectorCtx, report: TaskFinishReport): MaybePromise<void>;
 }
 
 export interface Connector {
@@ -501,6 +522,11 @@ const gitConnector: Connector = {
 
 const registry: Connector[] = [beadsConnector, gitConnector];
 
+/** Names that were in the registry at boot — unregisterConnector refuses
+ *  to drop them: removing a built-in breaks facade resolution for every
+ *  caller. */
+const builtinConnectorNames = new Set(registry.map(x => x.name));
+
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
  *  names are skipped — a plugin cannot shadow a built-in system. */
 export function registerConnector(c: Connector): void {
@@ -511,13 +537,26 @@ export function registerConnector(c: Connector): void {
   registry.push(c);
 }
 
+/** Remove a previously registered plugin connector by name — test
+ *  cleanup counterpart to registerConnector. Built-in connectors
+ *  (beads, git) are not removable through this. */
+export function unregisterConnector(name: string): void {
+  if (builtinConnectorNames.has(name)) {
+    return;
+  }
+  const idx = registry.findIndex(x => x.name === name);
+  if (idx >= 0) {
+    registry.splice(idx, 1);
+  }
+}
+
 export function connectors(): readonly Connector[] {
   return registry;
 }
 
 // --- resolution ----------------------------------------------------------------
 
-function remoteUrl(dir: string): string | undefined {
+export function remoteUrl(dir: string): string | undefined {
   const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
@@ -752,6 +791,9 @@ export function facadeAuth<K extends keyof FacadeMap>(
 
 /** Hard auth gate for commands — exits(1) with the remediation line when
  *  the resolved connector isn't usable. */
+import { CommandError } from './errors.ts';
+import { EXIT } from './exits.ts';
+
 export function ensureAuth<K extends keyof FacadeMap>(
   kind: K,
   ctx: ConnectorCtx,
@@ -759,8 +801,7 @@ export function ensureAuth<K extends keyof FacadeMap>(
 ): void {
   const msg = facadeAuth(kind, ctx, opts);
   if (msg) {
-    console.error(`error: ${msg}`);
-    process.exit(1);
+    throw new CommandError(`error: ${msg}`, EXIT.error);
   }
 }
 
@@ -1195,6 +1236,35 @@ export async function promptContextLines(
  *  drains and other per-event probes. */
 export async function postToolLines(ctx: ConnectorCtx, onProbe?: ProbeReporter): Promise<string[]> {
   return (await collectLines(ctx, h => h.postTool?.(ctx), onProbe)).lines;
+}
+
+/** Fire every connector's taskFinish probe — the `bro exec` report-back
+ *  sweep. Side-effect probes, parallel and fail-open like the line
+ *  collectors: one wedged system must not delay the caller's own exit. */
+export async function taskFinishProbes(
+  ctx: ConnectorCtx,
+  report: TaskFinishReport,
+  onProbe?: ProbeReporter
+): Promise<void> {
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now();
+      try {
+        const r = await probeWithTimeout<void | typeof PROBE_TIMED_OUT>(
+          () => hooks.taskFinish?.(ctx, report),
+          PROBE_TIMED_OUT
+        );
+        return {
+          connector: name,
+          ms: Date.now() - t0,
+          ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+        };
+      } catch {
+        return { connector: name, ms: Date.now() - t0, failed: true as const };
+      }
+    })
+  );
+  onProbe?.(rows);
 }
 
 /** Collect stop-gate contributions from all connectors — the caller

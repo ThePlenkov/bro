@@ -17,6 +17,18 @@
         "{workspaceRoot}/.claude-plugin/**/*",
         "{workspaceRoot}/.codex-plugin/**/*"
       ]
+    },
+    "test:e2e": {
+      "dependsOn": ["^build", "build"],
+      "cache": true,
+      "inputs": [
+        "default",
+        "envGates",
+        "{workspaceRoot}/plugin.json",
+        "{workspaceRoot}/skills/**/*",
+        "{workspaceRoot}/.claude-plugin/**/*",
+        "{workspaceRoot}/.codex-plugin/**/*"
+      ]
     }
   },
   "namedInputs": {

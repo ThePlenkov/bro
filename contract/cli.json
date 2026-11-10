@@ -7,7 +7,7 @@
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "stack"]
+      "members": ["convoy", "next", "loop", "watchdog", "stack"]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -31,11 +31,21 @@
     },
     "work": {
       "summary": "worktree & session mechanics",
-      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep"]
+      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep", "exec"]
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
-      "members": ["retrospect", "wtf", "learn", "skills", "judge", "dogfood", "guard", "providers"]
+      "members": [
+        "retrospect",
+        "wtf",
+        "learn",
+        "skills",
+        "judge",
+        "dogfood",
+        "benchmark",
+        "guard",
+        "providers"
+      ]
     },
     "comms": {
       "summary": "events & session mailbox",
@@ -52,6 +62,10 @@
     "spec": {
       "summary": "spec-driven development",
       "members": ["spec"]
+    },
+    "pipeline": {
+      "summary": "pipeline customer surface — accept verdicts, intake answers",
+      "members": ["pipeline"]
     }
   },
   "commands": {
@@ -171,10 +185,71 @@
       "plan": false,
       "external": false
     },
+    "watchdog": {
+      "name": "watchdog",
+      "group": "flow",
+      "summary": "Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]",
+      "spellings": ["watchdog", "flow watchdog"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "watchdog",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`"
+        },
+        "json": "schemas/cli/watchdog.json",
+        "exits": {
+          "0": "brief printed (human or --json)",
+          "2": "unknown flag — usage on stderr"
+        }
+      },
+      "external": false
+    },
+    "pipeline": {
+      "name": "pipeline",
+      "group": "pipeline",
+      "summary": "Pipeline customer surface — accept|answer write the verdict store",
+      "spellings": ["pipeline"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "subs": {
+          "accept": {
+            "flags": {
+              "--notes <text>": "the customer's notes — required on rejected (the fix scope)",
+              "--by <id>": "signer identity — default: $BRO_AGENT_ID, else the actor chain",
+              "--run <id>": "the run to write to — default: the sole run parked at accept"
+            },
+            "exits": {
+              "0": "verdict recorded on the run channel",
+              "1": "no run awaiting, an ambiguous target, or an unresolvable signer",
+              "2": "usage"
+            }
+          },
+          "answer": {
+            "flags": {
+              "-m <text>": "answer text (short spelling)",
+              "--message <text>": "answer text",
+              "--answers-file <path>": "answers from a file (JSON parsed when it parses)",
+              "--by <id>": "who answered — optional provenance",
+              "--run <id>": "the run to write to — default: the sole run parked at intake"
+            },
+            "exits": {
+              "0": "answers recorded on the run channel",
+              "1": "no run awaiting answers or an unreadable file",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
     "fleet": {
       "name": "fleet",
       "group": "fleet",
-      "summary": "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]",
+      "summary": "Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]",
       "spellings": ["fleet"],
       "aliases": [],
       "hidden": false,
@@ -410,7 +485,7 @@
     "cleanup": {
       "name": "cleanup",
       "group": "review",
-      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "summary": "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]",
       "spellings": ["cleanup", "review cleanup"],
       "aliases": [],
       "hidden": false,
@@ -560,6 +635,17 @@
       "plan": false,
       "external": false
     },
+    "benchmark": {
+      "name": "benchmark",
+      "group": "self",
+      "summary": "Paired native-vs-BRO workflow outcome benchmarks",
+      "spellings": ["benchmark", "self benchmark"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "dogfood",
+      "plan": false,
+      "external": false
+    },
     "guard": {
       "name": "guard",
       "group": "self",
@@ -651,7 +737,7 @@
     "trace": {
       "name": "trace",
       "group": "fleet",
-      "summary": "OTLP export of the session trace journals — export [--session|--dry-run|--json]",
+      "summary": "<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals",
       "spellings": ["trace", "fleet trace"],
       "aliases": [],
       "hidden": false,
@@ -757,6 +843,16 @@
       "aliases": [],
       "hidden": false,
       "skill": "providers",
+      "plan": false,
+      "external": false
+    },
+    "router": {
+      "name": "router",
+      "summary": "The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]",
+      "spellings": ["router"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "brouter",
       "plan": false,
       "external": false
     },
@@ -892,6 +988,22 @@
       "aliases": [],
       "hidden": false,
       "plan": false,
+      "external": false
+    },
+    "exec": {
+      "name": "exec",
+      "group": "work",
+      "summary": "Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)",
+      "spellings": ["exec", "work exec"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "exits": {
+          "2": "usage",
+          "130": "child killed by SIGINT"
+        }
+      },
       "external": false
     },
     "plan": {
