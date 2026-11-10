@@ -11,6 +11,8 @@
  * formulas/ trees) from an npm package — the repo's own node_modules
  * first, then the CLI's — instead of the embedded snapshot.
  */
+
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -18,37 +20,43 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
 import {
-  checkSkillLock,
+  type BroConfig,
   CONFIG_SCHEMA_URL,
+  checkSkillLock,
   hasHelpFlag,
   initBeadsStealth,
+  type LockedSkill,
   PERSONALITIES,
   printUsage,
+  probeBdCompat,
   readSkillLock,
-  withFileLock,
-  type BroConfig,
-  type LockedSkill,
   type SkillDrift,
+  withFileLock,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
+import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts';
 import {
   cliVersion,
   installCommitHook,
   installPostMergeHook,
   installRefGuardHook,
 } from './githooks.ts';
-import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts';
+
+/** Probe commands get a wall-clock bound — a hung `bd --version` or
+ *  stalled `gh auth status` must not freeze setup before a single file
+ *  is written. Matches the bd compat probe's 10s bound. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 function hasBin(name: string): boolean {
   try {
-    execFileSync(name, ['--version'], { stdio: 'ignore' }); // NOSONAR — user-installed CLI; PATH lookup is the contract
+    execFileSync(name, ['--version'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS }); // NOSONAR — user-installed CLI; PATH lookup is the contract
     return true;
   } catch {
     return false;
@@ -57,8 +65,26 @@ function hasBin(name: string): boolean {
 
 function ghAuthed(): boolean {
   try {
-    execFileSync('gh', ['auth', 'status'], { stdio: 'ignore' }); // NOSONAR — PATH lookup is the contract
+    execFileSync('gh', ['auth', 'status'], { stdio: 'ignore', timeout: PROBE_TIMEOUT_MS }); // NOSONAR — PATH lookup is the contract
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The GitHub Issues fallback is only viable when the checkout's repo
+ *  resolves AND its Issues feature is enabled — a repo with issues
+ *  switched off can't serve tasks no matter how healthy `gh auth` is.
+ *  `gh repo view` answers both (it fails outside a resolvable clone);
+ *  any failure or a missing flag means "not viable". */
+function githubTasksUsable(): boolean {
+  try {
+    const out = execFileSync(
+      'gh', // NOSONAR — PATH lookup is the contract (same as ghAuthed)
+      ['repo', 'view', '--json', 'hasIssuesEnabled', '--jq', '.hasIssuesEnabled'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: PROBE_TIMEOUT_MS }
+    ).trim();
+    return out === 'true';
   } catch {
     return false;
   }
@@ -200,7 +226,12 @@ function ensureLocalConfigExcluded(): void {
 }
 
 /** Exported for tests — writes/merges the gitignored local layer. */
-export function writeConfig(opts: { beads: boolean; personality?: string }): string {
+export function writeConfig(opts: {
+  beads: boolean;
+  personality?: string;
+  connectors?: Record<string, string>;
+  stores?: string[];
+}): string {
   // The written file is called "gitignored" by every doc that mentions
   // it — make that true here, not only in repos whose .gitignore
   // already carries the pattern.
@@ -219,31 +250,44 @@ export function writeConfig(opts: { beads: boolean; personality?: string }): str
     return `bro.config.local.ts present and takes precedence — edit it directly, not writing bro.config.local.json${orphan}`;
   }
   const path = join(process.cwd(), 'bro.config.local.json');
-  const existed = existsSync(path);
-  const existing = readExistingConfig(path)!;
-  // Only local-layer keys land in the file: spreading the merged
-  // effective config here would pin project/global values into the
-  // highest-precedence layer and mask later project edits.
-  const effective = loadBroConfig();
-  const merged: Partial<BroConfig> = { ...existing };
-  if (opts.beads && !effective.stores.includes('beads')) {
-    merged.stores = [...(merged.stores ?? effective.stores), 'beads'];
-  }
-  if (opts.personality) {
-    merged.personality = opts.personality as BroConfig['personality'];
-  }
-  // $schema first — IDEs/agents get completion+validation for free;
-  // an existing $schema pin wins the spread (never clobbered). Compare
-  // the RAW file keys against the output — a file lacking $schema is a
-  // diff, so the upgrade lands on the next setup run
-  const out = { $schema: CONFIG_SCHEMA_URL, ...merged };
-  if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
-    return 'bro.config.local.json already up to date';
-  }
-  writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
-  const stores = merged.stores ?? effective.stores;
-  const hint = existed ? '' : ' — gitignored (machine-local overrides live here)';
-  return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`;
+  // Two writers — parallel setups, or setup racing an operator edit —
+  // must not lose each other's keys: the read-modify-write rides the
+  // same create-if-absent lock the exclude write uses.
+  return withFileLock(`${path}.lock`, () => {
+    const existed = existsSync(path);
+    const existing = readExistingConfig(path)!;
+    // Only local-layer keys land in the file: spreading the merged
+    // effective config here would pin project/global values into the
+    // highest-precedence layer and mask later project edits.
+    const effective = loadBroConfig();
+    const merged: Partial<BroConfig> = { ...existing };
+    if (opts.stores !== undefined) {
+      merged.stores = opts.stores as BroConfig['stores'];
+    } else if (opts.beads && !effective.stores.includes('beads')) {
+      merged.stores = [...(merged.stores ?? effective.stores), 'beads'];
+    }
+    if (opts.personality) {
+      merged.personality = opts.personality as BroConfig['personality'];
+    }
+    if (opts.connectors !== undefined && Object.keys(opts.connectors).length > 0) {
+      // Only the supplied overrides land in the local layer — copying the
+      // effective map would pin project/global connector choices here and
+      // mask their later edits (highest-precedence layer wins).
+      merged.connectors = { ...(merged.connectors ?? {}), ...opts.connectors };
+    }
+    // $schema first — IDEs/agents get completion+validation for free;
+    // an existing $schema pin wins the spread (never clobbered). Compare
+    // the RAW file keys against the output — a file lacking $schema is a
+    // diff, so the upgrade lands on the next setup run
+    const out = { $schema: CONFIG_SCHEMA_URL, ...merged };
+    if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
+      return 'bro.config.local.json already up to date';
+    }
+    writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
+    const stores = merged.stores ?? effective.stores;
+    const hint = existed ? '' : ' — gitignored (machine-local overrides live here)';
+    return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`;
+  });
 }
 
 /** Install files under root; returns installed count. Warns on drift. */
@@ -291,15 +335,24 @@ export function readPackTree(dir: string): Record<string, string> {
     for (const name of readdirSync(d)) {
       const path = join(d, name);
       const rel = prefix ? `${prefix}/${name}` : name;
-      const st = lstatSync(path);
+      let st;
+      try {
+        st = lstatSync(path);
+      } catch {
+        continue; // dangling/vanished entry — a pack is a snapshot, skip it
+      }
       if (st.isSymbolicLink()) {
         continue;
       }
       if (st.isDirectory()) {
         walk(path, rel);
-      } else {
-        out[rel] = readFileSync(path, 'utf8');
+      } else if (st.isFile()) {
+        try {
+          out[rel] = readFileSync(path, 'utf8');
+        } catch {}
       }
+      // non-file non-dir entries (devices, sockets, fifos) are skipped —
+      // a pack's tree must never materialise one into a repo
     }
   };
   walk(dir, '');
@@ -314,9 +367,20 @@ export function checkedPackDir(spec: string): string {
     console.error(`error: pack ${spec} not resolvable — install it or check the "pack" config key`);
     process.exit(1);
   }
-  if (!existsSync(join(dir, 'skills'))) {
+  // The skills root itself must be a real directory — the tree walk
+  // skips symlinked FILES but a symlinked root would silently resolve
+  // outside the package, and a plain file named `skills` isn't a tree.
+  const skillsPath = join(dir, 'skills');
+  const notAPack = (): never => {
     console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`);
     process.exit(1);
+  };
+  try {
+    if (lstatSync(skillsPath).isSymbolicLink() || !statSync(skillsPath).isDirectory()) {
+      notAPack();
+    }
+  } catch {
+    notAPack();
   }
   return dir;
 }
@@ -382,7 +446,7 @@ function parseSetupArgs(argv: string[]): SetupArgs {
   };
 }
 
-function checkPrereqs(needBeads: boolean): void {
+function checkPrereqs(needBeads: boolean, allowFallback = false): void {
   const gh = hasBin('gh');
   const ghOk = gh && ghAuthed();
   const bd = hasBin('bd');
@@ -401,8 +465,9 @@ function checkPrereqs(needBeads: boolean): void {
     process.exit(1);
   }
   // Validate prerequisites before writing anything — a config pointing at a
-  // store we can't run would strand the repo.
-  if (needBeads && !bd) {
+  // store we can't run would strand the repo. A selected GitHub Issues
+  // fallback makes bd optional for this run.
+  if (needBeads && !bd && !allowFallback) {
     console.error(
       'error: bd not found — install beads (https://github.com/gastownhall/beads) ' +
         'or opt out with "stores": ["jsonl"] in bro.config.local.json'
@@ -527,6 +592,7 @@ interface SetupMutations {
   personality: string | undefined;
   packDir: string | null;
   wantsBeads: boolean;
+  fallbackToGithub: boolean;
 }
 
 function runSetupMutations(m: SetupMutations): void {
@@ -536,7 +602,29 @@ function runSetupMutations(m: SetupMutations): void {
     setupBeads();
   }
 
-  console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`);
+  if (m.fallbackToGithub) {
+    if (existsSync(join(process.cwd(), 'bro.config.local.ts'))) {
+      // The .ts layer shadows the .json setup writes — claiming the
+      // fallback landed while it silently didn't would strand the repo.
+      console.error(
+        '  bd unusable — GitHub Issues can serve tasks, but bro.config.local.ts ' +
+          'shadows the local layer: set connectors.tasks="github" and stores=["jsonl"] there'
+      );
+    } else {
+      console.error(
+        '  bd unusable — falling back to GitHub Issues (connectors.tasks=github, stores=["jsonl"])'
+      );
+    }
+    console.error(
+      `  ${writeConfig({ beads: false, personality: m.personality, connectors: { tasks: 'github' }, stores: ['jsonl'] })}`
+    );
+    console.error(
+      '  upgrade path: install beads (https://github.com/gastownhall/beads), drop the ' +
+        'connectors.tasks/stores pins from bro.config.local.json, re-run `bro setup`'
+    );
+  } else {
+    console.error(`  ${writeConfig({ beads: m.beads, personality: m.personality })}`);
+  }
 
   if (m.skills) {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
@@ -573,18 +661,51 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   }
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
-  const wantsBeads = beads || loadBroConfig().stores.includes('beads');
+  let wantsBeads = beads || loadBroConfig().stores.includes('beads');
+  let fallbackToGithub = false;
+  let bdFailure: string | null = null;
+  // When bd can't serve this repo — absent binary, a `bd --version` that
+  // itself fails, drift off the contract, or a store that errors on read
+  // (compat.ok stays true on an unclassifiable store failure — check the
+  // store state too) — and GitHub Issues can, pick the zero-install path
+  // instead of failing the first run.
+  if (wantsBeads) {
+    const compat = probeBdCompat(process.cwd());
+    if (compat.missing || compat.broken || !compat.ok || compat.store === 'error') {
+      // A pinned non-github tasks connector is the operator's own
+      // answer — never clobber it with the fallback.
+      const pinnedTasks = loadBroConfig().connectors?.tasks;
+      const mayPin = pinnedTasks === undefined || pinnedTasks === 'github';
+      if (mayPin && githubTasksUsable()) {
+        fallbackToGithub = true;
+        wantsBeads = false;
+      } else {
+        bdFailure = compat.problems.join('; ') || compat.storeErr || 'bd present but unusable';
+      }
+    }
+  }
   // Validate the pack BEFORE beads init/config/skills mutate anything —
   // a bad spec must fail setup on a clean tree, not a half-written one.
   const packDir =
     pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK);
-  checkPrereqs(wantsBeads);
+  checkPrereqs(wantsBeads, fallbackToGithub);
+  // bd unusable and GitHub couldn't take over — fail BEFORE mutations
+  // (a `bd init` into a store that already errors only obscures the cause).
+  if (bdFailure !== null) {
+    console.error(
+      `error: bd unusable — ${bdFailure}.\n` +
+        '  fix: install/repair beads (https://github.com/gastownhall/beads), ' +
+        'auth `gh` in a repo with Issues enabled for the zero-install fallback, ' +
+        'or set "stores": ["jsonl"] with a working tasks connector in bro.config.local.json'
+    );
+    process.exit(1);
+  }
 
   // In --check / --dry-run mode we verify without mutating: no beads
   // init, no config write, no skill/pack installs, no hook installs.
   // Only the locked-skill drift check (setupLockedSkills) runs.
   if (!checkOnly && !dryRun) {
-    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads });
+    runSetupMutations({ beads, skills, pack, personality, packDir, wantsBeads, fallbackToGithub });
   }
 
   if (lock) {

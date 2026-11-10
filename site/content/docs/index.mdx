@@ -43,9 +43,13 @@ bro setup --skills     # also: thin skill wrappers for your agent
 `bro setup` writes `bro.config.local.json` — the gitignored
 machine-local layer, excluded via `.git/info/exclude` — and never
 touches the committed `bro.config.{ts,json}` the repo shares as policy.
-Layers merge **local > project > global** (`~/.config/bro/config.*`) —
-see [Configuration](/docs/configuration). Fresh checkouts run on
-defaults until set up.
+When a `bro.config.local.ts` already exists it takes precedence and
+setup leaves it for you to edit directly — no JSON is written. Layers
+merge **local > project > global**; the global file is
+`$XDG_CONFIG_HOME/bro/config.{ts,json}` (default `~/.config/bro/`) —
+see [Configuration](/docs/configuration). Committed `bro.config.*`
+policy already applies on a fresh checkout, before setup — defaults
+fill only what no layer supplies.
 
 ## End-to-end scenario (no fleet/model gateway required)
 
