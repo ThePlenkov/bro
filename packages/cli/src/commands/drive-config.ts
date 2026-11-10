@@ -14,6 +14,12 @@ export interface DriveConfig {
    *  heartbeat, marker stamp — inside this window. Silence past it
    *  counts the PR orphaned: drive adopts it and merges. */
   occupancyTtlSec: number;
+  /** Seconds between loop-litter sweeps inside a pass (bro-7dgu3):
+   *  merged-PR/closed-bead worktrees, orphaned claims, the parked-pool
+   *  cap — the same reap `bro work prune --loop` runs. A --once pass
+   *  always sweeps when enabled; --every throttles to this cadence.
+   *  0 disables. */
+  litterSweepSec: number;
 }
 
 /** The cadence bounds `drive --every` enforces — the config section
@@ -59,6 +65,13 @@ export const driveSection: ConfigSection<DriveConfig> = raw => {
       obj.occupancyTtlSec >= MIN_OCCUPANCY_TTL_SEC
         ? obj.occupancyTtlSec
         : 7200,
+    litterSweepSec:
+      typeof obj.litterSweepSec === 'number' &&
+      Number.isFinite(obj.litterSweepSec) &&
+      obj.litterSweepSec >= 0 &&
+      obj.litterSweepSec <= MAX_INTERVAL_SEC
+        ? obj.litterSweepSec
+        : 3600,
   };
 };
 
@@ -66,4 +79,5 @@ driveSection.jsonSchema = js.obj({
   intervalSec: { type: 'number', minimum: MIN_INTERVAL_SEC, maximum: MAX_INTERVAL_SEC },
   merge: { enum: ['auto', 'never'] },
   occupancyTtlSec: { type: 'number', minimum: MIN_OCCUPANCY_TTL_SEC },
+  litterSweepSec: { type: 'number', minimum: 0, maximum: MAX_INTERVAL_SEC },
 });
