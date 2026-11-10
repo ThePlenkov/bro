@@ -16,3 +16,6 @@ packages/pack/formulas/
 bun.lock
 bun.lockb
 bro.config.local.*
+# session-local drill artifacts (drill.report.dir default) — records, not repo content
+drills/
+.drills/

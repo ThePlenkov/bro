@@ -2526,9 +2526,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // a stopped entry's stale wall stamp is not a horizon either —
     // same exclusion the no-PR wait below takes (bro-36bhc)
     const wait =
-      state !== 'stopped'
-        ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0)
-        : undefined;
+      state !== 'stopped' ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0) : undefined;
     if (wait !== undefined) {
       m.wallWaitUntil = wait;
       m.wallWaits = (m.wallWaits ?? 0) + 1;

@@ -3,14 +3,14 @@
  * (MR state, threads, checks, merge) over the `glab` CLI. Registers like
  * any connector — built-in today, nothing GitLab-specific in core.
  */
-import type { Connector } from '@broject/core'
-import { glabTry } from './glab.ts'
-import { gitlabReview, hostFor } from './reviews.ts'
-import { gitlabQueries } from './queries.ts'
-import { gitlabStacks } from './stacks.ts'
-import { gitlabTasks, gitlabTasksAsync } from './tasks.ts'
+import type { Connector } from '@broject/core';
+import { glabTry } from './glab.ts';
+import { gitlabReview, hostFor } from './reviews.ts';
+import { gitlabQueries } from './queries.ts';
+import { gitlabStacks } from './stacks.ts';
+import { gitlabTasks, gitlabTasksAsync } from './tasks.ts';
 
-export { gitlabReview, gitlabQueries, gitlabStacks, gitlabTasks, gitlabTasksAsync }
+export { gitlabReview, gitlabQueries, gitlabStacks, gitlabTasks, gitlabTasksAsync };
 
 export const gitlabConnector: Connector = {
   name: 'gitlab',
@@ -20,28 +20,28 @@ export const gitlabConnector: Connector = {
    *  instances resolve via `connectors.reviews` config. */
   matchRemote(url: string): boolean {
     const host =
-      /^(?:https?:\/\/|ssh:\/\/[^@]+@|[^@\s]+@)([^/:]+)/i.exec(url)?.[1]?.toLowerCase() ?? ''
-    return host === 'gitlab.com' || host.endsWith('.gitlab.com')
+      /^(?:https?:\/\/|ssh:\/\/[^@]+@|[^@\s]+@)([^/:]+)/i.exec(url)?.[1]?.toLowerCase() ?? '';
+    return host === 'gitlab.com' || host.endsWith('.gitlab.com');
   },
   /** `glab auth status` — covers both "glab missing" (spawn failure →
    *  nonzero code) and "glab present but logged out". */
   auth(ctx) {
-    const host = hostFor(ctx.dir)
-    const args = ['auth', 'status']
+    const host = hostFor(ctx.dir);
+    const args = ['auth', 'status'];
     if (host !== 'gitlab.com') {
-      args.push('--hostname', host)
+      args.push('--hostname', host);
     }
     return glabTry(args, { cwd: ctx.dir, env: { GITLAB_HOST: host } }).code === 0
       ? null
-      : `glab not authenticated for ${host} — run \`glab auth login\``
+      : `glab not authenticated for ${host} — run \`glab auth login\``;
   },
   /** `tasks` exists but is name-only — a gitlab remote must not flip a
    *  beads repo's task store by detection. Pin it:
    *  `"connectors": {"tasks": "gitlab"}`. */
   optInFacades: ['tasks', 'tasksAsync'],
-  reviews: (ctx) => gitlabReview(ctx.dir),
-  queries: (ctx) => gitlabQueries(ctx.dir),
-  stacks: (ctx) => gitlabStacks(ctx.dir),
-  tasks: (ctx) => gitlabTasks(ctx.dir),
-  tasksAsync: (ctx) => gitlabTasksAsync(ctx.dir),
-}
+  reviews: ctx => gitlabReview(ctx.dir),
+  queries: ctx => gitlabQueries(ctx.dir),
+  stacks: ctx => gitlabStacks(ctx.dir),
+  tasks: ctx => gitlabTasks(ctx.dir),
+  tasksAsync: ctx => gitlabTasksAsync(ctx.dir),
+};
