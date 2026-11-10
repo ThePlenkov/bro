@@ -46,13 +46,24 @@ knowledge into core or forcing other tools to adopt the native format.
   the key; default is a deterministic uppercase repo-name-derived key,
   normalized to letters/digits starting with a letter. Empty/invalid
   derivations require explicit config. IDs use positive decimal numbers;
-  compare parsed numbers, never lexical ordering.
+  compare parsed numbers, never lexical ordering. A derived key is not
+  re-derived forever: on first allocation it is persisted to project
+  config (`sdd.key`), so a later repository rename keeps the existing
+  namespace instead of forking one product's identities across two keys.
 - Allocate `max + 1` over allocated numbers on main, including removed
   identities in history, and account for new local allocations in the
   same batch. No distributed allocator: product specs are few. CI compares
   against current main and enforces uniqueness; competing branches that
-  allocate the same number must renumber before landing. Never reuse a
-  removed number or an alias for a different product.
+  allocate the same number must renumber before landing. A green check at
+  PR open is not proof at merge time: the gate re-validates uniqueness
+  against the landing-time main revision (pre-merge re-run or merge
+  queue), and a collision found there blocks landing until the branch
+  renumbers. Never reuse a removed number or an alias for a different
+  product. Allocation and removed-identity discovery require complete
+  history — a shallow checkout omits earlier allocations and deletions,
+  so the operation fails explicitly on `is-shallow-repository` with a
+  `git fetch --unshallow` remediation rather than silently reusing a
+  number whose removal it cannot see.
 - Native layout is `<KEY-N>-<slug>.md` or
   `<KEY-N>-<slug>/spec.md` under `sdd.dir`. Slug is cosmetic: resolve by
   the exact `KEY-N-` prefix, with frontmatter ID agreement, not a guessed
@@ -156,7 +167,9 @@ Readiness does not close/remove a spec; zero citations does not archive it.
 Provide stable JSON output, explain unavailable connector capabilities and
 missing bead backends, and distinguish no links from inaccessible links.
 Removed identities remain discoverable from git history without pretending
-their deleted files or references are live.
+their deleted files or references are live; where history is incomplete
+(shallow checkout) status/list report the discovery as unavailable rather
+than silently omitting removed identities.
 
 ### Migration — bro-y1jtm.6
 
@@ -171,11 +184,14 @@ contradictions for review. No automatic loss of unreferenced requirements.
 Apply only an approved mapping against the same source revisions, refuse
 dirty/conflicting paths, write targets and aliases, update citations where
 needed, validate coverage/references, then delete old source files in the
-same git change. Git keeps provenance; no new archive or duplicate live
-source of truth. Stage application safely for retry/rollback on failure;
-never delete originals before successful target validation. Re-running a
-completed migration is a no-op. Native output is available but external
-tools may retain their own format when their connector supports the model.
+same git change. Re-verify the checked revision immediately before each
+delete — a source edited between review and apply aborts that delete for
+a fresh review instead of silently discarding the user's newer changes.
+Git keeps provenance; no new archive or duplicate live source of truth.
+Stage application safely for retry/rollback on failure; never delete
+originals before successful target validation. Re-running a completed
+migration is a no-op. Native output is available but external tools may
+retain their own format when their connector supports the model.
 
 ### Review initialization — bro-y1jtm.7
 
@@ -184,6 +200,10 @@ installs/updates one managed `<!-- BEGIN bro:sdd -->` /
 `<!-- END bro:sdd -->` block in the project's REVIEW.md. Preserve all
 unmanaged policy; repeated init is idempotent. Missing REVIEW.md is created;
 duplicate/unbalanced markers fail with remediation, never overwrite prose.
+The write compares the file against the snapshot the managed-block plan
+was computed from: REVIEW.md changed between read and write aborts the
+update for a fresh pass rather than clobbering unmanaged edits made in
+between.
 The block enforces the gate now recorded in bro's REVIEW.md: missing spec
 touch and either divergence direction are critical, unowned code and
 contradictory specs major. Owns-based checks activate when metadata exists;

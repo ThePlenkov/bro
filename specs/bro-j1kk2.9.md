@@ -1,5 +1,12 @@
 # bro-j1kk2.9 — specs/: curate live specs into site docs, archive the rest
 
+> **Superseded policy** — [bro-y1jtm](sdd/bro-y1jtm.md) replaces the
+> bead-artifact lifecycle below: product specs are never archived on bead
+> closure (removal is a `removed` lifecycle state with provenance in git),
+> and existing `specs/archive/` entries become migration sources under
+> bro-y1jtm.6/.8. This record stays as provenance for the archive pass it
+> documents, not as current policy.
+
 Owner call (2026-10-15): option (a) — promote curated specs into the
 site as design docs, archive the rest under `specs/archive/`, and let
 `specs/README.md` carry the convention.
