@@ -888,7 +888,22 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
     );
     return false;
   }
-  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', ontoBase(wt.path, item.desiredBase), fork]);
+  // The replay is PINNED to the counted commits: `git rebase --onto <base>
+  // <fork> <head>` replays exactly `fork..head` and leaves the branch ref
+  // alone (detached HEAD). Nothing that lands after the count can be
+  // replayed uncounted. The branch then moves by COMPARE-AND-SWAP: if it
+  // moved since the count — the owner committed meanwhile — the swap
+  // fails and the branch is left exactly as the owner left it. A member
+  // whose history changed under the sync is reported, never rewritten.
+  const rb = gitTry([
+    '-C',
+    wt.path,
+    'rebase',
+    '--onto',
+    ontoBase(wt.path, item.desiredBase),
+    fork,
+    head,
+  ]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(
@@ -896,6 +911,17 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
     );
     return false;
   }
+  const replayed = gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', 'HEAD']).out.trim();
+  const swap = gitTry(['-C', wt.path, 'update-ref', `refs/heads/${m.branch}`, replayed, head]);
+  if (swap.code !== 0) {
+    // the branch moved while the replay ran — put the worktree back on it
+    gitTry(['-C', wt.path, 'checkout', m.branch]);
+    lines.push(
+      `  ${m.branch} moved during the rebase (${head.slice(0, 7)} was not the tip anymore) — not rebased; re-run to land the new tip`
+    );
+    return false;
+  }
+  gitTry(['-C', wt.path, 'checkout', m.branch]);
   lines.push(`  ${m.branch} rebased onto ${item.desiredBase}`);
   if (m.pr === undefined) {
     return true;
@@ -972,7 +998,14 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     lines.push(`  ${m.branch} remote gone — worktree left as-is`);
     return false;
   }
-  const before = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim();
+  const before = gitTry([
+    '-C',
+    wt.path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${m.branch}`,
+  ]).out.trim();
   // the platform's rewrite is a rebase too: the range it replays must be
   // free of merge commits, or their resolutions are dropped (bro-dz0u9)
   const fork = gitTry(['-C', wt.path, 'merge-base', 'FETCH_HEAD', 'HEAD']).out.trim();
@@ -987,7 +1020,11 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     lines.push(refusal);
     return false;
   }
-  const rb = gitTry(['-C', wt.path, 'rebase', 'FETCH_HEAD']);
+  // the replay is PINNED to the counted commits (the same shape as the
+  // local rebase): `git rebase --onto FETCH_HEAD <fork> <before>` replays
+  // exactly `fork..before` and leaves the branch ref alone, so nothing
+  // that lands after the count is replayed uncounted
+  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', 'FETCH_HEAD', fork, before]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(
@@ -996,6 +1033,17 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     return false;
   }
   const after = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim();
+  // the branch moves by compare-and-swap: a branch that moved while the
+  // replay ran is left exactly as its owner left it
+  const swap = gitTry(['-C', wt.path, 'update-ref', `refs/heads/${m.branch}`, after, before]);
+  if (swap.code !== 0) {
+    gitTry(['-C', wt.path, 'checkout', m.branch]);
+    lines.push(
+      `  ${m.branch} moved during the follow (${before.slice(0, 7)} was not the tip anymore) — not rebased; re-run to land the new tip`
+    );
+    return false;
+  }
+  gitTry(['-C', wt.path, 'checkout', m.branch]);
   lines.push(
     before === after
       ? `  ${m.branch} already on the rewritten remote`
