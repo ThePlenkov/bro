@@ -3,6 +3,8 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,6 +18,7 @@ import { otelJournal, type AcpTerminals } from '@broject/providers';
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
 import type { ConductorConfig } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
+import { scrubEnv } from '@broject/core';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -145,6 +148,7 @@ describe('conductorConfig', () => {
   // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
   // in ~/.config/bro would leak a backend into the 'unset env' assertions;
   // this suite reads an empty global config dir instead
+  after(scrubEnv());
   const prevXdg = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'));
   after(() => {
@@ -198,6 +202,60 @@ describe('conductorConfig', () => {
       );
       assert.equal(cfg?.timeoutMs, 120_000, raw);
     }
+  });
+  test('the provider windows read the config, and the env pins win', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: {
+          backend: 'dv-acp',
+          idleReleaseMs: 60_000,
+          acpMaxOpens: 4,
+          acpMaxAbandoned: 16,
+          acpStallMs: 120_000,
+        },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    const cfg = conductorConfig({}, dir);
+    assert.equal(cfg?.idleReleaseMs, 60_000);
+    assert.equal(cfg?.acpMaxOpens, 4);
+    assert.equal(cfg?.acpMaxAbandoned, 16);
+    assert.equal(cfg?.acpStallMs, 120_000);
+    // the env pins are the operator's explicit knob — they win
+    const pinned = conductorConfig(
+      {
+        BRO_PROVIDER_IDLE_RELEASE_MS: '0',
+        BRO_PROVIDER_ACP_MAX_OPENS: '2',
+        BRO_PROVIDER_ACP_MAX_ABANDONED: '8',
+        BRO_PROVIDER_ACP_STALL_MS: '30000',
+      },
+      dir
+    );
+    assert.equal(pinned?.idleReleaseMs, 0);
+    assert.equal(pinned?.acpMaxOpens, 2);
+    assert.equal(pinned?.acpMaxAbandoned, 8);
+    assert.equal(pinned?.acpStallMs, 30_000);
+    // a garbage pin falls back to the file's value
+    const garbage = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: 'abc' }, dir);
+    assert.equal(garbage?.acpStallMs, 120_000);
+    // a FRACTIONAL value is not a window nor a count: it must not floor
+    // into 0 and switch the watchdog off, nor become a 0.5 budget that
+    // refuses the first open
+    const fractional = conductorConfig(
+      { BRO_PROVIDER_ACP_STALL_MS: '0.5', BRO_PROVIDER_ACP_MAX_OPENS: '0.5' },
+      dir
+    );
+    assert.equal(fractional?.acpStallMs, 120_000);
+    assert.equal(fractional?.acpMaxOpens, 4);
+    // a window above node's timer ceiling is clamped — late, not instant
+    const huge = conductorConfig({ BRO_PROVIDER_IDLE_RELEASE_MS: '9999999999' }, dir);
+    assert.equal(huge?.idleReleaseMs, 2_147_483_647);
+    // the stall bound takes the same clamp — an oversized pin must not
+    // wrap the watchdog into firing at once
+    const hugeStall = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: '9999999999' }, dir);
+    assert.equal(hugeStall?.acpStallMs, 2_147_483_647);
   });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
@@ -456,6 +514,78 @@ describe('conductorConfig', () => {
     assert.equal(
       (cfg?.routes ?? []).some(r => r.entry === 'idle-acp'),
       false
+    );
+  });
+  test('the fast lane arms on the upstream key pair — env pins win (bro-6asnu)', () => {
+    const env = { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_API_KEY: 'k' };
+    const cfg = conductorConfig(env, '/r', providers);
+    assert.equal(cfg?.fast?.upstream, 'https://api.anthropic.com');
+    assert.equal(cfg?.fast?.apiKey, 'k');
+    assert.equal(cfg?.fast?.model, undefined);
+    assert.equal(cfg?.fast?.maxTokens, 2048);
+    // every pin: upstream host, model rewrite, classification cap
+    const pinned = conductorConfig(
+      {
+        ...env,
+        BRO_PROVIDER_UPSTREAM: 'http://up.example/v1/',
+        BRO_PROVIDER_FAST_MODEL: 'haiku-x',
+        BRO_PROVIDER_FAST_MAX_TOKENS: '512',
+      },
+      '/r',
+      providers
+    );
+    assert.equal(pinned?.fast?.upstream, 'http://up.example/v1');
+    assert.equal(pinned?.fast?.model, 'haiku-x');
+    assert.equal(pinned?.fast?.maxTokens, 512);
+    // a non-positive cap falls back to the default
+    assert.equal(
+      conductorConfig({ ...env, BRO_PROVIDER_FAST_MAX_TOKENS: '0' }, '/r', providers)?.fast
+        ?.maxTokens,
+      2048
+    );
+    // the ambient credential fallbacks arm it like the byte proxy does
+    assert.equal(
+      conductorConfig(
+        { BRO_PROVIDER_BACKEND: 'dv-acp', ANTHROPIC_AUTH_TOKEN: 't' },
+        '/r',
+        providers
+      )?.fast?.apiKey,
+      't'
+    );
+    // no key at all → unarmed, fast shapes still conduct
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.fast,
+      undefined
+    );
+    // the off switch — every spelling
+    for (const flag of ['off', '0', 'false', 'OFF']) {
+      assert.equal(
+        conductorConfig({ ...env, BRO_PROVIDER_FAST_LANE: flag }, '/r', providers)?.fast,
+        undefined,
+        flag
+      );
+    }
+  });
+
+  test('serve.fastModel + serve.fastLane ride the config file (bro-6asnu)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fast-'));
+    const write = (serve: Record<string, unknown>) =>
+      writeFileSync(
+        join(dir, 'bro.config.local.json'),
+        JSON.stringify({
+          serve,
+          providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+        })
+      );
+    write({ backend: 'dv-acp', fastLane: false });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast, undefined);
+    write({ backend: 'dv-acp', fastModel: 'haiku-cfg' });
+    assert.equal(conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir)?.fast?.model, 'haiku-cfg');
+    // env wins over the committed pin
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_API_KEY: 'k', BRO_PROVIDER_FAST_MODEL: 'env-m' }, dir)?.fast
+        ?.model,
+      'env-m'
     );
   });
 });
@@ -2835,6 +2965,217 @@ describe('serve /v1/* — the bridge keeps the answer honest', () => {
         }),
       });
       assert.equal(second.status, 400);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// --- the fast lane (bro-6asnu) ------------------------------------------
+// A classifier-shaped /v1/messages call byte-forwards to the direct
+// upstream instead of paying session/new.
+
+/** A canned Messages upstream — records every forwarded call and
+ *  answers a fixed anthropic reply; stands in for api.anthropic.com. */
+async function upstreamStub(): Promise<{
+  url: string;
+  calls: { path?: string; apiKey?: string; body: { model?: string } }[];
+  close: () => Promise<void>;
+}> {
+  const calls: { path?: string; apiKey?: string; body: { model?: string } }[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', c => {
+      raw += c;
+    });
+    req.on('end', () => {
+      calls.push({
+        path: req.url,
+        apiKey: req.headers['x-api-key'] as string | undefined,
+        body: JSON.parse(raw === '' ? '{}' : raw) as { model?: string },
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'msg_up',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'upstream-answer' }],
+          model: 'upstream-model',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 7, output_tokens: 3 },
+        })
+      );
+    });
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    calls,
+    close: () => new Promise<void>(r => server.close(() => r())),
+  };
+}
+
+describe('conductor fast lane (bro-6asnu)', () => {
+  /** fast-lane cfg pointing at the test's stub upstream. */
+  const fastCfg = (upstream: string, model?: string): ConductorConfig => ({
+    ...CFG,
+    fast: { upstream, apiKey: 'up-key', model, maxTokens: 2048 },
+  });
+
+  const CLASSIFIER_BODY = {
+    model: 'dv-acp/swe-2-max',
+    max_tokens: 512,
+    messages: [
+      {
+        role: 'user',
+        content:
+          'Evaluate whether this tool call is safe: {"name":"Bash","input":{"command":"rm x"}}',
+      },
+    ],
+    stream: false,
+  };
+
+  test('a classifier-shaped call byte-forwards upstream — no session/new', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'session answer' });
+    const { r, close } = await postMessages(fake, CLASSIFIER_BODY, fastCfg(up.url));
+    try {
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'upstream-answer');
+      // the whole call rode the upstream — credential swapped, path and
+      // model forwarded verbatim (no pin configured)
+      assert.equal(up.calls.length, 1);
+      assert.equal(up.calls[0]?.path, '/v1/messages');
+      assert.equal(up.calls[0]?.apiKey, 'up-key');
+      assert.equal(up.calls[0]?.body.model, 'dv-acp/swe-2-max');
+      // and no acp session was paid
+      assert.equal(fake.sessions.length, 0);
+      assert.equal(fake.prompts.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('fast.model rewrites the forwarded body — the inherited-lane fix', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'x' });
+    const { r, close } = await postMessages(
+      fake,
+      CLASSIFIER_BODY,
+      fastCfg(up.url, 'claude-haiku-4-5')
+    );
+    try {
+      assert.equal(r.status, 200);
+      // the conductor-only id never reaches the upstream
+      assert.equal(up.calls[0]?.body.model, 'claude-haiku-4-5');
+      assert.equal(fake.sessions.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a tool-carrying call conducts even inside the token cap', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        tools: [{ name: 'Bash', description: 'run', input_schema: {} }],
+        messages: [{ role: 'user', content: 'x' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('a session-scale cap conducts — compaction stays on the session lane', async () => {
+    const up = await upstreamStub();
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, fastCfg(up.url));
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 32_000,
+        messages: [{ role: 'user', content: 'summarize the whole thread' }],
+        stream: false,
+      });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+      assert.equal(up.calls.length, 0);
+    } finally {
+      await close();
+      await up.close();
+    }
+  });
+
+  test('an unarmed lane still conducts the fast-shaped call', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake); // CFG carries no fast lane
+    try {
+      const r = await post({ ...CLASSIFIER_BODY, model: undefined });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { content: { text: string }[] };
+      assert.equal(body.content[0]?.text, 'agent answer');
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a config-disabled lane conducts the fast-shaped call even with a key', async () => {
+    // serve.fastLane:false resolves to fast:undefined — the wire sees
+    // exactly this cfg; boot it end-to-end so the disable is honored
+    // through the routing decision, not just the config read
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-fastoff-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', fastLane: false },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      })
+    );
+    const cfg = conductorConfig({ BRO_PROVIDER_API_KEY: 'k' }, dir);
+    assert.equal(cfg?.fast, undefined);
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake, cfg as ConductorConfig);
+    try {
+      // model must name an id the agent actually serves — the routed
+      // gateway validates the id against the catalog, unlike bare CFG
+      const r = await post({ ...CLASSIFIER_BODY, model: 'swe-x' });
+      assert.equal(r.status, 200);
+      assert.equal(fake.sessions.length, 1);
+    } finally {
+      await close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a fast-shaped streamed call conducts over SSE when the lane is unarmed', async () => {
+    const fake = fakeAcpAgent({ replyText: 'agent answer', configOptions: [MODEL_OPTION] });
+    const { post, close } = await boot(fake);
+    try {
+      const r = await post({
+        model: 'x',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: 'x' }],
+        stream: true,
+      });
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.equal(fake.sessions.length, 1);
+      await r.text(); // drain the stream so the server can close
     } finally {
       await close();
     }

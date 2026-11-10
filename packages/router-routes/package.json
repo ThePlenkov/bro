@@ -43,5 +43,9 @@
     "toml",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }

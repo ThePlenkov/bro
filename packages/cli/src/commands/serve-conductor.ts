@@ -27,15 +27,23 @@ import { join } from 'node:path';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
 import {
+  admitSessionStartAsync,
   estimateTokens,
   gitCommonDir,
   isIntegerIndexKey,
   loadConfig,
+  LockTimeout,
+  MAX_TIMER_MS,
+  planesStartingSessions,
+  releaseSessionStart,
   reserveSessionStart,
   sessionCapViews,
+  SpawnError,
+  type SessionStartAdmission,
 } from '@broject/core';
 import type {
   AcpContentBlock,
+  AcpGuardCtx,
   AcpPeer,
   AcpRetainedSession,
   AcpTerminals,
@@ -48,6 +56,8 @@ import {
   acpOpen,
   acpPooledTurn,
   acpSessionRetain,
+  AcpDeadLoopError,
+  AcpDeadLoopGuard,
   otelEvent,
   otelJournal,
   otelParent,
@@ -59,6 +69,7 @@ import { peerAttrs } from './peer.ts';
 import { type CatalogModel, catalogModels } from './providers.ts';
 import { clientCall, OPEN_CONTRACT, type ToolContract } from './serve-conductor-bridge.ts';
 import { type ClientTool, clientTools } from './serve-conductor-tools.ts';
+import { forwardBody, providerConfig, type ProviderConfig } from './serve-provider.ts';
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
@@ -100,10 +111,40 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number;
+  /** The fast lane (spec bro-6asnu) — classifier-shaped calls
+   *  byte-forward to the direct upstream instead of paying
+   *  session/new. Absent when the lane is disabled or no upstream
+   *  key is configured. */
+  fast?: FastLane;
+  /** Set when FAST_LANE=off|0|false or serve.fastLane:false killed the
+   *  lane — a disabled lane is intentional routing, not a missing
+   *  upstream key, so `unrouted` must not claim one. */
+  fastDisabled?: boolean;
   /** The `agents.<kind>` bags — the session cap's knobs (spec
    *  bro-bww9v). Read once at startup: the cap is a policy, not a
    *  per-request config reload. */
   agents: Record<string, Record<string, unknown>>;
+  /** The dead-loop budgets (spec bro-b961a) — sessions opened and not
+   *  completed, per conversation (maxOpens) and per peer
+   *  (maxAbandoned). Absent = the defaults. */
+  acpMaxOpens?: number;
+  acpMaxAbandoned?: number;
+  /** The silence bound per turn, ms — a turn that produces no
+   *  `session/update` for this long is ended. 0 disables the watchdog. */
+  acpStallMs?: number;
+  /** The idle window — the pooled peer is released after it (spec
+   *  bro-7ira8). 0 disables the release; the /api/v1/acp transport keeps
+   *  its peer (the client owns that conversation's lifetime). */
+  idleReleaseMs?: number;
+}
+
+/** The fast lane — the byte proxy's upstream pair plus the routing
+ *  knobs: `model` rewrites the forwarded body when the client names
+ *  a conductor-only id (devin/swe-2-max), `maxTokens` is the
+ *  classifier shape's output cap. */
+export interface FastLane extends ProviderConfig {
+  model?: string;
+  maxTokens: number;
 }
 
 /** The routes a config answers to — the config's own table, or the
@@ -127,6 +168,49 @@ export function routeBindings(cfg: ConductorConfig): RouteBinding[] {
 function positiveEnvInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const raw = Number(env[key]);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+/** A whole-number env pin, else the fallback — a budget is a COUNT, and
+ *  a fractional one is not a count (0.5 would refuse the first open). */
+function positiveIntEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num > 0 ? num : fallback;
+}
+
+/** The idle window (spec bro-7ira8) — the env pin wins over the file,
+ *  and 0 is a deliberate "keep the peer". A fractional value is not a
+ *  window; a window above the timer ceiling is clamped (late, not
+ *  instant). */
+function idleWindow(env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env.BRO_PROVIDER_IDLE_RELEASE_MS?.trim();
+  if (raw === undefined || raw === '') {
+    return Math.min(fallback, MAX_TIMER_MS);
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
+}
+
+/** The silence bound (spec bro-b961a) — the env pin wins over the file,
+ *  and 0 is a deliberate "off". A negative or fractional value is not a
+ *  window at all, so the fallback wins (a fractional 0.5 must not floor
+ *  into 0 and silently switch the watchdog OFF). A window above the
+ *  timer ceiling is clamped — late, not instant (the watchdog would
+ *  fire at once on a wrapped delay). */
+function stallWindow(env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env.BRO_PROVIDER_ACP_STALL_MS?.trim();
+  if (raw === undefined || raw === '') {
+    return Math.min(fallback, MAX_TIMER_MS);
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or
@@ -214,6 +298,41 @@ function resolveCatalog(
 /** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
  *  no registry knows is a loud startup error naming what IS configured,
  *  never a silent fall back to the byte proxy. */
+/** The fast-lane resolution (spec bro-6asnu) — the direct upstream is
+ *  the byte proxy's own pair: the conductor intercepts `/v1/*` ahead of
+ *  it, so the same env that would have proxied becomes the lane.
+ *  `BRO_PROVIDER_FAST_LANE=off|0|false` or `serve.fastLane:false`
+ *  returns every call to the session lane; no upstream key leaves the
+ *  lane unarmed (fast-shaped calls still conduct). */
+/** The disable half of the lane's arming — kept apart so `unrouted`
+ *  means "no upstream key", never "operator turned it off". */
+function fastLaneDisabled(env: NodeJS.ProcessEnv, serve: { fastLane?: boolean }): boolean {
+  const flag = env.BRO_PROVIDER_FAST_LANE?.trim().toLowerCase();
+  return flag === 'off' || flag === '0' || flag === 'false' || serve.fastLane === false;
+}
+
+function resolveFastLane(
+  env: NodeJS.ProcessEnv,
+  serve: { upstream?: string; apiKeyEnv?: string; fastModel?: string; fastLane?: boolean }
+): FastLane | undefined {
+  if (fastLaneDisabled(env, serve)) {
+    return undefined;
+  }
+  // the file layer's upstream/apiKeyEnv resolves exactly like the byte
+  // proxy's — a config-only upstream must steer the lane, never send
+  // credentials to the default host instead
+  const pair = providerConfig(env, serve);
+  if (pair === undefined) {
+    return undefined;
+  }
+  const model = env.BRO_PROVIDER_FAST_MODEL?.trim();
+  return {
+    ...pair,
+    model: model === undefined || model === '' ? serve.fastModel : model,
+    maxTokens: positiveEnvInt(env, 'BRO_PROVIDER_FAST_MAX_TOKENS', FAST_MAX_TOKENS),
+  };
+}
+
 export function conductorConfig(
   env: NodeJS.ProcessEnv,
   dir: string,
@@ -301,8 +420,20 @@ export function conductorConfig(
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
+    fast: resolveFastLane(env, cfg.serve),
+    fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
+    // the dead-loop budgets (spec bro-b961a) — the env pin wins over the
+    // file, like BRO_PROVIDER_TIMEOUT_MS
+    acpMaxOpens: positiveIntEnv(env, 'BRO_PROVIDER_ACP_MAX_OPENS', cfg.serve?.acpMaxOpens ?? 8),
+    acpMaxAbandoned: positiveIntEnv(
+      env,
+      'BRO_PROVIDER_ACP_MAX_ABANDONED',
+      cfg.serve?.acpMaxAbandoned ?? 32
+    ),
+    acpStallMs: stallWindow(env, cfg.serve?.acpStallMs ?? 300_000),
+    idleReleaseMs: idleWindow(env, cfg.serve?.idleReleaseMs ?? 300_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
   };
 }
@@ -345,6 +476,9 @@ interface MessagesRequest {
   tool_choice?: { type?: string; name?: string };
   stop_sequences?: string[];
   stream?: boolean;
+  /** API-required output cap — the fast lane's shape signal (spec
+   *  bro-6asnu): internal calls cap ≤ ~1k, session turns ask 32k. */
+  max_tokens?: number;
 }
 
 // --- translation -----------------------------------------------------
@@ -624,6 +758,10 @@ interface ConvSession {
   lastReply: ReplyView;
   busy: boolean;
   lastSeen: number;
+  /** The session-cap claim this session holds — released when the
+   *  session is disposed (spec bro-b961a): a claim that outlived its
+   *  session ate the cap's budget until the TTL expired it. */
+  releaseCap?: () => void;
 }
 
 /** One settled reply as the wire renders it — buffered, streamed, or
@@ -708,6 +846,7 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
     if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
       sessions.delete(k);
       disposeQuiet(s.live);
+      releaseClaim(s);
     }
   }
 }
@@ -717,8 +856,16 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
 function dropSessions(sessions: Map<string, ConvSession>): void {
   for (const s of sessions.values()) {
     disposeQuiet(s.live);
+    releaseClaim(s);
   }
   sessions.clear();
+}
+
+/** The session-cap claim of a disposed session — the slot it held goes
+ *  back to the cap (spec bro-b961a). The release is idempotent, so a
+ *  session that dies twice never releases twice. */
+function releaseClaim(conv: ConvSession): void {
+  conv.releaseCap?.();
 }
 
 /** Drop a session handle without surfacing transport noise — the
@@ -750,6 +897,12 @@ export interface AcpLinkPool {
   /** `cb` runs when the pooled transport dies — the caller drops every
    *  session the dead link carried before the next link() respawns. */
   onDeath(cb: () => void): void;
+  /** A turn started on the peer — the idle release waits for it (spec
+   *  bro-7ira8): a peer that is answering is not idle. */
+  busy(): void;
+  /** The turn settled — the peer may be released once the idle window
+   *  passes (spec bro-7ira8). */
+  idle(): void;
   /** Teardown — a link resolving after dispose is killed on sight
    *  instead of resurrecting the pool; the live peer leaves pooledPeers
    *  and is closed. A pending handshake is the caller's signal handle
@@ -770,7 +923,8 @@ export function acpLinkPool(
   by: string,
   entry: AcpEntry,
   opts: ProviderWireOpts,
-  timeoutMs: number
+  timeoutMs: number,
+  idleReleaseMs = 0
 ): AcpLinkPool {
   let link: Promise<AcpPeer> | undefined;
   let live: AcpPeer | undefined;
@@ -778,6 +932,60 @@ export function acpLinkPool(
   // peer is killed on sight instead of being retained unowned
   let disposed = false;
   const deathHooks: Array<() => void> = [];
+  // the turns in flight on the peer — a peer that is answering is not
+  // idle, so the release waits for it (spec bro-7ira8)
+  let inflight = 0;
+  /** The idle release timer — unref'd, so it never holds the process. */
+  let idleTimer: NodeJS.Timeout | undefined;
+  const clearIdleTimer = (): void => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+  /** The peer is gone — the pool forgets it, the caller's sessions die
+   *  with it, and the next link() respawns. ONE path for every death:
+   *  the transport's abort, the idle release, the dispose. */
+  const deadPeers = new WeakSet<AcpPeer>();
+  const dropPeer = (p: AcpPeer): void => {
+    if (deadPeers.has(p)) {
+      return;
+    }
+    deadPeers.add(p);
+    clearIdleTimer();
+    link = undefined;
+    live = undefined;
+    pooledPeers.delete(p);
+    for (const cb of deathHooks) {
+      cb();
+    }
+  };
+  /** Arm the idle release — the peer is released when the window passes
+   *  with no turn in flight. 0 disables the release entirely. */
+  const armIdleRelease = (): void => {
+    clearIdleTimer();
+    if (idleReleaseMs <= 0 || disposed || live === undefined) {
+      return;
+    }
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (disposed || live === undefined) {
+        return;
+      }
+      if (inflight > 0) {
+        // a turn is running — look again when it settles
+        armIdleRelease();
+        return;
+      }
+      // the peer is idle: release it. The child dies with the link, the
+      // retained sessions die with it, and the next request respawns.
+      otelEvent('acp.idle_release', { backend: by });
+      const p = live;
+      dropPeer(p);
+      p.close();
+    }, idleReleaseMs);
+    idleTimer.unref?.();
+  };
   // close() is sync, safe in an 'exit' handler; an in-flight link
   // resolve is a ms-scale window.
   if (!poolExitArmed) {
@@ -795,6 +1003,14 @@ export function acpLinkPool(
   return {
     onDeath: cb => deathHooks.push(cb),
     live: () => live,
+    busy: () => {
+      inflight += 1;
+      clearIdleTimer();
+    },
+    idle: () => {
+      inflight = Math.max(0, inflight - 1);
+      armIdleRelease();
+    },
     link(parent) {
       if (link === undefined) {
         otelEvent('acp.spawn', { backend: by });
@@ -808,22 +1024,11 @@ export function acpLinkPool(
             }
             live = p;
             pooledPeers.add(p);
+            armIdleRelease();
             // a peer aborted BEFORE the listener attaches never fires
             // it — replay the dead state or the pool keeps serving a
             // corpse and the session cleanup never runs (amazon-q #581)
-            let dead = false;
-            const onDead = (): void => {
-              if (dead) {
-                return;
-              }
-              dead = true;
-              link = undefined;
-              live = undefined;
-              pooledPeers.delete(p);
-              for (const cb of deathHooks) {
-                cb();
-              }
-            };
+            const onDead = (): void => dropPeer(p);
             p.signal.addEventListener('abort', onDead, { once: true });
             if (p.signal.aborted) {
               onDead();
@@ -836,6 +1041,7 @@ export function acpLinkPool(
     },
     dispose() {
       disposed = true;
+      clearIdleTimer();
       const p = live;
       live = undefined;
       link = undefined;
@@ -1659,6 +1865,7 @@ function evict(
     sessions.delete(key);
   }
   disposeQuiet(conv.live);
+  releaseClaim(conv);
 }
 
 type PooledReply = Awaited<ReturnType<typeof acpPooledTurn>>;
@@ -1703,6 +1910,12 @@ interface TurnEnv {
   signal: AbortSignal;
   by: string;
   imageOk: boolean;
+  /** The lane's dead-loop guard (spec bro-b961a) — the churn measure
+   *  behind every session this turn opens. */
+  guard: AcpDeadLoopGuard;
+  /** The lane's pool — the turn marks it busy so the idle release
+   *  (spec bro-7ira8) never fires under a running turn. */
+  pool: AcpLinkPool;
   /** Called the moment a real turn is chosen (never on replay or a
    *  failed open) — it commits the wire to SSE and hands back the
    *  session-update sink the prompt pump streams deltas into
@@ -1817,7 +2030,95 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  Fails CLOSED: a cap that cannot be established is not walked past.
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
-function assertSessionCap(env: TurnEnv, claimKey: string): void {
+async function assertSessionCap(env: TurnEnv, claimKey: string): Promise<() => void> {
+  const command = env.cfg.entry.command;
+  // the serialized check+claim — under the kind's OWN admission mutex,
+  // the same lock the spawn's admission takes, so a request burst and
+  // a fleet spawn share ONE budget. The wait is the yielding form —
+  // the sync admission's Atomics.wait would park the conductor's one
+  // event loop for the whole contention, stalling every request,
+  // timer, and stream behind it.
+  // EVERY capped plane claiming the command is judged: a refusal on a
+  // later plane still refuses the request, and the claims earlier
+  // planes already took are released — a refused request opens
+  // nothing, so it may hold no slot (the guard's sessionCapVerdict
+  // takes the same shape).
+  const admissions: SessionStartAdmission[] = [];
+  let refusal: string | undefined;
+  try {
+    for (const plane of planesStartingSessions(command)) {
+      const admission = await admitSessionStartAsync({
+        plane,
+        command,
+        agents: env.cfg.agents,
+        key: claimKey,
+        // the retained conversations the plane cannot see — they ride
+        // one shared peer — count with the host's inside the lock
+        extraLive: env.sessions.size,
+        waitMs: CAP_LOCK_WAIT_MS,
+      });
+      if (admission === undefined) {
+        continue;
+      }
+      if (admission.refusal !== undefined) {
+        refusal = admission.refusal;
+        break;
+      }
+      admissions.push(admission);
+    }
+  } catch (err) {
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    if (err instanceof LockTimeout) {
+      // the mutex outlived the wait — contention is not a reason to
+      // refuse a request; the un-locked check+claim still enforces
+      return assertSessionCapUnlocked(env, claimKey);
+    }
+    if (err instanceof SpawnError) {
+      // the count could not be established — fail closed, with the
+      // reason the operator needs (a quota that cannot be verified is
+      // not walked past)
+      throw new Error(
+        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+      );
+    }
+    // a slot the ACP surface cannot claim refuses the request too — a
+    // session whose claim the budget never saw is exactly the
+    // unbudgeted session this change exists to stop
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    );
+  }
+  if (refusal !== undefined) {
+    releaseSessionStart(admissions.flatMap(a => a.paths));
+    throw new Error(refusal);
+  }
+  return claimRelease(admissions.flatMap(a => a.paths));
+}
+
+/** The claim's release — the slot this request holds, given back when
+ *  the session it covers is gone. A claim that outlives its session
+ *  eats the cap's budget until the TTL expires it, so a retry loop
+ *  would exhaust the cap on top of the quota it already burns
+ *  (spec bro-b961a). Releasing twice is a no-op. */
+function claimRelease(paths: string[]): () => void {
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    releaseSessionStart(paths);
+  };
+}
+
+/** The conductor's lock wait on the admission mutex — a request stalled
+ *  past this degrades to the un-locked check+claim rather than hang on
+ *  a wedged holder. */
+const CAP_LOCK_WAIT_MS = 5_000;
+
+/** The un-locked check+claim — the path the conductor ran before the
+ *  admission mutex serialized it, kept as the contention fallback. */
+function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): () => void {
   let views;
   try {
     views = sessionCapViews(env.cfg.entry.command, env.cfg.agents);
@@ -1842,24 +2143,22 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
   if (refusal !== undefined) {
     throw new Error(refusal);
   }
-  // the slot is claimed, not just counted: a burst of parallel requests
-  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
-  // surface fails CLOSED here — a request that cannot record its claim
-  // must not open a session the budget does not know about.
   if (view !== undefined) {
     try {
-      reserveSessionStart({
+      const { paths } = reserveSessionStart({
         kind: view.kind,
         agents: env.cfg.agents,
         key: claimKey,
         count: view.starts,
       });
+      return claimRelease(paths);
     } catch (err) {
       throw new Error(
         `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
       );
     }
   }
+  return claimRelease([]);
 }
 
 /** The one-shot path — a session on the shared peer, nothing retained. */
@@ -1874,6 +2173,10 @@ async function oneShotTurn(
     requestModel: env.requestModel,
     parent: env.parent,
     onUpdate: env.openStream?.(inputTokens),
+    // the churn accounting (spec bro-b961a) — the session this turn
+    // opens is charged to the conversation it belongs to
+    guard: guardCtx(env),
+    stallMs: env.cfg.acpStallMs ?? 300_000,
   });
   return { reply, reused: false, inputTokens, replay: false };
 }
@@ -1888,11 +2191,17 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   // the cap before a session is opened — both paths open one
   // each request opens its own session — the claim is per request, not
   // per backend (one shared claim would let every request reuse it)
-  assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`);
+  const releaseCap = await assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`);
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
-    return oneShotTurn(env, prompt, inputTokens);
+    try {
+      return await oneShotTurn(env, prompt, inputTokens);
+    } finally {
+      // the one-shot session is disposed when the turn settles — the
+      // slot it held goes back to the cap (spec bro-b961a)
+      releaseCap();
+    }
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose
@@ -1906,6 +2215,9 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       by: env.by,
       requestModel: env.requestModel,
       parent: env.parent,
+      // the churn accounting + the silence bound (spec bro-b961a)
+      guard: guardCtx(env),
+      stallMs: env.cfg.acpStallMs ?? 300_000,
     });
     const reply = await live.prompt(prompt, env.deadline, {
       signal: env.signal,
@@ -1924,6 +2236,8 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
       busy: false,
       lastSeen: Date.now(),
+      // the session holds the cap's slot until it is disposed
+      releaseCap,
     };
     return { reply, reused: false, inputTokens, replay: false, conv };
   } catch (err) {
@@ -1932,6 +2246,10 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
     if (live !== undefined) {
       disposeQuiet(live);
     }
+    // the session is gone — the slot it held goes back to the cap
+    // (spec bro-b961a): a claim that outlives its session eats the
+    // budget until the TTL expires it
+    releaseCap();
     throw err;
   } finally {
     env.pendingOpens.delete(key);
@@ -1959,34 +2277,44 @@ function chainWhy(cand: ConvSession | undefined, env: TurnEnv): string | undefin
 /** One request's acp turn — proves a stored conversation (or evicts a
  *  stale one), then routes to continuation/fresh/one-shot. */
 async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
-  sweepSessions(env.sessions, Date.now());
-  const cand = env.key !== undefined ? env.sessions.get(env.key) : undefined;
-  if (env.chained === true) {
-    // chained routing is strict: the named predecessor must still sit
-    // at the recorded point — else fail loudly, never answer
-    // history-less.
-    const why = chainWhy(cand, env);
-    if (why !== undefined) {
-      throw new ChainBroken(`previous_response_id ${why}`);
+  // the peer is busy for the turn's duration — the idle release waits
+  // for it (spec bro-7ira8): a peer that is answering is not idle
+  env.pool.busy();
+  try {
+    sweepSessions(env.sessions, Date.now());
+    const cand = env.key !== undefined ? env.sessions.get(env.key) : undefined;
+    if (env.chained === true) {
+      // chained routing is strict: the named predecessor must still sit
+      // at the recorded point — else fail loudly, never answer
+      // history-less.
+      const why = chainWhy(cand, env);
+      if (why !== undefined) {
+        throw new ChainBroken(`previous_response_id ${why}`);
+      }
+      // awaited — the pool must stay busy until the turn settles: a
+      // returned promise releases the peer while the turn is still
+      // running, and the idle release can drop it mid-flight
+      return await continuationTurn(env, cand as ConvSession);
     }
-    return continuationTurn(env, cand as ConvSession);
+    const usable =
+      cand !== undefined &&
+      cand.peer === env.peer &&
+      !cand.busy &&
+      cand.consumed <= env.msgs.length &&
+      hashTurns(env.prefix, env.msgs, cand.consumed, env.stopKey) === cand.historyHash;
+    if (usable === true) {
+      return await continuationTurn(env, cand);
+    }
+    const candBusy = cand?.busy === true;
+    if (cand !== undefined && !candBusy && env.key !== undefined) {
+      // a stale key — the stored context never proved this client;
+      // its session is poison for THIS conversation, retire it
+      evict(env.sessions, env.key, cand);
+    }
+    return await freshTurn(env, candBusy);
+  } finally {
+    env.pool.idle();
   }
-  const usable =
-    cand !== undefined &&
-    cand.peer === env.peer &&
-    !cand.busy &&
-    cand.consumed <= env.msgs.length &&
-    hashTurns(env.prefix, env.msgs, cand.consumed, env.stopKey) === cand.historyHash;
-  if (usable === true) {
-    return continuationTurn(env, cand);
-  }
-  const candBusy = cand?.busy === true;
-  if (cand !== undefined && !candBusy && env.key !== undefined) {
-    // a stale key — the stored context never proved this client;
-    // its session is poison for THIS conversation, retire it
-    evict(env.sessions, env.key, cand);
-  }
-  return freshTurn(env, candBusy);
 }
 
 /** The wire surface `messages` needs — one listener's cfg, provider
@@ -2027,6 +2355,9 @@ interface ProviderLane {
   pool: AcpLinkPool;
   sessions: Map<string, ConvSession>;
   pendingOpens: Map<string, number>;
+  /** The lane's dead-loop guard (spec bro-b961a) — one per lane, so a
+   *  conversation's churn is counted against its own provider. */
+  guard: AcpDeadLoopGuard;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -2097,9 +2428,13 @@ function turnError(
   const msg = err instanceof Error ? err.message : String(err);
   const avail = AVAIL.test(msg);
   const rate = RATE.test(msg);
+  // the dead-loop refusal (spec bro-b961a) — the churn was stopped
+  // before it cost a session; the client waits and tries again
+  const deadLoop = err instanceof AcpDeadLoopError ? err : undefined;
   let liveType = 'api_error';
   if (avail) liveType = 'overloaded_error';
   if (rate) liveType = 'rate_limit_error';
+  if (deadLoop) liveType = 'rate_limit_error';
   if (live !== undefined) {
     live.error(liveType, `bro conductor: ${msg}`);
     res.end();
@@ -2115,6 +2450,18 @@ function turnError(
   if (avail) status = 529;
   if (rate) status = 429;
   if (rate) res.setHeader('retry-after', '30');
+  if (deadLoop) {
+    // the refusal is the guard's cooldown, not a quota wall
+    status = 429;
+    res.setHeader('retry-after', '60');
+    otelEvent('conductor.deadloop', {
+      backend,
+      scope: deadLoop.scope,
+      kind: deadLoop.kind,
+      opens: deadLoop.opens,
+      budget: deadLoop.budget,
+    });
+  }
   otelEvent('conductor.error', {
     backend,
     status,
@@ -2217,10 +2564,12 @@ function canonicalMessages(body: MessagesRequest): MessagesRequest | undefined {
 async function parseMessagesBody(
   req: IncomingMessage,
   res: ServerResponse
-): Promise<MessagesRequest | undefined> {
+): Promise<{ body: MessagesRequest; raw: string } | undefined> {
   let body: MessagesRequest;
+  let raw: string;
   try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest;
+    raw = await readBody(req);
+    body = JSON.parse(raw) as MessagesRequest;
   } catch (err) {
     if (err instanceof Error && err.message === 'request body too large') {
       tooLarge(req, res);
@@ -2252,7 +2601,7 @@ async function parseMessagesBody(
     );
     return undefined;
   }
-  return canonical;
+  return { body: canonical, raw };
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
@@ -2304,6 +2653,20 @@ function laneTurnEnv(
     // share the agent, so they share the label too
     by: `conductor:${lane.entry}`,
     imageOk: peer.caps?.image === true,
+    guard: lane.guard,
+    pool: lane.pool,
+  };
+}
+
+/** The guard's context for one turn (spec bro-b961a) — the conversation
+ *  the session belongs to, and the peer behind it. A keyless request
+ *  (no history to fingerprint) rides the peer's own scope: it has no
+ *  conversation to attribute, but its churn still counts. */
+function guardCtx(env: TurnEnv): AcpGuardCtx {
+  return {
+    guard: env.guard,
+    scope: env.key ?? `peer:${env.by}`,
+    peer: env.by,
   };
 }
 
@@ -2376,15 +2739,82 @@ function messagesStreamOpener(
   };
 }
 
+/** The default classifier cap — the env pin rides resolveFastLane;
+ *  this is the fallback the shape test uses when the lane is unarmed
+ *  (the unrouted marker still needs a boundary). */
+const FAST_MAX_TOKENS = 2048;
+
+/** The client-internal shape (spec bro-6asnu) — both signals must
+ *  hold: `tools` absent or empty (a claude-code main turn always
+ *  carries the catalog, internal calls never do) AND `max_tokens`
+ *  within the cap (the field is API-required so it is always present;
+ *  internal calls cap ≤ ~1k where session turns ask 32k). Ambiguity
+ *  always resolves to the session lane — a false fast-lane hit would
+ *  answer a real turn with the wrong model, a false session hit only
+ *  costs latency the client already budgets. */
+function fastShaped(body: MessagesRequest, maxTokens: number): boolean {
+  if (body.tools !== undefined && body.tools.length > 0) {
+    return false;
+  }
+  const cap = body.max_tokens;
+  return typeof cap === 'number' && Number.isFinite(cap) && cap > 0 && cap <= maxTokens;
+}
+
+/** The fast-lane decision once per /v1/messages — `fast` forwards
+ *  upstream, `session` conducts. `unrouted` marks a fast-shaped call
+ *  the session lane still answers for lack of an upstream key — the
+ *  observability for "wire a fast upstream". */
+function fastLaneOf(
+  body: MessagesRequest,
+  cfg: ConductorConfig
+): { lane: 'fast' | 'session'; unrouted?: true } {
+  if (!fastShaped(body, cfg.fast?.maxTokens ?? FAST_MAX_TOKENS)) {
+    return { lane: 'session' };
+  }
+  if (cfg.fast !== undefined) {
+    return { lane: 'fast' };
+  }
+  // a disabled lane is the operator's intent — only a missing upstream
+  // key earns the unrouted observability marker
+  return cfg.fastDisabled === true ? { lane: 'session' } : { lane: 'session', unrouted: true };
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
   wire: WireCtx,
   parent: OtelCtx | undefined
 ): Promise<void> {
-  const body = await parseMessagesBody(req, res);
-  if (body === undefined) return;
+  const parsed = await parseMessagesBody(req, res);
+  if (parsed === undefined) return;
+  const { body, raw } = parsed;
   const t0 = Date.now();
+  // the fast lane (spec bro-6asnu) — a classifier-shaped call byte-
+  // forwards to the direct upstream instead of paying session/new
+  const fl = fastLaneOf(body, wire.cfg);
+  otelEvent('conductor.lane', {
+    backend: wire.cfg.backend,
+    lane: fl.lane,
+    ...(fl.unrouted === true ? { unrouted: true } : {}),
+    ...(typeof body.model === 'string' ? { model: body.model.slice(0, 120) } : {}),
+  });
+  if (fl.lane === 'fast') {
+    const fast = wire.cfg.fast as FastLane; // fastLaneOf proved the lane armed
+    // the upstream answers the id the client sent — the model pin
+    // exists for the inherited-lane case (devin/swe-2-max names a
+    // conductor-only wire no upstream serves)
+    // the upstream gets the client's own bytes — the canonicalized body
+    // carries lifted `systemTurns` a strict Messages upstream rejects.
+    // The model pin rewrites the RAW json so no other field changes
+    // shape (the pin exists for the inherited-lane case: devin/swe-2-max
+    // names a conductor-only wire no upstream serves).
+    const payload =
+      fast.model === undefined
+        ? raw
+        : JSON.stringify({ ...(JSON.parse(raw) as Record<string, unknown>), model: fast.model });
+    await forwardBody(req, res, fast, { payload, timeoutMs: wire.cfg.timeoutMs });
+    return;
+  }
   const key = conversationKey(req, body);
   const stopSeqs = stopSeqsOf(body) ?? [];
   const stopKey = stopKeyOf(stopSeqs);
@@ -3005,12 +3435,29 @@ async function parseDialect<T>(
 function openaiFailKind(
   err: unknown,
   msg: string
-): { status: number; stream: string; wire: string } {
+): { status: number; stream: string; wire: string; retryAfter?: string } {
   if (err instanceof ChainBroken) {
     return { status: 400, stream: 'invalid_request_error', wire: 'invalid_request_error' };
   }
+  if (err instanceof AcpDeadLoopError) {
+    // the refusal is the guard's cooldown, not a quota wall (spec
+    // bro-b961a): the churn was stopped before it cost a session, so the
+    // client waits and tries again — the same mapping the transport
+    // path uses, in both openai dialects
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: '60',
+    };
+  }
   if (RATE.test(msg)) {
-    return { status: 429, stream: 'rate_limit_error', wire: 'rate_limit_error' };
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: '30',
+    };
   }
   if (AVAIL.test(msg)) {
     return { status: 503, stream: 'overloaded', wire: 'server_error' };
@@ -3031,7 +3478,7 @@ function openaiFail(
     res.end();
     return;
   }
-  if (kind.status === 429) res.setHeader('retry-after', '30');
+  if (kind.retryAfter !== undefined) res.setHeader('retry-after', kind.retryAfter);
   openaiError(res, kind.status, kind.wire, `bro conductor: ${msg}`);
 }
 
@@ -4403,12 +4850,31 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // same connection. A dead transport drops the link so the next
     // request respawns. The pool belongs to the ENTRY, so two routes
     // over one entry share the agent.
-    const pool = acpLinkPool(`conductor:${entry}`, entryCfg, laneOpts, laneCfg.timeoutMs);
+    const pool = acpLinkPool(
+      `conductor:${entry}`,
+      entryCfg,
+      laneOpts,
+      laneCfg.timeoutMs,
+      // the idle window (spec bro-7ira8) — the request-scoped plane
+      // releases its peer; the /api/v1/acp transport keeps its own
+      laneCfg.idleReleaseMs ?? 300_000
+    );
     // retained conversations — one acp session per client conversation
     // (x-bro-session pin or history fingerprint). Transport death kills
     // every session it carried, so the death hook drops the map.
     const sessions = new Map<string, ConvSession>();
     pool.onDeath(() => dropSessions(sessions));
+    // the lane's churn accounting — one guard per lane (spec bro-b961a)
+    const guard = new AcpDeadLoopGuard({
+      maxOpens: laneCfg.acpMaxOpens ?? 8,
+      maxAbandoned: laneCfg.acpMaxAbandoned ?? 32,
+    });
+    // the peer's churn died with the peer: the replacement is a fresh
+    // child, and it must not be refused for its predecessor's abandoned
+    // sessions (a killed peer that keeps its tally blocks the backend
+    // until the window closes).
+    const peerKey = `conductor:${entry}`;
+    pool.onDeath(() => guard.forgetPeer({ scope: peerKey, peer: peerKey }));
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -4421,6 +4887,7 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // same-key request must not open a twin (the loser would leak
       // unmapped)
       pendingOpens: new Map<string, number>(),
+      guard,
     });
   };
   addLane(cfg.backend, cfg.entry, cfg, {

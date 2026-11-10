@@ -79,8 +79,11 @@ Developing bro itself: see CONTRIBUTING.md.
   is pure infra — its findings arrive as threads, which block on their
   own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
-  currently `"github-advanced-security"`, `"kilo"` (rate limits;
-  advisory, may still be read — `check:docs` fails if this quote rots).
+  currently `"github-advanced-security"`, `"kilo"`, `"sonarcloud"`,
+  `"codescene"` (rate limits / structural deltas; advisory, may still
+  be read — `check:docs` fails if this quote rots; naming a static
+  scanner overrides its must-fix default: findings still read,
+  verdicts don't gate).
   The
   ignore is conditional: a failing ignored check is dropped quietly
   only after `consecutiveFailures` failing heads in a row _with_
@@ -140,6 +143,18 @@ Developing bro itself: see CONTRIBUTING.md.
   budget is shared too — the batch lane spends the account's allowance,
   so it takes only what the operator's own sessions do not need
   (`agents.<kind>.maxBatchWorkers`; spec bro-9h86l).
+- **No spawning beside a foreign agent** — `prepareSpawn` refuses
+  `external agent active` on every spawn path (loop, drive fixers,
+  `bro fleet agents up`, convoy, all backends) while an agent this rig
+  does not own is actively working on the host. External-activity
+  planes (`external-planes.ts` in core) answer per ecosystem: devin
+  session locks minus `BRO_AGENT_ID`/`BRO_HOOKS=0`-badged sessions,
+  opencode `/proc` procs, copilot remote tasks minus this registry's
+  taskIds, live foreign-owned `.work`/`.task` markers. A session is
+  active while its proven stamps sit inside `spawn.externalIdleSec`
+  (default 480s); `spawn.externalBlock: false` is the explicit opt-out.
+  The session-quota lanes and provider walls refuse independently —
+  the exclusion is a second guard, not a replacement (spec bro-eqi2d).
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops
