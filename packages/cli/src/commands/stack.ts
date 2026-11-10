@@ -852,8 +852,13 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
   // member comes out rewritten and the sync says "rebased" — the
   // content is gone. Same corruption class as `stack merge --rebase`,
   // which refuses it (bro-dz0u9, PR #872) — the same counter, the same
-  // wording. The tip is PINNED: the branch is a moving ref, and the
-  // count, the range and the rebase must speak about the same commits.
+  // wording.
+  //
+  // The tip is read ONCE and pins everything downstream: the counted
+  // range is `fork..head`, the replay is exactly that range, and the
+  // branch moves by compare-and-swap against that same `head`. A branch
+  // that moved meanwhile fails the swap — the tip is never re-read, so
+  // the range and the replay can never speak about different commits.
   const head = gitTry([
     '-C',
     wt.path,
@@ -869,23 +874,6 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
   const refusal = mergeCommitRefusal(wt.path, `${fork}..${head}`, m.branch);
   if (refusal !== undefined) {
     lines.push(refusal);
-    return false;
-  }
-  // the branch must not have moved between the count and the rebase: a
-  // commit that landed meanwhile — a MERGE commit — would be replayed
-  // uncounted, and its resolution dropped
-  const headNow = gitTry([
-    '-C',
-    wt.path,
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    `refs/heads/${m.branch}`,
-  ]).out.trim();
-  if (headNow !== head) {
-    lines.push(
-      `  ${m.branch} moved during the merge check (${head.slice(0, 7)} → ${headNow.slice(0, 7)}) — not rebased; re-run to land the new tip`
-    );
     return false;
   }
   // The replay is PINNED to the counted commits: `git rebase --onto <base>
