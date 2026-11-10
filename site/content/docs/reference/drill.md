@@ -10,6 +10,7 @@ description: "Scoped descent over beads: down|up|current|tree|list|report|distil
 | | |
 | --- | --- |
 | group | `work` |
+| npm latest | `0.2.5` |
 | skill | `drill` |
 | config | `drill` in bro.config |
 | plan | `kind = "drill"` (v1) |

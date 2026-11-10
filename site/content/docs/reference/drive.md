@@ -8,6 +8,7 @@ description: "Post-PR review driver — poll act gates, spawn fixer agents, merg
 | | |
 | --- | --- |
 | group | `review` |
+| npm latest | `0.2.5` |
 | skill | `drive` |
 | config | `drive` in bro.config |
 | guide | [commands/fleet](/docs/commands/fleet) |

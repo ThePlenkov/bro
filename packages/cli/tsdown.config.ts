@@ -1,12 +1,12 @@
-import { fileURLToPath } from 'node:url'
-import { defineConfig } from 'tsdown'
-import { collectEmbedded } from './src/embedded.ts'
+import { fileURLToPath } from 'node:url';
+import { defineConfig } from 'tsdown';
+import { collectEmbedded } from './src/embedded.ts';
 
 // The tarball carries the embedded skills/formulas snapshot as a bundle
 // asset (dist/generated/skills-data.json), collected fresh at bundle time —
 // nothing generated is committed to git. skills-data.ts reads it back via a
 // sibling URL when the module runs from an installed package.
-const root = fileURLToPath(new URL('../..', import.meta.url))
+const root = fileURLToPath(new URL('../..', import.meta.url));
 
 // src/opencode.ts is the opencode plugin entry — its loader reads the
 // package's exports["./server"] (see packages/cli/package.json), and it
@@ -18,8 +18,10 @@ const main = defineConfig({
   entry: [
     'src/index.ts',
     'src/plugin.ts',
+    'src/config-schema.ts',
     'src/opencode.ts',
     'src/opencode-tui.ts',
+    'src/opencode-tui-v2.tsx',
     'src/kilo.ts',
   ],
   format: ['esm'],
@@ -34,11 +36,11 @@ const main = defineConfig({
           type: 'asset',
           fileName: 'generated/skills-data.json',
           source: JSON.stringify(collectEmbedded(root)),
-        })
+        });
       },
     },
   ],
-})
+});
 
 /**
  * The pi and omp adapters each get their OWN build.
@@ -59,7 +61,7 @@ const pi = defineConfig({
   format: ['esm'],
   dts: true,
   noExternal: [/^@broject\//],
-})
+});
 
 const omp = defineConfig({
   entry: ['src/adapter/omp.ts'],
@@ -67,6 +69,6 @@ const omp = defineConfig({
   format: ['esm'],
   dts: true,
   noExternal: [/^@broject\//],
-})
+});
 
-export default [main, pi, omp]
+export default [main, pi, omp];
