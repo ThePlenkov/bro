@@ -26,6 +26,7 @@
  *  params.sessionId.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { agent, RequestError } from '@agentclientprotocol/sdk';
 import { AcpServer } from '@agentclientprotocol/sdk/experimental/server';
@@ -39,7 +40,14 @@ import type {
   InitializeResponse,
   NewSessionRequest,
 } from '@agentclientprotocol/sdk';
-import { acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers';
+import {
+  acpSessionRetain,
+  AcpDeadLoopError,
+  AcpDeadLoopGuard,
+  otelEvent,
+  otelParent,
+  otelSpan,
+} from '@broject/providers';
 import type {
   AcpClientBridge,
   AcpPeer,
@@ -74,6 +82,9 @@ interface BrokeredSession {
 interface ConnState {
   /** initialize's clientInfo.name — otel attribution. */
   clientName: string;
+  /** The connection's churn scope (spec bro-b961a) — one client
+   *  connection's own session churn is measured against it. */
+  scope: string;
   sessions: Set<string>;
   /** conn.closed settled and dropConn ran — a session/new still mid-
    *  retain lands with no cleanup path left but this flag. */
@@ -123,6 +134,10 @@ function maskAgentCapabilities(
  *  resource_not_found (-32002), which the SDK already assigns. */
 const SESSION_BUSY = -32001;
 
+/** The dead-loop refusal (spec bro-b961a) — the client's own churn was
+ *  stopped before it cost a session. The client waits and retries. */
+const DEAD_LOOP = -32003;
+
 /** A brokered turn is session-scoped — thinking, tool calls, subagents
  *  routinely run past the per-request `timeoutMs` the conductor gives
  *  one Messages-API call. The floor keeps a wedged agent from parking
@@ -146,6 +161,11 @@ function asWireError(err: unknown): never {
     if (e instanceof RequestError) {
       throw e;
     }
+    if (e instanceof AcpDeadLoopError) {
+      // the refusal is the guard's own answer — it keeps its code, so the
+      // client can tell a dead loop from a broker failure
+      throw new RequestError(DEAD_LOOP, e.message);
+    }
   }
   throw new RequestError(-32603, err instanceof Error ? err.message : String(err));
 }
@@ -167,6 +187,12 @@ export function acpTransport(
   opts: ProviderWireOpts = {}
 ): ((req: IncomingMessage, res: ServerResponse) => void) & { dispose: () => void } {
   const by = `acp-transport:${cfg.backend}`;
+  // the churn accounting (spec bro-b961a) — one guard for the transport;
+  // each connection carries its own scope inside it
+  const guard = new AcpDeadLoopGuard({
+    maxOpens: cfg.acpMaxOpens ?? 8,
+    maxAbandoned: cfg.acpMaxAbandoned ?? 32,
+  });
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>();
@@ -240,7 +266,11 @@ export function acpTransport(
       bridge,
     },
   };
-  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs);
+  // the brokered plane is conversation-scoped: the client asked for a
+  // long-lived ACP link, so the idle release stays OFF here (spec
+  // bro-7ira8) — killing the peer mid-conversation breaks the contract
+  // the client holds.
+  const pool = acpLinkPool(by, cfg.entry, wireOpts, cfg.timeoutMs, 0);
 
   /** Out of every index + the local handle dropped — the caller owns
    *  whether upstream gets a session/close first (it can't once the
@@ -310,6 +340,10 @@ export function acpTransport(
       closeUpstream(sess, sid);
     }
     st.sessions.clear();
+    // the connection's churn scope dies with it — a per-connection key
+    // kept forever leaks one guard entry per client that ever
+    // connected (codeant #963)
+    guard.forgetScope({ scope: st.scope });
   };
 
   // link death ⇒ every session it carried is dead weight — drop them
@@ -321,6 +355,9 @@ export function acpTransport(
       sess.conn.sessions.delete(sid);
       disposeQuiet(sess.retained);
     }
+    // the peer's churn died with it — the respawned child is a fresh
+    // peer, not refused for its predecessor's abandoned sessions
+    guard.forgetPeer({ scope: by, peer: by });
   });
 
   /** A session-scoped method forwarded verbatim — set_config_option and
@@ -407,7 +444,14 @@ export function acpTransport(
         cfg.entry,
         wireOpts,
         Date.now() + cfg.timeoutMs,
-        { by, sessionRequest: params as NewSessionRequest }
+        {
+          by,
+          sessionRequest: params as NewSessionRequest,
+          // the churn accounting (spec bro-b961a) — the session is
+          // charged to the connection that opened it
+          guard: { guard, scope: st.scope, peer: by },
+          stallMs: cfg.acpStallMs ?? 300_000,
+        }
       );
       // upstream reissues ids across a link death+respawn — a
       // colliding set must not leak the displaced handle (and the
@@ -610,7 +654,14 @@ export function acpTransport(
    *  fresh AgentContext wrapper per request, so the app closure is the
    *  only stable conn-scope). */
   const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false };
+    const st: ConnState = {
+      clientName: '',
+      // the connection's churn scope (spec bro-b961a) — minted per
+      // connection, so one client's churn never implicates another's
+      scope: `acp:${randomUUID()}`,
+      sessions: new Set(),
+      dropped: false,
+    };
     const app = agent({ name: 'bro-acp' });
     attachDisconnectHandler(app, st);
     registerAgentRequests(app, st);

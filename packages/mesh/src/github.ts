@@ -270,12 +270,12 @@ export interface GhResult {
   err: string;
 }
 
-function gh(call: { args: string[]; input?: string }): GhResult {
+function gh(call: { args: string[]; input?: string; timeoutMs?: number }): GhResult {
   const opts: SpawnSyncOptions = {
     stdio: [call.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     input: call.input,
     encoding: 'utf8',
-    timeout: 120_000,
+    timeout: call.timeoutMs ?? 120_000,
     maxBuffer: 32 * 1024 * 1024,
   };
   // PATH lookup is the contract (same as pull.ts's dolt)
@@ -295,7 +295,10 @@ function gh(call: { args: string[]; input?: string }): GhResult {
   };
 }
 
-function ghJson<T>(call: { args: string[]; input?: string }): { data?: T; error?: string } {
+function ghJson<T>(call: { args: string[]; input?: string; timeoutMs?: number }): {
+  data?: T;
+  error?: string;
+} {
   const r = gh(call);
   if (r.code !== 0) {
     return { error: r.err || r.out };
@@ -369,8 +372,12 @@ function* fencedJsonBodies(comment: { body: string }): Generator<string> {
       return;
     }
     if (body.slice(after, eol).trim() !== '') {
-      // ```json <junk> — not a record fence; keep scanning past it
-      i = after;
+      // ```json <junk> — not a record fence; keep scanning past it.
+      // Jump to the next marker on the line when one exists, else to
+      // the line end — restarting just past this marker rescans the
+      // same line's suffix per marker (quadratic on hostile input)
+      const next = body.indexOf('```json', after);
+      i = next !== -1 && next < eol ? next : eol + 1;
       continue;
     }
     const close = body.indexOf('```', eol + 1);
@@ -447,7 +454,7 @@ function apiPath(call: { repo: GithubRepo; suffix: string }): string {
  *  error line. `--paginate --slurp` wraps every page in its own array
  *  — the wire shape is pages-of-rows, so the read flattens before
  *  iterating. */
-function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
+function listIssues(repo: GithubRepo, timeoutMs?: number): { issues: GhIssue[]; error?: string } {
   const r = ghJson<(GhIssueRow | GhIssueRow[])[]>({
     args: [
       'api',
@@ -455,6 +462,7 @@ function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
       '--paginate',
       '--slurp',
     ],
+    timeoutMs,
   });
   if (r.error !== undefined) {
     return { issues: [], error: `${repo.owner}/${repo.repo}: issue list failed — ${r.error}` };
@@ -513,12 +521,18 @@ function slurpedRows<T>(data: (T | T[])[] | undefined): T[] {
 }
 
 function filterIssueRows(rows: GhIssueRow[]): GhIssue[] {
-  return rows.filter((i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number');
+  // typeof null === 'object' — a null element would pass the object
+  // check and throw on .number; Number.isInteger keeps 1.5/NaN/Infinity
+  // out of issue URLs and API paths (external data, kody integer rule)
+  return rows.filter(
+    (i): i is GhIssue => i !== null && typeof i === 'object' && Number.isInteger(i.number)
+  );
 }
 
 export function issueComments(
   repo: GithubRepo,
-  issue: GhIssue
+  issue: GhIssue,
+  timeoutMs?: number
 ): { records: GhRecord[]; errors: string[] } {
   const r = ghJson<(GhCommentRow | GhCommentRow[])[]>({
     args: [
@@ -527,6 +541,7 @@ export function issueComments(
       '--paginate',
       '--slurp',
     ],
+    timeoutMs,
   });
   if (r.error !== undefined) {
     return {
@@ -539,12 +554,19 @@ export function issueComments(
 
 function scanIssues(
   repo: GithubRepo,
-  issues: GhIssue[]
+  issues: GhIssue[],
+  deadline?: number
 ): { records: GhRecord[]; errors: string[] } {
   const records: GhRecord[] = [];
   const errors: string[] = [];
   for (const issue of issues) {
-    const cs = issueComments(repo, issue);
+    const left =
+      deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()));
+    if (left !== undefined && left < 1) {
+      errors.push(`${repo.owner}/${repo.repo}: comment scan budget exhausted`);
+      break;
+    }
+    const cs = issueComments(repo, issue, left);
     records.push(...cs.records);
     errors.push(...cs.errors);
   }
@@ -553,16 +575,25 @@ function scanIssues(
 
 /** The label-narrowed, comment-verified scan: every mesh record across
  *  every request-labelled issue on the peer's repo. */
-export function scanGithub(input: { remote: string }): { records: GhRecord[]; errors: string[] } {
+export function scanGithub(input: { remote: string; timeoutMs?: number }): {
+  records: GhRecord[];
+  errors: string[];
+} {
   const repo = parseGithubRemote(input);
   if (repo === null) {
     return { records: [], errors: [`remote "${input.remote}" is not a github url`] };
   }
-  const listed = listIssues(repo);
+  // the budget is one deadline across the issue list plus every
+  // comment read — a hung gh call cannot re-grant the full 120s
+  const deadline = input.timeoutMs === undefined ? undefined : performance.now() + input.timeoutMs;
+  const listed = listIssues(
+    repo,
+    deadline === undefined ? undefined : Math.max(0, Math.floor(deadline - performance.now()))
+  );
   if (listed.error !== undefined) {
     return { records: [], errors: [listed.error] };
   }
-  return scanIssues(repo, listed.issues);
+  return scanIssues(repo, listed.issues, deadline);
 }
 
 /** The wire envelope for a posted request — id/thread are filled by

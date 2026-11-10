@@ -36,5 +36,9 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Framework-free ACP session model — reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)"
+  "description": "Framework-free ACP session model — reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }
