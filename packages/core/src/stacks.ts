@@ -232,8 +232,12 @@ function primaryWorktree(dir: string): { path: string; branch?: string } | undef
 /** Merge commits inside a `fork..head` rev range. The rebase replay
  *  can't preserve merge resolutions, so any nonzero count refuses;
  *  `undefined` means git itself couldn't count (bad range, repo error)
- *  — also a refusal, worded by the caller. */
-function countMergesInRange(path: string, range: string): number | undefined {
+ *  — also a refusal, worded by the caller.
+ *
+ *  Exported (bro-dz0u9): the stack SYNC path rewrites a member with a
+ *  plain rebase too, and it must refuse the same history with the same
+ *  counter — not a second implementation of the same question. */
+export function countMergesInRange(path: string, range: string): number | undefined {
   const r = gitTry(['-C', path, 'rev-list', '--merges', '--count', range]);
   if (r.code !== 0 || r.out.trim() === '') {
     return undefined;
