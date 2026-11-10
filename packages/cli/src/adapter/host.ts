@@ -655,6 +655,7 @@ async function runBro(
     child = spawn(command.cmd, [...command.args, ...args], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
