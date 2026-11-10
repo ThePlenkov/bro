@@ -1347,11 +1347,14 @@ describe('bro loop provider walls (bro-36bhc)', () => {
 
   test('a rate_limited worker parks until the provider reset — then wakes and lands', () => {
     // the incident fix: the park's snooze is the wall's own clock, not
-    // the flat 2h cooldown. The epoch reset form is absolute — the
-    // defer stamp equals it exactly, whenever the harvest runs. A
-    // far-future reset keeps run 1 deterministic on a slow CI; the
-    // wake half then simulates the clock passing rather than sleeping
-    // it out.
+    // the flat 2h cooldown. The epoch reset form is absolute — but the
+    // wall's clock is the stamp the harvest RECORDED, not the raw
+    // header: the fixture's worker dies instantly, and an instant rate
+    // death escalates the provider's word (spec bro-9eeld — the
+    // reported mark undershot), so defer_until equals the registry
+    // entry's resetAt. A far-future reset keeps run 1 deterministic on
+    // a slow CI; the wake half then simulates the clock passing rather
+    // than sleeping it out.
     const f = walledLane();
     inside(f.main, f.root, () => {
       const reset = Math.floor(Date.now() / 1000) + 5400;
@@ -1361,11 +1364,25 @@ describe('bro loop provider walls (bro-36bhc)', () => {
           'fx-a': { tail: `API rate limit exceeded — x-ratelimit-reset: ${reset}`, exit: 1 },
         },
       });
+      const regPath = join(f.main, '.git', 'bro', 'agents.json');
       const r = f.run();
       assert.match(r.stdout, /1 parked/, r.stderr);
       const row = bead(f.db, 'fx-a');
       assert.equal(row?.status, 'deferred');
-      assert.equal(row?.defer_until, resetIso);
+      const death = (
+        JSON.parse(readFileSync(regPath, 'utf8')) as Record<
+          string,
+          { cause?: string; resetAt?: string }
+        >
+      )['fx-a'];
+      assert.equal(death?.cause, 'rate_limited');
+      // the recorded hold never precedes the provider's stamp — the
+      // instant-death escalation can only extend it
+      assert.ok(
+        Date.parse(String(death?.resetAt)) >= Date.parse(resetIso),
+        `recorded wall ${String(death?.resetAt)} before provider reset ${resetIso}`
+      );
+      assert.equal(row?.defer_until, death?.resetAt);
       assert.match(String(row?.notes), /blocked \(rate_limited\) til /);
       // one spawn total — the worker that died; nothing churned
       assert.equal(spawns(f).trim().split('\n').length, 1);
@@ -1382,7 +1399,6 @@ describe('bro loop provider walls (bro-36bhc)', () => {
         Date.now() - 60_000
       ).toISOString();
       writeFileSync(f.db, JSON.stringify(db));
-      const regPath = join(f.main, '.git', 'bro', 'agents.json');
       const reg = JSON.parse(readFileSync(regPath, 'utf8')) as Record<
         string,
         Record<string, unknown>
