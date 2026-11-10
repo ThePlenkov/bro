@@ -1285,6 +1285,18 @@ function stampLoopPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): 
  *  release transition lands in the lifecycle journal beside it. */
 function reopenBead(ctx: Ctx, id: string): void {
   try {
+    // release only a claim that is ours to release — `bd update
+    // --assignee ''` is unconditional, so a foreign assignee (another
+    // runner, a rebinding guard probe) keeps its bead. An empty or
+    // unresolvable actor keeps the claim marker's word (fail-open):
+    // it cannot prove a claim foreign against an identity space it
+    // cannot read.
+    const actor = ctx.tasks.actor?.() ?? '';
+    const assignee = ctx.tasks.get(id)?.assignee ?? '';
+    if (actor !== '' && assignee !== '' && assignee !== actor) {
+      say(ctx, `loop: ${id} kept — claimed by ${assignee}, not ours to release`);
+      return;
+    }
     ctx.tasks.reopen(id);
     emitLifecycle(ctx.root, {
       kind: 'release',
@@ -2520,6 +2532,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     if (wait !== undefined) {
       m.wallWaitUntil = wait;
       m.wallWaits = (m.wallWaits ?? 0) + 1;
+      // the merge clock restarts at the wall's lift — time spent
+      // walled is not time the re-poll owed the merge deadline
+      m.since = wait;
       // refund the round the dead worker paid
       m.rounds = Math.max(0, m.rounds - 1);
       return 'kept';
@@ -2598,6 +2613,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     if (wait !== undefined) {
       m.wallWaitUntil = wait;
       m.wallWaits = (m.wallWaits ?? 0) + 1;
+      // walled time is not member time — the since-clock restarts at
+      // the lift, same exclusion the PR path takes
+      m.since = wait;
       say(
         ctx,
         `loop: worker ${w.agentId} rate_limited${resetAt !== undefined ? ` til ${resetAt}` : ''} without a PR — waiting`
