@@ -35,7 +35,6 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
-  rmdirSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -711,7 +710,6 @@ function skillsLinkTarget(adapterRel) {
 function skillsLinkFresh(adapterRel) {
   const link = join(ROOT, adapterRel, 'skills');
   try {
-<<<<<<< HEAD
     const st = lstatSync(link);
     if (!st.isSymbolicLink()) {
       return false;
@@ -733,16 +731,18 @@ function ensureSkillsLink(adapterRel) {
   if (skillsLinkFresh(adapterRel)) {
     return;
   }
-<<<<<<< HEAD
   const link = join(ROOT, adapterRel, 'skills');
-  try {
-    rmSync(link, { force: true });
-  } catch {
-    rmdirSync(link);
-  }
+  // recursive+force removes every stale shape — a real skills dir, an
+  // empty one, a symlink, a junction; rmSync lstat()s the entry so a
+  // link goes, never the tree it points at
+  rmSync(link, { recursive: true, force: true });
   mkdirSync(join(ROOT, adapterRel), { recursive: true });
   try {
-    symlinkSync(skillsLinkTarget(adapterRel), link, process.platform === 'win32' ? 'junction' : undefined);
+    // a junction stores an ABSOLUTE target — the relative link string
+    // would resolve against the reader's cwd, not the repo's
+    const target =
+      process.platform === 'win32' ? join(ROOT, 'skills') : skillsLinkTarget(adapterRel);
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : undefined);
   } catch {
     symlinkSync(skillsLinkTarget(adapterRel), link);
   }
