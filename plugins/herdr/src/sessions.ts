@@ -242,9 +242,11 @@ export function ensureSession(ctx: RenderCtx): boolean {
 }
 
 /** Lanes with nothing to show carry no session pane (spec
- *  bro-l8wqu): no acp session, no live agent journal — a worker-less
- *  arm renders `waiting for projector` forever. Close the recorded
- *  or orphan-labeled `bro: session` pane and drop the record. */
+ *  bro-l8wqu): no acp session, no agent journal on disk (live or
+ *  archived — a finished worker's record is still its feed, never
+ *  retired) — a record-less arm renders `waiting for projector`
+ *  forever. Close the recorded or orphan-labeled `bro: session` pane
+ *  and drop the record. */
 export function retireSession(ctx: RenderCtx): void {
   const rec = ctx.state.sessions[ctx.path];
   const panes = paneList(ctx.ws);

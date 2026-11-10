@@ -479,6 +479,39 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
     assert.match(run[3]!, /herdr session-view/);
   });
 
+  test('an archived (dead) session record still arms the session pane', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const repoMain = mkdtempSync(join(TMP, 'repo-'));
+    spawnSync('git', ['init', '-q', repoMain]);
+    const broDir = join(repoMain, '.git', 'bro');
+    mkdirSync(broDir, { recursive: true });
+    // dead registry record — no live pid, journal on disk: 'done' is
+    // a status row in the view, not a reason to hide the pane
+    writeFileSync(join(repoMain, 'native-1.events.jsonl'), '{}\n');
+    writeFileSync(
+      join(broDir, 'agents.json'),
+      JSON.stringify({
+        'run-1': { log: join(repoMain, 'native-1.log'), worktree: tree, spawnedAt: 'x' },
+      })
+    );
+    const p = armedTree(tree);
+    p.repo = repoMain;
+    p.main = repoMain;
+    p.status.dir = repoMain;
+    converge(p);
+    // the ONE human pane arms bound to the archive — events + status
+    // fold into it, nothing else splits
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.match(runs[0]![3]!, /--events .*native-1\.events\.jsonl/);
+    const st = loadState(stateScope(repoMain));
+    assert.equal(st.sessions[tree]?.pane_id, 'p1');
+    assert.equal(st.renderers[tree], undefined);
+    assert.equal(st.statuses[tree], undefined);
+  });
+
   test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
     reset({
       panes: [{ pane_id: 'pV', label: 'bro: session' }, { pane_id: 'pX' }],
