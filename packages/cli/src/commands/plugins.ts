@@ -835,8 +835,13 @@ function printOutcomes(outcomes: Outcome[]): void {
   }
 }
 
+/** The flags `bro plugins install|uninstall` accepts — a mistyped flag
+ *  must not be silently dropped: dropping it hides both the typo and
+ *  whatever value it was supposed to carry. */
+const PLUGIN_FLAGS = new Set(['--global', '--local', '--dry-run', '--force']);
+
 function clientArg(rest: string[]): string {
-  const pos = positionals(rest, new Set());
+  const pos = positionals(rest, new Set(), { boolFlags: PLUGIN_FLAGS, strict: true });
   if (pos.length !== 1) {
     throw new CommandError(
       `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`,

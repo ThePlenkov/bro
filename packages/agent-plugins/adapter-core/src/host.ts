@@ -303,6 +303,13 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  before-agent handlers cannot both inject. */
   let hydration: { sessionId: string; promise: Promise<string> } | undefined;
   let hydrated: string | undefined;
+  /** The session whose rehydration probe FAILED (not merely came back
+   *  empty) — a failed probe is not the session's verdict: bro may not
+   *  have been resolvable yet, so a later turn may re-probe once. */
+  let hydrationFailed: string | undefined;
+  /** The session that already spent its one re-probe — a broken install
+   *  must not turn every turn into a spawn. */
+  let hydrationRetried: string | undefined;
   /** Pre-compaction carry — kept apart from the hydration probe so a
    *  post-compaction re-probe cannot overwrite what must survive the
    *  summary. Consumed (cleared) by the next hydrate() that runs. */
@@ -403,7 +410,8 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     const sessionId = host.sessionId(ctx);
     const priorCarry = carry?.sessionId === sessionId ? carry.text : '';
     carry = undefined;
-    const started = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS)
+    const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
+    const started = raw
       .then(contextOf)
       .then(text =>
         priorCarry === '' ? text : text === '' ? priorCarry : `${priorCarry}\n\n${text}`
@@ -414,8 +422,18 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     if (hydrated === sessionId) {
       hydrated = undefined;
     }
-    // a failed probe is not the session's verdict — drop the cache entry
-    // so the next turn deserves a retry rather than sticking on ''
+    // a failed probe is not the session's verdict — remember it so a
+    // later turn can re-probe instead of running the session contextless
+    hydrationFailed = undefined;
+    void raw
+      .then(control => {
+        if (control === null && hydration?.promise === started) {
+          hydrationFailed = sessionId;
+        }
+      })
+      .catch(() => {});
+    // an empty answer has nothing to inject — drop the cache entry so
+    // the next turn sees no stale '' instead of claiming the session
     void started
       .then(text => {
         if (hydration?.promise === started && text === '') {
@@ -423,6 +441,38 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         }
       })
       .catch(() => {});
+  };
+
+  /** The session's context text, consumed from the cached probe. An
+   *  empty answer is not the session's verdict: the claim is released
+   *  and a failed probe is re-run once (fire-and-forget — the next turn
+   *  picks the answer up, this turn never waits on it). */
+  const consumeHydration = async (sessionId: string, cwd: string): Promise<string> => {
+    const pending = hydration;
+    if (pending === undefined || pending.sessionId !== sessionId || hydrated === sessionId) {
+      return '';
+    }
+    // claim synchronously, before the await — two concurrent
+    // before-agent handlers must not both inject this text
+    hydrated = sessionId;
+    const text = (await pending.promise).trim();
+    if (text !== '') {
+      return text;
+    }
+    hydrated = undefined;
+    if (hydrationFailed === sessionId && hydrationRetried !== sessionId) {
+      hydrationRetried = sessionId;
+      hydration = {
+        sessionId,
+        promise: probe(
+          'session-start',
+          { session_id: sessionId },
+          cwd,
+          REHYDRATION_TIMEOUT_MS
+        ).then(contextOf),
+      };
+    }
+    return '';
   };
 
   /** Register one handler if the host has that event. */
@@ -480,15 +530,9 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     const nudge = probe('prompt-submit', { session_id: sessionId, prompt }, cwd).then(contextOf);
 
     const parts: string[] = [];
-    const pending = hydration;
-    if (pending !== undefined && hydrated !== sessionId && pending.sessionId === sessionId) {
-      // claim synchronously, before the await — two concurrent
-      // before-agent handlers must not both inject this text
-      hydrated = sessionId;
-      const text = (await pending.promise).trim();
-      if (text !== '') {
-        parts.push(text);
-      }
+    const hydrationText = await consumeHydration(sessionId, cwd);
+    if (hydrationText !== '') {
+      parts.push(hydrationText);
     }
     const nudgeText = (await nudge).trim();
     if (nudgeText !== '') {
