@@ -49,11 +49,7 @@ export function capabilityOf(kind: unknown): string[] | undefined {
 
 /** The client's tools that answer the capability — in the capability's own
  *  order, so "edit" prefers the client's Edit over its Write. */
-export function matchingTools(
-  wanted: string[],
-  tools: ClientTool[],
-  named?: string
-): ClientTool[] {
+export function matchingTools(wanted: string[], tools: ClientTool[], named?: string): ClientTool[] {
   // a request that named its tool asked for THAT tool: another tool of the
   // same capability is a different contract
   const offered = named === undefined ? tools : tools.filter(t => t.name === named);

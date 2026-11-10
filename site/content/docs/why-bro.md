@@ -51,7 +51,9 @@ lands in git, no hooks or `AGENTS.md` edits, and `rm -rf .beads` reverses
 it — the same machine-local contract as `.agents/review-debt/` and the
 gitignored `bro.config.local.json`. It announces itself on stderr; a tool
 that wants adoption doesn't get to be silent about writing to your repo.
-Opt out once: `"stores": ["jsonl"]` in `bro.config.local.json`.
+Opt out once: `"stores": ["jsonl"]` in the local layer —
+`bro.config.local.json`, or `bro.config.local.ts` where one exists (it
+shadows the JSON).
 
 ## What it doesn't do
 

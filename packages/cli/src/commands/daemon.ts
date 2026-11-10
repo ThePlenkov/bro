@@ -83,15 +83,15 @@ export interface DaemonRecord {
   spawnedAt: string;
   cmd: string;
   /** the child's /proc start time — pins the pid against reuse; absent
-   *  on older records, which the probe trusts only briefly after
-   *  `spawnedAt` (the pre-lock window is seconds anyway) */
+   *  on older records, which the probe never trusts (a bare pid cannot
+   *  be told from a recycled one) */
   pidStart?: string;
 }
 
-/** Records without a `pidStart` are trusted this long after `spawnedAt`
- *  — long enough to cover the pre-lock window, short enough that a
- *  reused pid can't impersonate the daemon forever. */
-const RECORD_TRUST_MS = 120_000;
+/** Records written by older binaries lack `pidStart` — they are never
+ *  trusted: a record's only job is the pre-lock window of a NEW spawn,
+ *  and new records always carry the pin. Trusting a bare pid would let
+ *  a recycled one take SIGTERM meant for a dead supervisor. */
 
 /** `<git-common>/bro/daemon.json` — who armed the daemon
  *  (`daemon-loop.json` for the loop kind: each supervisor kind keeps
@@ -194,18 +194,29 @@ export function loopProbe(dir: string): SupervisorProbe {
   return probeSupervisor(dir, loopLockPath(dir), readDaemonRecord(dir, { loop: true }));
 }
 
-/** A recorded pid is trusted with its stored start time; records that
- *  predate the field get the bounded post-spawn window only — a reused
- *  pid must not impersonate the daemon forever. */
-function recordedPidAlive(rec: DaemonRecord, now: number = Date.now()): boolean {
+/** How long an UNPINNED record may stand in for the pre-lock window —
+ *  a fresh spawn's pid cannot have been recycled seconds after minting.
+ *  Past it, the record is trusted only with its start-time pin. */
+const UNPINNED_RECORD_GRACE_MS = 120_000;
+
+/** A recorded pid is trusted only with its stored start time; records
+ *  that predate the field cannot be verified against reuse and must
+ *  never be trusted to supervise or kill processes. One exception: on a
+ *  host where /proc cannot produce a start time at all (procStat fails
+ *  for our own pid — no procfs, macOS, a restricted container), a NEW
+ *  record still cannot carry the pin — yet the pid it names was minted
+ *  seconds ago, so reuse has had no window. Those records are trusted
+ *  for the spawn grace only; an old record on a /proc-capable host is
+ *  never trusted unpinned. */
+function recordedPidAlive(rec: DaemonRecord): boolean {
   if (rec.pidStart !== undefined) {
     return pidAlive(rec.pid, rec.pidStart);
   }
-  const spawnedAt = Date.parse(rec.spawnedAt);
-  if (!Number.isFinite(spawnedAt) || now - spawnedAt > RECORD_TRUST_MS) {
+  if (procStat(process.pid) !== null) {
     return false;
   }
-  return pidAlive(rec.pid);
+  const age = Date.now() - Date.parse(rec.spawnedAt);
+  return Number.isFinite(age) && age >= 0 && age <= UNPINNED_RECORD_GRACE_MS && pidAlive(rec.pid);
 }
 
 export type DaemonUpDecision =
@@ -262,6 +273,10 @@ export function spawnDaemon(
     cwd: dir,
     detached: true,
     stdio: ['ignore', out, out],
+    // stamp every daemon-log line — BRO_LOG_TIMESTAMP is read only by
+    // logWithTs/errWithTs and the TTY/json-guarded index patch, so a
+    // worker that inherits it never gets timestamped machine output
+    env: { ...process.env, BRO_LOG_TIMESTAMP: '1' },
   });
   child.unref();
   try {
@@ -348,7 +363,30 @@ function supervisionProcs(dir: string, kind?: 'drive' | 'loop'): number[] {
  *  unverifiable candidate is spared, never killed. */
 function procRepoCommon(pid: number): string | null {
   try {
-    return gitCommonDir(readlinkSync(`/proc/${pid}/cwd`));
+    if (process.platform === 'linux') {
+      return gitCommonDir(readlinkSync(`/proc/${pid}/cwd`));
+    }
+    if (process.platform === 'darwin') {
+      try {
+        const out = execFileSync(
+          'lsof', // NOSONAR — PATH lookup is the contract
+          ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'],
+          {
+            encoding: 'utf8',
+            timeout: 500,
+          }
+        );
+        const cline = out.split('\n').find(l => l.startsWith('n'));
+        if (cline) {
+          const cwd = cline.slice(1);
+          return gitCommonDir(cwd);
+        }
+      } catch {
+        // fall through
+      }
+      return null;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -453,7 +491,11 @@ export function supervisorDown(
     // unresolvable holder) — a bare `!` would push undefined into the
     // kill list and count a TypeError as "already gone"
     const pids = probe.live && probe.pid !== undefined ? [probe.pid] : [];
-    if (probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)) {
+    if (
+      probe.recorded !== null &&
+      probe.recorded.pidStart !== undefined &&
+      pidAlive(probe.recorded.pid, probe.recorded.pidStart)
+    ) {
       pids.push(probe.recorded.pid);
     }
     return [...pids, ...supervisionProcs(dir, kind)];
@@ -479,20 +521,46 @@ export function supervisorDown(
   return { pids: [...victims], hadRecord };
 }
 
+/** The daemon-log voice — a spawned supervisor's stdout is the log
+ *  file, so its own lines get the ISO stamp the index patch gives TTY
+ *  sessions (BRO_LOG_TIMESTAMP pins which children speak stamped). */
+function logWithTs(msg: string): void {
+  if (process.env.BRO_LOG_TIMESTAMP === '1') {
+    try {
+      process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`);
+      return;
+    } catch {
+      // fall through to the plain write
+    }
+  }
+  console.log(msg);
+}
+function errWithTs(msg: string): void {
+  if (process.env.BRO_LOG_TIMESTAMP === '1') {
+    try {
+      process.stderr.write(`[${new Date().toISOString()}] ${msg}\n`);
+      return;
+    } catch {
+      // fall through to the plain write
+    }
+  }
+  console.error(msg);
+}
+
 function daemonUp(main: string, interval: number, opts: { loop?: boolean } = {}): void {
   const up = supervisorUp(main, interval, process.env, { loop: opts.loop });
   switch (up.kind) {
     case 'refuse-worker':
-      console.error(
+      errWithTs(
         'error: BRO_AGENT_ID is set — spawned workers never arm the daemon; ' +
           'the orchestrator session owns it'
       );
       process.exit(2);
     case 'already':
-      console.log(`daemon up — already supervising (pid ${up.pid})`);
+      logWithTs(`daemon up — already supervising (pid ${up.pid})`);
       return;
     case 'spawned':
-      console.log(
+      logWithTs(
         `daemon up — pid ${up.pid} every ${interval}s` + (up.log === null ? '' : ` — log ${up.log}`)
       );
       return;
@@ -523,14 +591,14 @@ function daemonStatus(main: string): void {
   }
   const recorded = probe.recorded ?? lprobe.recorded;
   if (live.length === 0) {
-    console.log(
+    logWithTs(
       (recorded === null
         ? `daemon down — no supervisor; 'bro daemon up' to start`
         : `daemon down — recorded pid ${recorded.pid} is dead`) + installedStr
     );
     return;
   }
-  console.log(
+  logWithTs(
     `daemon up — ${live.join(' · ')} supervising` +
       (recorded === null ? ' (unrecorded holder)' : `, armed ${recorded.spawnedAt}`) +
       installedStr +
@@ -555,7 +623,7 @@ function daemonDown(main: string): void {
     readDriveMarker(main) !== null ? `'bro drive uninstall'` : null,
     readLoopMarker(main) !== null ? `'bro loop uninstall'` : null,
   ].filter((s): s is string => s !== null);
-  console.log(
+  logWithTs(
     [
       pids.length === 0
         ? 'daemon down — no live supervisor'

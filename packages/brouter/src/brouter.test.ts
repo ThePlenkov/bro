@@ -31,7 +31,7 @@ test('a family name inside another segment names no family', () => {
   assert.equal(modelFamily('devin-acp/haikuish-2'), 'other');
 });
 
-test('the lane is the row\'s own answer — never re-read off the id', () => {
+test("the lane is the row's own answer — never re-read off the id", () => {
   const { models } = servedModels({
     data: [
       { id: 'devin-acp/swe/2-high', display_name: 'SWE-2', source: 'devin-acp' },
@@ -150,7 +150,7 @@ test('a url with credentials is refused — and the refusal never prints the pas
   );
 });
 
-test('the refusal names the host — never the url\'s query or fragment', () => {
+test("the refusal names the host — never the url's query or fragment", () => {
   assert.throws(
     () => routerUrl('http://router.example.com/base?token=hunter2'),
     (err: unknown) => {
@@ -169,7 +169,10 @@ test('a router bro refuses is not a router bro did not find', () => {
     join(gitDir, 'bro', 'serve.json'),
     JSON.stringify({ pid: 1, url: 'http://router.example.com', dir: scratch, token: 'tok' })
   );
-  assert.throws(() => readRouterEndpoint(join(scratch, 'remote')), /cannot carry the session token/);
+  assert.throws(
+    () => readRouterEndpoint(join(scratch, 'remote')),
+    /cannot carry the session token/
+  );
 });
 
 test('the catalog is not fetched over cleartext to a remote host', async () => {
@@ -207,10 +210,13 @@ test('the catalog is read from the router with the credential', async () => {
 
 test('the base URL keeps no query and no fragment — the catalog path is appended to it', () => {
   assert.equal(routerUrl('http://127.0.0.1:44927/?trace=1'), 'http://127.0.0.1:44927');
-  assert.equal(routerUrl('https://router.example.com/base#frag'), 'https://router.example.com/base');
+  assert.equal(
+    routerUrl('https://router.example.com/base#frag'),
+    'https://router.example.com/base'
+  );
 });
 
-test('the catalog read asks the models path — not the base URL\'s query', async () => {
+test("the catalog read asks the models path — not the base URL's query", async () => {
   const seen: string[] = [];
   const server = createServer((req, res) => {
     seen.push(req.url ?? '');
@@ -238,7 +244,8 @@ test('a redirect is refused — the session token rides no hop', async () => {
   });
   await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve));
   const targetAddress = target.address();
-  const targetPort = typeof targetAddress === 'object' && targetAddress !== null ? targetAddress.port : 0;
+  const targetPort =
+    typeof targetAddress === 'object' && targetAddress !== null ? targetAddress.port : 0;
   const origin = createServer((req, res) => {
     hops.push(req.url ?? '');
     res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/v1/models` });
@@ -246,7 +253,8 @@ test('a redirect is refused — the session token rides no hop', async () => {
   });
   await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
   const originAddress = origin.address();
-  const originPort = typeof originAddress === 'object' && originAddress !== null ? originAddress.port : 0;
+  const originPort =
+    typeof originAddress === 'object' && originAddress !== null ? originAddress.port : 0;
   try {
     await assert.rejects(
       () => readCatalog({ url: `http://127.0.0.1:${originPort}`, token: 'tok' }),

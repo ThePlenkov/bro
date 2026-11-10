@@ -36,5 +36,9 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Renderer-independent ACP session package \u2014 wire decode, archive contract + tail, session model, segment/card view language"
+  "description": "Renderer-independent ACP session package — wire decode, archive contract + tail, session model, segment/card view language",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }

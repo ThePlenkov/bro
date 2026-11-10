@@ -142,6 +142,7 @@ export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // ~/.gitconfig (core.hooksPath, commit.gpgsign) on fixture commits
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = devNull;
+  env.BRO_HOOK_SPOOL = '0';
   return { ...env, ...extra };
 }
 
@@ -995,6 +996,8 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      // who landed it — the host's merge record (GitHub's mergedBy.login)
+      mergedBy: per.mergedBy ?? s.mergedBy,
       ...over,
     }
   }),
@@ -1771,8 +1774,10 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  constructor(public code: number) {
+  code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 
@@ -1796,9 +1801,13 @@ export async function capture(
   try {
     await fn();
     return { code: 0, out, err };
-  } catch (e) {
+  } catch (e: any) {
     if (e instanceof Exit) {
       return { code: e.code, out, err };
+    }
+    const cmdResult = capturedCommandError(e, out, err);
+    if (cmdResult !== undefined) {
+      return cmdResult;
     }
     throw e;
   } finally {
@@ -1807,6 +1816,30 @@ export async function capture(
     console.error = origErr;
     usageWriter.write = origUsageWrite;
   }
+}
+
+/** The capture's CommandError arm — mirrors the dispatcher: a
+ *  printUsage-thrown error already wrote itself through usageWriter
+ *  (message===usage marks that case); anything else prints message and
+ *  usage exactly once each — regardless of what the command already
+ *  emitted before throwing. */
+function capturedCommandError(
+  e: any,
+  out: string[],
+  err: string[]
+): { code: number; out: string[]; err: string[] } | undefined {
+  if (!e || (e.name !== 'CommandError' && e.constructor?.name !== 'CommandError')) {
+    return undefined;
+  }
+  const code = typeof e.code === 'number' ? e.code : 1;
+  const target = code === 0 ? out : err;
+  if (e.message && e.message !== e.usage) {
+    target.push(String(e.message).replace(/\n$/, ''));
+  }
+  if (e.usage !== undefined && e.usage !== e.message) {
+    target.push(String(e.usage).replace(/\n$/, ''));
+  }
+  return { code, out, err };
 }
 
 /** Delete ambient repo/agent pins from process.env (git-location and

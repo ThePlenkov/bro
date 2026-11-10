@@ -722,6 +722,53 @@ export const COLLECTORS: Record<DebtSource, (ctx: CollectCtx, staleDays: number)
     sverka: ctx => collectSverka(ctx),
   };
 
+/** Static dispatch — avoids dynamic property access on a record of
+ *  functions, which Codacy flags as object injection. */
+export function collectForSource(
+  source: DebtSource,
+  ctx: CollectCtx,
+  staleDays: number
+): DebtRecord[] {
+  switch (source) {
+    case 'dependabot':
+      return collectDependabot(ctx);
+    case 'code-scanning':
+      return collectCodeScanning(ctx);
+    case 'secret-scanning':
+      return collectSecretScanning(ctx);
+    case 'stale-prs':
+      return collectStalePrs(ctx, staleDays);
+    case 'failed-ci':
+      return collectFailedCi(ctx);
+    case 'sonarcloud':
+      return collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] });
+    case 'codacy':
+      return collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] });
+    case 'codescene':
+      return collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] });
+    case 'sverka':
+      return collectSverka(ctx);
+  }
+}
+
+/** Static lookup for a source's dedupe function, if any. */
+export function dedupeForSource(
+  source: DebtSource
+):
+  | ((records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] })
+  | undefined {
+  switch (source) {
+    case 'sonarcloud':
+      return dedupeReviewThreads;
+    case 'codacy':
+      return dedupeCodacyThreads;
+    case 'codescene':
+      return dedupeCodesceneThreads;
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Alerts/CI are server-side truth: an open ledger row for a source whose
  * finding is absent from the fresh fetch resolved upstream — return its

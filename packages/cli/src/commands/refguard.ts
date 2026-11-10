@@ -33,25 +33,26 @@
  * the exit code alone can never be the signal); every internal error
  * exits 0.
  */
-import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
-import { gitTry } from '@broject/core'
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { gitTry, psRegroupPaths, psTokenize } from '@broject/core';
 
-export const REFGUARD_HOOK_MARK = '# bro: reference-transaction — shared-branch ref guard'
-export const REFGUARD_HOOK_NAME = 'reference-transaction'
-export const REFGUARD_LOCAL_HOOK = 'reference-transaction.local'
+export const REFGUARD_HOOK_MARK = '# bro: reference-transaction — shared-branch ref guard';
+export const REFGUARD_HOOK_NAME = 'reference-transaction';
+export const REFGUARD_LOCAL_HOOK = 'reference-transaction.local';
 
-const HEADS = 'refs/heads/'
+const HEADS = 'refs/heads/';
 
 /** The null oid is all-zero in EVERY object-hash size — 40 chars for
  *  sha1 repos, 64 for sha256. Match the shape, not one length, or a
  *  sha256 repo's 64-zero create reads as a verified old. */
-const isNullOid = (oid: string): boolean => /^0+$/.test(oid)
+const isNullOid = (oid: string): boolean => /^0+$/.test(oid);
 
 export interface RefUpdate {
-  oldSha: string
-  newSha: string
-  ref: string
+  oldSha: string;
+  newSha: string;
+  ref: string;
 }
 
 /** `reference-transaction` stdin — one `<old> <new> <ref>` per update.
@@ -59,19 +60,19 @@ export interface RefUpdate {
  *  is never refs/heads, so it drops out at isHeadMove. Malformed lines
  *  are skipped rather than failing the parse. */
 export function parseRefUpdates(stdinText: string): RefUpdate[] {
-  const out: RefUpdate[] = []
+  const out: RefUpdate[] = [];
   for (const line of stdinText.split('\n')) {
-    const t = line.trim()
+    const t = line.trim();
     if (t === '') {
-      continue
+      continue;
     }
-    const fields = t.split(/\s+/)
+    const fields = t.split(/\s+/);
     if (fields.length !== 3) {
-      continue
+      continue;
     }
-    out.push({ oldSha: fields[0]!, newSha: fields[1]!, ref: fields[2]! })
+    out.push({ oldSha: fields[0]!, newSha: fields[1]!, ref: fields[2]! });
   }
-  return out
+  return out;
 }
 
 /** A move of an existing local branch: refs/heads only, not a create,
@@ -84,18 +85,15 @@ export function parseRefUpdates(stdinText: string): RefUpdate[] {
  *  for updates it verified. resolveRef reads the on-disk value, which at
  *  `prepared` time is still the pre-transaction ref — old = 0 means
  *  "unverified", not "create". */
-function effectiveOld(
-  u: RefUpdate,
-  resolveRef: (ref: string) => string | null
-): string | null {
+function effectiveOld(u: RefUpdate, resolveRef: (ref: string) => string | null): string | null {
   if (!u.ref.startsWith(HEADS) || isNullOid(u.newSha)) {
-    return null // not a local branch, or a delete
+    return null; // not a local branch, or a delete
   }
-  const old = isNullOid(u.oldSha) ? resolveRef(u.ref) : u.oldSha
+  const old = isNullOid(u.oldSha) ? resolveRef(u.ref) : u.oldSha;
   if (old === null || isNullOid(old) || old === u.newSha) {
-    return null // genuine create or no-op write
+    return null; // genuine create or no-op write
   }
-  return old
+  return old;
 }
 
 /** git global options that consume the NEXT argv token — skipped so
@@ -109,7 +107,7 @@ const GIT_ARG_OPTS = new Set([
   '--namespace',
   '--exec-path',
   '--config-env',
-])
+]);
 const GIT_INLINE_OPTS = [
   '--git-dir=',
   '--work-tree=',
@@ -118,32 +116,32 @@ const GIT_INLINE_OPTS = [
   '--config-env=',
   '--list-cmds=',
   '--super-prefix=',
-]
+];
 
 /** The subcommand out of a git process argv (/proc cmdline split).
  *  argv0's basename must be `git`/`git.exe` or a dashed `git-<verb>`
  *  builtin (`git-rebase` → `rebase`) — anything else is not a git
  *  invocation and returns undefined (no data, never a verdict). */
 export function gitSubcommand(argv: string[]): string | undefined {
-  const exe = basename(argv[0] ?? '')
+  const exe = basename(argv[0] ?? '');
   if (exe.startsWith('git-')) {
-    return exe.slice(4)
+    return exe.slice(4);
   }
   if (exe !== 'git' && exe !== 'git.exe') {
-    return undefined
+    return undefined;
   }
   for (let i = 1; i < argv.length; i++) {
-    const a = argv[i]!
+    const a = argv[i]!;
     if (GIT_ARG_OPTS.has(a)) {
-      i++
-      continue
+      i++;
+      continue;
     }
-    if (a.startsWith('-') || GIT_INLINE_OPTS.some((p) => a.startsWith(p))) {
-      continue
+    if (a.startsWith('-') || GIT_INLINE_OPTS.some(p => a.startsWith(p))) {
+      continue;
     }
-    return a
+    return a;
   }
-  return undefined
+  return undefined;
 }
 
 /** Verbs whose ref writes are produced content — a non-ff move under
@@ -162,11 +160,11 @@ const CONTENT_VERBS = new Set([
   'rebase',
   'revert',
   'stash',
-])
+]);
 
 export type RefGuardVerdict =
   | { verdict: 'allow' }
-  | { verdict: 'veto'; ref: string; oldSha: string; newSha: string; verb: string }
+  | { verdict: 'veto'; ref: string; oldSha: string; newSha: string; verb: string };
 
 /** The guard's core. opts.argv is the invoking git process's argv;
  *  undefined means no cmdline data (no /proc, stale pid) → every move
@@ -176,56 +174,102 @@ export type RefGuardVerdict =
 export function refGuardVerdict(
   updates: RefUpdate[],
   opts: {
-    env: NodeJS.ProcessEnv
-    cwd: string
-    argv?: string[]
-    isAncestor?: (oldSha: string, newSha: string) => boolean | null
-    resolveRef?: (ref: string) => string | null
+    env: NodeJS.ProcessEnv;
+    cwd: string;
+    argv?: string[];
+    isAncestor?: (oldSha: string, newSha: string) => boolean | null;
+    resolveRef?: (ref: string) => string | null;
   }
 ): RefGuardVerdict {
   if (['off', '0', 'false'].includes((opts.env.BRO_REF_GUARD ?? '').toLowerCase())) {
-    return { verdict: 'allow' }
+    return { verdict: 'allow' };
   }
   const isAncestor =
     opts.isAncestor ??
     ((o: string, n: string): boolean | null => {
-      const r = gitTry(['-C', opts.cwd, 'merge-base', '--is-ancestor', o, n])
-      return r.code === 0 ? true : r.code === 1 ? false : null
-    })
+      const r = gitTry(['-C', opts.cwd, 'merge-base', '--is-ancestor', o, n]);
+      if (r.code === 0) {
+        return true;
+      }
+      return r.code === 1 ? false : null;
+    });
   const resolveRef =
     opts.resolveRef ??
     ((ref: string): string | null => {
-      const r = gitTry(['-C', opts.cwd, 'rev-parse', '--verify', '--quiet', ref])
-      return r.code === 0 ? r.out.trim() : null
-    })
-  const verb = opts.argv === undefined ? undefined : gitSubcommand(opts.argv)
+      const r = gitTry(['-C', opts.cwd, 'rev-parse', '--verify', '--quiet', ref]);
+      return r.code === 0 ? r.out.trim() : null;
+    });
+  const verb = opts.argv === undefined ? undefined : gitSubcommand(opts.argv);
   for (const u of updates) {
-    const oldSha = effectiveOld(u, resolveRef)
+    const oldSha = effectiveOld(u, resolveRef);
     if (oldSha === null) {
-      continue
+      continue;
     }
-    const ff = isAncestor(oldSha, u.newSha)
+    const ff = isAncestor(oldSha, u.newSha);
     if (ff !== false) {
-      continue // ff — or unverifiable; both allow
+      continue; // ff — or unverifiable; both allow
     }
     if (verb === undefined || CONTENT_VERBS.has(verb)) {
-      continue
+      continue;
     }
-    return { verdict: 'veto', ref: u.ref, oldSha, newSha: u.newSha, verb }
+    return { verdict: 'veto', ref: u.ref, oldSha, newSha: u.newSha, verb };
   }
-  return { verdict: 'allow' }
+  return { verdict: 'allow' };
 }
 
 /** /proc/<pid>/cmdline → argv; undefined when unreadable (no /proc,
  *  dead pid). */
 function readProcArgv(pid: number): string[] | undefined {
-  try {
-    const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-    const argv = raw.split('\0').filter((s) => s !== '')
-    return argv.length > 0 ? argv : undefined
-  } catch {
-    return undefined
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      const argv = raw.split('\0').filter(s => s !== '');
+      return argv.length > 0 ? argv : undefined;
+    } catch {
+      return undefined;
+    }
   }
+  if (process.platform === 'darwin') {
+    try {
+      // Try to get args in a way that's less ambiguous
+      let out: string;
+      try {
+        out = execFileSync(
+          'ps', // NOSONAR — PATH lookup is the contract
+          ['-ww', '-o', 'args=', '-p', String(pid)],
+          {
+            encoding: 'utf8',
+            timeout: 500,
+          }
+        );
+      } catch {
+        try {
+          out = execFileSync(
+            'ps', // NOSONAR — PATH lookup is the contract
+            ['-ww', '-o', 'command=', '-p', String(pid)],
+            {
+              encoding: 'utf8',
+              timeout: 500,
+            }
+          );
+        } catch {
+          return undefined;
+        }
+      }
+      const s = out.replace(/\r?\n$/, '');
+      // ps space-joins the vector — re-glue fragments of a spaced
+      // absolute path so argv boundaries survive (same oracle as the
+      // other darwin argv readers: a script must exist, fragments don't)
+      const argv = psRegroupPaths(psTokenize(s));
+      if (argv.length > 0) {
+        return argv;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** git-hook entry — `bro hooks reference-transaction prepared <ppid>`
@@ -235,21 +279,20 @@ function readProcArgv(pid: number): string[] | undefined {
 export function emitRefGuard(argv: string[], stdinText: string): void {
   try {
     if (argv[0] !== 'prepared') {
-      return
+      return;
     }
-    const ppid = Number(argv[1])
-    const invoker =
-      Number.isInteger(ppid) && ppid > 0 ? readProcArgv(ppid) : undefined
+    const ppid = Number(argv[1]);
+    const invoker = Number.isInteger(ppid) && ppid > 0 ? readProcArgv(ppid) : undefined;
     const v = refGuardVerdict(parseRefUpdates(stdinText), {
       env: process.env,
       cwd: process.cwd(),
       argv: invoker,
-    })
+    });
     if (v.verdict === 'veto') {
       // the marker IS the veto — the shim greps for it, so an infra
       // failure of bro/npx itself (missing binary, npx ETARGET) can
       // never masquerade as a deliberate veto
-      process.stdout.write(`BRO_REF_GUARD_VETO ${v.ref}\n`)
+      process.stdout.write(`BRO_REF_GUARD_VETO ${v.ref}\n`);
       console.error(
         `bro refguard: refusing non-fast-forward move of ${v.ref} ` +
           `(${v.oldSha.slice(0, 8)} → ${v.newSha.slice(0, 8)}) by 'git ${v.verb}' — ` +
@@ -258,8 +301,8 @@ export function emitRefGuard(argv: string[], stdinText: string): void {
           `already reset the worktree — inspect \`git status\`; the ` +
           `branch's commits are intact. Deliberate rewrite: ` +
           `BRO_REF_GUARD=off git …`
-      )
-      process.exitCode = 1
+      );
+      process.exitCode = 1;
     }
   } catch {
     // fail-open — a broken guard must never wedge git
@@ -300,5 +343,5 @@ case "$out" in
   *"BRO_REF_GUARD_VETO"*) exit 1 ;;
 esac
 exit 0
-`
+`;
 }

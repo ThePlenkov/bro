@@ -21,6 +21,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import {
+  clearExternalPlanes,
   readAgentRegistry,
   readLedgerWalls,
   recordWall,
@@ -32,6 +33,9 @@ import {
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge';
 import { fakeFetch } from '@broject/providers/testkit';
 import { capture, initRepo, installFakeBd, killRun, readBeads } from './testrepo.ts';
+
+// real host planes would flake spawn tests — the registry clear is the belt
+clearExternalPlanes();
 import {
   collectDuplicateSuspects,
   discoverSessions,

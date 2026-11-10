@@ -16,7 +16,6 @@ import { scrubEnv, testGit } from './testkit.ts';
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv());
-
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
 const XDG = tmpDir('bro-xdg-');
@@ -190,6 +189,35 @@ describe('loadConfig serve.providers', () => {
   test('a providers value that is neither a list nor a map drops the section', () => {
     const cfg = load({ serve: { providers: 'oc-iceman' } });
     assert.equal(cfg.serve.providers, undefined);
+  });
+});
+
+describe('loadConfig serve — the provider windows', () => {
+  test('the idle window is read as-is', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 60_000 } }).serve.idleReleaseMs, 60_000);
+  });
+
+  test('an idle window of 0 disables the release — it is a value, not an absence', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 0 } }).serve.idleReleaseMs, 0);
+  });
+
+  test('a fractional or negative idle window is dropped — it is not a window', () => {
+    assert.equal(load({ serve: { idleReleaseMs: 1.5 } }).serve.idleReleaseMs, undefined);
+    assert.equal(load({ serve: { idleReleaseMs: -1 } }).serve.idleReleaseMs, undefined);
+  });
+
+  test('the churn budgets are counts — 0 and the fractions are dropped', () => {
+    assert.equal(load({ serve: { acpMaxOpens: 4 } }).serve.acpMaxOpens, 4);
+    assert.equal(load({ serve: { acpMaxOpens: 0 } }).serve.acpMaxOpens, undefined);
+    assert.equal(load({ serve: { acpMaxOpens: 2.5 } }).serve.acpMaxOpens, undefined);
+    assert.equal(load({ serve: { acpMaxAbandoned: 16 } }).serve.acpMaxAbandoned, 16);
+    assert.equal(load({ serve: { acpMaxAbandoned: 0 } }).serve.acpMaxAbandoned, undefined);
+  });
+
+  test('the stall window reads as a window — 0 disables the watchdog', () => {
+    assert.equal(load({ serve: { acpStallMs: 120_000 } }).serve.acpStallMs, 120_000);
+    assert.equal(load({ serve: { acpStallMs: 0 } }).serve.acpStallMs, 0);
+    assert.equal(load({ serve: { acpStallMs: -5 } }).serve.acpStallMs, undefined);
   });
 });
 

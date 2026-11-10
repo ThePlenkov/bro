@@ -8,9 +8,11 @@ export {
   ghTryAsync,
   issueLink,
   prLink,
+  prRefs,
   resolveRepo,
   resolveRepoAsync,
 } from './gh.ts';
+export type { PrRef } from './gh.ts';
 export {
   git,
   gitTry,
@@ -29,6 +31,7 @@ export {
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
+  worktreePathFor,
   worktreeGitDir,
 } from './git.ts';
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
@@ -75,6 +78,7 @@ export {
   js,
   loadConfig,
   loadConfigLayers,
+  MAX_TIMER_MS,
   mcpSection,
   meshSection,
   mirrorSection,
@@ -131,6 +135,8 @@ export type {
 } from './providers.ts';
 export {
   CLASS_LABEL_PREFIX,
+  DEFAULT_FLEET_WALL_TTLS,
+  DEFAULT_RATE_WALL_COOLDOWN_MS,
   DEFAULT_STEP_CLASS,
   deriveProviderWalls,
   fleetRouter,
@@ -332,6 +338,7 @@ export type {
   ScanOpts,
 } from './review.ts';
 export {
+  countMergesInRange,
   gitStacks,
   MANUAL_CASCADE,
   mergeChainPerLayer,
@@ -363,6 +370,7 @@ export {
   preToolVerdicts,
   promptContextLines,
   registerConnector,
+  unregisterConnector,
   reviewHost,
   specStore,
   sessionPinnedClaims,
@@ -488,14 +496,19 @@ export {
   classifyExitCauseParts,
   commandCliName,
   entryRunId,
+  INSTANT_DEATH_MS,
   isAgentCause,
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
   probeStep,
+  RATE_BACKOFF_BASE_MS,
+  RATE_BACKOFF_CAP_MS,
+  rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
   rebindStep,
+  RESET_MARK_MARGIN_MS,
   SpawnError,
   stepParent,
   withAgentRegistryLock,
@@ -526,6 +539,7 @@ export {
   reserveSessionSlot,
   reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
@@ -539,7 +553,21 @@ export type {
   SessionQuota,
 } from './session-planes.ts';
 export {
+  clearExternalPlanes,
+  externalPlanes,
+  ownedEnviron,
+  registerExternalPlane,
+} from './external-planes.ts';
+export type {
+  ExternalActivity,
+  ExternalActivityPlane,
+  ExternalProbeCtx,
+} from './external-planes.ts';
+export {
+  admitSessionStart,
+  admitSessionStartAsync,
   planeStartingSessions,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -547,7 +575,11 @@ export {
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts';
-export type { SessionCapView } from './session-cap.ts';
+export type {
+  SessionCapView,
+  SessionStartAdmission,
+  SessionStartAdmissionArgs,
+} from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -576,6 +608,7 @@ export type {
 } from './planes.ts';
 export {
   acquireFileLock,
+  acquireFileLockYielding,
   awaitFileLock,
   holdFileLock,
   lockHolderPid,
@@ -603,9 +636,17 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
 export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
-export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export {
+  EXIT,
+  EXIT_CODES,
+  hasHelpFlag,
+  passthroughExitCode,
+  printUsage,
+  usageWriter,
+} from './exits.ts';
 export { deprecatedFlag, flag, flagAll, flagValue, positionals } from './cli-args.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
+export { CommandError, isCommandError } from './errors.ts';
 export {
   groupMemberAlive,
   handleOwner,
@@ -613,6 +654,9 @@ export {
   markerOwner,
   pidAlive,
   procStat,
+  psEwwEnvTokens,
+  psRegroupPaths,
+  psTokenize,
   scanProc,
 } from './proc.ts';
 export type { ProcEntry } from './proc.ts';
@@ -655,6 +699,7 @@ export type {
   BusWake,
 } from './bus.ts';
 export {
+  DARWIN_SCAN_BUDGET_MS,
   pickOrphanProcs,
   readProcRows,
   sweepOrphanProcs,

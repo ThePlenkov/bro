@@ -22,7 +22,7 @@
  * Style note for editors: the page is a template literal — client JS
  * must not contain backticks or `${` sequences.
  */
-import { createHash } from 'node:crypto'
+import { createHash } from 'node:crypto';
 
 const PAGE_STYLE = `
   :root { color-scheme: dark; }
@@ -49,7 +49,7 @@ const PAGE_STYLE = `
   #logpanel .sum a { margin-left: .6rem; }
   #logpane { background: #161b22; border: 1px solid #30363d; padding: .4rem .8rem; margin: .3rem 0 0; max-height: 22rem; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .85rem; }
   #logauth input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; font: inherit; padding: .1rem .4rem; }
-`
+`;
 
 // String.raw — the script ships regex literals; raw keeps `\[` written
 // once instead of doubly escaped for the template
@@ -202,7 +202,8 @@ function openLog(ref) {
   logLine('[connecting]', 'muted');
   var es = new EventSource(
     '/api/v1/agents/' + encodeURIComponent(ref) +
-    '/log?follow&lines=' + LOG_REPLAY + '&token=' + encodeURIComponent(logToken));
+    '/log?follow&lines=' + LOG_REPLAY + '&' +
+    new URLSearchParams({ token: logToken }));
   logView.es = es;
   var got = false;
   es.onopen = function () {
@@ -257,28 +258,25 @@ function saveLogToken(ev) {
   if (logView.ref !== null) openLog(logView.ref);
 }
 
-// The agents union — registry agents first (the plane of record), then
-// legacy loop runs, then session-plane discoveries the registry never
-// saw. A discovered session whose BRO_AGENT_ID badge matches a
-// registry agent folds into that row's session column — the same work
-// counted twice would double-report occupancy.
-function renderAgents(board, snap) {
-  var tbody = document.getElementById('agents');
-  var warns = [];
-  var rows = [];
-  var byId = {};
-  board = board || {};
+function normTree(t) {
+  return typeof t === 'string' ? t.replace(/\/+$/, '') : t;
+}
+
+function ingestBackendAgents(board, rows, byId, warns) {
   (board.backends || []).forEach(function (b) {
     if (b.degraded) warns.push(b.name + ': ' + b.degraded);
     (b.agents || []).forEach(function (a) {
       var r = {
-        id: a.id, backend: b.name, step: a.molStep || '—',
+        id: a.id,
+        backend: b.name,
+        step: a.molStep || '—',
         ref: a.id,
         state: a.state + (a.cause ? ' · ' + a.cause : ''),
         bad: a.state === 'lost' || a.state === 'blocked',
         pid: a.pid,
         prov: [a.provider, a.model].filter(Boolean).join('/') || '—',
-        worktree: a.worktree, log: a.log,
+        worktree: a.worktree,
+        log: a.log,
         ageMs: a.spawnedAt ? Math.max(0, Date.now() - Date.parse(a.spawnedAt)) : undefined,
         session: ''
       };
@@ -286,13 +284,11 @@ function renderAgents(board, snap) {
       rows.push(r);
     });
   });
+}
+
+function ingestLoopRuns(snap, rows) {
   var loopRuns = (((snap || {}).loop || {}).runs) || [];
-  var normTree = function (t) { return typeof t === 'string' ? t.replace(/\/+$/, '') : t };
   loopRuns.forEach(function (r) {
-    // a registry-backed loop worker rides the record now (bro-wg896) —
-    // the same work in both planes folds into the registry row, its
-    // silence read merging in; a DEAD record never folds — crashed-run
-    // residue is its own row
     if (r.state !== 'dead') {
       var hit = rows.find(function (x) {
         return (r.pid !== null && r.pid !== undefined && x.pid === r.pid) ||
@@ -307,17 +303,35 @@ function renderAgents(board, snap) {
       }
     }
     rows.push({
-      id: 'loop:' + (r.slug || r.beadId || ''), backend: 'loop',
+      id: 'loop:' + (r.slug || r.beadId || ''),
+      backend: 'loop',
       step: r.beadId || r.slug || '—',
       state: r.state === 'dead' ? 'dead' : 'running',
       bad: r.state === 'dead',
       pid: r.pid === null ? undefined : r.pid,
-      prov: '—', worktree: r.worktree, log: r.log,
+      prov: '—',
+      worktree: r.worktree,
+      log: r.log,
       ageMs: r.silentMs === null || r.silentMs === undefined ? undefined : r.silentMs,
       ageNote: r.silentMs === null || r.silentMs === undefined ? '' : 'silent ',
       session: ''
     });
   });
+}
+
+// The agents union — registry agents first (the plane of record), then
+// legacy loop runs, then session-plane discoveries the registry never
+// saw. A discovered session whose BRO_AGENT_ID badge matches a
+// registry agent folds into that row's session column — the same work
+// counted twice would double-report occupancy.
+function renderAgents(board, snap) {
+  var tbody = document.getElementById('agents');
+  var warns = [];
+  var rows = [];
+  var byId = {};
+  board = board || {};
+  ingestBackendAgents(board, rows, byId, warns);
+  ingestLoopRuns(snap, rows);
   (board.discovered || []).forEach(function (s) {
     var label = s.kind + ':' + (s.name || 'pid ' + s.pid);
     // fold onto the registry row by badge, or onto the connector's own
@@ -429,6 +443,55 @@ function renderQueue(q) {
     : 'ready: ' + ready.map(function (b) { return b.id; }).join(', ') + (readyTotal > ready.length ? ' …+' + (readyTotal - ready.length) : '');
 }
 
+function gateVerdict(g, warns) {
+  var verdict, cls;
+  if (g.error) {
+    verdict = 'probe failed';
+    cls = 'bad';
+    warns.push((g.link || '#' + g.pr) + ': ' + g.error);
+  } else if (g.ok === false) {
+    verdict = 'blocked';
+    cls = 'bad';
+  } else if (g.ok === true) {
+    verdict = 'ok';
+    cls = 'quiet';
+  } else {
+    verdict = '—';
+  }
+  return { verdict: verdict, cls: cls };
+}
+
+function gateCi(g) {
+  if (g.ciPending === undefined && g.ciFailing === undefined) {
+    return { ci: '—', cls: undefined };
+  }
+  var parts = [];
+  if (g.ciFailing > 0) parts.push(g.ciFailing + ' failing');
+  if (g.ciPending > 0) parts.push(g.ciPending + ' pending');
+  if (g.reviewersPending > 0) parts.push(g.reviewersPending + ' reviewing');
+  if (g.sastPending > 0) parts.push(g.sastPending + ' sast');
+  var ci = parts.length === 0 ? 'ok' : parts.join(' · ');
+  var cls = g.ciFailing > 0 ? 'bad' : (g.ciPending > 0 || g.reviewersPending > 0) ? 'warn' : undefined;
+  return { ci: ci, cls: cls };
+}
+
+function renderGatePr(g, tr, warns) {
+  var pr = el('td');
+  appendPrLink(pr, g.link);
+  tr.appendChild(pr);
+  var v = gateVerdict(g, warns);
+  tr.appendChild(el('td', v.verdict, v.cls));
+  var mergeable = g.mergeable === undefined
+    ? '—'
+    : g.mergeable.toLowerCase() + (g.mergeState && g.mergeState !== 'CLEAN' ? ' · ' + g.mergeState.toLowerCase() : '');
+  tr.appendChild(el('td', mergeable, g.mergeable === 'CONFLICTING' ? 'bad' : (g.mergeState === 'BEHIND' ? 'warn' : undefined)));
+  tr.appendChild(el('td', g.openThreads === undefined ? '—' : String(g.openThreads), g.openThreads > 0 ? 'bad' : undefined));
+  var ci = gateCi(g);
+  tr.appendChild(el('td', ci.ci, ci.cls));
+  tr.appendChild(el('td', (g.blockers || []).join('; ') || '—', (g.blockers || []).length > 0 ? 'warn' : 'muted'));
+  (g.alerts || []).forEach(function (a) { warns.push((g.link || '#' + g.pr) + ': ' + a); });
+}
+
 function renderGates(gates) {
   var tbody = document.getElementById('gates');
   var warns = [];
@@ -445,34 +508,7 @@ function renderGates(gates) {
     }
     prs.forEach(function (g) {
       var tr = el('tr');
-      var pr = el('td');
-      appendPrLink(pr, g.link);
-      tr.appendChild(pr);
-      var verdict, cls;
-      if (g.error) { verdict = 'probe failed'; cls = 'bad'; warns.push((g.link || '#' + g.pr) + ': ' + g.error); }
-      else if (g.ok === false) { verdict = 'blocked'; cls = 'bad'; }
-      else if (g.ok === true) { verdict = 'ok'; cls = 'quiet'; }
-      else { verdict = '—'; }
-      tr.appendChild(el('td', verdict, cls));
-      var mergeable = g.mergeable === undefined
-        ? '—'
-        : g.mergeable.toLowerCase() + (g.mergeState && g.mergeState !== 'CLEAN' ? ' · ' + g.mergeState.toLowerCase() : '');
-      tr.appendChild(el('td', mergeable, g.mergeable === 'CONFLICTING' ? 'bad' : (g.mergeState === 'BEHIND' ? 'warn' : undefined)));
-      tr.appendChild(el('td', g.openThreads === undefined ? '—' : String(g.openThreads), g.openThreads > 0 ? 'bad' : undefined));
-      var ci;
-      if (g.ciPending === undefined && g.ciFailing === undefined) {
-        ci = '—';
-      } else {
-        var parts = [];
-        if (g.ciFailing > 0) parts.push(g.ciFailing + ' failing');
-        if (g.ciPending > 0) parts.push(g.ciPending + ' pending');
-        if (g.reviewersPending > 0) parts.push(g.reviewersPending + ' reviewing');
-        if (g.sastPending > 0) parts.push(g.sastPending + ' sast');
-        ci = parts.length === 0 ? 'ok' : parts.join(' · ');
-      }
-      tr.appendChild(el('td', ci, g.ciFailing > 0 ? 'bad' : ((g.ciPending > 0 || g.reviewersPending > 0) ? 'warn' : undefined)));
-      tr.appendChild(el('td', (g.blockers || []).join('; ') || '—', (g.blockers || []).length > 0 ? 'warn' : 'muted'));
-      (g.alerts || []).forEach(function (a) { warns.push((g.link || '#' + g.pr) + ': ' + a); });
+      renderGatePr(g, tr, warns);
       tbody.appendChild(tr);
     });
     (gates.lookupErrors || []).forEach(function (e) { warns.push(e); });
@@ -490,8 +526,18 @@ function renderTicks(t) {
     parts.push('no heartbeat — no watch has ticked here');
     cls += ' muted';
   } else {
-    parts.push('last tick ' + age(t.heartbeat.ageMs) + ' ago — ' + (t.heartbeat.attention === 0 ? 'quiet' : t.heartbeat.attention + ' attention'));
-    if (t.heartbeat.ageMs > 30 * 60 * 1000) cls += ' warn';
+    var hb = t.heartbeat;
+    var htail = hb.attention === 0 ? 'quiet' : hb.attention + ' attention';
+    if (hb.futureMs !== undefined) {
+      parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer or reader clock skew — ' + htail);
+      cls += ' warn';
+    } else if (hb.writerSkewed) {
+      parts.push('last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail);
+      cls += ' warn';
+    } else {
+      parts.push('last tick ' + age(hb.ageMs) + ' ago — ' + htail);
+      if (hb.ageMs > 30 * 60 * 1000) cls += ' warn';
+    }
   }
   var d = t.drive || { pid: null, alive: false };
   if (d.pid === null || d.pid === undefined) {
@@ -698,10 +744,10 @@ document.getElementById('logtoken').addEventListener('keydown', function (ev) {
 window.addEventListener('pagehide', closeLog);
 
 tick();
-`
+`;
 
 function cspHash(s: string): string {
-  return createHash('sha256').update(s).digest('base64')
+  return createHash('sha256').update(s).digest('base64');
 }
 
 /** CSP for the HTML response — hash-pinned inline script/style (the
@@ -709,7 +755,7 @@ function cspHash(s: string): string {
  *  forgets the pin fails closed), same-origin fetch, nothing else. A
  *  smuggled title can't execute or load anything even if markup
  *  injection ever slips through. */
-export const WEBUI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(PAGE_SCRIPT)}'; style-src 'sha256-${cspHash(PAGE_STYLE)}'; connect-src 'self'`
+export const WEBUI_CSP = `default-src 'none'; script-src 'sha256-${cspHash(PAGE_SCRIPT)}'; style-src 'sha256-${cspHash(PAGE_STYLE)}'; connect-src 'self'`;
 
 export const FLEET_PAGE = `<!doctype html>
 <html lang="en">
@@ -786,4 +832,4 @@ export const FLEET_PAGE = `<!doctype html>
 <script>${PAGE_SCRIPT}</script>
 </body>
 </html>
-`
+`;
