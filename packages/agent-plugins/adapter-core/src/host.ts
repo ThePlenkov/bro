@@ -381,6 +381,14 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     if (seq !== refreshSeq) {
       return;
     }
+    // the repo changed while the refresh was in flight: the answer
+    // belongs to ANOTHER repo, and another repo's bead claims must
+    // never be injected into this session
+    if (host.cwd(ctx) !== cwd) {
+      board = null;
+      paint(ctx);
+      return;
+    }
     board = next;
     paint(ctx);
   };

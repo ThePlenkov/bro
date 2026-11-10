@@ -146,15 +146,23 @@ function firstExisting(candidates: Array<string | null>): string | null {
 }
 
 /** Artifact sources in preference order: the TS source (checkout), then the
- *  repo-distributed adapter a bro clone carries under plugins/. The two
- *  names differ — the checkout keeps the server as `opencode.ts`, the
- *  installed catalog plugin serves it as the directory's `index.ts`. */
+ *  repo-distributed adapter a bro clone carries under plugins/, then the
+ *  copy that rides the tarball. The names differ — the checkout keeps
+ *  the server as `opencode.ts`, the installed catalog plugin serves it
+ *  as the directory's `index.ts`.
+ *
+ *  The tarball copy is the one that works OUTSIDE a checkout: an
+ *  installed bro has no `packages/agent-plugins/` tree and no repo
+ *  clone, and the adapter packages are not published on their own — so
+ *  without it `bro plugins install opencode` had nothing to write. */
 function opencodeArtifact(cwd: string, src: string, shipped: string): string | null {
   const ap = agentPluginPackageRoot('opencode');
   const root = gitRoot(cwd);
+  const cli = packageRoot();
   return firstExisting([
     ap === null ? null : join(ap, 'src', src),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', shipped),
+    cli === null ? null : join(cli, 'dist', 'plugins', 'opencode', 'bro', shipped),
   ]);
 }
 

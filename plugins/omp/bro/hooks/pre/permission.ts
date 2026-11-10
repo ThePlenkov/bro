@@ -37,10 +37,21 @@ import type { OmpApi } from './omp-api.ts';
  *  hide behind one. */
 const SHELL_SPLIT = /&&|\|\||[;|\n|]/;
 
+/** A backslash-continued line is ONE line for the shell: the backslash
+ *  and the newline vanish, and the next line's words join the command.
+ *  The guard must un-join them FIRST — otherwise `git \` + newline +
+ *  `push --force` is two segments, and neither one names a force
+ *  push. */
+const CONTINUATION = /\\\r?\n\s*/g;
+
 /** `git [global opts] push …` — git's global options (`-C dir`,
  *  `-c k=v`, `--git-dir=…`) may sit between `git` and `push`. An
- *  option's separate value never consumes the `push` word itself. */
-const PUSH_CALL = /(?:^|\s)git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/;
+ *  option's separate value never consumes the `push` word itself.
+ *
+ *  The `git` word may follow a grouping paren: `(git push --force …)`
+ *  is the same command to the shell, and a bracket must not defeat
+ *  the guard. */
+const PUSH_CALL = /(?:^|[\s(])git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/;
 
 /** Force spellings in the push arguments: `--force` as a whole word
  *  (never `--force-with-lease` / `--force-if-includes` — a following
@@ -50,10 +61,14 @@ const FORCE_FLAG = /(?:^|\s)--force(?!-)|(?:^|\s)-f(?![\w-])|(?:^|\s)\+\S+/;
 
 /** Does any shell segment of this command force-push? */
 export function isForcePush(command: string): boolean {
-  return command.split(SHELL_SPLIT).some(segment => {
-    const push = PUSH_CALL.exec(segment);
-    return push !== null && FORCE_FLAG.test(push[1] ?? '');
-  });
+  // the shell's own line joining, first — then the segments
+  return command
+    .replace(CONTINUATION, ' ')
+    .split(SHELL_SPLIT)
+    .some(segment => {
+      const push = PUSH_CALL.exec(segment);
+      return push !== null && FORCE_FLAG.test(push[1] ?? '');
+    });
 }
 
 export default function broGuard(pi: OmpApi): void {

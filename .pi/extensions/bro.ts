@@ -167,6 +167,48 @@ async function callHook(command, event, payload, cwd, timeoutMs) {
  * Scan for the first parseable control line — unrelated chatter on
  * stdout must not swallow the answer.
  */
+/**
+ * The command's arguments — split the way a shell splits them:
+ * whitespace separates, and a quoted run stays ONE argument. `/bro
+ * drill "a title with spaces"` must pass the title as one argument,
+ * not three, and the quotes must not reach the CLI.
+ */
+function splitArgs(input) {
+  const args = [];
+  let current = '';
+  let quote = undefined;
+  let started = false;
+  for (const ch of input) {
+    if (quote !== undefined) {
+      if (ch === quote) {
+        quote = undefined;
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) {
+        args.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (started) {
+    args.push(current);
+  }
+  return args;
+}
+
 function parseControl(out) {
   for (const line of out.split('\n')) {
     const text = line.trim();
@@ -605,7 +647,7 @@ function createBroDriver(host, api) {
         host.notify(ctx, 'bro: board refreshed', 'info');
         return;
       }
-      const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
+      const result = await run(splitArgs(trimmed), host.cwd(ctx));
       const text = (result.stdout || result.stderr).trim();
       if (result.code !== 0) {
         host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, 'error');

@@ -124,8 +124,22 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     if (drill !== undefined && drill !== null) {
       scope = `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ?? '(untitled)'}. `;
     }
+    // the objective belongs to a bead — NAME it, or the bridge does not
+    // do what its own contract says: the in-flight beads are the work
+    // this objective is about, and the exit gate judges the claim.
+    const claims = board?.beads?.inProgress ?? [];
+    const bead =
+      claims.length === 0
+        ? ''
+        : `bro scope: this objective belongs to the bead(s) in flight — ${claims
+            .map(b => (b.title ? `${b.id ?? '?'} (${b.title})` : (b.id ?? '?')))
+            .join(', ')}. `;
+    const advice =
+      claims.length === 0
+        ? 'bro: claim a bead for this objective (`bro flow next`) so the exit gate can judge it;'
+        : 'bro: the exit gate judges this objective against that bead;';
     return {
-      additionalContext: `${scope}bro: claim a bead for this objective (\`bro flow next\`) so the exit gate can judge it; \`bro work goal\` carries the condition across sessions.`,
+      additionalContext: `${scope}${bead}${advice} \`bro work goal\` carries the condition across sessions.`,
     };
   });
 
