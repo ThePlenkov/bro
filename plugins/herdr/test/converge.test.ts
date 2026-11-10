@@ -133,6 +133,22 @@ const boundTree = (dir: string, claim = 'bead-1'): Planes => {
   return armedTree(dir, claim);
 };
 
+/** A LIVE agent on the tree whose journal has not landed yet — a
+ *  warming run: registry entry with a live pid, no events file. */
+const seedWarming = (tree: string): void => {
+  const broDir = join(MAIN, '.git', 'bro');
+  const reg = JSON.parse(readFileSync(join(broDir, 'agents.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  reg['run-2'] = {
+    log: join(broDir, 'agents', 'run-2.log'),
+    worktree: tree,
+    pid: process.pid,
+  };
+  writeFileSync(join(broDir, 'agents.json'), JSON.stringify(reg));
+};
+
 const H = 3_600_000;
 
 describe('dead-workspace reaper', () => {
@@ -583,6 +599,20 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
     assert.equal(st.sessions[tree]?.pane_id, 'p1');
     assert.equal(st.renderers[tree], undefined);
     assert.equal(st.statuses[tree], undefined);
+  });
+
+  test('a warming live agent without a journal keeps the archive bind', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const p = boundTree(tree);
+    // run-2 is alive (pid pinned) but its events file never landed —
+    // it must not bury run-1's readable archive (codeant thread)
+    seedWarming(tree);
+    converge(p);
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /--events .*run-1\.events\.jsonl/);
+    assert.equal(loadState(scope).sessions[tree]?.agent_id, 'run-1');
   });
 
   test('a lane flip OFF acp keeps the session pane — the view, not the lane', () => {

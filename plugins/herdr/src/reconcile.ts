@@ -363,7 +363,14 @@ function archiveBinds(
       bindByTree.set(key, { id: basename(e.log).replace(/\.log$/, ''), events, at });
     }
   }
-  for (const [key, a] of liveByTree) bindByTree.set(key, { ...a, at: '\uffff' });
+  for (const [key, a] of liveByTree) {
+    // a warming live agent whose journal has not landed yet must not
+    // bury the tree's usable archive — overlay a dead bind only over
+    // nothing (codeant: the missing file would disarm AND retire the
+    // recorded session pane)
+    if (bindByTree.has(key) && !existsSync(a.events)) continue;
+    bindByTree.set(key, { ...a, at: '\uffff' });
+  }
   return bindByTree;
 }
 
