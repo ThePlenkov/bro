@@ -2503,7 +2503,12 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     if (verdict !== undefined) {
       return leave(m, verdict);
     }
-    const wait = wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0);
+    // a stopped entry's stale wall stamp is not a horizon either —
+    // same exclusion the no-PR wait below takes (bro-36bhc)
+    const wait =
+      state !== 'stopped'
+        ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0)
+        : undefined;
     if (wait !== undefined) {
       m.wallWaitUntil = wait;
       m.wallWaits = (m.wallWaits ?? 0) + 1;
@@ -2570,12 +2575,17 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // a rate_limited death carrying a NEAR reset waits (auto-respawn)
     // instead of parking; a far reset parks (deferred) so the run does
     // not hold for hours — the operator wakes it when the wall lifts.
+    // A STOPPED entry is out entirely: `bro agents down` keeps the old
+    // death's cause/resetAt on the record, so its stale wall stamp is
+    // not a horizon to wait — the parkIt branch owns the flat cooldown.
     const resetMs =
       resetAt !== undefined && Number.isFinite(Date.parse(resetAt))
         ? Date.parse(resetAt)
         : undefined;
     const near =
-      resetMs !== undefined && (resetMs <= Date.now() || resetMs - Date.now() <= 15 * 60 * 1000);
+      state !== 'stopped' &&
+      resetMs !== undefined &&
+      (resetMs <= Date.now() || resetMs - Date.now() <= 15 * 60 * 1000);
     const wait = near ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0) : undefined;
     if (wait !== undefined) {
       m.wallWaitUntil = wait;

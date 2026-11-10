@@ -1471,7 +1471,10 @@ switch (scenario) {
     // a provider rate wall that kills the FIRST spawn — wallDied marks
     // the death so the post-reset respawn lands (bro-36bhc). The reset
     // rides stderr like a real provider's rate-limit line, where the
-    // .stderr tail the classifier reads picks it up
+    // .stderr tail the classifier reads picks it up. The tail must NOT
+    // say 'Reached free model rate limit' — that phrase arms the
+    // classifier's Devin rolling-window grace (+10min), and a 10min
+    // wall can never fit the 60s e2e clock
     const walled = withState((s) => {
       if (s.wallDied === true) return false
       s.wallDied = true
@@ -1485,7 +1488,7 @@ switch (scenario) {
         ])
       })
       log('hit the rate wall til ' + resetAt)
-      console.error('Reached free model rate limit — resets at ' + resetAt)
+      console.error('HTTP 429 rate limit exceeded — resets at ' + resetAt)
       process.exit(1)
     }
     retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))

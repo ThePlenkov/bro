@@ -1367,8 +1367,11 @@ describe('bro loop provider walls (bro-36bhc)', () => {
       // one spawn total — the worker that died; nothing churned
       assert.equal(spawns(f).trim().split('\n').length, 1);
       // the wall lifts: the snooze's due stamp wakes on the next ready
-      // read, and the recorded death is operator-cleared (`bro agents
-      // down` writes the same stopped flag — spec bro-1x7p)
+      // read, and the recorded death is operator-cleared on BOTH planes
+      // — `bro agents down` writes the registry stopped flag (spec
+      // bro-1x7p) while the classified death also landed a host-ledger
+      // row the spawn admission reads; `bro fleet walls clear` is its
+      // lift (the registry flag alone leaves the ledger holding pushes)
       const db = JSON.parse(readFileSync(f.db, 'utf8')) as {
         rows: Array<Record<string, unknown>>;
       };
@@ -1383,6 +1386,11 @@ describe('bro loop provider walls (bro-36bhc)', () => {
       >;
       reg['fx-a']!.stopped = true;
       writeFileSync(regPath, JSON.stringify(reg));
+      const cleared = runCli(['fleet', 'walls', 'clear', '--all'], {
+        cwd: f.main,
+        env: f.env,
+      });
+      assert.equal(cleared.code, 0, cleared.stderr);
       const woke = f.run();
       assert.match(woke.stdout, /loop: fx-a landed/, woke.stderr);
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
