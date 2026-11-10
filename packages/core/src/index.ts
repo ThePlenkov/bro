@@ -8,9 +8,11 @@ export {
   ghTryAsync,
   issueLink,
   prLink,
+  prRefs,
   resolveRepo,
   resolveRepoAsync,
 } from './gh.ts';
+export type { PrRef } from './gh.ts';
 export {
   git,
   gitTry,
@@ -75,6 +77,7 @@ export {
   js,
   loadConfig,
   loadConfigLayers,
+  MAX_TIMER_MS,
   mcpSection,
   meshSection,
   mirrorSection,
@@ -488,14 +491,19 @@ export {
   classifyExitCauseParts,
   commandCliName,
   entryRunId,
+  INSTANT_DEATH_MS,
   isAgentCause,
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
   probeStep,
+  RATE_BACKOFF_BASE_MS,
+  RATE_BACKOFF_CAP_MS,
+  rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
   rebindStep,
+  RESET_MARK_MARGIN_MS,
   SpawnError,
   stepParent,
   withAgentRegistryLock,
@@ -526,6 +534,7 @@ export {
   reserveSessionSlot,
   reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
@@ -539,7 +548,21 @@ export type {
   SessionQuota,
 } from './session-planes.ts';
 export {
+  clearExternalPlanes,
+  externalPlanes,
+  ownedEnviron,
+  registerExternalPlane,
+} from './external-planes.ts';
+export type {
+  ExternalActivity,
+  ExternalActivityPlane,
+  ExternalProbeCtx,
+} from './external-planes.ts';
+export {
+  admitSessionStart,
+  admitSessionStartAsync,
   planeStartingSessions,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -547,7 +570,11 @@ export {
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts';
-export type { SessionCapView } from './session-cap.ts';
+export type {
+  SessionCapView,
+  SessionStartAdmission,
+  SessionStartAdmissionArgs,
+} from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -576,6 +603,7 @@ export type {
 } from './planes.ts';
 export {
   acquireFileLock,
+  acquireFileLockYielding,
   awaitFileLock,
   holdFileLock,
   lockHolderPid,

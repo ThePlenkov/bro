@@ -38,6 +38,15 @@ const commands: Record<string, string[]> = {};
 for (const [name, summary] of top.commands) {
   commands[name] = install.helpFor({ name, summary }).subs();
 }
+// the flat member spellings dispatch on their own — `bro act` is the
+// `review` group's `act` — so the manifest knows them too. The member
+// has no summary of its own on the top-level help; its own `--help`
+// names its subcommands.
+for (const name of top.members) {
+  if (commands[name] === undefined) {
+    commands[name] = install.helpFor({ name, summary: '' }).subs();
+  }
+}
 
 const surface: PublishedSurface = {
   package: spec.package,

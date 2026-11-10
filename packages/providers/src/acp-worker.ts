@@ -355,11 +355,13 @@ async function openSession(
           configOptions: res.configOptions,
         });
       } catch (err) {
-        log(`session ${resumeId} resume failed — ${errMsg(err)}; starting a fresh session`);
+        log(
+          `session ${resumeId} resume failed — ${errMsg(err)}; starting a fresh session (mcpServers forwarded)`
+        );
       }
     } else {
       log(
-        `session ${resumeId} not resumable — no load/resume capability; starting a fresh session`
+        `session ${resumeId} not resumable — no load/resume capability; starting a fresh session (mcpServers forwarded)`
       );
     }
   }

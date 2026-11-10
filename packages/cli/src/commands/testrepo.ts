@@ -995,6 +995,8 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      // who landed it — the host's merge record (GitHub's mergedBy.login)
+      mergedBy: per.mergedBy ?? s.mergedBy,
       ...over,
     }
   }),
@@ -1771,8 +1773,10 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  constructor(public code: number) {
+  code: number;
+  constructor(code: number) {
     super(`exit ${code}`);
+    this.code = code;
   }
 }
 

@@ -37,6 +37,11 @@ exclude_paths:
   # — the module's function reads to the path rule as uncontrolled data,
   # same as the store/contract files above.
   - 'packages/core/src/private-files.ts'
+  # The hook latency bench is a dev/CI script — every fs path it
+  # touches is computed (the fixture root it builds, the operator's
+  # --out/--budget args). Codacy's non-literal-path rule reads a
+  # computed path as uncontrolled data; nothing here ships.
+  - 'scripts/bench-hooks.ts'
 
   # The router gateway reads the catalog over HTTP from the router's own
   # published endpoint (a state file bro writes into the git common dir).
@@ -79,3 +84,13 @@ exclude_paths:
   # computed path as uncontrolled data; the same shapes ship on main
   # unflagged.
   - 'scripts/claude-code-live-check.ts'
+
+  # The title matcher walks a formula's title PATTERN — a string, split
+  # into literal spans and `{{var}}` wildcards. There is no object and no
+  # key anywhere in the file: the pattern is a title, the walk slices it,
+  # and the segments are plain records. Codacy's object-injection rule
+  # reads the pattern's computed slices as a keyed lookup on a
+  # user-controlled object — the rule's subject does not exist in this
+  # file, and the same walk shape (a string scan with computed slices) in
+  # this PR's own markdown-link scanner is not flagged.
+  - 'packages/convoy/src/title.ts'

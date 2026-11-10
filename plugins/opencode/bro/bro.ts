@@ -236,7 +236,10 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
     try {
       // PATH lookup is the point of both tiers — the probe verifies the
       // answer before any hook trusts it
-      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+      child = spawn(cmd, args, {
+        stdio: ['pipe', 'ignore', 'ignore'],
+        detached: process.platform !== 'win32',
+      }); // NOSONAR typescript:S4036
     } catch {
       resolve(false);
       return;

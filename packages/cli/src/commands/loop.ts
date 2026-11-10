@@ -928,13 +928,29 @@ function spawnAgent(
       detached: true,
     };
     const w = lane.worker;
+    // When a log file is open, prefix every emitted line with an ISO8601
+    // timestamp so loop.out/daemon.log-style trails stay attributable
+    // (spec bro-7h976). The wrapped command's exit status is captured to
+    // a side file before the filter runs, so the pipeline reports the
+    // AGENT's code, never the while loop's 0.
+    // single-quote escaping, not JSON.stringify: inside the sh -c
+    // wrapper a double-quoted assignment still expands $ ` $() and
+    // backslashes before eval ever sees the command (kody #760)
+    const sqEsc = String.raw`'\''`;
+    const shq = (s: string): string => `'${s.replaceAll("'", sqEsc)}'`;
+    const wrap = (cmd: string): string =>
+      `({ _bro_cmd=${shq(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
-          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
+          logFd !== null
+          ? spawn('sh', ['-c', wrap('"$@"'), 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+          : spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+        : logFd !== null
+          ? spawn('sh', ['-c', wrap(expandAgentCmd(laneCommand(ctx, lane)))], opts) // NOSONAR — operator-configured agent command
+          : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane))], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -4626,9 +4642,14 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
-  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
+  if (q.drained || maxed || Date.now() < q.pushHoldUntil) {
     return false;
   }
+  // the stack cap is consulted AFTER the ceiling check — a full stack
+  // must not silence the ceiling-hold line: at/over the fleet ceiling
+  // the hold belongs to the ceiling, and this log is the only place an
+  // operator learns that pushes are held for it (#791)
+  const stackFull = q.stack.length >= ctx.cfg.maxOpen;
   // Hard ceiling on TOTAL open fleet PRs — plus every admitted-but-
   // PR-less claim a sibling loop holds a reservation for. The
   // reservation is what makes the bound atomic: without it two loops
@@ -4668,8 +4689,10 @@ async function tryClaim(
         }
         ctx.claimsHeld = undefined;
         // admit = reserve, still under the lock — the claim→spawn→open
-        // window is then visible to the next loop's count
-        if (resDir !== null) {
+        // window is then visible to the next loop's count. A full
+        // stack admits nothing this pass, so it reserves nothing —
+        // the listing above still served the hold line
+        if (!stackFull && resDir !== null) {
           ceilingRes = reserveCeilingSlot(resDir);
           if (ceilingRes === null) {
             if (!ctx.claimsHeld) {
@@ -4713,6 +4736,9 @@ async function tryClaim(
     }
   } else {
     ctx.claimsHeld = undefined;
+  }
+  if (stackFull) {
+    return false;
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
