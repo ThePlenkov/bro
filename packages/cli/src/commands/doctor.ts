@@ -21,11 +21,20 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import type {
+  BdCompat,
+  BdProbe,
+  ConfigDiagnostic,
+  DoltHeadHealth,
+  DoltRemote,
+  ProviderEntry,
+  ProviderSurface,
+} from '@broject/core';
 import {
   bdTry,
   CONFIG_SECTION_LAYERS,
-  connectors,
   CORE_CONFIG_SECTIONS,
+  connectors,
   displayUrl,
   doltDirHealth,
   doltRemoteSrc,
@@ -42,24 +51,14 @@ import {
   listDoltRemotes,
   loadConfig,
   loadConfigLayers,
+  PROVIDER_REGISTRY,
   pidAlive,
   printUsage,
-  procStat,
   probeBdCompat,
   probeDoltRemote,
-  PROVIDER_REGISTRY,
+  procStat,
   runJanitor,
 } from '@broject/core';
-import type {
-  BdCompat,
-  BdProbe,
-  ConfigDiagnostic,
-  DoltHeadHealth,
-  DoltRemote,
-  ProviderEntry,
-  ProviderSurface,
-} from '@broject/core';
-import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
 import {
   assertSonarHostTrusted,
   assertTokenSafeHost,
@@ -68,19 +67,20 @@ import {
   resolveSonarProject,
   SourceSkipped,
 } from '@broject/debt';
-import { judgeConfig, synthesizedProviders } from '@broject/judge';
 import type { JudgeConfig } from '@broject/judge';
-import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
-import { pluginRows } from './plugins.ts';
-import { daemonProbe, readDriveMarker } from './daemon.ts';
-import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
+import { judgeConfig, synthesizedProviders } from '@broject/judge';
+import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh';
 import {
+  type AgentConnectorEnv,
+  type BudgetSnapshot,
   budgetLines,
   budgetSnapshotFor,
   loadAgentEnv,
-  type AgentConnectorEnv,
-  type BudgetSnapshot,
 } from '../agent-connectors.ts';
+import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
+import { daemonProbe, readDriveMarker } from './daemon.ts';
+import { pluginRows } from './plugins.ts';
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -1175,17 +1175,41 @@ function bdChecks(
     out.push(check('bd-backend', 'ok', 'dolt remotes reachable'));
   }
   if (beadsDir) {
-    const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
-    out.push(
-      list.code === 0
-        ? check('bd-store', 'ok', 'beads store readable')
-        : check(
-            'bd-store',
-            'fail',
-            'beads store present but `bd list` failed',
-            list.err || 'inspect the store or re-run `bd init`'
-          )
-    );
+    // GitHub serves tasks AND compat already proved bd or its store
+    // unusable — a second `bd list` only repeats a 15s stall on a
+    // backend nothing routes to.
+    if (
+      githubTasksHealthy &&
+      (compat.broken || compat.missing || !compat.ok || compat.store === 'error')
+    ) {
+      out.push(
+        check(
+          'bd-store',
+          'warn',
+          'beads store probe skipped — bd unusable',
+          'GitHub Issues serves tasks (connectors.tasks=github)'
+        )
+      );
+    } else {
+      const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
+      out.push(
+        list.code === 0
+          ? check('bd-store', 'ok', 'beads store readable')
+          : githubTasksHealthy
+            ? check(
+                'bd-store',
+                'warn',
+                'beads store present but `bd list` failed',
+                `${list.err || 'inspect the store'} — GitHub Issues serves tasks (connectors.tasks=github)`
+              )
+            : check(
+                'bd-store',
+                'fail',
+                'beads store present but `bd list` failed',
+                list.err || 'inspect the store or re-run `bd init`'
+              )
+      );
+    }
   } else if (beadsActive) {
     out.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'));
   }

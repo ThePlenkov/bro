@@ -58,11 +58,11 @@ import {
   writeHarvestFile,
   writeSummary,
   ALL_SOURCES,
-  COLLECTORS,
+  collectForSource,
   DEBT_SOURCES,
   parseSources,
+  dedupeForSource,
   resolvedThreadIds,
-  SOURCE_DEDUPES,
   SourceSkipped,
   type DebtPrState,
   type DebtRecord,
@@ -318,53 +318,103 @@ function collectDebtSources(
   }
 }
 
-function collectOneSource(
+function collectSourceRecordsDebt(
   source: DebtSource,
   args: CollectArgs,
-  debtCfg: { stale_days: number; sourceConfig: Record<string, Record<string, unknown>> }
-): void {
-  const harvestedAt = new Date().toISOString();
-  let records: DebtRecord[] = [];
+  debtCfg: { stale_days: number; sourceConfig: Record<string, Record<string, unknown>> },
+  harvestedAt: string
+): DebtRecord[] | undefined {
   try {
-    records = COLLECTORS[source](
+    return collectForSource(
+      source,
       {
         repo: args.repo,
         runId: args.runId,
         harvestedAt,
-        // Properties files resolve at the checkout root — a collect run
-        // from a repo subdirectory must still see them.
         dir: gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd(),
         sourceConfig: debtCfg.sourceConfig,
       },
       debtCfg.stale_days
     );
   } catch (err) {
-    // A skipped source is a setup gap, not a fetch failure — the ledger
-    // is untouched so live rows are never swept on an empty fetch.
     console.error(
       err instanceof SourceSkipped
         ? `debt: ${source} skipped — ${err.message}`
         : `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
     );
-    return;
+    return undefined;
   }
+}
+
+function applyDebtDedupe(
+  source: DebtSource,
+  records: DebtRecord[]
+): {
+  records: DebtRecord[];
+  existing: DebtRecord[];
+  dupedIds: Set<string>;
+  coveredBy: Map<string, string>;
+  ran: boolean;
+} {
   // PR-decorating sources dedupe against open review-thread rows — the
   // service's PR comments already landed those findings via the merged-PR
   // sweep.
-  const dedupe = SOURCE_DEDUPES.get(source);
-  let existing: DebtRecord[] = [];
-  let dupedIds = new Set<string>();
-  let coveredBy = new Map<string, string>();
-  if (dedupe !== undefined) {
-    existing = readDebtRecords();
-    const d = dedupe(records, existing);
-    records = d.kept;
-    dupedIds = new Set(d.duped.map(x => x.record.thread_id));
-    coveredBy = new Map(d.duped.map(x => [x.record.thread_id, x.coveredBy]));
-    if (d.duped.length > 0) {
-      console.error(`debt: ${source} — ${d.duped.length} finding(s) covered by review threads`);
-    }
+  const dedupe = dedupeForSource(source);
+  if (dedupe === undefined) {
+    return {
+      records,
+      existing: [],
+      dupedIds: new Set<string>(),
+      coveredBy: new Map<string, string>(),
+      ran: false,
+    };
   }
+  const existing = readDebtRecords();
+  const d = dedupe(records, existing);
+  const dupedIds = new Set(d.duped.map(x => x.record.thread_id));
+  const coveredBy = new Map(d.duped.map(x => [x.record.thread_id, x.coveredBy]));
+  if (d.duped.length > 0) {
+    console.error(`debt: ${source} — ${d.duped.length} finding(s) covered by review threads`);
+  }
+  return { records: d.kept, existing, dupedIds, coveredBy, ran: true };
+}
+
+// Alerts/CI are server-side truth: a finding absent from the fresh
+// fetch resolved upstream — close its ledger row so the queue shrinks.
+// Deduped ids are covered, not resolved — they transition above.
+function maybeResolveGoneRecords(
+  source: DebtSource,
+  records: DebtRecord[],
+  dupedIds: Set<string>
+): void {
+  const gone = resolvedThreadIds(readDebtRecords(), source, records).filter(id => !dupedIds.has(id));
+  if (gone.length === 0) {
+    return;
+  }
+  upsertLedgerOverlays(
+    gone.map(thread_id => ({
+      thread_id,
+      status: 'done' as const,
+      fix_pr: null,
+      fixed_at: new Date().toISOString(),
+      notes: 'resolved upstream — no longer reported',
+    }))
+  );
+  console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`);
+}
+
+function collectOneSource(
+  source: DebtSource,
+  args: CollectArgs,
+  debtCfg: { stale_days: number; sourceConfig: Record<string, Record<string, unknown>> }
+): void {
+  const harvestedAt = new Date().toISOString();
+  const raw = collectSourceRecordsDebt(source, args, debtCfg, harvestedAt);
+  if (raw === undefined) {
+    return;
+  }
+  const dedupe = applyDebtDedupe(source, raw);
+  const records = dedupe.records;
   console.error(`debt: ${source} — ${records.length} finding(s)`);
   if (args.dryRun) {
     for (const row of records) {
@@ -372,8 +422,8 @@ function collectOneSource(
     }
     return;
   }
-  if (dedupe !== undefined) {
-    syncDedupeOverlays(source, existing, records, dupedIds, coveredBy);
+  if (dedupe.ran) {
+    syncDedupeOverlays(source, dedupe.existing, records, dedupe.dupedIds, dedupe.coveredBy);
   }
   if (records.length > 0) {
     writeHarvestFile({
@@ -384,24 +434,7 @@ function collectOneSource(
       records,
     });
   }
-  // Alerts/CI are server-side truth: a finding absent from the fresh
-  // fetch resolved upstream — close its ledger row so the queue shrinks.
-  // Deduped ids are covered, not resolved — they transition above.
-  const gone = resolvedThreadIds(readDebtRecords(), source, records).filter(
-    id => !dupedIds.has(id)
-  );
-  if (gone.length > 0) {
-    upsertLedgerOverlays(
-      gone.map(thread_id => ({
-        thread_id,
-        status: 'done' as const,
-        fix_pr: null,
-        fixed_at: new Date().toISOString(),
-        notes: 'resolved upstream — no longer reported',
-      }))
-    );
-    console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`);
-  }
+  maybeResolveGoneRecords(source, records, dedupe.dupedIds);
 }
 
 /** PR-decorator dedupe bookkeeping (specs: bro-huy5o.4, bro-huy5o.5) —
