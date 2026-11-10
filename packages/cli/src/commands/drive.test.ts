@@ -147,25 +147,37 @@ describe('driveSection', () => {
       intervalSec: 300,
       merge: 'auto',
       occupancyTtlSec: 7200,
+      litterSweepSec: 3600,
     });
     assert.deepEqual(driveSection({}), {
       intervalSec: 300,
       merge: 'auto',
       occupancyTtlSec: 7200,
+      litterSweepSec: 3600,
     });
     assert.deepEqual(driveSection('garbage'), {
       intervalSec: 300,
       merge: 'auto',
       occupancyTtlSec: 7200,
+      litterSweepSec: 3600,
     });
   });
 
   test('values survive; junk falls back', () => {
-    assert.deepEqual(driveSection({ intervalSec: 60, merge: 'never', occupancyTtlSec: 600 }), {
-      intervalSec: 60,
-      merge: 'never',
-      occupancyTtlSec: 600,
-    });
+    assert.deepEqual(
+      driveSection({
+        intervalSec: 60,
+        merge: 'never',
+        occupancyTtlSec: 600,
+        litterSweepSec: 900,
+      }),
+      {
+        intervalSec: 60,
+        merge: 'never',
+        occupancyTtlSec: 600,
+        litterSweepSec: 900,
+      }
+    );
     assert.equal(driveSection({ intervalSec: -5 }).intervalSec, 300);
     // a saved cadence below the --every floor would be rejected as its
     // own default — the section normalizes out-of-range values
@@ -176,6 +188,11 @@ describe('driveSection', () => {
     assert.equal(driveSection({ occupancyTtlSec: 5 }).occupancyTtlSec, 7200);
     assert.equal(driveSection({ occupancyTtlSec: 'never' }).occupancyTtlSec, 7200);
     assert.equal(driveSection({ occupancyTtlSec: 60 }).occupancyTtlSec, 60);
+    // the litter cadence normalizes like the other durations — 0 is a
+    // real value (sweep off), negatives/junk fall back to the default
+    assert.equal(driveSection({ litterSweepSec: 0 }).litterSweepSec, 0);
+    assert.equal(driveSection({ litterSweepSec: -5 }).litterSweepSec, 3600);
+    assert.equal(driveSection({ litterSweepSec: 'hourly' }).litterSweepSec, 3600);
   });
 });
 

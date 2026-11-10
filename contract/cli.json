@@ -957,6 +957,7 @@
       "spellings": ["mesh"],
       "aliases": [],
       "hidden": false,
+      "skill": "mesh",
       "configKey": "mesh",
       "plan": false,
       "external": false

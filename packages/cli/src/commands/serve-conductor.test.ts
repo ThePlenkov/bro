@@ -15,8 +15,8 @@ import {
 } from '@agentclientprotocol/sdk';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { otelJournal, type AcpTerminals } from '@broject/providers';
-import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts';
-import type { ConductorConfig } from './serve-conductor.ts';
+import { conductorConfig, conductorProxy, parseReply, sweepSessions } from './serve-conductor.ts';
+import type { ConductorConfig, ConvSession } from './serve-conductor.ts';
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts';
 import { scrubEnv } from '@broject/core';
 
@@ -1715,6 +1715,34 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.equal(fake.sessions.length, 2);
       assert.match(fake.prompts[2] ?? '', /more/);
     }));
+
+  test('a named session outlives the anonymous TTL — probes reuse across cadence', () => {
+    // bro-5xm9g: a ~16min probe cadence vs the 10min fingerprint TTL
+    // evicted every probe's session — each paid a fresh session/new
+    // (~11k input tokens). Named (h:) sessions asked for persistence
+    // explicitly and get the longer TTL.
+    const now = 1_000_000_000;
+    const mk = (lastSeen: number): ConvSession =>
+      ({
+        busy: false,
+        lastSeen,
+        live: { dispose() {} },
+        releaseCap: () => {},
+      }) as unknown as ConvSession;
+    const sessions = new Map<string, ConvSession>([
+      ['f:abc', mk(now - 11 * 60_000)],
+      ['h:bro-live-check', mk(now - 11 * 60_000)],
+      ['h:old', mk(now - 61 * 60_000)],
+    ]);
+    sweepSessions(sessions, now);
+    assert.equal(sessions.has('f:abc'), false, 'fingerprint past the 10m TTL evicts');
+    assert.equal(
+      sessions.has('h:bro-live-check'),
+      true,
+      'named session at 11m survives — the probe reuses it'
+    );
+    assert.equal(sessions.has('h:old'), false, 'named session still bounded by its own TTL');
+  });
 
   test('an edited prefix under a pinned key evicts and restarts', () =>
     withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {

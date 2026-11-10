@@ -1,4 +1,5 @@
 ---
+
 name: pulse
 description: "Use when a session needs its own watchdog cadence — 'arm the pulse', 'wake me every N', keeping an eye on long-running fleet/loop/convoy work without blind infinite waits. Thin wrapper over the bro CLI: `bro pulse <S>` is the session-owned metronome — every S seconds it ticks and drops the beat into the mailbox, which is what actually reaches the session mid-turn. Requires `bro` (npx -y @broject/bro@0)."
 ---
@@ -13,12 +14,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro pulse [S]` | The session metronome — a long-lived child: beats every S seconds (default `watch.intervalSec`, 60), prints each tick, and drops it into the mailbox as the `pulse.lock` holder. The mail IS the wake: a background child's exit reaches no one, so the tick's drop is the only channel that lands mid-turn |
-| `bro pulse [S] --no-notify` | Stdout liveness only — no mailbox drops (default is `--notify`) |
-| `bro pulse [S] --json` | One structured object per beat — `{ts, …snapshot, pulse:{sec,mailing}}`, or `{ts,sec,cmd,code,stdout,stderr,mailing}` for a probe |
-| `bro pulse [S] -- <cmd>…` | The tick is `<cmd>` instead of the watch snapshot — stdout/stderr echoed verbatim; a failing probe is beat content, never a kill |
+| Command                     | What it does                                                                                                                                                                                                                                                                                                |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro pulse [S]`             | The session metronome — a long-lived child: beats every S seconds (default `watch.intervalSec`, 60), prints each tick, and drops it into the mailbox as the `pulse.lock` holder. The mail IS the wake: a background child's exit reaches no one, so the tick's drop is the only channel that lands mid-turn |
+| `bro pulse [S] --no-notify` | Stdout liveness only — no mailbox drops (default is `--notify`)                                                                                                                                                                                                                                             |
+| `bro pulse [S] --json`      | One structured object per beat — `{ts, …snapshot, pulse:{sec,mailing}}`, or `{ts,sec,cmd,code,stdout,stderr,mailing}` for a probe                                                                                                                                                                           |
+| `bro pulse [S] -- <cmd>…`   | The tick is `<cmd>` instead of the watch snapshot — stdout/stderr echoed verbatim; a failing probe is beat content, never a kill                                                                                                                                                                            |
 
 ## Policy
 
@@ -52,5 +53,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   killed — it never exits on its own. Disarming the marker
   (`uninstall`) stops future rearm, not the live child.
 - **Report progress in words, not IDs.** Same rule as `/watch` — a
-  digest says what an agent is *doing* and what *landed*, never bare
-  mol/bead/PR IDs.
+  digest says what an agent is _doing_ and what _landed_, never bare
+  mol/bead/PR IDs. Same verification rule too: a merge is reported
+  only with `gh pr view` state in hand, and a `clock skew`/`clock
+  unverified` flag on the tick means its times are untrusted.

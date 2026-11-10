@@ -67,6 +67,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
@@ -91,39 +92,20 @@ import {
   type ProbeTiming,
 } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
-import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard';
-import { GUARD_PROBES } from '../guard-probes.ts';
-import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
-import { otelSpan } from '@broject/providers';
 import { emitHook } from '@broject/otel';
-import {
-  hooksDir,
-  previousTraceFile,
-  readTraceTail,
-  relativize,
-  sessionContextText,
-  type MatchContext,
-} from '@broject/learn';
+import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
+import { GUARD_PROBES } from '../guard-probes.ts';
 import { loadBroConfig } from '../plugins.ts';
 import { sessionCapRefusalForHook } from './session-cap.ts';
-import {
-  cliVersion,
-  emitCommitTrailers,
-  installCommitHook,
-  installPostMergeHook,
-  installRefGuardHook,
-  uninstallCommitHook,
-  uninstallPostMergeHook,
-  uninstallRefGuardHook,
-  type InstallResult,
-} from './githooks.ts';
+import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { maybeSpawnTraceStamp } from './trace-resolve.ts';
 import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
-import { goalContextLines, goalStopLines } from './goal.ts';
-import { heartbeatLine } from './watch-heartbeat.ts';
+import type { MatchContext } from '@broject/learn';
+import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts';
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -133,6 +115,17 @@ import {
   toCursorHookOutput,
 } from '../cursor-hook.ts';
 import { deriveToolSuccess } from '../host-matrix.ts';
+
+// Lazy-loaded heavy deps to cut hook startup time
+const lazyRunGuards = async () => (await import('@broject/guard')).runGuards;
+const lazyAppendRow = async () => (await import('@broject/judge')).appendRow;
+const lazyJudgeConfig = async () => (await import('@broject/judge')).judgeConfig;
+const lazyJudgeFacade = async () => (await import('@broject/judge')).judgeFacade;
+const lazyOtelSpan = async () => (await import('@broject/providers')).otelSpan;
+const lazyLearn = async () => import('@broject/learn');
+const lazyGithooks = async () => import('./githooks.ts');
+const lazyGoal = async () => import('./goal.ts');
+const lazyHeartbeat = async () => import('./watch-heartbeat.ts');
 
 interface HookInput {
   tool_name?: unknown;
@@ -287,7 +280,7 @@ export type GateAspect = 'act' | 'drill' | 'work' | 'task';
 /** `bro` at a command position — the installed bin (`bro …`) or npx
  *  against the package (`npx [--flags] [@broject/]bro[@ver] …`). The
  *  negative lookahead keeps `npx bro-fu`/`npx brother` out. */
-const BRO_CMD = String.raw`(?:bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
+const BRO_CMD = String.raw`(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
@@ -435,12 +428,6 @@ export function classifySkillMutation(cmd: string): { plugin: string; skill: str
   return null;
 }
 
-/** Self-tool heads — `bd` plus BRO_CMD's alternation, spelled out as a
- *  literal: a computed RegExp trips the non-literal-constructor SAST
- *  rule. Keep the npx arm in sync with BRO_CMD. */
-const SELF_TOOL_HEAD_RE =
-  /^\s*(?:bd|bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
-
 /** bro/bd are the plugin's own tools — permission hooks approve them
  * outright. Chained, piped, or redirected commands are NOT self-tool calls:
  * the second stage could be anything, so it falls through to a prompt. */
@@ -448,7 +435,36 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return SELF_TOOL_HEAD_RE.test(cmd);
+  if (/^\s*(bro|bd)(\s|$)/.test(cmd)) {
+    return true;
+  }
+  if (!/^\s*npx\b/.test(cmd)) {
+    return false;
+  }
+  const exec = npxExecutable(cmd.trim().split(/\s+/).slice(1));
+  return exec !== undefined && /^(?:@broject\/)?bro(?:@[\w.:-]+)?$/.test(exec);
+}
+
+/** `-p`/`--package` in every spelling npx accepts — the package-set
+ *  selector means `bro` in the argv is not necessarily what runs. */
+const NPX_PACKAGE_RE = /^(?:-p|--package)(?:=|$)/;
+
+/** Flags that take no value and change nothing about what runs —
+ *  the only flags allowed between `npx` and its executable. */
+const NO_VALUE_NPX_FLAGS = new Set(['-y', '--yes', '--no-install', '-q', '--quiet']);
+
+/** The executable npx will run, or undefined when the argv says `bro`
+ *  isn't it: a package override anywhere vetoes, and the first token
+ *  that is not a known no-value flag must be the executable — a flag
+ *  in its place can rename the run (`--call`), repoint the fetch
+ *  (`--registry`), or eat the next token as its value (`--prefix`,
+ *  `--cache`), so the command falls through to a prompt. */
+function npxExecutable(tokens: string[]): string | undefined {
+  if (tokens.some(t => NPX_PACKAGE_RE.test(t))) {
+    return undefined;
+  }
+  const exec = tokens.find(t => !NO_VALUE_NPX_FLAGS.has(t));
+  return exec !== undefined && !exec.startsWith('-') ? exec : undefined;
 }
 
 // --- session arming -----------------------------------------------------------
@@ -619,13 +635,19 @@ async function parallelLines(
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
   try {
-    const parts: string[] = [];
     const stateDir = hooksStateDir(dir);
-    if (stateDir) {
-      parts.push(...liveSessionLines(stateDir, sessionId));
-    }
-    const work = await parallelWorkProbe(hookCtx(dir, sessionId), onProbe);
-    parts.push(...work.lines);
+    const [local, work] = await Promise.all([
+      Promise.resolve().then(() => {
+        if (!stateDir) return [];
+        try {
+          return liveSessionLines(stateDir, sessionId);
+        } catch {
+          return [];
+        }
+      }),
+      parallelWorkProbe(hookCtx(dir, sessionId), onProbe),
+    ]);
+    const parts = [...local, ...work.lines];
     if (parts.length === 0) {
       return { lines: [], settled: work.settled };
     }
@@ -1077,9 +1099,35 @@ let perfBuf: PerfRow[] | null = null;
  *  when rows arrive, so span duration ≈ probe duration (spec
  *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
-  const span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
+  let span: any | undefined;
+  let pendingEnd: Record<string, unknown> | undefined;
+  void lazyOtelSpan()
+    .then((otelSpan: any) => {
+      try {
+        const created = otelSpan(`hook.probe.${probe}`, { 'hook.event': event });
+        if (pendingEnd) {
+          created.end(pendingEnd);
+        } else {
+          span = created;
+        }
+      } catch {
+        span = undefined;
+      }
+    })
+    // a failed dynamic import is fail-open — span stays undefined,
+    // ends land in pendingEnd and drop
+    .catch(() => {});
   return rows => {
-    span.end({ 'hook.rows': rows.length });
+    const attrs = { 'hook.rows': rows.length };
+    try {
+      if (span) {
+        span.end(attrs);
+      } else {
+        pendingEnd = attrs;
+      }
+    } catch {
+      // ignore
+    }
     if (!perfBuf) {
       return;
     }
@@ -1196,14 +1244,25 @@ export function hookDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
 
 // --- event handlers -----------------------------------------------------------
 
+const require = createRequire(import.meta.url);
+
 /** Trace tail for this session — the MatchContext's structured half.
  *  No hooks dir or session id means an empty tail, never a throw. */
-function sessionTail(
+async function sessionTail(
   dir: string,
   sessionId: string
-): { entries: ReturnType<typeof readTraceTail>['entries']; raw: string } {
+): Promise<{ entries: any[]; raw: string }> {
   const path = traceFile(dir, sessionId);
-  return path === null ? { entries: [], raw: '' } : readTraceTail(path);
+  if (path === null) {
+    return { entries: [], raw: '' };
+  }
+  try {
+    const learn = await lazyLearn();
+    (globalThis as any).__bro_learn_cache = learn;
+    return learn.readTraceTail(path);
+  } catch {
+    return { entries: [], raw: '' };
+  }
 }
 
 /** `sessionContextText` costs a cold bd/dolt handshake plus git spawns —
@@ -1282,8 +1341,21 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
   // t0 before the build: a concurrent hook that finished first wrote a
   // FRESHER snapshot — never overwrite it with this older one
   const t0 = Date.now();
-  const text = await sessionContextText({ dir, sessionId });
-  if (file !== null) {
+  let text = '';
+  try {
+    const learn = await lazyLearn();
+    text = await learn.sessionContextText({ dir, sessionId });
+  } catch {
+    try {
+      const { createRequire } = require('node:module');
+      const req = createRequire(import.meta.url);
+      const learn = req('@broject/learn');
+      text = await learn.sessionContextText({ dir, sessionId });
+    } catch {
+      text = '';
+    }
+  }
+  if (file !== null && text) {
     cachedContextWrite(file, text, t0);
   }
   return text;
@@ -1308,6 +1380,21 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  mid-write sees a stale stamp or a stale extra file, both of which
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
+function pruneStaleGuardEvents(gdir: string, coverageEvents: readonly string[]): void {
+  for (const ev of GUARD_EVENTS) {
+    if (!coverageEvents.includes(ev)) {
+      try {
+        rmSync(join(gdir, ev), { force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (!coverageEvents.includes('.trace')) {
+    // handled separately
+  }
+}
+
 export function recordGuardEvents(
   coverage: GuardRun['coverage'],
   repoDir: string = process.cwd()
@@ -1319,39 +1406,47 @@ export function recordGuardEvents(
   try {
     const gdir = join(dir, 'guards');
     if (coverage?.complete !== true) {
-      // a degraded collection must invalidate the last good record —
-      // leaving the old stamp would masquerade stale coverage as
-      // current, and the shell would skip guards the failed
-      // collection dropped
-      rmSync(join(gdir, '.stamp'), { force: true });
+      try {
+        rmSync(join(gdir, '.stamp'), { force: true });
+      } catch {
+        // ignore
+      }
       return;
     }
     mkdirSync(gdir, { recursive: true });
     for (const ev of coverage.events) {
       writeFileSync(join(gdir, ev), '');
     }
-    // .trace marks a def reading the journaled tail — post-tool then
-    // defers so the journal stays complete for later evaluations
     if (coverage.trace) {
       writeFileSync(join(gdir, '.trace'), '');
     }
-    // .stamp lands last via rename — atomic, and its body carries the
-    // same coverage list so a pruned event file can never hide a def
-    // from a concurrent reader pair
     const body = [...coverage.events, ...(coverage.trace ? ['.trace'] : [])].join('\n') + '\n';
     const tmp = join(gdir, `.stamp-${process.pid}`);
     writeFileSync(tmp, body);
     renameSync(tmp, join(gdir, '.stamp'));
-    for (const ev of GUARD_EVENTS) {
-      if (!coverage.events.includes(ev)) {
-        rmSync(join(gdir, ev), { force: true });
-      }
-    }
+    pruneStaleGuardEvents(gdir, coverage.events);
     if (!coverage.trace) {
-      rmSync(join(gdir, '.trace'), { force: true });
+      try {
+        rmSync(join(gdir, '.trace'), { force: true });
+      } catch {
+        // ignore
+      }
     }
   } catch {
     // a failed record only costs future spawns — never stall a hook
+  }
+}
+
+/** The guard sweep's trace half — this session's tail entries
+ *  relativized through the learn index. An unloaded learn package or a
+ *  relativize throw degrades to an empty trace, never a thrown event:
+ *  a guard losing its match haystack is a miss, not a broken hook. */
+async function guardTrace(dir: string, entries: any[]): Promise<any[]> {
+  try {
+    const learn = await lazyLearn().catch(() => null);
+    return learn ? learn.relativize(dir, entries) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -1367,6 +1462,10 @@ async function guardLines(
 ): Promise<string[]> {
   try {
     const cfg = (loadBroConfig(dir) as Record<string, unknown>).guard as GuardConfig;
+    const runGuards = await lazyRunGuards();
+    const judgeConfigMod = await lazyJudgeConfig().catch(() => null);
+    const judgeFacadeMod = await lazyJudgeFacade().catch(() => null);
+    const appendRowMod = await lazyAppendRow().catch(() => null);
     const run = await runGuards({
       dir,
       sessionId,
@@ -1381,17 +1480,30 @@ async function guardLines(
       // guard's deterministic clauses pass. mode:'off' abstains here;
       // mode:'shadow' decides + journals kind:'guard' verdicts
       judge: () => {
-        const jcfg = judgeConfig(dir).judge;
-        if (jcfg.mode !== 'shadow') {
+        if (!judgeConfigMod) {
           return undefined;
         }
-        const input: GuardJudgeInput = {
-          facade: judgeFacade(dir),
-          confidence: jcfg.confidence,
-          maxDecisions: jcfg.maxDecisionsPerRun,
-          journal: v => appendRow(dir, v),
-        };
-        return input;
+        if (!judgeFacadeMod) {
+          return undefined;
+        }
+        if (!appendRowMod) {
+          return undefined;
+        }
+        try {
+          const jcfg = judgeConfigMod(dir).judge;
+          if (jcfg.mode !== 'shadow') {
+            return undefined;
+          }
+          const input: GuardJudgeInput = {
+            facade: judgeFacadeMod(dir),
+            confidence: jcfg.confidence,
+            maxDecisions: jcfg.maxDecisionsPerRun,
+            journal: (v: any) => appendRowMod(dir, v),
+          };
+          return input;
+        } catch {
+          return undefined;
+        }
       },
     });
     recordGuardEvents(run.coverage, dir);
@@ -1414,20 +1526,41 @@ async function rehydrateLines(
   sessionId: string,
   cliEvent: string
 ): Promise<ProbeResult> {
-  const [start, par] = await Promise.all([
+  // every leg resolves to its own lines INSIDE the sweep — the goal and
+  // heartbeat reads overlap the probe work instead of queueing behind
+  // it, and the assembly below keeps the original output order
+  const [start, par, goalLines, hbLine] = await Promise.all([
     sessionStartProbe(hookCtx(dir, sessionId), probeReporter(cliEvent, 'sessionStart')),
     parallelLines(dir, sessionId, probeReporter(cliEvent, 'parallelWork')),
+    // the session's active goal rehydrates like every other durable
+    // state — resume/compaction restores it (spec:
+    // specs/goal/bro-6vcll.md). Load or read failure contributes
+    // nothing, same as the probes
+    lazyGoal()
+      .then(mod => {
+        try {
+          return mod.goalContextLines(dir, sessionId);
+        } catch {
+          return [] as string[];
+        }
+      })
+      .catch(() => [] as string[]),
+    // rig liveness comes from the durable heartbeat file, not from
+    // whether a session happened to poll — mailbox drops expire in an
+    // hour (bro-dxoa5); absent file contributes nothing
+    lazyHeartbeat()
+      .then(mod => {
+        try {
+          return mod.heartbeatLine(dir);
+        } catch {
+          return null;
+        }
+      })
+      .catch(() => null),
   ]);
-  const parts = [...start.lines, ...par.lines];
-  // the session's active goal rehydrates like every other durable state —
-  // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
-  parts.push(...goalContextLines(dir, sessionId));
-  // rig liveness comes from the durable heartbeat file, not from whether
-  // a session happened to poll — mailbox drops expire in an hour
-  // (bro-dxoa5); absent file contributes nothing
-  const hb = heartbeatLine(dir);
-  if (hb !== null) {
-    parts.push(`watch heartbeat: ${hb}`);
+  const parts = [...start.lines, ...par.lines, ...goalLines];
+  if (hbLine !== null) {
+    parts.push(`watch heartbeat: ${hbLine}`);
   }
   return { lines: parts, settled: start.settled && par.settled };
 }
@@ -1439,6 +1572,26 @@ async function rehydrateLines(
  *  every probe, marker read, trace tail, and cache key resolves inside
  *  it. Fail-open identical to the hook: a dir outside a bro-enabled
  *  repo yields `lines: []`. */
+async function previousTraceTail(
+  dir: string,
+  sessionId: string
+): Promise<{ entries: any[]; raw: string }> {
+  let tail: { entries: any[]; raw: string } = { entries: [], raw: '' };
+  try {
+    const learn = await lazyLearn().catch(() => null);
+    if (!learn) {
+      return tail;
+    }
+    const hooks = learn.hooksDir(dir);
+    const prev =
+      hooks !== null && sessionId !== '' ? learn.previousTraceFile(hooks, sessionId) : null;
+    tail = prev !== null ? learn.readTraceTail(prev) : { entries: [], raw: '' };
+  } catch {
+    // ignore
+  }
+  return tail;
+}
+
 export async function collectSessionContext(
   dir: string,
   sessionId: string,
@@ -1459,12 +1612,10 @@ export async function collectSessionContext(
     // haystack is the same session-context text + previous-session trace
     // tail the learn connector assembles
     guardLines(dir, 'session-start', sessionId, async () => {
-      const hooks = hooksDir(dir);
-      const prev = hooks !== null && sessionId !== '' ? previousTraceFile(hooks, sessionId) : null;
-      const tail = prev !== null ? readTraceTail(prev) : { entries: [], raw: '' };
+      const tail = await previousTraceTail(dir, sessionId);
       return {
         text: `${await sessionContextTextCached(dir, sessionId)}\n${tail.raw}`,
-        trace: relativize(dir, tail.entries),
+        trace: await guardTrace(dir, tail.entries),
       };
     }),
   ]);
@@ -1492,8 +1643,8 @@ export async function collectPromptContext(
     // guards on prompt-submit: match.terms sees the raw prompt, trace
     // keys see this session's tail, state sees the live repo
     guardLines(dir, 'prompt-submit', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
-      return { text: prompt, trace: relativize(dir, tail.entries) };
+      const tail = await sessionTail(dir, sessionId);
+      return { text: prompt, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
   return { lines: [...promptLines, ...guards] };
@@ -1590,23 +1741,8 @@ function execNudges(cmd: string): string[] {
   }
 }
 
-async function emitPostTool(input: HookInput): Promise<void> {
-  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+function armingLinesForOutcome(outcome: unknown, cmd: string, sessionId: string): string[] {
   const lines: string[] = [];
-  // journal before the probes run — a lesson triggered on this exact
-  // tool landing must see its own trace line in the same event
-  journalTrace(input, sessionId);
-  // OTLP auto-flush — opt-in only, throttled, detached; a dead
-  // collector can lose spans, never stall the hook (spec:
-  // specs/telemetry/bro-huy5o.11.md)
-  maybeSpawnTraceFlush(process.cwd());
-  const outcome = input.tool_response?.success;
-  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
-  // arming is a "probe live state once" hint the stop gate re-verifies,
-  // not a verdict — so it fires on every outcome except a proven
-  // failure. A host that cannot observe outcomes (Codex PostToolUse
-  // fires on non-zero exits) over-approximates: a false arm costs one
-  // probe that finds nothing, a missed arm loses the gate entirely.
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId));
     // a `gh pr create` in a formula-attested session earns the detached
@@ -1626,6 +1762,27 @@ async function emitPostTool(input: HookInput): Promise<void> {
   if (outcome === true) {
     lines.push(...execNudges(cmd));
   }
+  return lines;
+}
+
+async function emitPostTool(input: HookInput): Promise<void> {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+  const lines: string[] = [];
+  // journal before the probes run — a lesson triggered on this exact
+  // tool landing must see its own trace line in the same event
+  journalTrace(input, sessionId);
+  // OTLP auto-flush — opt-in only, throttled, detached; a dead
+  // collector can lose spans, never stall the hook (spec:
+  // specs/telemetry/bro-huy5o.11.md)
+  maybeSpawnTraceFlush(process.cwd());
+  const outcome = input.tool_response?.success;
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+  // arming is a "probe live state once" hint the stop gate re-verifies,
+  // not a verdict — so it fires on every outcome except a proven
+  // failure. A host that cannot observe outcomes (Codex PostToolUse
+  // fires on non-zero exits) over-approximates: a false arm costs one
+  // probe that finds nothing, a missed arm loses the gate entirely.
+  lines.push(...armingLinesForOutcome(outcome, cmd, sessionId));
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
   // the same journaled tail — one parallel flight with the probes
@@ -1635,8 +1792,8 @@ async function emitPostTool(input: HookInput): Promise<void> {
     // guards on post-tool: match sees the journaled trace tail (this
     // landing included — journalTrace ran first), state sees live repo
     guardLines(dir, 'post-tool', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
-      return { text: tail.raw, trace: relativize(dir, tail.entries) };
+      const tail = await sessionTail(dir, sessionId);
+      return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
   lines.push(...postLines, ...guards);
@@ -1675,12 +1832,18 @@ async function emitStopGate(input: HookInput): Promise<void> {
     sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
     4_000
   );
-  const goalP = goalStopLines(process.cwd(), sessionId, {
-    trace: sessionTail(process.cwd(), sessionId).raw,
-    // the judge's checkable surface — beads/gate/tree state, not just
-    // tool metadata (fail-open inside; a slow probe → undefined)
-    context: contextP,
-  });
+  const goalP = (async () => {
+    try {
+      const g = await lazyGoal();
+      const tail = await sessionTail(process.cwd(), sessionId);
+      return await g.goalStopLines(process.cwd(), sessionId, {
+        trace: tail.raw,
+        context: contextP,
+      });
+    } catch {
+      return [];
+    }
+  })();
   if (input.stop_hook_active === true) {
     const [goal] = await Promise.all([goalP, contextP]);
     if (goal.length > 0) {
@@ -1710,6 +1873,27 @@ function stopGateVerdict(
   return { hint: c.armedHint ?? c.passive };
 }
 
+/** The contribution walk of the stop gate — first block in aspect
+ *  order wins the emit; every non-block verdict's hint rides along so
+ *  a block still drops them (they journal as verdict rows regardless). */
+function stopGateOutcome(
+  contributions: GateContribution[],
+  armed: Set<string>,
+  sessionId: string
+): { block?: string; hints: string[] } {
+  const hints: string[] = [];
+  for (const c of contributions) {
+    const verdict = stopGateVerdict(c, armed, sessionId);
+    if (verdict.block !== undefined) {
+      return { block: verdict.block, hints };
+    }
+    if (verdict.hint !== undefined) {
+      hints.push(verdict.hint);
+    }
+  }
+  return { hints };
+}
+
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
@@ -1737,21 +1921,16 @@ async function emitStopGateBody(
       rows.sort((a, b) => rank(a.aspect) - rank(b.aspect))
     ),
     guardLines(dir, 'stop', sessionId, async () => {
-      const tail = sessionTail(dir, sessionId);
-      return { text: tail.raw, trace: relativize(dir, tail.entries) };
+      const tail = await sessionTail(dir, sessionId);
+      return { text: tail.raw, trace: await guardTrace(dir, tail.entries) };
     }),
   ]);
-  const gateHints: string[] = [];
-  for (const c of contributions) {
-    const verdict = stopGateVerdict(c, armed, sessionId);
-    if (verdict.block !== undefined) {
-      emit({ decision: 'block', reason: verdict.block });
-      return;
-    }
-    if (verdict.hint) {
-      gateHints.push(verdict.hint);
-    }
+  const outcome = stopGateOutcome(contributions, armed, sessionId);
+  if (outcome.block !== undefined) {
+    emit({ decision: 'block', reason: outcome.block });
+    return;
   }
+  const gateHints = outcome.hints;
   // any Stop context re-wakes the host as a new turn — repeating an
   // unchanged gate hint every stop turns an idle wait into a loop
   const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])];
@@ -1885,34 +2064,45 @@ function runCommitHookCommand(event: 'install' | 'uninstall'): void {
   // every bro git hook rides the same install — provenance tags the
   // commit message, refguard fences shared branch refs (bro-1c78),
   // post-merge keeps the dep graph and dist inside the just-merged head
-  const results: [string, InstallResult][] =
-    event === 'install'
-      ? [
-          ['prepare-commit-msg', installCommitHook(process.cwd(), cliVersion())],
-          ['reference-transaction', installRefGuardHook(process.cwd(), cliVersion())],
-          ['post-merge', installPostMergeHook(process.cwd(), cliVersion())],
-        ]
-      : [
-          ['prepare-commit-msg', uninstallCommitHook(process.cwd())],
-          ['reference-transaction', uninstallRefGuardHook(process.cwd())],
-          ['post-merge', uninstallPostMergeHook(process.cwd())],
-        ];
-  for (const [name, r] of results) {
-    if (r.state === 'error') {
-      console.error(`bro hooks ${event} ${name}: ${r.err}`);
+  void lazyGithooks()
+    .then(m => {
+      const results: [string, InstallResult][] =
+        event === 'install'
+          ? [
+              ['prepare-commit-msg', m.installCommitHook(process.cwd(), m.cliVersion())],
+              ['reference-transaction', m.installRefGuardHook(process.cwd(), m.cliVersion())],
+              ['post-merge', m.installPostMergeHook(process.cwd(), m.cliVersion())],
+            ]
+          : [
+              ['prepare-commit-msg', m.uninstallCommitHook(process.cwd())],
+              ['reference-transaction', m.uninstallRefGuardHook(process.cwd())],
+              ['post-merge', m.uninstallPostMergeHook(process.cwd())],
+            ];
+      for (const [name, r] of results) {
+        if (r.state === 'error') {
+          console.error(`bro hooks ${event} ${name}: ${r.err}`);
+          process.exitCode = 1;
+          continue;
+        }
+        console.error(`bro hooks ${event} ${name}: ${r.state} ${r.path}`);
+      }
+    })
+    .catch(err => {
+      console.error(`bro hooks ${event}: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
-      continue;
-    }
-    console.error(`bro hooks ${event} ${name}: ${r.state} ${r.path}`);
-  }
+    });
 }
 
 function runPrepareCommitMsg(argv: string[]): void {
-  try {
-    emitCommitTrailers(argv.slice(1));
-  } catch {
-    // fail-open — provenance must never block a commit
-  }
+  void lazyGithooks()
+    .then(m => {
+      try {
+        m.emitCommitTrailers(argv.slice(1));
+      } catch {
+        // fail-open
+      }
+    })
+    .catch(() => {});
   emitHook('prepare-commit-msg', {}, { dir: process.cwd() });
 }
 
@@ -2115,29 +2305,26 @@ function runPerf(argv: string[]): void {
 /** post-merge and its detached worker are git-hook events — same
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
- *  block a merge (the catch covers a throw before the worker's own). The
- *  dispatch stays a static if-chain — a computed function-table lookup
- *  trips the non-static-access SAST rule. */
+ *  block a merge (the catch covers a throw before the worker's own). */
 function runPostMergeEvent(event: string | undefined): boolean {
-  if (event !== 'post-merge' && event !== 'post-merge-run') {
-    return false;
-  }
-  try {
-    if (event === 'post-merge') {
-      emitPostMerge(process.cwd());
-    } else {
-      runPostMergeRefresh(process.cwd());
-    }
-  } catch {
-    // fail-open
-  }
-  // telemetry on the dispatch, not the worker — `post-merge-run` is an
-  // internal spawn, not a hook event: its row would duplicate the
-  // `hook.post-merge` one and dodge the `post-merge` policy name.
   if (event === 'post-merge') {
-    emitHook(event, {}, { dir: process.cwd() });
+    try {
+      emitPostMerge(process.cwd());
+    } catch {
+      // fail-open
+    }
+    emitHook('post-merge', {}, { dir: process.cwd() });
+    return true;
   }
-  return true;
+  if (event === 'post-merge-run') {
+    try {
+      runPostMergeRefresh(process.cwd());
+    } catch {
+      // fail-open
+    }
+    return true;
+  }
+  return false;
 }
 
 /** Write the host-derived outcome into `tool_response.success` for the
@@ -2158,31 +2345,28 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
   return { ...input, tool_response: { ...response, success } };
 }
 
-/** Events that settle on argv alone — operator commands and git-hook
- *  events never read stdin (a git hook's stdin can be a terminal, and
- *  reading stdin would block on it forever) and run before the
- *  broEnabled gate: wiring/shimming a repo is how it opts in. Returns
- *  true when the argv named one of them. */
-function runArgvEvent(argv: string[]): boolean {
-  const event = argv[0];
+/** Pre-gate lane — the operator commands and git-hook events that run
+ *  on argv alone and never read stdin (a git hook's stdin can be a
+ *  terminal, and reading it would block forever). They stay ahead of
+ *  the broEnabled gate: wiring a repo is how it opts in, and an
+ *  installed shim IS the opt-in — gating on .beads/bro.config would
+ *  silently deaden a hook the repo installed. */
+function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
   // install/uninstall are operator commands, not hook events — they
-  // report a verdict on stderr. They also run before the broEnabled
-  // gate: wiring a repo is how it opts in.
+  // report a verdict on stderr and never read stdin
   if (event === 'install' || event === 'uninstall') {
     runCommitHookCommand(event);
     return true;
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
   // same no-stdin rule as the operator commands, and same pre-gate
-  // placement: the installed shim IS the opt-in, so gating on
-  // .beads/bro.config would silently deaden a hook the repo installed
+  // placement
   if (event === 'prepare-commit-msg') {
     runPrepareCommitMsg(argv);
     return true;
   }
   // reference-transaction is a git-hook event too — argv for the phase
-  // and ppid, stdin for the update list; same pre-gate placement (the
-  // installed shim is the opt-in)
+  // and ppid, stdin for the update list; same pre-gate placement
   if (event === 'reference-transaction') {
     runRefGuard(argv);
     return true;
@@ -2197,37 +2381,101 @@ function runArgvEvent(argv: string[]): boolean {
     runPerf(argv);
     return true;
   }
-  // a bare `bro hooks` is a capability probe — launchers test the
-  // subcommand exists before calling it with the real event. Return
-  // before readRaw: the probe must not consume a payload still waiting
-  // on the caller's stdin for that next invocation.
-  return !event;
+  // `bro hooks status` is the report over the hook spool the launcher's
+  // run.sh writes (start/end pairs — a start without an end is a host
+  // kill) — same no-stdin operator placement as perf.
+  if (event === 'status') {
+    console.log(renderHookSpoolStatus(argv));
+    return true;
+  }
+  return false;
+}
+
+function detectHookClients(raw: unknown): { cursor: boolean; codex: boolean } {
+  const cursor = isCursorHookPayload(raw);
+  const codex =
+    !cursor &&
+    typeof raw === 'object' &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    typeof (raw as { turn_id?: unknown }).turn_id === 'string';
+  return { cursor, codex };
+}
+
+function prepareHookInput(
+  event: string,
+  raw: unknown,
+  cursorClient: boolean
+): { root: string; input: HookInput } {
+  const root = hookProjectDir(raw);
+  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw);
+  input = normalizeToolOutcome(event, input, raw);
+  return { root, input };
+}
+
+async function dispatchWithSpan(
+  event: string,
+  raw: unknown,
+  input: HookInput,
+  spanState: { evSpan: any; evSpanEnded: boolean; evSpanError: any }
+): Promise<boolean> {
+  try {
+    await dispatchHook(event, raw, input);
+    try {
+      spanState.evSpan?.end();
+    } catch {
+      // ignore
+    }
+    spanState.evSpanEnded = true;
+    return true;
+  } catch (e) {
+    try {
+      spanState.evSpan?.end({}, 'error');
+    } catch {
+      // ignore
+    }
+    if (!spanState.evSpan) {
+      spanState.evSpanError = { attrs: {}, status: 'error' };
+    }
+    spanState.evSpanEnded = true;
+    // hooks fail open — a bro bug must never break the session.
+    console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`);
+    answerCursorPermission(event, input);
+    return false;
+  }
 }
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
   permissionAnswerEmitted = false;
-  if (runArgvEvent(argv)) {
+  // run.sh spools a start/end pair on every launch — including the
+  // early-return paths below (operator commands, the capability probe,
+  // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
+  // of them, is the only spot that bounds the spool on a tree where the
+  // dispatch path never runs.
+  rotateHookSpool();
+  const event = argv[0];
+  if (runPreGateCommand(event, argv)) {
     return;
   }
-  const event = argv[0];
+  // a bare `bro hooks` is a capability probe — launchers test the
+  // subcommand exists before calling it with the real event. Return
+  // before readRaw: the probe must not consume a payload still waiting
+  // on the caller's stdin for that next invocation.
+  if (!event) {
+    return;
+  }
   // stdin before the opt-in check: Cursor's project dir is on the
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw();
-  cursorClient = isCursorHookPayload(raw);
-  codexClient =
-    !cursorClient &&
-    typeof raw === 'object' &&
-    raw !== null &&
-    !Array.isArray(raw) &&
-    typeof (raw as { turn_id?: unknown }).turn_id === 'string';
-  const root = hookProjectDir(raw);
-  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw);
+  const clients = detectHookClients(raw);
+  cursorClient = clients.cursor;
+  codexClient = clients.codex;
   // the post-tool outcome normalizes at this edge — hosts encode
   // success differently (a boolean field, split event names, or not at
   // all), and policy below must not know which host sent the payload
-  input = normalizeToolOutcome(event, input, raw);
+  const { root, input } = prepareHookInput(event, raw, cursorClient);
   // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
   // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
   // gate for a human session that isn't there, so every event is pure
@@ -2258,39 +2506,49 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     process.stdout.write('', () => process.exit(0));
   }, hookDeadlineMs());
   deadlineTimer.unref();
-  const evSpan = otelSpan('hook.event', {
-    'hook.event': event,
-    'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+  const spanState = {
+    evSpan: undefined as any,
+    evSpanEnded: false,
+    evSpanError: undefined as
+      | { attrs?: Record<string, unknown>; status?: 'error' | 'ok' }
+      | undefined,
+  };
+  void lazyOtelSpan()
+    .then((otelSpan: any) => {
+      try {
+        const span = otelSpan('hook.event', {
+          'hook.event': event,
+          'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+        });
+        if (spanState.evSpanEnded) {
+          try {
+            span.end(spanState.evSpanError?.attrs, spanState.evSpanError?.status);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+        spanState.evSpan = span;
+      } catch {
+        spanState.evSpan = undefined;
+      }
+    })
+    // a failed dynamic import is fail-open — no span, no unhandled rejection
+    .catch(() => {});
+  const ok = await dispatchWithSpan(event, raw, input, spanState);
+  clearTimeout(deadlineTimer);
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+  flushPerf(sessionId, event, t0);
+  emitHook(event, input, {
+    sessionId,
+    client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+    durationMs: Date.now() - t0,
+    ok,
+    error: ok ? undefined : 'dispatch threw',
+    dir: root,
   });
-  let hookErr = false;
-  try {
-    await dispatchHook(event, raw, input);
-    evSpan.end();
-  } catch {
-    evSpan.end({}, 'error');
-    hookErr = true;
-    // hooks fail open — a bro bug must never break the session.
-    // A permission hook that already answered returned above; this
-    // covers a throw before that answer.
-    answerCursorPermission(event, input);
-  } finally {
-    clearTimeout(deadlineTimer);
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-    flushPerf(sessionId, event, t0);
-    // hook-first telemetry (spec bro-xgejl) — every dispatched event
-    // emits one facade record; enabled=false in config means this is a
-    // memoized config read and a boolean, nothing more.
-    emitHook(event, input, {
-      sessionId,
-      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
-      durationMs: Date.now() - t0,
-      ok: !hookErr,
-      error: hookErr ? 'dispatch threw' : undefined,
-      dir: root,
-    });
-    // A probe that raced past its budget leaves its bd/gh child running —
-    // unref the stragglers so the hook exits with the answer it sent,
-    // not when the last subprocess closes.
-    unrefPendingChildren();
-  }
+  // A probe that raced past its budget leaves its bd/gh child running —
+  // unref the stragglers so the hook exits with the answer it sent,
+  // not when the last subprocess closes.
+  unrefPendingChildren();
 }
