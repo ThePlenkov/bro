@@ -12,19 +12,43 @@
       "default": "./dist/opencode.js"
     },
     "./tui": {
-      "types": "./dist/opencode-tui.d.ts",
-      "default": "./dist/opencode-tui.js"
+      "types": "./dist/tui.d.ts",
+      "default": "./dist/tui.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "default": "./dist/rpc.js"
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/**/*.test.ts src/**/*.test.tsx",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/index.ts src/opencode.ts src/opencode-tui.ts --format esm --dts --clean"
+    "build": "tsdown src/index.ts src/opencode.ts src/tui.tsx src/rpc.ts --format esm --dts --clean"
   },
   "devDependencies": {
+    "@opencode/plugin": "^2.1.4",
+    "@opentui/core": "^0.7.0",
+    "@opentui/solid": "^0.7.0",
+    "solid-js": "^1.9.12",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.8",
+    "@opentui/solid": ">=0.6.8",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "files": [
     "dist"
@@ -36,10 +60,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ThePlenkov/bro.git",
-    "directory": "packages/opencode"
+    "directory": "packages/agent-plugins/opencode"
   },
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro's OpenCode plugin adapters (server + TUI)"
+  "description": "bro's OpenCode plugin — server + TUI + RPC parts"
 }

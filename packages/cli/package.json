@@ -80,9 +80,6 @@
     "sverka": "^0.2.10"
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.1.4",
-    "@opentui/solid": "^0.7.0",
-    "solid-js": "^1.9.12",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
