@@ -36,6 +36,8 @@ export interface AcpTarget {
   peer?: string;
 }
 
+import { AcpCooldownError, type AcpLaneCooldown } from './acp-cooldown.ts';
+
 /** A scope (or a peer) is in a dead loop — the churn is refused. */
 export class AcpDeadLoopError extends Error {
   override name = 'AcpDeadLoopError';
@@ -94,6 +96,10 @@ export interface AcpDeadLoopOptions {
  *  measures. The ctx IS the target — one shape, one meaning. */
 export interface AcpGuardCtx extends AcpTarget {
   guard: AcpDeadLoopGuard;
+  /** The lane's wall cooldown (spec bro-i6811) — the lane's own state,
+   * shared by every conversation on it. A refusal here costs no
+   * session: it is spoken BEFORE the session opens. */
+  cooldown?: AcpLaneCooldown;
 }
 
 /** What one admitted open owes the guard — the tallies it was counted
