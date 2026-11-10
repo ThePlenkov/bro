@@ -127,6 +127,23 @@ function checkoutCli(): string | null {
  * rewritten to plugin.json's version on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.3.0';
 
+const BRO_PLUGIN_HELP = `bro plugin — limited command set (not the full CLI)
+
+Usage:
+  /bro or /bro help   this help
+  /bro status         board summary (bro status)
+  /bro act [PR]       PR review gate / threads (bro act)
+  /bro debt           review debt (bro debt)
+  /bro work           worktrees / stack (bro work)
+  /bro loop           claim/work/close loop (bro loop)
+  /bro next           claim top ready bead (bro next)
+  /bro fleet          fleet board (bro fleet)
+  /bro watch          read-only heartbeat (bro watch)
+  /bro drive          apply act gate to fleet PRs (bro drive)
+
+Other commands: run 'bro <name> ...' directly in the shell.
+Full CLI reference: bro help (not /bro).`;
+
 /** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
  * probe serves both launch tiers: `hooks` with no event answers "is this
  * a bro that speaks the hook contract" — a bare `bro hooks` returns before
@@ -1232,10 +1249,14 @@ export async function BroSetup(ctx: PluginContext): Promise<() => Promise<void>>
       };
       editor.add?.({
         name: 'bro',
-        description: 'bro orchestration — `/bro [args]` runs the CLI and submits the output',
+        description: 'bro orchestration — `/bro [args]` runs a limited plugin command set',
         execute: async ({ sessionID, prompt }) => {
           const args = splitArgs(prompt?.text ?? '');
-          const verb = args.length > 0 ? args : ['status'];
+          if (args.length === 0 || args[0] === 'help') {
+            await ctx.session?.prompt?.({ sessionID, text: BRO_PLUGIN_HELP });
+            return;
+          }
+          const verb = args;
           await run(sessionID, verb, `bro ${verb.join(' ')}`);
         },
       });
