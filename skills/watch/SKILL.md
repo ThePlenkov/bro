@@ -79,6 +79,14 @@ context), never an inference from whether a session was polled.
   A status line must say what the agent is _doing_ and what just
   _landed_ ("PR for X merged, session moved to Y") — bare mol/bead/PR
   IDs alone are not a report. IDs may appear in parentheses.
+- **Never report a merge you didn't verify.** A landed claim comes
+  from `gh pr view <N> --json state,mergedAt` in hand — never from
+  memory, a worker's exit line, or another digest. What the probe
+  didn't confirm is reported as "unverified", not "merged".
+- **Report times only against a verified clock.** The snapshot's
+  `clock` field is the tick's own check — `skewed` or `error` means
+  every stamp it carries (ages, merge times) is unverifiable and the
+  digest flags that instead of trusting the numbers.
 
 ## Watchdog tick (lane watch between turns)
 

@@ -543,7 +543,7 @@ export function reconcileLanePauseForRegistry(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  return reconcileWith(env, registry, deriveProviderWalls(registry, now), {
+  return reconcileWith(env, registry, deriveProviderWalls(registry, now, env.providers), {
     dir,
     now,
     write: writePauseFile,
@@ -567,7 +567,9 @@ export interface LaneStatusRow {
  *  spawn path's laziness, not a report's). */
 export function laneStatus(dir: string, env: AgentConnectorEnv, now = Date.now()): LaneStatusRow[] {
   const registry = readRegistrySafe(dir);
-  const walls = new Map(deriveProviderWalls(registry, now).map(w => [w.provider, w]));
+  const walls = new Map(
+    deriveProviderWalls(registry, now, env.providers).map(w => [w.provider, w])
+  );
   const pausedBy = pauseCounts(lanePausePath(dir));
   const rows = new Map<string, LaneStatusRow>();
   const row = (p: string): LaneStatusRow => {

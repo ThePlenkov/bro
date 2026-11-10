@@ -135,6 +135,8 @@ export type {
 } from './providers.ts';
 export {
   CLASS_LABEL_PREFIX,
+  DEFAULT_FLEET_WALL_TTLS,
+  DEFAULT_RATE_WALL_COOLDOWN_MS,
   DEFAULT_STEP_CLASS,
   deriveProviderWalls,
   fleetRouter,

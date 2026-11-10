@@ -727,43 +727,45 @@ export const COLLECTORS: Record<DebtSource, (ctx: CollectCtx, staleDays: number)
 export function collectForSource(
   source: DebtSource,
   ctx: CollectCtx,
-  staleDays: number,
+  staleDays: number
 ): DebtRecord[] {
   switch (source) {
     case 'dependabot':
-      return collectDependabot(ctx)
+      return collectDependabot(ctx);
     case 'code-scanning':
-      return collectCodeScanning(ctx)
+      return collectCodeScanning(ctx);
     case 'secret-scanning':
-      return collectSecretScanning(ctx)
+      return collectSecretScanning(ctx);
     case 'stale-prs':
-      return collectStalePrs(ctx, staleDays)
+      return collectStalePrs(ctx, staleDays);
     case 'failed-ci':
-      return collectFailedCi(ctx)
+      return collectFailedCi(ctx);
     case 'sonarcloud':
-      return collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] })
+      return collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] });
     case 'codacy':
-      return collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] })
+      return collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] });
     case 'codescene':
-      return collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] })
+      return collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] });
     case 'sverka':
-      return collectSverka(ctx)
+      return collectSverka(ctx);
   }
 }
 
 /** Static lookup for a source's dedupe function, if any. */
 export function dedupeForSource(
-  source: DebtSource,
-): ((records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }) | undefined {
+  source: DebtSource
+):
+  | ((records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] })
+  | undefined {
   switch (source) {
     case 'sonarcloud':
-      return dedupeReviewThreads
+      return dedupeReviewThreads;
     case 'codacy':
-      return dedupeCodacyThreads
+      return dedupeCodacyThreads;
     case 'codescene':
-      return dedupeCodesceneThreads
+      return dedupeCodesceneThreads;
     default:
-      return undefined
+      return undefined;
   }
 }
 

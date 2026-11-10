@@ -105,6 +105,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
+import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts';
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -2380,6 +2381,13 @@ function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
     runPerf(argv);
     return true;
   }
+  // `bro hooks status` is the report over the hook spool the launcher's
+  // run.sh writes (start/end pairs — a start without an end is a host
+  // kill) — same no-stdin operator placement as perf.
+  if (event === 'status') {
+    console.log(renderHookSpoolStatus(argv));
+    return true;
+  }
   return false;
 }
 
@@ -2441,6 +2449,12 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
   permissionAnswerEmitted = false;
+  // run.sh spools a start/end pair on every launch — including the
+  // early-return paths below (operator commands, the capability probe,
+  // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
+  // of them, is the only spot that bounds the spool on a tree where the
+  // dispatch path never runs.
+  rotateHookSpool();
   const event = argv[0];
   if (runPreGateCommand(event, argv)) {
     return;
