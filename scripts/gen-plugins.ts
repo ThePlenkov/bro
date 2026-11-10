@@ -841,7 +841,6 @@ function skillsLinkFresh(adapterRel) {
     } catch {
       return readlinkSync(link) === skillsLinkTarget(adapterRel);
     }
-
   } catch {
     return false;
   }

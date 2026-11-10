@@ -321,6 +321,11 @@
         "occupancyTtlSec": {
           "type": "number",
           "minimum": 60
+        },
+        "litterSweepSec": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2147483.647
         }
       },
       "additionalProperties": false
