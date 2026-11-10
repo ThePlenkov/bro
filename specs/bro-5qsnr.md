@@ -97,7 +97,7 @@ opened.
 `prepareSpawn`. Inside prepareSpawn (the registry's clear-point, spec
 bro-1x7p) the effective resume id is:
 
-```
+```ts
 spec.resumeSessionId
   ?? (existing.provider === spec.provider && spec.provider !== undefined
       ? existing.acpSessionId : undefined)
@@ -167,7 +167,7 @@ fallback is total: every resume failure mode lands on today's cold path.
 
 - [ ] spec (this file)
 - [ ] providers: `AcpWorkerSpec.resumeSessionId`, the load/resume ladder
-  + `attachSession` seam, drop `sessionRm`/`armSessionCleanup`;
+  `attachSession` seam, drop `sessionRm`/`armSessionCleanup`;
   `acpWorkerArgv` drops `--session-rm`; `--resume` flag on
   `bro acp-worker`
 - [ ] spawn pipeline: `resumeSessionId` on StepSpawnRequest/SpawnSpec/
@@ -180,6 +180,6 @@ fallback is total: every resume failure mode lands on today's cold path.
   mergeAndRetire / non-OPEN / sweepSettledFixers
 - [ ] tests: argv render, resume ladder (load ok / no capability /
   load failure), same-id record, settlement render+clear, donor
-  selection, drive "resumes session <id>" log
+  selection, drive `resumes session <id>` log
 - [ ] `npm run build`, `npm run typecheck`, `npm test`; commit, push,
   PR
