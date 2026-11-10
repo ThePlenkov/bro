@@ -16,7 +16,8 @@ All mechanics live in the `bro` CLI — this surface orients and hands off to th
 
 Print **plugin help only** (do **not** run `bro --help` / dump the full CLI):
 
-**Usage**
+### Usage
+
 - `/bro` or `/bro help` — this help
 - `/bro status` — run `bro status --deep` and summarize the board
 - `/bro <family> [args]` — hand off to the family below (read its skill first)
