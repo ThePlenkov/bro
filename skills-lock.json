@@ -7,12 +7,6 @@
       "skillPath": "skills/configuring-codescene-mcp/SKILL.md",
       "computedHash": "6c89bb232adcaa600cd9a9b7550e7cd007a1c6d45fa020c035aad8a0114b1802"
     },
-    "evidence": {
-      "source": "theplenkov-ai/skills",
-      "sourceType": "github",
-      "skillPath": "skills/verification/evidence/SKILL.md",
-      "computedHash": "3b5f8e79e446f831a84f5376221655f5fb5d11c72d477df3357eb8eb2dc43c31"
-    },
     "explaining-code-health": {
       "source": "codescene-oss/codescene-mcp-server",
       "sourceType": "github",
@@ -24,12 +18,6 @@
       "sourceType": "github",
       "skillPath": "skills/guiding-refactoring-with-code-health/SKILL.md",
       "computedHash": "22d342392a555cfa0acbce6798771f803f81a78767e8ac41edb5c2667d52dac9"
-    },
-    "herdr": {
-      "source": "herdrdev/herdr",
-      "sourceType": "github",
-      "skillPath": "skills/herdr/SKILL.md",
-      "computedHash": "72177e911f55467de8737174072ec6bb08e30bbf62bceabcb69678e944398b18"
     },
     "installing-and-activating-codescene-mcp": {
       "source": "codescene-oss/codescene-mcp-server",
