@@ -67,14 +67,18 @@ Claude and Codex do not receive a `skills/` entry — each plugin root is the re
 Never edit generated files — `npm run gen:plugins` rewrites them,
 `npm run check:plugins` verifies freshness.
 
-OpenCode is not a generated adapter: it loads JS/TS modules instead of a hook
-manifest, so it ships as a hand-written plugin at
-`packages/cli/src/opencode.ts` — a tsdown entry published as the package's
-`./server` export (the subpath OpenCode's loader looks for, hardcoded as
-`PluginKind = "server"` upstream). It speaks the same `bro hooks <event>`
-stdin/stdout contract as `hooks/run.sh` rather than importing bro, so the
-plugin and the CLI can never be different versions. Any bro policy added to
-that contract lands in every adapter at once.
+OpenCode is a generated adapter too, but a different shape: opencode v2
+loads a plugin as a _directory_, so `plugins/opencode/bro/` holds three
+modules copied from `packages/agent-plugins/opencode/src/` — `index.ts`
+(the server entrypoint), `tui.tsx` (the terminal half) and `rpc.ts` (the
+contract both halves share). opencode raises the TUI half only for a
+package that also has a server, so the three must stay together — and
+`bro plugins install opencode` materializes them as one directory. The
+sources live in their own package (`@broject/opencode`) because a TUI
+half cannot ship without its server. The adapter speaks the same
+`bro hooks <event>` stdin/stdout contract as `hooks/run.sh` rather than
+importing bro, so the plugin and the CLI can never be different versions.
+Any bro policy added to that contract lands in every adapter at once.
 
 ### The adapter framework (pi, omp)
 
@@ -135,11 +139,11 @@ the capability, absence is honest.
 
 ```ts
 interface Connector {
-  name: string                      // 'beads' | 'github' | …
-  matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
-  tasks?(ctx): TaskStore            // work items — `bro task` doc surface + `bro spec` reads
-  reviews?(ctx): ReviewFacade       // PR review loop — `bro review act`, `debt`
-  hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
+  name: string; // 'beads' | 'github' | …
+  matchRemote?(url): boolean; // claims hosts it can serve (auto-detect)
+  tasks?(ctx): TaskStore; // work items — `bro task` doc surface + `bro spec` reads
+  reviews?(ctx): ReviewFacade; // PR review loop — `bro review act`, `debt`
+  hooks?(ctx): ConnectorHooks; // lifecycle probes — see below
 }
 ```
 
@@ -200,11 +204,11 @@ silently. Two rules:
 
 The seams:
 
-| surface | mechanism |
-| --- | --- |
-| whole command | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
-| flag / subcommand | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts) |
-| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site |
+| surface                 | mechanism                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------ |
+| whole command           | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
+| flag / subcommand       | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts)                          |
+| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site             |
 
 All emit `warning: <what> is deprecated — <advice>`. One line, on
 stderr, and the old path keeps working — that's the whole contract.

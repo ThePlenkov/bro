@@ -7,11 +7,10 @@ import { collectEmbedded } from './src/embedded.ts';
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
 // Agent adapters (opencode/kilo/omp/pi) live in packages/agent-plugins/* —
-// CLI no longer bundles or exports them. The V2 TUI plugin
-// (src/opencode-tui-v2.tsx, installed as plugins/bro/tui.<ext>) stays here —
-// main landed it after the adapter extraction.
+// CLI no longer bundles or exports them. The opencode plugin (server +
+// TUI + RPC) ships as its own package: @broject/opencode.
 export default defineConfig({
-  entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts', 'src/opencode-tui-v2.tsx'],
+  entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts'],
   format: ['esm'],
   dts: true,
   noExternal: [/^@broject\//],

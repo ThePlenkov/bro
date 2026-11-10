@@ -28,10 +28,12 @@ directory:
 | `bro plugins install <client> [--global\|--local] [--dry-run]`             | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
 | `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it                                                                          |
 
-Clients: `opencode` (global `$XDG_CONFIG_HOME/opencode/plugins/bro.ts` +
-the TUI `bro-cli.ts`, local `<repo>/.opencode/plugins/`), `kilo` (module
-plus a `file:///` entry in `kilo.json`'s `plugin` array on global
-installs), `pi` (`<agentDir>/extensions/bro.ts`), `omp`
+Clients: `opencode` (a plugin _directory_ — global
+`$XDG_CONFIG_HOME/opencode/plugins/bro/`, local `<repo>/.opencode/plugins/bro/`
+— holding the server entrypoint `index.ts`, the TUI half `tui.tsx` and the
+RPC contract `rpc.ts`), `kilo` (module plus a `file:///` entry in
+`kilo.json`'s `plugin` array on global installs), `pi`
+(`<agentDir>/extensions/bro.ts`), `omp`
 (`<agentDir>/extensions/bro.ts`, or `<repo>/.omp/extensions/`). Every
 adapter carries a `bro-adapter` sentinel comment so detection survives a
 rename.

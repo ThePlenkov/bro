@@ -31,7 +31,7 @@
  */
 import { CURSOR_SELF_TOOL_MATCHER } from './cursor-hook.ts';
 
-export const HOOK_MATRIX_VERSION = 1;
+export const HOOK_MATRIX_VERSION = 2;
 
 /** The events in bro's shared hook vocabulary — what `bro hooks <e>`
  *  accepts. A host cell absent from `events` is declared-unsupported:
@@ -91,9 +91,6 @@ export interface EventCell {
   effects: HookEffect[];
   /** post-tool only: how the outcome field is populated. */
   outcome?: OutcomeSource;
-  /** OpenCode serves V1 (`server()`) and V2 (`id` + `setup(ctx)`); a
-   *  cell with `v2` exists only on the V2 surface. */
-  v2?: boolean;
   /** The repo-relative module registering this cell when it isn't the
    *  adapter's main module — omp's pre-tool guard ships as its own
    *  extension file. */
@@ -269,16 +266,18 @@ export const HOOK_MATRIX: {
       surface: 'plugin',
       plugin: 'plugins/opencode/bro',
       events: {
+        // opencode v2 only — the v1 surfaces (chat.system.transform,
+        // chat.message, session.compacting, permission.ask) are gone
         'session-start': {
-          native: ['experimental.chat.system.transform', 'session.hook("context")'],
+          native: ['session.hook("context")'],
           effects: ['context'],
         },
         'prompt-submit': {
-          native: ['chat.message', 'session.hook("prompt")'],
+          native: ['session.hook("prompt")'],
           effects: ['context'],
         },
         'pre-compact': {
-          native: ['experimental.session.compacting', 'session.hook("compaction")'],
+          native: ['session.hook("compaction")'],
           effects: ['context'],
         },
         'post-tool': {
@@ -289,9 +288,8 @@ export const HOOK_MATRIX: {
         'pre-tool': {
           native: ['tool.execute.before'],
           effects: ['block', 'rewrite'],
-          v2: true,
         },
-        permission: { native: ['permission.ask'], effects: ['approve'] },
+        permission: { native: ['permission.hook("evaluate")'], effects: ['approve'] },
         // no pre-stop slot — the `event` hook delivers `session.idle`,
         // and the blocker re-enters as one synthesized prompt; later
         // idles are skipped via stop_hook_active
@@ -300,7 +298,7 @@ export const HOOK_MATRIX: {
       nativeOnly: ['shell.env'],
       stopRefusal: 'reprompt',
       background: 'async',
-      upstream: { doc: 'https://opencode.ai/docs/plugins/', checked: '2026-10-24' },
+      upstream: { doc: 'https://opencode.ai/docs/build/plugins', checked: '2026-11-10' },
     },
 
     kilo: {

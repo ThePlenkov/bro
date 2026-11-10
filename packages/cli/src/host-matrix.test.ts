@@ -257,7 +257,8 @@ test('matrix conformance — omp pre-tool cell ships via its own module', async 
 // --- in-process plugin hosts ---------------------------------------------------
 
 test('matrix conformance — opencode plugin exposes setup (modern API)', async () => {
-  const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/bro.ts'))) as {
+  // the v2 catalog plugin — the server entrypoint of the plugin dir
+  const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/index.ts'))) as {
     default: { id?: string; setup?: unknown; server?: unknown };
   };
   assert.equal(plugin.default.id, 'bro');
