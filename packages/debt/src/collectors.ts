@@ -746,6 +746,8 @@ export function collectForSource(
       return collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] })
     case 'codescene':
       return collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] })
+    case 'sverka':
+      return collectSverka(ctx)
   }
 }
 
