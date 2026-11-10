@@ -1525,34 +1525,41 @@ async function rehydrateLines(
   sessionId: string,
   cliEvent: string
 ): Promise<ProbeResult> {
-  const [start, par, goalMod, hbMod] = await Promise.all([
+  // every leg resolves to its own lines INSIDE the sweep — the goal and
+  // heartbeat reads overlap the probe work instead of queueing behind
+  // it, and the assembly below keeps the original output order
+  const [start, par, goalLines, hbLine] = await Promise.all([
     sessionStartProbe(hookCtx(dir, sessionId), probeReporter(cliEvent, 'sessionStart')),
     parallelLines(dir, sessionId, probeReporter(cliEvent, 'parallelWork')),
-    lazyGoal().catch(() => null),
-    lazyHeartbeat().catch(() => null),
+    // the session's active goal rehydrates like every other durable
+    // state — resume/compaction restores it (spec:
+    // specs/goal/bro-6vcll.md). Load or read failure contributes
+    // nothing, same as the probes
+    lazyGoal()
+      .then(mod => {
+        try {
+          return mod.goalContextLines(dir, sessionId);
+        } catch {
+          return [] as string[];
+        }
+      })
+      .catch(() => [] as string[]),
+    // rig liveness comes from the durable heartbeat file, not from
+    // whether a session happened to poll — mailbox drops expire in an
+    // hour (bro-dxoa5); absent file contributes nothing
+    lazyHeartbeat()
+      .then(mod => {
+        try {
+          return mod.heartbeatLine(dir);
+        } catch {
+          return null;
+        }
+      })
+      .catch(() => null),
   ]);
-  const parts = [...start.lines, ...par.lines];
-  // the session's active goal rehydrates like every other durable state —
-  // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
-  try {
-    if (goalMod) {
-      parts.push(...goalMod.goalContextLines(dir, sessionId));
-    }
-  } catch {
-    // ignore
-  }
-  // rig liveness comes from the durable heartbeat file, not from whether
-  // a session happened to poll — mailbox drops expire in an hour
-  // (bro-dxoa5); absent file contributes nothing
-  try {
-    if (hbMod) {
-      const hb = hbMod.heartbeatLine(dir);
-      if (hb !== null) {
-        parts.push(`watch heartbeat: ${hb}`);
-      }
-    }
-  } catch {
-    // ignore
+  const parts = [...start.lines, ...par.lines, ...goalLines];
+  if (hbLine !== null) {
+    parts.push(`watch heartbeat: ${hbLine}`);
   }
   return { lines: parts, settled: start.settled && par.settled };
 }
