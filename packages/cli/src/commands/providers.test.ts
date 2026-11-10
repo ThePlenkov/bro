@@ -88,7 +88,7 @@ describe('bro providers models', () => {
 
   test('lists all configured providers when no names given', async () => {
     const out: string[] = [];
-    await runProvidersCommand([], {
+    await runProvidersCommand(['models'], {
       providers: {
         a: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: 'openai-compat' } },
         b: { type: 'cli', command: 'x', model: 'p' },
