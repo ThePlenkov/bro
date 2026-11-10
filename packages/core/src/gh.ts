@@ -35,6 +35,7 @@ export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     maxBuffer: GH_MAX_BUFFER,
   });
@@ -112,6 +113,7 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   const proc = /* NOSONAR */ spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     maxBuffer: GH_MAX_BUFFER,
   });

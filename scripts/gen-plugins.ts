@@ -39,6 +39,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -830,7 +831,16 @@ function skillsLinkFresh(adapterRel) {
   const link = join(ROOT, adapterRel, 'skills');
   try {
     const st = lstatSync(link);
-    return st.isSymbolicLink() && readlinkSync(link) === skillsLinkTarget(adapterRel);
+    if (!st.isSymbolicLink()) {
+      return false;
+    }
+    // Windows junctions (mklink /J) report as symlinks but resolve
+    // readlink() to an absolute path, so compare realpath trees too.
+    try {
+      return realpathSync(link) === realpathSync(join(ROOT, 'skills'));
+    } catch {
+      return readlinkSync(link) === skillsLinkTarget(adapterRel);
+    }
   } catch {
     return false;
   }
@@ -841,9 +851,20 @@ function ensureSkillsLink(adapterRel) {
     return;
   }
   const link = join(ROOT, adapterRel, 'skills');
+  // recursive+force removes every stale shape — a real skills dir, an
+  // empty one, a symlink, a junction; rmSync lstat()s the entry so a
+  // link goes, never the tree it points at
   rmSync(link, { recursive: true, force: true });
   mkdirSync(join(ROOT, adapterRel), { recursive: true });
-  symlinkSync(skillsLinkTarget(adapterRel), link);
+  try {
+    // a junction stores an ABSOLUTE target — the relative link string
+    // would resolve against the reader's cwd, not the repo's
+    const target =
+      process.platform === 'win32' ? join(ROOT, 'skills') : skillsLinkTarget(adapterRel);
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : undefined);
+  } catch {
+    symlinkSync(skillsLinkTarget(adapterRel), link);
+  }
 }
 
 emit(
