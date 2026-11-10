@@ -20,9 +20,17 @@
  * mutations are herdr CLI calls and the plugin's own state file.
  */
 
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, resolve } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { handleOwner } from '../../../packages/core/src/proc.ts';
 import { type Lane, laneOf } from './lanes.ts';
 import {
@@ -37,7 +45,6 @@ import {
   herdrTry,
   loadState,
   notify,
-  PLUGIN_ID,
   PLUGIN_ROOT,
   type PluginState,
   paneIdle,
@@ -60,7 +67,7 @@ import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
 import { dropOrphanRenderers, ensureRenderer, retireEvents } from './renderers.ts';
-import { dropOrphanSessions, ensureSession, retireSession } from './sessions.ts';
+import { dropOrphanSessions, ensureSession } from './sessions.ts';
 import { agentTreePath } from './status.ts';
 import { dropOrphanStatuses, ensureStatus, retireStatus } from './statuses.ts';
 
@@ -239,10 +246,15 @@ export interface ConvergeResult {
 function convergeWorkspaces(
   p: Planes,
   armed: Map<string, ArmedTree>,
-  ctx: WsCtx
+  ctx: WsCtx,
+  viewable: Set<string>
 ): Map<string, string> {
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
+    // the viewable gate (user ruling 10.11): a workspace exists only
+    // where the session pane has something to show — an armed tree
+    // with nothing recorded is an empty window, never opened
+    if (!viewable.has(t.path)) continue;
     const ws = ensureWorkspace(t, desiredLabel(t, laneOf(p.lanes, t.path)), ctx);
     if (ws !== undefined) wsForPath.set(t.path, ws);
   }
@@ -307,8 +319,7 @@ function convergeStatuses(
 function convergeSessionPanes(
   wsForPath: Map<string, string>,
   ctx: WsCtx,
-  bindByTree: Map<string, { id: string; events: string }>,
-  sessionArmed: Set<string>
+  bindByTree: Map<string, { id: string; events: string }>
 ): Set<string> {
   // pane-live paths — fallback surfaces fold only where the human
   // pane actually ended up live: eligibility alone must not retire
@@ -323,12 +334,8 @@ function convergeSessionPanes(
     // and its registry entry is what lets the worker floor read
     // 'blocked' instead of a blind idle
     const agent = bindByTree.get(path);
-    if (sessionArmed.has(path)) {
-      if (
-        ensureSession({ path, ws, state: ctx.state, ...(agent !== undefined ? { agent } : {}) })
-      ) {
-        live.add(path);
-      }
+    if (ensureSession({ path, ws, state: ctx.state, ...(agent !== undefined ? { agent } : {}) })) {
+      live.add(path);
     }
   }
   return live;
@@ -360,38 +367,36 @@ function archiveBinds(
   return bindByTree;
 }
 
-/** Where a session pane SHOULD live — every managed worktree. The
- *  session view is THE human pane (user ruling 10.11): a session
- *  record binds its archive or live wire, a record-less tree renders
- *  the honest empty state ('no session recorded' + the projector's
- *  status), and the technical surfaces (mirror tail, events renderer,
- *  status strip) are plugin plumbing that always folds under it — an
- *  empty tech pane is never worth a human's screen. */
-function sessionEligibility(p: Planes, wsForPath: Map<string, string>): Set<string> {
-  const armed = new Set<string>();
-  for (const [path, lane] of Object.entries(p.lanes)) {
-    if (lane === 'acp' && wsForPath.has(path)) armed.add(path);
-  }
-  for (const key of wsForPath.keys()) armed.add(key);
-  return armed;
-}
-
-/** Every lane with nothing viewable retires the session pane — a
- *  worker-less arm has nothing to show. The arming already ran
- *  (convergeSessionPanes); retiring last is the safe direction: on a
- *  viewable→empty flip the fallback set armed first, so closing the
- *  session pane never empties the workspace. */
-function convergeSessions(
-  wsForPath: Map<string, string>,
-  ctx: WsCtx,
-  sessionArmed: Set<string>
-): void {
-  for (const [path, ws] of wsForPath) {
-    const rec = ctx.state.workspaces[path];
-    if (rec?.managed === true && rec.ws === ws && !sessionArmed.has(path)) {
-      retireSession({ path, ws, state: ctx.state });
+/** The session view is THE human pane (user ruling 10.11) — every
+ *  tree that passed the viewable gate gets it, live or archived or
+ *  acp, and the technical surfaces (mirror tail, events renderer,
+ *  status strip) are plugin plumbing that always folds under it. A
+ *  managed workspace whose tree lost ALL session content is an empty
+ *  window — close it whole rather than show a human 'no session
+ *  recorded' forever; armed-but-recordless trees live on the fleet
+ *  board, not in herdr. */
+function retireUnviewable(viewable: Set<string>, ctx: WsCtx): void {
+  for (const [path, rec] of Object.entries(ctx.state.workspaces)) {
+    if (rec.managed !== true || viewable.has(path)) continue;
+    if (ctx.wsById.has(rec.ws)) {
+      herdrTry(['workspace', 'close', rec.ws]);
+      log(`closed ${basename(path)} — nothing viewable (${rec.ws})`);
+    }
+    // every pane record on the dead workspace dies with it — mirrors
+    // key on the step, not the path, so sweep by workspace id
+    delete ctx.state.workspaces[path];
+    delete ctx.state.sessions[path];
+    delete ctx.state.renderers[path];
+    delete ctx.state.statuses[path];
+    for (const [step, m] of Object.entries(ctx.state.mirrors)) {
+      if (m.workspace === rec.ws) delete ctx.state.mirrors[step];
     }
   }
+}
+
+/** Orphan sweep — a session record outliving its workspace (a foreign
+ *  close, an unviewable retire) drops with the pane it ran. */
+function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
   dropOrphanSessions(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
@@ -867,10 +872,9 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   };
 
   const armed = armedSet(p);
-  const wsForPath = convergeWorkspaces(p, armed, ctx);
   const base = gitCommonDir(p.main) ?? p.main;
-  // live agents by worktree — the session pane's viewable set AND its
-  // direct archive binding; one registry scan feeds both halves
+  // live agents by worktree — the viewable set's live half AND the
+  // session pane's direct archive binding; one registry scan feeds both
   const live = liveAgents(base);
   // the status plane keys on absolute paths; a registry worktree may
   // be relative — normalize the sightings ONCE so liveByTree AND the
@@ -893,20 +897,32 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
     liveByTree.set(a.worktree, { id: a.id, events: a.events });
   }
   const bindByTree = archiveBinds(base, p.main, liveByTree);
-  const sessionArmed = sessionEligibility(p, wsForPath);
+  // the viewable gate (user ruling 10.11): a workspace opens only
+  // where the session pane has something to show — a session record
+  // (live or archived), a live agent journal, or the acp lane. An
+  // armed tree with nothing recorded is an empty window; it never
+  // opens, and a managed one that lost its content closes
+  const viewable = new Set<string>(bindByTree.keys());
+  for (const [path, lane] of Object.entries(p.lanes)) {
+    if (lane === 'acp') viewable.add(path);
+  }
+  const wsForPath = convergeWorkspaces(p, armed, ctx, viewable);
   // the viewable lane's one pane arms before any retire — a workspace
   // emptying mid-flip is auto-reaped under the closing panes. The
   // retire set is pane-LIVE, not eligibility: an arm that never
   // landed leaves the fallback panes in place
-  const sessionLive = convergeSessionPanes(wsForPath, ctx, bindByTree, sessionArmed);
+  const sessionLive = convergeSessionPanes(wsForPath, ctx, bindByTree);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state, sessionLive);
   markExitedMirrors(p, ctx.state, sessionLive);
   convergeRenderers(wsForPath, ctx, sessionLive);
   convergeStatuses(wsForPath, ctx, sessionLive);
-  convergeSessions(wsForPath, ctx, sessionArmed);
+  convergeSessions(wsForPath, ctx);
   // live agents with no armed worktree get a plugin-owned view
   // workspace+pane; armed trees are covered by their own panes
   convergeLiveViews(base, p.main, ctx.state, new Set(armed.keys()), live);
+  // the viewable gate's other half — a managed workspace that lost all
+  // session content is an empty window; it closes whole (user ruling)
+  retireUnviewable(viewable, ctx);
   const reapedGone = reapDead(p, ctx);
   const reapedPreserved = reapPreservedDead(p, ctx);
   const reaped = reapedGone + reapedPreserved;
@@ -1011,18 +1027,43 @@ function releasePending(pidFile: string): void {
   }
 }
 
-/** The sync pane is the converge daemon, but the manifest's `[[panes]]`
- *  entry is only a template — herdr materializes it solely via `plugin
- *  pane open`, and nothing re-opens it after a server restart
- *  (bro-m8hew: a reboot left every session pane on a bare shell with
- *  no loop to re-arm them). The startup hook and the `sync` action
- *  both land here, so both restore it. `plugin pane open` has no
- *  dedup — the probe is the idempotence: sync.ts writes its own pid
- *  to a scoped file at start, so a live loop proves itself regardless
- *  of how its argv was launched; a dead pane's bare shell leaves a
- *  stale pid that fails the liveness check and gets replaced. */
-export function ensureSyncLoop(): void {
-  const pidFile = syncPidPath(stateScope(repoDir(ctxJson())));
+/** The loop launcher — a detachable spawn seam so tests never fork a
+ *  real loop. Returns whether the child was started. */
+export type SyncLauncher = (scope: string) => boolean;
+
+/** `node src/sync.ts` detached + unref'd, stdio to the scoped log —
+ *  the child's own pid-marker write is the liveness proof every other
+ *  ensure probes. */
+const spawnSyncLoop: SyncLauncher = scope => {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    const out = openSync(join(STATE_DIR, `sync-${scope}.log`), 'a');
+    const child = spawn(process.execPath, [join(PLUGIN_ROOT, 'src', 'sync.ts')], {
+      cwd: PLUGIN_ROOT,
+      env: process.env,
+      detached: true,
+      stdio: ['ignore', out, out],
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** The sync loop is the converge daemon — a DETACHED process, never a
+ *  pane (user ruling 10.11: plumbing does not take a human's screen).
+ *  sync.ts self-terminates once herdr stops answering, so the loop
+ *  still dies with the server it serves; the pid file is the dedup —
+ *  a live loop proves itself regardless of how its argv was launched,
+ *  and a dead loop's stale pid fails the liveness check and gets
+ *  replaced. The startup hook and the `sync` action both land here, so
+ *  both restore it (bro-m8hew: a reboot must never leave panes with no
+ *  loop to re-arm them). `plugin pane open` stays in the manifest as a
+ *  manual debug surface only. */
+export function ensureSyncLoop(launch: SyncLauncher = spawnSyncLoop): void {
+  const scope = stateScope(repoDir(ctxJson()));
+  const pidFile = syncPidPath(scope);
   const live = (): boolean => syncPidLiveOrPending(pidFile);
   if (live()) return;
   // the in-flight marker IS the reservation — an exclusive 'wx' create
@@ -1032,9 +1073,9 @@ export function ensureSyncLoop(): void {
   // sweep's shadow would open a second pane under it
   if (!claimSyncSlot(pidFile, live)) return;
   sweepSyncHusks();
-  const out = herdrTry(['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', 'sync']);
-  if (out === undefined) releasePending(pidFile);
-  log(`sync pane ${out === undefined ? 'open failed' : 'opened'}`);
+  const ok = launch(scope);
+  if (!ok) releasePending(pidFile);
+  log(`sync loop ${ok ? 'spawned (detached)' : 'spawn failed'}`);
 }
 
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {

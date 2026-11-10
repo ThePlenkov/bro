@@ -27,8 +27,10 @@ platforms = ["linux", "macos"]
 [[startup]]
 command = ["node", "src/reconcile.ts"]
 
-# the reconcile loop as a managed daemon pane — lives/dies with the
-# server, no detached background processes
+# the reconcile loop normally runs DETACHED (ensureSyncLoop spawns it
+# — plumbing never takes a human's screen; sync.ts exits once herdr
+# stops answering, so the loop still dies with its server). This pane
+# entry stays as the manual debug surface only
 [[panes]]
 id = "sync"
 title = "bro sync"
