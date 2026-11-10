@@ -486,7 +486,11 @@ function wallable(e: WallRecord): e is WallRecord & { provider: string } {
 }
 
 function stamp(e: WallRecord): string {
-  return typeof e.spawnedAt === 'string' ? e.spawnedAt : '';
+  // the death stamp when the record carries one — the newest DEATH
+  // dominates the fold, and a retained attempt's spawn is older than
+  // its death (observedAt rides along since bro-uswqn)
+  const s = typeof e.observedAt === 'string' ? e.observedAt : e.spawnedAt;
+  return typeof s === 'string' ? s : '';
 }
 
 /** The fallback horizon a `rate_limited` death with no usable `resetAt`
@@ -513,7 +517,11 @@ function rateWallCooldownMs(
   if (gate === undefined) {
     return DEFAULT_RATE_WALL_COOLDOWN_MS;
   }
-  return (gate.spawnCost / gate.requestsPerHour) * 3_600_000;
+  const ms = (gate.spawnCost / gate.requestsPerHour) * 3_600_000;
+  // a degenerate gate (requestsPerHour ≤ 0, spawnCost ≤ 0, NaN) must not
+  // defeat the bound — Infinity would re-create the indefinite wall and a
+  // non-positive regen would lift it instantly; both fall back to the default
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_RATE_WALL_COOLDOWN_MS;
 }
 
 /** The horizon a `rate_limited` record walls until — `null` when the
@@ -526,13 +534,10 @@ function rateWallCooldownMs(
  *  per snapshot rather than honestly anchored (pathological — spawn
  *  stamps `spawnedAt` unconditionally). */
 function rateDeathUntil(e: WallRecord, cooldownMs: number, now: number): string | null {
-  const raw = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined;
-  if (raw !== undefined) {
-    const t = Date.parse(raw);
-    if (Number.isFinite(t)) {
-      return t <= now ? null : raw;
-    }
-    // an unparseable mark bounds exactly like a missing one
+  const mark = parseTs(e.resetAt);
+  if (mark !== undefined) {
+    // horizons are ISO-normalized so `until` values compare uniformly
+    return mark <= now ? null : new Date(mark).toISOString();
   }
   const anchor = parseTs(e.observedAt) ?? parseTs(e.spawnedAt) ?? now;
   const until = anchor + cooldownMs;

@@ -2483,6 +2483,10 @@ function outgoingAttemptOf(
     ...(existing.model === undefined ? {} : { model: existing.model }),
     ...(existing.cause === undefined ? {} : { cause: existing.cause }),
     ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
+    // the death stamp — without it a mark-less rate death anchors at the
+    // original spawn, so a long-running worker's fresh wall lifts instantly
+    // (bro-uswqn review: the bound must start at the death, not the birth)
+    ...(existing.observedAt === undefined ? {} : { observedAt: existing.observedAt }),
     ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
     ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
   };
