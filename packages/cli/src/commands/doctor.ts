@@ -11,7 +11,14 @@
  * a failing check, never as a crash.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import {
@@ -33,9 +40,11 @@ import {
   janitorDidWork,
   janitorLine,
   listDoltRemotes,
+  loadConfig,
   loadConfigLayers,
   pidAlive,
   printUsage,
+  procStat,
   probeBdCompat,
   probeDoltRemote,
   PROVIDER_REGISTRY,
@@ -63,6 +72,7 @@ import { judgeConfig, synthesizedProviders } from '@broject/judge';
 import type { JudgeConfig } from '@broject/judge';
 import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
 import { pluginRows } from './plugins.ts';
+import { daemonProbe, readDriveMarker } from './daemon.ts';
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
 import {
   budgetLines,
@@ -467,14 +477,18 @@ function devDistEntry(realPath: string): DevDist | null {
  *  be trusted either. */
 function distStampMs(distDir: string): number {
   let newest = 0;
-  for (const f of readdirSync(distDir, { withFileTypes: true })) {
-    if (!f.isFile()) {
-      continue;
+  try {
+    for (const f of readdirSync(distDir, { withFileTypes: true })) {
+      if (!f.isFile()) {
+        continue;
+      }
+      const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+      if (m > newest) {
+        newest = m;
+      }
     }
-    const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
-    if (m > newest) {
-      newest = m;
-    }
+  } catch {
+    return 0;
   }
   return newest;
 }
@@ -503,10 +517,17 @@ function refMovedMs(checkout: string, ref: string): number {
   if (name === '') {
     return 0;
   }
-  return (
-    statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
-      ?.mtimeMs ?? 0
-  );
+  try {
+    return (
+      statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
+        ?.mtimeMs ?? 0
+    );
+  } catch {
+    // an unreadable reflog (EACCES) is no evidence the ref moved —
+    // throwIfNoEntry only suppresses ENOENT; the caller reports 0 as
+    // unverifiable rather than aborting the whole doctor run
+    return 0;
+  }
 }
 
 function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
@@ -574,6 +595,327 @@ function selfDistChecks(): DoctorCheck[] {
     out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'));
   }
   return out;
+}
+
+// --- daemon binary drift (bro-kn6bq) ------------------------------------
+// The supervisor is only as live as the binary it exec'd: a daemon armed
+// under the published install kept respawning the fleet for a full day
+// without the protections merged into the repo (the provider wall —
+// published 0.2.5 equalled the repo's 0.2.5, so VERSION alone proved
+// nothing; the binary path is the discriminating signal). Compare the
+// running daemon's resolved entry — /proc cmdline — against this repo's
+// dist and, outside a bro checkout, the entry `bro` resolves to.
+
+/** The daemon process's resolved entry script — argv[1] under a
+ *  node-ish runtime, argv[0] when the process IS the program. Relative
+ *  spellings resolve against the process's own cwd, never doctor's.
+ *  null when /proc can't name a file (non-/proc platform, raced exit,
+ *  `node -e`). */
+function daemonEntry(pid: number): string | null {
+  let argv: string[];
+  try {
+    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      .split('\0')
+      .filter(t => t !== '');
+  } catch {
+    return null;
+  }
+  if (argv.length === 0) {
+    return null;
+  }
+  const runtime = basename(argv[0]!);
+  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime) ? scriptArg(argv) : argv[0];
+  if (candidate === undefined || candidate.startsWith('-')) {
+    return null;
+  }
+  try {
+    const abs = candidate.startsWith('/')
+      ? candidate
+      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
+    return realpathSync(abs);
+  } catch {
+    return null;
+  }
+}
+
+/** Runtime options whose value travels as the next argv token —
+ *  `-r`/`--require`, `--import`, loaders, eval strings, env files.
+ *  `=`-joined options need no entry: they never consume a token. An
+ *  option missing from the set degrades to today's behavior (its value
+ *  is probed as the entry and fails realpath), never to a wrong entry. */
+const RUNTIME_VALUE_OPTS = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '-e',
+  '--eval',
+  '-p',
+  '--print',
+  '-c',
+  '--check',
+  '--watch-path',
+  '--env-file',
+  '--env-file-if-exists',
+]);
+
+/** The entry script inside a runtime argv — the first operand after
+ *  the runtime's own options. `--` ends option parsing outright. */
+function scriptArg(argv: string[]): string | undefined {
+  let i = 1;
+  while (i < argv.length) {
+    const t = argv[i]!;
+    if (t === '--') {
+      return argv[i + 1];
+    }
+    if (!t.startsWith('-')) {
+      return t;
+    }
+    i += RUNTIME_VALUE_OPTS.has(t) ? 2 : 1;
+  }
+  return undefined;
+}
+
+/** The daemon process's start epoch in ms — /proc starttime jiffies off
+ *  /proc/uptime's boot estimate, the same conversion readProcRows uses.
+ *  null off-linux or on a raced exit; callers read null as unverifiable,
+ *  never as stale. */
+function procStartMs(pid: number): number | null {
+  try {
+    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+    const st = procStat(pid);
+    if (st === null || st.start === '') {
+      return null;
+    }
+    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/** Two dirs inside the same repository — linked worktrees share the
+ *  common dir, so an entry exec'd from any of them is this repo's code,
+ *  not a foreign binary. */
+function sameGitCommon(a: string, b: string): boolean {
+  const ca = gitCommonDir(a);
+  const cb = gitCommonDir(b);
+  try {
+    return ca !== null && cb !== null && realpathSync(ca) === realpathSync(cb);
+  } catch {
+    return false;
+  }
+}
+
+/** The checkout's resolved HEAD commit — null where HEAD won't
+ *  resolve (unborn branch, detached probe failure, not a repo). */
+function headSha(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
+}
+
+/** Same repository AND same HEAD — a linked worktree sitting on another
+ *  commit is a different build of the code, not this checkout's: its
+ *  binary can lack what this HEAD carries. An unresolved HEAD never
+ *  matches. */
+function sameCheckoutHead(a: string, b: string): boolean {
+  const ha = headSha(a);
+  return ha !== null && ha === headSha(b) && sameGitCommon(a, b);
+}
+
+/** The bro package version behind an entry — `<pkg>/dist/index.js` sits
+ *  two levels under package.json in dev checkouts, npm installs and the
+ *  npx cache alike. Versionless entries (a bare script) report none. */
+function broEntryVersion(entry: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** This repo's own bro version when the checkout builds bro —
+ *  `<root>/packages/cli/package.json` naming @broject/bro. A daemon
+ *  serving the bro repo must run this tree's dist (or an install
+ *  rebuilt from it) for merged protections to be live. */
+function broCheckoutVersion(root: string | null): string | null {
+  if (root === null) {
+    return null;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' && typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The daemon exec'd a bro dev checkout's dist. Same repo + same HEAD →
+ *  the bro-dist staleness verdict IS the binary verdict — a dist that
+ *  predates HEAD is protections-not-live. Anything else is a different
+ *  checkout's build. */
+function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): DoctorCheck[] {
+  if (!sameCheckoutHead(dev.checkout, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's dist`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ];
+  }
+  const c = devDistCheck(dev);
+  if (c.status === 'ok') {
+    // ...but devDistCheck only weighs the files on disk: the running
+    // process still holds what it exec'd, so a dist rebuilt after
+    // this daemon started is fresh on disk and stale in memory
+    const start = procStartMs(pid);
+    if (start !== null && distStampMs(dev.distDir) > start) {
+      return [
+        check(
+          'daemon',
+          'warn',
+          `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
+          'restart the daemon — the running process still holds the pre-build code'
+        ),
+      ];
+    }
+  }
+  return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)];
+}
+
+/** A non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
+ *  a tsx worker, a repo script) IS that checkout's code — node_modules
+ *  paths are vendored installs, never source. Only the drift question
+ *  remains: HEAD moving after the daemon spawned leaves the running
+ *  process behind the checkout. */
+function srcDaemonCheck(pid: number, entry: string, entryRoot: string, dir: string): DoctorCheck[] {
+  if (!sameCheckoutHead(entryRoot, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's source`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ];
+  }
+  const start = procStartMs(pid);
+  // HEAD covers a pulled checkout; @{u} catches "source built/loaded before
+  // the merge landed" even when a fetch moved the tracking ref ahead
+  const headMoved = refMovedMs(entryRoot, 'HEAD');
+  let moved = headMoved;
+  if (gitTry(['-C', entryRoot, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
+    const upstreamMoved = refMovedMs(entryRoot, '@{u}');
+    if (upstreamMoved > moved) moved = upstreamMoved;
+  }
+  // a missing HEAD reflog is unverifiable even when @{u} has one — the
+  // tracking ref's log cannot prove HEAD didn't move
+  if (headMoved === 0) moved = 0;
+  // no start time or no reflog = no evidence the process is current —
+  // unverifiable, never a silent ok (commit %ct is committer-declared,
+  // not a fallback)
+  if (start === null || moved === 0) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, drift unverifiable (${
+          start === null ? 'process start unreadable' : 'no reflog'
+        })`,
+        'restart the daemon — protections live only in the code the process loaded'
+      ),
+    ];
+  }
+  if (moved > start) {
+    // a moved HEAD means the process holds pre-move code; a still HEAD
+    // with a moved @{u} means the checkout itself is behind — pull first,
+    // a restart alone would reread the same stale code
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, ${
+          headMoved > start ? 'HEAD' : '@{u}'
+        } moved since it started`,
+        headMoved > start
+          ? 'restart the daemon — the running process loaded the pre-move code'
+          : 'git pull, then restart the daemon — the checkout lacks what @{u} already carries'
+      ),
+    ];
+  }
+  return [check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`)];
+}
+
+/** One row: supervisor liveness plus the binary-drift verdict. Down is
+ *  ordinary (installed = the checkpoint rearms); up compares the
+ *  running entry — this repo's dist borrows the bro-dist staleness
+ *  verdict, a foreign dist or an install in a bro checkout warns that
+ *  merged protections aren't live, and elsewhere the daemon's entry
+ *  must be the one `bro` resolves or a restart keeps the drift. */
+function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
+  const probe = daemonProbe(dir);
+  if (!probe.live) {
+    const installed =
+      readDriveMarker(dir) !== null ? ' · installed — the next session checkpoint rearms' : '';
+    return [
+      check(
+        'daemon',
+        'ok',
+        probe.recorded === null
+          ? `down — no supervisor${installed}`
+          : `down — recorded pid ${probe.recorded.pid} is dead${installed}`
+      ),
+    ];
+  }
+  const pid = probe.pid!;
+  const entry = daemonEntry(pid);
+  if (entry === null) {
+    return [check('daemon', 'skip', `up — pid ${pid} · binary unverifiable (no readable argv)`)];
+  }
+  const dev = devDistEntry(entry);
+  if (dev !== null) {
+    return devDaemonCheck(pid, entry, dev, dir);
+  }
+  const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry));
+  if (entryRoot !== null && broCheckoutVersion(entryRoot) !== null) {
+    return srcDaemonCheck(pid, entry, entryRoot, dir);
+  }
+  const v = broEntryVersion(entry);
+  const vs = v === undefined ? '' : ` (v${v})`;
+  const repoV = broCheckoutVersion(root);
+  if (repoV !== null) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry}${vs} — installed, not this repo's build (v${repoV})`,
+        "merged protections aren't live until the daemon's binary is rebuilt — npm run build + reinstall, or restart it on the repo's dist"
+      ),
+    ];
+  }
+  const eps = broEntrypoints();
+  if (eps.includes(entry)) {
+    return [check('daemon', 'ok', `up — pid ${pid} · ${entry}${vs}`)];
+  }
+  return [
+    check(
+      'daemon',
+      'warn',
+      `pid ${pid} runs ${entry}${vs} — \`bro\` resolves ${eps[0] ?? 'nothing'}`,
+      "the daemon's binary and the rearm path differ — restart it under the current bro"
+    ),
+  ];
 }
 
 /** Top-level keys bro knows — anything else in bro.config.json is almost
@@ -776,20 +1118,48 @@ function bdChecks(
   bd: BinProbe,
   beadsDir: boolean,
   beadsActive: boolean,
-  compat: BdCompat
+  compat: BdCompat,
+  pins?: Record<string, string>
 ): DoctorCheck[] {
+  const prefer = pins ?? {};
+  const tasksPinned = prefer.tasks;
+  let tasksName: string | null = null;
+  try {
+    tasksName = facadeName('tasks', { dir }, { prefer });
+  } catch {
+    tasksName = null;
+  }
+  const githubTasksHealthy = tasksName === 'github' && tasksPinned === 'github';
   if (!bd.found) {
     const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]';
+    if (githubTasksHealthy) {
+      return [
+        check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks'),
+      ];
+    }
     return [
       beadsActive
         ? check('bd', 'fail', binProblem(bd), fix)
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
     ];
   }
-  const out: DoctorCheck[] = [
-    check('bd', 'ok', bd.version ?? 'present'),
-    bdCompatCheck(beadsActive, compat),
-  ];
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')];
+  if (githubTasksHealthy && (compat.broken || compat.missing || !compat.ok)) {
+    out.push(
+      check(
+        'bd-compat',
+        'warn',
+        compat.problems.length > 0
+          ? compat.problems.join('; ')
+          : compat.broken
+            ? 'bd unusable'
+            : 'bd not usable',
+        'beads broken but GitHub Issues serves tasks (connectors.tasks=github)'
+      )
+    );
+  } else {
+    out.push(bdCompatCheck(beadsActive, compat));
+  }
   const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir);
   if (dolt.code !== 0) {
     const err = dolt.err ? ` (${dolt.err})` : '';
@@ -1294,11 +1664,51 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
   return undefined;
 }
 
+/** The running server's env, once — `/proc/<pid>/environ` is the
+ *  authoritative leg for "what did this serve boot with". undefined on
+ *  non-/proc platforms or a raced exit. */
+function serveEnviron(
+  serve: { url: string; pid: number } | undefined
+): Record<string, string> | undefined {
+  if (serve === undefined) {
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  try {
+    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
+    for (const kv of environ.split('\0')) {
+      const eq = kv.indexOf('=');
+      if (eq > 0) {
+        out[kv.slice(0, eq)] = kv.slice(eq + 1);
+      }
+    }
+  } catch {
+    // unreadable — raced exit or a platform without /proc
+  }
+  // same-process serves: the CURRENT process.env is the truth — the
+  // /proc snapshot predates any env the caller set or deleted after
+  // start (test fixtures mutate process.env mid-run)
+  if (serve.pid === process.pid) {
+    const own: Record<string, string> = {};
+    for (const k of Object.keys(process.env)) {
+      const v = process.env[k];
+      if (typeof v === 'string') {
+        own[k] = v;
+      }
+    }
+    return Object.keys(own).length > 0 ? own : undefined;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
- *  the same env hosts the serve), else the running server's /proc
- *  environ. Non-/proc platforms can't read a foreign env — the
- *  client-side wire evidence below then decides the row alone. */
-function serveBackendName(serve: { url: string; pid: number } | undefined): string | undefined {
+ *  the same env hosts the serve), else the running server's env.
+ *  Non-/proc platforms can't read a foreign env — the client-side wire
+ *  evidence below then decides the row alone. */
+function serveBackendName(
+  serve: { url: string; pid: number } | undefined,
+  env: Record<string, string> | undefined
+): string | undefined {
   const own = process.env.BRO_PROVIDER_BACKEND?.trim();
   if (own !== undefined && own !== '') {
     return own;
@@ -1306,19 +1716,60 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
   if (serve === undefined) {
     return undefined;
   }
-  try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-        const v = kv.slice(eq + 1).trim();
-        return v === '' ? undefined : v;
-      }
-    }
-  } catch {
-    // unreadable — raced exit or a platform without /proc
+  const v = env?.BRO_PROVIDER_BACKEND?.trim();
+  return v === undefined || v === '' ? undefined : v;
+}
+
+/** The upstream key names providerConfig resolves — presence in the
+ *  server's env is what arms the conductor's fast lane (bro-6asnu). */
+const UPSTREAM_KEY_ENVS = [
+  'BRO_PROVIDER_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+] as const;
+
+/** Is the fast lane armed on this serve — an upstream key in the
+ *  server's env and no FAST_LANE off. Doctor's own env is leg one
+ *  (a serve spawned from the same shell inherits it); the server's env
+ *  decides when the two differ. Values are only inspected for
+ *  presence/flag, never surfaced. */
+function fastLaneArmed(
+  env: Record<string, string> | undefined,
+  serveLane?: boolean,
+  sameProcess?: boolean,
+  /** the file layer's serve.apiKeyEnv — an upstream key can live in
+   *  a config-named var beyond the three hardcoded ones */
+  apiKeyEnv?: string
+): boolean {
+  // the config escape hatch — serve.fastLane:false disables the lane
+  // regardless of env evidence, exactly as resolveFastLane honors it
+  if (serveLane === false) {
+    return false;
   }
-  return undefined;
+  const flagsOff = (v: string | undefined): boolean => {
+    const f = v?.trim().toLowerCase();
+    return f === 'off' || f === '0' || f === 'false';
+  };
+  const nonBlank = (v: string | undefined): boolean => v !== undefined && v.trim() !== '';
+  // server env wins when present; the process.env fallback exists only
+  // for legs doctor shares — a missing /proc read or OUR OWN process.
+  // A foreign server's env must never be padded with doctor's own:
+  // its missing key means the lane is unarmed there even if doctor's
+  // shell carries one.
+  const ownEnv = env === undefined || sameProcess === true;
+  const get = (k: string): string | undefined => {
+    const v = env?.[k];
+    if (v !== undefined && v !== '') {
+      return v;
+    }
+    return ownEnv ? (process.env as Record<string, string | undefined>)[k] : undefined;
+  };
+  const hasKey = (): boolean =>
+    UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k))) ||
+    // the file layer names its own key var — providerConfig resolves
+    // it for the lane, so doctor's arming check must see it too
+    (apiKeyEnv !== undefined && nonBlank(get(apiKeyEnv)));
+  return hasKey() && !flagsOff(get('BRO_PROVIDER_FAST_LANE'));
 }
 
 /** The model ids an acp entry can serve: the pinned `model` field plus
@@ -1419,6 +1870,34 @@ interface ClassifierCtx {
   ids: Map<string, string[]>;
   acpNames: Set<string>;
   nonAcpNames: Set<string>;
+  /** the serve's env proves the fast lane armed (bro-6asnu) — the
+   *  conductor routes classifier calls upstream itself. */
+  fastArmed?: boolean;
+  /** the resolved fast-model pin (BRO_PROVIDER_FAST_MODEL →
+   *  serve.fastModel) — without it a conductor-only classifier id
+   *  forwards verbatim and the upstream rejects it. */
+  fastModel?: string;
+}
+
+/** A `<acp-name>/<id>` pin — conductor vocabulary the upstream cannot
+ *  serve verbatim. Split on the slash and test whole segments: a bare
+ *  model id that merely contains a '/' is not a prefix pin. */
+function isConductorPin(v: string, acpNames: Set<string>): boolean {
+  const slash = v.indexOf('/');
+  return slash > 0 && v.slice(slash + 1) !== '' && acpNames.has(v.slice(0, slash));
+}
+
+/** First non-blank value, trimmed — resolveFastLane's model chain
+ *  semantics: a set-but-empty env pin falls through to the file layer
+ *  instead of winning the ?? chain. */
+function firstTrimmed(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    const t = v?.trim();
+    if (t !== undefined && t !== '') {
+      return t;
+    }
+  }
+  return undefined;
 }
 
 /** One client source → its warn row(s). A live-endpoint hit outranks
@@ -1438,6 +1917,34 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
     base !== undefined &&
     endpointKey(base) === endpointKey(ctx.serve.url)
   ) {
+    // the serve's fast lane (bro-6asnu) already routes classifier calls
+    // upstream — the warn only stands while no upstream key arms it
+    if (
+      ctx.fastArmed === true &&
+      (ctx.fastModel !== undefined ||
+        !classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames)))
+    ) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            (hits.length > 0 ? ` — ${hits.join('; ')}` : '') +
+            ' — fast lane armed: classifier calls route to the direct upstream'
+        ),
+      ];
+    }
+    if (ctx.fastArmed === true) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+            ` — ${hits.join('; ')} — the lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
@@ -1446,17 +1953,44 @@ function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[
           (hits.length > 0
             ? ` — ${hits.join('; ')}`
             : ' — the client\u2019s safety classifier rides it too'),
-        'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
+        'every permission check pays a full session/new and fail-closes — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
     ];
   }
   if (hits.length > 0) {
+    // the ok needs evidence the client actually reaches an armed
+    // conductor — a bare pin plus an armed env elsewhere is no routing
+    const armedHere = ctx.fastArmed === true && ctx.conductor !== undefined;
+    // a `<name>/<id>` pin is conductor vocabulary no upstream serves —
+    // without the model pin it forwards verbatim and fails there
+    const needsModelPin =
+      ctx.fastModel === undefined &&
+      classifierPins(src).some(([, v]) => isConductorPin(v, ctx.acpNames));
+    if (armedHere && !needsModelPin) {
+      return [
+        check(
+          'conductor',
+          'ok',
+          `${src.label}: ${hits.join('; ')} — on an armed conductor the fast lane routes them to the direct upstream`
+        ),
+      ];
+    }
+    if (armedHere) {
+      return [
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ${hits.join('; ')} — the fast lane is armed but a conductor-only id forwards verbatim`,
+          'pin the upstream model the lane rewrites to: BRO_PROVIDER_FAST_MODEL (or serve.fastModel) in the serve env'
+        ),
+      ];
+    }
     return [
       check(
         'conductor',
         'warn',
         `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
-        'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
+        'session-grade wires deadlock interactive approvals — arm the fast lane with an upstream key (BRO_PROVIDER_API_KEY) in the serve env'
       ),
     ];
   }
@@ -1476,7 +2010,10 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   );
   const nonAcpNames = new Set(Object.keys(providers).filter(n => !acpNames.has(n)));
   const serve = liveServeEndpoint(dir);
-  const backend = serveBackendName(serve);
+  const env = serveEnviron(serve);
+  const sameProcess = serve?.pid === process.pid;
+  const fileServe = loadConfig(dir).serve;
+  const backend = serveBackendName(serve, env);
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
   const ctx: ClassifierCtx = {
     serve,
@@ -1484,6 +2021,12 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
+    fastArmed: fastLaneArmed(env, fileServe.fastLane, sameProcess, fileServe.apiKeyEnv),
+    fastModel:
+      firstTrimmed(
+        env?.BRO_PROVIDER_FAST_MODEL,
+        env === undefined || sameProcess ? process.env.BRO_PROVIDER_FAST_MODEL : undefined
+      ) ?? fileServe.fastModel,
   };
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir]);
   const warns = sources.flatMap(src => classifierSrcWarns(src, ctx));
@@ -1648,14 +2191,23 @@ function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
 }
 
 /** Peer census — every binding must parse; beads-remote peers are
- *  counted for the dolt probe. */
+ *  counted for the dolt probe. GitHub-derived bindings need a `login`
+ *  (no explicit transport override) or the plane admits nothing after the
+ *  url-derivation flip. */
 function meshPeerChecks(
   aliases: string[],
-  peers: Record<string, { rig: string; remote: string }>
+  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
 ): { row: DoctorCheck; remotes: number } {
   let remotes = 0;
   let bad = 0;
+  let missingLogin = 0;
   for (const alias of aliases) {
+    const raw = peers[alias] as {
+      rig?: unknown;
+      remote?: unknown;
+      transport?: unknown;
+      login?: unknown;
+    };
     const p = parsePeer(alias, peers[alias]);
     if (p === null) {
       bad++;
@@ -1664,16 +2216,48 @@ function meshPeerChecks(
     if (p.transport === 'beads-remote') {
       remotes++;
     }
+    if (
+      p.transport === 'github' &&
+      (typeof raw.transport !== 'string' || raw.transport === '') &&
+      (p.login === undefined ||
+        p.login === '' ||
+        (typeof p.login === 'string' && p.login.trim() === ''))
+    ) {
+      missingLogin++;
+    }
   }
-  const row =
-    bad === 0
-      ? check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`)
-      : check(
-          'mesh-peers',
-          'warn',
-          `${bad}/${aliases.length} peer binding(s) unparseable`,
-          'each needs {"rig": "mesh://org/repo", "remote": "…"}'
-        );
+  if (bad > 0 || missingLogin > 0) {
+    if (bad > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${bad}/${aliases.length} peer binding(s) unparseable${missingLogin > 0 ? `; ${missingLogin} github-derived without login` : ''}`,
+        missingLogin > 0
+          ? 'each unparseable needs {"rig": "mesh://org/repo", "remote": "…"}; github-derived need "login" or set "transport": "beads-remote" to keep a replica binding'
+          : 'each needs {"rig": "mesh://org/repo", "remote": "…"}'
+      );
+      return { row, remotes };
+    }
+    if (missingLogin > 0) {
+      const row = check(
+        'mesh-peers',
+        'warn',
+        `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
+        'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+      );
+      return { row, remotes };
+    }
+  }
+  if (missingLogin > 0) {
+    const row = check(
+      'mesh-peers',
+      'warn',
+      `${aliases.length} peer(s), ${remotes} beads-remote — ${missingLogin} github-derived without login`,
+      'github.com remotes derive to the github plane; add "login" or set "transport": "beads-remote" to keep a replica binding'
+    );
+    return { row, remotes };
+  }
+  const row = check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`);
   return { row, remotes };
 }
 
@@ -1880,7 +2464,10 @@ function debtCodesceneCheck(debt: {
 
 function meshChecks(
   dir: string,
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }
+  mesh: {
+    rig?: string;
+    peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+  }
 ): DoctorCheck[] {
   const aliases = Object.keys(mesh.peers);
   if (mesh.rig === undefined && aliases.length === 0) {
@@ -1892,6 +2479,61 @@ function meshChecks(
     out.push(meshDoltCheck());
   }
   return out;
+}
+
+function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
+  try {
+    const agents = cfg.agents ?? {};
+    // strict scope is OPT-IN (spec bro-l8c4f.6): getCredentialScope only
+    // enforces the allowlist when strictEnv/credentialScope says so —
+    // an envAllowlist alone stays trusted-host (inert), and reporting it
+    // as enabled would show an ok trust boundary that isn't enforced
+    const strictBackends: string[] = [];
+    const inertBackends: string[] = [];
+    for (const [backend, b] of Object.entries(agents)) {
+      const bb = b as any;
+      if (bb && typeof bb === 'object') {
+        if (bb.strictEnv === true || bb.credentialScope != null) {
+          strictBackends.push(backend);
+        } else if (Array.isArray(bb.envAllowlist)) {
+          inertBackends.push(backend);
+        }
+      }
+    }
+    const out: DoctorCheck[] = [];
+    if (strictBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope',
+          'ok',
+          `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
+        )
+      );
+    }
+    if (inertBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope-inert',
+          'warn',
+          `envAllowlist without strictEnv stays trusted-host (inert) on: ${inertBackends.join(', ')} — workers inherit ambient env`,
+          'set agents.<backend>.strictEnv: true to enforce the allowlist (bro-l8c4f.6)'
+        )
+      );
+    }
+    if (out.length === 0) {
+      out.push(
+        check(
+          'env-scope',
+          'warn',
+          'trusted-host mode (default) — workers inherit ambient env',
+          'set agents.<backend>.strictEnv: true and agents.<backend>.envAllowlist for explicit credential scope (bro-l8c4f.6)'
+        )
+      );
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 export function runDoctorChecks(
@@ -1933,10 +2575,11 @@ export function runDoctorChecks(
   checks.push(
     checkGh(),
     tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
-    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat, cfg.connectors),
     checkHooks(dir),
     devinWiringCheck(root),
     ...selfDistChecks(),
+    ...daemonBinChecks(dir, root),
     ...checkConfig(dir),
     ...configSchemaChecks(dir, opts.strict === true),
     ...providerChecks(dir),
@@ -1949,7 +2592,8 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
+    ...credentialScopeChecks(dir, cfg)
   );
 
   return checks;

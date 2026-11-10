@@ -9,7 +9,9 @@
  *                                       the review host parses its own PR URLs → act snapshot
  *   pre-tool                          connector preTool verdicts — the guard plane:
  *                                       first block vetoes the call, input overrides merge
- *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
+ *   post-tool                         exec nudges: gh pr create → act gate + the
+ *                                       detached trace-stamp footer (bro-7d5nb);
+ *                                       merge → debt sweep;
  *                                       first mutating bro subcommand per session cites its
  *                                       governing skill (skills/<name>/SKILL.md); arms the
  *                                       stop gate for this session (bro act/drill/
@@ -55,6 +57,7 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -79,22 +82,28 @@ import {
   stopGateContributions,
   unrefPendingChildren,
   withFileLock,
+  GUARD_EVENTS,
+  type ConnectorCtx,
+  type GateContribution,
+  type GuardEvent,
+  type ProbeReporter,
+  type ProbeResult,
+  type ProbeTiming,
 } from '@broject/core';
-import type { ConnectorCtx, ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
 import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
 import { otelSpan } from '@broject/providers';
+import { emitHook } from '@broject/otel';
 import {
   hooksDir,
   previousTraceFile,
   readTraceTail,
   relativize,
   sessionContextText,
+  type MatchContext,
 } from '@broject/learn';
-import type { MatchContext } from '@broject/learn';
-import { GUARD_EVENTS, type GuardEvent } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import {
@@ -110,6 +119,8 @@ import {
 } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
+import { maybeSpawnTraceStamp } from './trace-resolve.ts';
+import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
@@ -240,10 +251,13 @@ export function readCodexInstructions(pluginRoot: string | undefined): string | 
 /** Which gh lifecycle a shell command belongs to, if any. `gh` must sit at
  * a command position — `echo "gh pr merge"` is text, not a merge. */
 export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | null {
-  if (/(^|[;&|]\s*)gh\s+pr\s+merge\b/.test(cmd)) {
+  // the global flags gh takes BEFORE the subcommand (`gh -R owner/repo pr
+  // create`) are part of the same command — a PR opened that way is a PR
+  const flags = '(?:\\s+-{1,2}[\\w-]+(?:[= ]\\S+)?)*';
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+merge\\b`).test(cmd)) {
     return 'pr-merge';
   }
-  if (/(^|[;&|]\s*)gh\s+pr\s+create\b/.test(cmd)) {
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\s+create\\b`).test(cmd)) {
     return 'pr-create';
   }
   return null;
@@ -273,7 +287,7 @@ export type GateAspect = 'act' | 'drill' | 'work' | 'task';
 /** `bro` at a command position — the installed bin (`bro …`) or npx
  *  against the package (`npx [--flags] [@broject/]bro[@ver] …`). The
  *  negative lookahead keeps `npx bro-fu`/`npx brother` out. */
-const BRO_CMD = String.raw`(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
+const BRO_CMD = String.raw`(?:bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
@@ -421,6 +435,12 @@ export function classifySkillMutation(cmd: string): { plugin: string; skill: str
   return null;
 }
 
+/** Self-tool heads — `bd` plus BRO_CMD's alternation, spelled out as a
+ *  literal: a computed RegExp trips the non-literal-constructor SAST
+ *  rule. Keep the npx arm in sync with BRO_CMD. */
+const SELF_TOOL_HEAD_RE =
+  /^\s*(?:bd|bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
+
 /** bro/bd are the plugin's own tools — permission hooks approve them
  * outright. Chained, piped, or redirected commands are NOT self-tool calls:
  * the second stage could be anything, so it falls through to a prompt. */
@@ -428,7 +448,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd);
+  return SELF_TOOL_HEAD_RE.test(cmd);
 }
 
 // --- session arming -----------------------------------------------------------
@@ -774,6 +794,89 @@ function stopHintsChanged(sessionId: string, hints: string[]): boolean {
     // dedup is best-effort — a failed marker must never stall the hook
   }
   return hints.length > 0;
+}
+
+/** Gates, not loops — each aspect's hard block goes back ONCE per
+ *  session. The host drivers hold an in-memory one-shot (`gatedSession`)
+ *  and a host that re-enters the same stop says so through
+ *  `stop_hook_active`, but a plugin host whose hooks are one process per
+ *  event (devin's hooks/run.sh) hands every stop a fresh
+ *  `stop_hook_active: false` — and a blocked stop wakes the session as a
+ *  NEW turn whose stop re-blocks. That ping-pong is a loop, not a gate:
+ *  it burned a session's whole budget in minutes (observed 2026-11-04:
+ *  11 blocks in 5 minutes, one per answered block message). So the
+ *  one-shot lives HERE, in a marker beside the hint-dedup ones — and the
+ *  marker is the contract for EVERY host: a `stop_hook_active` stop
+ *  exits before this runs, so flag-correct hosts only reach it where
+ *  their in-memory one-shot demoted anyway, or where the host process
+ *  restarted — precisely the case the flag cannot cover.
+ *
+ *  The marker is keyed per ASPECT (`stop-gate-block.<aspect>`): an early
+ *  spec or claim block must not spend the worktree gate's one shot —
+ *  GATE_PRIORITY says uncommitted work is never shadowed — and loops
+ *  stay bounded because each aspect blocks at most once. The first
+ *  block stamps the marker, later blocks demote to a hint. Same TTL as
+ *  skillHinted — a week-old marker is a new session and gets its gate
+ *  back.
+ *
+ *  Concurrency: every claim goes through the single exclusive create
+ *  (`wx`), which alone arbitrates concurrent stops. The stale-marker
+ *  re-arm cannot delete-then-create — a loser of that race would unlink
+ *  the winner's fresh marker and let both block — so the stale file is
+ *  stolen aside with `renameSync` (one atomic op, one winner) and a
+ *  marker fresher than the one we stat'd is put back (`linkSync` is
+ *  atomic too, and loses cleanly to a marker armed meanwhile). Littered
+ *  `.stolen.*` files expire under the hinted/ sweep's TTL. Fail-open on
+ *  an unstampable session (no hooks state dir): the gate keeps its
+ *  block — a rig that cannot arm aspects never reaches the block branch
+ *  anyway. */
+export function takeStopGateBlock(sessionId: string, aspect: string): boolean {
+  const safeAspect = aspect.replace(/[^\w.-]/g, '_') || 'gate';
+  const path = hintedPath(sessionId, `stop-gate-block.${safeAspect}`);
+  if (!path) {
+    return true;
+  }
+  const now = Date.now();
+  const fresh = (mtimeMs: number): boolean => mtimeMs >= now - MARKER_TTL_MS;
+  try {
+    if (fresh(statSync(path).mtimeMs)) {
+      return false;
+    }
+    // a stale marker is a session that left and came back — re-arm by
+    // stealing it aside; two re-armers cannot both win the rename, the
+    // loser's ENOENT falls through to the exclusive create below
+    const stolen = `${path}.stolen.${process.pid}`;
+    try {
+      renameSync(path, stolen);
+      // the steal took whatever the path held — if a fresher marker
+      // landed between our stat and the rename, restore it and demote:
+      // the block is already spent
+      if (fresh(statSync(stolen).mtimeMs)) {
+        try {
+          linkSync(stolen, path);
+        } catch {
+          // another stop armed the marker while it sat aside
+        }
+        rmSync(stolen, { force: true });
+        return false;
+      }
+      rmSync(stolen, { force: true });
+    } catch {
+      // no steal — another re-armer beat us to the stale marker
+    }
+  } catch {
+    // no marker yet — this aspect's first block of the session
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${now}\n`, { flag: 'wx' });
+    return true;
+  } catch {
+    // a concurrent stop took the block, or a stale marker could not be
+    // replaced — demote either way: a gate that cannot remember it
+    // already blocked must never loop
+    return false;
+  }
 }
 
 /** True when this session was already pointed at the skill — a marker
@@ -1506,6 +1609,19 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // probe that finds nothing, a missed arm loses the gate entirely.
   if (outcome !== false) {
     lines.push(...armPostTool(cmd, sessionId));
+    // a `gh pr create` in a formula-attested session earns the detached
+    // PR-body footer stamp (spec bro-7d5nb §traceability) — same
+    // over-approximation as arming: hosts that can't observe the exit
+    // (Codex reports no success field) still stamp, a failed create
+    // just buys one `gh pr view` that finds nothing. The stamp reads
+    // worker-env pins, so like every stamp it is a hint the resolver
+    // verifies against the registry, not proof
+    if (classifyExecCommand(cmd) === 'pr-create') {
+      maybeSpawnTraceStamp(process.cwd());
+      // the PR IS a chain member — the chain registers itself with the
+      // host, so nobody adds the PRs to the stack by hand (bro-awbgd)
+      maybeSpawnStackPublish(process.cwd());
+    }
   }
   if (outcome === true) {
     lines.push(...execNudges(cmd));
@@ -1575,6 +1691,25 @@ async function emitStopGate(input: HookInput): Promise<void> {
   await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP]);
 }
 
+/** One contribution's verdict in priority order: an armed block fires
+ *  the session's one-shot for that aspect — a spent marker demotes the
+ *  block to a hint the stop-hint dedup keeps from re-waking the host;
+ *  an armed-but-clean contribution shows its hint; ambient state stays
+ *  passive. */
+function stopGateVerdict(
+  c: GateContribution,
+  armed: Set<string>,
+  sessionId: string
+): { block?: string; hint?: string } {
+  if (!armed.has(c.aspect)) {
+    return { hint: c.passive };
+  }
+  if (c.block) {
+    return takeStopGateBlock(sessionId, c.aspect) ? { block: c.block } : { hint: c.block };
+  }
+  return { hint: c.armedHint ?? c.passive };
+}
+
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
@@ -1608,19 +1743,13 @@ async function emitStopGateBody(
   ]);
   const gateHints: string[] = [];
   for (const c of contributions) {
-    if (!armed.has(c.aspect)) {
-      if (c.passive) {
-        gateHints.push(c.passive);
-      }
-      continue;
-    }
-    if (c.block) {
-      emit({ decision: 'block', reason: c.block });
+    const verdict = stopGateVerdict(c, armed, sessionId);
+    if (verdict.block !== undefined) {
+      emit({ decision: 'block', reason: verdict.block });
       return;
     }
-    const hint = c.armedHint ?? c.passive;
-    if (hint) {
-      gateHints.push(hint);
+    if (verdict.hint) {
+      gateHints.push(verdict.hint);
     }
   }
   // any Stop context re-wakes the host as a new turn — repeating an
@@ -1784,6 +1913,7 @@ function runPrepareCommitMsg(argv: string[]): void {
   } catch {
     // fail-open — provenance must never block a commit
   }
+  emitHook('prepare-commit-msg', {}, { dir: process.cwd() });
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -1796,6 +1926,7 @@ function runRefGuard(argv: string[]): void {
   } catch {
     // fail-open — the guard must never wedge git
   }
+  emitHook('reference-transaction', {}, { dir: process.cwd() });
 }
 
 /** bd/gh probes inherit cwd — run them in the project the hook fired for. */
@@ -1984,21 +2115,27 @@ function runPerf(argv: string[]): void {
 /** post-merge and its detached worker are git-hook events — same
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
- *  block a merge (the catch covers a throw before the worker's own). */
-const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
-  'post-merge': emitPostMerge,
-  'post-merge-run': runPostMergeRefresh,
-};
-
+ *  block a merge (the catch covers a throw before the worker's own). The
+ *  dispatch stays a static if-chain — a computed function-table lookup
+ *  trips the non-static-access SAST rule. */
 function runPostMergeEvent(event: string | undefined): boolean {
-  const run = POST_MERGE_EVENTS[event ?? ''];
-  if (run === undefined) {
+  if (event !== 'post-merge' && event !== 'post-merge-run') {
     return false;
   }
   try {
-    run(process.cwd());
+    if (event === 'post-merge') {
+      emitPostMerge(process.cwd());
+    } else {
+      runPostMergeRefresh(process.cwd());
+    }
   } catch {
     // fail-open
+  }
+  // telemetry on the dispatch, not the worker — `post-merge-run` is an
+  // internal spawn, not a hook event: its row would duplicate the
+  // `hook.post-merge` one and dodge the `post-merge` policy name.
+  if (event === 'post-merge') {
+    emitHook(event, {}, { dir: process.cwd() });
   }
   return true;
 }
@@ -2021,18 +2158,19 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
   return { ...input, tool_response: { ...response, success } };
 }
 
-export async function runHooksCommand(argv: string[]): Promise<void> {
-  cursorClient = false;
-  codexClient = false;
-  permissionAnswerEmitted = false;
+/** Events that settle on argv alone — operator commands and git-hook
+ *  events never read stdin (a git hook's stdin can be a terminal, and
+ *  reading stdin would block on it forever) and run before the
+ *  broEnabled gate: wiring/shimming a repo is how it opts in. Returns
+ *  true when the argv named one of them. */
+function runArgvEvent(argv: string[]): boolean {
   const event = argv[0];
   // install/uninstall are operator commands, not hook events — they
-  // report a verdict on stderr and never read stdin (a git hook's stdin
-  // can be a terminal, and reading stdin would block on it forever). They
-  // also run before the broEnabled gate: wiring a repo is how it opts in.
+  // report a verdict on stderr. They also run before the broEnabled
+  // gate: wiring a repo is how it opts in.
   if (event === 'install' || event === 'uninstall') {
     runCommitHookCommand(event);
-    return;
+    return true;
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
   // same no-stdin rule as the operator commands, and same pre-gate
@@ -2040,32 +2178,40 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // .beads/bro.config would silently deaden a hook the repo installed
   if (event === 'prepare-commit-msg') {
     runPrepareCommitMsg(argv);
-    return;
+    return true;
   }
   // reference-transaction is a git-hook event too — argv for the phase
   // and ppid, stdin for the update list; same pre-gate placement (the
   // installed shim is the opt-in)
   if (event === 'reference-transaction') {
     runRefGuard(argv);
-    return;
+    return true;
   }
   if (runPostMergeEvent(event)) {
-    return;
+    return true;
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin
   // operator placement as install/uninstall: it must not block reading
   // a payload that was never sent.
   if (event === 'perf') {
     runPerf(argv);
-    return;
+    return true;
   }
   // a bare `bro hooks` is a capability probe — launchers test the
   // subcommand exists before calling it with the real event. Return
   // before readRaw: the probe must not consume a payload still waiting
   // on the caller's stdin for that next invocation.
-  if (!event) {
+  return !event;
+}
+
+export async function runHooksCommand(argv: string[]): Promise<void> {
+  cursorClient = false;
+  codexClient = false;
+  permissionAnswerEmitted = false;
+  if (runArgvEvent(argv)) {
     return;
   }
+  const event = argv[0];
   // stdin before the opt-in check: Cursor's project dir is on the
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw();
@@ -2116,11 +2262,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     'hook.event': event,
     'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
   });
+  let hookErr = false;
   try {
     await dispatchHook(event, raw, input);
     evSpan.end();
   } catch {
     evSpan.end({}, 'error');
+    hookErr = true;
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
@@ -2129,6 +2277,17 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     clearTimeout(deadlineTimer);
     const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
     flushPerf(sessionId, event, t0);
+    // hook-first telemetry (spec bro-xgejl) — every dispatched event
+    // emits one facade record; enabled=false in config means this is a
+    // memoized config read and a boolean, nothing more.
+    emitHook(event, input, {
+      sessionId,
+      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+      durationMs: Date.now() - t0,
+      ok: !hookErr,
+      error: hookErr ? 'dispatch threw' : undefined,
+      dir: root,
+    });
     // A probe that raced past its budget leaves its bd/gh child running —
     // unref the stragglers so the hook exits with the answer it sent,
     // not when the last subprocess closes.

@@ -13,6 +13,9 @@
  * `status` is meant to be safe to call from a hook or a doctor walk.
  */
 import {
+  CommandError,
+  isCommandError,
+  EXIT,
   busPublish,
   busSocketPath,
   busStatus,
@@ -77,8 +80,7 @@ function usage(exitCode: ExitCode = 2): never {
 
 // Same reason as agents.ts's die(): declared so tsc narrows.
 function die(msg: string): never {
-  console.error(`error: ${msg}`)
-  process.exit(1)
+  throw new CommandError(`error: ${msg}`, EXIT.error)
 }
 
 /** A misspelled option is a typo, not input — writes fail closed. */
@@ -133,6 +135,7 @@ async function cmdServe(rest: string[]): Promise<void> {
   try {
     broker = await startBusBroker(process.cwd())
   } catch (err) {
+    if (isCommandError(err)) throw err
     die(err instanceof Error ? err.message : String(err))
   }
   const payload = { socketPath: broker.socketPath, pid: process.pid, seq: broker.seq }
@@ -263,9 +266,25 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
       onClose: end,
     }, since !== undefined ? { since } : {})
   } catch (err) {
+    process.removeListener('SIGINT', end)
+    process.removeListener('SIGTERM', end)
+    if (isCommandError(err)) {
+      throw err
+    }
+    if (err instanceof Error && err.message.startsWith('error:')) {
+      throw new CommandError(err.message, EXIT.error)
+    }
     die(err instanceof Error ? err.message : String(err))
   }
-  await ended
+  try {
+    await ended
+  } finally {
+    // the once() listeners detach on a signal; a broker-driven close
+    // leaves them armed — an embedding host that catches the return
+    // must not inherit this command's listeners
+    process.removeListener('SIGINT', end)
+    process.removeListener('SIGTERM', end)
+  }
   sub.close()
 }
 

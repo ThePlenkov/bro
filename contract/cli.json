@@ -7,7 +7,7 @@
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "stack"]
+      "members": ["convoy", "next", "loop", "watchdog", "stack"]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -24,17 +24,28 @@
         "pulse",
         "telemetry",
         "trace",
+        "otel",
         "acp",
         "rig"
       ]
     },
     "work": {
       "summary": "worktree & session mechanics",
-      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep"]
+      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep", "exec"]
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
-      "members": ["retrospect", "wtf", "learn", "judge", "dogfood", "guard", "providers"]
+      "members": [
+        "retrospect",
+        "wtf",
+        "learn",
+        "skills",
+        "judge",
+        "dogfood",
+        "benchmark",
+        "guard",
+        "providers"
+      ]
     },
     "comms": {
       "summary": "events & session mailbox",
@@ -51,6 +62,10 @@
     "spec": {
       "summary": "spec-driven development",
       "members": ["spec"]
+    },
+    "pipeline": {
+      "summary": "pipeline customer surface — accept verdicts, intake answers",
+      "members": ["pipeline"]
     }
   },
   "commands": {
@@ -80,6 +95,7 @@
               "--area <a>": "only findings in this area",
               "--author <u>": "only findings from this thread author"
             },
+            "json": "schemas/cli/debt-next.schema.json",
             "exits": {
               "0": "top open finding emitted",
               "1": "no open findings, or the claim CAS lost",
@@ -112,7 +128,8 @@
               "0": "exit gate green",
               "1": "gate blocked — threads/failures remain (usage errors also exit 1 today)",
               "2": "no open PR for the current branch"
-            }
+            },
+            "json": "schemas/cli/act-status.schema.json"
           }
         }
       },
@@ -147,6 +164,7 @@
           "--global": "read the user-level store instead of the project",
           "--label <a,b>": "only beads carrying one of these labels are claimable"
         },
+        "json": "schemas/cli/next.schema.json",
         "exits": {
           "0": "verdict emitted — task | gated | idle",
           "1": "task store unreachable or classify failed",
@@ -167,10 +185,71 @@
       "plan": false,
       "external": false
     },
+    "watchdog": {
+      "name": "watchdog",
+      "group": "flow",
+      "summary": "Infinite read-only pipeline watchdog — launch brief + tick-0 baselines [--json]",
+      "spellings": ["watchdog", "flow watchdog"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "watchdog",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`"
+        },
+        "json": "schemas/cli/watchdog.json",
+        "exits": {
+          "0": "brief printed (human or --json)",
+          "2": "unknown flag — usage on stderr"
+        }
+      },
+      "external": false
+    },
+    "pipeline": {
+      "name": "pipeline",
+      "group": "pipeline",
+      "summary": "Pipeline customer surface — accept|answer write the verdict store",
+      "spellings": ["pipeline"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "subs": {
+          "accept": {
+            "flags": {
+              "--notes <text>": "the customer's notes — required on rejected (the fix scope)",
+              "--by <id>": "signer identity — default: $BRO_AGENT_ID, else the actor chain",
+              "--run <id>": "the run to write to — default: the sole run parked at accept"
+            },
+            "exits": {
+              "0": "verdict recorded on the run channel",
+              "1": "no run awaiting, an ambiguous target, or an unresolvable signer",
+              "2": "usage"
+            }
+          },
+          "answer": {
+            "flags": {
+              "-m <text>": "answer text (short spelling)",
+              "--message <text>": "answer text",
+              "--answers-file <path>": "answers from a file (JSON parsed when it parses)",
+              "--by <id>": "who answered — optional provenance",
+              "--run <id>": "the run to write to — default: the sole run parked at intake"
+            },
+            "exits": {
+              "0": "answers recorded on the run channel",
+              "1": "no run awaiting answers or an unreadable file",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
     "fleet": {
       "name": "fleet",
       "group": "fleet",
-      "summary": "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]",
+      "summary": "Fleet view — mols × steps × agents × worktrees × PRs; walls [--json | clear <account> | --all]; leases [--json | release <key>]",
       "spellings": ["fleet"],
       "aliases": [],
       "hidden": false,
@@ -181,6 +260,7 @@
           "--live": "TTY dashboard repaint loop (needs a TTY)",
           "--every N": "repaint cadence seconds — implies --live"
         },
+        "json": "schemas/cli/fleet.schema.json",
         "exits": {
           "0": "fleet printed",
           "2": "usage — --live without TTY, --every out of range, --json + --live"
@@ -237,6 +317,7 @@
               "--json": "agent rows + occupancy + session quota as JSON",
               "--connector <name>": "pin the agents facade connector"
             },
+            "json": "schemas/cli/agents-status.schema.json",
             "exits": {
               "0": "agent plane printed",
               "1": "backend collection failed",
@@ -261,6 +342,7 @@
           "--json": "the board as one JSON document",
           "--deep": "add the act exit gate for the current branch PR — the fast path stays local-only"
         },
+        "json": "schemas/cli/fleet-status.schema.json",
         "exits": {
           "0": "board printed"
         }
@@ -403,7 +485,7 @@
     "cleanup": {
       "name": "cleanup",
       "group": "review",
-      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "summary": "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]",
       "spellings": ["cleanup", "review cleanup"],
       "aliases": [],
       "hidden": false,
@@ -492,6 +574,44 @@
       "plan": false,
       "external": false
     },
+    "skills": {
+      "name": "skills",
+      "group": "self",
+      "summary": "Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]",
+      "spellings": ["skills", "self skills"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "skills",
+      "configKey": "skills",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "sync": {
+            "flags": {
+              "--root <dir>": "run root — its bro.config and .agents/skills apply",
+              "--json": "per-source steps + reconcile rows + drift as JSON"
+            },
+            "exits": {
+              "0": "all declared sources installed — lock verifies",
+              "1": "a source failed, or drift reported after sync",
+              "2": "usage"
+            }
+          },
+          "list": {
+            "flags": {
+              "--root <dir>": "run root",
+              "--json": "the reconcile rows as JSON"
+            },
+            "json": "schemas/cli/skills-list.schema.json",
+            "exits": {
+              "0": "rows printed",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
     "judge": {
       "name": "judge",
       "group": "self",
@@ -509,6 +629,17 @@
       "group": "self",
       "summary": "Scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict",
       "spellings": ["dogfood", "self dogfood"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "dogfood",
+      "plan": false,
+      "external": false
+    },
+    "benchmark": {
+      "name": "benchmark",
+      "group": "self",
+      "summary": "Paired native-vs-BRO workflow outcome benchmarks",
+      "spellings": ["benchmark", "self benchmark"],
       "aliases": [],
       "hidden": false,
       "skill": "dogfood",
@@ -606,7 +737,7 @@
     "trace": {
       "name": "trace",
       "group": "fleet",
-      "summary": "OTLP export of the session trace journals — export [--session|--dry-run|--json]",
+      "summary": "<ref> → provenance chain (VERIFIED/FORGED/MISSING) · export — OTLP export of session trace journals",
       "spellings": ["trace", "fleet trace"],
       "aliases": [],
       "hidden": false,
@@ -615,10 +746,68 @@
       "plan": false,
       "external": false
     },
+    "otel": {
+      "name": "otel",
+      "group": "fleet",
+      "summary": "Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)",
+      "spellings": ["otel", "fleet otel"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "otel",
+      "configKey": "otel",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "report printed"
+            }
+          },
+          "test": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "would-be record printed",
+              "2": "missing hook name"
+            }
+          },
+          "on": {
+            "exits": {
+              "0": "otel.enabled=true written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          },
+          "off": {
+            "exits": {
+              "0": "otel.enabled=false written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          }
+        },
+        "exits": {
+          "0": "status (bare `bro otel`)",
+          "2": "usage — unknown subcommand"
+        }
+      },
+      "external": false
+    },
     "acp-worker": {
       "name": "acp-worker",
       "summary": "ACP provider spawn unit — backends exec this; never typed",
       "spellings": ["acp-worker"],
+      "aliases": [],
+      "hidden": true,
+      "plan": false,
+      "external": false
+    },
+    "herdr": {
+      "name": "herdr",
+      "summary": "Herdr bridge — pane-facing helpers (status-view); spawned, never typed",
+      "spellings": ["herdr"],
       "aliases": [],
       "hidden": true,
       "plan": false,
@@ -657,6 +846,16 @@
       "plan": false,
       "external": false
     },
+    "router": {
+      "name": "router",
+      "summary": "The model router — the served catalog and the clients it renders for: models|clients|client <id> [--write]",
+      "spellings": ["router"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "brouter",
+      "plan": false,
+      "external": false
+    },
     "setup": {
       "name": "setup",
       "summary": "Wire bro into the current repo",
@@ -692,6 +891,7 @@
               "--repo <dir>": "rig checkout to inspect (default: this repo)",
               "--json": "rig status as JSON"
             },
+            "json": "schemas/cli/rig-status.schema.json",
             "exits": {
               "0": "rig fresh — no error surfaced",
               "1": "a status error was found",
@@ -702,6 +902,7 @@
             "flags": {
               "--json": "the re-entry verdict as JSON"
             },
+            "json": "schemas/cli/rig-next.schema.json",
             "exits": {
               "0": "verdict — step | gate | wait | done",
               "1": "verdict blocked",
@@ -787,6 +988,22 @@
       "aliases": [],
       "hidden": false,
       "plan": false,
+      "external": false
+    },
+    "exec": {
+      "name": "exec",
+      "group": "work",
+      "summary": "Run a shell command, then fire taskFinish connector probes — the pane report-back for agent kinds without a native task-exit wake (spec bro-84zrj)",
+      "spellings": ["exec", "work exec"],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "exits": {
+          "2": "usage",
+          "130": "child killed by SIGINT"
+        }
+      },
       "external": false
     },
     "plan": {

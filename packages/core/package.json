@@ -1,6 +1,6 @@
 {
   "name": "@broject/core",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -43,5 +43,9 @@
     "agent",
     "bro"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "core",
+    "status": "beta"
+  }
 }
