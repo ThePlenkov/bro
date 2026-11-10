@@ -52,6 +52,7 @@ shipped. Verification results and chosen command strings are recorded above.
 ### Command surface
 
 Extend `bro providers` with:
+
 - `bro providers add <preset> [--name <name>] [--global] [--force]`
   - Adds a provider entry for the named preset.
   - By default writes to the project config (`bro.config.json`) in cwd (following
@@ -74,6 +75,7 @@ Extend `bro providers` with:
 ### Config writing
 
 Config writes follow project conventions:
+
 - Project config: `bro.config.json` in cwd, atomic write (tmp + rename),
   file lock. Refuse if `bro.config.ts` exists (edit TS directly). Merge
   into existing file (preserve other keys/sections).
