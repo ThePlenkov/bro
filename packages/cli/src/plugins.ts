@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  CommandError,
+  EXIT,
   actSection,
   agentsSection,
   beadsSection,
@@ -709,7 +711,9 @@ export const PLUGINS: BroPlugin[] = [
     // dispatch lives in index.ts's argv[0] fallback — this entry owns
     // the beads config section and keeps the registry honest
     hidden: true,
-    run: () => process.exit(2),
+    run: () => {
+      throw new CommandError('docs plugin must be dispatched via verb-first dispatch', EXIT.usage)
+    },
     skill: 'docs',
     configKey: 'beads',
     configSchema: beadsSection,
@@ -931,7 +935,8 @@ export const PLUGINS: BroPlugin[] = [
     runPlan: async plan => {
       const code = await applyQueryPlan(plan as QueryPlan);
       if (code !== 0) {
-        process.exit(code);
+        const core = await import('@broject/core')
+        throw new core.CommandError('', core.passthroughExitCode(code))
       }
     },
   }),
@@ -1031,12 +1036,12 @@ export function pluginGroups(): Map<string, BroPlugin[]> {
 /** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
  *  envelope `version`, validate with the owning plugin's planSchema,
  *  execute via runPlan. Resolution is shared with `bro plan validate`. */
+
 export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter(a => !a.startsWith('-'));
   const kinds = PLUGINS.filter(p => p.planSchema && p.runPlan).map(p => p.name);
   if (files.length !== 1) {
-    console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`);
-    process.exit(2);
+    throw new CommandError(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`, EXIT.usage)
   }
   const file = files[0] as string;
   const { plugin, plan } = resolvePlanDoc(file, PLUGINS);

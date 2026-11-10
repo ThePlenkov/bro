@@ -20,8 +20,10 @@
  * NOT consumed (a value would eat the ref).
  */
 import {
+  CommandError,
   docTypeNamed,
   docVerbs,
+  EXIT,
   gitTry,
   STANDARD_VERBS,
   verbMethod,
@@ -137,8 +139,7 @@ export function docArgs(argv: string[]): {
 }
 
 function die(msg: string): never {
-  console.error(`error: ${msg}`)
-  process.exit(2)
+  throw new CommandError(`error: ${msg}`, EXIT.usage)
 }
 
 function needRef(type: DocType, ref: string | undefined, verb: string): string {

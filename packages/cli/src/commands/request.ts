@@ -8,7 +8,7 @@
  * is the plain own-store post — `bro mesh request` verbatim.
  */
 import { basename } from 'node:path'
-import { gitCommonDir, hasHelpFlag, printUsage } from '@broject/core'
+import { gitCommonDir, hasHelpFlag, printUsage, CommandError, EXIT } from '@broject/core'
 import {
   deliverGithub,
   deliverRequest,
@@ -33,11 +33,11 @@ on external:<rig>:<id> — a marker, not a gate.
 `
 
 function failAmbiguous(input: { arg: string; ambiguous: string[] }): never {
-  console.error(`error: "${input.arg}" is ambiguous — matching sibling checkouts:`)
+  const lines = [`error: "${input.arg}" is ambiguous — matching sibling checkouts:`]
   for (const c of input.ambiguous) {
-    console.error(`  ${c}`)
+    lines.push(`  ${c}`)
   }
-  process.exit(2)
+  throw new CommandError(lines.join('\n'), EXIT.usage)
 }
 
 function resolveOrExit(input: { dir: string; arg: string }): ResolvedTarget {
@@ -46,8 +46,7 @@ function resolveOrExit(input: { dir: string; arg: string }): ResolvedTarget {
     failAmbiguous({ arg: input.arg, ambiguous: resolved.ambiguous })
   }
   if (resolved.target === undefined) {
-    console.error(`error: ${resolved.error ?? 'cannot resolve target'}`)
-    process.exit(2)
+    throw new CommandError(`error: ${resolved.error ?? 'cannot resolve target'}`, EXIT.usage)
   }
   return resolved.target
 }
@@ -55,12 +54,10 @@ function resolveOrExit(input: { dir: string; arg: string }): ResolvedTarget {
 function selfRigOrExit(input: { dir: string }): string {
   const rig = selfRig(input.dir)
   if (rig === null) {
-    console.error('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)')
-    process.exit(2)
+    throw new CommandError('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)', EXIT.usage)
   }
   if (gitCommonDir(input.dir) === null) {
-    console.error('bro request: not inside a git repository')
-    process.exit(2)
+    throw new CommandError('bro request: not inside a git repository', EXIT.usage)
   }
   return rig
 }
@@ -73,8 +70,7 @@ function parsePriority(rest: string[]): number | undefined {
   const priority = Number(prio)
   const inRange = priority >= 0 && priority <= 4
   if (!Number.isInteger(priority) || !inRange) {
-    console.error('error: --priority wants 0-4')
-    process.exit(2)
+    throw new CommandError('error: --priority wants 0-4', EXIT.usage)
   }
   return priority
 }
@@ -143,8 +139,7 @@ function remoteRequest(input: { dir: string; t: ResolvedTarget; titleText: strin
     priority: parsePriority(input.rest),
   })
   if (posted.error !== undefined) {
-    console.error(`error: ${posted.error}`)
-    process.exit(1)
+    throw new CommandError(`error: ${posted.error}`, EXIT.error)
   }
   reportRemote({ peer, thread: posted.thread, mirror: posted.mirror, rest: input.rest })
   return true
@@ -168,8 +163,7 @@ function checkoutRequest(input: { dir: string; t: ResolvedTarget; titleText: str
     priority: parsePriority(rest),
   })
   if (posted.error !== undefined) {
-    console.error(`error: ${posted.error}`)
-    process.exit(1)
+    throw new CommandError(`error: ${posted.error}`, EXIT.error)
   }
   console.log(`request ${posted.id} → ${t.rig}`)
 
@@ -186,8 +180,7 @@ export function runRequestCommand(argv: string[]): void {
   }
   const titleBad = titleText === undefined || titleText.startsWith('--')
   if (target === undefined || titleBad) {
-    console.error(USAGE)
-    process.exit(2)
+    throw new CommandError(USAGE.trim(), EXIT.usage)
   }
 
   const t = resolveOrExit({ dir, arg: target })

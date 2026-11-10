@@ -45,11 +45,15 @@ const capture = (
   process.chdir(dir)
   try {
     runOtelCommand(argv)
-  } catch (e) {
-    if (!(e instanceof ExitSignal)) {
+  } catch (e: any) {
+    if (e instanceof ExitSignal) {
+      exit = e.code
+    } else if (e && (e.name === 'CommandError' || e.constructor?.name === 'CommandError')) {
+      exit = typeof e.code === 'number' ? e.code : 1
+      if (e.message) err.push(String(e.message))
+    } else {
       throw e
     }
-    exit = e.code
   } finally {
     process.chdir(cwd)
     console.log = origLog
