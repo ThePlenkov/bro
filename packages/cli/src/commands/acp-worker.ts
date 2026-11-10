@@ -6,9 +6,9 @@
  * apply to it directly. The ACP session id is diagnostic only; the
  * fleet's own registry identity stands.
  */
+import { CommandError, EXIT, passthroughExitCode, patchAgentRegistry } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { readFileSync } from 'node:fs';
-import { patchAgentRegistry } from '@broject/core';
 
 /** MCP server descriptors reach the worker as a FILE, never inline on
  *  argv — a stdio server's `env` credentials would be world-readable in
@@ -26,14 +26,16 @@ function mcpServersFromFile(argv: string[]): unknown[] | undefined {
     // SyntaxError text can quote the offending source slice — the file
     // carries env credentials, so a parse failure must never echo
     // parser details into an aggregated stderr log.
-    console.error(
-      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof SyntaxError ? 'invalid JSON' : err instanceof Error ? err.message : String(err)}`
+    throw new CommandError(
+      `bro acp-worker: cannot read MCP servers file ${mcpFile} — ${err instanceof SyntaxError ? 'invalid JSON' : err instanceof Error ? err.message : String(err)}`,
+      EXIT.usage
     );
-    process.exit(2);
   }
   if (!Array.isArray(parsed)) {
-    console.error(`bro acp-worker: MCP servers file ${mcpFile} must contain a JSON array`);
-    process.exit(2);
+    throw new CommandError(
+      `bro acp-worker: MCP servers file ${mcpFile} must contain a JSON array`,
+      EXIT.usage
+    );
   }
   return parsed;
 }
@@ -49,10 +51,10 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
     new Set(['--command', '--model', '--resume', '--mcp-servers-file'])
   );
   if (command === undefined || pos.length !== 1) {
-    console.error(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--resume <sessionId>] [--mcp-servers-file <path>] <promptFile>'
+    throw new CommandError(
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--resume <sessionId>] [--mcp-servers-file <path>] <promptFile>',
+      EXIT.usage
     );
-    process.exit(2);
   }
   const promptFile = pos[0]!;
   const { runAcpWorker } = await import('@broject/providers');
@@ -80,5 +82,7 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
             }
           },
   });
-  process.exit(code);
+  if (code !== 0) {
+    throw new CommandError('', passthroughExitCode(code));
+  }
 }

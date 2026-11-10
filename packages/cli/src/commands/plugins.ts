@@ -25,23 +25,23 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-} from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { gitTry, hasHelpFlag, printUsage, type BroPlugin } from '@broject/core'
-import { positionals } from './args.ts'
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gitTry, hasHelpFlag, printUsage, CommandError, EXIT, type BroPlugin } from '@broject/core';
+import { positionals } from './args.ts';
 
-export type PluginScope = 'global' | 'local'
+export type PluginScope = 'global' | 'local';
 /** installed = bytes match the shipped artifact; stale = bytes differ;
  *  present = file exists but no artifact resolved to compare against. */
-export type InstallState = 'installed' | 'stale' | 'present' | 'absent'
+export type InstallState = 'installed' | 'stale' | 'present' | 'absent';
 
 export interface PluginRow {
-  client: string
-  scope: PluginScope
-  state: InstallState
-  path: string
+  client: string;
+  scope: PluginScope;
+  state: InstallState;
+  path: string;
 }
 
 /** A manifest step beyond the module file — kilo's global install also
@@ -49,9 +49,9 @@ export interface PluginRow {
 interface Registration {
   /** Reading this parses the manifest — a malformed one exits before
    *  any file is written. */
-  readonly registered: boolean
-  register(): void
-  unregister(): void
+  readonly registered: boolean;
+  register(): void;
+  unregister(): void;
 }
 
 /** A second module file installed beside the primary — opencode's TUI
@@ -59,59 +59,55 @@ interface Registration {
  *  artifact ladder; they never own a registration (where a manifest
  *  entry exists it belongs to the primary module). */
 interface ExtraFile {
-  artifact: string | null
-  targets: Record<PluginScope, string>
+  artifact: string | null;
+  targets: Record<PluginScope, string>;
 }
 
 interface ClientSpec {
   /** The shippable module's source path, or null when unresolvable. */
-  artifact(cwd: string): string | null
-  targets(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string>
-  extras?(cwd: string, env: NodeJS.ProcessEnv): ExtraFile[]
-  registration?(
-    scope: PluginScope,
-    path: string,
-    env: NodeJS.ProcessEnv
-  ): Registration | null
+  artifact(cwd: string): string | null;
+  targets(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string>;
+  extras?(cwd: string, env: NodeJS.ProcessEnv): ExtraFile[];
+  registration?(scope: PluginScope, path: string, env: NodeJS.ProcessEnv): Registration | null;
 }
 
 /** The bro package root — this module sits at src/commands/ in a
  *  checkout and bundles into dist/index.js in the tarball, so anchor on
  *  the package.json, not on the module's own depth. */
 function packageRoot(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url))
+  let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
-    const manifest = join(dir, 'package.json')
+    const manifest = join(dir, 'package.json');
     try {
       if (
         existsSync(manifest) &&
         (JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string }).name === '@broject/bro'
       ) {
-        return dir
+        return dir;
       }
     } catch {
       // unreadable manifest — keep walking
     }
-    const parent = dirname(dir)
+    const parent = dirname(dir);
     if (parent === dir) {
-      return null
+      return null;
     }
-    dir = parent
+    dir = parent;
   }
 }
 
 function gitRoot(cwd: string): string | null {
-  const r = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel'])
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
+  const r = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
 }
 
 function firstExisting(candidates: Array<string | null>): string | null {
   for (const c of candidates) {
     if (c !== null && existsSync(c)) {
-      return c
+      return c;
     }
   }
-  return null
+  return null;
 }
 
 /** Artifact sources in preference order: the TS source (checkout), the
@@ -119,108 +115,105 @@ function firstExisting(candidates: Array<string | null>): string | null {
  *  node builtins only, so its bundle has no internal chunks), then the
  *  repo-distributed adapter a bro clone carries under plugins/. */
 function opencodeArtifact(cwd: string): string | null {
-  const pkg = packageRoot()
-  const root = gitRoot(cwd)
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
   return firstExisting([
     pkg === null ? null : join(pkg, 'src', 'opencode.ts'),
     pkg === null ? null : join(pkg, 'dist', 'opencode.js'),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'bro.ts'),
-  ])
+  ]);
 }
 
 /** The TUI half's ladder mirrors the server module's — source, bundled
  *  dist (`./tui` export → dist/opencode-tui.js), the repo artifact. */
 function opencodeTuiArtifact(cwd: string): string | null {
-  const pkg = packageRoot()
-  const root = gitRoot(cwd)
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
   return firstExisting([
     pkg === null ? null : join(pkg, 'src', 'opencode-tui.ts'),
     pkg === null ? null : join(pkg, 'dist', 'opencode-tui.js'),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'cli.ts'),
-  ])
+  ]);
 }
 
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
-  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo')
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo');
 }
 
 function kiloManifestPath(env: NodeJS.ProcessEnv): string {
-  return join(kiloConfigDir(env), 'kilo.json')
+  return join(kiloConfigDir(env), 'kilo.json');
 }
 
 /** kilo.json is strict JSON — kilo.jsonc exists too but kilo merges both
  *  files, so writing only kilo.json is always correct and a comment-
  *  bearing file we can't parse is left for the user, never rewritten. */
 function readKiloManifest(env: NodeJS.ProcessEnv): Record<string, unknown> {
-  const path = kiloManifestPath(env)
+  const path = kiloManifestPath(env);
   if (!existsSync(path)) {
-    return {}
+    return {};
   }
-  let parsed: unknown
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'))
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    console.error(
-      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`
-    )
-    process.exit(1)
+    throw new CommandError(
+      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`,
+      EXIT.error
+    );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    console.error(`plugins: ${path} must be a JSON object — edit it by hand`)
-    process.exit(1)
+    throw new CommandError(`plugins: ${path} must be a JSON object — edit it by hand`, EXIT.error);
   }
-  return parsed as Record<string, unknown>
+  return parsed as Record<string, unknown>;
 }
 
 function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
-  const manifestPath = kiloManifestPath(env)
-  const entry = pathToFileURL(path).href
+  const manifestPath = kiloManifestPath(env);
+  const entry = pathToFileURL(path).href;
   const pluginList = (m: Record<string, unknown>): unknown[] =>
-    Array.isArray(m.plugin) ? m.plugin : []
+    Array.isArray(m.plugin) ? m.plugin : [];
   const writeManifest = (m: Record<string, unknown>): void => {
-    atomicWrite(manifestPath, `${JSON.stringify(m, null, 2)}\n`)
-  }
+    atomicWrite(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
+  };
   return {
     get registered() {
-      return pluginList(readKiloManifest(env)).includes(entry)
+      return pluginList(readKiloManifest(env)).includes(entry);
     },
     register() {
-      const fresh = !existsSync(manifestPath)
-      const m = readKiloManifest(env)
-      const list = pluginList(m)
+      const fresh = !existsSync(manifestPath);
+      const m = readKiloManifest(env);
+      const list = pluginList(m);
       if (list.includes(entry)) {
-        return
+        return;
       }
-      const body = fresh
-        ? { $schema: 'https://app.kilo.ai/config.json', ...m }
-        : m
-      writeManifest({ ...body, plugin: [...list, entry] })
+      const body = fresh ? { $schema: 'https://app.kilo.ai/config.json', ...m } : m;
+      writeManifest({ ...body, plugin: [...list, entry] });
     },
     unregister() {
       if (!existsSync(manifestPath)) {
-        return
+        return;
       }
-      const m = readKiloManifest(env)
-      const list = pluginList(m)
+      const m = readKiloManifest(env);
+      const list = pluginList(m);
       if (!list.includes(entry)) {
-        return
+        return;
       }
-      writeManifest({ ...m, plugin: list.filter((e) => e !== entry) })
+      writeManifest({ ...m, plugin: list.filter(e => e !== entry) });
     },
-  }
+  };
 }
 
 /** kilo's artifact ladder mirrors opencode's — but the global target is
  *  NOT `plugin/`/`plugins/` (kilo auto-scans those; a file there would
  *  double-register against the kilo.json `plugin[]` entry). */
 function kiloArtifact(cwd: string): string | null {
-  const pkg = packageRoot()
-  const root = gitRoot(cwd)
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
   return firstExisting([
     pkg === null ? null : join(pkg, 'src', 'kilo.ts'),
     pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
     root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
-  ])
+  ]);
 }
 
 /** The pi adapter artifact — the generated plugin bundle, the bundled
@@ -228,13 +221,13 @@ function kiloArtifact(cwd: string): string | null {
  *  adapter core is folded in), so jiti loads it with no node_modules to
  *  resolve against. */
 function piArtifact(cwd: string): string | null {
-  const pkg = packageRoot()
-  const root = gitRoot(cwd)
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
     pkg === null ? null : join(pkg, 'src', 'pi.ts'),
-  ])
+  ]);
 }
 
 /** The omp adapter artifact — the generated plugin bundle, the bundled
@@ -242,13 +235,13 @@ function piArtifact(cwd: string): string | null {
  *  adapter core is folded in) and carries the `bro-adapter` sentinel, so
  *  it loads with no node_modules and stays recognizable as ours. */
 function ompArtifact(cwd: string): string | null {
-  const pkg = packageRoot()
-  const root = gitRoot(cwd)
+  const pkg = packageRoot();
+  const root = gitRoot(cwd);
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'omp', 'bro', 'bro.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
     pkg === null ? null : join(pkg, 'src', 'omp.ts'),
-  ])
+  ]);
 }
 
 /** omp's active agent directory — the user profile's config root.
@@ -256,13 +249,13 @@ function ompArtifact(cwd: string): string | null {
  *  a named profile lives under `~/.omp/profiles/<name>/agent`. */
 function ompAgentDir(env: NodeJS.ProcessEnv): string {
   if (env.PI_CODING_AGENT_DIR !== undefined && env.PI_CODING_AGENT_DIR !== '') {
-    return env.PI_CODING_AGENT_DIR
+    return env.PI_CODING_AGENT_DIR;
   }
-  const profile = env.OMP_PROFILE
+  const profile = env.OMP_PROFILE;
   if (profile !== undefined && profile !== '') {
-    return join(homedir(), '.omp', 'profiles', profile, 'agent')
+    return join(homedir(), '.omp', 'profiles', profile, 'agent');
   }
-  return join(homedir(), '.omp', 'agent')
+  return join(homedir(), '.omp', 'agent');
 }
 
 const CLIENTS: Record<string, ClientSpec> = {
@@ -298,8 +291,7 @@ const CLIENTS: Record<string, ClientSpec> = {
       global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
       local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
     }),
-    registration: (scope, path, env) =>
-      scope === 'global' ? kiloRegistration(path, env) : null,
+    registration: (scope, path, env) => (scope === 'global' ? kiloRegistration(path, env) : null),
   },
   pi: {
     artifact: piArtifact,
@@ -326,10 +318,10 @@ const CLIENTS: Record<string, ClientSpec> = {
       local: join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
     }),
   },
-}
+};
 
 export function clientNames(): string[] {
-  return Object.keys(CLIENTS)
+  return Object.keys(CLIENTS);
 }
 
 /** The materialized module's fingerprint — holds for the TS source and
@@ -346,7 +338,7 @@ export function isBroAdapter(text: string): boolean {
   // stale-era `server: bro` read as foreign once: retro bro-g2f9);
   // shape checks recognize adapters shipped before the marker existed.
   if (!/\bid:\s*["']bro(?:\.cli)?["']/.test(text)) {
-    return false
+    return false;
   }
   return (
     text.includes('bro-adapter') ||
@@ -354,23 +346,19 @@ export function isBroAdapter(text: string): boolean {
     /\bkind:\s*["']pi-extension["']/.test(text) ||
     /\bkind:\s*["']omp-extension["']/.test(text) ||
     /\bkind:\s*["']opencode-tui["']/.test(text)
-  )
+  );
 }
 
-function stateAt(
-  target: string,
-  artifact: string | null,
-  reg: Registration | null
-): InstallState {
+function stateAt(target: string, artifact: string | null, reg: Registration | null): InstallState {
   if (!existsSync(target)) {
-    return 'absent'
+    return 'absent';
   }
   if (artifact === null) {
-    return 'present'
+    return 'present';
   }
-  const current = readFileSync(target, 'utf8') === readFileSync(artifact, 'utf8')
+  const current = readFileSync(target, 'utf8') === readFileSync(artifact, 'utf8');
   // a matching file with its manifest entry missing is "install me again"
-  return current && (reg === null || reg.registered) ? 'installed' : 'stale'
+  return current && (reg === null || reg.registered) ? 'installed' : 'stale';
 }
 
 /** The client × scope matrix — `bro plugins list` and doctor's row. A
@@ -379,21 +367,21 @@ export function pluginRows(
   cwd: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env
 ): PluginRow[] {
-  const rows: PluginRow[] = []
+  const rows: PluginRow[] = [];
   for (const [name, client] of Object.entries(CLIENTS)) {
     const files = [
       { artifact: client.artifact(cwd), targets: client.targets(cwd, env), primary: true },
-      ...(client.extras?.(cwd, env) ?? []).map((e) => ({ ...e, primary: false })),
-    ]
+      ...(client.extras?.(cwd, env) ?? []).map(e => ({ ...e, primary: false })),
+    ];
     for (const scope of ['global', 'local'] as const) {
       for (const f of files) {
-        const path = f.targets[scope]
-        const reg = f.primary ? (client.registration?.(scope, path, env) ?? null) : null
-        rows.push({ client: name, scope, state: stateAt(path, f.artifact, reg), path })
+        const path = f.targets[scope];
+        const reg = f.primary ? (client.registration?.(scope, path, env) ?? null) : null;
+        rows.push({ client: name, scope, state: stateAt(path, f.artifact, reg), path });
       }
     }
   }
-  return rows
+  return rows;
 }
 
 /** `write tmp; rename` — a torn write must never leave a half module.
@@ -401,22 +389,22 @@ export function pluginRows(
  *  copied over before the rename: a 0600 kilo.json carrying permission
  *  rules must not silently widen to 0644. */
 function atomicWrite(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
-  writeFileSync(tmp, content)
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, content);
   try {
-    chmodSync(tmp, statSync(path).mode)
+    chmodSync(tmp, statSync(path).mode);
   } catch {
     // no prior file — the default mode stands
   }
-  renameSync(tmp, path)
+  renameSync(tmp, path);
 }
 
 export interface MutateOpts {
-  dryRun: boolean
-  force: boolean
-  cwd: string
-  env: NodeJS.ProcessEnv
+  dryRun: boolean;
+  force: boolean;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
 }
 
 export type Action =
@@ -428,51 +416,62 @@ export type Action =
   | 'refused'
   | 'would-install'
   | 'would-update'
-  | 'would-remove'
+  | 'would-remove';
 
 export interface Outcome {
-  client: string
-  scope: PluginScope
-  action: Action
-  path: string
+  client: string;
+  scope: PluginScope;
+  action: Action;
+  path: string;
   /** refusal reason, when action === 'refused' */
-  note?: string
+  note?: string;
 }
 
 function knownClient(name: string): ClientSpec {
-  const client = CLIENTS[name]
+  const client = CLIENTS[name];
   if (client === undefined) {
-    console.error(`plugins: unknown client "${name}" — known: ${clientNames().join(', ')}`)
-    process.exit(2)
+    throw new CommandError(
+      `plugins: unknown client "${name}" — known: ${clientNames().join(', ')}`,
+      EXIT.usage
+    );
   }
-  return client
+  return client;
 }
 
-export function installClient(
-  name: string,
-  scopes: PluginScope[],
-  opts: MutateOpts
-): Outcome[] {
-  const client = knownClient(name)
-  const artifact = client.artifact(opts.cwd)
+export function installClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
+  const client = knownClient(name);
+  const artifact = client.artifact(opts.cwd);
   if (artifact === null) {
-    console.error(`plugins install: cannot resolve the ${name} adapter module`)
-    process.exit(1)
+    throw new CommandError(
+      `plugins install: cannot resolve the ${name} adapter module`,
+      EXIT.error
+    );
   }
-  const content = readFileSync(artifact, 'utf8')
-  const targets = client.targets(opts.cwd, opts.env)
+  const content = readFileSync(artifact, 'utf8');
+  const targets = client.targets(opts.cwd, opts.env);
   // extras with no resolvable artifact are additive surfaces — skipped,
   // never fatal (an old dist may predate the module)
   const extras = (client.extras?.(opts.cwd, opts.env) ?? [])
     .filter((e): e is ExtraFile & { artifact: string } => e.artifact !== null)
-    .map((e) => ({ content: readFileSync(e.artifact, 'utf8'), targets: e.targets }))
-  const outcomes: Outcome[] = []
+    .map(e => ({ content: readFileSync(e.artifact, 'utf8'), targets: e.targets }));
+  const outcomes: Outcome[] = [];
   for (const scope of scopes) {
-    for (const f of [{ content, targets, primary: true }, ...extras.map((e) => ({ ...e, primary: false }))]) {
-      outcomes.push(installOne(name, scope, f, f.primary ? client : { ...client, registration: undefined }, opts))
+    for (const f of [
+      { content, targets, primary: true },
+      ...extras.map(e => ({ ...e, primary: false })),
+    ]) {
+      outcomes.push(
+        installOne(
+          name,
+          scope,
+          f,
+          f.primary ? client : { ...client, registration: undefined },
+          opts
+        )
+      );
     }
   }
-  return outcomes
+  return outcomes;
 }
 
 function installOne(
@@ -482,15 +481,15 @@ function installOne(
   client: ClientSpec,
   opts: MutateOpts
 ): Outcome {
-  const { content } = file
-  const path = file.targets[scope]
+  const { content } = file;
+  const path = file.targets[scope];
   // registration parses the manifest — a malformed one exits here,
   // before the module file is touched
-  const reg = client.registration?.(scope, path, opts.env) ?? null
-  const needsRegistration = reg !== null && !reg.registered
-  const prior = existsSync(path) ? readFileSync(path, 'utf8') : null
+  const reg = client.registration?.(scope, path, opts.env) ?? null;
+  const needsRegistration = reg !== null && !reg.registered;
+  const prior = existsSync(path) ? readFileSync(path, 'utf8') : null;
   if (prior === content && !needsRegistration) {
-    return { client: name, scope, action: 'current', path }
+    return { client: name, scope, action: 'current', path };
   }
   // a file already holding the slot that carries no bro sentinel is a
   // foreign plugin under our name — clobbering it needs --force. A
@@ -502,7 +501,7 @@ function installOne(
       action: 'refused',
       path,
       note: 'a foreign file holds this slot — pass --force to overwrite',
-    }
+    };
   }
   if (opts.dryRun) {
     return {
@@ -510,13 +509,13 @@ function installOne(
       scope,
       action: prior === null ? 'would-install' : 'would-update',
       path,
-    }
+    };
   }
   if (prior !== content) {
-    atomicWrite(path, content)
+    atomicWrite(path, content);
   }
   if (needsRegistration) {
-    reg.register()
+    reg.register();
   }
   return {
     client: name,
@@ -524,31 +523,38 @@ function installOne(
     action: prior === null ? 'installed' : 'updated',
     path,
     note: needsRegistration ? 'registered in kilo.json' : undefined,
-  }
+  };
 }
 
-export function uninstallClient(
-  name: string,
-  scopes: PluginScope[],
-  opts: MutateOpts
-): Outcome[] {
-  const client = knownClient(name)
-  const targets = client.targets(opts.cwd, opts.env)
-  const artifact = client.artifact(opts.cwd)
-  const clean = artifact === null ? null : readFileSync(artifact, 'utf8')
+export function uninstallClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
+  const client = knownClient(name);
+  const targets = client.targets(opts.cwd, opts.env);
+  const artifact = client.artifact(opts.cwd);
+  const clean = artifact === null ? null : readFileSync(artifact, 'utf8');
   // extras keep a possibly-null artifact — no artifact to compare means
   // the sentinel check alone decides ownership, same as the primary
-  const extras = (client.extras?.(opts.cwd, opts.env) ?? []).map((e) => ({
+  const extras = (client.extras?.(opts.cwd, opts.env) ?? []).map(e => ({
     clean: e.artifact === null ? null : readFileSync(e.artifact, 'utf8'),
     targets: e.targets,
-  }))
-  const outcomes: Outcome[] = []
+  }));
+  const outcomes: Outcome[] = [];
   for (const scope of scopes) {
-    for (const f of [{ clean, targets, primary: true }, ...extras.map((e) => ({ ...e, primary: false }))]) {
-      outcomes.push(uninstallOne(name, scope, f, f.primary ? client : { ...client, registration: undefined }, opts))
+    for (const f of [
+      { clean, targets, primary: true },
+      ...extras.map(e => ({ ...e, primary: false })),
+    ]) {
+      outcomes.push(
+        uninstallOne(
+          name,
+          scope,
+          f,
+          f.primary ? client : { ...client, registration: undefined },
+          opts
+        )
+      );
     }
   }
-  return outcomes
+  return outcomes;
 }
 
 function uninstallOne(
@@ -558,19 +564,19 @@ function uninstallOne(
   client: ClientSpec,
   opts: MutateOpts
 ): Outcome {
-  const { clean } = file
-  const path = file.targets[scope]
-  const reg = client.registration?.(scope, path, opts.env) ?? null
+  const { clean } = file;
+  const path = file.targets[scope];
+  const reg = client.registration?.(scope, path, opts.env) ?? null;
   if (!existsSync(path)) {
-    return absentOutcome(name, scope, path, reg, opts.dryRun)
+    return absentOutcome(name, scope, path, reg, opts.dryRun);
   }
-  const wasRegistered = reg?.registered ?? false
-  const prior = readFileSync(path, 'utf8')
+  const wasRegistered = reg?.registered ?? false;
+  const prior = readFileSync(path, 'utf8');
   // provably ours = byte-equal to this bro's artifact. A sentinel-only
   // match is a different version or a hand edit — indistinguishable by
   // shape, and deletion is irreversible, so it refuses without --force
   // (sentinel alone only suffices when no artifact resolves to compare)
-  const ours = clean === null ? isBroAdapter(prior) : prior === clean
+  const ours = clean === null ? isBroAdapter(prior) : prior === clean;
   if (!opts.force && !ours) {
     return {
       client: name,
@@ -580,14 +586,14 @@ function uninstallOne(
       note: isBroAdapter(prior)
         ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
         : 'not a bro adapter — pass --force to remove',
-    }
+    };
   }
   if (opts.dryRun) {
-    return { client: name, scope, action: 'would-remove', path }
+    return { client: name, scope, action: 'would-remove', path };
   }
-  rmSync(path)
+  rmSync(path);
   if (wasRegistered) {
-    reg!.unregister()
+    reg!.unregister();
   }
   return {
     client: name,
@@ -595,7 +601,7 @@ function uninstallOne(
     action: 'removed',
     path,
     note: wasRegistered ? 'removed kilo.json entry' : undefined,
-  }
+  };
 }
 
 /** The plugin file is already gone — an absent slot can still carry a
@@ -607,9 +613,9 @@ function absentOutcome(
   reg: Registration | null,
   dryRun: boolean
 ): Outcome {
-  const wasRegistered = reg?.registered ?? false
+  const wasRegistered = reg?.registered ?? false;
   if (wasRegistered && !dryRun) {
-    reg!.unregister()
+    reg!.unregister();
   }
   return {
     client: name,
@@ -619,46 +625,46 @@ function absentOutcome(
     note: wasRegistered
       ? `${dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
       : undefined,
-  }
+  };
 }
 
 function printOutcomes(outcomes: Outcome[]): void {
   for (const o of outcomes) {
-    console.log(`${o.client} ${o.scope}: ${o.action} — ${o.path}${o.note ? ` (${o.note})` : ''}`)
+    console.log(`${o.client} ${o.scope}: ${o.action} — ${o.path}${o.note ? ` (${o.note})` : ''}`);
   }
 }
 
 function clientArg(rest: string[]): string {
-  const pos = positionals(rest, new Set())
+  const pos = positionals(rest, new Set());
   if (pos.length !== 1) {
-    console.error(
-      `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`
-    )
-    process.exit(2)
+    throw new CommandError(
+      `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`,
+      EXIT.usage
+    );
   }
-  return pos[0]!
+  return pos[0]!;
 }
 
 /** Neither scope flag means both — `--global` or `--local` alone narrows. */
 export function scopesOf(rest: string[]): PluginScope[] {
-  const global = rest.includes('--global')
-  const local = rest.includes('--local')
-  return global === local ? ['global', 'local'] : global ? ['global'] : ['local']
+  const global = rest.includes('--global');
+  const local = rest.includes('--local');
+  return global === local ? ['global', 'local'] : global ? ['global'] : ['local'];
 }
 
 function printRegistry(plugins: BroPlugin[]): void {
   for (const p of plugins) {
-    const src = p.external ? 'ext' : 'core'
-    const plan = p.planSchema ? 'plan' : '-'
+    const src = p.external ? 'ext' : 'core';
+    const plan = p.planSchema ? 'plan' : '-';
     console.log(
       `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${plan.padEnd(4)} ${p.summary}`
-    )
+    );
   }
 }
 
 /** The registry as data — generators (command reference) read this. */
 function registryRows(plugins: BroPlugin[]) {
-  return plugins.map((p) => ({
+  return plugins.map(p => ({
     name: p.name,
     group: p.group,
     summary: p.summary,
@@ -670,55 +676,53 @@ function registryRows(plugins: BroPlugin[]) {
     plan: p.planSchema !== undefined,
     planVersion: p.planVersion,
     external: p.external === true,
-  }))
+  }));
 }
 
 const PLUGINS_USAGE =
-  'usage: bro plugins [list [--json] | install <client> [--global] [--local] [--dry-run] | uninstall <client> [--global] [--local] [--dry-run] [--force]]'
+  'usage: bro plugins [list [--json] | install <client> [--global] [--local] [--dry-run] | uninstall <client> [--global] [--local] [--dry-run] [--force]]';
 
 export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
-  const [sub, ...rest] = argv
+  const [sub, ...rest] = argv;
   if (hasHelpFlag(argv)) {
-    printUsage(PLUGINS_USAGE, 0)
+    printUsage(PLUGINS_USAGE, 0);
   }
   switch (sub) {
     case undefined:
-      printRegistry(plugins)
-      return
+      printRegistry(plugins);
+      return;
     case '--json':
-      console.log(JSON.stringify(registryRows(plugins), null, 2))
-      return
+      console.log(JSON.stringify(registryRows(plugins), null, 2));
+      return;
     case 'list': {
-      const rows = pluginRows()
+      const rows = pluginRows();
       if (rest.includes('--json')) {
-        console.log(JSON.stringify(rows, null, 2))
-        return
+        console.log(JSON.stringify(rows, null, 2));
+        return;
       }
       for (const r of rows) {
-        console.log(
-          `${r.client.padEnd(10)} ${r.scope.padEnd(7)} ${r.state.padEnd(10)} ${r.path}`
-        )
+        console.log(`${r.client.padEnd(10)} ${r.scope.padEnd(7)} ${r.state.padEnd(10)} ${r.path}`);
       }
-      return
+      return;
     }
     case 'install':
     case 'uninstall': {
-      const name = clientArg(rest)
+      const name = clientArg(rest);
       const opts: MutateOpts = {
         dryRun: rest.includes('--dry-run'),
         force: rest.includes('--force'),
         cwd: process.cwd(),
         env: process.env,
+      };
+      const mutate = sub === 'install' ? installClient : uninstallClient;
+      const outcomes = mutate(name, scopesOf(rest), opts);
+      printOutcomes(outcomes);
+      if (outcomes.some(o => o.action === 'refused')) {
+        throw new CommandError('plugins: refused', EXIT.error);
       }
-      const mutate = sub === 'install' ? installClient : uninstallClient
-      const outcomes = mutate(name, scopesOf(rest), opts)
-      printOutcomes(outcomes)
-      if (outcomes.some((o) => o.action === 'refused')) {
-        process.exit(1)
-      }
-      return
+      return;
     }
     default:
-      printUsage(PLUGINS_USAGE, 2)
+      throw new CommandError(PLUGINS_USAGE, EXIT.usage);
   }
 }
