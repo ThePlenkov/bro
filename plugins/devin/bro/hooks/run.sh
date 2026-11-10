@@ -1,18 +1,10 @@
 #!/bin/sh
-# Plugin hook launcher — resolves bro without depending on PATH:
-#   1. built dist reachable from this checkout (local/dev installs — the
-#      plugin's own code, so hook behavior tracks the checkout; found by
-#      walking up from the plugin dir so adapters under plugins/<c>/bro/
-#      resolve the repo root too)
-#   2. `bro` on PATH — but only if it actually has the hooks subcommand
-#      (`bro hooks` with no event is a silent no-op; an older bro fails
-#      the probe instead of failing every hook)
-#   3. published package via npx, pinned to the plugin's own version
-#      (gen:plugins keeps it in sync with plugin.json)
+# Plugin hook launcher — prefer the checkout's built CLI, then `bro` on
+# PATH. There is no network fallback on the hook path.
 #
 # Fail-open contract: nothing here may stall or fail the session —
-# commands run (not exec'd), a failed candidate falls through to the
-# next, and the script always exits 0.
+# normal candidate failures fall through, deadline exhaustion stops the
+# chain, and the script always exits 0.
 #
 # No-op fast path (spec: specs/bro-arm83.md): post-tool fires on every
 # tool call and prompt-submit on every prompt; most emit nothing yet
@@ -34,16 +26,175 @@ set -u
 # must allow), so it still resolves the binary; the CLI's flag check
 # answers before any probe runs.
 [ "${BRO_HOOKS:-}" = "0" ] && [ "${1:-}" != "permission" ] && exit 0
+BRO_HOOK_T0=$(date +%s)
+
+SCRIPT_ROOT=$(CDPATH= cd -P "$(dirname "$0")/.." 2>/dev/null && pwd -P)
+DEVIN_PROJECT_ROOT=
+if [ -n "${DEVIN_PROJECT_DIR:-}" ]; then
+  DEVIN_PROJECT_ROOT=$(CDPATH= cd -P "$DEVIN_PROJECT_DIR" 2>/dev/null && pwd -P)
+fi
+
+project_devin_hook_owns_event() {
+  _event=$1
+  case "$_event" in
+    ''|*[!a-z-]*) return 1 ;;
+    *) : ;;
+  esac
+  [ -n "$SCRIPT_ROOT" ] || return 1
+  [ -n "$DEVIN_PROJECT_ROOT" ] || return 1
+  [ "$SCRIPT_ROOT" != "$DEVIN_PROJECT_ROOT" ] || return 1
+  [ -f "$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json" ] || return 1
+  [ -x "$DEVIN_PROJECT_ROOT/hooks/run.sh" ] || return 1
+  grep -Eq "hooks/run[.]sh[^[:alnum:]_-]+${_event}([^a-z-]|$)" \
+    "$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json"
+}
+
+# Devin's project-local chain owns only its registered event.
+if project_devin_hook_owns_event "${1:-}"; then
+  exit 0
+fi
 
 CAPTURED=0
 PAYLOAD=
+PAYLOAD_FILE=
 EVENT=${1:-}
+
+cleanup_payload() {
+  [ -z "$PAYLOAD_FILE" ] || rm -f "$PAYLOAD_FILE"
+  return 0
+}
+
+trap cleanup_payload 0
+
+BRO_HOOK_WATCHDOG_S=${BRO_HOOK_WATCHDOG_S:-8}
+case "$BRO_HOOK_WATCHDOG_S" in
+  ''|*[!0-9]*) BRO_HOOK_WATCHDOG_S=8 ;;
+  *) [ "$BRO_HOOK_WATCHDOG_S" -gt 0 ] 2>/dev/null || BRO_HOOK_WATCHDOG_S=8 ;;
+esac
 
 # feed the (possibly captured) hook payload to whichever binary runs —
 # the fast-path events re-read stdin, so it is replayed instead of the
 # original fd
 run_hook() {
-  if [ "$CAPTURED" = 1 ]; then printf %s "$PAYLOAD" | "$@"; else "$@"; fi
+  if [ "$CAPTURED" = 1 ]; then
+    exec "$@" < "$PAYLOAD_FILE"
+  else
+    exec "$@" <&0
+  fi
+}
+
+_kill_tree() {
+  # children before parent — a dead parent's orphans reparent to init
+  # and pkill -P sees nothing once the link is gone
+  command -v pkill >/dev/null 2>&1 && pkill -"$2" -P "$1" 2>/dev/null
+  kill -s "$2" "$1" 2>/dev/null
+  :
+}
+
+bro_hook_kill_journal() {
+  # best-effort journal of host/watchdog kills to <git-common>/bro/hooks/perf/killed.jsonl
+  # fail-open
+  local _base=${DEVIN_PROJECT_DIR:-$PWD}
+  local _common
+  # the rev-parse is bounded where timeout(1) exists — a wedged git
+  # must not stall the hook past the budget this code enforces;
+  # where it doesn't the call runs bare, same as it always did
+  if command -v timeout >/dev/null 2>&1; then
+    _common=$(timeout 2 git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  else
+    _common=$(git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  fi
+  case "$_common" in
+    /*) ;;
+    ?*) _common=$_base/$_common ;;
+    *) _common= ;;
+  esac
+  [ -n "$_common" ] || return 0
+  local _dir="$_common/bro/hooks/perf"
+  mkdir -p "$_dir" 2>/dev/null || return 0
+  local _ts _ev _budget
+  # ISO only — an epoch-seconds fallback would write a second format
+  # into killed.jsonl and break consumers (kilo); the sentinel keeps
+  # the field parseable even if date somehow fails
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '1970-01-01T00:00:00Z')
+  _ev=${1:-timeout}
+  _budget=${2:-${BRO_HOOK_WATCHDOG_S:-8}}
+  # try to use python/node if available for safe JSON; fallback to printf
+  if command -v node >/dev/null 2>&1; then
+    node -e "require('fs').appendFileSync(process.argv[1], JSON.stringify({ts:new Date().toISOString(),event:process.argv[2],budget_ms:Number(process.argv[3])*1000})+'\n');" "$_dir/killed.jsonl" "$_ev" "$_budget" 2>/dev/null && return 0
+  fi
+  # printf fallback — sanitize first: the arithmetic dies on a
+  # non-digit budget, and quotes/backslashes/newlines in _ev would
+  # break the JSON row (kody)
+  _budget=$(printf '%s' "$_budget" | tr -cd '0-9')
+  [ -n "$_budget" ] || _budget=8
+  _ev=$(printf '%s' "$_ev" | tr -d '"\\\n\r\t')
+  printf '{"ts":"%s","event":"%s","budget_ms":%d}\n' "$_ts" "$_ev" $((_budget * 1000)) >> "$_dir/killed.jsonl" 2>/dev/null || true
+  return 0
+}
+
+run_bounded() {
+  RUN_BOUNDED_EXPIRED=0
+  _now=$(date +%s)
+  _elapsed=$((_now - BRO_HOOK_T0))
+  _remaining=$((BRO_HOOK_WATCHDOG_S - _elapsed))
+  if [ "$_remaining" -le 0 ]; then
+    RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
+    return 124
+  fi
+  _marker=$(mktemp "${TMPDIR:-/tmp}/bro-hook-watchdog.XXXXXX" 2>/dev/null) || {
+    RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
+    return 124
+  }
+  # fd 0 may be closed at launch: `exec` is a POSIX special builtin —
+  # a failed redirect would exit the script before `||` runs, while a
+  # redirect attached to it directly would persist in the shell. The
+  # `command` prefix drops the exit rule; the brace group's 2>/dev/null
+  # swallows the error without lasting (compound redirects don't persist).
+  { command exec 3<&0 || command exec 3</dev/null; } 2>/dev/null
+  run_hook "$@" <&3 &
+  _pid=$!
+  _kidsfile=$_marker.kids
+  # detached dog: after the leftover window it marks expiry, pins the
+  # direct kids (once the parent dies they reparent to init and
+  # `pkill -P` sees nothing — the parent below owes the recorded ones
+  # their signal), and TERMs the tree. Only TERM lives here: the KILL
+  # leg runs in the parent, where cancelling this subshell mid-leg
+  # can't leave a straggler holding the host's pipe
+  (
+    sleep "$_remaining"
+    printf 1 > "$_marker" 2>/dev/null
+    command -v pgrep >/dev/null 2>&1 && pgrep -P "$_pid" > "$_kidsfile" 2>/dev/null
+    _kill_tree "$_pid" TERM
+  ) </dev/null >/dev/null 2>&1 &
+  _wd=$!
+  wait "$_pid" 2>/dev/null
+  _rc=$?
+  kill "$_wd" 2>/dev/null
+  wait "$_wd" 2>/dev/null || true
+  if [ -s "$_marker" ]; then
+    RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
+    # the dog's TERM landed before it exited — give the tree its 1s
+    # grace, then KILL the recorded kids and sweep. Checked after
+    # wait $_wd too: a marker that lands between the wait and the dog's
+    # exit still gets its leg
+    sleep 1
+    if [ -s "$_kidsfile" ]; then
+      while IFS= read -r _k; do
+        [ -n "$_k" ] && kill -s KILL "$_k" 2>/dev/null
+      done < "$_kidsfile"
+    fi
+    _kill_tree "$_pid" KILL
+  else
+    _now=$(date +%s)
+    _elapsed=$((_now - BRO_HOOK_T0))
+    [ "$_elapsed" -ge "$BRO_HOOK_WATCHDOG_S" ] && { RUN_BOUNDED_EXPIRED=1; bro_hook_kill_journal timeout; }
+  fi
+  rm -f "$_marker" "$_kidsfile" 2>/dev/null
+  return "$_rc"
 }
 
 # 1 when a drop in mailbox dir $1 is deliverable to this session —
@@ -151,11 +302,21 @@ agent_root_pid() {
 
 case "$EVENT" in
 post-tool|prompt-submit)
-  PAYLOAD=$(cat)
-  CAPTURED=1
   # same base the hook resolves for non-cursor hosts
   BASE=${DEVIN_PROJECT_DIR:-$PWD}
   NEED_NODE=
+  PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/bro-hook.XXXXXX" 2>/dev/null) || PAYLOAD_FILE=
+  if [ -n "$PAYLOAD_FILE" ]; then
+    if ! cat > "$PAYLOAD_FILE"; then
+      exit 0
+    fi
+    if ! PAYLOAD=$(cat "$PAYLOAD_FILE"); then
+      exit 0
+    fi
+    CAPTURED=1
+  else
+    NEED_NODE=1
+  fi
 
   # foreign-schema payload — cursor/codex need schema translation, the
   # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
@@ -492,7 +653,6 @@ esac
 # a relative or nonexistent root is untrusted input: canonicalize an
 # absolute root, and fall back to this script's own dir otherwise so the
 # walk-up can't wander off CWD and execute an unrelated dist.
-SCRIPT_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
 ROOT="${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
 case "$ROOT" in
   /*) ROOT="$(CDPATH='' cd -- "$ROOT" 2>/dev/null && pwd)" ;;
@@ -509,18 +669,37 @@ while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
   DIR="$PARENT"
 done
 
+# silence on Cursor's beforeShellExecution is a deny — when no binary
+# answered (the watchdog expired the run, or nothing could run), the
+# launcher itself emits the no-opinion
+cursor_permission_ask() {
+  [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ] || return 0
+  printf '%s\n' '{"permission":"ask"}'
+}
+
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  run_hook node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
+  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
+  _rc=$?
+  # BRO_HOOKS_NO_FALLBACK=1 — the latency bench pins it so the in-tree
+  # dist result IS the measurement: a nonzero exit or an expired
+  # deadline is the error, never a PATH-bro swap. Never set it on a
+  # live session: it weakens the fail-open contract.
+  if [ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ]; then
+    { [ "$RUN_BOUNDED_EXPIRED" = 1 ] || [ "$_rc" -ne 0 ]; } && exit 1
+    exit 0
+  fi
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
+  [ "$_rc" -eq 0 ] && exit 0
 fi
-# stdin is the host's hook payload — the capability probe must not
-# consume it, so it runs with stdin closed (a pre-0.2.5 `bro hooks`
-# would otherwise eat the payload the real invocation needs)
-if command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then
-  run_hook bro hooks "$@" && exit 0
-fi
-if command -v npx >/dev/null 2>&1; then
-  # --prefer-offline: warm npm cache wins over the network, so a slow
-  # fetch can't eat the whole hook timeout
-  run_hook npx -y --prefer-offline "@broject/bro@0.2.5" hooks "$@" || true
+# same pin when dist or node is missing — the PATH fallback must not
+# hide it either
+[ "${BRO_HOOKS_NO_FALLBACK:-}" = "1" ] && exit 1
+if command -v bro >/dev/null 2>&1; then
+  run_bounded bro hooks "$@" || true
+  # run_bounded already journaled the kill — a second row here would
+  # double-count one expiry (kody: two killed.jsonl rows per kill)
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
+else
+  cursor_permission_ask
 fi
 exit 0

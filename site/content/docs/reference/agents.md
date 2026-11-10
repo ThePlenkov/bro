@@ -10,6 +10,7 @@ description: "Agent supervisor — status|up|down over the orchestrator connecto
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | `0.2.5` |
 | skill | `agents` |
 | config | `agents` in bro.config |
 | guide | [commands/fleet](/docs/commands/fleet) |

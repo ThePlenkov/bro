@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": [
+    "*.ts",
+    "*.tsx",
+    "../../../packages/acp/tui/*.ts",
+    "../../../packages/acp/tui/*.tsx",
+    "../../../packages/acp/tui/preload.d.ts"
+  ],
+  "exclude": ["*.test.ts"]
+}

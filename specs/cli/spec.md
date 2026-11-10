@@ -1,6 +1,6 @@
 ---
-parent: project
----
+
+## parent: project
 
 # cli — command-surface structure: groups, aliases, naming contract
 
@@ -26,7 +26,7 @@ and member is the plugin that already exists today:
 ```text
 bro review   act | debt | drive | watch | cleanup
 bro flow     next | loop | convoy | stack
-bro fleet    agents | fleet | serve | status | telemetry*
+bro fleet    agents | fleet (walls, leases) | serve | status | telemetry*
 bro work     work | drill | goal | sweep | sync
 bro self     retrospect | learn | judge | guard
 bro comms    bus | notify
@@ -34,7 +34,7 @@ bro mesh     me | peers | pull | inbox | request | claim | done |
              accept | reject | wait | list            (already grouped)
 bro plan     list | validate | run | query
 bro spec     check | drift | init | new | tree        (already grouped)
-top-level    status? check setup doctor plugins
+top-level    status? check setup doctor plugins wait router
 hidden       hooks acp-worker docs
              *telemetry stays an alias — see alias model
 ```

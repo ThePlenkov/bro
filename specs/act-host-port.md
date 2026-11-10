@@ -6,7 +6,7 @@ parent: project
 
 ## Problem
 
-The portable skills repo (`theplenkov-ai/skills`) carries a PR-fix workflow at
+A portable, agent-agnostic skills repo carries a PR-fix workflow at
 `skills/code-review/act/` — ~4036 lines of scripts that implement the loop over
 two hosts. It works, and it works *without* bro — but it re-derives, by hand,
 the abstractions bro already owns:
