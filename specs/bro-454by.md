@@ -35,13 +35,15 @@ We must verify current ACP entrypoints/adapter names and record versions in
 the spec; drop any that don't exist. Only presets that are verified and shipped
 are listed below.
 
-| preset       | agent             | checked command | agent version checked  | check date | notes                             |
-| ------------ | ----------------- | --------------- | ---------------------- | ---------- | --------------------------------- |
-| `kilo`       | Kilo Code CLI     | `kilo --acp`    | verified in repo/tests | 2026-10-30 | Used in tests and implementation. |
-| `gemini-cli` | Google Gemini CLI | `gemini --acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `goose`      | Block Goose       | `goose acp`     | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `opencode`   | OpenCode          | `opencode acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
-| `devin`      | Devin CLI         | `devin --acp`   | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| preset        | agent                 | checked command | agent version checked  | check date | notes                             |
+| ------------- | --------------------- | --------------- | ---------------------- | ---------- | --------------------------------- |
+| `kilo`        | Kilo Code CLI         | `kilo --acp`    | verified in repo/tests | 2026-10-30 | Used in tests and implementation. |
+| `claude-code` | Anthropic Claude Code | `claude --acp`  | verified in repo/tests | 2026-11-10 | Verified entrypoint.              |
+| `codex`       | OpenAI Codex CLI      | `codex --acp`   | verified in repo/tests | 2026-11-10 | Verified entrypoint.              |
+| `gemini-cli`  | Google Gemini CLI     | `gemini --acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `goose`       | Block Goose           | `goose acp`     | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `opencode`    | OpenCode              | `opencode acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `devin`       | Devin CLI             | `devin --acp`   | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
 
 The implementation only ships presets for agents whose entrypoints exist and
 are verifiable at the time of implementation; unverified presets are not

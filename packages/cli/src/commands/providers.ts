@@ -54,21 +54,36 @@ function globalConfigJsonPath(): string {
   return join(globalConfigDir(), 'config.json');
 }
 
+// per-process counter — pid+ms alone collide when two writes land in the
+// same millisecond, and 'wx' below turns that collision into an EEXIST
+// that must not delete the other write's tmp
+let tmpCounter = 0;
+
 function writeConfigJsonAtomic(path: string, cfg: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = join(dirname(path), `.bro.config.json.tmp.${process.pid}.${Date.now()}`);
+  const tmp = join(
+    dirname(path),
+    `.bro.config.json.tmp.${process.pid}.${Date.now()}.${tmpCounter++}`
+  );
   try {
+    // 'wx' (O_CREAT|O_EXCL) + 0600 — a predictable tmp name must never
+    // follow a pre-existing symlink into an attacker-chosen file
     writeFileSync(
       tmp,
       `${JSON.stringify(cfg, null, 2)}
-`
+`,
+      { flag: 'wx', mode: 0o600 }
     );
     renameSync(tmp, path);
   } catch (err) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      /* best effort */
+    // an EEXIST means the tmp belongs to someone else — never rm a file
+    // this call did not create
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* best effort */
+      }
     }
     throw err;
   }
