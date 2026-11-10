@@ -50,6 +50,7 @@ export function git(args: string[]): string {
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     env: repoEnv(args),
   });
@@ -73,6 +74,7 @@ export function gitTry(
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     env: repoEnv(args),
     timeout: timeoutMs,
@@ -422,6 +424,13 @@ function worktreeListMain(dir: string, common: string, real: (p: string) => stri
   return real(answer) === real(common) ? null : answer;
 }
 
+/** Slug → sibling path next to the main checkout: `bro` + `fix-x` →
+ *  `../bro--fix-x`. The linked-worktree naming convention every surface
+ *  shares — pure path math, the git reads live around it. */
+export function worktreePathFor(mainRoot: string, slug: string): string {
+  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
+}
+
 /** Every worktree checkout's root — `git worktree list` records, main
  *  first, bare records dropped (a bare repo's own entry is git storage,
  *  not a checkout; its LINKED worktrees still count). `-z` terminates
@@ -714,6 +723,7 @@ export function gitLogPathRecords(
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     timeout: opts?.timeoutMs ?? LOG_SCAN_TIMEOUT_MS,
     maxBuffer: 256 * 1024 * 1024,

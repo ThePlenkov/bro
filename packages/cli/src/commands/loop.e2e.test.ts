@@ -22,6 +22,7 @@ import {
   inside,
   installFakeBd,
   installFakeHost,
+  killRunHandles,
   readHostState,
   runCli,
   writeHostState,
@@ -56,6 +57,12 @@ function loopFixture(
   extra: (host: { state: string; agent: string }) => Record<string, unknown> = () => ({})
 ): Fixture {
   const { root, main } = initRepo('bro-loop-e2e-');
+  // a bare origin makes the remote-branch lifecycle real — the run's
+  // `push origin --delete` lands (or reports) instead of failing on a
+  // remote that was never configured
+  spawnSync('git', ['init', '--bare', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'remote', 'add', 'origin', join(root, 'origin.git')]);
+  spawnSync('git', ['-C', main, 'push', '-q', 'origin', 'main']);
   const { binDir, db } = installFakeBd(root, rows);
   const host = installFakeHost(main);
   writeFileSync(
@@ -63,6 +70,9 @@ function loopFixture(
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      // the spawned loop's external guard must not see the host's real
+      // agents (a live opencode/devin session refuses every spawn)
+      spawn: { externalBlock: false },
       ...extra(host),
       loop: {
         agent: `node ${host.agent}`,
@@ -449,6 +459,30 @@ describe('bro loop e2e', () => {
     inside(f.main, f.root, () => {
       const r = f.run();
       assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/);
+    });
+  });
+
+  test('a throwing claim read degrades to a held push — never a supervisor death (bro-etimout)', () => {
+    // a store wedged past bd's 15s budget throws out of claimClump's
+    // bd ready — uncaught it killed the loop supervisor three times in
+    // one day (raw spawnSync ETIMEDOUT, exit 1). The claim read must
+    // degrade: warn + hold pushes, then retry — the SAME run lands the
+    // bead once the store answers again. A failed read is not an empty
+    // queue: drained stays unset, so 'done' never lies either way.
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'slow store' }]);
+    // one injected failure — the first claim read throws, the retry
+    // after the hold succeeds
+    f.env.FAKE_BD_READY_FAILS = '1';
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      // the message spans the wrapped spawn error (multi-line) — anchor
+      // the two halves instead of one dot-all
+      assert.match(r.stdout, /loop: claim read failed — [\s\S]*?holding pushes for [\d.]+s/);
+      // the same run recovered and finished the pipeline — exit 0, no
+      // raw err.message death at the supervisor's top level
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /done — 1 landed/);
+      assertLandedBead(f.db, 'fx-a');
     });
   });
 
@@ -839,6 +873,9 @@ describe('bro loop liveness', () => {
           /* already gone */
         }
       }
+      // a fork-style scope would name the payload under a pid the log
+      // never saw — the handles cover either topology (bro-ybo8z)
+      killRunHandles(f.main);
       rmSync(f.root, { recursive: true, force: true });
     }
   });
@@ -1264,10 +1301,15 @@ describe('bro loop gate-stack round-robin', () => {
     // servicing the rest: B's spawn AND merge land while A's agent is
     // still inside its deliberate delay — an ordering the awaited-spawn
     // shape made impossible.
-    const f = loopFixture([
-      { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
-      { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
-    ]);
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
+      ],
+      // the overlap this test exists to prove needs a second stack
+      // slot — the serial-by-default cap (bro-jis0c) is opted out of
+      { maxOpen: 2 }
+    );
     writeHostState(f.hostState, { prs: {}, delays: { 'fx-a': 5000 } });
     inside(f.main, f.root, () => {
       const r = f.run();
@@ -1290,10 +1332,15 @@ describe('bro loop gate-stack round-robin', () => {
   });
 
   test('a pending gate does not block the next claim — B lands while A waits', () => {
-    const f = loopFixture([
-      { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },
-      { ...FAKE_BEAD, id: 'fx-b', title: 'fast gate' },
-    ]);
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'fast gate' },
+      ],
+      // B must claim while A's member still gates — impossible under
+      // the serial-by-default cap (bro-jis0c), so the test opts out
+      { maxOpen: 2 }
+    );
     // A is pending until B's PR (12 — A takes 11) merges
     writeHostState(f.hostState, {
       prs: {

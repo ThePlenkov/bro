@@ -1,14 +1,16 @@
 ---
+
 parent: bro-5hx1
 scope:
-  - packages/core/src/agents.ts
-  - packages/core/src/config.ts
-  - packages/core/src/providers.ts
-  - packages/providers/src/acp.ts
-  - packages/cli/src/agent-connectors.ts
-  - packages/cli/src/commands/agents.ts
-  - packages/cli/src/commands/fleet.ts
-  - packages/cli/src/commands/serve.ts
+- packages/core/src/agents.ts
+- packages/core/src/config.ts
+- packages/core/src/providers.ts
+- packages/providers/src/acp.ts
+- packages/cli/src/agent-connectors.ts
+- packages/cli/src/commands/agents.ts
+- packages/cli/src/commands/fleet.ts
+- packages/cli/src/commands/serve.ts
+
 ---
 
 # bro-5hx1.1 — fleet-acp: a heterogeneous fleet through the provider registry
@@ -37,7 +39,7 @@ must answer where it lives, who owns its pid, and what happens to
 permissions, models, and mid-turn death.
 
 Missing the provenance half is its own bug: a heterogeneous fleet that
-can't say *which* provider and model produced a run makes `bro fleet` a
+can't say _which_ provider and model produced a run makes `bro fleet` a
 liar and the budget taxonomy (bro-7xgk.3) unattributeable — "3 agents
 live" is not a fleet when they cost different rates.
 
@@ -69,14 +71,13 @@ resolution lands there — a fleet consumed through one seam, not three.
 ```jsonc
 {
   "providers": {
-    "kilo-jev":  { "type": "acp", "command": "kilo --acp",
-                   "model": "typesafe/jev-1.13" },
+    "kilo-jev": { "type": "acp", "command": "kilo --acp", "model": "typesafe/jev-1.13" },
     "devin-cli": { "type": "cli", "command": "devin -p", "model": "swe-2" }
   },
   "agents": { "native": { "provider": "devin-cli" } },
   "fleet": {
     "profiles": {
-      "cheap":  { "provider": "kilo-jev" },
+      "cheap": { "provider": "kilo-jev" },
       "strong": { "provider": "devin-cli", "model": "swe-2-high" }
     }
   }
@@ -127,7 +128,7 @@ Errors fail loud at `agents up`, never at `list`:
   the existing one-shot mechanics apply verbatim;
 - `acp` kind → the driver path below.
 
-**The backend still owns *where*, the provider owns *what*.** An
+**The backend still owns _where_, the provider owns _what_.** An
 `acp` provider on the `native` backend is still a detached process group
 with a registry entry, a `.prompt.md`, a `.log`, a `.exit` — the backend
 machinery (claim, dedup, fleet cap, kill) never learns what ACP is.
@@ -138,7 +139,7 @@ machinery (claim, dedup, fleet cap, kill) never learns what ACP is.
 not types. The contract stays vendor-blind (bro-ribc.1's non-negotiable):
 the connector records what the resolution layer computed and never
 branches on it. Resolution — profile expansion, entry lookup, kind check
-— all happens *before* `conn.spawn`, inside `spawnStepAgent` /
+— all happens _before_ `conn.spawn`, inside `spawnStepAgent` /
 `agent-connectors.ts`; a backend receives an already-resolved spec.
 
 Provenance lands in three places, all written in the same registry patch
@@ -146,7 +147,7 @@ the spawn makes (`prepareSpawn`'s `opts.entry` merge — provenance exists
 even if the child process never starts):
 
 - **`AgentRegistryEntry` / `AgentInfo`** gain `provider?: string` and
-  `model?: string` — the registry entry name and the *effective* model.
+  `model?: string` — the registry entry name and the _effective_ model.
 - **Env pins** — `BRO_AGENT_PROVIDER` and `BRO_AGENT_MODEL` are injected
   when resolved and **join `AGENT_PIN_KEYS`**: connector-owned, filtered
   from caller `spec.env` like every identity pin. This answers bro-bq5i's
@@ -186,7 +187,7 @@ The driver never parses the command — it receives the rendered string.
 same trusted-code contract `loop.agent`/`agents.<backend>.command`
 already carry (NOSONAR-documented `sh -c`); the driver does not
 "sanitize" it because sanitizing a shell string is theatre. What the
-spec forbids is *data* reaching the shell: the driver argv is built as
+spec forbids is _data_ reaching the shell: the driver argv is built as
 an argument ARRAY — `spawn(bro, ['acp-worker', '--command', command,
 '--model', model, promptFile])`, never string-concatenated into one
 `sh -c` line — so a `model` value carrying shell metachars (a
@@ -225,16 +226,17 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
    apply is fidelity laundering, the same sin ribc.1 bans for judge
    answers. `session/set_model` is never called — it was unstable-only
    and removed from the protocol in 0.13.5 (2026-06); model selection
-   lives in `set_config_option` on v1 *and* v2. No model requested →
+   lives in `set_config_option` on v1 _and_ v2. No model requested →
    the session's `currentValue` stands and provenance records it when
    the option reports one.
 5. **`session/prompt`** — the prompt file's text as one `text`
    ContentBlock (baseline-required content — no capability negotiation
    needed).
 6. **`session/update` notifications → the `.log`.** One rendered line
-   per update — the log stays the observability plane *and* the exit-
-   cause classifier's input: provider walls (rate-limit/quota text the
-   agent prints) must reach it or `classifyExitCause` reads 'crash'.
+   per update — the log stays the observability plane **and** the exit-cause
+   classifier's input; provider walls (rate-limit/quota text the agent
+   prints) must reach the classifier input (both `.log` and `.stderr`
+   tails, per bro-e2ec0), or `classifyExitCause` reads 'crash'.
 7. **`session/request_permission` → a defined policy field.** The
    `acp` entry union gains `autoApprove?: boolean` (this spec amends
    bro-ribc.1's union — the kind file owns the wire detail); a spawn
@@ -256,10 +258,11 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
 10. **turn end** — the `session/prompt` response's `stopReason` maps to
     the driver's exit code: `end_turn` → 0; `max_tokens`,
     `max_turn_requests`, `refused`, `cancelled`, transport death, or a
-    handshake failure → non-zero. The wrapper writes `.exit`, the log
-    tail classifies the cause — every existing mechanic (respawn block
-    on `rate_limited`/`quota`, `lost — respawn?`) works unchanged
-    because the driver speaks the same artifacts.
+    handshake failure → non-zero. The wrapper writes `.exit`, both
+    `.log` and `.stderr` tails feed the exit-cause classifier — every
+    existing mechanic (respawn block on `rate_limited`/`quota`,
+    `lost — respawn?`) works unchanged because the driver speaks the
+    same artifacts.
 
 `acpSessionId` lands on the registry entry (`opts.entry`) for debugging
 — inspect-only, never a second handle.
@@ -343,7 +346,7 @@ packages/cli/src/commands/serve.ts     StepSpawnRequest fields pass through
   is the honest error path working; the risk is agents that accept any
   value silently and run something else. The driver records the
   `config_option_update`/currentValue it observed into provenance when
-  available — what the agent *said* it set, not what was asked.
+  available — what the agent _said_ it set, not what was asked.
 - **Permission stall.** Default-deny plus a permissions-asking agent =
   a worker that does nothing, slowly. Logged denials make it visible;
   the mitigation is documented (`command` carries the CLI's own flag),
@@ -357,6 +360,6 @@ packages/cli/src/commands/serve.ts     StepSpawnRequest fields pass through
   PATH-first, `npx` fallback. A repo whose spawned env strips both is a
   startup error with a clear message, same class as a missing `bd`.
 - **ACP agent crash mid-turn** surfaces as transport death → non-zero
-  exit → the existing cause ladder. Works *because* the driver owns the
-  artifacts — the failure mode this spec must not regress is the log
-  tail carrying the provider's real error text.
+  exit → the existing cause ladder. Works _because_ the driver owns the
+  artifacts — the failure mode this spec must not regress is both `.log`
+  and `.stderr` tails carrying the provider's real error text.

@@ -1,7 +1,13 @@
 ---
+
 title: Why bro
 description: The problem bro solves — agent workflows are mechanics, not prompts.
 ---
+
+_Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`)._
 
 Agents are good at judgment and bad at bookkeeping. Prompts try to carry
 both — and the bookkeeping parts ("remember to check for unresolved

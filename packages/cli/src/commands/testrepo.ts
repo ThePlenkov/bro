@@ -3,9 +3,9 @@
  *  spawner, and the fake bd/review-host the e2e matrix needs. Test files
  *  must not re-declare these — SonarCloud counts fixture clones as
  *  duplication on new code. */
-import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
-import { bdTry } from '@broject/core'
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { bdTry, handleOwner, pidAlive } from '@broject/core';
 import {
   chmodSync,
   existsSync,
@@ -16,11 +16,11 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
-} from 'node:fs'
-import { devNull, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { usageWriter } from '@broject/core'
+} from 'node:fs';
+import { devNull, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { usageWriter } from '@broject/core';
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -28,7 +28,7 @@ import { usageWriter } from '@broject/core'
  *  injects config — a pinned core.hooksPath would run host hooks on
  *  fixture commits — and GIT_TEMPLATE_DIR plants hook files at init. */
 const AMBIENT_GIT =
-  /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|GIT_CONFIG($|_)|GIT_TEMPLATE_DIR$)/
+  /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|GIT_CONFIG($|_)|GIT_TEMPLATE_DIR$)/;
 
 export function git(args: string[], cwd: string): string {
   // a test run inside another repo still carries its repo-location env —
@@ -39,25 +39,28 @@ export function git(args: string[], cwd: string): string {
   // leak through a file instead of a var
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !AMBIENT_GIT.test(k))
-  ) as NodeJS.ProcessEnv
-  env.GIT_CONFIG_NOSYSTEM = '1'
-  env.GIT_CONFIG_GLOBAL = devNull
-  return execFileSync('git', args, { cwd, env, encoding: 'utf8' }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+  ) as NodeJS.ProcessEnv;
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = devNull;
+  return execFileSync('git', args, { cwd, env, encoding: 'utf8' }); // NOSONAR — PATH lookup is the contract (same as core/git.ts)
 }
 
 /** mkdtemp repo → `main` checkout with git identity and one commit.
  *  `seed` may drop files before the commit; without it the commit is
  *  --allow-empty. */
-export function initRepo(prefix: string, seed?: (main: string) => void): { root: string; main: string } {
-  const root = tmpDir(prefix)
-  const main = join(root, 'main')
-  git(['init', '-q', '-b', 'main', main], root)
-  git(['config', 'user.email', 't@t'], main)
-  git(['config', 'user.name', 't'], main)
-  seed?.(main)
-  git(['add', '-A'], main)
-  git(['commit', '-qm', 'init', '--allow-empty'], main)
-  return { root, main }
+export function initRepo(
+  prefix: string,
+  seed?: (main: string) => void
+): { root: string; main: string } {
+  const root = tmpDir(prefix);
+  const main = join(root, 'main');
+  git(['init', '-q', '-b', 'main', main], root);
+  git(['config', 'user.email', 't@t'], main);
+  git(['config', 'user.name', 't'], main);
+  seed?.(main);
+  git(['add', '-A'], main);
+  git(['commit', '-qm', 'init', '--allow-empty'], main);
+  return { root, main };
 }
 
 /** mkdtemp under a per-process sweep: dirs made here are deleted when
@@ -65,29 +68,29 @@ export function initRepo(prefix: string, seed?: (main: string) => void): { root:
  *  half of the fixture-leak contract (initRepo callers get the same
  *  guarantee through inside()/insideAsync). Use this for fixture dirs
  *  that are NOT wrapped in a try/finally rmSync of their own. */
-const tmpDirs: string[] = []
-let tmpSweepArmed = false
+const tmpDirs: string[] = [];
+let tmpSweepArmed = false;
 export function tmpDir(prefix: string): string {
   if (!tmpSweepArmed) {
-    tmpSweepArmed = true
+    tmpSweepArmed = true;
     process.once('exit', () => {
-      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
-    })
+      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    });
   }
-  const dir = mkdtempSync(join(tmpdir(), prefix))
-  tmpDirs.push(dir)
-  return dir
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
 }
 
 /** Run fn in dir, then always restore cwd and delete the repo. */
 export function inside<T>(dir: string, root: string, fn: () => T): T {
-  const prev = process.cwd()
-  process.chdir(dir)
+  const prev = process.cwd();
+  process.chdir(dir);
   try {
-    return fn()
+    return fn();
   } finally {
-    process.chdir(prev)
-    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -96,13 +99,13 @@ export function inside<T>(dir: string, root: string, fn: () => T): T {
  *  maxRetries covers the detached-child tail (trace flush, act wait): a
  *  straggler write between readdir and rmdir is ENOTEMPTY, not a bug. */
 export async function insideAsync<T>(dir: string, root: string, fn: () => Promise<T>): Promise<T> {
-  const prev = process.cwd()
-  process.chdir(dir)
+  const prev = process.cwd();
+  process.chdir(dir);
   try {
-    return await fn()
+    return await fn();
   } finally {
-    process.chdir(prev)
-    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -121,31 +124,31 @@ export const CLI_DIST = join(
   '..',
   'dist',
   'index.js'
-)
+);
 
 /** Sanitized env for spawned e2e processes — ambient GIT_/BEADS_/DEVIN_/
  *  CLAUDE_/CURSOR_/BRO_ vars from the outer agent session must not redirect a
  *  fixture's git dir, hook root, or beads store. Whitelist, not
  *  strip-list: a new leak variable can't sneak in. */
 export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: Record<string, string> = {}
+  const env: Record<string, string> = {};
   for (const k of ['PATH', 'HOME', 'TMPDIR', 'USER', 'LANG']) {
     if (process.env[k] !== undefined) {
-      env[k] = process.env[k]!
+      env[k] = process.env[k]!;
     }
   }
   // the whitelist drops even a file-scope scrub's null-config pins —
   // HOME rides along, so without these the child's git reads the host
   // ~/.gitconfig (core.hooksPath, commit.gpgsign) on fixture commits
-  env.GIT_CONFIG_NOSYSTEM = '1'
-  env.GIT_CONFIG_GLOBAL = devNull
-  return { ...env, ...extra }
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = devNull;
+  return { ...env, ...extra };
 }
 
 export interface CliResult {
-  code: number | null
-  stdout: string
-  stderr: string
+  code: number | null;
+  stdout: string;
+  stderr: string;
 }
 
 /** Spawn `node dist/index.js <args>` — the real CLI, pipes captured. */
@@ -154,7 +157,7 @@ export function runCli(
   opts: { cwd: string; input?: string; env?: Record<string, string> }
 ): CliResult {
   if (!existsSync(CLI_DIST)) {
-    throw new Error('packages/cli/dist is missing — run `npm run build` before e2e tests')
+    throw new Error('packages/cli/dist is missing — run `npm run build` before e2e tests');
   }
   const proc = spawnSync(process.execPath, [CLI_DIST, ...args], {
     cwd: opts.cwd,
@@ -162,12 +165,12 @@ export function runCli(
     env: e2eEnv(opts.env),
     encoding: 'utf8',
     timeout: 60_000,
-  })
+  });
   return {
     code: proc.status,
     stdout: proc.stdout ?? '',
     stderr: proc.stderr ?? '',
-  }
+  };
 }
 
 /** Minimal `bd` — a JSON-file store behind a node shim, covering the
@@ -210,11 +213,19 @@ for (let i = 0; i < args.length; i++) {
   if (t === '--json') continue
   if (t.startsWith('--')) {
     const k = t.slice(2)
-    if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
+    const valueFlags = new Set(['title', 'description', 'type', 'priority', 'labels', 'parent', 'external-ref', 'metadata', 'deps', 'reason', 'id', 'result', 'prevent', 'evidence', 'wake', 'C', 'older-than', 'dir'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlags.has(k))) flags[k] = args[++i]
     else flags[k] = true
-  } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
+  } else if (/^-\\w$/.test(t)) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    const valueFlagsShort = new Set(['d', 't', 'p', 'l', 'C'])
+    if (args[i + 1] !== undefined && (!args[i + 1].startsWith('-') || valueFlagsShort.has(k))) {
+      flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
+    } else if (valueFlagsShort.has(k)) {
+      fail('create -' + k + ' requires a value')
+    } else {
+      flags[k] = true
+    }
   } else pos.push(t)
 }
 // real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
@@ -230,6 +241,22 @@ const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
 const cmd = pos[0]
+// one-shot claim-read failure injection (bro-etimout): a wedged store
+// past bd's 15s budget makes the throwing bd() ready call throw — a
+// non-zero exit throws identically for execFileSync callers. Scoped to
+// the claim read's own argv signature (exclude-label) so the startup
+// compat probe (ready -n 1, bdTry, non-throwing) never consumes the
+// injection. The counter lives beside the db so each fresh bd process
+// shares it.
+if (process.env.FAKE_BD_READY_FAILS && cmd === 'ready' && args.includes('--exclude-label')) {
+  const counter = DB + '.readyfails'
+  let left = Number(process.env.FAKE_BD_READY_FAILS)
+  try { left = Number(fs.readFileSync(counter, 'utf8')) } catch {}
+  if (left > 0) {
+    retry(() => fs.writeFileSync(counter, String(left - 1)))
+    fail('spawnSync timeout ETIMEDOUT')
+  }
+}
 switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case '--version':
     console.log('bd 0.0.0-fake')
@@ -262,7 +289,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       (r) => r.status === 'open' && !(r.labels || []).some((l) => ex.includes(l))
     )
     rows.sort((a, b) => (a.priority - b.priority) || String(a.created_at).localeCompare(String(b.created_at)))
-    jsonOut(rows)
+    // real bd truncates a deep queue to its page — tests can opt in
+    // with db.readyLimit to prove callers do not rely on membership
+    const lim = db.readyLimit
+    jsonOut(typeof lim === 'number' ? rows.slice(0, lim) : rows)
     break
   }
   case 'show': {
@@ -292,7 +322,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
-      title: flags.title || '',
+      title: typeof flags.title === 'string' ? flags.title : (flags.title === true ? fail('create --title requires a value') : (flags.title ? String(flags.title) : '')),
       description: short('description') || '',
       status: 'open',
       priority: Number(short('priority') ?? 2),
@@ -308,7 +338,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
     }
     save(db)
-    jsonOut({ id })
+    // real bd answers create with the created row — callers read
+    // title/status back off it, not just the id
+    jsonOut(row(id))
     break
   }
   case 'update': {
@@ -410,8 +442,30 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       const r = row(pos[2])
       if (!r) fail('not found: ' + pos[2])
       db.deps = db.deps || []
-      db.deps.push({ from: pos[2], to: pos[3] })
+      // --type persists with the edge — a hydrated dep list filters
+      // on it, and bd's default is 'blocks'
+      db.deps.push({ from: pos[2], to: pos[3], type: flags.type || 'blocks' })
       save(db)
+      break
+    }
+    if (pos[1] === 'list' && pos.length === 3) {
+      // real bd answers a single-id dep list with hydrated neighbor
+      // rows carrying dependency_type; bare and multi-id queries keep
+      // the raw edge records (wiring asserts read those)
+      const want = pos[2]
+      const rels = flags.t === undefined ? undefined : [].concat(flags.t)
+      const up = Object.keys(flags).includes('direction=up')
+      const out = []
+      for (const e of db.deps || []) {
+        const from = e.issue_id !== undefined ? e.issue_id : e.from
+        const to = e.depends_on_id !== undefined ? e.depends_on_id : e.to
+        const other = up ? (to === want ? from : undefined) : (from === want ? to : undefined)
+        if (other === undefined) continue
+        if (rels !== undefined && !rels.includes(e.type)) continue
+        const r = row(other)
+        if (r !== undefined) out.push({ ...r, dependency_type: e.type })
+      }
+      jsonOut(out)
       break
     }
     jsonOut(db.deps || [])
@@ -514,7 +568,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   default:
     fail('unhandled: ' + args.join(' '))
 }
-`
+`;
 
 /** A healthy-empty docker for fixtures on docker-less hosts — `version`
  *  answers, `ps` lists nothing, anything else is a 'No such object'
@@ -526,7 +580,7 @@ const FAKE_DOCKER = `#!/bin/sh
 if [ "$1" = version ]; then echo "25.0.0-fake"; exit 0; fi
 if [ "$1" = ps ]; then exit 0; fi
 echo "Error: No such object" >&2; exit 1
-`
+`;
 
 /** Capability probe for bd-dependent tests — the "needs-bd" gate.
  *  `bd --version` alone can't tell a CGO-less build: it prints fine,
@@ -534,17 +588,31 @@ echo "Error: No such object" >&2; exit 1
  *  real init in a scratch dir instead; the returned string is what
  *  `t.skip` should print. `undefined` means bd fully works. */
 export function bdStoreBlocker(): string | undefined {
-  const dir = tmpDir('bro-bd-probe-')
-  if (bdTry(['--version'], 10_000, dir).code !== 0) {
-    return 'bd not installed'
+  const dir = tmpDir('bro-bd-probe-');
+  try {
+    if (bdTry(['--version'], 10_000, dir).code !== 0) {
+      return 'bd not installed';
+    }
+    // a checkout-shaped scratch: a bd build that insists on a git
+    // worktree for init must probe "store works", never "dir had no git"
+    git(['init', '-q'], dir);
+    const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
+    return r.code === 0
+      ? undefined
+      : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
+  } finally {
+    // bd/dolt can spawn a background daemon on init; rmSync the probe dir
+    // must retry and not rely on the process-exit sweep (which races the
+    // still-starting daemon). Remove from the exit sweep to avoid double
+    // cleanup.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      const idx = tmpDirs.indexOf(dir);
+      if (idx >= 0) tmpDirs.splice(idx, 1);
+    } catch {
+      // keep the directory registered so the exit sweep still sees it
+    }
   }
-  // a checkout-shaped scratch: a bd build that insists on a git
-  // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q'], dir)
-  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir)
-  return r.code === 0
-    ? undefined
-    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`
 }
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
@@ -553,15 +621,15 @@ export function installFakeBd(
   dir: string,
   rows: Array<Record<string, unknown>> = []
 ): { binDir: string; db: string } {
-  const binDir = join(dir, 'bin')
-  const db = join(dir, 'beads.json')
-  mkdirSync(binDir, { recursive: true })
-  writeFileSync(join(binDir, 'bd'), FAKE_BD)
-  chmodSync(join(binDir, 'bd'), 0o755)
-  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER)
-  chmodSync(join(binDir, 'docker'), 0o755)
-  writeBeads(db, rows)
-  return { binDir, db }
+  const binDir = join(dir, 'bin');
+  const db = join(dir, 'beads.json');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'bd'), FAKE_BD);
+  chmodSync(join(binDir, 'bd'), 0o755);
+  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER);
+  chmodSync(join(binDir, 'docker'), 0o755);
+  writeBeads(db, rows);
+  return { binDir, db };
 }
 
 export function writeBeads(
@@ -569,7 +637,7 @@ export function writeBeads(
   rows: Array<Record<string, unknown>>,
   extra: Record<string, unknown> = {}
 ): void {
-  writeFileSync(db, JSON.stringify({ ...extra, rows }))
+  writeFileSync(db, JSON.stringify({ ...extra, rows }));
 }
 
 /** Test-side read with the same CI-jitter shield the embedded fakes
@@ -578,16 +646,16 @@ export function writeBeads(
 function readJsonRetry(path: string): unknown {
   for (let i = 0; ; i++) {
     try {
-      return JSON.parse(readFileSync(path, 'utf8'))
+      return JSON.parse(readFileSync(path, 'utf8'));
     } catch (e) {
-      if (i > 40) throw e
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+      if (i > 40) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
 }
 
 export function readBeads(db: string): Array<Record<string, unknown>> {
-  return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows
+  return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows;
 }
 
 /** A second git checkout beside `main` — git-initialized so
@@ -596,20 +664,195 @@ export function readBeads(db: string): Array<Record<string, unknown>> {
  *  discovery picks it over FAKE_BD_DB). The cross-repo mesh/request
  *  fixtures' target side. */
 export function initTarget(root: string, name: string): { dir: string; db: string } {
-  const dir = join(root, name)
-  git(['init', '-q', '-b', 'main', dir], root)
-  git(['config', 'user.email', 't@t'], dir)
-  git(['config', 'user.name', 't'], dir)
-  git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], dir)
-  git(['commit', '-qm', 'init', '--allow-empty'], dir)
-  const db = join(dir, '.beads', 'beads.json')
-  mkdirSync(join(dir, '.beads'), { recursive: true })
-  writeBeads(db, [])
-  return { dir, db }
+  const dir = join(root, name);
+  git(['init', '-q', '-b', 'main', dir], root);
+  git(['config', 'user.email', 't@t'], dir);
+  git(['config', 'user.name', 't'], dir);
+  git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], dir);
+  git(['commit', '-qm', 'init', '--allow-empty'], dir);
+  const db = join(dir, '.beads', 'beads.json');
+  mkdirSync(join(dir, '.beads'), { recursive: true });
+  writeBeads(db, []);
+  return { dir, db };
 }
 
 export function bead(db: string, id: string): Record<string, unknown> | undefined {
-  return readBeads(db).find((r) => r.id === id)
+  return readBeads(db).find(r => r.id === id);
+}
+
+/** /proc proof the pid still runs OUR wrapper — the wrapper's argv
+ *  carries the handle path as a positional arg, so the run token
+ *  matches verbatim. This is what makes the group kill safe: a stale
+ *  handle or registry row can name a pid the OS has since recycled,
+ *  and a blind kill(-p) would land on a stranger's whole process
+ *  group. Unreadable /proc (raced exit, non-Linux) is never a target —
+ *  a leaked fixture process beats a killed foreign one. */
+function pidRunsToken(pid: number, token: string): boolean {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(token);
+  } catch {
+    return false;
+  }
+}
+
+/** The run's process tree — pid, group and starttime off one /proc
+ *  scan, taken BEFORE the first signal: a setsid'd descendant leads its
+ *  own session and group, so kill(-wrapperPgid) never reaches it, and
+ *  the moment the wrapper dies it reparents to init — the parentage is
+ *  the only way left to find it (spec bro-ybo8z; the same pre-signal
+ *  snapshot the production `down` takes). pid+starttime keeps a
+ *  recycled pid out of the kill list. Empty where /proc is absent
+ *  (non-Linux). */
+function descendantTree(root: number): Array<{ pid: number; pgrp: number; start: string }> {
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const children = new Map<number, Array<{ pid: number; pgrp: number; start: string }>>();
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const row = { pid, pgrp: Number(rest[2]), start: rest[19] ?? '' };
+      children.set(Number(rest[1]), [...(children.get(Number(rest[1])) ?? []), row]);
+    } catch {
+      // a process vanishing mid-scan belongs to no tree
+    }
+  }
+  const tree: Array<{ pid: number; pgrp: number; start: string }> = [];
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const row of children.get(cur) ?? []) {
+      if (seen.has(row.pid)) {
+        continue;
+      }
+      seen.add(row.pid);
+      queue.push(row.pid);
+      tree.push(row);
+    }
+  }
+  return tree;
+}
+
+/** SIGKILL a run pid's whole group — detached workers lead their own
+ *  group. Self/parent pids are never signaled: tests pin their own
+ *  pid into registries to fake 'running'. A needle-verified pid is
+ *  provably ours; without a needle the caller's own registry pid
+ *  keeps the old trust — a FILE-derived pid never gets here without
+ *  one. The tree snapshot rides BEFORE the signal: a setsid-escaped
+ *  descendant (the `setsid sleep` fixture shape) leaves the wrapper's
+ *  group, and after the wrapper dies it is unreachable — each snapshotted
+ *  member still alive with its recorded starttime then gets its OWN
+ *  group signaled, so an early assertion failure can never leak it. */
+function killVerifiedGroup(pid: number, needle: string | undefined): void {
+  if (
+    pid === process.pid ||
+    pid === process.ppid ||
+    (needle !== undefined && !pidRunsToken(pid, needle))
+  ) {
+    return;
+  }
+  const tree = descendantTree(pid);
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // already gone
+  }
+  for (const m of tree) {
+    // starttime-verified liveness: a recycled member pid (or the group
+    // it would name) is a stranger's — never signal it
+    if (m.pid === pid || m.start === '' || !pidAlive(m.pid, m.start)) {
+      continue;
+    }
+    try {
+      process.kill(-m.pgrp, 'SIGKILL');
+    } catch {
+      // already gone, or its group emptied with it
+    }
+  }
+}
+
+/** The pid a run-scoped handle names — absent file, absent run, or a
+ *  pre-handshake run all read as none. */
+function handlePid(main: string, token: string | undefined): number | undefined {
+  // truthiness, not `=== undefined`: an empty token is equally absent
+  // (the `.handle` file it would name never exists) and a string
+  // comparison guard here reads as a timing-attack pattern to static
+  // analysis without ever comparing secret bytes
+  if (!token) {
+    return undefined;
+  }
+  try {
+    const owner = handleOwner(
+      readFileSync(join(main, '.git', 'bro', 'agents', `${token}.handle`), 'utf8')
+    );
+    return owner?.pid;
+  } catch {
+    return undefined; // no handle — plain-shape run or pre-handshake
+  }
+}
+
+/** SIGKILL a spawned run's whole unit — the recorded pid's group plus
+ *  the run-scoped handle's group when the worker named a different
+ *  pid (exec-style `systemd-run --scope` keeps them equal; a
+ *  fork-style one would differ, bro-ybo8z). Pids are cmdline-verified
+ *  against the run token before the group signal — the wrapper's argv
+ *  carries the handle path, so `<id>.<runId>.` proves ownership and
+ *  the trailing dot keeps a shared prefix from aliasing another run. */
+export function killRun(
+  main: string,
+  run: { pid?: unknown; runId?: unknown; agentId?: unknown; id?: unknown }
+): void {
+  const agentId = [run.agentId, run.id].find((x): x is string => typeof x === 'string');
+  const token =
+    agentId !== undefined && typeof run.runId === 'string' ? `${agentId}.${run.runId}` : undefined;
+  const pids = new Set<number>();
+  if (typeof run.pid === 'number' && run.pid > 0) {
+    pids.add(run.pid);
+  }
+  const h = handlePid(main, token);
+  if (h !== undefined) {
+    pids.add(h);
+  }
+  const needle = token ? `${token}.` : undefined;
+  for (const p of pids) {
+    killVerifiedGroup(p, needle);
+  }
+}
+
+/** SIGKILL every live handle in the repo's agents dir — the reaper for
+ *  runs whose registry row is already gone (a worker self-published
+ *  before its launcher died, or the fixture only knows the log pid).
+ *  Every handle read is verified against its own filename token —
+ *  a leftover file outlives its run, and the pid it names may be a
+ *  recycled stranger's by the time cleanup sweeps. */
+export function killRunHandles(main: string): void {
+  let names: string[] = [];
+  try {
+    names = readdirSync(join(main, '.git', 'bro', 'agents'));
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!n.endsWith('.handle')) {
+      continue;
+    }
+    try {
+      const owner = handleOwner(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8'));
+      if (owner !== null) {
+        killVerifiedGroup(owner.pid, n);
+      }
+    } catch {
+      // unreadable handle — not a kill target
+    }
+  }
 }
 
 /** The landed-claim verdict every act settle path owes — the bead is
@@ -617,11 +860,11 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
  *  caller holds one) carries the `act: <id> closed` line. */
 export function assertLandedBead(db: string, id: string, stderr?: string): void {
   if (stderr !== undefined) {
-    assert.match(stderr, new RegExp(`${id} closed`))
+    assert.ok(stderr.includes(`${id} closed`));
   }
-  const row = bead(db, id)
-  assert.equal(row?.status, 'closed')
-  assert.match(String(row?.close_reason), /landed via/)
+  const row = bead(db, id);
+  assert.equal(row?.status, 'closed');
+  assert.match(String(row?.close_reason), /landed via/);
 }
 
 export const FAKE_BEAD = {
@@ -630,7 +873,7 @@ export const FAKE_BEAD = {
   status: 'open',
   created_at: '2026-01-01T00:00:00Z',
   labels: [] as string[],
-}
+};
 
 /** The review-host connector the fixture repo loads as an external
  *  plugin — every facade probe reads host.json so tests and the fake
@@ -716,6 +959,18 @@ const facade = {
     }
     return s.prOpened ? [s.pr ?? 7] : []
   }),
+  // the fleet listing the ceiling + reconcile read — same projection
+  // rules as prsForBranch (prs map authoritative, flat flag legacy)
+  openPrs: () => withState((s) => {
+    if (s.prs) {
+      return Object.values(s.prs)
+        .filter((p) => (p.state ?? s.prState ?? 'OPEN') === 'OPEN')
+        .map((p) => ({ pr: p.number, headRef: p.headRef }))
+    }
+    return s.prOpened
+      ? [{ pr: s.pr ?? 7, headRef: s.openPrHead ?? s.headRef ?? 'loop/fx-a' }]
+      : []
+  }),
   parsePrRef: () => null,
   prMeta: (t) => withState((s) => {
     // readQueues.meta — the same mid-flight race scripting as
@@ -740,6 +995,8 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      // who landed it — the host's merge record (GitHub's mergedBy.login)
+      mergedBy: per.mergedBy ?? s.mergedBy,
       ...over,
     }
   }),
@@ -940,7 +1197,7 @@ export default {
   run: () => {},
   connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade, stacks: () => stacksFacade }],
 }
-`
+`;
 
 /** The loop's spawned agent — a node script keyed off E2E_SCENARIO and
  *  the prompt file (a '<review-threads>' marker means it was respawned
@@ -1066,6 +1323,7 @@ const markPrOpened = (s) => {
     }
   }
   s.prOpened = true
+  s.openPrHead = branch
 }
 // a per-bead wall-clock delay — the fairness test's long worker: the
 // detached spawn means the loop must service other members while this
@@ -1163,28 +1421,28 @@ switch (scenario) {
   default:
     process.exit(1)
 }
-`
+`;
 
 /** Write the fake review-host plugin, its state file, and the fake agent
  *  into a fixture repo root. Returns the host state path. */
 export function installFakeHost(root: string): { state: string; agent: string } {
-  writeFileSync(join(root, 'fakehost.ts'), FAKE_HOST_PLUGIN)
-  writeFileSync(join(root, 'fake-agent.js'), FAKE_AGENT)
-  const state = join(root, 'host.json')
-  writeHostState(state, { prOpened: false })
-  return { state, agent: join(root, 'fake-agent.js') }
+  writeFileSync(join(root, 'fakehost.ts'), FAKE_HOST_PLUGIN);
+  writeFileSync(join(root, 'fake-agent.js'), FAKE_AGENT);
+  const state = join(root, 'host.json');
+  writeHostState(state, { prOpened: false });
+  return { state, agent: join(root, 'fake-agent.js') };
 }
 
 export function readHostState(state: string): Record<string, unknown> {
-  return readJsonRetry(state) as Record<string, unknown>
+  return readJsonRetry(state) as Record<string, unknown>;
 }
 
 export interface HostFixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
+  root: string;
+  main: string;
+  db: string;
+  hostState: string;
+  run: (args: string[]) => CliResult;
 }
 
 /** Repo + fake bd + fake review host + connector wiring in one — the
@@ -1192,9 +1450,9 @@ export interface HostFixture {
  *  `loopAgent` wires `loop.agent` to the fake agent — the fixer spawn's
  *  command fallback (agents.native.command unset). */
 export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}): HostFixture {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root);
+  const host = installFakeHost(main);
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({
@@ -1202,20 +1460,20 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
       connectors: { reviews: 'fakehost' },
       ...(opts.loopAgent === true ? { loop: { agent: `node ${host.agent}` } } : {}),
     })
-  )
+  );
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     HOME: root,
     FAKE_BD_DB: db,
     FAKE_HOST_STATE: host.state,
-  }
+  };
   return {
     root,
     main,
     db,
     hostState: host.state,
-    run: (args) => runCli(args, { cwd: main, env }),
-  }
+    run: args => runCli(args, { cwd: main, env }),
+  };
 }
 
 /** Repo + fake bd + a PATH-pinned spawn env — the minimal scaffold for
@@ -1225,13 +1483,13 @@ export function e2eRepo(
   prefix: string,
   rows: Array<Record<string, unknown>> = []
 ): { main: string; db: string; env: Record<string, string> } {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root, rows)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root, rows);
   return {
     main,
     db,
     env: { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db },
-  }
+  };
 }
 
 /** A `tasks` connector over tasks.json beside the plugin — the
@@ -1285,7 +1543,7 @@ export default {
     },
   ],
 }
-`
+`;
 
 /** Write the fake tasks-connector plugin + its store into the fixture
  *  repo root; `db` is the tasks.json path `bead()` can read. */
@@ -1293,10 +1551,10 @@ export function installFakeTasks(
   root: string,
   rows: Array<Record<string, unknown>> = []
 ): { db: string } {
-  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN)
-  const db = join(root, 'tasks.json')
-  writeBeads(db, rows)
-  return { db }
+  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN);
+  const db = join(root, 'tasks.json');
+  writeBeads(db, rows);
+  return { db };
 }
 
 // --- fake dolt — the beads-remote transport fixture -----------------------------
@@ -1352,7 +1610,7 @@ switch (args[0]) {
   default:
     fail(args[0])
 }
-`
+`;
 
 /** A bare "published dolt store" a peer would expose: `dir/db.json`
  *  holding `issues` rows with inline `labels`. Returns dir + a `publish`
@@ -1361,44 +1619,44 @@ export function installFakeDoltRemote(
   dir: string,
   issues: Array<Record<string, unknown>>
 ): { remoteDir: string; publish: (issues: Array<Record<string, unknown>>) => void } {
-  const remoteDir = join(dir, 'remote-dolt')
-  mkdirSync(remoteDir, { recursive: true })
+  const remoteDir = join(dir, 'remote-dolt');
+  mkdirSync(remoteDir, { recursive: true });
   const publish = (rows: Array<Record<string, unknown>>) =>
-    writeFileSync(join(remoteDir, 'db.json'), JSON.stringify({ issues: rows }))
-  publish(issues)
-  return { remoteDir, publish }
+    writeFileSync(join(remoteDir, 'db.json'), JSON.stringify({ issues: rows }));
+  publish(issues);
+  return { remoteDir, publish };
 }
 
 /** Put the fake `dolt` binary next to a fake `bd` binDir (or alone). */
 export function installFakeDolt(dir: string): string {
-  const binDir = join(dir, 'bin')
-  mkdirSync(binDir, { recursive: true })
-  writeFileSync(join(binDir, 'dolt'), FAKE_DOLT)
-  chmodSync(join(binDir, 'dolt'), 0o755)
-  return binDir
+  const binDir = join(dir, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'dolt'), FAKE_DOLT);
+  chmodSync(join(binDir, 'dolt'), 0o755);
+  return binDir;
 }
 
 export function writeHostState(state: string, patch: Record<string, unknown>): void {
   // the same mkdir lock + tmp+rename the embedded fixtures serialize on
   // — a mid-run scripted write must not lose to a worker's mutation
-  const lock = `${state}.lock`
+  const lock = `${state}.lock`;
   for (let i = 0; ; i++) {
     try {
-      mkdirSync(lock)
-      break
+      mkdirSync(lock);
+      break;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
-      if (i > 2000) throw new Error('host state lock wedged')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (i > 2000) throw new Error('host state lock wedged');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
   }
   try {
-    const cur = existsSync(state) ? (readJsonRetry(state) as Record<string, unknown>) : {}
-    const tmp = `${state}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }))
-    renameSync(tmp, state)
+    const cur = existsSync(state) ? (readJsonRetry(state) as Record<string, unknown>) : {};
+    const tmp = `${state}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }));
+    renameSync(tmp, state);
   } finally {
-    rmSync(lock, { recursive: true, force: true })
+    rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -1408,19 +1666,19 @@ export function writeHostState(state: string, patch: Record<string, unknown>): v
 // rule at the top of this file.
 
 export interface DriveFixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
+  root: string;
+  main: string;
+  db: string;
+  hostState: string;
+  run: (args: string[]) => CliResult;
 }
 
 /** Repo + fake bd + fake host + bro.config wiring — `loop.agent` is the
  *  fixer spawn's command fallback (agents.native.command unset). */
 export function driveFixture(prefix: string): DriveFixture {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root);
+  const host = installFakeHost(main);
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({
@@ -1428,80 +1686,84 @@ export function driveFixture(prefix: string): DriveFixture {
       connectors: { reviews: 'fakehost' },
       loop: { agent: `node ${host.agent}` },
     })
-  )
+  );
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     HOME: root,
     FAKE_BD_DB: db,
     FAKE_HOST_STATE: host.state,
-  }
+  };
   return {
     root,
     main,
     db,
     hostState: host.state,
-    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
-  }
+    run: args => runCli(['drive', ...args], { cwd: main, env }),
+  };
 }
 
 /** The one `{"verdict": …}` row on `drive --json` stdout. */
 export function driveVerdict(r: CliResult): { verdict?: string; detail?: string } {
-  return (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ??
-    {}) as { verdict?: string; detail?: string }
+  return (JSON.parse(
+    r.stdout
+      .trim()
+      .split('\n')
+      .find(l => l.includes('"verdict"')) ?? '{}'
+  ) ?? {}) as { verdict?: string; detail?: string };
 }
 
 export async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
-  const deadline = Date.now() + ms
+  const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (cond()) {
-      return true
+      return true;
     }
-    await new Promise((r) => setTimeout(r, 25))
+    await new Promise(r => setTimeout(r, 25));
   }
-  return false
+  return false;
 }
 
 /** Bead rows labelled 'fixer' — the drive sweep's work-order ledger. */
 export function fixerRows(db: string): Array<Record<string, unknown>> {
-  return readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
+  return readBeads(db).filter(r => ((r.labels as string[] | undefined) ?? []).includes('fixer'));
 }
 
 /** A spawned fixer is detached — completion is its .exit record on the
  *  registry, never a process wait. */
 export function exitRecorded(main: string): boolean {
-  const agentsDir = join(main, '.git', 'bro', 'agents')
-  return existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
+  const agentsDir = join(main, '.git', 'bro', 'agents');
+  return existsSync(agentsDir) && readdirSync(agentsDir).some(n => n.endsWith('.exit'));
 }
 
 export function spawnLog(main: string): string {
-  const log = join(main, 'spawns.log')
-  return existsSync(log) ? readFileSync(log, 'utf8') : ''
+  const log = join(main, 'spawns.log');
+  return existsSync(log) ? readFileSync(log, 'utf8') : '';
 }
 
 /** A live session marker naming the branch — the occupancy guard's
  *  signal that a worker already owns it. */
 export function occupyBranch(main: string, branch: string): void {
-  const hooks = join(main, '.git', 'bro', 'hooks')
-  mkdirSync(hooks, { recursive: true })
-  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`)
+  const hooks = join(main, '.git', 'bro', 'hooks');
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`);
 }
 
 /** The verdict line plus the no-spawn ledger every declined/capped
  *  drive pass owes: no fixer bead, no spawn-log entry. */
 export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
-  const v = driveVerdict(r)
-  assert.equal(v.verdict, want, v.detail)
-  assert.equal(fixerRows(f.db).length, 0)
-  assert.equal(spawnLog(f.main), '')
+  const v = driveVerdict(r);
+  assert.equal(v.verdict, want, v.detail);
+  assert.equal(fixerRows(f.db).length, 0);
+  assert.equal(spawnLog(f.main), '');
 }
 
 /** The post-fixer pass: gate green → the orphan merged and its fixer
  *  bead closed 'merged via …'. */
 export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
-  const v = driveVerdict(r)
-  assert.equal(v.verdict, 'merged', v.detail)
-  assert.equal(bead(f.db, String(fixerId))?.status, 'closed')
-  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/)
+  const v = driveVerdict(r);
+  assert.equal(v.verdict, 'merged', v.detail);
+  assert.equal(bead(f.db, String(fixerId))?.status, 'closed');
+  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/);
 }
 
 // --- shared in-process test helpers --------------------------------------
@@ -1511,8 +1773,10 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  constructor(public code: number) {
-    super(`exit ${code}`)
+  code: number;
+  constructor(code: number) {
+    super(`exit ${code}`);
+    this.code = code;
   }
 }
 
@@ -1520,33 +1784,61 @@ export class Exit extends Error {
 export async function capture(
   fn: () => Promise<unknown>
 ): Promise<{ code: number; out: string[]; err: string[] }> {
-  const origExit = process.exit
-  const origLog = console.log
-  const origErr = console.error
-  const origUsageWrite = usageWriter.write
-  const out: string[] = []
-  const err: string[] = []
-  console.log = (...a: unknown[]) => out.push(a.join(' '))
-  console.error = (...a: unknown[]) => err.push(a.join(' '))
+  const origExit = process.exit;
+  const origLog = console.log;
+  const origErr = console.error;
+  const origUsageWrite = usageWriter.write;
+  const out: string[] = [];
+  const err: string[] = [];
+  console.log = (...a: unknown[]) => out.push(a.join(' '));
+  console.error = (...a: unknown[]) => err.push(a.join(' '));
   // printUsage bypasses console.* via writeSync — capture through its seam
-  usageWriter.write = (fd, t) => (fd === 1 ? out : err).push(t.replace(/\n$/, ''))
+  usageWriter.write = (fd, t) => (fd === 1 ? out : err).push(t.replace(/\n$/, ''));
   process.exit = ((code?: number) => {
-    throw new Exit(code ?? 0)
-  }) as typeof process.exit
+    throw new Exit(code ?? 0);
+  }) as typeof process.exit;
   try {
-    await fn()
-    return { code: 0, out, err }
-  } catch (e) {
+    await fn();
+    return { code: 0, out, err };
+  } catch (e: any) {
     if (e instanceof Exit) {
-      return { code: e.code, out, err }
+      return { code: e.code, out, err };
     }
-    throw e
+    const cmdResult = capturedCommandError(e, out, err);
+    if (cmdResult !== undefined) {
+      return cmdResult;
+    }
+    throw e;
   } finally {
-    process.exit = origExit
-    console.log = origLog
-    console.error = origErr
-    usageWriter.write = origUsageWrite
+    process.exit = origExit;
+    console.log = origLog;
+    console.error = origErr;
+    usageWriter.write = origUsageWrite;
   }
+}
+
+/** The capture's CommandError arm — mirrors the dispatcher: a
+ *  printUsage-thrown error already wrote itself through usageWriter
+ *  (message===usage marks that case); anything else prints message and
+ *  usage exactly once each — regardless of what the command already
+ *  emitted before throwing. */
+function capturedCommandError(
+  e: any,
+  out: string[],
+  err: string[]
+): { code: number; out: string[]; err: string[] } | undefined {
+  if (!e || (e.name !== 'CommandError' && e.constructor?.name !== 'CommandError')) {
+    return undefined;
+  }
+  const code = typeof e.code === 'number' ? e.code : 1;
+  const target = code === 0 ? out : err;
+  if (e.message && e.message !== e.usage) {
+    target.push(String(e.message).replace(/\n$/, ''));
+  }
+  if (e.usage !== undefined && e.usage !== e.message) {
+    target.push(String(e.usage).replace(/\n$/, ''));
+  }
+  return { code, out, err };
 }
 
 /** Delete ambient repo/agent pins from process.env (git-location and
@@ -1557,28 +1849,28 @@ export async function capture(
  *  child's env. The same null-config pins are set so git children the
  *  in-process code spawns can't read host hooks/config either. */
 export function scrubEnv(extra: string[] = []): () => void {
-  const ambient = /^(BEADS_DIR|BRO_)/
-  const saved: Record<string, string | undefined> = {}
+  const ambient = /^(BEADS_DIR|BRO_)/;
+  const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(process.env)) {
     if (AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)) {
-      saved[k] = process.env[k]
-      delete process.env[k]
+      saved[k] = process.env[k];
+      delete process.env[k];
     }
   }
   // a var that matched AMBIENT_GIT is only in saved when it was set —
   // record the pins too or they'd leak past the restore
   for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
-    if (!(k in saved)) saved[k] = process.env[k]
+    if (!(k in saved)) saved[k] = process.env[k];
   }
-  process.env.GIT_CONFIG_NOSYSTEM = '1'
-  process.env.GIT_CONFIG_GLOBAL = devNull
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
+  process.env.GIT_CONFIG_GLOBAL = devNull;
   return () => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) {
-        delete process.env[k]
+        delete process.env[k];
       } else {
-        process.env[k] = v
+        process.env[k] = v;
       }
     }
-  }
+  };
 }

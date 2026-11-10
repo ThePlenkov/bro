@@ -101,19 +101,19 @@ primitive in the same change; its `<path>.lock` is already a dir.
 ## Plan
 
 - [x] `packages/core/src/filelock.ts`: dir-lock acquire/publish/verify,
-      inode-pinned release/steal/reap, lstat-only classification,
-      heartbeat on dir inode, legacy-file read/steal path; delete
-      `removeCaptured`, the `wx` fallback, and every rename in steal
-      paths; keep `sweepStaged` for pre-change `.tmp` debris.
+  inode-pinned release/steal/reap, lstat-only classification,
+  heartbeat on dir inode, legacy-file read/steal path; delete
+  `removeCaptured`, the `wx` fallback, and every rename in steal
+  paths; keep `sweepStaged` for pre-change `.tmp` debris.
 - [x] `packages/core/src/janitor.ts`: `*.lock` sweep accepts
-      directories (dead-entry reaping + empty-dir reap), keeps
-      legacy-file reaping, classifies by `lstat`.
+  directories (dead-entry reaping + empty-dir reap), keeps
+  legacy-file reaping, classifies by `lstat`.
 - [x] `packages/debt/src/store.ts`: drop the local capture/restore
-      lock, use `withFileLock`/`acquireFileLock` from `@broject/core`.
+  lock, use `withFileLock`/`acquireFileLock` from `@broject/core`.
 - [x] `packages/core/src/filelock.test.ts`: rewrite around the dir
-      primitive + deterministic multi-process barrier tests;
-      `syncBuiltinESMExports`-propagated fs patches for the fallback
-      tests.
+  primitive + deterministic multi-process barrier tests;
+  `syncBuiltinESMExports`-propagated fs patches for the fallback
+  tests.
 - [x] `packages/core/src/janitor.test.ts`: dir-lock reap rows.
 
 ## Acceptance
