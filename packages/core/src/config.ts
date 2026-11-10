@@ -2188,6 +2188,19 @@ function layerRecordFile(cacheDir: string, dirHash: string, layer: ConfigLayerNa
   return join(cacheDir, `config-layer-${layer}-${dirHash}.json`);
 }
 
+/** The record filename's hash input — the global layer's scan root is
+ *  env-derived (XDG_CONFIG_HOME, HOME via homedir), which the file
+ *  probes cannot see: an env flip leaving the old files intact would
+ *  replay the old root's record. Keying on the resolved dir instead —
+ *  a changed env hashes to a different file → miss → rescan, and the
+ *  stale record sweeps out with the rest. Project/local dirs derive
+ *  from `base` (already the record's `dir` pin); recomputing their
+ *  worktree-root twin on every read would cost a git probe a hit must
+ *  not pay. */
+function layerRecordKey(base: string, layer: ConfigLayerName): string {
+  return cacheKey(layer === 'global' ? `${base}@${globalConfigDir()}` : base);
+}
+
 function readLayerRecord(
   cacheDir: string | null,
   base: string,
@@ -2197,7 +2210,7 @@ function readLayerRecord(
     return undefined;
   }
   try {
-    const file = layerRecordFile(cacheDir, cacheKey(base), layer);
+    const file = layerRecordFile(cacheDir, layerRecordKey(base, layer), layer);
     const rec = readCacheFile(file);
     if (rec === undefined || rec.v !== 1 || rec.dir !== base || rec.layer !== layer) {
       return undefined;
@@ -2272,7 +2285,11 @@ function writeLayerRecord(
     hit,
     broken,
   };
-  writeCacheFile(layerRecordFile(cacheDir, cacheKey(base), layer), record, 'config-layer-');
+  writeCacheFile(
+    layerRecordFile(cacheDir, layerRecordKey(base, layer), layer),
+    record,
+    'config-layer-'
+  );
 }
 
 /** One candidate config file — 'missing' lets the next name try,

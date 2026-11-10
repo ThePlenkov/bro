@@ -91,7 +91,11 @@ describe('hook-cache primitives', () => {
 });
 
 describe('loadConfigLayers cache (spec bro-gwh2a)', () => {
-  test('a second load serves the record — an unreadable config still answers', () => {
+  // root ignores file modes — chmod 000 stays readable, so the "cached
+  // record must answer" premise can't hold under uid 0
+  test('a second load serves the record — an unreadable config still answers', {
+    skip: process.getuid?.() === 0,
+  }, () => {
     const dir = repo();
     const cfg = join(dir, 'bro.config.json');
     writeFileSync(cfg, JSON.stringify({ marker: 'v1' }));

@@ -1088,6 +1088,24 @@ function collectedGuardsKey(
   };
 }
 
+/** A replayed row must carry the collectRow contract: `source` plus a
+ *  still-valid `guard` or a `problems` list — a hand-edited or stale
+ *  record can't feed the engine a malformed declaration. */
+function isCollectedRow(row: unknown): row is CollectedGuard {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+    return false;
+  }
+  const r = row as Record<string, unknown>;
+  return (
+    typeof r.source === 'string' &&
+    (r.guard === undefined || guardProblems(r.guard).length === 0) &&
+    (r.name === undefined || typeof r.name === 'string') &&
+    (r.problems === undefined ||
+      (Array.isArray(r.problems) && r.problems.every(p => typeof p === 'string'))) &&
+    (r.guard !== undefined || r.problems !== undefined)
+  );
+}
+
 function readCollectedGuards(ctx: ConnectorCtx, defs: Guard[]): CollectedGuard[] | undefined {
   try {
     const key = collectedGuardsKey(ctx, defs);
@@ -1105,7 +1123,8 @@ function readCollectedGuards(ctx: ConnectorCtx, defs: Guard[]): CollectedGuard[]
       typeof rec.ts !== 'number' ||
       Date.now() - rec.ts >= COLLECTED_GUARDS_TTL_MS ||
       !Array.isArray(rec.collected) ||
-      !isJsonData(rec.collected)
+      !isJsonData(rec.collected) ||
+      !rec.collected.every(isCollectedRow)
     ) {
       return undefined;
     }

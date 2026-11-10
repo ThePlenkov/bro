@@ -9,17 +9,10 @@
  * `BRO_HOOK_CACHE=0` disables all of it (debug escape hatch).
  */
 import { createHash } from 'node:crypto';
-import {
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { writePrivateFileSync } from './private-files.ts';
 
 /** One fingerprinted path — `exists` false means "this file was absent
  *  at scan time"; appearing later must invalidate. Stats ride along on
@@ -36,14 +29,16 @@ export function hookCacheEnabled(env: NodeJS.ProcessEnv = process.env): boolean 
 }
 
 /** `<git-common>/bro/hooks/cache` — null outside a repo (cache silently
- *  off, matching the lessons/drills snapshot behavior). `dir` need not
- *  be resolved; gitCommonDir handles the relative/ambient-env cases. */
+ *  off, matching the lessons/drills snapshot behavior). The probe is
+ *  budget-bounded: a stalled mount reads as "no repo" rather than
+ *  hanging the hook. `dir` need not be resolved; gitCommonDir handles
+ *  the relative/ambient-env cases. */
 export function hookCacheDir(dir: string): string | null {
   if (!hookCacheEnabled()) {
     return null;
   }
   try {
-    const common = gitCommonDir(dir);
+    const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
     return common === null ? null : join(common, 'bro', 'hooks', 'cache');
   } catch {
     return null;
@@ -74,12 +69,15 @@ const CACHE_SWEEP_MS = 24 * 60 * 60 * 1000;
 
 /** Atomic write (tmp + rename — the snapshot contract: a reader mid-
  *  write sees the old record or none, never a torn one) plus the
- *  opportunistic same-prefix sweep. Never throws. */
+ *  opportunistic same-prefix sweep. Records carry full config/guard
+ *  payloads, so the write is owner-only (0600 via the private-files
+ *  contract — a planted permissive tmp gets repaired, not inherited).
+ *  Never throws. */
 export function writeCacheFile(file: string, record: object, prefix: string): void {
   try {
     mkdirSync(dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(record));
+    writePrivateFileSync(tmp, JSON.stringify(record));
     renameSync(tmp, file);
     const dir = dirname(file);
     const cutoff = Date.now() - CACHE_SWEEP_MS;
@@ -128,17 +126,25 @@ export function probesHold(probes: readonly FileProbe[]): boolean {
 }
 
 /** Deep JSON-data check — a record that can't round-trip (functions,
- *  symbols, cycles, undefined-in-object) must not be written: the read
- *  side would silently see different values than the live scan. */
+ *  symbols, cycles, undefined-in-object, non-finite numbers, sparse
+ *  arrays) must not be written: the read side would silently see
+ *  different values than the live scan. */
 export function isJsonData(v: unknown, depth = 0): boolean {
-  if (v === null || typeof v === 'boolean' || typeof v === 'number' || typeof v === 'string') {
+  if (v === null || typeof v === 'boolean' || typeof v === 'string') {
     return true;
+  }
+  // NaN and ±Infinity serialize as null — only finite numbers round-trip
+  if (typeof v === 'number') {
+    return Number.isFinite(v);
   }
   if (depth > 32) {
     return false;
   }
   if (Array.isArray(v)) {
-    return v.every(item => isJsonData(item, depth + 1));
+    // every() skips holes — JSON.stringify writes them as null, and it
+    // drops non-index own keys too; a key count short of/over length
+    // is either, so refuse before recursing
+    return Object.keys(v).length === v.length && v.every(item => isJsonData(item, depth + 1));
   }
   if (typeof v === 'object') {
     const proto = Object.getPrototypeOf(v);
