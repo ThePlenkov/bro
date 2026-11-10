@@ -6,7 +6,7 @@
  * renumbering the queue. No parent-child edge: an open child would
  * block the frame's `drill up`.
  */
-import { taskStore } from '@broject/core'
+import { taskStore, type TaskStore } from '@broject/core'
 import { currentFrame, drillDown } from './frames.ts'
 import type { DrillRow } from './types.ts'
 
@@ -39,14 +39,17 @@ function rankOf(row: DrillRow): number {
 const isOpen = (r: DrillRow): boolean => r.status !== 'closed' && r.status !== 'done'
 
 /** The queue a writer lands on: explicit --under, else the current
- *  drill leaf, else the session queue (frame #0). */
-export function queueScope(under?: string): string {
-  return under ?? currentFrame()?.id ?? ROOT_QUEUE
+ *  drill leaf, else the session queue (frame #0). `dir` anchors the
+ *  lookup at another checkout and `opts.store` pins the tasks backend —
+ *  a caller probing a repo/store that is not the ambient one must pass
+ *  them or the ambient store answers for the wrong context. */
+export function queueScope(under?: string, dir?: string, opts?: { store?: TaskStore }): string {
+  return under ?? currentFrame(dir, opts)?.id ?? ROOT_QUEUE
 }
 
 /** The frame's open queue items in rank order (id breaks ties). */
-export function queueItems(frame: string): QueueItem[] {
-  return taskStore()
+export function queueItems(frame: string, dir?: string, opts?: { store?: TaskStore }): QueueItem[] {
+  return (opts?.store ?? taskStore(dir))
     .list<DrillRow>({ labels: [queueLabel(frame)], limit: 0 })
     .filter(isOpen)
     .map((r) => ({ id: r.id, title: r.title, rank: rankOf(r) }))

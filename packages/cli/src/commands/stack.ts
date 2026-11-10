@@ -24,6 +24,7 @@
 import { basename } from 'node:path';
 import {
   acquireFileLock,
+  countMergesInRange,
   facade,
   gitTry,
   LockTimeout,
@@ -105,6 +106,52 @@ function allBranches(dir: string): string[] {
 
 function localBranch(dir: string, name: string): boolean {
   return gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `refs/heads/${name}`]).code === 0;
+}
+
+/** The base's usable commit-ish — the LOCAL head first, then the
+ *  remote-tracking ref (bro-yi9sz).
+ *
+ *  Git's rev-parse never falls back from `main` to `origin/main`: the
+ *  shorthand names `refs/heads/main`, the tracking branch is
+ *  `origin/main`. So a repository whose default branch has no local
+ *  branch (a checkout that never created it, a default branch renamed
+ *  on the remote) reads every base as dead — the chain is unsyncable
+ *  and every member is skipped with a reason.
+ *
+ *  The NAME stays the name: the PR retarget and the recorded stack edge
+ *  need the branch name, not a ref. Only the git reads take the
+ *  commit-ish. `undefined` when the base exists nowhere — the old
+ *  answer, and the only honest one. */
+export function baseRef(dir: string, base: string): string | undefined {
+  const local = `refs/heads/${base}`;
+  if (gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', local]).code === 0) {
+    return local;
+  }
+  for (const remote of remotesOf(dir)) {
+    const tracking = `refs/remotes/${remote}/${base}`;
+    if (gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', tracking]).code === 0) {
+      return tracking;
+    }
+  }
+  return undefined;
+}
+
+/** The configured remotes, `origin` first — the conventional remote is
+ *  the one a default branch tracks. */
+function remotesOf(dir: string): string[] {
+  const names = gitTry(['-C', dir, 'remote'])
+    .out.split('\n')
+    .map(r => r.trim())
+    .filter(r => r !== '');
+  const origin = names.filter(r => r === 'origin');
+  return [...origin, ...names.filter(r => r !== 'origin')];
+}
+
+/** The rebase target — the base's usable commit-ish (bro-yi9sz). The
+ *  NAME stays the name for the PR retarget and the recorded edge; only
+ *  the git call takes the ref. */
+function ontoBase(dir: string, base: string): string {
+  return baseRef(dir, base) ?? base;
 }
 
 /** Stack name resolution: --name wins, else the current worktree's own
@@ -445,23 +492,6 @@ function memberLine(
   return `  ${m.n}  ${m.slug}  ${m.branch}  base ${base}${stale ? ' (stale edge)' : ''}  ${wt}  ${pr}`;
 }
 
-function printPublishHint(
-  stacks: ReturnType<typeof resolveStacks>,
-  members: MemberView[],
-  name: string
-): void {
-  if (stacks?.publish === undefined || stacks.membership === undefined) {
-    return
-  }
-  const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
-  const unstacked = open.filter((m) => stacks.membership!(m) === null)
-  if (open.length >= 2 && unstacked.length > 0) {
-    console.log(
-      `  ${unstacked.length} of ${open.length} open member PRs not in a stack on the host — \`bro stack publish ${name}\``
-    )
-  }
-}
-
 function cmdList(argv: string[]): void {
   const pos = positionals(argv, NAME_FLAGS);
   const main = mainWorktree();
@@ -480,19 +510,26 @@ function cmdList(argv: string[]): void {
     for (const m of members) {
       console.log(memberLine(m, defaultBase, rev, main.path));
     }
-    printPublishHint(stacks, members, name)
+    // the publish hint needs both caps: membership detects the gap,
+    // publish is the fix it names. Neither present → the host has no
+    // stack registry and there is nothing to hint at.
+    if (stacks?.publish !== undefined && stacks.membership !== undefined) {
+      const open = members.filter(m => m.pr !== undefined && m.prState === 'OPEN');
+      const unstacked = open.filter(m => stacks.membership!(m) === null);
+      if (open.length >= 2 && unstacked.length > 0) {
+        console.log(
+          `  ${unstacked.length} of ${open.length} open member PRs not in a stack on the host — \`bro stack publish ${name}\``
+        );
+      }
+    }
   }
 }
 
 /** A merged member leaves the chain — its edge goes, and its branch
  *  goes too when no worktree still holds it (a checked-out branch can't
  *  be deleted; the owner's worktree keeps it until `work leave`). */
-function retireMerged(
-  m: Pick<MemberView, 'branch' | 'worktree'>,
-  root: string,
-  lines: string[]
-): void {
-  removeStackEdge(m.branch)
+function retireMerged(m: MemberView, root: string, lines: string[]): void {
+  removeStackEdge(m.branch);
   if (m.worktree !== undefined) {
     lines.push(`  ${m.branch} merged — leaves the chain (worktree keeps the branch)`);
     return;
@@ -526,14 +563,15 @@ function baseOf(m: MemberView, prev: string): string {
  * rather than claiming a success it cannot prove.
  */
 function carriesBaseHead(branch: string, base: string, root: string): boolean | undefined {
-  const baseHead = gitTry([
-    '-C',
-    root,
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    `refs/heads/${base}`,
-  ]).out.trim();
+  const baseHead = baseTip(root, base);
+  return carriesCommit(branch, baseHead ?? '', root);
+}
+
+/** Does the branch still carry this COMMIT? The chain's base==prev-head
+ *  invariant, read from the git truth — and the same question the fork
+ *  asks: the fork is only the member's own work when the base's commit
+ *  is inside the member's history. */
+function carriesCommit(branch: string, baseHead: string, root: string): boolean | undefined {
   const memberHead = gitTry([
     '-C',
     root,
@@ -548,14 +586,47 @@ function carriesBaseHead(branch: string, base: string, root: string): boolean | 
   return gitTry(['-C', root, 'merge-base', '--is-ancestor', baseHead, memberHead]).code === 0;
 }
 
+/** The base's tip, read as a SHA. The ref's TIP — the commit the
+ *  member's own work starts after — and a SHA does not move: the
+ *  cascade rewrites the base's ref, and a name read after that points
+ *  somewhere else.
+ *
+ *  ONE read, ONE answer: the containment check and the fork use the
+ *  same commit, so the base cannot slip between the two reads. */
+function baseTip(root: string, base: string): string | undefined {
+  const ref = baseRef(root, base);
+  if (ref === undefined) {
+    return undefined;
+  }
+  const sha = gitTry([
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${ref}^{commit}`,
+  ]).out.trim();
+  return sha === '' ? undefined : sha;
+}
+
 /** The heads the plan reads — one flag per member. A merged member
  *  leaves the chain: the member above it stands on the one below the
- *  merged one, exactly as `planSync`'s own live tip walks. */
+ *  merged one, exactly as `planSync`'s own live tip walks.
+ *
+ *  The plan's FORK rides along: the base's tip as a SHA, read HERE —
+ *  in the plan phase, before the cascade moves any ref. The rebase
+ *  starts the member's replay from that commit, so the replay carries
+ *  the member's own work and never the base's old commits. */
 function markBaseHeads(members: MemberView[], root: string, defaultBase: string): void {
   let prev = defaultBase;
   for (const m of members) {
     if (m.prState !== 'MERGED') {
-      m.containsBaseHead = carriesBaseHead(m.branch, baseOf(m, prev), root);
+      const base = baseOf(m, prev);
+      const tip = baseTip(root, base);
+      m.forkSha = tip;
+      // the containment check reads the SAME commit the fork will use —
+      // one answer, so the base cannot slip between the two reads
+      m.containsBaseHead = tip === undefined ? undefined : carriesCommit(m.branch, tip, root);
       prev = m.branch;
     }
   }
@@ -566,11 +637,67 @@ function markBaseHeads(members: MemberView[], root: string, defaultBase: string)
  * that roots on something other than the default branch (the router's arc
  * roots on its own PR) must not be planned onto the default: the root is
  * the chain's own, and the plan follows it.
+ *
+ * A member that MERGED left the chain: its base is the branch it landed
+ * on, and that branch is gone with it. The chain then stands on the
+ * default branch — the same answer `planSync` gives the member that
+ * follows ("its successor's base becomes the nearest lower member still
+ * open, or the default branch").
+ *
+ * A DEAD ref is never a base. The recorded edge names a branch that may
+ * itself have merged and been deleted (the arc's base merges before the
+ * layer above it does) — planning onto it is what made the sync refuse
+ * to move the members that were still in the chain. So the candidate
+ * must be a branch that still EXISTS; otherwise the chain falls back to
+ * the default branch, which is where the dead branch's work landed.
+ *
+ * `alive` answers "does this branch still exist" — the caller reads it
+ * from the git truth, so this stays a pure function of its inputs. It is
+ * REQUIRED, with no default: a caller that forgot to check would fail
+ * OPEN (every dead branch reads as alive), which is the failure this
+ * whole guard exists to prevent.
+ *
+ * `undefined` when NO branch is alive — not even the default branch.
+ * There is nothing to stand on, and the caller must say so rather than
+ * plan onto a dead ref.
  */
-function chainRootBase(members: MemberView[], defaultBase: string): string {
+export function chainRootBase(
+  members: SyncMemberInput[],
+  defaultBase: string,
+  alive: (branch: string) => boolean
+): string | undefined {
   const first = members[0];
-  if (first === undefined) return defaultBase;
-  return first.edgeBase ?? first.prBase ?? defaultBase;
+  if (first !== undefined && first.prState !== 'MERGED') {
+    for (const candidate of [first.edgeBase, first.prBase]) {
+      if (candidate !== undefined && alive(candidate)) return candidate;
+    }
+  }
+  return alive(defaultBase) ? defaultBase : undefined;
+}
+
+/** Where the member's own work began — the commit its branch was
+ *  created at, read from its OWN reflog ("branch: Created from <base>"
+ *  names the base's tip of that moment). The base's ref may be GONE —
+ *  the platform deletes a merged member's branch — and the member's
+ *  history still remembers.
+ *
+ *  The CREATION entry, not merely the oldest one: a reflog that was
+ *  truncated or expired has no creation entry left, and its oldest
+ *  survivor is a later commit — a fork that would drop the member's own
+ *  commits. No creation entry means no answer, and the caller falls
+ *  through to the base's reflog. */
+function forkFromReflog(branch: string, wt: string): string | undefined {
+  const out = gitTry(['-C', wt, 'reflog', 'show', '--format=%H %gs', branch]).out;
+  for (const line of out.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    const [sha, ...rest] = trimmed.split(' ');
+    if (!rest.join(' ').startsWith('branch: Created')) continue;
+    return gitTry(['-C', wt, 'merge-base', '--is-ancestor', sha, 'HEAD']).code === 0
+      ? sha
+      : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -583,30 +710,47 @@ function chainRootBase(members: MemberView[], defaultBase: string): string {
  *
  * Three answers, in order of how well they know the truth:
  *
- * 1. git's OWN fork point — the base's reflog remembers the tip the
+ * 1. the base's tip, already inside the child — the merge-base IS the
+ *    fork: the child's work starts right after it.
+ * 2. git's OWN fork point — the base's reflog remembers the tip the
  *    child was built on, so this is exact even when the rewrite changed
  *    the parent's CONTENT (an amend that adds a file is not patch-
  *    equivalent, and only the reflog still knows where the child began).
- * 2. the child's last commit the new base already holds BY PATCH — the
+ * 3. the child's last commit the new base already holds BY PATCH — the
  *    rewritten parent looks patch-equivalent to git.
- * 3. the merge-base — the blunt answer, and the one that replays the
- *    parent's old commits when nothing better is known.
+ *
+ * And when none of the three answers — NO FORK. The bare merge-base is a
+ * GUESS: it sits BEFORE the base's old commits, so a replay from there
+ * carries them (and their conflicts) along. When no reflog and no
+ * patch-equivalence can place the fork, the rebase does not happen and
+ * the owner resolves it — a member that is skipped is visible, a member
+ * that replays the base's commits is not.
  */
 export function forkPoint(base: string, wt: string): string {
-  const mergeBase = gitTry(['-C', wt, 'merge-base', base, 'HEAD']).out.trim();
+  // the base is read through the resolver (bro-yi9sz): a base that lives
+  // only as a remote-tracking ref is a base, not a dead ref. An
+  // unresolvable base keeps the old behaviour — the git calls below fail
+  // and the caller sees no fork.
+  const ref = baseRef(wt, base) ?? base;
+  const mergeBase = gitTry(['-C', wt, 'merge-base', ref, 'HEAD']).out.trim();
   if (mergeBase === '') {
     return mergeBase;
   }
   // the base's tip is already inside the child — the merge-base IS the fork
-  if (gitTry(['-C', wt, 'merge-base', '--is-ancestor', base, 'HEAD']).code === 0) {
+  if (gitTry(['-C', wt, 'merge-base', '--is-ancestor', ref, 'HEAD']).code === 0) {
     return mergeBase;
   }
   // git's own answer — the base's reflog, not a guess
-  const forked = gitTry(['-C', wt, 'merge-base', '--fork-point', base, 'HEAD']).out.trim();
+  const forked = gitTry(['-C', wt, 'merge-base', '--fork-point', ref, 'HEAD']).out.trim();
   if (forked !== '') {
     return forked;
   }
-  const cherry = gitTry(['-C', wt, 'cherry', base, 'HEAD']).out.trim();
+  const cherry = gitTry(['-C', wt, 'cherry', ref, 'HEAD']).out.trim();
+  if (cherry === '') {
+    // every commit the member carries is in the base by patch — there is
+    // no work of its own to replay, and the fork is its own tip
+    return gitTry(['-C', wt, 'rev-parse', 'HEAD']).out.trim();
+  }
   let fork = '';
   for (const line of cherry.split('\n')) {
     // The cherry list runs OLDEST first: the equivalent commits the
@@ -619,27 +763,135 @@ export function forkPoint(base: string, wt: string): string {
       fork = line.slice(2).trim();
     }
   }
-  return fork === '' ? mergeBase : fork;
+  return fork;
+}
+
+/** Where the member's replay must start — the fork, in the order of how
+ *  well each answer knows the truth.
+ *
+ *  1. THE PLAN'S SHA — the base's tip as the plan saw it — but only
+ *     while the member's CURRENT history still carries it: the member
+ *     may have been rewritten since the plan (the platform's follow),
+ *     and a commit the member does not carry is not a fork.
+ *  2. THE BASE THE MEMBER FORKED FROM (`oldBase`) — the branch the
+ *     member's line actually left, so `forkPoint` asks the right
+ *     question: where was that base when the member branched off it.
+ *     The BASE's reflog is the base's own history — the member's own
+ *     branch moves cannot rewrite it, so a member that was deleted and
+ *     recreated (a new creation entry, a later point) cannot fool it.
+ *  3. THE MEMBER'S OWN CREATION POINT — the base's ref may be GONE (the
+ *     platform deleted it after the merge), and the member's history
+ *     still remembers where its work began.
+ *  4. NOTHING — and that is an answer too. The desired base's reflog
+ *     answers a DIFFERENT question (where the desired base forked from
+ *     the member's line), and its answer is OLDER than the truth: it is
+ *     where the chain left the trunk, so a replay from there carries
+ *     the base's old commits. No fork, no rebase: the owner resolves
+ *     it. */
+export function forkFor(
+  branch: string,
+  forkSha: string | undefined,
+  oldBase: string,
+  wt: string
+): string {
+  if (forkSha !== undefined && carriesCommit(branch, forkSha, wt) === true) {
+    return forkSha;
+  }
+  const fromBase = forkPoint(oldBase, wt);
+  if (fromBase !== '') {
+    return fromBase;
+  }
+  const own = forkFromReflog(branch, wt);
+  if (own !== undefined) {
+    return own;
+  }
+  return '';
+}
+
+/** The merge commits in the range a rebase would replay — the refusal
+ *  line, or undefined when the range is clean.
+ *
+ *  A plain rebase LINEARIZES: the merge commits in the range are
+ *  dropped, and with them the conflict resolutions they carry (the
+ *  corruption class `stack merge --rebase` refuses, PR #872). An
+ *  unreadable count is a refusal too: an unknown truth is not "no
+ *  merges". */
+function mergeCommitRefusal(path: string, range: string, branch: string): string | undefined {
+  const count = countMergesInRange(path, range);
+  if (count === undefined) {
+    return `  ${branch} skipped — the merge commits in its range cannot be counted; owner resolves on enter`;
+  }
+  if (count > 0) {
+    return `  ${branch} contains merge commits — a rebase cannot preserve merge resolutions; use merge or squash`;
+  }
+  return undefined;
 }
 
 /** Rebase a member's branch onto its new base and force-push the result
- *  when a PR rides it. The fork point is the recorded old base — under
- *  squash merges a merge-base can predate the parent's commits and
- *  replay already-squashed changes; the edge is the truthful fork. */
+ *  when a PR rides it. The fork point is the base's tip AS THE PLAN SAW
+ *  IT — a SHA captured before the cascade moved any ref. A branch name
+ *  read here would be the base's NEW tip, and git would fall back to
+ *  the merge-base: too old, and the parent's old commits ride along as
+ *  add/add conflicts. */
 function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
   const m = item.member;
   const wt = m.worktree!;
-  const oldRef =
-    item.oldBase !== item.desiredBase &&
-    gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', `refs/heads/${item.oldBase}`])
-      .code === 0
-      ? item.oldBase
-      : undefined;
-  const fork = oldRef ?? forkPoint(item.desiredBase, wt.path);
-  const rb =
-    fork === ''
-      ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
-      : gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork]);
+  const fork = forkFor(m.branch, m.forkSha, item.oldBase, wt.path);
+  if (fork === '') {
+    // No verified fork: the plan's SHA is not carried, the base's reflog
+    // cannot place the fork, and the member's own cannot either. A guess
+    // here would replay the base's old commits — so the member is left
+    // alone and its owner is told.
+    lines.push(
+      `  ${m.branch} skipped — the fork could not be established (the base's reflog is gone and the member's own does not answer); owner resolves on enter`
+    );
+    return false;
+  }
+  // A plain rebase LINEARIZES: the merge commits in the replayed range
+  // are dropped, and with them the conflict resolutions they carry. The
+  // member comes out rewritten and the sync says "rebased" — the
+  // content is gone. Same corruption class as `stack merge --rebase`,
+  // which refuses it (bro-dz0u9, PR #872) — the same counter, the same
+  // wording.
+  //
+  // The tip is read ONCE and pins everything downstream: the counted
+  // range is `fork..head`, the replay is exactly that range, and the
+  // branch moves by compare-and-swap against that same `head`. A branch
+  // that moved meanwhile fails the swap — the tip is never re-read, so
+  // the range and the replay can never speak about different commits.
+  const head = gitTry([
+    '-C',
+    wt.path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${m.branch}`,
+  ]).out.trim();
+  if (head === '') {
+    lines.push(`  ${m.branch} skipped — its tip cannot be read; owner resolves on enter`);
+    return false;
+  }
+  const refusal = mergeCommitRefusal(wt.path, `${fork}..${head}`, m.branch);
+  if (refusal !== undefined) {
+    lines.push(refusal);
+    return false;
+  }
+  // The replay is PINNED to the counted commits: `git rebase --onto <base>
+  // <fork> <head>` replays exactly `fork..head` and leaves the branch ref
+  // alone (detached HEAD). Nothing that lands after the count can be
+  // replayed uncounted. The branch then moves by COMPARE-AND-SWAP: if it
+  // moved since the count — the owner committed meanwhile — the swap
+  // fails and the branch is left exactly as the owner left it. A member
+  // whose history changed under the sync is reported, never rewritten.
+  const rb = gitTry([
+    '-C',
+    wt.path,
+    'rebase',
+    '--onto',
+    ontoBase(wt.path, item.desiredBase),
+    fork,
+    head,
+  ]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(
@@ -647,6 +899,17 @@ function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean 
     );
     return false;
   }
+  const replayed = gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', 'HEAD']).out.trim();
+  const swap = gitTry(['-C', wt.path, 'update-ref', `refs/heads/${m.branch}`, replayed, head]);
+  if (swap.code !== 0) {
+    // the branch moved while the replay ran — put the worktree back on it
+    gitTry(['-C', wt.path, 'checkout', m.branch]);
+    lines.push(
+      `  ${m.branch} moved during the rebase (${head.slice(0, 7)} was not the tip anymore) — not rebased; re-run to land the new tip`
+    );
+    return false;
+  }
+  gitTry(['-C', wt.path, 'checkout', m.branch]);
   lines.push(`  ${m.branch} rebased onto ${item.desiredBase}`);
   if (m.pr === undefined) {
     return true;
@@ -723,8 +986,33 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     lines.push(`  ${m.branch} remote gone — worktree left as-is`);
     return false;
   }
-  const before = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim();
-  const rb = gitTry(['-C', wt.path, 'rebase', 'FETCH_HEAD']);
+  const before = gitTry([
+    '-C',
+    wt.path,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${m.branch}`,
+  ]).out.trim();
+  // the platform's rewrite is a rebase too: the range it replays must be
+  // free of merge commits, or their resolutions are dropped (bro-dz0u9)
+  const fork = gitTry(['-C', wt.path, 'merge-base', 'FETCH_HEAD', 'HEAD']).out.trim();
+  if (fork === '' || before === '') {
+    lines.push(
+      `  ${m.branch} skipped — the rewritten remote's fork cannot be read; owner resolves on enter`
+    );
+    return false;
+  }
+  const refusal = mergeCommitRefusal(wt.path, `${fork}..${before}`, m.branch);
+  if (refusal !== undefined) {
+    lines.push(refusal);
+    return false;
+  }
+  // the replay is PINNED to the counted commits (the same shape as the
+  // local rebase): `git rebase --onto FETCH_HEAD <fork> <before>` replays
+  // exactly `fork..before` and leaves the branch ref alone, so nothing
+  // that lands after the count is replayed uncounted
+  const rb = gitTry(['-C', wt.path, 'rebase', '--onto', 'FETCH_HEAD', fork, before]);
   if (rb.code !== 0) {
     gitTry(['-C', wt.path, 'rebase', '--abort']);
     lines.push(
@@ -733,6 +1021,17 @@ function followRemote(m: MemberView, lines: string[]): boolean {
     return false;
   }
   const after = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim();
+  // the branch moves by compare-and-swap: a branch that moved while the
+  // replay ran is left exactly as its owner left it
+  const swap = gitTry(['-C', wt.path, 'update-ref', `refs/heads/${m.branch}`, after, before]);
+  if (swap.code !== 0) {
+    gitTry(['-C', wt.path, 'checkout', m.branch]);
+    lines.push(
+      `  ${m.branch} moved during the follow (${before.slice(0, 7)} was not the tip anymore) — not rebased; re-run to land the new tip`
+    );
+    return false;
+  }
+  gitTry(['-C', wt.path, 'checkout', m.branch]);
   lines.push(
     before === after
       ? `  ${m.branch} already on the rewritten remote`
@@ -782,58 +1081,6 @@ function membershipPreflight(
   return 'unproven';
 }
 
-function buildPublishChain(
-  open: MemberView[],
-  defaultBase: string
-): StackChainMember[] {
-  return open.map((m) => ({
-    branch: m.branch,
-    base: displayBase(m, defaultBase),
-    pr: m.pr,
-    headSha: m.headSha,
-  }))
-}
-
-function publishStackChain(
-  name: string,
-  stacks: StackFacade,
-  chain: StackChainMember[],
-  lines: string[]
-): PublishOutcome {
-  try {
-    const hit = stacks.publish?.(chain)
-    if (hit === null || hit === undefined) {
-      lines.push(`  stack ${name} publish failed — host reported no membership`)
-      return 'failed'
-    }
-    lines.push(`  stack ${name} published — stack #${hit.id}`)
-    return 'registered'
-  } catch (err) {
-    lines.push(`  stack ${name} publish failed — ${(err as Error).message}`)
-    return 'failed'
-  }
-}
-
-function handlePublishPreflight(
-  name: string,
-  open: MemberView[],
-  stacks: StackFacade,
-  lines: string[],
-  quiet: boolean
-): PublishOutcome | undefined {
-  if (stacks.membership === undefined) {
-    return undefined
-  }
-  const pre = membershipPreflight(name, open, stacks.membership, lines, quiet)
-  if (pre === 'refused') {
-    return 'failed'
-  }
-  if (pre === 'registered') {
-    return 'registered'
-  }
-  return undefined
-}
-
 /** Register the chain's open member PRs as the host's stack object —
  *  `gh stack link` on GitHub, absent everywhere chains are detected
  *  from the base links themselves. `quiet` is the cascade caller:
@@ -856,12 +1103,33 @@ function publishStack(
     }
     return 'skipped';
   }
-  const pre = handlePublishPreflight(name, open, stacks, lines, quiet)
-  if (pre !== undefined) {
-    return pre
+  if (stacks.membership !== undefined) {
+    const pre = membershipPreflight(name, open, stacks.membership, lines, quiet);
+    if (pre === 'refused') {
+      return 'failed';
+    }
+    if (pre === 'registered') {
+      return 'registered';
+    }
   }
-  const chain = buildPublishChain(open, defaultBase)
-  return publishStackChain(name, stacks, chain, lines)
+  const chain: StackChainMember[] = open.map(m => ({
+    branch: m.branch,
+    base: displayBase(m, defaultBase),
+    pr: m.pr,
+    headSha: m.headSha,
+  }));
+  try {
+    const hit = stacks.publish?.(chain);
+    if (hit === null || hit === undefined) {
+      lines.push(`  stack ${name} publish failed — host reported no membership`);
+      return 'failed';
+    }
+    lines.push(`  stack ${name} published — stack #${hit.id}`);
+    return 'registered';
+  } catch (err) {
+    lines.push(`  stack ${name} publish failed — ${(err as Error).message}`);
+    return 'failed';
+  }
 }
 
 /** `bro stack publish [<name>]` — the post-hoc verb: member PRs are
@@ -1029,39 +1297,6 @@ function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): SyncOutcome {
   return moveMember(item, m, ctx);
 }
 
-function runStackSyncCascade(ctx: SyncCtx, members: MemberView[]): boolean {
-  ctx.defaultBase = chainRootBase(members, ctx.trunk)
-  markBaseHeads(members, ctx.root, ctx.defaultBase)
-  // A clean cascade — nothing skipped, nothing refused — leaves the
-  // chain's base==prev-head invariant proven, which is exactly what the
-  // host's stack registration demands. A dirty member or a failed move
-  // breaks it: defer publish instead of feeding the tool a reject.
-  let intact = true
-  for (const item of planSync(members, ctx.defaultBase)) {
-    if (syncMember(item, ctx) === 'failed') {
-      intact = false
-    }
-  }
-  return intact
-}
-
-function maybeAutoPublish(
-  intact: boolean,
-  stacks: StackFacade | undefined,
-  name: string,
-  members: MemberView[],
-  ctx: SyncCtx,
-  status?: { publishFailed: boolean }
-): void {
-  if (!intact || stacks?.publish === undefined) {
-    return
-  }
-  const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true)
-  if (outcome === 'failed' && status !== undefined) {
-    status.publishFailed = true
-  }
-}
-
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
  *  post-merge step. Per-member cascade ownership comes from the
  *  connector's stacks facade: when the platform already retargeted the
@@ -1088,21 +1323,48 @@ export function syncStack(
     trunk,
     defaultBase: trunk,
     lines: [],
+  };
+  const members = collectMembers(name, root, ctx.rev);
+  // a branch that no longer exists cannot carry the chain — the git truth
+  // decides, so the root falls back to the default branch
+  const chainRoot =
+    chainRootBase(members, ctx.trunk, b => localBranch(root, b)) ??
+    // the default branch may live ONLY as a remote-tracking ref
+    // (bro-yi9sz): a checkout that never created it locally still has a
+    // base to stand on. A member's own edge base keeps the local-only
+    // rule above — a deleted branch must not be resurrected by a stale,
+    // unpruned tracking ref.
+    (baseRef(root, ctx.trunk) !== undefined ? ctx.trunk : undefined);
+  if (chainRoot === undefined) {
+    // not even the default branch exists locally: there is nothing to
+    // stand on, and planning onto a dead ref is what this guard is for
+    ctx.lines.push(
+      `  ${name} — the chain's root ${ctx.trunk} does not exist; nothing to sync onto`
+    );
+    return ctx.lines;
   }
-  const members = collectMembers(name, root, ctx.rev)
-  const intact = runStackSyncCascade(ctx, members)
-  maybeAutoPublish(intact, ctx.stacks, name, members, ctx, status)
-  return ctx.lines
-}
-
-function printSyncResult(lines: string[]): void {
-  if (lines.length === 0) {
-    console.log('  in sync')
-    return
+  ctx.defaultBase = chainRoot;
+  markBaseHeads(members, root, ctx.defaultBase);
+  // A clean cascade — nothing skipped, nothing refused — leaves the
+  // chain's base==prev-head invariant proven, which is exactly what the
+  // host's stack registration demands. A dirty member or a failed move
+  // breaks it: defer publish instead of feeding the tool a reject.
+  let intact = true;
+  const plan = planSync(members, ctx.defaultBase);
+  for (const item of plan) {
+    const outcome = syncMember(item, ctx);
+    if (outcome === 'failed') {
+      intact = false;
+    }
   }
-  for (const l of lines) {
-    console.log(l)
+  const stacks = ctx.stacks;
+  if (intact && stacks?.publish !== undefined) {
+    const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true);
+    if (outcome === 'failed' && status !== undefined) {
+      status.publishFailed = true;
+    }
   }
+  return ctx.lines;
 }
 
 function cmdSync(argv: string[]): void {
@@ -1114,10 +1376,16 @@ function cmdSync(argv: string[]): void {
     return;
   }
   for (const name of names) {
-    console.log(`stack ${name}:`)
-    const status = { publishFailed: false }
-    const lines = syncStack(main.path, name, status)
-    printSyncResult(lines)
+    console.log(`stack ${name}:`);
+    const status = { publishFailed: false };
+    const lines = syncStack(main.path, name, status);
+    if (lines.length === 0) {
+      console.log('  in sync');
+    } else {
+      for (const l of lines) {
+        console.log(l);
+      }
+    }
     if (status.publishFailed) {
       process.exitCode = 1;
     }
@@ -1125,155 +1393,6 @@ function cmdSync(argv: string[]): void {
 }
 
 const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin']);
-
-function mergeOptsFrom(argv: string[]): StackMergeOpts {
-  const picked = (['--squash', '--merge', '--rebase'] as const).filter((f) => argv.includes(f))
-  if (picked.length > 1) {
-    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`)
-    usage()
-  }
-  return {
-    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
-    admin: argv.includes('--admin'),
-  }
-}
-
-function resolveMergeStackName(argv: string[]): string | undefined {
-  const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true })
-  return (
-    flag(argv, '--name') ??
-    pos[0] ??
-    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name
-  )
-}
-
-function computeMergeable(
-  live: Array<{
-    branch: string
-    pr?: number
-    prState?: string
-    headSha?: string
-  }>,
-  rev: { repo: string; facade: ReviewFacade } | undefined,
-  stacks: ReturnType<typeof resolveStacks>
-): Array<{
-  branch: string
-  pr?: number
-  prState?: string
-  headSha?: string
-}> | undefined {
-  let mergeable = live
-  if (rev !== undefined) {
-    const cut = live.findIndex((m) => m.pr === undefined || m.prState !== 'OPEN')
-    mergeable = cut === -1 ? live : live.slice(0, cut)
-    if (mergeable.length === 0) {
-      console.error(
-        `error: bottom member ${live[0]!.branch} has no OPEN PR — nothing can merge past it`
-      )
-      process.exitCode = 1
-      return undefined
-    }
-    if (mergeable.length < live.length) {
-      console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`)
-    }
-    return mergeable
-  }
-  if (stacks?.mergeChain === undefined) {
-    console.error('error: no merge path — no review host and no stacks connector serve this repo')
-    process.exitCode = 1
-    return undefined
-  }
-  return mergeable
-}
-
-async function gateMergeable(
-  mergeable: Array<{ branch: string; pr?: number }>,
-  main: ReturnType<typeof mainWorktree>,
-  rev: { repo: string; facade: ReviewFacade }
-): Promise<boolean> {
-  const act = loadBroConfig(main.path).act
-  for (const m of mergeable) {
-    const pr = m.pr
-    if (pr === undefined) {
-      continue
-    }
-    const state = await fetchPrActState(
-      rev.facade,
-      { repo: rev.repo, pr },
-      {
-        ignoreChecks: act.ignoreChecks,
-        checkHistory: checkHistory(main.path),
-        maxRounds: act.maxRounds,
-        docsPaths: act.docsPaths,
-        docsMaxRounds: act.docsMaxRounds,
-        requireApproval: act.requireApproval,
-        approvers: act.approvers,
-        resolveLedger: resolveLedger(main.path),
-      }
-    )
-    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
-    if (gate.ok) {
-      continue
-    }
-    console.error(
-      `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
-    )
-    for (const b of gate.blockers) {
-      console.error(`  blocker: ${b}`)
-    }
-    process.exitCode = 1
-    return false
-  }
-  return true
-}
-
-function doStackMerge(
-  mergeable: Array<{ branch: string; pr?: number; headSha?: string }>,
-  trunk: string,
-  opts: StackMergeOpts,
-  stacks: ReturnType<typeof resolveStacks>,
-  rev: { repo: string; facade: ReviewFacade } | undefined
-) {
-  const chain: StackChainMember[] = mergeable.map((m) => ({
-    branch: m.branch,
-    base: trunk,
-    pr: m.pr,
-    headSha: m.headSha,
-  }))
-  const report =
-    stacks?.mergeChain?.(chain, opts) ??
-    (rev !== undefined
-      ? mergeChainPerLayer(rev.facade, rev.repo, chain, opts, (m) =>
-          stacks?.cascade?.(m) ?? MANUAL_CASCADE
-        )
-      : undefined)
-  if (report === undefined) {
-    console.error('error: stack merge declined — no connector can merge this chain')
-    process.exitCode = 1
-    return undefined
-  }
-  return report
-}
-
-function postMergeRetire(
-  mergeable: Array<{ branch: string; pr?: number }>,
-  report: { lines: string[]; merged: string[] },
-  main: ReturnType<typeof mainWorktree>
-): void {
-  for (const l of report.lines) {
-    console.log(l)
-  }
-  const mergedSet = new Set(report.merged)
-  for (const m of mergeable) {
-    if (mergedSet.has(m.branch) && m.pr === undefined) {
-      const retireLines: string[] = []
-      retireMerged(m, main.path, retireLines)
-      for (const l of retireLines) {
-        console.log(l)
-      }
-    }
-  }
-}
 
 /** `bro stack merge` — land the chain bottom→top through the
  *  connector's own mechanism: `gh stack merge` where the extension
@@ -1283,17 +1402,29 @@ function postMergeRetire(
  *  evaluated BEFORE the first merge call — refusing early keeps even
  *  the per-layer fallback effectively all-or-nothing on the gate axis. */
 async function cmdMerge(argv: string[]): Promise<void> {
-  const name = resolveMergeStackName(argv)
+  const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true });
+  const name =
+    flag(argv, '--name') ??
+    pos[0] ??
+    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name;
   if (name === undefined || !isStackName(name)) {
     console.error('error: no stack context — pass a name or run inside a member worktree');
     usage();
   }
-  const opts = mergeOptsFrom(argv)
-  const main = mainWorktree()
-  const trunk = defaultBranchName() ?? main.branch ?? 'main'
-  const rev = resolveReview(main.path)
-  const stacks = resolveStacks(main.path)
-  const members = collectMembers(name, main.path, rev)
+  const picked = (['--squash', '--merge', '--rebase'] as const).filter(f => argv.includes(f));
+  if (picked.length > 1) {
+    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`);
+    usage();
+  }
+  const opts: StackMergeOpts = {
+    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
+    admin: argv.includes('--admin'),
+  };
+  const main = mainWorktree();
+  const trunk = defaultBranchName() ?? main.branch ?? 'main';
+  const rev = resolveReview(main.path);
+  const stacks = resolveStacks(main.path);
+  const members = collectMembers(name, main.path, rev);
   if (members.length === 0) {
     console.log(`stack ${name} has no members — nothing to merge`);
     return;
@@ -1303,9 +1434,28 @@ async function cmdMerge(argv: string[]): Promise<void> {
     console.log('nothing to merge — every member already landed');
     return;
   }
-  const mergeable = computeMergeable(live, rev, stacks)
-  if (mergeable === undefined) {
-    return
+  // The merge set is the contiguous prefix that CAN land — on a review
+  // host that means an OPEN PR per member, so a PR-less or closed member
+  // breaks the chain (nothing merges past it). Forge-less, every member
+  // is mergeable: git lands the whole chain.
+  let mergeable = live;
+  if (rev !== undefined) {
+    const cut = live.findIndex(m => m.pr === undefined || m.prState !== 'OPEN');
+    mergeable = cut === -1 ? live : live.slice(0, cut);
+    if (mergeable.length === 0) {
+      console.error(
+        `error: bottom member ${live[0]!.branch} has no OPEN PR — nothing can merge past it`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (mergeable.length < live.length) {
+      console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`);
+    }
+  } else if (stacks?.mergeChain === undefined) {
+    console.error('error: no merge path — no review host and no stacks connector serve this repo');
+    process.exitCode = 1;
+    return;
   }
 
   // gate evaluation → merge is one critical section, same as act merge —
@@ -1321,14 +1471,85 @@ async function cmdMerge(argv: string[]): Promise<void> {
     return;
   }
   try {
-    if (rev !== undefined && !(await gateMergeable(mergeable, main, rev))) {
-      return
+    // gate every mergeable layer before the first merge — an unresolved
+    // thread three layers up must not leave the bottom two landed
+    if (rev !== undefined) {
+      const act = loadBroConfig(main.path).act;
+      for (const m of mergeable) {
+        const pr = m.pr;
+        if (pr === undefined) {
+          continue; // unreachable — the prefix guarantees an OPEN PR
+        }
+        const state = await fetchPrActState(
+          rev.facade,
+          { repo: rev.repo, pr },
+          {
+            ignoreChecks: act.ignoreChecks,
+            checkHistory: checkHistory(main.path),
+            maxRounds: act.maxRounds,
+            docsPaths: act.docsPaths,
+            docsMaxRounds: act.docsMaxRounds,
+            requireApproval: act.requireApproval,
+            approvers: act.approvers,
+            resolveLedger: resolveLedger(main.path),
+          }
+        );
+        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
+        if (!gate.ok) {
+          console.error(
+            `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
+          );
+          for (const b of gate.blockers) {
+            console.error(`  blocker: ${b}`);
+          }
+          process.exitCode = 1;
+          return;
+        }
+      }
     }
-    const report = doStackMerge(mergeable, trunk, opts, stacks, rev)
+    const chain: StackChainMember[] = mergeable.map(m => ({
+      branch: m.branch,
+      base: trunk,
+      pr: m.pr,
+      headSha: m.headSha,
+    }));
+    const report =
+      stacks?.mergeChain?.(chain, opts) ??
+      (rev !== undefined
+        ? mergeChainPerLayer(
+            rev.facade,
+            rev.repo,
+            chain,
+            opts,
+            m => stacks?.cascade?.(m) ?? MANUAL_CASCADE
+          )
+        : undefined);
     if (report === undefined) {
-      return
+      // a stacks facade that declined and no reviews facade to fall
+      // back on — git-only connectors always carry mergeChain, so this
+      // is the no-connector corner
+      console.error('error: stack merge declined — no connector can merge this chain');
+      process.exitCode = 1;
+      return;
     }
-    postMergeRetire(mergeable, report, main)
+    for (const l of report.lines) {
+      console.log(l);
+    }
+    // a PR-less member that landed is invisible to sync's MERGED
+    // detection — retire it here; members with reviews retire inside
+    // the sync pass their host reports
+    const mergedSet = new Set(report.merged);
+    for (const m of mergeable) {
+      if (mergedSet.has(m.branch) && m.pr === undefined) {
+        const retireLines: string[] = [];
+        retireMerged(m, main.path, retireLines);
+        for (const l of retireLines) {
+          console.log(l);
+        }
+      }
+    }
+    // the post-merge cascade: forge-merged retirement, retargets,
+    // rebases — same pass `bro stack sync` runs
     for (const l of syncStack(main.path, name)) {
       console.log(l);
     }

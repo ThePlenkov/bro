@@ -1,0 +1,23 @@
+:root { --fd-banner-height: 108px; }
+body { margin: 0; padding-top: 108px; background: #0a0c0b; color: #d6ddd9; }
+.toolkit-shell { position: fixed; inset: 0 0 auto; z-index: 60; background: #0a0c0b; border-bottom: 1px solid #1d2320; font-family: ui-monospace, monospace; }
+.wip-banner { height: 36px; display: flex; align-items: center; justify-content: center; gap: 12px; background: #201c13; color: #f5b454; font-size: 12px; border-bottom: 1px solid #44351e; }
+.wip-banner strong { text-transform: uppercase; letter-spacing: .08em; }
+.toolkit-nav { max-width: 1100px; height: 72px; padding: 0 24px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.toolkit-nav a { color: #a4b0a9; text-decoration: none; }
+.toolkit-nav a:hover, .product-menu summary:hover { color: #5eea9a; }
+.toolkit-nav .toolkit-logo { font-size: 22px; font-weight: 700; color: #d6ddd9; }
+.toolkit-nav nav { display: flex; gap: 24px; align-items: center; font-size: 13px; }
+.product-menu { position: relative; color: #a4b0a9; }
+.product-menu summary { cursor: pointer; }
+.product-menu > div { position: absolute; top: 32px; left: 0; width: 230px; padding: 12px; background: #0f1211; border: 1px solid #35413a; box-shadow: 0 12px 32px #0008; }
+.product-menu > div a { display: block; padding: 10px; }
+.toolkit-nav a:focus-visible, .product-menu summary:focus-visible { outline: 2px solid #5eea9a; outline-offset: 5px; }
+@media (max-width: 600px) {
+  .toolkit-nav { padding: 0 16px; gap: 12px; }
+  .toolkit-nav nav { gap: 12px; font-size: 11px; }
+  .toolkit-nav .toolkit-logo { font-size: 18px; }
+  .wip-banner { font-size: 10px; gap: 8px; }
+  .wip-banner span { max-width: 200px; line-height: 1.2; }
+  .product-menu > div { left: -48px; }
+}

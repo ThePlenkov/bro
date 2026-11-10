@@ -202,7 +202,8 @@ function openLog(ref) {
   logLine('[connecting]', 'muted');
   var es = new EventSource(
     '/api/v1/agents/' + encodeURIComponent(ref) +
-    '/log?follow&lines=' + LOG_REPLAY + '&token=' + encodeURIComponent(logToken));
+    '/log?follow&lines=' + LOG_REPLAY + '&' +
+    new URLSearchParams({ token: logToken }));
   logView.es = es;
   var got = false;
   es.onopen = function () {

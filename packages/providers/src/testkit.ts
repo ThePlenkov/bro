@@ -146,6 +146,9 @@ export function fakeAcpAgent(
      *  {sessionId: sid, path: '/x'})`; its result lands in
      *  `probeResult` (bro-ymbq1's brokered bridge). */
     probeClient?: (client: AgentContext, sessionId: string) => Promise<unknown>;
+    /** The pause before each emitted update (ms) — a test that needs a
+     *  turn to outlive a watchdog window while it keeps reporting. */
+    updateDelayMs?: number;
     /** The prompt turn holds until this resolves — lets a test observe
      *  live mid-turn traffic (session/update fan-out, cancel) before
      *  the stop flows (bro-ymbq1). */
@@ -299,6 +302,9 @@ export function fakeAcpAgent(
         },
       ];
       for (const update of updates) {
+        if (opts.updateDelayMs !== undefined) {
+          await new Promise<void>(resolve => setTimeout(resolve, opts.updateDelayMs));
+        }
         await ctx.client.notify('session/update', {
           sessionId: ctx.params.sessionId,
           update,

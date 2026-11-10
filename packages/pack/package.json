@@ -23,7 +23,8 @@
   "files": [
     "dist",
     "skills",
-    "formulas"
+    "formulas",
+    "pack.json"
   ],
   "engines": {
     "node": ">=22.18"
@@ -44,5 +45,9 @@
     "skills",
     "agent"
   ],
-  "homepage": "https://broject.dev/docs"
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
 }

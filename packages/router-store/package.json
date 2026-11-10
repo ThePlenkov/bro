@@ -1,0 +1,51 @@
+{
+  "name": "@broject/router-store",
+  "version": "0.3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@broject/core": "^0.3.0",
+    "drizzle-orm": "^1.0.0-rc.5"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/router-store"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "router-store — the router's own ledger: the health facts a route decision reads",
+  "keywords": [
+    "router",
+    "sqlite",
+    "health",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs",
+  "bro": {
+    "kind": "capability",
+    "status": "beta"
+  }
+}
