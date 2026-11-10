@@ -63,6 +63,7 @@
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
+import { spawn } from 'node:child_process';
 import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -160,6 +161,7 @@ import {
 import { type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
 import { rigNext, type RigNext } from './rig-next.ts';
+import { SELF_ENTRY } from './self-entry.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts';
 
@@ -2735,13 +2737,60 @@ function lanePauseTick(ctx: Ctx): void {
   }
 }
 
-/** The pass's litter sweep (spec bro-7dgu3) — the same reapLoopLitter
- *  the loop closeout and `bro work prune --loop` run: merges landing
- *  without a cleanup caller (GitHub auto-merge, UI merges) strand their
- *  worktrees otherwise, and dead fixers' orphaned nx daemons keep the
- *  trees "occupied" on every /proc plane until the sweep kills them.
- *  Callers own the cadence throttle and the try/catch — a sweep
- *  failure is a warning, never a pass failure. */
+/** The pass's litter sweep (spec bro-7dgu3) — isolated in a child
+ *  process: reapLoopLitter's rooted scans and per-candidate lookups are
+ *  synchronous, so in-pass they'd stall the supervisor's event loop and
+ *  could let the drive role lease lapse on a repo with many candidates.
+ *  `bro work prune --loop` IS the same sweep — the child carries the
+ *  full nx-kill wait budget while this process stays responsive. The
+ *  awaited close still lands before the pass's enumeration, so a reaped
+ *  branch never reaches openFleetPrs — only the event loop is freed,
+ *  not the ordering. */
+async function litterSweep(ctx: Ctx): Promise<void> {
+  const entry = SELF_ENTRY;
+  if (entry === null) {
+    // imported by a test harness — no CLI argv to respawn; run in-pass
+    sayLitterSweep(ctx, litterSweepTick(ctx));
+    return;
+  }
+  await new Promise<void>(resolvePromise => {
+    const child = spawn(process.execPath, [entry, 'work', 'prune', '--loop'], {
+      cwd: ctx.mainRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout?.on('data', (c: Buffer) => {
+      out += c.toString();
+    });
+    child.stderr?.on('data', (c: Buffer) => {
+      out += c.toString();
+    });
+    const done = (warn?: string): void => {
+      for (const line of out.split('\n')) {
+        const t = line.trim();
+        // kept lines are the sweep's noise floor — same policy as
+        // sayLitterSweep: relay actions, warnings, and the tally only
+        if (t !== '' && !t.startsWith('kept ')) {
+          say(ctx, `drive litter: ${t}`);
+        }
+      }
+      if (warn !== undefined) {
+        say(ctx, `warning: litter sweep — ${warn}`);
+      }
+      resolvePromise();
+    };
+    child.on('error', err => done(errText(err)));
+    child.on('close', code => done(code === 0 ? undefined : `exit ${code ?? '?'}`));
+  });
+}
+
+/** The in-pass sweep primitive — the same reapLoopLitter the loop
+ *  closeout and `bro work prune --loop` run: merges landing without a
+ *  cleanup caller (GitHub auto-merge, UI merges) strand their worktrees
+ *  otherwise, and dead fixers' orphaned nx daemons keep the trees
+ *  "occupied" on every /proc plane until the sweep kills them. Only
+ *  reached when SELF_ENTRY is unset (test harness) — the supervisor
+ *  path sweeps in a child so the scans never touch the event loop. */
 function litterSweepTick(ctx: Ctx): LitterReap {
   // the sweep's git helpers narrate via console.log — under --json
   // route them to stderr like the loop audit does, or the verdict
@@ -2807,7 +2856,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   if (ctx.litter.sweepSec > 0 && Date.now() - ctx.litter.lastAt >= ctx.litter.sweepSec * 1000) {
     ctx.litter.lastAt = Date.now();
     try {
-      sayLitterSweep(ctx, litterSweepTick(ctx));
+      await litterSweep(ctx);
     } catch (err) {
       say(ctx, `warning: litter sweep failed — ${errText(err)}`);
     }

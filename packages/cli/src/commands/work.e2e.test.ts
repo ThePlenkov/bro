@@ -84,10 +84,17 @@ const fakeNxDaemon = (wt: string): number => {
 /** Wait until /proc shows the spawned argv — the sweep's own rooted
  *  scan reads the same plane, so the fixture must be visible first. */
 const waitCmdline = (pid: number, needle: string): void => {
-  const f = `/proc/${pid}/cmdline`;
+  // /proc is linux-only — darwin reads the same argv through `ps`
+  // (NUL- vs space-separated doesn't matter for an includes probe)
+  const readCmd = (): string => {
+    if (process.platform === 'linux') {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    }
+    return spawnSync('ps', ['-o', 'command=', '-p', String(pid)]).stdout?.toString() ?? '';
+  };
   for (let i = 0; i < 60; i++) {
     try {
-      if (readFileSync(f, 'utf8').includes(needle)) return;
+      if (readCmd().includes(needle)) return;
     } catch {
       // not yet exec'd
     }
