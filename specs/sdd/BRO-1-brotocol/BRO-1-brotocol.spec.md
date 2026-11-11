@@ -196,6 +196,22 @@ status: draft
   `@broject/brotocol`. Scaffold (`bro spec new`) renders the resolved
   template — `scaffoldBody` in today's connector is the hand-written
   `spec@0` this replaces.
+- **Parse/render contract.** `parse(file)` returns `{ frontmatter,
+  sectionTree }` with byte positions — position-accurate so edits
+  splice spans instead of rewriting the file (spec docs must stay
+  byte-stable where untouched; a full-doc serializer churns git
+  diffs). `render(template, values)` produces md text for scaffold
+  and migration re-renders. A *template* is a declarative document
+  schema — `{ frontmatter: zodSchema, sections: SectionSpec[] }` —
+  the ProseMirror-schema idea without the editor toolkit. Decision:
+  **no ProseMirror** — PM's doc model serves WYSIWYG editing
+  (selections, marks), its markdown adapter wraps markdown-it anyway
+  (~6 deps), and its serialize-the-doc output loses frontmatter,
+  HTML-comment managed blocks and byte fidelity. The parser is a
+  seam: hand-rolled frontmatter+heading parse initially (specs are
+  shallow), `mdast-util`/`remark` if section validation ever needs
+  deeper structure. A spec *editor* UI could adopt PM later — editor
+  concerns are a different package.
 
 Additions this spec makes normative:
 
