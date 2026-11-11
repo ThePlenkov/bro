@@ -110,6 +110,7 @@ describe('act-gate — lifecycle → verdict', () => {
     const res = settled(await stageOf(probe.fn).invoke(call(memoryJournal())));
     assert.equal(res.verdict, 'landed');
     const p = res.payload as Record<string, unknown>;
+    assert.equal(p.state, 'MERGED'); // lifecycle echoed — landed via merge
     assert.equal(p.pr, 42); // the ctx ref echoed verbatim
     assert.equal(p.headSha, 'abc123def');
     assert.equal(p.mergedBy, 'octocat');
@@ -150,10 +151,12 @@ describe('act-gate — lifecycle → verdict', () => {
     assert.equal(res.verdict, 'landed');
     const p = res.payload as {
       verdict: string;
+      state: string;
       gate: Record<string, unknown>;
       headSha?: string;
     };
     assert.equal(p.verdict, 'landed');
+    assert.equal(p.state, 'OPEN'); // merge-ready, not yet physically merged
     assert.equal(p.headSha, 'abc123def');
     assert.deepEqual(p.gate, { ok: true, settling: false, provider: 'github', model: 'gh' });
     assert.match(String((res.payload as Record<string, unknown>).summary), /settled green/);

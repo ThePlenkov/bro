@@ -124,11 +124,16 @@ never blind.
 `ActGatePayload` merges into ctx flat AND under the stage name:
 
 ```ts
-{ verdict, pr, headSha?, url?, mergedBy?,
+{ verdict, state, pr, headSha?, url?, mergedBy?,
   gate?: { ok, settling, blockers?, ciPending?, reviewersPending?,
            ciFailing?, openThreads?, provider?, model? },
   summary? }
 ```
+
+`state` echoes the probed lifecycle verbatim — `landed` covers BOTH a
+physically-merged PR and an OPEN one the gate cleared (merge-ready;
+the host's auto-merge owns the physical landing, a declared
+non-goal), so downstream stages read `state` to tell them apart.
 
 `pr` echoes the resolved ref verbatim — capture's land scan already
 reads the `landed` record's payload as lesson evidence ("a `pr:` ref

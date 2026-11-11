@@ -136,6 +136,11 @@ export interface ActGatePayload {
   /** the emitted verdict, restated in the payload per the spec's
    *  `{verdict, …}` shape */
   verdict: ActGateVerdict;
+  /** the PR lifecycle the probe read — 'OPEN' | 'MERGED' | 'CLOSED'.
+   *  `landed` covers BOTH a physically-merged PR and an OPEN one the
+   *  gate cleared (merge-ready, host auto-merge owns the landing);
+   *  downstream stages read `state` to tell them apart. */
+  state: string;
   /** the resolved PR ref, echoed verbatim — capture's land scan
    *  reads it as lesson evidence */
   pr: ActGatePrRef;
@@ -348,7 +353,7 @@ function payloadFor(
   obs: ActGateObservation,
   ref: ActGatePrRef
 ): ActGatePayload {
-  const p: ActGatePayload = { verdict, pr: ref };
+  const p: ActGatePayload = { verdict, state: obs.state, pr: ref };
   if (obs.headSha !== undefined) {
     p.headSha = obs.headSha;
   }
