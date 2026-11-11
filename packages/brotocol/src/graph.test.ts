@@ -55,6 +55,20 @@ describe('tree', () => {
       `G-1  ${name}/G-1.spec.md`,
     ]);
   });
+
+  it('a self-parent doc and its subtree drop out of the listing', () => {
+    const { root: r2 } = mktree({
+      'spec.md': '---\nid: ROOT-0\n---\n# root\n',
+      'S-1.spec.md': '---\nid: S-1\nparent: S-1\n---\n# self\n',
+      'SC-1.spec.md': '---\nid: SC-1\nparent: S-1\n---\n# child of self\n',
+    });
+    after(() => rm(r2));
+    const lines = tree(proto(r2));
+    assert.ok(lines.some(l => l.includes('ROOT-0')));
+    assert.ok(!lines.some(l => l.includes('S-1')));
+    assert.ok(!lines.some(l => l.includes('SC-1')));
+    assert.ok(graph(proto(r2)).diagnostics.some(d => d.rule === 'cycle'));
+  });
 });
 
 describe('lint', () => {

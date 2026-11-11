@@ -88,7 +88,10 @@ export function scan(protocol: Protocol): Doc[] {
       if (e.isDirectory()) {
         walk(abs, self);
       } else if (e.isFile() && e.name !== idx && globMatch(glob, posix(relative(root, abs)))) {
-        const fallback = e.name.endsWith(suffix) ? e.name.slice(0, -suffix.length) : e.name;
+        // `''.endsWith('')` is true — an empty suffix (docGlob `*`) must
+        // keep the whole basename, `slice(0, -0)` would yield `''`.
+        const fallback =
+          suffix !== '' && e.name.endsWith(suffix) ? e.name.slice(0, -suffix.length) : e.name;
         const d = makeDoc(protocol, abs, false, fallback, self);
         if (d !== undefined) {
           out.push(d);
@@ -103,12 +106,15 @@ export function scan(protocol: Protocol): Doc[] {
 export const list = scan;
 
 /** Resolve one doc by id or by `aliases:` frontmatter membership. On a
- *  duplicate id the path-first doc wins — deterministic, matching the
- *  graph edge resolution. */
+ *  duplicate id the path-first doc wins — the same ordering `docById`
+ *  gives graph edges, never the depth-first walk order. */
 export function get(protocol: Protocol, id: string): Doc | undefined {
   const docs = scan(protocol);
   return (
-    docs.find(d => d.id === id) ??
+    docs
+      .filter(d => d.id === id)
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .at(0) ??
     docs.find(d => Array.isArray(d.frontmatter.aliases) && d.frontmatter.aliases.includes(id))
   );
 }

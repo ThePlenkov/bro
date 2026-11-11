@@ -44,12 +44,14 @@ export interface Diagnostic {
   line: number;
 }
 
-/** `**\/*.spec.md` → '.spec.md'; `*.md` → '.md'; `*` → ''. The suffix a
- *  doc filename carries — create names files `<id><suffix>`. */
+/** `**\/*.spec.md` → '.spec.md'; `???.md` → '.md'; `*` → ''. The suffix
+ *  a doc filename carries — create names files `<id><suffix>`. Derived
+ *  from the last wildcard of either kind so a `?`-only glob still
+ *  yields its extension. */
 export const docSuffix = (docGlob: string): string => {
   const base = docGlob.slice(docGlob.lastIndexOf('/') + 1);
-  const star = base.indexOf('*');
-  return star === -1 ? '' : base.slice(star + 1);
+  const wild = Math.max(base.lastIndexOf('*'), base.lastIndexOf('?'));
+  return wild === -1 ? '' : base.slice(wild + 1);
 };
 
 /** Minimal glob matcher — no RegExp: `**` spans separators, `*`/`?`

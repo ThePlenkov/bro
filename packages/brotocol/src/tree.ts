@@ -46,7 +46,9 @@ export function tree(protocol: Protocol): string[] {
       continue;
     }
     const p = byId.get(n.parentId)?.[0];
-    if (p !== undefined && p !== n) {
+    // a self-parent edge is kept — cyclicDocs treats it as the 1-cycle
+    // it is, and the doc's whole subtree drops out of the listing.
+    if (p !== undefined) {
       parentOf.set(n, p);
     }
   }

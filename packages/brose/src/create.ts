@@ -4,7 +4,7 @@
  * is `render()`'d `{{placeholder}}` interpolation. `createFile` refuses
  * to overwrite without `{force: true}`.
  */
-import { ioExists, ioWrite } from './io.ts';
+import { ioWrite } from './io.ts';
 import { ownValue } from './own.ts';
 import { dumpFrontmatter } from './frontmatter.ts';
 import { render } from './render.ts';
@@ -36,11 +36,13 @@ export function create(
       `missing required field${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`
     );
   }
+  // the `name@version` pin is emitted last so a template that declares
+  // a `template` field can never shadow which template made the doc.
   const fm = Object.fromEntries([
-    ['template', `${t.name}@${t.version}`],
     ...Object.keys(t.fields)
       .map(k => [k, ownValue(values, k)] as const)
       .filter((e): e is readonly [string, unknown] => e[1] !== undefined),
+    ['template', `${t.name}@${t.version}`],
   ]);
   return `---\n${dumpFrontmatter(fm)}---\n\n${render(t, values)}`;
 }
@@ -51,8 +53,17 @@ export function createFile(
   values: Record<string, unknown> = {},
   opts: CreateOpts & { force?: boolean } = {}
 ): void {
-  if (ioExists(path) && opts.force !== true) {
-    throw new Error(`file exists: ${path} (pass force to overwrite)`);
+  const content = create(templateRef, values, opts);
+  if (opts.force === true) {
+    ioWrite(path, content);
+    return;
   }
-  ioWrite(path, create(templateRef, values, opts));
+  try {
+    ioWrite(path, content, { exclusive: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`file exists: ${path} (pass force to overwrite)`);
+    }
+    throw e;
+  }
 }

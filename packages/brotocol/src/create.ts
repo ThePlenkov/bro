@@ -6,10 +6,10 @@
  * the positional edge IS the link, no frontmatter written). Refuses to
  * overwrite.
  */
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { create as broseCreate, createRegistry, type FieldSpec, ownValue } from '@broject/brose';
 import { ioExists, ioWrite, resolveIn } from './io.ts';
-import { type Doc, docSuffix, type Protocol } from './protocol.ts';
+import { type Doc, docSuffix, globMatch, type Protocol } from './protocol.ts';
 import { get, scan } from './scan.ts';
 
 export interface CreateDocOpts {
@@ -65,6 +65,13 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
     opts.dir === undefined
       ? `${opts.id}${suffix}`
       : join(opts.dir, protocol.indexName?.(basename(opts.dir)) ?? `${opts.id}${suffix}`);
+  // the write must be discoverable — refuse before touching disk when
+  // the id/dir combo can't match the configured glob (`?` arity, a
+  // dir-prefixed pattern, …). `id`/`dir` also can't smuggle separators
+  // the glob would have let through.
+  if (!globMatch(protocol.docGlob, name.split(sep).join('/'))) {
+    throw new Error(`doc name '${name}' does not match docGlob '${protocol.docGlob}'`);
+  }
   // normalize, then prove the target stays under base — a `..` in
   // `id`/`dir` must not write outside the configured tree.
   const file = resolveIn(base, name);
@@ -76,7 +83,14 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
   if (get(protocol, opts.id) !== undefined) {
     throw new Error(`doc id '${opts.id}' already exists in the tree`);
   }
-  ioWrite(file, broseCreate(t, values));
+  try {
+    ioWrite(file, broseCreate(t, values), { exclusive: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`file exists: ${file}`);
+    }
+    throw e;
+  }
   const created = scan(protocol).find(d => d.path === file);
   if (created === undefined) {
     throw new Error(`created file '${file}' was not discovered by scan — check docGlob`);

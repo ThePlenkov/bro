@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { create } from './create.ts';
 import { remove } from './remove.ts';
@@ -71,6 +72,50 @@ describe('create', () => {
         create(protocol, { template: 'note@1', id: 'X-2', values: { title: 'x' }, parent: 'G' }),
       /unknown parent/
     );
+  });
+
+  it('a `?`-only docGlob keeps its extension; a non-matching name refuses before write', () => {
+    const { root: r2, dir: d2 } = mktree({
+      'tpls/note.md':
+        '---\nname: note\nversion: 1\nfields:\n  title: { required: true }\n---\n# {{title}}\n',
+    });
+    after(() => rm(r2));
+    const q = {
+      ...proto(r2),
+      docGlob: '???.md',
+      indexName: undefined,
+      indexAliases: undefined,
+      templateDirs: [d2('tpls')],
+    };
+    const doc = create(q, { template: 'note@1', id: 'ABC', values: { title: 't' } });
+    assert.equal(doc.path, d2('ABC.md'));
+    assert.throws(
+      () => create(q, { template: 'note@1', id: 'TOOLONG', values: { title: 't' } }),
+      /does not match docGlob/
+    );
+    assert.ok(!existsSync(d2('TOOLONG.md')));
+  });
+
+  it('a symlink inside the root cannot point a write outside it', () => {
+    const { root: r3, dir: d3 } = mktree({
+      'tpls/note.md':
+        '---\nname: note\nversion: 1\nfields:\n  title: { required: true }\n---\n# {{title}}\n',
+    });
+    const { root: outside } = mktree({});
+    after(() => {
+      rm(r3);
+      rm(outside);
+    });
+    symlinkSync(outside, d3('escape'), 'dir');
+    assert.throws(
+      () =>
+        create(
+          { ...proto(r3), templateDirs: [d3('tpls')] },
+          { template: 'note@1', id: 'E-1', values: { title: 't' }, dir: 'escape' }
+        ),
+      /escapes the tree/
+    );
+    assert.ok(!existsSync(join(outside, 'escape.spec.md')));
   });
 });
 

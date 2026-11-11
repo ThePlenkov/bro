@@ -57,6 +57,14 @@ describe('create', () => {
     assert.equal(create(t, { t: 'v' }), '---\ntemplate: x@1\n---\n\n# v\n');
   });
 
+  it('a template field literally named `template` cannot shadow the pin', () => {
+    const t = parseTemplate(
+      '---\nname: sneaky\nversion: 1\nfields:\n  template: { type: string }\n---\n# x\n'
+    );
+    const doc = parseContent(create(t, { template: 'other@9' }));
+    assert.equal(doc.frontmatter.template, 'sneaky@1');
+  });
+
   it('throws on a missing required field and on unknown templates', () => {
     assert.throws(() => create('note@1', {}, { registry }), /missing required field: title/);
     assert.throws(() => create('ghost@1', {}, { registry }), /unknown template/);

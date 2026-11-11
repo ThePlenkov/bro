@@ -50,7 +50,7 @@ product. Two names carry it:
   not a program.
 - **Brose** — the markdown *template engine*: a template registry
   (dedicated folder), a frontmatter model, template versions, and a
-  library API (`parse`/`render`/`validate`/`new`) behind a thin
+  library API (`parse`/`render`/`validate`/`create`) behind a thin
   `brose` CLI (`new` + `validate`). Generic — it knows templates,
   not file trees. A `.spec.md` file is an md file that matches a
   spec template.
@@ -223,7 +223,7 @@ status: draft
   untouched, a full-doc serializer churns git diffs — and
   markdown-it has none, which suits us (md→tokens only). `render`
   is string template interpolation — an SDK op, not a CLI op.
-  Library surface: `parse`/`render`/`validate`/`new`; the `brose`
+  Library surface: `parse`/`render`/`validate`/`create`; the `brose`
   bin exposes only `new` + `validate`. A *template* is a
   declarative document schema — `{ frontmatter: zodSchema,
   sections: SectionSpec[] }` — the ProseMirror-schema idea without
@@ -302,7 +302,7 @@ Implementation beads under `bro-bntld`; pure moves first:
 1. Engine → `packages/brose` — the markdown template engine:
    frontmatter parsing (the YAML/frontmatter helpers move here),
    markdown-it token-stream section model, template registry +
-   `name@version` resolution, `parse`/`render`/`validate`/`new`
+   `name@version` resolution, `parse`/`render`/`validate`/`create`
    library API, `brose` bin (`new|validate`). No `@broject/*` deps.
 2. Protocol → `packages/brotocol` — the filetree protocol:
    protocol config, CRUD/search/graph ops over a configured tree,

@@ -17,9 +17,11 @@ export const ioExists = (path: string): boolean => existsSync(path);
 
 export const ioRead = (path: string): string => readFileSync(path, 'utf8');
 
-export const ioWrite = (path: string, content: string): void => {
+export const ioWrite = (path: string, content: string, opts?: { exclusive?: boolean }): void => {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content);
+  // `wx` makes the no-overwrite check atomic — an existsSync pre-check
+  // leaves a window where another writer lands first.
+  writeFileSync(path, content, opts?.exclusive === true ? { flag: 'wx' } : {});
 };
 
 export const ioReadDir = (path: string): Dirent[] => readdirSync(path, { withFileTypes: true });

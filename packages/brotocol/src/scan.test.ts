@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { basename } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { docById, graph } from './graph.ts';
 import { get, scan } from './scan.ts';
 import { search } from './search.ts';
 import { mktree, proto, rm } from './testkit.ts';
@@ -74,6 +75,32 @@ describe('get', () => {
     assert.equal(get(protocol, 'FEAT-1')?.isDirDoc, true);
     assert.equal(get(protocol, 'ALPHA-9')?.id, 'A-1');
     assert.equal(get(protocol, 'ghost'), undefined);
+  });
+
+  it('a duplicate id resolves path-first — same ordering as graph edges', () => {
+    // 'a-b-dup' sorts before 'a/dup' ('-' < '/'), yet the depth-first
+    // walk reaches 'a/dup' first — the winner must be path order.
+    const { root: r2 } = mktree({
+      'a/dup.spec.md': '---\nid: SAME-1\n---\n# nested\n',
+      'a-b-dup.spec.md': '---\nid: SAME-1\n---\n# flat\n',
+      'k.spec.md': '---\nid: K-1\nparent: SAME-1\n---\n# child\n',
+    });
+    after(() => rm(r2));
+    const p = proto(r2);
+    assert.equal(get(p, 'SAME-1')?.path, `${r2}/a-b-dup.spec.md`);
+    // a doc parenting SAME-1 binds the same path-first winner
+    const e = graph(p).edges.find(x => x.from === 'K-1');
+    assert.equal(e?.to, 'SAME-1');
+    const winner = docById(scan(p)).get('SAME-1')?.at(0);
+    assert.equal(get(p, 'SAME-1')?.path, winner?.path);
+  });
+
+  it('an empty-suffix docGlob keeps the whole basename as fallback id', () => {
+    const { root: r4 } = mktree({ 'leaf.txt': '---\ntitle: t\n---\n# l\n' });
+    after(() => rm(r4));
+    const p = { ...proto(r4), docGlob: '*', indexName: undefined, indexAliases: undefined };
+    const docs = scan(p);
+    assert.equal(docs.at(0)?.id, 'leaf.txt');
   });
 });
 

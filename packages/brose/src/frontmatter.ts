@@ -232,16 +232,16 @@ const inlineValue = (s: string): unknown => {
       .filter(v => v !== null && v !== '');
   }
   if (t.startsWith('{') && t.endsWith('}')) {
-    const out: Record<string, unknown> = {};
+    const entries: [string, unknown][] = [];
     for (const entry of flowSplit(t.slice(1, -1))) {
       const c = flowColon(entry);
       if (c === -1) {
         continue;
       }
       const key = String(scalarValue(entry.slice(0, c)));
-      out[key] = inlineValue(entry.slice(c + 1));
+      entries.push([key, inlineValue(entry.slice(c + 1))]);
     }
-    return out;
+    return Object.fromEntries(entries);
   }
   return scalarValue(t);
 };
@@ -304,49 +304,62 @@ const flowJoin = (inline: string, lines: Line[], i: number): { value: string; ne
 };
 
 /** Map at indent `level` — consumes lines until indentation drops or a
- *  `- ` sibling list item ends it. Returns the map and next index. */
-const parseMap = (lines: Line[], i: number, level: number): [Record<string, unknown>, number] => {
-  const out: Record<string, unknown> = {};
-  let cur = i;
-  while (cur < lines.length) {
-    const l = lines[cur]!;
+ *  `- ` sibling list item ends it. `head` stands in for a synthetic
+ *  first line at index `i - 1` (parseList's dash item) so the tail
+ *  array is shared, never sliced. Entries go through `fromEntries` —
+ *  a `__proto__` key lands as a plain own entry, not a prototype
+ *  write. Returns the map and next index. */
+const parseMap = (
+  lines: Line[],
+  i: number,
+  level: number,
+  head?: Line
+): [Record<string, unknown>, number] => {
+  const entries: [string, unknown][] = [];
+  let at = head === undefined ? i : i - 1;
+  let l: Line | undefined = head ?? lines[at];
+  while (l !== undefined) {
+    const nextLine = lines[at + 1];
+    const advance = (next: number): void => {
+      at = next;
+      l = lines[next];
+    };
     if (l.indent < level || (l.indent === level && LIST_ITEM.test(l.text))) {
       break;
     }
     const kv = keyOf(l.text);
     if (kv === undefined) {
-      cur++;
+      advance(at + 1);
       continue;
     }
     const inline = stripComment(kv.rest).trim();
     if (inline !== '') {
-      const joined = flowJoin(inline, lines, cur + 1);
-      out[kv.key] = inlineValue(joined.value);
-      cur = joined.next;
+      const joined = flowJoin(inline, lines, at + 1);
+      entries.push([kv.key, inlineValue(joined.value)]);
+      advance(joined.next);
       continue;
     }
-    const next = lines[cur + 1];
     if (
-      next === undefined ||
-      next.indent < l.indent ||
-      (next.indent === l.indent && !LIST_ITEM.test(next.text))
+      nextLine === undefined ||
+      nextLine.indent < l.indent ||
+      (nextLine.indent === l.indent && !LIST_ITEM.test(nextLine.text))
     ) {
-      out[kv.key] = null;
-      cur++;
+      entries.push([kv.key, null]);
+      advance(at + 1);
       continue;
     }
-    if (LIST_ITEM.test(next.text)) {
+    if (LIST_ITEM.test(nextLine.text)) {
       // `- item` deeper than the key — or at its indent (YAML allows both).
-      const [items, after] = parseList(lines, cur + 1, next.indent);
-      out[kv.key] = items;
-      cur = after;
+      const [items, after] = parseList(lines, at + 1, nextLine.indent);
+      entries.push([kv.key, items]);
+      advance(after);
     } else {
-      const [map, after] = parseMap(lines, cur + 1, next.indent);
-      out[kv.key] = map;
-      cur = after;
+      const [map, after] = parseMap(lines, at + 1, nextLine.indent);
+      entries.push([kv.key, map]);
+      advance(after);
     }
   }
-  return [out, cur];
+  return [Object.fromEntries(entries), at];
 };
 
 /** `- ` items at indent `level`. A `- key: v` item opens a map whose
@@ -363,12 +376,12 @@ const parseList = (lines: Line[], i: number, level: number): [unknown[], number]
     const itemIndent = l.indent + (l.text.length - text.length);
     const kv = keyOf(text);
     if (kv !== undefined) {
-      // `- key: v` — the dash item is a map; deeper lines continue it.
-      // `after` indexes into [item, ...tail] where tail[k] = lines[cur+k].
+      // `- key: v` — the dash item is a map; the synthetic item line is
+      // parseMap's `head`, standing in at index cur so `lines` is shared.
       const item: Line = { indent: itemIndent, text, line: l.line };
-      const [map, after] = parseMap([item, ...lines.slice(cur + 1)], 0, itemIndent);
+      const [map, after] = parseMap(lines, cur + 1, itemIndent, item);
       out.push(map);
-      cur += after;
+      cur = after;
       continue;
     }
     out.push(inlineValue(text));
@@ -418,7 +431,9 @@ export function parseFrontmatter(content: string): Frontmatter {
 const NEEDS_QUOTE = /[:#\[\]{}"',]/;
 const NEEDS_QUOTE_START = /^[-@`&*!|>%? \t]/;
 const RESERVED = /^(true|false|null|~)$/i;
-const NUMERIC = /^-?[\d.]+$/;
+// mirror of the parser's numeric set — ints, floats, and exponents. A
+// bare `1e3` or `001` re-reads as a number, so it must emit quoted.
+const NUMERIC = /^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 
 const scalarOut = (v: unknown): string => {
   if (v === null || v === undefined) {
@@ -444,8 +459,9 @@ const scalarOut = (v: unknown): string => {
 const dumpLines = (obj: Record<string, unknown>, indent: string): string[] => {
   const out: string[] = [];
   for (const [k, v] of Object.entries(obj)) {
-    const key =
-      NEEDS_QUOTE.test(k) || NEEDS_QUOTE_START.test(k) || /\s$/.test(k) ? scalarOut(k) : k;
+    // keys get the full scalar predicate set — a bare `001` or `true`
+    // key re-reads as a number/boolean, so it emits quoted like a value.
+    const key = scalarOut(k);
     if (Array.isArray(v)) {
       if (v.length === 0) {
         out.push(`${indent}${key}: []`);

@@ -140,10 +140,16 @@ The emulated commands now exist. Replays against real binaries:
 
 - **Run 1/6 — scaffold + validate:**
   `brose new --template brotocol/spec@1 --set template=brotocol/spec@1
-  --set id=BRO-2 --set title="Demo spec" --out /tmp/brose-new-demo.spec.md`
+  --set id=BRO-2 --set title="Demo spec" --out /tmp/brose-new-demo.spec.md
+  --templates-dir packages/brotocol/templates`
   produced a frontmatter-complete spec doc; `brose validate` on it →
   clean exit 0. `brose validate` on THIS spec file
-  (`BRO-1-brotocol.spec.md`, pins `brotocol/spec@1`) → clean exit 0.
+  (`BRO-1-brotocol.spec.md`, pins `brotocol/spec@1`, same
+  `--templates-dir`) → clean exit 0.
+  The bare `brose` bin resolves templates only from `--templates-dir`
+  and `<cwd>/.brose/templates/`; the shipped `brotocol/spec@N` dir is
+  wired in by `specProtocol`'s `templateDirs` on the API side, so the
+  CLI replay passes it explicitly.
   Note: the spec template requires the doc to declare its own
   `template:` — `new` without `--set template=…` fails
   `missing required field: template`, as designed.

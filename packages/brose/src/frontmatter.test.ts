@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { dumpFrontmatter, parseFrontmatter, scalarValue } from './frontmatter.ts';
+import { ownValue } from './own.ts';
 
 const fm = (src: string) => parseFrontmatter(`---\n${src}---\n\nbody\n`);
 
@@ -139,5 +140,34 @@ describe('dumpFrontmatter', () => {
     assert.match(dumped, /d: '-z'/);
     assert.match(dumped, /e: 'a#b'/);
     assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
+  });
+
+  it('quotes every numeric-looking string — exponents and padding re-read as numbers', () => {
+    const data = { sci: '1e3', neg: '-2E-2', pad: '001', dot: '1.', frac: '.5', int: '42' };
+    const dumped = dumpFrontmatter(data);
+    for (const v of Object.values(data)) {
+      assert.match(dumped, new RegExp(`'${v.replace('.', '\\.')}'`));
+    }
+    assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
+  });
+
+  it('quotes keys that would re-read as non-strings', () => {
+    const data = { '007': 'x', true: 'y', '1.5': 'z' };
+    const dumped = dumpFrontmatter(data);
+    assert.match(dumped, /^'007': x$/m);
+    assert.match(dumped, /^'true': y$/m);
+    assert.match(dumped, /^'1\.5': z$/m);
+    assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
+  });
+
+  it('a `__proto__` key is data, never a prototype write', () => {
+    const { data } = fm('__proto__:\n  polluted: true\nsafe: 1\n');
+    assert.ok(Object.hasOwn(data, '__proto__'));
+    assert.deepEqual(ownValue(data, '__proto__'), { polluted: true });
+    assert.equal(({} as Record<string, unknown>).polluted, undefined);
+    // flow maps carry the same guard
+    const { data: nested } = fm('m: {__proto__: {x: 1}, ok: 2}\n');
+    assert.deepEqual(ownValue(nested.m as Record<string, unknown>, '__proto__'), { x: 1 });
+    assert.equal(({} as Record<string, unknown>).x, undefined);
   });
 });
