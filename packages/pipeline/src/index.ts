@@ -184,6 +184,14 @@ export type {
 } from './stages/verify.ts';
 export { ROW_VERDICTS, VERIFY_VERDICTS, verifyStage } from './stages/verify.ts';
 export type {
+  FleetDeps,
+  FleetDiff,
+  FleetPayload,
+  FleetSpawnRequest,
+  WorkVerdict,
+} from './stages/work.ts';
+export { WORK_VERDICTS, workStage } from './stages/work.ts';
+export type {
   ArtifactTrace,
   TraceDeps,
   TraceEntryView,
