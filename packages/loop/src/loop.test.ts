@@ -339,7 +339,7 @@ describe('prompts', () => {
     assert.match(LEARN_RETRO_CLOSEOUT, /bro learn probe/);
     assert.match(LEARN_RETRO_CLOSEOUT, /skills\/retro\/SKILL\.md/);
     assert.match(LEARN_RETRO_CLOSEOUT, /bro self learn capture --dry-run/);
-    assert.match(LEARN_RETRO_CLOSEOUT, /if `bro` is on PATH/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /if `bro` and `bd` are on PATH/);
   });
 });
 

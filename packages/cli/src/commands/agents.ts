@@ -605,7 +605,11 @@ function resolvePrompt(
     );
   }
   const base = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
-  if (row === undefined || base === `# ${molStep}`) {
+  // presence, not rendered equality — a bead titled exactly its id
+  // still carries a title; only a row with neither field is promptless
+  const promptless =
+    row === undefined || ((row.title ?? '').trim() === '' && (row.description ?? '').trim() === '');
+  if (promptless) {
     throw new SpawnInputError(
       `bead ${molStep} has no title/description to prompt with — pass --prompt-file`
     );

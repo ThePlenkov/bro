@@ -32,9 +32,9 @@ const BATCH_FALLBACK =
  *  here: loop/fleet/drive/delegate/convoy prompt builders import it
  *  rather than copying (N copies drift). Not a gate — the sibling
  *  exit-time artifact check owns enforcement; a foreign rig without
- *  `bro` on PATH skips it silently. */
-export const LEARN_RETRO_CLOSEOUT = `Close out before your final message — learn + retro (skills/retro/SKILL.md); if \`bro\` is on PATH:
-- Flag learnings in the result: \`--result\` lines prefixed \`learn:\`/\`learning:\` are the mol-capture contract — \`bro self learn capture --mol\` harvests them.
+ *  `bro`/`bd` on PATH skips it silently. */
+export const LEARN_RETRO_CLOSEOUT = `Close out before your final message — learn + retro (skills/retro/SKILL.md); if \`bro\` and \`bd\` are on PATH:
+- Flag learnings in the result: \`--result\` lines prefixed \`learn:\`/\`learning:\` are the mol-capture contract — \`bro self learn capture --mol <id>\` harvests them.
 - A durable rule → \`bro self learn add --lesson "…" --on … --evidence …\`; a distilled answer → \`bro learn probe "<q>" --lesson "…"\`.
 - Session-scale review → the retro checklist: loose ends, hand-rolled mechanics → bd gap beads, call economy, debt sweep.
 - \`bro self learn capture --dry-run\` previews artifact harvest — capture is cheap and deduped, safe to run at close.`;
