@@ -32,7 +32,7 @@ import {
   writeBeads,
   writeHostState,
 } from './testrepo.ts';
-import { isNxDaemonCmd } from './work.ts';
+import { claimWorktree, isNxDaemonCmd } from './work.ts';
 
 function workFixture(): { root: string; main: string } {
   return initRepo('bro-work-e2e-');
@@ -49,6 +49,24 @@ const litter = (root: string, main: string, slug: string, commit = false): strin
   if (commit) {
     git(['commit', '-q', '--allow-empty', '-m', 'wip'], wt);
   }
+  return wt;
+};
+
+/** Label-namespace litter — a worktree on a work//feat//fix//devin/
+ *  branch whose tail names (or prefix-matches) a bead; the widened
+ *  sweep's new candidate class (bro-imvu3). The sibling dir keeps the
+ *  <main>--<tail> convention so a lost registration still reads as
+ *  litter-shaped. */
+const labelLitter = (root: string, main: string, branch: string): string => {
+  const wt = join(root, `main--${branch.split('/').pop()}`);
+  git(['worktree', 'add', '-b', branch, wt], main);
+  return wt;
+};
+
+/** A detached-HEAD worktree — `at` pins the commit-ish (default HEAD). */
+const detLitter = (root: string, main: string, dir: string, at?: string): string => {
+  const wt = join(root, dir);
+  git(['worktree', 'add', '--detach', wt, ...(at === undefined ? [] : [at])], main);
   return wt;
 };
 
@@ -415,6 +433,215 @@ describe('bro work e2e — prune --loop', () => {
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /kept .*fx-r \(agent registry unreadable\)/);
       assert.equal(existsSync(wt), true);
+    });
+  });
+});
+
+describe('bro work e2e — prune --loop label + detached litter (bro-imvu3)', () => {
+  /** fake review host wired via bro.config.json — same fixture the
+   *  loop/* suite above installs (the testrepo hostFixture name is
+   *  taken by the whole-fixture factory). */
+  const hostFixture = (main: string) => {
+    const host = installFakeHost(main);
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
+    );
+    return host;
+  };
+
+  test('reaps work//feat//fix//devin/ trees whose bead closed — branches retire', () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-wt', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-ft', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-fx', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-dv', status: 'closed' },
+    ]);
+    inside(main, root, () => {
+      const pairs = [
+        ['work/fx-wt', labelLitter(root, main, 'work/fx-wt')],
+        ['feat/fx-ft', labelLitter(root, main, 'feat/fx-ft')],
+        ['fix/fx-fx', labelLitter(root, main, 'fix/fx-fx')],
+        ['devin/fx-dv', labelLitter(root, main, 'devin/fx-dv')],
+      ] as const;
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      for (const [b, wt] of pairs) {
+        assert.match(
+          r.stdout,
+          new RegExp(`reaped .*main--${b.split('/').pop()} \\[${b.replace('/', '\\/')}\\]`)
+        );
+        assert.match(r.stdout, new RegExp(`deleted branch ${b.replace('/', '\\/')}`));
+        assert.equal(existsSync(wt), false, wt);
+        assert.equal(git(['branch', '--list', b, '--format=%(refname:short)'], main).trim(), '');
+      }
+    });
+  });
+
+  test('a label tail prefix-matches its bead — work/fx-pre-retry names fx-pre', () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-pre', status: 'closed' }]);
+    inside(main, root, () => {
+      const wt = labelLitter(root, main, 'work/fx-pre-retry');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /reaped .*main--fx-pre-retry \[work\/fx-pre-retry\]/);
+      assert.equal(existsSync(wt), false);
+    });
+  });
+
+  test('a short label slug resolves through the store prefix — work/qq names fx-qq', () => {
+    // `bro work enter <slug>` trees carry the bare slug, not the bead
+    // id — the '<prefix>-<slug>' rung of the bead matcher closes the
+    // gap the exact-slug read can't (fx is the fixture store's
+    // issue_prefix)
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-qq', status: 'closed' }]);
+    inside(main, root, () => {
+      const wt = labelLitter(root, main, 'work/qq');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /reaped .*main--qq \[work\/qq\]/);
+      assert.equal(existsSync(wt), false);
+    });
+  });
+
+  test('a merged PR retires a label branch past a squash-blind tip', () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-m', status: 'closed' }]);
+    const host = hostFixture(main);
+    inside(main, root, () => {
+      const wt = labelLitter(root, main, 'work/fx-m');
+      git(['commit', '-q', '--allow-empty', '-m', 'wip'], wt);
+      // the squash-merge shape: the branch tip is nowhere in main's
+      // history — only the host's merged head proves the landing
+      const tip = git(['rev-parse', 'work/fx-m'], main).trim();
+      writeHostState(host.state, {
+        prs: { 'work/fx-m': { number: 9, state: 'MERGED', headSha: tip, headRef: 'work/fx-m' } },
+      });
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /reaped .*main--fx-m \[work\/fx-m\]/);
+      assert.match(r.stdout, /deleted branch work\/fx-m/);
+      assert.equal(existsSync(wt), false);
+      assert.equal(git(['branch', '--list', 'work/fx-m'], main).trim(), '');
+    });
+  });
+
+  test('a detached HEAD reaps on the <main>--<slug> sibling name', () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-det', status: 'closed' }]);
+    inside(main, root, () => {
+      const wt = detLitter(root, main, 'main--fx-det');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      // no branch could be attributed — the tree reaps detached and
+      // nothing branch-side is touched
+      assert.match(r.stdout, /reaped .*main--fx-det \(detached\)/);
+      assert.equal(existsSync(wt), false);
+    });
+  });
+
+  test('a detached HEAD on a live in-tree claim is found and kept claimed', () => {
+    // the claim marker names the slug for a tree whose dir breaks the
+    // <main>--<slug> convention — discovery works, and the live claim
+    // itself is the occupancy veto (a claimed tree is never litter)
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-claim1', status: 'closed' },
+    ]);
+    inside(main, root, () => {
+      const wt = detLitter(root, main, 'stray-det');
+      assert.equal(claimWorktree(wt, 'claim1'), 'stamped');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /kept .*stray-det \(claimed\)/);
+      assert.equal(existsSync(wt), true);
+    });
+  });
+
+  test('a detached HEAD attributes its single eligible branch tip', () => {
+    // exactly one candidate-eligible branch sits on the detached HEAD —
+    // it names the tree: PR evidence and branch retire ride it, so the
+    // reaped line shows the branch, not '(detached)'
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-tip', status: 'closed' }]);
+    inside(main, root, () => {
+      git(['branch', 'work/fx-tip'], main);
+      const wt = detLitter(root, main, 'main--tipdet', 'work/fx-tip');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /reaped .*main--tipdet \[work\/fx-tip\]/);
+      // the tip is main's own tip — git's merged check retires it
+      assert.match(r.stdout, /deleted branch work\/fx-tip/);
+      assert.equal(existsSync(wt), false);
+      assert.equal(git(['branch', '--list', 'work/fx-tip'], main).trim(), '');
+    });
+  });
+
+  test('an ambiguous label tail keeps — two bead owners means unverifiable', () => {
+    // work/fx-amb-x-desc prefix-matches BOTH fx-amb and fx-amb-x —
+    // beadForHead's ambiguity rule answers nothing and the tree keeps
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-amb', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-amb-x', status: 'closed' },
+    ]);
+    inside(main, root, () => {
+      const wt = labelLitter(root, main, 'work/fx-amb-x-desc');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /kept .*main--fx-amb-x-desc \(no bead — unverifiable\)/);
+      assert.equal(existsSync(wt), true);
+    });
+  });
+
+  test('label trees fail the same guards — open bead, dirty, locked, live process, open PR, no bead', () => {
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-open', title: 'still cooking' },
+      { ...FAKE_BEAD, id: 'fx-dirty', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-lock', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-proc', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-pr', status: 'closed' },
+    ]);
+    const host = hostFixture(main);
+    inside(main, root, () => {
+      const openWt = labelLitter(root, main, 'devin/fx-open');
+      const dirtyWt = labelLitter(root, main, 'feat/fx-dirty');
+      writeFileSync(join(dirtyWt, 'wip.txt'), 'uncommitted\n');
+      const lockWt = labelLitter(root, main, 'feat/fx-lock');
+      git(['worktree', 'lock', lockWt], main);
+      const procWt = labelLitter(root, main, 'fix/fx-proc');
+      const sleeper = spawn('sleep', ['300'], { cwd: procWt, detached: true, stdio: 'ignore' });
+      sleeper.unref();
+      const prWt = labelLitter(root, main, 'work/fx-pr');
+      const noneWt = labelLitter(root, main, 'fix/fx-none');
+      writeHostState(host.state, {
+        prs: { 'work/fx-pr': { number: 9, state: 'OPEN', headRef: 'work/fx-pr' } },
+      });
+      try {
+        const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+        assert.equal(r.code, 0, r.stderr);
+        for (const wt of [openWt, dirtyWt, lockWt, procWt, prWt, noneWt]) {
+          assert.equal(existsSync(wt), true, wt);
+        }
+        assert.match(r.stdout, /kept .*main--fx-open \(bead open\)/);
+        assert.match(r.stdout, /kept .*main--fx-dirty \(dirty\)/);
+        assert.match(r.stdout, /kept .*main--fx-lock \(locked/);
+        assert.match(r.stderr, /hosts live process/);
+        assert.match(r.stdout, /kept .*main--fx-pr \(open PR — unmerged\)/);
+        assert.match(r.stdout, /kept .*main--fx-none \(no bead — unverifiable\)/);
+      } finally {
+        try {
+          if (sleeper.pid !== undefined) {
+            process.kill(sleeper.pid, 'SIGKILL');
+          }
+        } catch {
+          // already gone
+        }
+      }
     });
   });
 });
