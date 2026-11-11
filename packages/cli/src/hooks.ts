@@ -69,15 +69,21 @@ process.on('exit', code => {
 // probes. Empty `plugins` makes loadExternalPlugins a no-op, so the
 // registry import stays dynamic and pays nothing where no external
 // plugin exists; where one does, the full collision semantics apply.
-const externalSpecs = loadConfig().plugins;
-if (externalSpecs.length > 0) {
-  const plugins = await import('./plugins.ts');
-  const { reservedWords } = await import('./docs.ts');
-  await plugins.loadExternalPlugins(
-    undefined,
-    externalSpecs,
-    new Set([...reservedWords(), ...plugins.pluginGroups().keys()])
-  );
+try {
+  const externalSpecs = loadConfig().plugins;
+  if (externalSpecs.length > 0) {
+    const plugins = await import('./plugins.ts');
+    const { reservedWords } = await import('./docs.ts');
+    await plugins.loadExternalPlugins(
+      undefined,
+      externalSpecs,
+      new Set([...reservedWords(), ...plugins.pluginGroups().keys()])
+    );
+  }
+} catch {
+  // fail-open like every probe: a broken config read or plugin module
+  // must never keep the hook dispatch from running — whatever
+  // registered before the throw stays registered, the rest is skipped
 }
 
 // argv is already the post-`hooks` spelling the plugin's `run` receives
