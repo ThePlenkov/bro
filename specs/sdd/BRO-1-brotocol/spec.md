@@ -76,8 +76,17 @@ owns is *beads-aware coverage and gating*.
 
 Two decomposition axes, kept apart on purpose:
 
-- The **spec tree** decomposes the *product*: spec → child spec →
-  part. Enduring; lives on main; outlives every bead.
+- The **spec tree** holds every durable project document, in two
+  classes. *Product specs* describe what the system is; *policy
+  specs* describe the rules agents and reviewers follow —
+  `AGENTS.md` conventions, `REVIEW.md` review policy,
+  `CONTRIBUTING.md`. Same lifecycle class: persistent, owned,
+  lintable. Policy specs keep their conventional paths (clients read
+  `AGENTS.md` at the root; relocating them breaks the contract) and
+  gain spec identity via frontmatter or a managed block — the
+  `bro:sdd` markers y1jtm.7 installs in REVIEW.md are the same idea.
+  A spec is the textual RFC of the project; a policy doc is an RFC
+  too, just one aimed at agents.
 - The **bead graph** decomposes the *work*: epic → task → subtask,
   with dep edges. Transient; closes.
 
@@ -105,8 +114,11 @@ Phases, BMAD-mapped onto bro primitives:
    coverage gate). Spec-ahead is permissible only while a linked
    change bead is open (y1jtm conformance rule).
 5. **Review** — the act gate plus lint decide conformance of the PR
-   diff; `spec unchanged: <reason>` is the reviewed exception, not a
-   loophole.
+   diff on two axes: code ↔ product spec AND code ↔ policy spec (a
+   violated AGENTS.md rule is a defect of the same class as a
+   spec-divergent behavior — REVIEW.md is already the gate's
+   yardstick). `spec unchanged: <reason>` is the reviewed exception,
+   not a loophole.
 6. **Persist** — the bead closes; the spec stays on main, lifecycle
    moves `draft → active`. Decision history is the spec's git history
    plus optional `decisions/` parts — never another ticket-shaped
@@ -147,6 +159,10 @@ Additions this spec makes normative:
 - **Requirement anchors.** `## Requirements` items carry stable
   anchors `R<n>` cited as `KEY-N#R<n>` from beads and from other
   specs — the link between the two trees.
+- **Policy specs.** Durable rule documents (`AGENTS.md`,
+  `REVIEW.md`) join the tree as spec nodes at their conventional
+  paths — identity via frontmatter or a managed block, `area:
+  policy`, no `owns` requirement (rules bind behavior, not paths).
 - **Emulation log** as a spec part: `KEY-N-<slug>/emulation.md`
   records spec-emulation runs (skill spec-emulation), turning into
   golden cases for the real engine.
@@ -248,6 +264,10 @@ conventions; the decoupling stands either way.
 - How much of `bro spec check`/`drift` is bead-aware (plugin) vs
   pure-spec (brose): coverage over beads stays in the plugin; drift
   over git history is pure and lives in brose.
+- Policy-spec mechanics: does a fixed-path doc carry frontmatter
+  (not every client tolerates frontmatter in AGENTS.md) or a
+  `bro:sdd`-style managed identity block; and whether `area: policy`
+  vs a separate `kind:` field classifies it.
 
 ## Verify
 
