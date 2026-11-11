@@ -127,7 +127,7 @@ function checkFields(
       }
       continue;
     }
-    const value = desc?.value;
+    const value = desc.value;
     const typeCheck =
       spec.type === undefined ? undefined : ownValue<z.ZodType>(FIELD_TYPE, spec.type);
     if (typeCheck !== undefined && !typeCheck.safeParse(value).success) {
@@ -181,9 +181,9 @@ function checkSections(
         ? {
             severity: 'error',
             rule: 'section-order',
-            message: `section '${req.title}' appears out of order (line ${(misplaced.line ?? 0) + 1})`,
+            message: `section '${req.title}' appears out of order (line ${misplaced.line + 1})`,
             path,
-            line: (misplaced.line ?? 0) + 1,
+            line: misplaced.line + 1,
           }
         : {
             severity: 'error',
