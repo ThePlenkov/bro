@@ -73,7 +73,14 @@ export function tmpDir(prefix: string): string {
   if (!tmpSweepArmed) {
     tmpSweepArmed = true;
     process.once('exit', () => {
-      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+      // same contract as inside()/insideAsync(): a detached child still
+      // flushing (serve watchdog respawn, trace tail) makes a straggler
+      // write between readdir and rmdir — ENOTEMPTY, not a bug. Without
+      // retries one late write fails the whole file after every test
+      // passed (serve.e2e flake, run 43094960264).
+      for (const d of tmpDirs) {
+        rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
     });
   }
   const dir = mkdtempSync(join(tmpdir(), prefix));

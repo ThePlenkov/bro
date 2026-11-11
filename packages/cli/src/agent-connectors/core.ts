@@ -123,7 +123,7 @@ import {
   writeAgentRegistry,
   writePrivateFileSync,
 } from '@broject/core';
-import { expandAgentCmd, type LoopConfig, loopSection } from '@broject/loop';
+import { expandAgentCmd, LEARN_RETRO_CLOSEOUT, type LoopConfig, loopSection } from '@broject/loop';
 import { otelEvent, type AcpSeam, type FetchFn } from '@broject/providers';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
@@ -5028,6 +5028,8 @@ work order — plus a submitted message carrying the rendered prompt. Follow
 it exactly: work in this session's work_dir, verify like CI, push, open
 the PR. The beads store is the shared store (this rig is adopted) —
 verdicts go through \`bd update\`/\`bd close\` on the routed bead.
+
+${LEARN_RETRO_CLOSEOUT}
 `;
 
 /** City root — explicit `agents.gascity.configDir`, else the shared

@@ -9,6 +9,7 @@ import {
   type AgentState,
 } from '@broject/core';
 import type { ConvoyNext, Molecule } from '@broject/convoy';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   runArgs,
   runnerPrompt,
@@ -156,6 +157,12 @@ describe('runnerPrompt', () => {
     assert.match(p, /\/repo\/here/);
     assert.match(p, /state: complete/);
     assert.match(p, /bro act merge/);
+  });
+
+  test('ends with the shared learn+retro closeout (bro-xkv42.1)', () => {
+    const p = runnerPrompt('bro-mol-x', '/repo/here');
+    assert.ok(p.includes(LEARN_RETRO_CLOSEOUT), 'closeout verbatim');
+    assert.ok(p.trimEnd().endsWith(LEARN_RETRO_CLOSEOUT), 'closeout is the last word');
   });
 });
 

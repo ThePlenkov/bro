@@ -27,6 +27,7 @@ export {
   buildRebasePrompt,
   buildWorkPrompt,
   expandAgentCmd,
+  LEARN_RETRO_CLOSEOUT,
 } from './prompt.ts';
 export { memberAction } from './schedule.ts';
 export type {

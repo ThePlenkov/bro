@@ -742,7 +742,11 @@ describe('bro agents run — --for claim dedup', () => {
       assert.equal(r.code, 0, r.err.join('\n'));
       const entry = readAgentRegistry(fx.main)['fx-1']!;
       const stored = agentPromptPath(fx.main, String(entry.agentId))!;
-      assert.equal(readFileSync(stored, 'utf8'), '# my title\n\nmy desc');
+      const text = readFileSync(stored, 'utf8');
+      // the composed work order: bead text first, then the shared
+      // learn+retro closeout block (spec bro-xkv42.1)
+      assert.ok(text.startsWith('# my title\n\nmy desc'), 'bead text leads the order');
+      assert.ok(text.includes('learn + retro'), 'closeout contract appended');
       await agents(['down', 'fx-1']);
     } finally {
       fx.restore();

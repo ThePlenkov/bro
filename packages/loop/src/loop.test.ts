@@ -4,7 +4,13 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopSection } from './config.ts';
 import { planItem } from './item.ts';
-import { buildFixPrompt, buildRebasePrompt, buildWorkPrompt, expandAgentCmd } from './prompt.ts';
+import {
+  buildFixPrompt,
+  buildRebasePrompt,
+  buildWorkPrompt,
+  expandAgentCmd,
+  LEARN_RETRO_CLOSEOUT,
+} from './prompt.ts';
 import { DEFAULT_LOOP_CONFIG, type LoopBead } from './types.ts';
 
 const bead: LoopBead = {
@@ -308,6 +314,32 @@ describe('prompts', () => {
 
     assert.match(buildRebasePrompt(bead, 42, 'main', 'sess-abc'), /sess-abc/);
     assert.match(buildRebasePrompt(bead, 42, 'main'), /fresh agent/);
+  });
+
+  test('every work order ends with the shared learn+retro closeout (bro-xkv42.1)', () => {
+    // one wording, exported — solo, batch, fix, and rebase rounds all
+    // carry it verbatim so no lane can drift
+    const clump: LoopBead[] = [bead, { ...bead, id: 'bro-x2' }];
+    const orders = [
+      buildWorkPrompt(bead, 'loop/bro-x1'),
+      buildWorkPrompt(clump, 'loop/bro-x1'),
+      buildFixPrompt(bead, 42, 't'),
+      buildFixPrompt(clump, 42, 't'),
+      buildRebasePrompt(bead, 42, 'main'),
+      buildRebasePrompt(clump, 42, 'main'),
+    ];
+    for (const p of orders) {
+      assert.ok(p.includes(LEARN_RETRO_CLOSEOUT), 'closeout verbatim');
+      assert.ok(p.trimEnd().endsWith(LEARN_RETRO_CLOSEOUT), 'closeout is the last word');
+    }
+    // the contract's four moves: mol-capture flag, lesson store,
+    // retro checklist, capture preview — plus the foreign-rig degrade
+    assert.match(LEARN_RETRO_CLOSEOUT, /`learn:`\/`learning:`/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /bro self learn add/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /bro learn probe/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /skills\/retro\/SKILL\.md/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /bro self learn capture --dry-run/);
+    assert.match(LEARN_RETRO_CLOSEOUT, /if `bro` and `bd` are on PATH/);
   });
 });
 

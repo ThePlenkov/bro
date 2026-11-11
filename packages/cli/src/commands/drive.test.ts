@@ -15,6 +15,7 @@ import {
   type TaskStore,
 } from '@broject/core';
 import type { ListedWatch } from '@broject/act';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   agentProcessesIn,
   branchSlug,
@@ -1485,6 +1486,53 @@ describe('buildSastFixerPrompt', () => {
     assert.match(p, /glab api projects\/o%2Fr/);
     assert.match(p, /no check-run/);
     assert.doesNotMatch(p, /gh api|check-runs\//);
+  });
+});
+
+describe('fixer work orders — learn+retro closeout (bro-xkv42.1)', () => {
+  test('every fixer prompt ends with the shared closeout contract', () => {
+    const orders = [
+      buildFixerPrompt({
+        pr: 42,
+        link: 'x',
+        branch: 'b',
+        worktree: 'w',
+        threads: [{ path: 'a.ts', line: 1, author: 'bot', body: 'nit' }],
+      }),
+      buildRebaseFixerPrompt({
+        pr: 42,
+        link: 'x',
+        branch: 'b',
+        base: 'main',
+        baseTip: { ref: 'origin/main', sha: 'abc', remote: true, origin: true },
+        worktree: 'w',
+        repo: 'o/r',
+        host: 'github',
+      }),
+      buildCiFixerPrompt({
+        pr: 42,
+        link: 'x',
+        branch: 'b',
+        worktree: 'w',
+        repo: 'o/r',
+        host: 'github',
+        failing: [{ name: 'build', state: 'FAILURE', bucket: 'fail' }],
+      }),
+      buildSastFixerPrompt({
+        pr: 42,
+        link: 'x',
+        branch: 'b',
+        worktree: 'w',
+        repo: 'o/r',
+        host: 'github',
+        headSha: 'abc',
+        findings: [{ name: 'sonar', count: 1 }],
+      }),
+    ];
+    for (const p of orders) {
+      assert.ok(p.includes(LEARN_RETRO_CLOSEOUT), 'closeout verbatim');
+      assert.ok(p.trimEnd().endsWith(LEARN_RETRO_CLOSEOUT), 'closeout is the last word');
+    }
   });
 });
 
