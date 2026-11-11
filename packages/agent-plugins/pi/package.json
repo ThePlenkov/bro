@@ -14,13 +14,10 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/pi.ts --format esm --dts --clean --no-external=/^@broject\\//"
+    "build": "tsdown"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "files": [
     "dist"

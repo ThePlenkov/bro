@@ -14,12 +14,7 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/omp.ts --format esm --dts --clean --no-external=/^@broject\\//"
-  },
-  "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "build": "tsdown"
   },
   "files": [
     "dist",

@@ -22,6 +22,7 @@ export default defineConfig({
   entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts', 'src/hooks.ts'],
   format: ['esm'],
   dts: true,
+  fixedExtension: false,
   noExternal: [/^@broject\//],
   plugins: [
     {

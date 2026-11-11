@@ -1887,7 +1887,7 @@ export function occupyBranch(main: string, branch: string): void {
  *  drive pass owes: no fixer bead, no spawn-log entry. */
 export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
   const v = driveVerdict(r);
-  assert.equal(v.verdict, want, v.detail);
+  assert.equal(v.verdict, want, String(v.detail));
   assert.equal(fixerRows(f.db).length, 0);
   assert.equal(spawnLog(f.main), '');
 }
@@ -1896,7 +1896,7 @@ export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void
  *  bead closed 'merged via …'. */
 export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
   const v = driveVerdict(r);
-  assert.equal(v.verdict, 'merged', v.detail);
+  assert.equal(v.verdict, 'merged', String(v.detail));
   assert.equal(bead(f.db, String(fixerId))?.status, 'closed');
   assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/);
 }

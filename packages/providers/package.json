@@ -22,9 +22,6 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
     "@broject/acp-session": "^0.3.0"
   },
   "files": [

@@ -41,14 +41,14 @@
     "@nx-devkit/skill": "^0.1.23",
     "@nx-devkit/skillspector": "^0.1.23",
     "@nx-devkit/tsdown": "^0.1.21",
-    "@nx/js": "^23.3.1",
-    "@types/node": "^22.0.0",
+    "@nx/js": "24.0.6",
+    "@types/node": "^26.0.0",
     "husky": "^9.1.7",
-    "nx": "^23.3.1",
+    "nx": "24.0.6",
     "rolldown": "1.0.0-beta.45",
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=22.18"
