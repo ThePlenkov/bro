@@ -224,6 +224,12 @@ status: draft
 
 Additions this spec makes normative:
 
+- **Schema deviations recorded for y1jtm reconciliation.** This spec
+  deliberately departs from y1jtm's drafted field list in two places
+  and records them so the validator/scaffold/lint contract can be
+  amended in y1jtm rather than silently drifted: `beads:` is
+  prohibited (below) and `template:` is added (its required-vs-latest
+  semantics stay an open question until y1jtm's schema absorbs it).
 - **No `beads:` in spec frontmatter.** Divergence from y1jtm's
   required-fields list: a spec must never cite ephemeral work items —
   the change-link lives only on the bead (`spec:`), and engines
@@ -317,10 +323,9 @@ conventions; the decoupling stands either way.
 - **R1** — `bro spec` surface unchanged: verbs, `sdd` section, facade
   semantics and hook probes keep working through the move; a pure
   refactor verified by existing tests.
-- **R2** — `brose` usable standalone: `npx brose validate <file>`
-  works in a repo with no bro install and no beads; the engine
-  imports only `node:*` (and zod for schema). `@broject/brotocol`
-  itself never touches fs.
+- **R2** — `brose` usable standalone: `npx @broject/brose validate
+  <file>` works in a repo with no bro install and no beads; the
+  engine imports only `node:*`, `markdown-it` and `zod`.
 - **R3** — the specs facade admits third-party engines:
   openspec/speckit connectors ship as their own packages, resolve via
   config plugins or builtin registration, precedence preserved.
