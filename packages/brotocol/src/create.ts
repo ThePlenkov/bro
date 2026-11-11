@@ -74,13 +74,14 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
     // every configured index name in the target dir is a conflict — a
     // legacy `spec.md` next to the new canonical index makes the older
     // dir-doc vanish from lookup and orphans its inbound edges.
-    const dirAbs = join(base, opts.dir);
-    const target = join(opts.dir, basename(name));
-    const conflict = [protocol.indexName?.(basename(opts.dir)), ...(protocol.indexAliases ?? [])]
-      .filter((n): n is string => n !== undefined && join(opts.dir, n) !== target)
+    const dirName = opts.dir;
+    const dirAbs = join(base, dirName);
+    const target = join(dirName, basename(name));
+    const conflict = [protocol.indexName?.(basename(dirName)), ...(protocol.indexAliases ?? [])]
+      .filter((n): n is string => n !== undefined && join(dirName, n) !== target)
       .find(n => ioExists(join(dirAbs, n)));
     if (conflict !== undefined) {
-      throw new Error(`directory '${opts.dir}' already has index '${conflict}'`);
+      throw new Error(`directory '${dirName}' already has index '${conflict}'`);
     }
   }
   // the write must be discoverable — refuse before touching disk when
