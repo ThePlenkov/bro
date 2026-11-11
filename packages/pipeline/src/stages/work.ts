@@ -195,12 +195,16 @@ export interface FleetDeps {
 const ROUTING_CTX_KEYS = ['provider', 'model', 'class', 'kind', 'orch'] as const;
 
 /** The run's journaled formula sha — every row carries it
- *  (RunOptions.formulaSha is required), so the first row for this run
+ *  (RunOptions.formulaSha is required), so the newest row for this run
  *  answers. Undefined only on a journal with no rows yet — invoke
  *  always runs after the intent append, recheck after the pending
  *  record, so real runs always resolve. */
 function journaledSha(call: StageCall): string | undefined {
-  for (const row of call.journal.rows()) {
+  // newest first — a mid-run formula drift leaves several shas on the
+  // run's rows, and the spawn pins the freshest known revision
+  const rows = call.journal.rows();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
     if (row.run_id === call.runId && row.formula_sha !== '') {
       return row.formula_sha;
     }
