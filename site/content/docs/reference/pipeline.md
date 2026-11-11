@@ -10,5 +10,5 @@ description: "Pipeline customer surface — accept|answer write the verdict stor
 | | |
 | --- | --- |
 | group | `pipeline` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 

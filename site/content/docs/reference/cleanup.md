@@ -8,6 +8,6 @@ description: "Delete local branches whose PR merged and stale temp dirs [--remot
 | | |
 | --- | --- |
 | group | `review` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | guide | [commands/utility](/docs/commands/utility) |
 

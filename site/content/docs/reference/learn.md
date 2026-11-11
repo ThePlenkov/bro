@@ -10,7 +10,7 @@ description: "Self-improvement loop — lessons: add|list|show|forget|capture|pr
 | | |
 | --- | --- |
 | group | `self` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `learn` |
 | config | `learn` in bro.config |
 | guide | [commands/learn](/docs/commands/learn) |

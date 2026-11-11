@@ -4,10 +4,9 @@ title: Restoring a rig on a fresh machine
 description: A rig's durable state lives on git refs and branches — clone, bro sync --pull, bd sync through a dolt remote, bro drive install re-supervises open PRs.
 ---
 
-_Everything below runs on npm `latest` (**0.2.5**) as written — the
-`0.3.0` mark is the one piece not yet published. These are the flat
-spellings; the grouped `bro <group> <member>` surface (`bro work sync`)
-arrives with the next release._
+_Everything below runs on npm `latest` (**0.3.0**) as written. These
+are the flat spellings — permanent aliases; the grouped `bro <group>
+<member>` surface (`bro work sync`) dispatches on the same install._
 
 A bro rig is designed so the machine is disposable. What dies with it is
 **processes** — the daemon, act watchers, exec shells, dolt servers —
@@ -48,9 +47,9 @@ from dead markers under `<git-common>/bro/watches/` — machine-local
 files a clone never carried — so on a fresh machine there is nothing to
 rearm. The lost machine's open PRs get their supervision back from `bro
 drive --every` instead, which discovers them from local branches, not
-markers — hence the fetch step. On 0.2.5 that supervisor is
-foreground-only: it drives while the command runs and installs no
-durable marker — that is what `bro drive install` adds in 0.3.0. A
+markers — hence the fetch step. Before 0.3.0 that supervisor was
+foreground-only: it drove while the command ran and installed no
+durable marker — `bro drive install` is the 0.3.0 piece that adds it. A
 watch armed on a branch outside `work/`/`loop/`/`stack/` has no such
 enumeration: that promise died with the machine — arm a fresh
 `bro act wait <PR> --merge` if the PR still needs one.

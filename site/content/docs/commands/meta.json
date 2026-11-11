@@ -5,11 +5,13 @@
     "spec",
     "stack",
     "query",
+    "goal",
     "---Orchestration---",
     "loop",
     "convoy",
     "fleet",
     "events",
+    "mesh",
     "---Review---",
     "act",
     "debt",
@@ -21,8 +23,11 @@
     "learn",
     "---Plumbing---",
     "providers",
+    "provider",
+    "mcp",
     "status",
     "sweep",
+    "trace",
     "utility"
   ]
 }

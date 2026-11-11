@@ -8,7 +8,7 @@ description: "Drop an event into the session mailbox — drained into context by
 | | |
 | --- | --- |
 | group | `comms` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `notify` |
 | guide | [commands/events](/docs/commands/events) |
 

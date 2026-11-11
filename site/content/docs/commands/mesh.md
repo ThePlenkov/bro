@@ -4,11 +4,6 @@ title: bro mesh
 description: Inter-rig work federation across bro checkouts.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 `bro mesh` coordinates work between bro rigs. Peer bindings can point to
 local checkouts or beads-remote Dolt replicas; requests flow through
 `inbox`/`claim`/`done`/`accept`/`reject`. `bro mesh wait` performs a

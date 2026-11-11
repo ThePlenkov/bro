@@ -10,6 +10,6 @@ description: "Outbound event sinks — list configured webhooks, send a probe [l
 | | |
 | --- | --- |
 | group | `comms` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 | guide | [commands/events](/docs/commands/events) |
 

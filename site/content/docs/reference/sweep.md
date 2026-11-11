@@ -10,7 +10,7 @@ description: "Gated disposal for closed beads: status|distill|run — gate → a
 | | |
 | --- | --- |
 | group | `work` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `sweep` |
 | config | `sweep` in bro.config |
 | guide | [commands/sweep](/docs/commands/sweep) |

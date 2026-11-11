@@ -8,5 +8,5 @@ description: "Run a shell command, then fire taskFinish connector probes — the
 | | |
 | --- | --- |
 | group | `work` |
-| npm latest | unreleased — lands in `0.3.0` |
+| npm latest | `0.3.0` |
 

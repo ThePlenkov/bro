@@ -4,11 +4,6 @@ title: bro fleet provider
 description: Claude-facing Messages-API host — run bro as a provider for Claude Code.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 `bro fleet provider` (alias `bro provider`) hosts a Messages-API listener
 so Claude Code can run on bro. Use `provider serve` to start the host,
 and the wiring helpers to point clients at it. The listener binds to

@@ -4,11 +4,6 @@ title: bro self learn
 description: Triggered lessons with evidence, confidence, and a memory that knows when to speak.
 ---
 
-_Command examples track the upcoming **0.3.0** — grouped
-`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
-`latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`)._
-
 `bro self learn` stores durable lessons for the moments they matter. A lesson
 is a rule plus a trigger: hook events and optional terms, commands, paths,
 tools, or failed-tool evidence decide when it surfaces.

@@ -10,7 +10,7 @@ description: "Convoy execution over beads molecules: status|next|done|pour|list|
 | | |
 | --- | --- |
 | group | `flow` |
-| npm latest | `0.2.5` |
+| npm latest | `0.3.0` |
 | skill | `convoy` |
 | plan | `kind = "convoy"` (v1) |
 | guide | [commands/convoy](/docs/commands/convoy) |
