@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/watchdog.schema.json",
+  "title": "bro watchdog --json",
+  "description": "The launch brief as {ts, skill, baselines} — every baseline plane measured at call time or {unavailable: <why>} when its probe could not run. Mirrors WatchdogBaselines in packages/cli/src/commands/watchdog.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ts", "skill", "baselines"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "description": "ISO-8601 tick clock (baselines.ts duplicated at top level)."
+    },
+    "skill": {
+      "type": "string",
+      "description": "The skill owning the loop protocol — WATCHDOG_SKILL ('watchdog')."
+    },
+    "baselines": {
+      "$ref": "#/$defs/WatchdogBaselines"
+    }
+  },
+  "$defs": {
+    "Unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unavailable"],
+      "properties": {
+        "unavailable": {
+          "type": "string",
+          "description": "Why the plane could not be measured — degradation is the contract, never a guessed value."
+        }
+      }
+    },
+    "WatchdogUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "mainPid", "nRestarts"],
+      "properties": {
+        "state": { "type": "string" },
+        "mainPid": { "type": ["integer", "null"] },
+        "nRestarts": { "type": ["integer", "null"] }
+      }
+    },
+    "WatchdogDaemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "alive", "logAgeSec", "etimedout"],
+      "properties": {
+        "pid": { "type": ["integer", "null"] },
+        "alive": { "type": ["boolean", "null"] },
+        "logAgeSec": { "type": ["integer", "null"] },
+        "etimedout": { "type": ["integer", "null"] }
+      }
+    },
+    "WatchdogLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lines", "ageSec", "etimedout"],
+      "properties": {
+        "lines": { "type": "integer" },
+        "ageSec": { "type": ["integer", "null"] },
+        "etimedout": { "type": ["integer", "null"] }
+      }
+    },
+    "WatchdogPrs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["open", "ours", "foreign", "capped"],
+      "properties": {
+        "open": { "type": "integer" },
+        "ours": { "type": "integer" },
+        "foreign": { "type": "integer" },
+        "capped": {
+          "type": "boolean",
+          "description": "true at the --limit ceiling — exactly-N rows is indistinguishable from a truncated sample."
+        }
+      }
+    },
+    "WatchdogDisk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "usePercent"],
+      "properties": {
+        "path": { "type": "string" },
+        "usePercent": { "type": "number" }
+      }
+    },
+    "WatchdogMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["swapUsedBytes", "memAvailableBytes"],
+      "properties": {
+        "swapUsedBytes": { "type": "number" },
+        "memAvailableBytes": { "type": "number" }
+      }
+    },
+    "WatchdogWorktrees": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count"],
+      "properties": {
+        "count": { "type": "integer" }
+      }
+    },
+    "WatchdogSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "beadId", "pid", "state", "silentMs"],
+      "properties": {
+        "slug": { "type": "string" },
+        "beadId": { "type": "string" },
+        "pid": { "type": ["integer", "null"] },
+        "state": {
+          "type": "string",
+          "enum": ["running", "dead"]
+        },
+        "silentMs": {
+          "type": ["number", "null"],
+          "description": "Log silence so far — fractional (mtimeMs carries sub-ms precision); null when neither the log nor the record carries a timestamp."
+        }
+      }
+    },
+    "WatchdogBaselines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "unit",
+        "daemon",
+        "loopOut",
+        "prs",
+        "disk",
+        "memory",
+        "worktrees",
+        "slots",
+        "residue"
+      ],
+      "properties": {
+        "ts": {
+          "type": "string",
+          "description": "ISO-8601 tick clock."
+        },
+        "unit": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogUnit" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "daemon": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogDaemon" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "loopOut": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogLog" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "prs": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogPrs" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "disk": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogDisk" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "memory": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogMemory" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "worktrees": {
+          "oneOf": [
+            { "$ref": "#/$defs/WatchdogWorktrees" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "slots": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/WatchdogSlot" }
+            },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        },
+        "residue": {
+          "oneOf": [
+            { "type": "integer" },
+            { "$ref": "#/$defs/Unavailable" }
+          ]
+        }
+      }
+    }
+  }
+}
