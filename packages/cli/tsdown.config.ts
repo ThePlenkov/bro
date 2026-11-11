@@ -16,7 +16,10 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 const OPENCODE_PLUGIN_FILES = ['index.ts', 'tui.tsx', 'rpc.ts', 'README.md'];
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts'],
+  // src/hooks.ts → dist/hooks.js is the slim hook entry (specs/
+  // bro-36sx7.7.md): run.sh prefers it so a hook event never evaluates
+  // the PLUGINS registry in index.ts's graph.
+  entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts', 'src/hooks.ts'],
   format: ['esm'],
   dts: true,
   noExternal: [/^@broject\//],

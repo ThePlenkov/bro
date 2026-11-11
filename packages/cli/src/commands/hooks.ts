@@ -74,6 +74,7 @@ import {
   acquireFileLock,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
+  loadConfig,
   parallelWorkProbe,
   postToolLines,
   preToolVerdicts,
@@ -95,7 +96,10 @@ import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
 import { emitHook } from '@broject/otel';
 import type { GuardConfig, GuardJudgeInput, GuardRun } from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
-import { loadBroConfig } from '../plugins.ts';
+// .guard config resolves through core's loadConfig with the guard
+// package's own section schema — NOT loadBroConfig from ../plugins.ts,
+// whose import evaluates the whole PLUGINS registry on every hook event
+// (review #9, specs/bro-36sx7.7.md)
 import { sessionCapRefusalForHook } from './session-cap.ts';
 import type { InstallResult } from './githooks.ts';
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
@@ -117,7 +121,8 @@ import {
 import { deriveToolSuccess } from '../host-matrix.ts';
 
 // Lazy-loaded heavy deps to cut hook startup time
-const lazyRunGuards = async () => (await import('@broject/guard')).runGuards;
+// (@broject/guard is imported inline in guardLines — runGuards and
+// guardSection ride the same module instance)
 const lazyAppendRow = async () => (await import('@broject/judge')).appendRow;
 const lazyJudgeConfig = async () => (await import('@broject/judge')).judgeConfig;
 const lazyJudgeFacade = async () => (await import('@broject/judge')).judgeFacade;
@@ -1461,8 +1466,13 @@ async function guardLines(
   mctx: () => Promise<MatchContext>
 ): Promise<string[]> {
   try {
-    const cfg = (loadBroConfig(dir) as Record<string, unknown>).guard as GuardConfig;
-    const runGuards = await lazyRunGuards();
+    // .guard is a plugin configKey, not a core section — scoping the
+    // section map resolves it exactly as loadBroConfig's full registry
+    // scan did, without importing plugins.ts (specs/bro-36sx7.7.md)
+    const guardMod = await import('@broject/guard');
+    const cfg = (loadConfig(dir, { guard: guardMod.guardSection }) as Record<string, unknown>)
+      .guard as GuardConfig;
+    const runGuards = guardMod.runGuards;
     const judgeConfigMod = await lazyJudgeConfig().catch(() => null);
     const judgeFacadeMod = await lazyJudgeFacade().catch(() => null);
     const appendRowMod = await lazyAppendRow().catch(() => null);

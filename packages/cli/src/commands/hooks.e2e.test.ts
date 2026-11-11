@@ -2614,3 +2614,189 @@ describe('hooks e2e — native payload conformance (bro-l8c4f.8)', () => {
     });
   });
 });
+
+describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
+  /** The second tsdown entry — the same `runHooksCommand` dispatch minus
+   *  the PLUGINS registry cold-load. run.sh prefers it wherever it
+   *  resolves; these tests pin both the direct entry and the launcher's
+   *  preference/fallback contract. */
+  const HOOKS_DIST = resolve(CLI_DIST, '..', 'hooks.js');
+
+  const runSlim = (
+    cwd: string,
+    event: string,
+    payload: Record<string, unknown>,
+    env: Record<string, string> = {}
+  ) =>
+    spawnSync(process.execPath, [HOOKS_DIST, event], {
+      cwd,
+      input: JSON.stringify(payload),
+      env: e2eEnv(env),
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+
+  test('dist/hooks.js answers session-start like dist/index.js hooks', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      assert.ok(existsSync(HOOKS_DIST), 'dist/hooks.js missing — run `npm run build`');
+      const env = { XDG_STATE_HOME: join(f.root, 'xdg-state') };
+      const slim = runSlim(f.main, 'session-start', { session_id: 's-slim' }, env);
+      assert.equal(slim.status, 0, slim.stderr);
+      const full = hook(f, 'session-start', { session_id: 's-full' });
+      assert.equal(full.code, 0);
+      // same control-JSON envelope and connector context — the slim
+      // entry is a different binary, not a different dispatch
+      const slimJson = JSON.parse(slim.stdout) as {
+        hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+      };
+      const fullJson = JSON.parse(full.stdout) as typeof slimJson;
+      assert.equal(slimJson.hookSpecificOutput?.hookEventName, 'SessionStart');
+      assert.equal(fullJson.hookSpecificOutput?.hookEventName, 'SessionStart');
+      assert.match(slimJson.hookSpecificOutput?.additionalContext ?? '', /parallel-friendly/);
+      assert.match(fullJson.hookSpecificOutput?.additionalContext ?? '', /parallel-friendly/);
+    });
+  });
+
+  test('dist/hooks.js answers operator events and fails open on unknown ones', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const env = { XDG_STATE_HOME: join(f.root, 'xdg-state') };
+      for (const event of ['perf', 'status', 'bogus-event']) {
+        const r = runSlim(f.main, event, {}, env);
+        assert.equal(r.status, 0, `${event}: ${r.stderr}`);
+      }
+    });
+  });
+
+  /** A fake plugin root whose walk-up lands on a marker dist — the
+   *  launcher keys on dist/index.js existing, then prefers hooks.js. */
+  function fakePluginDist(root: string, withHooksJs: boolean): string {
+    const pluginRoot = join(root, 'plugin');
+    const distDir = join(pluginRoot, 'packages', 'cli', 'dist');
+    mkdirSync(distDir, { recursive: true });
+    writeFileSync(join(distDir, 'index.js'), 'console.log("INDEX_JS_RAN")\n');
+    if (withHooksJs) {
+      writeFileSync(join(distDir, 'hooks.js'), 'console.log("HOOKS_JS_RAN")\n');
+    }
+    return pluginRoot;
+  }
+
+  const runShEvent = (cwd: string, event: string, env: Record<string, string>) =>
+    spawnSync('sh', [RUN_SH, event], {
+      cwd,
+      input: JSON.stringify({ session_id: 's1' }),
+      env: e2eEnv(env),
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+
+  test('run.sh prefers dist/hooks.js over the index.js hooks spelling', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const pluginRoot = fakePluginDist(f.root, true);
+      const r = runShEvent(f.main, 'session-start', {
+        PLUGIN_ROOT: pluginRoot,
+        XDG_STATE_HOME: join(f.root, 'xdg-state'),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /HOOKS_JS_RAN/);
+      assert.doesNotMatch(r.stdout, /INDEX_JS_RAN/);
+    });
+  });
+
+  test('run.sh falls back to index.js hooks when hooks.js is absent', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const pluginRoot = fakePluginDist(f.root, false);
+      const r = runShEvent(f.main, 'session-start', {
+        PLUGIN_ROOT: pluginRoot,
+        XDG_STATE_HOME: join(f.root, 'xdg-state'),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /INDEX_JS_RAN/);
+    });
+  });
+
+  /** A PATH-resolvable fake `bro`: <root>/fakebin/bro symlinks to
+   *  <root>/fakepkg/dist/index.js — the npm .bin layout, with an empty
+   *  PLUGIN_ROOT so the launcher's walk-up finds nothing and resolution
+   *  falls to `command -v bro`. `withHooksJs` adds the slim sibling the
+   *  launcher prefers; index.js always carries a shebang + exec bit so
+   *  the `bro hooks` fallback can run it directly. */
+  function fakePathBro(root: string, withHooksJs: boolean) {
+    const pluginRoot = join(root, 'empty-plugin');
+    mkdirSync(pluginRoot, { recursive: true });
+    const fakeBin = join(root, 'fakebin');
+    mkdirSync(fakeBin, { recursive: true });
+    const pkgDist = join(root, 'fakepkg', 'dist');
+    mkdirSync(pkgDist, { recursive: true });
+    // +x matters: `command -v` skips a PATH entry that isn't
+    // executable, so a mode-644 target would hide the fake bro and
+    // resolution would fall through to the host's real install
+    const indexJs = join(pkgDist, 'index.js');
+    writeFileSync(indexJs, '#!/usr/bin/env node\nconsole.log("INDEX_JS_RAN")\n');
+    chmodSync(indexJs, 0o755);
+    if (withHooksJs) {
+      writeFileSync(join(pkgDist, 'hooks.js'), 'console.log("HOOKS_JS_RAN")\n');
+    }
+    symlinkSync(indexJs, join(fakeBin, 'bro'));
+    return {
+      PLUGIN_ROOT: pluginRoot,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      XDG_STATE_HOME: join(root, 'xdg-state'),
+    };
+  }
+
+  test('run.sh resolves a PATH bro bin to its sibling hooks.js', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const r = runShEvent(f.main, 'session-start', fakePathBro(f.root, true));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /HOOKS_JS_RAN/);
+      assert.doesNotMatch(r.stdout, /INDEX_JS_RAN/);
+    });
+  });
+
+  test('run.sh falls back to `bro hooks` when the resolved dist has no hooks.js', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const r = runShEvent(f.main, 'session-start', fakePathBro(f.root, false));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /INDEX_JS_RAN/);
+    });
+  });
+
+  test('SELF_ENTRY under a hooks.js launch respawns through the index sibling', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      // the layout dist ships: hooks.js beside index.js. A probe file
+      // named hooks.js reports what self-entry.ts resolved — detached
+      // respawns (daemon run, watch, trace export, post-merge) must
+      // re-enter the full CLI, never the hook-only dispatch
+      const dir = join(f.root, 'entries');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'index.js'), '');
+      const probe = join(dir, 'hooks.js');
+      const selfEntry = resolve(CLI_DIST, '..', '..', 'src', 'commands', 'self-entry.ts');
+      writeFileSync(
+        probe,
+        `import { SELF_ENTRY } from ${JSON.stringify(selfEntry)};\n` +
+          'process.stdout.write(String(SELF_ENTRY));\n'
+      );
+      const r = spawnSync(process.execPath, [probe], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, join(dir, 'index.js'));
+      // and the full entry is untouched — index.js stays itself
+      const probe2 = join(dir, 'probe2.js');
+      writeFileSync(
+        probe2,
+        `import { SELF_ENTRY } from ${JSON.stringify(selfEntry)};\n` +
+          'process.stdout.write(String(SELF_ENTRY));\n'
+      );
+      // argv[1] is probe2.js — not hooks-shaped, SELF_ENTRY is itself
+      const r2 = spawnSync(process.execPath, [probe2], { encoding: 'utf8' });
+      assert.equal(r2.stdout, probe2);
+    });
+  });
+});
