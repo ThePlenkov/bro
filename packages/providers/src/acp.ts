@@ -695,14 +695,15 @@ export async function acpConverse(
       );
       sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
+        'acp.session_id': session.sessionId,
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
       });
       return { ...r, model, usage: acpUsage(r.response) };
     } catch (err) {
-      sessSpan.end({ error: errMsg(err) }, 'error');
-      span.end({ error: errMsg(err) }, 'error');
+      sessSpan.end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      span.end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
       throw err;
     } finally {
       session.dispose();

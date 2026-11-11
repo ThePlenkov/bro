@@ -73,6 +73,7 @@ import {
   type ListResult,
   loadConfig,
   localLeaseStore,
+  mainWorktreeRoot,
   type ModelRoute,
   mintAgentId,
   mintRunId,
@@ -1095,6 +1096,13 @@ const AGENT_PIN_KEYS = new Set([
   // the MCP-servers artifact path is connector-owned too — a caller-
   // supplied BRO_MCP_FILE would point the worker at a planted file
   'BRO_MCP_FILE',
+  // telemetry identity is connector-owned too (spec bro-xgejl.1) — a
+  // caller-supplied BRO_WORKTREE/BRO_BRANCH/BRO_REPO would mislabel
+  // every span the worker emits, and an ambient copy would bleed the
+  // PARENT's dims into a child spawn on a different worktree
+  'BRO_WORKTREE',
+  'BRO_BRANCH',
+  'BRO_REPO',
 ]);
 
 /** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
@@ -1130,6 +1138,14 @@ function isAllowedByEnvPolicy(
   // worker holding it can mint customer verdicts (spec bro-7d5nb
   // trust model), so it's denied in every mode: ambient AND spec.env
   if (key === 'BRO_PIPELINE_KEY') return false;
+  // trace plumbing is not a credential (spec bro-xgejl.1): the
+  // spawner's explicit TRACEPARENT must survive strictEnv or the
+  // worker's spans can never join the parent's trace; an ambient
+  // copy is the correct parent for a nested spawn either way. The
+  // OTLP endpoint passes only from spec.env — ambient stays
+  // strict-gated as before (provider.env resolution covers the rest)
+  if (key === 'TRACEPARENT') return true;
+  if (key === 'OTEL_EXPORTER_OTLP_ENDPOINT' && fromSpec) return true;
   if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
   // strict mode: only allowlisted
   if (policy.envAllowlist?.includes(key) === true) return true;
@@ -1147,6 +1163,48 @@ function isAllowedByEnvPolicy(
  *  exactly this failure shape). GIT_INDEX_FILE stays: data-ref writes
  *  use it as a private index. */
 const GIT_REPOSITORY_ENV_KEYS = new Set(['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']);
+
+/** Telemetry identity for one worktree (spec bro-xgejl.1) — the dims a
+ *  spawned worker's otel `resource()` reads back as
+ *  BRO_WORKTREE/BRO_BRANCH/BRO_REPO. Probed once per resolved path per
+ *  process: spawns are rare, the git reads are not free, and every
+ *  backend's env build calls this (inside the native registry lock for
+ *  the common case). Fail-open — a vanished or non-git worktree yields
+ *  the dims it can prove, never a throw. */
+export interface WorktreeTelemetryDims {
+  /** The resolved worktree path — always present (pure path math). */
+  worktree: string;
+  /** `git branch --show-current` — absent on detached HEAD/non-git. */
+  branch?: string;
+  /** The primary checkout (`mainWorktreeRoot`) — absent outside git. */
+  repo?: string;
+}
+
+const telemetryDimsMemo = new Map<string, WorktreeTelemetryDims>();
+export function worktreeTelemetryDims(dir: string): WorktreeTelemetryDims {
+  const key = resolve(dir);
+  const hit = telemetryDimsMemo.get(key);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const dims: WorktreeTelemetryDims = { worktree: key };
+  const br = gitTry(['-C', key, 'branch', '--show-current']);
+  const branch = br.code === 0 ? br.out.trim() : '';
+  if (branch !== '') {
+    dims.branch = branch;
+  }
+  const repo = mainWorktreeRoot(key);
+  if (repo !== null && repo !== '') {
+    dims.repo = repo;
+  }
+  // bound the memo — a long-lived loop/serve probing many worktrees
+  // must not grow it without limit; a clear just re-probes
+  if (telemetryDimsMemo.size >= 512) {
+    telemetryDimsMemo.clear();
+  }
+  telemetryDimsMemo.set(key, dims);
+  return dims;
+}
 
 /** The real pin values a backend injects over/around caller env —
  *  BEADS_DIR/BRO_BEAD_ID bind the shared store + claim; BRO_AGENT_ID is
@@ -1215,6 +1273,16 @@ const agentEnvPins = (
     spec.worker.mcpServers.length > 0
   ) {
     pins.push(['BRO_MCP_FILE', join(dirname(promptFile), `${agentId}.mcp.json`)]);
+  }
+  // telemetry identity (spec bro-xgejl.1) — the worktree triple the
+  // worker's otel resource() reports; only the spawner can resolve it
+  const dims = worktreeTelemetryDims(spec.repoRoot);
+  pins.push(['BRO_WORKTREE', dims.worktree]);
+  if (dims.branch !== undefined) {
+    pins.push(['BRO_BRANCH', dims.branch]);
+  }
+  if (dims.repo !== undefined) {
+    pins.push(['BRO_REPO', dims.repo]);
   }
   return pins;
 };

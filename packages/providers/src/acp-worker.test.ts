@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
@@ -572,6 +573,108 @@ describe('runAcpWorker', () => {
       assert.equal(await runAcpWorker(spec), 0);
       assert.match(lines.join('\n'), /fs\/read_text_file.*method-not-found/);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('emits acp.open → acp.turn → acp.session as one trace with the session id (spec bro-xgejl.1)', async () => {
+    // a loopback OTLP collector — the worker's spans must nest
+    // open → turn → session and carry acp.session_id on both inner
+    // spans, so a fleet trace resolves WHICH session ran the turn
+    const hits: string[] = [];
+    const server: Server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (d: Buffer) => (body += d.toString('utf8')));
+      req.on('end', () => {
+        if (req.url === '/v1/traces') hits.push(body);
+        res.writeHead(200).end('{}');
+      });
+    });
+    await new Promise<void>(res => server.listen(0, '127.0.0.1', res));
+    const addr = server.address();
+    assert.ok(addr !== null && typeof addr !== 'string');
+    const savedEp = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    const savedTelemetry = process.env.BRO_TELEMETRY;
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = `http://127.0.0.1:${addr.port}`;
+    delete process.env.BRO_TELEMETRY;
+    const fake = fakeAcpAgent({ replyText: 'done', configOptions: [MODEL_OPTION] });
+    const { spec, dir } = workerSpec({ peer: fake.app });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      // span ends queue and flush on the unref'd timer — poll the wire
+      const deadline = Date.now() + 8_000;
+      let spans: {
+        name: string;
+        spanId: string;
+        parentSpanId?: string;
+        attrs: Map<string, unknown>;
+      }[] = [];
+      while (Date.now() < deadline) {
+        spans = hits.flatMap(body => {
+          const parsed = JSON.parse(body) as {
+            resourceSpans: {
+              scopeSpans: {
+                spans: {
+                  name: string;
+                  spanId: string;
+                  parentSpanId?: string;
+                  attributes?: { key: string; value: Record<string, unknown> }[];
+                }[];
+              }[];
+            }[];
+          };
+          return parsed.resourceSpans.flatMap(rs =>
+            rs.scopeSpans.flatMap(ss =>
+              ss.spans.map(s => ({
+                name: s.name,
+                spanId: s.spanId,
+                parentSpanId: s.parentSpanId,
+                attrs: new Map((s.attributes ?? []).map(a => [a.key, Object.values(a.value)[0]])),
+              }))
+            )
+          );
+        });
+        const byName = new Map(spans.map(s => [s.name, s]));
+        if (
+          byName.has('acp.open') &&
+          byName.has('acp.turn') &&
+          byName.has('acp.session') &&
+          spans.every(
+            s => !s.name.startsWith('acp.') || s.parentSpanId !== undefined || s.name === 'acp.open'
+          )
+        ) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const byName = new Map(spans.map(s => [s.name, s]));
+      const open = byName.get('acp.open');
+      const turn = byName.get('acp.turn');
+      const sess = byName.get('acp.session');
+      assert.ok(open, 'acp.open emitted');
+      assert.ok(turn, 'acp.turn emitted');
+      assert.ok(sess, 'acp.session emitted');
+      // one trace, nested open → turn → session
+      assert.equal(turn!.parentSpanId, open!.spanId);
+      assert.equal(sess!.parentSpanId, turn!.spanId);
+      assert.equal(open!.attrs.get('acp.command'), 'unused-with-peer');
+      assert.equal(turn!.attrs.get('acp.session_id'), 'sess-1');
+      assert.equal(sess!.attrs.get('acp.session_id'), 'sess-1');
+      assert.equal(turn!.attrs.get('acp.model'), 'typesafe/jev-1.13');
+      assert.equal(turn!.attrs.get('acp.stop_reason'), 'end_turn');
+      // the resource attrs carry the worker's own identity pins
+      const first = JSON.parse(hits[0]!) as {
+        resourceSpans: { resource: { attributes: { key: string }[] } }[];
+      };
+      const rkeys = first.resourceSpans[0]!.resource.attributes.map(a => a.key);
+      assert.ok(rkeys.includes('service.name'));
+      assert.ok(rkeys.includes('bro.cwd'));
+    } finally {
+      if (savedEp === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEp;
+      if (savedTelemetry === undefined) delete process.env.BRO_TELEMETRY;
+      else process.env.BRO_TELEMETRY = savedTelemetry;
+      server.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

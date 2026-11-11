@@ -43,6 +43,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { pumpTurn } from './acp.ts';
 import { agentEventRecord } from './acp-events.ts';
+import { otelHeader, otelSpan } from './otel.ts';
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -391,6 +392,22 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
   const errOut = spec.err ?? ((text: string) => void process.stderr.write(text));
   const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
 
+  // acp.open/acp.turn/acp.session spans (spec bro-xgejl.1) — the fleet
+  // worker's trace leg: bro.cmd acp-worker → acp.open → acp.turn →
+  // acp.session → acp.tool*, all under the agent.spawn parent the
+  // spawn's TRACEPARENT env carried in. Ends are once-guarded — every
+  // failure path lands exactly one terminal status.
+  const openSpan = otelSpan('acp.open', { 'acp.by': by, 'acp.command': spec.command });
+  let openEnded = false;
+  const endOpen = (
+    more: Record<string, string | number | boolean> = {},
+    status: 'ok' | 'error' = 'ok'
+  ): void => {
+    if (openEnded) return;
+    openEnded = true;
+    openSpan.end(more, status);
+  };
+
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
     permissionHandler(spec.autoApprove === true, spec.provider, log, r =>
@@ -449,15 +466,21 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
 
   const op = async (ctx: ClientContext): Promise<number> => {
     cx = ctx;
-    const init = await ctx.request('initialize', {
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: 'bro', version: '1' },
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-    });
+    const init = await ctx
+      .request('initialize', {
+        protocolVersion: PROTOCOL_VERSION,
+        clientInfo: { name: 'bro', version: '1' },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+      })
+      .catch((err: unknown) => {
+        endOpen({ error: errMsg(err) }, 'error');
+        throw err;
+      });
     if (init.protocolVersion !== PROTOCOL_VERSION) {
+      endOpen({ error: `protocol ${init.protocolVersion}` }, 'error');
       throw new AcpWorkerError(
         `${by}: agent negotiated protocol ${init.protocolVersion} — the driver speaks v${PROTOCOL_VERSION} only`
       );
@@ -467,10 +490,50 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     // its login methods — only an actual refusal at session/new names
     // auth as required
     const authMethods = init.authMethods ?? [];
-    const mcpServers = validatedMcpServers(
-      Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
-      by
+    // open is established — its children (the agent child's hook
+    // descendants) parent under it via the TRACEPARENT pinned into the
+    // spawn env below. acp.session/acp.turn nest one level under open;
+    // session id lands on both once session/new answers (spec
+    // bro-xgejl.1)
+    endOpen({ 'acp.pid': child?.pid ?? 0 });
+    const turnSpan = otelSpan(
+      'acp.turn',
+      { 'acp.by': by, 'acp.requested_model': spec.model ?? '' },
+      { parent: openSpan.ctx }
     );
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: turnSpan.ctx });
+    let sessEnded = false;
+    let turnEnded = false;
+    const endSess = (
+      more: Record<string, string | number | boolean> = {},
+      status: 'ok' | 'error' = 'ok'
+    ): void => {
+      if (sessEnded) return;
+      sessEnded = true;
+      sessSpan.end(more, status);
+    };
+    const endTurn = (
+      more: Record<string, string | number | boolean> = {},
+      status: 'ok' | 'error' = 'ok'
+    ): void => {
+      if (turnEnded) return;
+      turnEnded = true;
+      turnSpan.end(more, status);
+    };
+    let reportedModel: string | undefined;
+    let mcpServers: unknown[];
+    try {
+      mcpServers = validatedMcpServers(
+        Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
+        by
+      );
+    } catch (err) {
+      endSess({ error: errMsg(err) }, 'error');
+      endTurn({ error: errMsg(err) }, 'error');
+      throw err;
+    }
+    // openSession owns the resume-or-new decision (bro-5qsnr); a throw
+    // here means no session ever attached — the spans end error
     const session = await openSession(
       ctx,
       spec,
@@ -479,7 +542,11 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       mcpServers,
       log,
       by
-    );
+    ).catch((err: unknown) => {
+      endSess({ error: errMsg(err) }, 'error');
+      endTurn({ error: errMsg(err) }, 'error');
+      throw err;
+    });
     sessionId = session.sessionId;
     spec.record?.({ acpSessionId: session.sessionId });
     log(`session ${session.sessionId} (cwd ${spec.cwd})`);
@@ -507,11 +574,13 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
           });
         const served = res.configOptions?.find(o => o.id === modelOpt.id)?.currentValue;
         const reported = typeof served === 'string' ? served : spec.model;
+        reportedModel = reported;
         spec.record?.({ model: reported });
         log(`model ${reported}`);
       } else {
         const cur = modelOpt?.currentValue;
         if (typeof cur === 'string') {
+          reportedModel = cur;
           spec.record?.({ model: cur });
           log(`model ${cur} (agent default)`);
         }
@@ -558,12 +627,30 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         () => ({}),
         undefined,
         by,
-        undefined,
+        sessSpan.ctx,
         spec.cwd,
         drainTimeoutMs
       ).finally(flush);
       log(`turn stopped — ${r.stopReason}`);
+      endSess({ 'acp.session_id': session.sessionId });
+      endTurn({
+        'acp.session_id': session.sessionId,
+        ...(reportedModel === undefined ? {} : { 'acp.model': reportedModel }),
+        'acp.stop_reason': r.stopReason,
+        'acp.reply_len': r.text.length,
+      });
       return r.stopReason === 'end_turn' ? 0 : 1;
+    } catch (err) {
+      endSess({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      endTurn(
+        {
+          'acp.session_id': session.sessionId,
+          ...(reportedModel === undefined ? {} : { 'acp.model': reportedModel }),
+          error: errMsg(err),
+        },
+        'error'
+      );
+      throw err;
     } finally {
       session.dispose();
     }
@@ -581,7 +668,14 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         // loop.agent/agents.*.command already carry. Only DATA is
         // forbidden from the shell — everything else rides argv/params.
         cwd: spec.cwd,
-        env: { ...process.env, ...spec.env },
+        env: {
+          ...process.env,
+          ...spec.env,
+          // the agent child's own hook descendants parent under
+          // acp.open — same injection the fleet spawn sites perform
+          // (spec bro-xgejl.1)
+          TRACEPARENT: otelHeader(openSpan.ctx),
+        },
         // stdin is the request channel — 'ignore' would leave
         // proc.stdin null and the driver dead before initialize
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -612,6 +706,9 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       );
     }
   } catch (err) {
+    // covers connectWith/transport failures op never reached —
+    // initialize/protocol/refusal paths already ended their spans
+    endOpen({ error: errMsg(err) }, 'error');
     log(`acp-worker failed — ${errMsg(err)}`);
     return 1;
   } finally {
