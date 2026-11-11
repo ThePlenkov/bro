@@ -94,3 +94,20 @@ exclude_paths:
   # file, and the same walk shape (a string scan with computed slices) in
   # this PR's own markdown-link scanner is not flagged.
   - 'packages/convoy/src/title.ts'
+
+  # The pipeline run-starter IS path construction: every fs op lands on
+  # a path bro builds itself — <git-common>/bro/pipeline/*.journal.jsonl
+  # for the live-run dedup scan and <runId>.formula.toml for the formula
+  # sidecar. runId is runner-minted under the journal's RUN_ID_RE, the
+  # dir resolves through git's own common dir — never request data.
+  # Codacy's path rule reads a computed path as uncontrolled data; the
+  # same shape already ships on main (packages/core/src/private-files.ts,
+  # packages/act/src/state-cache.ts) unflagged.
+  - 'packages/pipeline/src/starter.ts'
+
+  # The production engine map IS path construction too: the exit records
+  # it reads are <git-common>/bro/agents/<agentId>.<runId>.exit and the
+  # emit/retro sentinels it writes sit beside the pipeline plane — every
+  # path is bro-built (git common dir + registry-minted ids), never
+  # customer input. Same non-literal-path false positive as starter.ts.
+  - 'packages/cli/src/pipeline-engines.ts'

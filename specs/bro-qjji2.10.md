@@ -3,8 +3,10 @@
 Parent: specs/bro-7d5nb.md (the agile pipeline contract — stages,
 transitions, customer channels, concurrency). Sibling boundaries:
 bro-qjji2.12 owns the fleet `work` engine's real worker spawn (merged
-#999); bro-v0pvd.2 owns the `act-gate` merge-stage factory (merged
-#1002); bro-v0pvd.3 owns the run waker — journal scan →
+[#999](https://github.com/ThePlenkov/bro/pull/999)); bro-v0pvd.2 owns
+the `act-gate` merge-stage factory (merged
+[#1002](https://github.com/ThePlenkov/bro/pull/1002)); bro-v0pvd.3 owns
+the run waker — journal scan →
 `resumePipeline` on settle (its own branch; this bead ships ONLY the
 fresh-start/admission side and must not grow a second resume loop);
 bro-qjji2.11 owns the production accept `emit` transport (this bead
@@ -38,7 +40,7 @@ A new subcommand on the existing `bro pipeline` group (the group is
 already the pipeline's CLI surface — `accept`/`answer` write the
 customer channel, `run` creates the runs that channel feeds):
 
-```
+```text
 bro pipeline run [--formula <file>] [--engines <module>]
                  [--customer <id>] [--label <label>] [--limit <n>]
                  [--dry-run] [--json] [<item>…]
