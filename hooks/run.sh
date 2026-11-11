@@ -440,10 +440,13 @@ EOF
 
     mailbox_pending "$BRODIR/notify" && NEED_NODE=1
 
-    # orchestrator want-markers — a dead pulse/drive/rig gets respawned
-    # by the post-tool checkpoint; workers (BRO_AGENT_ID) never rearm
+    # orchestrator want-markers — a dead pulse/drive/loop/rig gets
+    # respawned by the post-tool checkpoint; workers (BRO_AGENT_ID)
+    # never rearm. loop.json belongs: a repo armed only by
+    # `bro loop install` has no drive.json, and without it here the
+    # fast path would exit 0 before the checkpoint could ever run
     if [ -z "$NEED_NODE" ] && [ "$EVENT" = post-tool ] && [ -z "${BRO_AGENT_ID:-}" ]; then
-      if [ -f "$BRODIR/pulse.json" ] || [ -f "$BRODIR/rig-pulse.json" ] || [ -f "$BRODIR/drive.json" ]; then
+      if [ -f "$BRODIR/pulse.json" ] || [ -f "$BRODIR/rig-pulse.json" ] || [ -f "$BRODIR/drive.json" ] || [ -f "$BRODIR/loop.json" ]; then
         NEED_NODE=1
       fi
     fi
@@ -684,7 +687,9 @@ bro_hooks_js() {
   esac
   # chase the symlink chain — npm .bin entries link into the package;
   # plain `readlink` is POSIX (no -f, which macOS lacks). Bounded so a
-  # link cycle can't spin the launcher.
+  # link cycle can't spin the launcher — 40 is generous: npm link
+  # chains run single digits, and a deeper chain is pathological, not
+  # a layout to support.
   _n=0
   while [ -L "$_b" ] && [ "$_n" -lt 40 ]; do
     _n=$((_n + 1))
