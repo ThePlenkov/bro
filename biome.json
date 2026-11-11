@@ -15,6 +15,7 @@
       "!plugins/*/bro/bro.ts",
       "!site/content/docs/reference/**",
       "!specs/**/*.md",
+      "!packages/brose/**/*.md",
       "!**/vendor/**",
       "!packages/acp/model/src/content.ts",
       "!packages/acp/model/src/index.ts",
