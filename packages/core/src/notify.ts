@@ -10,10 +10,13 @@
  * state dir (`$XDG_STATE_HOME`, default `~/.local/state`) outside one.
  *
  * Delivery is broadcast, not first-consumer-wins: each session carries
- * a `.seen-<session>` cursor in the mailbox, so a drop reaches every
- * live session exactly once — the writer's own postTool echoing it back
- * cannot eat it before the parent sees it. Drops expire after
- * DROP_TTL_MS and cursors after SEEN_TTL_MS.
+ * its cursor inside the mailbox's single `.cursors` file, so a drop
+ * reaches every live session exactly once — the writer's own postTool
+ * echoing it back cannot eat it before the parent sees it. A drain
+ * stats the dir first: an unchanged mtime+ctime means nothing new, so
+ * the common post-tool probe costs one stat plus one small read instead
+ * of a full mailbox scan. Drops expire after DROP_TTL_MS and cursors
+ * after SEEN_TTL_MS.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -161,15 +164,135 @@ export function mailboxEvent(text: string, locator: string | undefined): EventEn
  *  was idle past the TTL never sees it. */
 export const DROP_TTL_MS = 60 * 60 * 1000;
 
-/** Session cursors outlive drops — pruned on the marker TTL scale. */
+/** Session cursors outlive drops — entries idle past this are dropped
+ *  on the next cursor write (the marker TTL scale the old `.seen-*`
+ *  file prune used). */
 const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Drops one session has already been shown — a newline list of drop
- *  names in `.seen-<sid>` inside the mailbox dir. The cursor is
- *  rewritten to only the names that still exist, so it self-limits. */
+/** The one cursor file per mailbox dir — every session's seen-set plus
+ *  the dir stat its last drain scanned against, in a single JSON
+ *  document. It is written IN PLACE only: a tmp+rename would add and
+ *  remove dir entries, bumping the mailbox's own mtime — the signal
+ *  the drain fast path reads. */
+const CURSOR_FILE = '.cursors';
+
+function cursorPath(mb: string): string {
+  return join(mb, CURSOR_FILE);
+}
+
+/** The `.cursors` map key — the raw session id. JSON keys need no
+ *  filename sanitization, so two distinct sids can no longer collide
+ *  onto one cursor the way `.seen-<sid>`'s `[\w.-]` mangling could;
+ *  '' keeps the old `.seen-unknown` shared bucket. */
+function sessionKey(sessionId: string): string {
+  return sessionId === '' ? 'unknown' : sessionId;
+}
+
+/** One session's cursor row — `seen` is the drop names it has been
+ *  shown (pruned to names still on disk on every write), `touched` the
+ *  GC clock, `sig`+`dirMtimeMs`+`dirCtimeMs` the fast-path baseline. */
+interface CursorEntry {
+  seen: string[];
+  touched: number;
+  sig: string;
+  dirMtimeMs: number;
+  dirCtimeMs: number;
+}
+
+interface CursorState {
+  sessions: Record<string, CursorEntry>;
+}
+
+/** The `.cursors` document — absent or unreadable means first drain,
+ *  everything is new. Rows are shape-checked: a corrupt entry degrades
+ *  to absent (rescan + rewrite), never a crash. */
+function readCursorState(mb: string): CursorState {
+  try {
+    const parsed = JSON.parse(readFileSync(cursorPath(mb), 'utf8')) as {
+      sessions?: unknown;
+    } | null;
+    const sessions: Record<string, CursorEntry> = {};
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      parsed.sessions !== null &&
+      typeof parsed.sessions === 'object'
+    ) {
+      for (const [sid, raw] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+        const e = raw as Partial<CursorEntry> | null;
+        if (
+          e === null ||
+          typeof e !== 'object' ||
+          !Array.isArray(e.seen) ||
+          typeof e.touched !== 'number'
+        ) {
+          continue;
+        }
+        sessions[sid] = {
+          seen: e.seen.filter((s): s is string => typeof s === 'string'),
+          touched: e.touched,
+          sig: typeof e.sig === 'string' ? e.sig : '',
+          dirMtimeMs: typeof e.dirMtimeMs === 'number' ? e.dirMtimeMs : Number.NaN,
+          dirCtimeMs: typeof e.dirCtimeMs === 'number' ? e.dirCtimeMs : Number.NaN,
+        };
+      }
+    }
+    return { sessions };
+  } catch {
+    return { sessions: {} };
+  }
+}
+
+/** Persist this session's cursor row. Re-reads first so a concurrent
+ *  drain's session entries merge rather than clobber, then drops
+ *  entries idle past SEEN_TTL_MS — the single file's answer to the old
+ *  per-file cursor prune. This session's `seen` unions with the
+ *  freshest row's before the live-name prune: parallel post-tool hooks
+ *  share a sessionId, and a racing drain may have marked drops seen
+ *  that this scan predated — union loses nothing and never resurrects
+ *  a pruned name. Fail-open: a lost write just redelivers next drain. */
+function writeCursorState(
+  mb: string,
+  key: string,
+  entry: CursorEntry,
+  now: number,
+  live: Set<string>
+): void {
+  try {
+    const state = readCursorState(mb);
+    for (const [sid, e] of Object.entries(state.sessions)) {
+      if (now - e.touched > SEEN_TTL_MS) {
+        delete state.sessions[sid];
+      }
+    }
+    const prev = state.sessions[key];
+    const seen = prev === undefined ? entry.seen : [...new Set([...prev.seen, ...entry.seen])];
+    state.sessions[key] = { ...entry, seen: seen.filter(f => live.has(f)) };
+    writeFileSync(cursorPath(mb), JSON.stringify(state));
+  } catch {
+    // best-effort
+  }
+}
+
+/** The pre-`.cursors` per-session cursor filename — `.seen-<sid>`.
+ *  Read only, to migrate a session's first post-upgrade drain. */
 function seenPath(mb: string, sessionId: string): string {
   const sid = sessionId.replace(/[^\w.-]/g, '_') || 'unknown';
   return join(mb, `.seen-${sid}`);
+}
+
+/** The legacy `.seen-<sid>` cursor — `existed` distinguishes "no file"
+ *  from "empty file" so the caller removes it only when there was a
+ *  cursor to migrate. */
+function readLegacySeen(cursor: string): { names: Set<string>; existed: boolean } {
+  try {
+    return {
+      names: new Set(readFileSync(cursor, 'utf8').split('\n').filter(Boolean)),
+      existed: true,
+    };
+  } catch {
+    return { names: new Set(), existed: false };
+  }
 }
 
 /** Epoch-ms embedded in a drop name (`<prefix>-<ms>-<rand>.txt`) — the
@@ -177,37 +300,19 @@ function seenPath(mb: string, sessionId: string): string {
  *  `watch-*` regardless of drop time. */
 const dropTime = (name: string): number => Number(/-(\d+)-/.exec(name)?.[1] ?? 0);
 
-/** The session's `.seen` cursor — absent or unreadable means first
- *  drain, everything is new. */
-function readSeen(cursor: string): Set<string> {
-  try {
-    return new Set(readFileSync(cursor, 'utf8').split('\n').filter(Boolean));
-  } catch {
-    return new Set();
+/** The fast-path key for a drain's delivery semantics. Only a
+ *  keep-less drain (`opts.keep === undefined` — the notify connector's
+ *  hook path) may skip the scan, and only against a baseline an
+ *  identically-addressed keep-less drain recorded: `for` serializes
+ *  the addressing identity. A `keep`-filtered drain (the events
+ *  plane's subscribe/probe) can leave drops pending that a keep-less
+ *  drain must deliver, so it always scans and records 'k' — which can
+ *  never equal a 'u:' signature. */
+function drainSignature(opts?: DrainOpts): string | null {
+  if (opts?.keep !== undefined) {
+    return null;
   }
-}
-
-/** Persist the cursor pruned to names still on disk — a failed write
- *  just re-delivers next drain (fail-open). */
-function writeSeen(cursor: string, seen: Set<string>, files: string[]): void {
-  try {
-    writeFileSync(cursor, [...seen].filter(f => files.includes(f)).join('\n'));
-  } catch {
-    // best-effort
-  }
-}
-
-/** Dead sessions leave cursors behind — prune them like hook markers. */
-function pruneStaleCursors(mb: string, files: string[], now: number): void {
-  for (const f of files.filter(f => f.startsWith('.seen-'))) {
-    try {
-      if (now - statSync(join(mb, f)).mtimeMs > SEEN_TTL_MS) {
-        rmSync(join(mb, f), { force: true });
-      }
-    } catch {
-      // best-effort
-    }
-  }
+  return `u:${JSON.stringify(opts?.for ?? null)}`;
 }
 
 /** Who is draining. A consumer's addresses: its session id (always
@@ -376,22 +481,76 @@ function drainDrop(
  *  time. Drops are injected verbatim — a heartbeat's formatting is
  *  part of the event. */
 function drainDir(mb: string, sessionId: string, now: number, opts?: DrainOpts): string[] {
+  // One stat is the whole fast path: a dir's mtime+ctime move on every
+  // entry create/remove/rename, drops are immutable once renamed (the
+  // tmp+rename write protocol), and `.cursors` is only ever rewritten
+  // in place — so an unchanged stat means nothing deliverable can
+  // exist for a session whose last identical drain recorded it.
+  let dst: { isDirectory(): boolean; mtimeMs: number; ctimeMs: number };
+  try {
+    dst = statSync(mb);
+  } catch {
+    return []; // no mailbox yet — nothing to drain
+  }
+  if (!dst.isDirectory()) {
+    return [];
+  }
+  const key = sessionKey(sessionId);
+  const entry = readCursorState(mb).sessions[key];
+  const sig = drainSignature(opts);
+  if (
+    sig !== null &&
+    entry !== undefined &&
+    entry.sig === sig &&
+    entry.dirMtimeMs === dst.mtimeMs &&
+    entry.dirCtimeMs === dst.ctimeMs
+  ) {
+    return [];
+  }
+
   let files: string[];
   try {
     files = readdirSync(mb);
   } catch {
-    return []; // no mailbox yet — nothing to drain
+    return []; // vanished or unreadable between stat and readdir
   }
-  const cursor = seenPath(mb, sessionId);
-  const seen = readSeen(cursor);
+  const filesSet = new Set(files);
+  const seen = new Set<string>(entry?.seen ?? []);
+  // The session's first post-upgrade drain migrates its legacy
+  // `.seen-<sid>` cursor into `.cursors`, then removes it — dedup
+  // survives the move and the orphaned-cursor pattern stops growing.
+  // Other sessions' legacy files stay for their own drains or the
+  // janitor's `.seen-*` sweep.
+  const legacyPath = seenPath(mb, sessionId);
+  const legacy = readLegacySeen(legacyPath);
+  if (legacy.existed) {
+    for (const n of legacy.names) {
+      seen.add(n);
+    }
+    rmSync(legacyPath, { force: true });
+  }
   const out: string[] = [];
   for (const f of files
     .filter(f => f.endsWith('.txt') && !f.startsWith('.'))
     .sort((a, b) => dropTime(a) - dropTime(b) || a.localeCompare(b))) {
     drainDrop(mb, f, seen, out, now, opts);
   }
-  writeSeen(cursor, seen, files);
-  pruneStaleCursors(mb, files, now);
+  // The baseline is the PRE-scan stat: a drop landing between stat and
+  // readdir was scanned yet leaves the recorded stat stale, so the next
+  // drain rescans once — the conservative direction, never a miss.
+  writeCursorState(
+    mb,
+    key,
+    {
+      seen: [...seen],
+      touched: now,
+      sig: sig ?? 'k',
+      dirMtimeMs: dst.mtimeMs,
+      dirCtimeMs: dst.ctimeMs,
+    },
+    now,
+    filesSet
+  );
   return out;
 }
 
