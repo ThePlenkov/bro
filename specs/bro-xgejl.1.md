@@ -38,18 +38,18 @@ the identity dims, read live from env per emit (env is fixed at spawn
 for workers; the reads are a handful of `process.env` lookups, cheaper
 than the attribute array already built per call):
 
-| resource attr       | env source                                            |
-| ------------------- | ----------------------------------------------------- |
-| `bro.session.id`    | `BRO_SESSION_ID`                                      |
-| `bro.agent.id`      | `BRO_AGENT_ID`                                        |
-| `bro.bead.id`       | `BRO_BEAD_ID` (fallback `BRO_BEAD`)                   |
-| `bro.agent.provider`| `BRO_AGENT_PROVIDER` (fallback `BRO_PROVIDER`)        |
-| `bro.agent.model`   | `BRO_AGENT_MODEL` (fallback `BRO_MODEL`)              |
-| `bro.worktree`      | `BRO_WORKTREE`                                        |
-| `bro.branch`        | `BRO_BRANCH`                                          |
-| `bro.repo`          | `BRO_REPO`                                            |
-| `bro.cwd`           | `process.cwd()` — always                             |
-| `service.instance.id`| `process.pid` — always                              |
+| resource attr         | env source                                     |
+| --------------------- | ---------------------------------------------- |
+| `bro.session.id`      | `BRO_SESSION_ID`                               |
+| `bro.agent.id`        | `BRO_AGENT_ID`                                 |
+| `bro.bead.id`         | `BRO_BEAD_ID` (fallback `BRO_BEAD`)            |
+| `bro.agent.provider`  | `BRO_AGENT_PROVIDER` (fallback `BRO_PROVIDER`) |
+| `bro.agent.model`     | `BRO_AGENT_MODEL` (fallback `BRO_MODEL`)       |
+| `bro.worktree`        | `BRO_WORKTREE`                                 |
+| `bro.branch`          | `BRO_BRANCH`                                   |
+| `bro.repo`            | `BRO_REPO`                                     |
+| `bro.cwd`             | `process.cwd()` — always                       |
+| `service.instance.id` | `process.pid` — always                         |
 
 The bead's env names (`BRO_BEAD`, `BRO_MODEL`, `BRO_PROVIDER`) read as
 fallbacks behind the real pin names the connector already injects —
