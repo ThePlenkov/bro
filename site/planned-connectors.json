@@ -24,6 +24,18 @@
     "source": "packages/cli/src/spec-connectors.ts"
   },
   {
+    "name": "Spec engine plugin",
+    "description": "Bind the Brose/Brotocol spec engine to bro's SDD facade — the default engine, replaceable via connectors.",
+    "bro": { "kind": "connector", "facade": "sdd", "status": "planned" },
+    "source": "specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md"
+  },
+  {
+    "name": "Spec Kitty connector",
+    "description": "Connect Spec Kitty specification trees to bro's SDD facade.",
+    "bro": { "kind": "connector", "facade": "sdd", "status": "planned" },
+    "source": "specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md"
+  },
+  {
     "name": "Claude Code on other agents",
     "description": "Use Claude Code as a CLI client on top of agents such as OpenCode and Devin.",
     "bro": { "kind": "connector", "facade": "clients", "status": "planned" },
