@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { after, describe, test } from 'node:test';
 import type { BroPlugin, PlaneDescriptor } from '@broject/core';
 import { clearPlanes, registerPlane } from '@broject/core';
@@ -623,5 +623,88 @@ describe('runContractCommand', () => {
     }
     assert.equal(code, 1);
     assert.match(errs.join('\n'), /breaking\s+planes\.orphan\.zap/);
+  });
+});
+
+/** Every `json` schema ref reachable in a dump — `contract.json` plus
+ *  `contract.subs.*.json` today; the walk is generic so a deeper nest
+ *  still lands. Sorted for a stable failure message. */
+function schemaRefs(dump: ContractDump): string[] {
+  const refs: string[] = [];
+  const walk = (node: unknown): void => {
+    if (typeof node !== 'object' || node === null) {
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        walk(item);
+      }
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'json' && typeof value === 'string') {
+        refs.push(value);
+      } else {
+        walk(value);
+      }
+    }
+  };
+  for (const row of Object.values(dump.commands)) {
+    if (row.contract !== undefined) {
+      walk(row.contract);
+    }
+  }
+  return refs.sort();
+}
+
+/** Refs that do not resolve to a file under pkgDir — the watchdog rot
+ *  (`schemas/cli/watchdog.json`, no such file) shipped because nothing
+ *  checked this; check:contract only diffs registry→cli.json. A ref
+ *  escaping the package root counts as missing too. */
+function missingSchemaRefs(dump: ContractDump, pkgDir: string): string[] {
+  const root = resolve(pkgDir);
+  return schemaRefs(dump).filter(ref => {
+    const target = resolve(root, ref);
+    return !target.startsWith(`${root}${sep}`) || !existsSync(target);
+  });
+}
+
+describe('json schema refs', () => {
+  // refs are relative to packages/cli — `schemas/cli/<name>.schema.json`
+  const PKG_DIR = join(import.meta.dirname, '..', '..');
+
+  test('every json ref in the live registry resolves to a real file', () => {
+    const dump = buildDump(PLUGINS, GROUP_META);
+    // non-vacuity: the walk must actually find refs, or "no missing"
+    // would pass on an empty set forever
+    assert.ok(schemaRefs(dump).length > 0);
+    assert.deepEqual(missingSchemaRefs(dump, PKG_DIR), []);
+  });
+
+  test('a dangling ref — top-level or sub — is reported, proving the gate bites', () => {
+    const dump = buildDump(
+      [
+        fakePlugin({
+          name: 'ghost',
+          contract: {
+            json: 'schemas/cli/does-not-exist.schema.json',
+            subs: {
+              run: { json: 'schemas/cli/also-missing.schema.json' },
+            },
+          },
+        }),
+      ],
+      GROUPS
+    );
+    assert.deepEqual(missingSchemaRefs(dump, PKG_DIR), [
+      'schemas/cli/also-missing.schema.json',
+      'schemas/cli/does-not-exist.schema.json',
+    ]);
+    // and a ref that escapes the package root is missing too
+    const escape = buildDump(
+      [fakePlugin({ name: 'esc', contract: { json: '../../etc/passwd' } })],
+      GROUPS
+    );
+    assert.deepEqual(missingSchemaRefs(escape, PKG_DIR), ['../../etc/passwd']);
   });
 });

@@ -250,7 +250,7 @@ export const PLUGINS: BroPlugin[] = [
         '--json':
           'the launch brief as {ts, skill, baselines} — every plane measured now or `unavailable (<why>)`',
       },
-      json: 'schemas/cli/watchdog.json',
+      json: 'schemas/cli/watchdog.schema.json',
       exits: {
         0: 'brief printed (human or --json)',
         2: 'unknown flag — usage on stderr',
