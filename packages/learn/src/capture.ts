@@ -426,7 +426,7 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
  *  newline — the same span the old `\s*\n+` left behind. `stop` is
  *  tested against each following line's start; no stop runs to EOF.
  *  `head` is a caller-built literal (`/##\s*Name/g`) — never a
- *  non-literal RegExp (semgrep javascript_dos_rule-non-literal-regexp). */
+ *  non-literal pattern (semgrep javascript_dos_rule-non-literal-regexp). */
 function mdSection(text: string, head: RegExp, stop?: RegExp): string | undefined {
   for (const m of text.matchAll(head)) {
     const after = (m.index ?? 0) + m[0].length;

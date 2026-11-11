@@ -1305,6 +1305,22 @@ const sh = (cmd, args) => {
     }
   }
 }
+// learn/retro evidence for the exit-harvest check (spec bro-xkv42.2):
+// every exit — explicit or natural — leaves a retro bead born+closed
+// inside the run window, satisfying the artifact contract without
+// ever entering the ready queue. The 'exit' hook covers the break-out-
+// of-switch paths process.exit never sees; gated on FAKE_BD_DB so
+// real-bd fixtures don't write into a live store. Best-effort: a
+// wedged store must not kill the worker.
+process.on('exit', () => {
+  if (!process.env.FAKE_BD_DB) return
+  try {
+    const retro = JSON.parse(
+      sh('bd', ['create', '--title', 'retro: worker learn', '--labels', 'retro'])
+    )
+    sh('bd', ['close', String(retro.id)])
+  } catch {}
+})
 const prompt = retry(() => fs.readFileSync(promptFile, 'utf8'))
 const branch = sh('git', ['branch', '--show-current']).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
