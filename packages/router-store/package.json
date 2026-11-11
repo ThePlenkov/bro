@@ -12,11 +12,6 @@
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "dependencies": {
     "@broject/core": "^0.3.0",
     "drizzle-orm": "^1.0.0-rc.5"
@@ -36,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "router-store \u2014 the router's own ledger: the health facts a route decision reads",
+  "description": "router-store — the router's own ledger: the health facts a route decision reads",
   "keywords": [
     "router",
     "sqlite",

@@ -16,11 +16,6 @@
   "dependencies": {
     "@broject/core": "^0.3.0"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -36,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Inter-rig work federation for bro \u2014 mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
+  "description": "Inter-rig work federation for bro — mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
   "keywords": [
     "federation",
     "agents",

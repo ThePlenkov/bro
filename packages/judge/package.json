@@ -16,11 +16,6 @@
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -36,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Judge connectors for bro \u2014 TypeSafe /v1/systemone (systemone) + llm-judge fallback behind the judge facade",
+  "description": "Judge connectors for bro — TypeSafe /v1/systemone (systemone) + llm-judge fallback behind the judge facade",
   "keywords": [
     "judge",
     "decisions",

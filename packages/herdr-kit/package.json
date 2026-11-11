@@ -19,11 +19,6 @@
     "@broject/core": "^0.3.0",
     "@broject/providers": "^0.3.0"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -38,7 +33,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro-side herdr bridge kit \u2014 pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions",
+  "description": "bro-side herdr bridge kit — pane report envelope, fleet-status doc, line-mode session lifecycle, view-convergence decisions",
   "bro": {
     "kind": "capability",
     "status": "beta"
