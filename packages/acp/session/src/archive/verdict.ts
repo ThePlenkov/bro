@@ -5,9 +5,13 @@ import type { ArchiveRow } from './rows.ts';
 import { fmtWhen } from '../wire/fmt.ts';
 
 /** Terminal postures carry the status-entry stamp — "since" is the
- *  question a finished/blocked row must answer. */
-const since = (base: string, ts: string | undefined): string =>
-  ts === undefined ? base : `${base} · since ${fmtWhen(ts)}`;
+ *  question a finished/blocked row must answer. A stamp that parses
+ *  to nothing (malformed ts) degrades to the bare mode, never a
+ *  trailing `· since ` with no time. */
+const since = (base: string, ts: string | undefined): string => {
+  const when = ts === undefined ? '' : fmtWhen(ts);
+  return when === '' ? base : `${base} · since ${when}`;
+};
 
 /** The archive's own LED for one row — last row wins: a turn start or
  *  update is working, a clean stop is idle, an error/denied-ask is
