@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -458,6 +459,24 @@ describe('drain fast path (.cursors)', () => {
         assert.deepEqual(drainMailbox(dir, 's1', { keep: () => false }), []);
         assert.deepEqual(drainMailbox(dir, 's1'), ['pending']);
         assert.deepEqual(drainMailbox(dir, 's1'), []);
+      });
+    });
+  });
+
+  test('a .cursors symlink is debris — the drain never reads or writes through it', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        const secret = join(dir, 'cursor-target.txt');
+        writeFileSync(secret, 'foreign-bytes');
+        symlinkSync(secret, join(mb, '.cursors'));
+        dropMailbox(mb, 'hello', 'note');
+        // the poisoned cursor is ignored — the drop still delivers, and
+        // the write path refuses to truncate through the link
+        assert.deepEqual(drainMailbox(dir, 's1'), ['hello']);
+        assert.equal(readFileSync(secret, 'utf8'), 'foreign-bytes');
+        assert.ok(lstatSync(join(mb, '.cursors')).isSymbolicLink());
       });
     });
   });

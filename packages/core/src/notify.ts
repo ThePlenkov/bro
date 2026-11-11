@@ -203,12 +203,40 @@ interface CursorState {
   sessions: Record<string, CursorEntry>;
 }
 
+/** Read a small state file without following a symlink — a writable
+ *  mailbox must never read through to a foreign file (the same rule
+ *  drainDrop applies to drops, peekDrop to the tail). O_NONBLOCK keeps
+ *  a fifo named like the state file from stalling the drain; the
+ *  fstat isFile check skips it unread. */
+function readStateFile(path: string): string | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return undefined;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      return undefined;
+    }
+    return readFileSync(fd, 'utf8');
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The `.cursors` document — absent or unreadable means first drain,
  *  everything is new. Rows are shape-checked: a corrupt entry degrades
  *  to absent (rescan + rewrite), never a crash. */
 function readCursorState(mb: string): CursorState {
+  const raw = readStateFile(cursorPath(mb));
+  if (raw === undefined) {
+    return { sessions: {} };
+  }
   try {
-    const parsed = JSON.parse(readFileSync(cursorPath(mb), 'utf8')) as {
+    const parsed = JSON.parse(raw) as {
       sessions?: unknown;
     } | null;
     const sessions: Record<string, CursorEntry> = {};
@@ -258,6 +286,7 @@ function writeCursorState(
   now: number,
   live: Set<string>
 ): void {
+  let json: string;
   try {
     const state = readCursorState(mb);
     for (const [sid, e] of Object.entries(state.sessions)) {
@@ -268,9 +297,28 @@ function writeCursorState(
     const prev = state.sessions[key];
     const seen = prev === undefined ? entry.seen : [...new Set([...prev.seen, ...entry.seen])];
     state.sessions[key] = { ...entry, seen: seen.filter(f => live.has(f)) };
-    writeFileSync(cursorPath(mb), JSON.stringify(state));
+    json = JSON.stringify(state);
+  } catch {
+    return; // best-effort
+  }
+  // O_NOFOLLOW: a `.cursors` symlink is debris, not a cursor — the write
+  // must never truncate through to a foreign file. ELOOP skips the
+  // persist; the next drain simply rescans.
+  let fd: number;
+  try {
+    fd = openSync(
+      cursorPath(mb),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW
+    );
+  } catch {
+    return;
+  }
+  try {
+    writeFileSync(fd, json);
   } catch {
     // best-effort
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -285,14 +333,11 @@ function seenPath(mb: string, sessionId: string): string {
  *  from "empty file" so the caller removes it only when there was a
  *  cursor to migrate. */
 function readLegacySeen(cursor: string): { names: Set<string>; existed: boolean } {
-  try {
-    return {
-      names: new Set(readFileSync(cursor, 'utf8').split('\n').filter(Boolean)),
-      existed: true,
-    };
-  } catch {
+  const raw = readStateFile(cursor);
+  if (raw === undefined) {
     return { names: new Set(), existed: false };
   }
+  return { names: new Set(raw.split('\n').filter(Boolean)), existed: true };
 }
 
 /** Epoch-ms embedded in a drop name (`<prefix>-<ms>-<rand>.txt`) — the
@@ -527,7 +572,11 @@ function drainDir(mb: string, sessionId: string, now: number, opts?: DrainOpts):
     for (const n of legacy.names) {
       seen.add(n);
     }
-    rmSync(legacyPath, { force: true });
+    try {
+      rmSync(legacyPath, { force: true });
+    } catch {
+      // best-effort — a stuck legacy cursor retries the import next drain
+    }
   }
   const out: string[] = [];
   for (const f of files
