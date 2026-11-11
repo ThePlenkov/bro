@@ -2,7 +2,7 @@
  * `bro learn <verb>` — the lesson store (spec:
  * specs/sessions/bro-f4ot.1-learn.md). Lessons live in `bd kv` under
  * the `learn/` prefix; this command is the CRUD surface — the matcher
- * and connector live in @broject/learn, promote is still pending.
+ * and connector live in @broject/learn.
  *
  *   add --lesson "…" --on <event> [--on …] --evidence <kind>:<ref> [--evidence …]
  *        [--match-terms …] [--match-commands …] [--match-paths …]
@@ -29,6 +29,7 @@ import {
   listLessons,
   probeQuestion,
   probeTrigger,
+  promoteLesson,
   putLesson,
   recordProbeAnswer,
   withStoreLock,
@@ -51,6 +52,9 @@ Commands:
   list     All lessons [--json] [--source X] [--confidence X]
   show     One lesson as JSON: bro learn show learn-<slug>
   forget   Remove a lesson: bro learn forget learn-<slug>
+  promote  Graduate a lesson to a rule-edit bead:
+           bro learn promote learn-<slug> — the bead carries the rule,
+           trigger, and evidence; the lesson records promotedTo
   capture  Harvest finished artifacts into lessons
            [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
   probe    Store-first query: bro learn probe <question>
@@ -108,6 +112,7 @@ const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
   list: new Set(['--json', '--source', '--confidence']),
   show: new Set(),
   forget: new Set(),
+  promote: new Set(),
   capture: new Set(['--source', '--mol', '--dry-run', '--json']),
   probe: new Set([
     '--lesson',
@@ -301,11 +306,36 @@ function cmdShow(argv: string[]): void {
 function cmdForget(argv: string[]): void {
   const id = oneId(argv, 'forget')
   checkBeads()
-  if (getLesson(id) === null) {
-    fail(`no lesson ${id}`, 1)
-  }
-  deleteLesson(id)
+  // read+delete is a critical section like every other learn writer —
+  // unlocked, a concurrent promote can resurrect the lesson (its
+  // putLesson lands after the clear) or leave the rule-edit bead
+  // pointing at a deleted lesson (bd kv has no CAS)
+  withStoreLock(undefined, () => {
+    if (getLesson(id) === null) {
+      fail(`no lesson ${id}`, 1)
+    }
+    deleteLesson(id)
+  })
   console.log(`forgot ${id}`)
+}
+
+/** `promote <id>` — graduate the lesson to a rule-edit bead (spec
+ *  §promote): the bead carries rule + trigger + evidence, the lesson
+ *  records `promotedTo`. Idempotent — a re-promote prints the same
+ *  bead id and notes the skip on stderr. stdout stays the bare bead
+ *  id like every other learn verb's id output. */
+function cmdPromote(argv: string[]): void {
+  const id = oneId(argv, 'promote')
+  checkBeads()
+  try {
+    const r = promoteLesson(id)
+    if (r.alreadyPromoted) {
+      console.error(`${id} already promoted → ${r.beadId}`)
+    }
+    console.log(r.beadId)
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err), 1)
+  }
 }
 
 /** `--source drill|retro|act|mol|all` — repeatable, 'all' folds to every
@@ -546,6 +576,9 @@ export function runLearnCommand(argv: string[]): void {
       return
     case 'forget':
       cmdForget(rest)
+      return
+    case 'promote':
+      cmdPromote(rest)
       return
     case 'capture':
       cmdCapture(rest)

@@ -162,12 +162,12 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 
 ### Self-reflection
 
-| Command                                             | What bro does                                                        |
-| --------------------------------------------------- | -------------------------------------------------------------------- |
-| `bro drill down\|up\|current\|tree\|list\|distill`  | Scoped descent frames — result and prevention required on the way up |
-| `bro wtf <complaint>`                               | Capture the complaint verbatim as a bead                             |
-| `bro retrospect record\|status\|schema\|list`       | Turn `wtf`s into retro records and prevention beads                  |
-| `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match             |
+| Command                                                      | What bro does                                                        |
+| ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `bro drill down\|up\|current\|tree\|list\|distill`           | Scoped descent frames — result and prevention required on the way up |
+| `bro wtf <complaint>`                                        | Capture the complaint verbatim as a bead                             |
+| `bro retrospect record\|status\|schema\|list`                | Turn `wtf`s into retro records and prevention beads                  |
+| `bro learn add\|list\|show\|forget\|promote\|capture\|probe` | Store lessons and surface them when their triggers match             |
 
 ### Plumbing
 

@@ -62,6 +62,8 @@ export type {
   CaptureSource,
   CaptureWrite,
 } from './capture.ts';
+export { promoteLesson } from './promote.ts';
+export type { PromoteResult } from './promote.ts';
 export {
   probeQuestion,
   probeTerms,

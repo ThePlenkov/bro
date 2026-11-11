@@ -28,6 +28,7 @@ capped by `budget` per session and `learn.maxInject` per probe.
 | `bro self learn list [--json] [--source X] [--confidence X]` | List lessons |
 | `bro self learn show <id>` | One lesson as JSON |
 | `bro self learn forget <id>` | Delete a lesson |
+| `bro self learn promote <id>` | Graduate a lesson to a rule-edit bead — carries the rule, trigger, and evidence; the lesson records `promotedTo` and keeps firing until the rule lands |
 | `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run]` | Distill finished artifacts (drill memos, retro beads, review findings, mol results) into trigger-shaped lessons |
 | `bro self learn probe <question>` | Store-first query — a hit prints ranked lessons; a miss prints candidates and logs the gap. `--lesson "…"` stores the distilled answer (phase 2 — needs a trigger: `--on`/`--match-*` or a question with usable terms) |
 
