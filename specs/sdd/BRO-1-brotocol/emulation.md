@@ -68,6 +68,7 @@ wherever it already implements the contract.
 - Expected by spec: `BRO-1-brotocol` resolves as a spec node under
   `sdd`.
 - Actual:
+
   ```text
   sdd  specs/sdd/spec.md
     BRO-1-brotocol  specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md
@@ -75,6 +76,7 @@ wherever it already implements the contract.
     bro-19g  specs/sdd/bro-19g.md
     …
   ```
+
   (`emulation` still renders as a child — today's compat rule counts
   any nested `.md`; post-migration it's a *part* since it's not
   `.spec.md`.)
