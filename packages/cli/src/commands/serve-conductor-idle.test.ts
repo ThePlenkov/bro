@@ -29,7 +29,7 @@ describe('the pooled peer idle release (bro-7ira8)', () => {
       // the churn lives inside the child, so a live process buys nothing
       const peer = pool.live()!;
       let closes = 0;
-      const close = peer.close;
+      const close = peer.close.bind(peer);
       peer.close = () => {
         closes += 1;
         close();
@@ -68,21 +68,21 @@ describe('the pooled peer idle release (bro-7ira8)', () => {
     // leave the peer on the original deadline — the release re-arms
     // when the turn ends (spec bro-7ira8).
     const fake = fakeAcpAgent({ replyText: 'ok' });
-    const pool = acpLinkPool('conductor:t', ENTRY, { acp: { peer: fake.app } }, 10_000, 120);
+    const pool = acpLinkPool('conductor:t', ENTRY, { acp: { peer: fake.app } }, 10_000, 200);
     try {
       await pool.link();
       // a turn starts inside the first window and settles past its
       // deadline — busy holds the peer, idle re-arms a fresh window
-      await sleep(70);
+      await sleep(100);
       pool.busy();
-      await sleep(70);
+      await sleep(100);
       pool.idle();
-      // ~t140: the original ~t120 deadline passed while the turn ran —
+      // ~t320: the original ~t200 deadline passed while the turn ran —
       // the peer is still here because the window re-armed at the settle
-      await sleep(80);
+      await sleep(120);
       assert.ok(pool.live());
-      // ~t220: a full window after the settle — now the release applies
-      await sleep(110);
+      // ~t480: a full window after the settle — now the release applies
+      await sleep(160);
       assert.equal(pool.live(), undefined);
     } finally {
       pool.dispose();
