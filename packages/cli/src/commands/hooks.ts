@@ -110,6 +110,7 @@ import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
 import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts';
+import { drainHookSpool } from '@broject/core';
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -2370,7 +2371,7 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
  *  the broEnabled gate: wiring a repo is how it opts in, and an
  *  installed shim IS the opt-in — gating on .beads/bro.config would
  *  silently deaden a hook the repo installed. */
-function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
+async function runPreGateCommand(event: string | undefined, argv: string[]): Promise<boolean> {
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin
   if (event === 'install' || event === 'uninstall') {
@@ -2402,8 +2403,13 @@ function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
   }
   // `bro hooks status` is the report over the hook spool the launcher's
   // run.sh writes (start/end pairs — a start without an end is a host
-  // kill) — same no-stdin operator placement as perf.
+  // kill) — same no-stdin operator placement as perf. It is also the
+  // ledger worker's lazy cadence (bro-izpyk.1.1): drain pending spool
+  // rows into ledger.db first so the read — and every later facade read —
+  // sees a fresh ledger. Best-effort: a missing node:sqlite or an
+  // unwritable state dir degrades to ok:false, never a failed status.
   if (event === 'status') {
+    await drainHookSpool().catch(() => {});
     console.log(renderHookSpoolStatus(argv));
     return true;
   }
@@ -2475,7 +2481,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // dispatch path never runs.
   rotateHookSpool();
   const event = argv[0];
-  if (runPreGateCommand(event, argv)) {
+  if (await runPreGateCommand(event, argv)) {
     return;
   }
   // a bare `bro hooks` is a capability probe — launchers test the

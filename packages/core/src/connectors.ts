@@ -29,6 +29,9 @@ import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
 import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } from './hook-cache.ts';
 import { markerOwner } from './proc.ts';
 import type { EventsFacade } from './events.ts';
+import type { ClaimFacade } from './claims.ts';
+import type { LedgerFacade } from './ledger.ts';
+import { ledgerFacade } from './ledger-store.ts';
 import type { QueryFacade } from './queries.ts';
 import type { JudgeFacade } from './judge.ts';
 import type { MergeQueueFacade, ReviewFacade } from './review.ts';
@@ -88,6 +91,15 @@ export interface FacadeMap {
   /** Stacked-change ops — chain hints, post-merge cascade ownership,
    *  native whole-chain merge (spec bro-r6vge). */
   stacks: StackFacade;
+  /** Machine-wide session/hook ledger — installs, sessions, events,
+   *  stats, modes (epic spec specs/sessions/bro-izpyk.md; impl
+   *  specs/bro-izpyk.1.1.md). Default backend: node:sqlite under
+   *  $XDG_STATE_HOME/bro/, drained lazily from the hook spool. */
+  ledger: LedgerFacade;
+  /** Session leases on resource URIs — contract landed in F1a, first
+   *  provider in bro-izpyk.3. Until then `facade('claims')` throws the
+   *  honest "no connector provides" — absence is never faked. */
+  claims: ClaimFacade;
 }
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -198,6 +210,8 @@ export interface Connector {
   events?(ctx: ConnectorCtx): EventsFacade;
   queries?(ctx: ConnectorCtx): QueryFacade;
   stacks?(ctx: ConnectorCtx): StackFacade;
+  ledger?(ctx: ConnectorCtx): LedgerFacade;
+  claims?(ctx: ConnectorCtx): ClaimFacade;
   /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
    *  never by detection, and never a reason to warn about ambiguity on
    *  its own. A transport that must be opted into (it needs a daemon, or
@@ -519,9 +533,21 @@ const gitConnector: Connector = {
   stacks: ctx => gitStacks(ctx.dir),
 };
 
+// --- built-in: ledger ---------------------------------------------------------
+
+/** The machine-wide session ledger — node:sqlite under the XDG state
+ *  dir, fed lazily by the hook-spool drain. Machine-scoped, not
+ *  project-scoped: ctx.dir is irrelevant, env paths decide. The designed
+ *  default backend (epic spec's facade table) — never opt-in, and the
+ *  only provider until a remote/jsonl backend registers. */
+const ledgerConnector: Connector = {
+  name: 'ledger',
+  ledger: () => ledgerFacade(),
+};
+
 // --- registry ------------------------------------------------------------------
 
-const registry: Connector[] = [beadsConnector, gitConnector];
+const registry: Connector[] = [beadsConnector, gitConnector, ledgerConnector];
 
 /** Names that were in the registry at boot — unregisterConnector refuses
  *  to drop them: removing a built-in breaks facade resolution for every
@@ -732,6 +758,10 @@ export function facade<K extends keyof FacadeMap>(
       return pick.queries!(ctx) as FacadeMap[K];
     case 'stacks':
       return pick.stacks!(ctx) as FacadeMap[K];
+    case 'ledger':
+      return pick.ledger!(ctx) as FacadeMap[K];
+    case 'claims':
+      return pick.claims!(ctx) as FacadeMap[K];
     default:
       throw new Error(`connector "${pick.name}" does not provide "${String(kind)}"`);
   }

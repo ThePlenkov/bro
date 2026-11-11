@@ -1134,6 +1134,8 @@ const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
   'events',
   'queries',
   'stacks',
+  'ledger',
+  'claims',
 ]);
 
 const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
@@ -1149,6 +1151,8 @@ const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
   'events',
   'queries',
   'stacks',
+  'ledger',
+  'claims',
   'hooks',
   'guards',
 ];

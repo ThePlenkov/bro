@@ -387,6 +387,54 @@ export {
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';
+export {
+  drainHookSpool,
+  drainIntoStore,
+  ledgerDbPath,
+  ledgerFacade,
+  openLedgerStore,
+  sessionProject,
+} from './ledger-store.ts';
+export type {
+  DrainIntoResult,
+  DrainOptions,
+  DrainResult,
+  FileBatch,
+  IngestContext,
+  IngestResult,
+  LedgerStore,
+  LedgerStoreResult,
+} from './ledger-store.ts';
+export {
+  isSpoolOutcome,
+  parseSpoolLine,
+  resolveHookSpoolPath,
+  SPOOL_OUTCOMES,
+} from './hook-spool.ts';
+export type { SpoolOutcome, SpoolRow } from './hook-spool.ts';
+export { isMode, MODES } from './ledger.ts';
+export type {
+  HookStat,
+  InstallRow,
+  LedgerEventRow,
+  LedgerFacade,
+  LedgerInstallRow,
+  LedgerRow,
+  LedgerSessionRow,
+  Mode,
+  SessionKey,
+  SessionQuery,
+  SessionRow,
+  SessionState,
+  StatsQuery,
+} from './ledger.ts';
+export type {
+  ClaimFacade,
+  ClaimQuery,
+  ClaimResult,
+  ClaimRow,
+  ResourceUri,
+} from './claims.ts';
 export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts';
 export type {
   HoldRoleLeaseOptions,
