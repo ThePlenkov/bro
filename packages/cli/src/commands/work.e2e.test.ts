@@ -470,9 +470,9 @@ describe('bro work e2e — prune --loop label + detached litter (bro-imvu3)', ()
       for (const [b, wt] of pairs) {
         assert.match(
           r.stdout,
-          new RegExp(`reaped .*main--${b.split('/').pop()} \\[${b.replace('/', '\\/')}\\]`)
+          new RegExp(`reaped .*main--${b.split('/').pop()} \\[${b.replaceAll('/', '\\/')}\\]`)
         );
-        assert.match(r.stdout, new RegExp(`deleted branch ${b.replace('/', '\\/')}`));
+        assert.match(r.stdout, new RegExp(`deleted branch ${b.replaceAll('/', '\\/')}`));
         assert.equal(existsSync(wt), false, wt);
         assert.equal(git(['branch', '--list', b, '--format=%(refname:short)'], main).trim(), '');
       }
@@ -593,6 +593,58 @@ describe('bro work e2e — prune --loop label + detached litter (bro-imvu3)', ()
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /kept .*main--fx-amb-x-desc \(no bead — unverifiable\)/);
+      assert.equal(existsSync(wt), true);
+    });
+  });
+
+  test('an exact-tail bead hit still loses to ambiguity — work/fx-exact-x keeps', () => {
+    // work/fx-exact-x names bead fx-exact-x exactly, but the shorter
+    // bead fx-exact also prefix-matches the tail — beadForHead's
+    // two-owner rule must win over the tidy-name shortcut, or the
+    // closed bead would reap a tree the open one may own
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-exact', status: 'open' },
+      { ...FAKE_BEAD, id: 'fx-exact-x', status: 'closed' },
+    ]);
+    inside(main, root, () => {
+      const wt = labelLitter(root, main, 'work/fx-exact-x');
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /kept .*main--fx-exact-x \(no bead — unverifiable\)/);
+      assert.equal(existsSync(wt), true);
+    });
+  });
+
+  test('a detached HEAD whose tip no ref reaches keeps — closed bead is not land proof', () => {
+    // the commit made inside the detached tree sits past every ref —
+    // removing the worktree would orphan it (gc fodder), so the sweep
+    // keeps even though the bead closed
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-orphan', status: 'closed' },
+    ]);
+    inside(main, root, () => {
+      const wt = detLitter(root, main, 'main--fx-orphan');
+      git(['commit', '-q', '--allow-empty', '-m', 'unlanded'], wt);
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /kept .*main--fx-orphan \(detached HEAD unreachable/);
+      assert.equal(existsSync(wt), true);
+    });
+  });
+
+  test('a nested-slash label branch is not litter-shaped — skipped, never a forever-keep', () => {
+    // work/fx-nest/ed's tail carries a second '/' — no bead slug can
+    // hold one, so the candidate filter drops it before the verdicts
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, []);
+    inside(main, root, () => {
+      const wt = join(root, 'main--nested');
+      git(['worktree', 'add', '-b', 'work/fx-nest/ed', wt], main);
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.stdout.includes('main--nested'), false);
       assert.equal(existsSync(wt), true);
     });
   });
@@ -946,6 +998,25 @@ describe('bro work e2e — prune --loop ghost dirs (bro-ho09d)', () => {
       assert.match(r.stdout, /kept .*fx-go \(bead open\)/);
       assert.equal(existsSync(wt), true);
       assert.equal(git(['worktree', 'list', '--porcelain'], main).includes('main--fx-go'), true);
+    });
+  });
+
+  test('a ghost whose slug fits two namespaces keeps — binding would be a guess', () => {
+    // main--fx-gh could have been loop/fx-gh's or work/fx-gh's
+    // checkout — the dir name carries the slug, not the namespace, so
+    // recovery refuses rather than hand the tree the wrong evidence
+    const { root, main } = workFixture();
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-gh', status: 'closed' }]);
+    inside(main, root, () => {
+      const wt = join(root, 'main--fx-gh');
+      git(['worktree', 'add', '-b', 'loop/fx-gh', wt], main);
+      unRegister(main, wt);
+      git(['branch', 'work/fx-gh'], main);
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /kept .*main--fx-gh \(ghost — ambiguous branch binding/);
+      assert.equal(existsSync(wt), true);
+      assert.equal(git(['worktree', 'list', '--porcelain'], main).includes('main--fx-gh'), false);
     });
   });
 

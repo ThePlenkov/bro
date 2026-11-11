@@ -54,7 +54,10 @@ tail as `slug` plus `label: true`: the tail is a human/agent label,
 not a bead contract, so bead resolution goes through matching (below)
 instead of the exact map read alone. A merged PR's headRef is the land
 proof for these branches either way — `litterPrEvidence` is
-branch-keyed and needs no bead at all.
+branch-keyed and needs no bead at all. A label tail containing a
+second `/` (`work/foo/bar`) is a nested ref name, never a bead slug —
+`loopSlug` sanitizes `/` away, so no rung could resolve it; the
+candidate filter drops it rather than report a permanent keep.
 
 `litterBranches` sweeps the same prefixes for bare (worktree-less)
 branches — a merged `work/foo` ref is the same litter class as a
@@ -83,22 +86,44 @@ lookup failure), `retireLitterBranch` no-ops, and the reap report
 reads `(detached)` instead of `[]`. Its done verdict is therefore
 bead-CLOSED-only — merged-PR evidence requires the attribution leg.
 
+Two fail-closed edges guard the unattributed path. When the tip-index
+`for-each-ref` itself fails, EVERY detached tree keeps
+(`tip index unavailable`) — without attribution an open PR on the
+branch that would have claimed the tip is invisible to the
+bead-only verdict, and the git error lands in `rep.errors`. And a
+bead-CLOSED verdict is not land proof for THIS tip: before an
+unattributed tree may reap, its HEAD must still be reachable from
+some ref (`for-each-ref --contains`) — the tree's own HEAD is the
+commits' only ref once `worktree remove` drops the admin dir, so an
+unreachable tip would become gc fodder.
+
 ### 3. Label bead resolution (`litterBead`)
 
 `bySlug` stays `loopSlug(id) → row`. Lookups become a ladder:
 
-1. Exact `bySlug.get(c.slug)` — deterministic namespaces and tidy
-   `work/<bead-id>` names hit here.
+1. Deterministic namespaces (`loop/`, `stack/…`) read the exact slug
+   map — a miss means no bead, full stop.
 2. Label candidates only: `beadForHead` (`@broject/loop`, the
    fleet-head reconcile's own matcher) over the candidate's branch —
-   `-`-bounded prefix match (`work/<bead>-desc` → `<bead>`), longest
-   slug wins, two distinct bead owners → undefined (ambiguous = keep).
+   it is the ONLY rung because its `-`-bounded prefix match already
+   covers the tidy `work/<bead-id>` exact tail AND refuses ambiguity
+   (two distinct bead owners → undefined = keep). A raw exact-map
+   shortcut would bypass that check: `work/<slug>` naming bead B
+   while a shorter bead also prefix-matches would attribute the tree
+   to B and reap a live owner's work.
 3. Label candidates only + store prefix (`tasks.prefix()`, best-effort
-   — probe failure just skips this rung): the same matcher on the
+   — a probe failure keeps the lookup fail-closed but reports the
+   store error in `rep.errors`): the same matcher on the
    `<prefix>-<slug>` form, so `work/imvu3` resolves `bro-imvu3`.
+   Skipped when the slug already carries the prefix — that shape
+   matched at rung two or names a doubled-prefix bead the rung can't
+   reach anyway.
 
-Unresolved → `undefined` → the existing "no bead — unverifiable"
-keep. Resolution NEVER widens a verdict: it only lets the same
+Unresolved → `undefined` → the "no bead — unverifiable" keep — UNLESS
+merged-PR evidence independently proves the land: `litterDoneVerdict`
+is `bead closed OR merged-PR head`, so a branch whose PR merged reaps
+with no bead at all (the same rule `loop/` litter has always had).
+Resolution NEVER widens a verdict: it only lets the same
 closed/in_progress checks see the bead that was always there.
 
 `sessionOwner` additionally matches live `.work`/`.task` marker
@@ -118,7 +143,8 @@ Candidates flow through the identical verdict chain as today:
   when every liveness plane is dead (run records, registry, session
   markers, act watches, /proc).
 - `litterTreeVerdict` under the agent-registry lock — locked,
-  registry occupant, live in-tree claim marker, dirty porcelain.
+  registry occupant, live in-tree claim marker, dirty porcelain, and
+  (unattributed detached only) HEAD reachable from some ref.
 - `removeMergedWorktree` — locked, `processesRootedIn` (live cwd or
   argv inside the tree), clean `status --porcelain` with untracked
   files forced visible, `worktree remove --force`.
@@ -132,7 +158,11 @@ Candidates flow through the identical verdict chain as today:
 
 `ghostBranch` gains `feat/`/`fix/`/`devin/` bindings so recovered
 `<main>--<slug>` ghosts can re-register onto those branches too
-(`loop/`/`work/`/`stack/` already covered).
+(`loop/`/`work/`/`stack/` already covered) — but recovery now requires
+a UNIQUE branch match: the dir name carries the slug, not the
+namespace, so `work/foo` + `feat/foo` both existing makes the binding
+a guess that could hand the tree the wrong branch's bead/PR evidence.
+Ambiguous → kept and reported, never bound by iteration order.
 
 ## Out of scope
 

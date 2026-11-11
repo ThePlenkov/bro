@@ -1298,7 +1298,12 @@ function litterSlug(
   }
   for (const p of LITTER_LABEL_PREFIXES) {
     if (branch.startsWith(p)) {
-      return { slug: branch.slice(p.length), label: true };
+      const tail = branch.slice(p.length);
+      // a '/' tail is a nested ref name (`work/foo/bar`), never a bead
+      // slug — loopSlug sanitizes '/' away, so no lookup rung can ever
+      // resolve it; not litter-shaped, skip rather than report a
+      // permanent 'no bead' keep every sweep
+      return tail.includes('/') ? undefined : { slug: tail, label: true };
     }
   }
   return undefined;
@@ -1407,7 +1412,7 @@ function litterCandidates(
   const tipIndex = (): Map<string, string[]> | undefined => {
     if (!tipsRead) {
       tipsRead = true;
-      tips = litterBranchTips(opts.root, opts.stackPrefix);
+      tips = litterBranchTips(opts.root, opts.stackPrefix, rep);
     }
     return tips;
   };
@@ -1431,7 +1436,16 @@ function litterCandidates(
     // on this HEAD names the tree — PR evidence and branch retire ride
     // it. Zero or several matches stay unattributed (branch ''): the
     // dir/claim slug alone feeds the bead verdict.
-    const atTip = tipIndex()?.get(w.head) ?? [];
+    const tips = tipIndex();
+    if (tips === undefined) {
+      // the ref listing failed — attribution is off, so an open PR on
+      // the branch that WOULD have claimed this tip is invisible to
+      // the bead-only verdict. Keep every detached tree until a sweep
+      // can attribute honestly; never a silent reap on a failed probe
+      rep.kept.push(`${w.path} (tip index unavailable)`);
+      continue;
+    }
+    const atTip = tips.get(w.head) ?? [];
     const attributed = atTip.length === 1 ? atTip[0] : undefined;
     if (attributed !== undefined) {
       const s = litterSlug(attributed, opts.stackPrefix);
@@ -1455,8 +1469,13 @@ function litterCandidates(
  *  HEAD attribution index. Eligibility is the same litterSlug the
  *  candidate loop applies, so an attributed branch can never name a
  *  namespace the sweep wouldn't have swept anyway. Undefined when the
- *  ref listing fails — attribution just stays off. */
-function litterBranchTips(root: string, stackPrefix?: string): Map<string, string[]> | undefined {
+ *  ref listing fails — the error is reported and every detached tree
+ *  keeps until attribution works again (fail closed). */
+function litterBranchTips(
+  root: string,
+  stackPrefix: string | undefined,
+  rep: LitterReap
+): Map<string, string[]> | undefined {
   const res = gitTry([
     '-C',
     root,
@@ -1465,6 +1484,7 @@ function litterBranchTips(root: string, stackPrefix?: string): Map<string, strin
     'refs/heads/',
   ]);
   if (res.code !== 0) {
+    rep.errors.push(`branch tip index failed — ${res.err || 'git error'}`);
     return undefined;
   }
   const map = new Map<string, string[]>();
@@ -1580,11 +1600,16 @@ function recoverGhost(
   if (existsSync(admin)) {
     return; // registered but unlisted — worktree prune/list's business
   }
-  const branch = ghostBranch(opts.root, slug);
-  if (branch === undefined) {
+  const found = ghostBranch(opts.root, slug);
+  if (found === undefined) {
     keep('no branch to bind');
     return;
   }
+  if ('ambiguous' in found) {
+    keep(`ambiguous branch binding — ${found.ambiguous.join(', ')}`);
+    return;
+  }
+  const branch = found.branch;
   if (opts.dryRun === true) {
     rep.repaired.push(`${path} [${branch}]`);
     return;
@@ -1631,10 +1656,17 @@ function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): vo
 /** The branch a recovered ghost binds HEAD to — the naming convention's
  *  own mapping: loop/<slug> first, then the label namespaces
  *  (work/<slug> — a `bro work enter` tail — plus feat//fix//devin/
- *  ad-hoc heads), else the stack member carrying <slug>. */
-function ghostBranch(root: string, slug: string): string | undefined {
+ *  ad-hoc heads), else the stack member carrying <slug>. The dir name
+ *  carries the slug, not the namespace: when several branches claim it
+ *  the binding is a guess that can hand the tree the wrong branch's
+ *  bead/PR evidence — 'ambiguous' refuses the recovery instead. */
+function ghostBranch(
+  root: string,
+  slug: string
+): { branch: string } | { ambiguous: string[] } | undefined {
   const has = (b: string): boolean =>
     gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0;
+  const matches: string[] = [];
   for (const b of [
     `loop/${slug}`,
     `work/${slug}`,
@@ -1643,18 +1675,21 @@ function ghostBranch(root: string, slug: string): string | undefined {
     `devin/${slug}`,
   ]) {
     if (has(b)) {
-      return b;
+      matches.push(b);
     }
   }
   const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)']);
   if (st.code === 0) {
     for (const b of st.out.split('\n').filter(s => s !== '')) {
       if (parseStackBranch(b)?.slug === slug) {
-        return b;
+        matches.push(b);
       }
     }
   }
-  return undefined;
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return matches.length === 1 ? { branch: matches[0] } : { ambiguous: matches };
 }
 
 /** Bare litter branches — a worktree-less loop/* (or label-namespace
@@ -1701,19 +1736,23 @@ function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow
   }
 }
 
-/** Candidate → bead row. Deterministic namespaces read the exact slug
- *  map — a miss means no bead, full stop. Label namespaces
- *  (work//feat//fix//devin/ and detached dir/claim slugs) carry a human
- *  label, not a bead contract: the ladder is exact first (tidy
- *  `work/<bead-id>` names), then beadForHead's '-'-bounded prefix match
- *  over the branch (`work/<bead>-desc`), then the same match on the
- *  '<prefix>-<slug>' short form (`work/imvu3` → `bro-imvu3`). Every
- *  rung is the fleet-head reconcile's own matcher — ambiguity answers
- *  undefined, and undefined is always a keep. */
+/** Candidate → bead row. Deterministic namespaces (loop/, stack/)
+ *  read the exact slug map — a miss means no bead, full stop. Label
+ *  namespaces (work//feat//fix//devin/ and detached dir/claim slugs)
+ *  carry a human label, not a bead contract: beadForHead — the
+ *  fleet-head reconcile's own matcher — is the ONLY rung, because its
+ *  '-'-bounded prefix match already covers the tidy `work/<bead-id>`
+ *  exact tail AND refuses ambiguity (two bead owners → undefined =
+ *  keep). A raw exact-map shortcut would bypass that check: `work/
+ *  <slug>` naming bead B while a shorter bead also prefix-matches
+ *  would attribute the tree to B and reap a live owner's work. The
+ *  second rung is the same matcher on the '<prefix>-<slug>' short
+ *  form (`work/imvu3` → `bro-imvu3`), skipped when the slug already
+ *  carries the prefix (that shape matched at rung one or names a
+ *  doubled-prefix bead the prefix rung can't reach anyway). */
 function litterBead(ctx: LitterCtx, c: LitterCandidate): TaskRow | undefined {
-  const exact = ctx.bySlug.get(c.slug);
-  if (exact !== undefined || c.label !== true) {
-    return exact;
+  if (c.label !== true) {
+    return ctx.bySlug.get(c.slug);
   }
   const headRef = c.branch === '' ? `x/${c.slug}` : c.branch;
   const direct = beadForHead({ pr: 0, headRef }, ctx.bySlug);
@@ -1805,7 +1844,39 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
   if (st.code !== 0) {
     return 'cleanliness unverifiable';
   }
-  return st.out.trim() === '' ? undefined : 'dirty';
+  if (st.out.trim() !== '') {
+    return 'dirty';
+  }
+  // '' branch = unattributed detached HEAD — the tree's own HEAD is the
+  // commits' only ref, and `worktree remove` drops the admin dir that
+  // holds it: commits no other ref reaches become gc fodder. The bead
+  // verdict proved the WORK done, not that THIS tip landed anywhere —
+  // keep unless some ref still holds it (attributed trees and branches
+  // are covered by their own ref + the branch-retire guards)
+  if (c.branch === '' && !detachedTipReachable(ctx.opts.root, w.path)) {
+    return 'detached HEAD unreachable — no ref keeps its commits';
+  }
+  return undefined;
+}
+
+/** Does any ref still reach this tree's HEAD? An unattributed detached
+ *  worktree's own HEAD is not a ref — once the worktree is removed,
+ *  commits nothing else names are unreachable and gc fodder. Fail
+ *  closed: an unverifiable probe keeps the tree. */
+function detachedTipReachable(root: string, wtPath: string): boolean {
+  const head = gitTry(['-C', wtPath, 'rev-parse', '--verify', 'HEAD']);
+  if (head.code !== 0) {
+    return false;
+  }
+  const refs = gitTry([
+    '-C',
+    root,
+    'for-each-ref',
+    '--contains',
+    head.out.trim(),
+    '--format=%(refname)',
+  ]);
+  return refs.code === 0 && refs.out.trim() !== '';
 }
 
 /** The evidence-plane keep reason — bead verdict + PR state. undefined
@@ -2309,11 +2380,16 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
     return rep;
   }
   // the store's id prefix — label short slugs resolve through the
-  // '<prefix>-<slug>' form; a probe failure just skips that rung
+  // '<prefix>-<slug>' form; a probe failure stays fail-closed (that
+  // rung just skips) but the store error belongs in the report —
+  // short slugs left unresolved otherwise read as plain 'no bead'
   let prefix: string | undefined;
   try {
     prefix = opts.tasks.prefix();
-  } catch {
+  } catch (err) {
+    rep.errors.push(
+      `task store prefix probe failed — ${err instanceof Error ? err.message : String(err)}`
+    );
     prefix = undefined;
   }
   // claim-liveness planes — snapshotted once for the sweep; the release
