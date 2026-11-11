@@ -11,13 +11,13 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsdown src/kilo.ts --format esm --dts --clean --no-external=/^@broject\\//"
+    "build": "tsdown"
   },
   "devDependencies": {
     "@kilocode/plugin": "^7.8.3",
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^6.0.3"
   },
   "files": [
     "dist"
