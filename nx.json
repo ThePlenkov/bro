@@ -23,6 +23,19 @@
     }
   },
   "namedInputs": {
+    "pluginSurface": [
+      "{workspaceRoot}/plugin.json",
+      "{workspaceRoot}/plugins/**/*",
+      "{workspaceRoot}/packages/agent-plugins/**/*",
+      "{workspaceRoot}/.claude-plugin/**/*",
+      "{workspaceRoot}/.codex-plugin/**/*",
+      "{workspaceRoot}/.agents/**/*",
+      "{workspaceRoot}/skills/**/*",
+      "{workspaceRoot}/formulas/**/*",
+      "{workspaceRoot}/hooks/**/*",
+      "{workspaceRoot}/hooks.json",
+      "{workspaceRoot}/dogfood/**/*"
+    ],
     "envGates": [
       {
         "env": "BRO_MESH_E2E_REPO"
