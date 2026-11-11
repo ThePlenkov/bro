@@ -104,6 +104,7 @@ import {
   resolveSpawnProvider,
   resolveSpawnRoute,
   settleAcpSessions,
+  worktreeTelemetryDims,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
@@ -795,12 +796,18 @@ export function spawnStepAgent(
       // a spawned worker is a child trace: the span ctx crosses the
       // process boundary as TRACEPARENT (and the endpoint itself so the
       // worker emits without sourcing provider.env) — the worker's own
-      // bro.cmd/acp.* spans nest under this one in Tempo.
+      // bro.cmd/acp.* spans nest under this one in Tempo. The worktree
+      // triple rides the span too — the same dims agentEnvPins pins
+      // into the worker's env (spec bro-xgejl.1)
+      const dims = worktreeTelemetryDims(repoRoot);
       const span = otelSpan('agent.spawn', {
         'agent.step': req.molStep ?? '',
         'agent.backend': conn.name,
         'agent.provider': pick.provider ?? '',
         'agent.model': pick.model ?? '',
+        'agent.worktree': dims.worktree,
+        ...(dims.branch === undefined ? {} : { 'agent.branch': dims.branch }),
+        ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
       });
       const tp = otelHeader(span.ctx);
       const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;

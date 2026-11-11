@@ -64,12 +64,64 @@ const attrs = (a: Record<string, AttrValue>): { key: string; value: Record<strin
 
 const nanos = (ms: number): string => String(BigInt(ms) * 1_000_000n);
 
-const resource = (): { attributes: { key: string; value: Record<string, unknown> }[] } => ({
-  attributes: [
-    attr('service.name', 'bro'),
-    attr('service.version', process.env.BRO_VERSION ?? 'dev'),
-  ],
-});
+/** Identity dims every emitter inherits (spec bro-xgejl.1) — the
+ *  `bro.*` resource attrs a Tempo search answers "which session /
+ *  agent / model / cwd / repo / worktree / branch" from without reading
+ *  code. Env is the channel: the connector's spawn pins
+ *  (BRO_AGENT_ID/BRO_SESSION_ID/BRO_BEAD_ID/BRO_AGENT_PROVIDER/
+ *  BRO_AGENT_MODEL) plus the worktree triple the spawn site resolves
+ *  (BRO_WORKTREE/BRO_BRANCH/BRO_REPO) reach every descendant process
+ *  unchanged. The bead's short names (BRO_BEAD/BRO_MODEL/BRO_PROVIDER)
+ *  read as fallbacks behind the real pin names. Unset dims are absent,
+ *  never '': a non-worker process carries fewer attrs, not empty ones.
+ *  Read live per emit — a handful of env lookups against the attribute
+ *  array already built per call; workers' env is fixed at spawn. */
+const IDENTITY_ENV: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['bro.session.id', ['BRO_SESSION_ID']],
+  ['bro.agent.id', ['BRO_AGENT_ID']],
+  ['bro.bead.id', ['BRO_BEAD_ID', 'BRO_BEAD']],
+  ['bro.agent.provider', ['BRO_AGENT_PROVIDER', 'BRO_PROVIDER']],
+  ['bro.agent.model', ['BRO_AGENT_MODEL', 'BRO_MODEL']],
+  ['bro.worktree', ['BRO_WORKTREE']],
+  ['bro.branch', ['BRO_BRANCH']],
+  ['bro.repo', ['BRO_REPO']],
+];
+
+const envDim = (names: readonly string[]): string | undefined => {
+  for (const n of names) {
+    const v = process.env[n];
+    if (v !== undefined && v !== '') return v;
+  }
+  return undefined;
+};
+
+/** cwd can vanish under a long-lived worker (its worktree reaped
+ *  mid-run) — process.cwd() then throws, and resource() runs inside
+ *  every emit, so an unguarded read would turn telemetry into the
+ *  crash (review bro-xgejl.1). Absent beats thrown. */
+const cwdDim = (): string | undefined => {
+  try {
+    return process.cwd();
+  } catch {
+    return undefined;
+  }
+};
+
+const resource = (): { attributes: { key: string; value: Record<string, unknown> }[] } => {
+  const cwd = cwdDim();
+  return {
+    attributes: [
+      attr('service.name', 'bro'),
+      attr('service.version', process.env.BRO_VERSION ?? 'dev'),
+      attr('service.instance.id', String(process.pid)),
+      ...(cwd === undefined ? [] : [attr('bro.cwd', cwd)]),
+      ...IDENTITY_ENV.flatMap(([k, names]) => {
+        const v = envDim(names);
+        return v === undefined ? [] : [attr(k, v)];
+      }),
+    ],
+  };
+};
 
 /** Emit queue — no in-process OTLP sockets, ever (bro-uwoss). A void'd
  *  fetch to a dead endpoint rejects at its abort yet keeps undici's
@@ -249,7 +301,7 @@ function journal(name: string, a: Record<string, AttrValue>): void {
  *  provider env file (the same ENDPOINT() resolution every emit uses,
  *  exposed so status surfaces can say where telemetry would go). */
 export function otelEndpoint(): string | undefined {
-  return ENDPOINT()
+  return ENDPOINT();
 }
 
 /** Push one OTEL log record. `a` becomes structured metadata —

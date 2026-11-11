@@ -178,7 +178,9 @@ import {
   type SpawnProviderPick,
   sessionQuotaOf,
   settleAcpSessions,
+  worktreeTelemetryDims,
 } from '../agent-connectors.ts';
+import { otelHeader, otelSpan } from '@broject/providers';
 import { loadBroConfig } from '../plugins.ts';
 import { runActCommand } from './act.ts';
 import { flag, positionals } from './args.ts';
@@ -410,6 +412,11 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_AGENT_CLASS',
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
+    // telemetry dims are per-spawn facts (spec bro-xgejl.1) — a parent
+    // worker's worktree/branch/repo must not label this child's spans
+    'BRO_WORKTREE',
+    'BRO_BRANCH',
+    'BRO_REPO',
     BATCH_MARKER_ENV,
   ]) {
     delete env[k];
@@ -904,6 +911,22 @@ function spawnAgent(
 ): Promise<number | null> {
   return new Promise(resolve => {
     const leadId = beadIds[0]!;
+    // agent.spawn span + TRACEPARENT — the same child-trace injection
+    // spawnStepAgent performs at the `bro fleet agents up` site (spec
+    // bro-xgejl.1); without it the worker's own spans root a fresh
+    // trace instead of nesting under this spawn
+    const dims = worktreeTelemetryDims(dir);
+    const span = otelSpan('agent.spawn', {
+      'agent.step': leadId,
+      'agent.backend': 'template',
+      'agent.provider': lane.provider ?? '',
+      'agent.model': lane.model ?? '',
+      'agent.worktree': dims.worktree,
+      ...(dims.branch === undefined ? {} : { 'agent.branch': dims.branch }),
+      ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
+    });
+    const tp = otelHeader(span.ctx);
+    const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     const env = agentEnv(ctx, {
       // BRO_BEAD_ID stays the lead for compatibility — batch work orders
       // read the whole clump off BRO_BEAD_IDS
@@ -911,7 +934,16 @@ function spawnAgent(
       BRO_BEAD_IDS: beadIds.join(','),
       BRO_BEAD_TITLE: title,
       BRO_PROMPT_FILE: promptFile,
-      ...(agentId !== undefined ? { BRO_AGENT_ID: agentId } : {}),
+      // the template arm's session/agent ids are the run key — the
+      // connector's agentId-fallback semantics (spec bro-xgejl.1)
+      ...(agentId !== undefined ? { BRO_AGENT_ID: agentId, BRO_SESSION_ID: agentId } : {}),
+      // telemetry dims (spec bro-xgejl.1) — ambient copies are stripped
+      // in agentEnv; these are THIS worktree's, never the parent's
+      BRO_WORKTREE: dims.worktree,
+      ...(dims.branch === undefined ? {} : { BRO_BRANCH: dims.branch }),
+      ...(dims.repo === undefined ? {} : { BRO_REPO: dims.repo }),
+      TRACEPARENT: tp,
+      ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
       ...provenancePins(ctx, leadId, lane),
       ...(lane.class === undefined ? {} : { BRO_AGENT_CLASS: lane.class }),
     });
@@ -994,6 +1026,13 @@ function spawnAgent(
         worktree: dir,
         log: log ?? '',
       });
+      // the span covers the whole run — spawn failure is the only
+      // error verdict; a completed run reports its exit code (spec
+      // bro-xgejl.1)
+      span.end(
+        code === null ? { error: 'agent spawn failed' } : { 'agent.exit_code': code },
+        code === null ? 'error' : 'ok'
+      );
       resolve(code);
     };
     child.on('error', err => {
@@ -1031,29 +1070,63 @@ function specEnv(ctx: Ctx, extra: Record<string, string>): Record<string, string
  *  is the caller's settle decision (cap → hold, conflict → park). */
 async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLane): Promise<void> {
   const lead = m.beads[0]!;
-  const info = await ctx.agents!.spawn({
-    molStep: lead.id,
-    repoRoot: m.item.worktreeDir,
-    beadsDir: ctx.beadsDir!,
-    prompt,
-    env: specEnv(ctx, {
-      BRO_BEAD_IDS: m.beads.map(b => b.id).join(','),
-      BRO_BEAD_TITLE: clumpTitle(m.beads),
-      // the fleet's own budget must see this worker — the marker rides
-      // on every loop spawn, root bead or not (spec bro-9h86l)
-      [BATCH_MARKER_ENV]: '1',
-    }),
-    provider: lane.provider,
-    account: lane.account,
-    model: lane.model,
-    // the routing lane the spawn resolved to — provenance the registry
-    // records and the BRO_AGENT_CLASS env pin both read spec.class
-    class: lane.class,
-    ...(lane.route === undefined ? {} : { route: lane.route }),
-    // an explicit worker keeps the backend's own command fallback from
-    // re-reading loop.agent config — a --agent flag override would
-    // otherwise be silently ignored
-    worker: lane.worker ?? { kind: 'template', command: laneCommand(ctx, lane) },
+  // agent.spawn span + TRACEPARENT — the same child-trace injection
+  // spawnStepAgent performs at the `bro fleet agents up` site (spec
+  // bro-xgejl.1); the registry path bypassed it, so loop-spawned
+  // workers emitted rootless spans with no parent chain
+  const dims = worktreeTelemetryDims(m.item.worktreeDir);
+  const branch = dims.branch ?? m.item.branch;
+  const span = otelSpan('agent.spawn', {
+    'agent.step': lead.id,
+    'agent.backend': ctx.agents!.name,
+    'agent.provider': lane.provider ?? '',
+    'agent.model': lane.model ?? '',
+    'agent.worktree': dims.worktree,
+    ...(branch === undefined ? {} : { 'agent.branch': branch }),
+    ...(dims.repo === undefined ? {} : { 'agent.repo': dims.repo }),
+  });
+  const tp = otelHeader(span.ctx);
+  const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  let info: AgentInfo;
+  try {
+    info = await ctx.agents!.spawn({
+      molStep: lead.id,
+      repoRoot: m.item.worktreeDir,
+      beadsDir: ctx.beadsDir!,
+      prompt,
+      env: specEnv(ctx, {
+        BRO_BEAD_IDS: m.beads.map(b => b.id).join(','),
+        BRO_BEAD_TITLE: clumpTitle(m.beads),
+        // the fleet's own budget must see this worker — the marker rides
+        // on every loop spawn, root bead or not (spec bro-9h86l)
+        [BATCH_MARKER_ENV]: '1',
+        TRACEPARENT: tp,
+        ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
+      }),
+      provider: lane.provider,
+      account: lane.account,
+      model: lane.model,
+      // the routing lane the spawn resolved to — provenance the registry
+      // records and the BRO_AGENT_CLASS env pin both read spec.class
+      class: lane.class,
+      ...(lane.route === undefined ? {} : { route: lane.route }),
+      // an explicit worker keeps the backend's own command fallback from
+      // re-reading loop.agent config — a --agent flag override would
+      // otherwise be silently ignored
+      worker: lane.worker ?? { kind: 'template', command: laneCommand(ctx, lane) },
+    });
+  } catch (err) {
+    span.end({ error: err instanceof Error ? err.message : String(err) }, 'error');
+    throw err;
+  }
+  // same end-attrs spawnStepAgent writes — the registry's stamped
+  // provenance is what ran (a chain walk can move the spawn off the
+  // head pick the span opened with)
+  span.end({
+    'agent.id': String(info.id ?? ''),
+    'agent.pid': info.pid ?? 0,
+    'agent.provider': info.provider ?? '',
+    'agent.model': info.model ?? '',
   });
   m.worker = {
     agentId: info.id,

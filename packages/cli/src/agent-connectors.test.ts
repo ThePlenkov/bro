@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
   type AgentCapabilities,
@@ -78,6 +78,7 @@ import {
   sessionQuotaOf,
   systemdScopeProbe,
   unregisterAgentConnector,
+  worktreeTelemetryDims,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
 
@@ -1392,6 +1393,81 @@ describe('native credential scope (bro-l8c4f.6)', () => {
       await c.stop(b.id);
     } finally {
       delete process.env.BRO_PIPELINE_KEY;
+      cleanup(f);
+    }
+  });
+});
+
+/** Telemetry identity pins (spec bro-xgejl.1): the worktree triple is
+ *  connector-owned — resolved from spec.repoRoot at spawn, never from
+ *  caller env — and TRACEPARENT rides spec.env through strictEnv so
+ *  the worker's spans join the parent's trace. Native-only: it is the
+ *  backend that can assert the spawned process's actual environ. */
+describe('native telemetry identity pins (bro-xgejl.1)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+
+  test('BRO_WORKTREE/BRO_BRANCH/BRO_REPO pin the spawn worktree; forged spec.env values lose', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    const payload =
+      "require('fs').writeFileSync('env.out', [process.env.BRO_WORKTREE ?? '', process.env.BRO_BRANCH ?? '', process.env.BRO_REPO ?? ''].join('|'))";
+    try {
+      const c = conn(f);
+      const a = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', payload),
+        env: { BRO_WORKTREE: '/forged', BRO_BRANCH: 'forged', BRO_REPO: '/forged' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      const [wt, br, repo] = readFileSync(join(f.main, 'env.out'), 'utf8').split('|');
+      assert.equal(wt, f.main);
+      assert.equal(br, 'main');
+      assert.equal(repo, f.main);
+      await c.stop(a.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('TRACEPARENT rides spec.env through strictEnv — the worker joins the parent trace', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    const tp = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+    const payload = "require('fs').writeFileSync('env.out', process.env.TRACEPARENT ?? '')";
+    try {
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME'],
+      };
+      const c = conn(f);
+      const a = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', payload),
+        env: { TRACEPARENT: tp },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), tp);
+      await c.stop(a.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a pre-create probe is not memoized — the post-create probe still resolves branch/repo', () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      // enter-spawn shape: agents.ts probes repoRoot for the agent.spawn
+      // span BEFORE prepareSpawn mints the worktree — that miss must not
+      // poison the memo agentEnvPins reads after creation (review
+      // bro-xgejl.1)
+      const dir = join(f.main, 'wt-later');
+      const early = worktreeTelemetryDims(dir);
+      assert.equal(early.worktree, resolve(dir));
+      assert.equal(early.branch, undefined);
+      assert.equal(early.repo, undefined);
+      mkdirSync(dir);
+      const late = worktreeTelemetryDims(dir);
+      assert.equal(late.branch, 'main');
+      assert.equal(late.repo, f.main);
+    } finally {
       cleanup(f);
     }
   });
