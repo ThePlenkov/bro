@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
   type AgentCapabilities,
@@ -78,6 +78,7 @@ import {
   sessionQuotaOf,
   systemdScopeProbe,
   unregisterAgentConnector,
+  worktreeTelemetryDims,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
 
@@ -1445,6 +1446,27 @@ describe('native telemetry identity pins (bro-xgejl.1)', () => {
       await until(() => existsSync(join(f.main, 'env.out')));
       assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), tp);
       await c.stop(a.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('a pre-create probe is not memoized — the post-create probe still resolves branch/repo', () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      // enter-spawn shape: agents.ts probes repoRoot for the agent.spawn
+      // span BEFORE prepareSpawn mints the worktree — that miss must not
+      // poison the memo agentEnvPins reads after creation (review
+      // bro-xgejl.1)
+      const dir = join(f.main, 'wt-later');
+      const early = worktreeTelemetryDims(dir);
+      assert.equal(early.worktree, resolve(dir));
+      assert.equal(early.branch, undefined);
+      assert.equal(early.repo, undefined);
+      mkdirSync(dir);
+      const late = worktreeTelemetryDims(dir);
+      assert.equal(late.branch, 'main');
+      assert.equal(late.repo, f.main);
     } finally {
       cleanup(f);
     }

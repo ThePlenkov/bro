@@ -1188,6 +1188,14 @@ export function worktreeTelemetryDims(dir: string): WorktreeTelemetryDims {
     return hit;
   }
   const dims: WorktreeTelemetryDims = { worktree: key };
+  // an enter-spawn probes repoRoot before prepareSpawn mints the
+  // worktree — caching that miss would pin the env build (which runs
+  // after creation, same key) to a branch/repo-less result forever
+  // (review bro-xgejl.1). A path that doesn't exist yet simply isn't
+  // memoized; the post-create probe pays the git reads once.
+  if (!existsSync(key)) {
+    return dims;
+  }
   const br = gitTry(['-C', key, 'branch', '--show-current']);
   const branch = br.code === 0 ? br.out.trim() : '';
   if (branch !== '') {
