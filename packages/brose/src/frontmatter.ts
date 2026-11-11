@@ -118,7 +118,8 @@ export const scalarValue = (s: string): unknown => {
   }
   if (t.startsWith('"') || t.startsWith("'")) {
     const end = closeQuote(t, 0);
-    const v = end !== -1 && /^\s*(#.*)?$/.test(t.slice(end)) ? t.slice(0, end) : t;
+    const tail = t.slice(end).trim();
+    const v = end !== -1 && (tail === '' || tail.startsWith('#')) ? t.slice(0, end) : t;
     const u = unquote(v);
     if (v.startsWith('"')) {
       return undouble(u);

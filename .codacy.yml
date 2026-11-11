@@ -127,3 +127,10 @@ exclude_paths:
   # rule would flag the one file whose job is path safety.
   - 'packages/brose/src/io.ts'
   - 'packages/brotocol/src/io.ts'
+
+  # The frontmatter lexer IS bounded-cursor character reading: `t[i]`/
+  # `t[i]!` on the input string are its fundamental operations, the same
+  # class the object-injection rule flags on keyed lookups. The input is
+  # a bounded scalar, not outside data — reading chars by cursor is the
+  # file's whole job, like the fs seam above.
+  - 'packages/brose/src/frontmatter.ts'

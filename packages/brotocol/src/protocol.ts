@@ -91,7 +91,7 @@ export const globMatch = (glob: string, path: string): boolean => {
     if (gi === gs.length) {
       return pi === ps.length;
     }
-    if (gs[gi] === '**') {
+    if (gs.at(gi) === '**') {
       for (let k = pi; k <= ps.length; k++) {
         if (match(gi + 1, k)) {
           return true;
@@ -99,7 +99,7 @@ export const globMatch = (glob: string, path: string): boolean => {
       }
       return false;
     }
-    return pi < ps.length && segMatch(gs[gi] ?? '', ps[pi] ?? '') && match(gi + 1, pi + 1);
+    return pi < ps.length && segMatch(gs.at(gi) ?? '', ps.at(pi) ?? '') && match(gi + 1, pi + 1);
   };
   return match(0, 0);
 };

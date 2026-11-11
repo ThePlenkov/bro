@@ -58,10 +58,13 @@ function sectionTree(body: string, bodyOffset: number): SectionNode[] {
       endLine: total,
       children: [],
     };
-    while (stack.length > 0 && stack[stack.length - 1]!.level >= node.level) {
-      stack.pop()!.endLine = node.line;
+    while (stack.length > 0 && (stack.at(-1)?.level ?? -1) >= node.level) {
+      const top = stack.pop();
+      if (top !== undefined) {
+        top.endLine = node.line;
+      }
     }
-    const parent = stack[stack.length - 1];
+    const parent = stack.at(-1);
     if (parent === undefined) {
       roots.push(node);
     } else {
