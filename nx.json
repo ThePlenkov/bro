@@ -4,7 +4,13 @@
   "targetDefaults": {
     "typecheck": {
       "dependsOn": ["^build"],
-      "cache": true
+      "cache": true,
+      "inputs": [
+        "default",
+        {
+          "externalDependencies": ["typescript"]
+        }
+      ]
     },
     "test": {
       "dependsOn": ["^build", "build"],
@@ -18,12 +24,24 @@
   },
   "namedInputs": {
     "envGates": [
-      { "env": "BRO_MESH_E2E_REPO" },
-      { "env": "BRO_MESH_WL_E2E" },
-      { "env": "CODACY_API_TOKEN" },
-      { "env": "CODACY_PROJECT_TOKEN" },
-      { "env": "CODESCENE_TOKEN" },
-      { "env": "SONAR_TOKEN" }
+      {
+        "env": "BRO_MESH_E2E_REPO"
+      },
+      {
+        "env": "BRO_MESH_WL_E2E"
+      },
+      {
+        "env": "CODACY_API_TOKEN"
+      },
+      {
+        "env": "CODACY_PROJECT_TOKEN"
+      },
+      {
+        "env": "CODESCENE_TOKEN"
+      },
+      {
+        "env": "SONAR_TOKEN"
+      }
     ]
   },
   "release": {
