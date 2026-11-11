@@ -670,7 +670,16 @@ export async function acpConverse(
   const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' });
   return withAcp(by, entry, opts, deadline, async ctx => {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
-    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline);
+    // a refused/failed session open still owes both spans a terminal
+    // status — an un-ended span pins the trace leg open in the
+    // collector (review bro-xgejl.1)
+    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline).catch(
+      (err: unknown) => {
+        sessSpan.end({ error: errMsg(err) }, 'error');
+        span.end({ error: errMsg(err) }, 'error');
+        throw err;
+      }
+    );
     try {
       const model = await converseModel(
         ctx,
