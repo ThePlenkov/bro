@@ -51,7 +51,11 @@ default store, so standard installs already have it).
   before any classification — scanners post verdicts there, never in
   threads, so "no thread activity" says nothing about whether the tool
   is down; a named failing condition (duplication %, coverage) is a
-  real finding to fix or debt-bead, not flake.
+  real finding to fix or debt-bead, not flake. A check you don't
+  **recognize** is a fact to fetch — `gh api check-runs` for the run +
+  `git log --follow` on the workflow file — not a thing to name; an
+  `in_progress` gate-style check is waiting on the gate, which IS the
+  verdict, not a stall.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
