@@ -25,30 +25,13 @@ import { loadConfig } from '@broject/core';
 import { otelSpan, setAmbient } from '@broject/providers';
 import './connectors.ts';
 import { runHooksCommand } from './commands/hooks.ts';
+import { installLogTimestamps } from './log-timestamps.ts';
 
-// ISO timestamps on console output — the same env-gated wrap index.ts
-// installs (BRO_LOG_TIMESTAMP=1 pinned by daemon/postmerge children
-// writing to log files). Hook answers go through writeSync(1) and were
-// never affected; this keeps the operator subcommands
+// Same env-gated console wrap index.ts installs — shared module so the
+// two entries can't drift; hook answers go through writeSync(1) and
+// were never affected, this keeps the operator subcommands
 // (install/perf/status) byte-identical under the pin.
-if (
-  process.env.BRO_LOG_TIMESTAMP === '1' &&
-  !process.argv.some(
-    a => a === '--json' || a === '--jsonl' || a === '-j' || a.startsWith('--json=')
-  ) &&
-  !process.env.BRO_JSON &&
-  !process.env.BRO_MACHINE_OUTPUT
-) {
-  const origLog = console.log;
-  const origErr = console.error;
-  const origWarn = console.warn;
-  const origInfo = console.info;
-  const ts = (): string => new Date().toISOString();
-  console.log = (...args: unknown[]) => origLog(`[${ts()}]`, ...args);
-  console.error = (...args: unknown[]) => origErr(`[${ts()}]`, ...args);
-  console.warn = (...args: unknown[]) => origWarn(`[${ts()}]`, ...args);
-  console.info = (...args: unknown[]) => origInfo(`[${ts()}]`, ...args);
-}
+installLogTimestamps();
 
 // Command telemetry — the same span contract index.ts gives every bro
 // command; the ambient ctx is what hooks.ts's hook.event span resolves
@@ -59,8 +42,8 @@ const cmdSpan = otelSpan('bro.cmd hooks', { cmd: 'hooks' }, { startMs: t0 });
 setAmbient(cmdSpan.ctx);
 process.on('exit', code => {
   cmdSpan.endDetached(
-    { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
-    (code ?? 0) === 0 ? 'ok' : 'error'
+    { 'cmd.exit_code': code, 'cmd.duration_ms': Date.now() - t0 },
+    code === 0 ? 'ok' : 'error'
   );
 });
 

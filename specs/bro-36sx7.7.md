@@ -2,6 +2,8 @@
 parent: bro-36sx7
 scope:
 - packages/cli/src/hooks.ts
+- packages/cli/src/log-timestamps.ts
+- packages/cli/src/index.ts
 - packages/cli/src/connectors.ts
 - packages/cli/src/plugins.ts
 - packages/cli/src/commands/hooks.ts
@@ -270,4 +272,12 @@ run.sh automatically.
   config's full entry list (found by CI: the nested `nx run` inside an
   nx task fails project-graph processing on `plugins/omp/bro`, so the
   fallback is the path CI actually exercises).
+- [ ] `packages/cli/src/log-timestamps.ts` + `index.ts`/`hooks.ts` —
+  the BRO_LOG_TIMESTAMP console wrap moves to a shared module both
+  entries call: SonarCloud flagged the parallel copy as new-code
+  duplication (4.6% > 3% gate), and one module makes drift impossible
+- [ ] `hooks.e2e.test.ts` — the two PATH-bro run.sh cases share a
+  `fakePathBro` fixture (same duplication finding, test-internal)
+- [ ] `hooks.ts` ErrorProne cleanup — braces on the console-wrap arrow
+  bodies, drop the dead `?? 0` on the exit code (Codacy: 6 new issues)
 - [ ] build / typecheck / test / bench delta

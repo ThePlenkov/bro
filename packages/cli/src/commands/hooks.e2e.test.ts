@@ -2718,31 +2718,40 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
     });
   });
 
+  /** A PATH-resolvable fake `bro`: <root>/fakebin/bro symlinks to
+   *  <root>/fakepkg/dist/index.js — the npm .bin layout, with an empty
+   *  PLUGIN_ROOT so the launcher's walk-up finds nothing and resolution
+   *  falls to `command -v bro`. `withHooksJs` adds the slim sibling the
+   *  launcher prefers; index.js always carries a shebang + exec bit so
+   *  the `bro hooks` fallback can run it directly. */
+  function fakePathBro(root: string, withHooksJs: boolean) {
+    const pluginRoot = join(root, 'empty-plugin');
+    mkdirSync(pluginRoot, { recursive: true });
+    const fakeBin = join(root, 'fakebin');
+    mkdirSync(fakeBin, { recursive: true });
+    const pkgDist = join(root, 'fakepkg', 'dist');
+    mkdirSync(pkgDist, { recursive: true });
+    // +x matters: `command -v` skips a PATH entry that isn't
+    // executable, so a mode-644 target would hide the fake bro and
+    // resolution would fall through to the host's real install
+    const indexJs = join(pkgDist, 'index.js');
+    writeFileSync(indexJs, '#!/usr/bin/env node\nconsole.log("INDEX_JS_RAN")\n');
+    chmodSync(indexJs, 0o755);
+    if (withHooksJs) {
+      writeFileSync(join(pkgDist, 'hooks.js'), 'console.log("HOOKS_JS_RAN")\n');
+    }
+    symlinkSync(indexJs, join(fakeBin, 'bro'));
+    return {
+      PLUGIN_ROOT: pluginRoot,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      XDG_STATE_HOME: join(root, 'xdg-state'),
+    };
+  }
+
   test('run.sh resolves a PATH bro bin to its sibling hooks.js', () => {
     const f = hookFixture();
     inside(f.main, f.root, () => {
-      // no in-tree dist reachable — PLUGIN_ROOT's walk-up finds nothing,
-      // so resolution falls to `command -v bro`
-      const pluginRoot = join(f.root, 'empty-plugin');
-      mkdirSync(pluginRoot, { recursive: true });
-      const fakeBin = join(f.root, 'fakebin');
-      mkdirSync(fakeBin, { recursive: true });
-      // npm .bin style: bro symlinks into <pkg>/dist/index.js
-      const pkgDist = join(f.root, 'fakepkg', 'dist');
-      mkdirSync(pkgDist, { recursive: true });
-      // +x matters: `command -v` skips a PATH entry that isn't
-      // executable, so a mode-644 target would hide the fake bro and
-      // resolution would fall through to the host's real install
-      const indexJs = join(pkgDist, 'index.js');
-      writeFileSync(indexJs, 'console.log("INDEX_JS_RAN")\n');
-      chmodSync(indexJs, 0o755);
-      writeFileSync(join(pkgDist, 'hooks.js'), 'console.log("HOOKS_JS_RAN")\n');
-      symlinkSync(indexJs, join(fakeBin, 'bro'));
-      const r = runShEvent(f.main, 'session-start', {
-        PLUGIN_ROOT: pluginRoot,
-        PATH: `${fakeBin}:${process.env.PATH}`,
-        XDG_STATE_HOME: join(f.root, 'xdg-state'),
-      });
+      const r = runShEvent(f.main, 'session-start', fakePathBro(f.root, true));
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stdout, /HOOKS_JS_RAN/);
       assert.doesNotMatch(r.stdout, /INDEX_JS_RAN/);
@@ -2752,22 +2761,7 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
   test('run.sh falls back to `bro hooks` when the resolved dist has no hooks.js', () => {
     const f = hookFixture();
     inside(f.main, f.root, () => {
-      const pluginRoot = join(f.root, 'empty-plugin');
-      mkdirSync(pluginRoot, { recursive: true });
-      const fakeBin = join(f.root, 'fakebin');
-      mkdirSync(fakeBin, { recursive: true });
-      const pkgDist = join(f.root, 'fakepkg', 'dist');
-      mkdirSync(pkgDist, { recursive: true });
-      // executable + shebang — the `bro hooks` fallback execs it directly
-      const bin = join(pkgDist, 'index.js');
-      writeFileSync(bin, '#!/usr/bin/env node\nconsole.log("INDEX_JS_RAN")\n');
-      chmodSync(bin, 0o755);
-      symlinkSync(bin, join(fakeBin, 'bro'));
-      const r = runShEvent(f.main, 'session-start', {
-        PLUGIN_ROOT: pluginRoot,
-        PATH: `${fakeBin}:${process.env.PATH}`,
-        XDG_STATE_HOME: join(f.root, 'xdg-state'),
-      });
+      const r = runShEvent(f.main, 'session-start', fakePathBro(f.root, false));
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stdout, /INDEX_JS_RAN/);
     });
