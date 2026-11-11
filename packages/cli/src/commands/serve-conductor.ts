@@ -23,7 +23,7 @@
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AgentApp, SessionUpdate } from '@agentclientprotocol/sdk';
 import type { ProviderEntry } from '@broject/core';
 import {
@@ -250,10 +250,13 @@ function cooldownWindow(env: NodeJS.ProcessEnv, fallback: number): number {
 
 /** The session-workspace pin (spec bro-sx4hr) — a path string, so only
  *  a non-empty value counts; the env pin wins over the file like every
- *  other serve knob. */
+ *  other serve knob. The pin lands in `session/new`'s cwd, which ACP
+ *  requires absolute — a relative value resolves against the listener's
+ *  working directory rather than reaching the wire relative. */
 function acpCwdPin(env: NodeJS.ProcessEnv, configured: string | undefined): string | undefined {
   const raw = env.BRO_PROVIDER_ACP_CWD?.trim() || configured?.trim();
-  return raw === undefined || raw === '' ? undefined : raw;
+  if (raw === undefined || raw === '') return undefined;
+  return resolve(raw);
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or

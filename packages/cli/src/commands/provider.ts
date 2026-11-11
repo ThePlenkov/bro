@@ -43,7 +43,7 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   getJson,
   hasHelpFlag,
@@ -90,7 +90,12 @@ export function providerStatePath(): string {
  *  machine — 272 errors per rescan in the 2026-11-09 incident. */
 export function acpWorkspaceDir(): string {
   const xdg = process.env['XDG_DATA_HOME'];
-  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share');
+  // the spec ignores a relative XDG_DATA_HOME — it would anchor sessions
+  // at a cwd that moves with the launch directory
+  const base =
+    xdg !== undefined && xdg.trim() !== '' && isAbsolute(xdg)
+      ? xdg
+      : join(homedir(), '.local', 'share');
   return join(base, 'bro', 'acp');
 }
 
@@ -349,7 +354,10 @@ async function cmdServe(argv: string[]): Promise<void> {
     // stable. serve.acpCwd / BRO_PROVIDER_ACP_CWD is the operator's pin.
     conductorCfg.cwd = conductorCfg.acpCwd ?? acpWorkspaceDir();
     try {
-      mkdirSync(conductorCfg.cwd, { recursive: true });
+      // 0700 — agent-written session state must not be world-readable
+      // under a permissive umask (review bro-sx4hr); existing dirs keep
+      // their mode, only fresh creations tighten
+      mkdirSync(conductorCfg.cwd, { recursive: true, mode: 0o700 });
     } catch (err) {
       console.error(
         `error: cannot create the acp session workspace '${conductorCfg.cwd}' — ` +

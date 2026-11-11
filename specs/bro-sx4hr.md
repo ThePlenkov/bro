@@ -94,7 +94,7 @@ because the repo root is not synthetic.
 | surface | session cwd | skills-discovery cost |
 | --- | --- | --- |
 | `bro serve` `/v1/*`, `/api/v1/acp` | the repo root (unchanged) | repo tree only |
-| `bro provider serve` `/v1/*`, `/api/v1/acp` | `serve.acpCwd` / `BRO_PROVIDER_ACP_CWD`, else `$XDG_DATA_HOME/bro/acp` | near-empty tree |
+| `bro provider serve` `/v1/*` | `serve.acpCwd` / `BRO_PROVIDER_ACP_CWD`, else `$XDG_DATA_HOME/bro/acp` | near-empty tree |
 | brokered `session/new` | the client's own `cwd`, verbatim (unchanged — spec `bro-ymbq1`) | the client's workspace |
 
 ## Tests

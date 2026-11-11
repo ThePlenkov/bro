@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   agent,
   type SessionConfigOption,
@@ -276,6 +276,12 @@ describe('conductorConfig', () => {
     assert.equal(
       conductorConfig({ BRO_PROVIDER_ACP_CWD: '   ' }, dir)?.acpCwd,
       '/srv/acp-workspace'
+    );
+    // a relative pin resolves against the listener's cwd — session/new
+    // requires an absolute cwd (review bro-sx4hr)
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: 'rel/ws' }, dir)?.acpCwd,
+      resolve('rel/ws')
     );
     // unset everywhere → undefined — the host listener's default anchor applies
     const bare = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
