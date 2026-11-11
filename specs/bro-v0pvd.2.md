@@ -55,13 +55,13 @@ interface ActGateDeps {
 
 ### Lifecycle → verdict — the settle state, mapped once
 
-| observation                     | outcome |
-| ------------------------------- | ------- |
-| `state === 'MERGED'`            | `landed` — it landed, gate irrelevant (evaluateExitGate reads non-OPEN as ok) |
-| `state === 'CLOSED'`            | `dropped` — closed unmerged, terminal (`→ close`) |
-| `OPEN` + `gate.settling`        | `'pending'` — still settling; the intent stays the resume anchor |
-| `OPEN` + `!settling` + `ok`     | `landed` — the act gate settled green |
-| `OPEN` + `!settling` + `!ok`    | `blocked` — settled with blockers (`→ retry`, bounded by `pipeline.maxAttempts`, exhaustion parks) |
+| observation                  | outcome                                                                                            |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `state === 'MERGED'`         | `landed` — it landed, gate irrelevant (evaluateExitGate reads non-OPEN as ok)                      |
+| `state === 'CLOSED'`         | `dropped` — closed unmerged, terminal (`→ close`)                                                  |
+| `OPEN` + `gate.settling`     | `'pending'` — still settling; the intent stays the resume anchor                                   |
+| `OPEN` + `!settling` + `ok`  | `landed` — the act gate settled green                                                              |
+| `OPEN` + `!settling` + `!ok` | `blocked` — settled with blockers (`→ retry`, bounded by `pipeline.maxAttempts`, exhaustion parks) |
 
 `settling` is checked FIRST: a PR with a settled blocker AND a
 pending check is still settling — `pending` waits for free on the
@@ -146,13 +146,13 @@ the observation, never seam text.
 
 - The production binding — bro-qjji2.10's run-starter owns the engine
   map (`probe` over `fetchPrActState`/`evaluateExitGate`/`gatePending`
-  + the `ReviewFacade`, PR-target resolution from ctx/worktree). This
-  bead ships the factory + contract only.
+  plus the `ReviewFacade`, PR-target resolution from ctx/worktree).
+  This bead ships the factory + contract only.
 - The work stage's `pr`/`worktree` payload fields — bro-qjji2.12's
   engine may add them; act-gate consumes whatever ctx carries and
   fails closed when nothing usable lands.
-- Resume/wake machinery — bro-v0pvd.3 owns the run waker; `pending`
-  + `recheck` is the whole async contract here.
+- Resume/wake machinery — bro-v0pvd.3 owns the run waker; the
+  `pending` + `recheck` pair is the whole async contract here.
 - Merging — the stage PROBES settle state; landing the PR is the
   host's auto-merge/act machinery, outside the formula.
 
