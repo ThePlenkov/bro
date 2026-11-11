@@ -63,6 +63,7 @@ import {
   groupMemberAlive,
   handleOwner,
   isAgentCause,
+  isAgentLearnCheck,
   rateDeathBackoff,
   isBatchSpawn,
   isQualifiedRouteId,
@@ -139,6 +140,7 @@ import {
 } from '@broject/devin';
 import { assertMutableConfig } from '../config-policy.ts';
 import { enterWorktree } from '../commands/work.ts';
+import { checkRunLearnEvidence } from './learn-evidence.ts';
 import {
   COPILOT_COUNT_TTL_MS,
   copilotCountFile,
@@ -2764,6 +2766,10 @@ function commitSpawn(
     // absolute — a relative repoRoot breaks branch/PR lookup when the
     // reader's cwd differs from the spawner's (bro-qoqt)
     worktree: resolve(spec.repoRoot),
+    // the store this run was pinned to — the exit-harvest learn check
+    // reads it verbatim so a --beads-dir/env-pinned spawn is verified
+    // where its worker actually wrote (spec bro-xkv42.2)
+    storeDir: spec.beadsDir,
     log,
     logFrom,
     // the worker's stderr lands in a sibling capture, never the .log —
@@ -2781,6 +2787,10 @@ function commitSpawn(
     // the new agent must not inherit a 'blocked' it didn't earn
     cause: undefined,
     resetAt: undefined,
+    // same for the learn/retro verdict — the new run's check hasn't
+    // run yet; inheriting 'miss' would flag a run that never exited
+    learnCheck: undefined,
+    learnEvidence: undefined,
     pid: undefined,
     pidStart: undefined,
     spawnError: undefined,
@@ -3114,6 +3124,44 @@ function emitClassifiedExitLifecycle(
   });
 }
 
+/** The learn-miss annotation (spec bro-xkv42.2) — emitted once per run
+ *  beside agent-exit when the artifact check proves no learn/retro
+ *  evidence. Journal-only: it is an audit annotation, not a worker
+ *  state transition, so the bus mapping ignores it. */
+function emitLearnMissLifecycle(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  exitStatus: number,
+  cause: string
+): void {
+  let exitAt: number | undefined;
+  if (home !== null) {
+    try {
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
+    } catch {
+      // the file rotated between read and stat — fall back to now
+    }
+  }
+  emitLifecycle(dir, {
+    kind: 'learn-miss',
+    bead: molStep,
+    actor: entry.agentId,
+    session: entry.agentId,
+    ts: exitAt,
+    detail: {
+      via: 'agents',
+      agent: entry.agentId,
+      backend: entry.backend,
+      code: exitStatus,
+      cause,
+      ...(entryRunId(entry) !== undefined ? { runId: entryRunId(entry) } : {}),
+      ...(typeof entry.log === 'string' && entry.log !== '' ? { log: entry.log } : {}),
+    },
+  });
+}
+
 function persistClassifiedExit(
   dir: string,
   molStep: string,
@@ -3142,6 +3190,10 @@ function persistClassifiedExit(
         resetAt,
         rateStreak: entry.rateStreak,
         ...(entry.observedAt === undefined ? {} : { observedAt: entry.observedAt }),
+        // the learn/retro artifact verdict rides the same once-per-run
+        // write (spec bro-xkv42.2) — undefined drops out of the JSON
+        learnCheck: entry.learnCheck,
+        learnEvidence: entry.learnEvidence,
       };
       writeAgentRegistry(dir, reg);
     });
@@ -3228,6 +3280,24 @@ function ensureExitCause(
   emitProviderWall(entry, molStep, c.cause, back.resetAt);
   recordClassifiedWall(dir, molStep, entry, c.cause, back.resetAt, wallTtls);
   emitClassifiedExitLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
+  // learn/retro artifact check (spec bro-xkv42.2) — once per run, inside
+  // the same classify block the carried-cause early return dedupes.
+  // The verdict persists on the entry; a proven-absent run also earns
+  // the learn-miss journal row. Never throws — a store problem reads
+  // 'skipped', not a crash in the death harvest.
+  const learn = checkRunLearnEvidence({
+    dir,
+    home,
+    molStep,
+    entry,
+    cause: c.cause,
+    exitAt: exitAt ?? Date.now(),
+  });
+  entry.learnCheck = learn.verdict;
+  entry.learnEvidence = learn.evidence;
+  if (learn.verdict === 'miss') {
+    emitLearnMissLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause);
+  }
   persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, back.resetAt);
 }
 
@@ -3463,6 +3533,13 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
   resetAt: typeof entry.resetAt === 'string' ? entry.resetAt : undefined,
 });
 
+/** learnCheck/learnEvidence ride the same way (spec bro-xkv42.2) — the
+ *  exit-harvest artifact verdict, absent until a run classifies. */
+const infoLearn = (entry: AgentRegistryEntry): Pick<AgentInfo, 'learnCheck' | 'learnEvidence'> => ({
+  learnCheck: isAgentLearnCheck(entry.learnCheck) ? entry.learnCheck : undefined,
+  learnEvidence: typeof entry.learnEvidence === 'string' ? entry.learnEvidence : undefined,
+});
+
 /** provider/model/class provenance — absent fields read as a legacy
  *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
@@ -3493,6 +3570,7 @@ function toInfo(
     backend: entry.backend,
     state,
     ...infoCause(entry),
+    ...infoLearn(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
@@ -4463,6 +4541,7 @@ function toTmuxInfo(
     backend: entry.backend,
     state: probeState(dir, home, molStep, entry, probe),
     ...infoCause(entry),
+    ...infoLearn(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
@@ -5179,6 +5258,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
       ...infoCause(entry),
+      ...infoLearn(entry),
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
@@ -5939,6 +6019,7 @@ function toDockerInfo(
     // mounted .exit file is the only death record, exactly like native
     state: probeState(dir, home, molStep, entry, dockerProbeVerdict(entry, live)),
     ...infoCause(entry),
+    ...infoLearn(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
@@ -6873,6 +6954,7 @@ function copilotInfoFor(
     backend: entry.backend,
     state: st === 'running' && probe.state === 'queued' ? 'spawned' : st,
     ...infoCause(entry),
+    ...infoLearn(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     // no local log exists — the session URL is the attach/log pointer

@@ -4142,6 +4142,20 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
   }
 }
 
+/** Workers this run saw exit with no learn/retro evidence (spec
+ *  bro-xkv42.2) — the exit-harvest verdict persisted on the registry
+ *  entry. Only steps the loop itself worked are this audit's tail;
+ *  a foreign lane's miss surfaces on `bro agents status` instead. */
+function learnMissTails(root: string, seen: ReadonlySet<string>): string[] {
+  try {
+    return Object.entries(readAgentRegistry(root))
+      .filter(([step, e]) => seen.has(step) && e.learnCheck === 'miss')
+      .map(([step, e]) => `${e.agentId} ${step}${e.cause === undefined ? '' : ` (${e.cause})`}`);
+  } catch {
+    return ['warning: learn-miss audit failed — registry unreadable'];
+  }
+}
+
 /** The close-out litter sweep — reap the provably-done leftovers before
  *  the audit names what survived. A sweep failure is a warning line,
  *  never a crash. */
@@ -4268,6 +4282,7 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ['branches', branches],
       ['claimed beads', claimed.own],
       ['in_progress elsewhere', claimed.other],
+      ['learn misses', learnMissTails(ctx.root, seen)],
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
     ]);

@@ -25,6 +25,7 @@ export {
   lessonIds,
   LessonStoreError,
   listLessons,
+  listLessonsAt,
   putLesson,
   withStoreLock,
 } from './store.ts';
@@ -51,7 +52,13 @@ export {
   traceFile,
   TRACE_TAIL_LINES,
 } from './connector.ts';
-export { applyCapture, captureLessons, CAPTURE_SOURCES, planCapture } from './capture.ts';
+export {
+  applyCapture,
+  captureLessons,
+  CAPTURE_SOURCES,
+  LEARN_FLAG,
+  planCapture,
+} from './capture.ts';
 export type {
   CaptureCandidate,
   CaptureMerge,

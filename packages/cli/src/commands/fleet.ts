@@ -288,6 +288,11 @@ export function agentCell(
   if ((agent.state === 'lost' || agent.state === 'exited') && step.state === 'in_progress') {
     return 'lost — respawn?';
   }
+  // the exit-harvest learn/retro verdict (spec bro-xkv42.2) — a miss is
+  // the named tail: the run exited with no learn/retro evidence
+  if (agent.learnCheck === 'miss') {
+    return `${agent.state} — learn-miss${pid}`;
+  }
   return `${agent.state}${pid}`;
 }
 

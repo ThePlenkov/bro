@@ -26,8 +26,8 @@
  * confidence instead of writing a second lesson. `dryRun` renders the
  * would-be plan — capture is a proposal surface.
  */
-import { bdJson, taskStore } from '@broject/core'
-import type { TaskDepEdge, TaskRow } from '@broject/core'
+import { bdJson, taskStore } from '@broject/core';
+import type { TaskDepEdge, TaskRow } from '@broject/core';
 import {
   deriveConfidence,
   lessonId,
@@ -37,27 +37,21 @@ import {
   type LessonSource,
   type LessonTrigger,
   type TriggerMatch,
-} from './lesson.ts'
-import {
-  getLesson,
-  LessonStoreError,
-  listLessons,
-  putLesson,
-  withStoreLock,
-} from './store.ts'
+} from './lesson.ts';
+import { getLesson, LessonStoreError, listLessons, putLesson, withStoreLock } from './store.ts';
 
-export const CAPTURE_SOURCES = ['drill', 'retro', 'act', 'mol'] as const
-export type CaptureSource = (typeof CAPTURE_SOURCES)[number]
+export const CAPTURE_SOURCES = ['drill', 'retro', 'act', 'mol'] as const;
+export type CaptureSource = (typeof CAPTURE_SOURCES)[number];
 
-const CLOSED = new Set(['closed', 'done'])
-const isClosed = (r: TaskRow): boolean => r.status !== undefined && CLOSED.has(r.status)
-const hasLabel = (r: TaskRow, label: string): boolean => r.labels?.includes(label) ?? false
+const CLOSED = new Set(['closed', 'done']);
+const isClosed = (r: TaskRow): boolean => r.status !== undefined && CLOSED.has(r.status);
+const hasLabel = (r: TaskRow, label: string): boolean => r.labels?.includes(label) ?? false;
 
 /** The lesson is quotable as one line — collapse a memo/section the
  *  same way `add` normalizes --lesson. */
-const oneLine = (s: string): string => s.trim().replace(/\s+/g, ' ')
+const oneLine = (s: string): string => s.trim().replace(/\s+/g, ' ');
 
-const beadEvidence = (id: string): Evidence => ({ kind: 'bead', ref: id })
+const beadEvidence = (id: string): Evidence => ({ kind: 'bead', ref: id });
 
 // --- trigger scope -------------------------------------------------------------
 // A lesson that can't name when it fires is trigger rot. Structured keys
@@ -71,69 +65,152 @@ const beadEvidence = (id: string): Evidence => ({ kind: 'bead', ref: id })
  *  regex past sonar's complexity cap (S5843) — branches live in code
  *  now, not in the pattern. */
 const CLI_WORDS = new Set([
-  'bro', 'bd', 'gh', 'glab', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'node',
-  'tsx', 'git', 'docker', 'cargo', 'curl',
-])
-const WORD_RE = /\b[a-z]\w*/g
-const SUBWORD_RE = /^\s+[a-z][\w-]*/
+  'bro',
+  'bd',
+  'gh',
+  'glab',
+  'npm',
+  'npx',
+  'pnpm',
+  'yarn',
+  'bun',
+  'node',
+  'tsx',
+  'git',
+  'docker',
+  'cargo',
+  'curl',
+]);
+const WORD_RE = /\b[a-z]\w*/g;
+const SUBWORD_RE = /^\s+[a-z][\w-]*/;
 
 /** Repo-ish paths: anything containing a '/' (`specs/sessions`,
  *  `packages/learn/**`) and bare filenames with a real extension
  *  (`bro.config.json`, `SKILL.md`, `AGENTS.md`). The extension list is
  *  a Set for the same reason — a 23-branch alternation was the other
  *  S5843 hit. */
-const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
+const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g;
 /** Bare filenames `name.ext` — and a dedicated branch for leading-dot
  *  dotfiles (`.env`, `.gitignore`, `.eslintrc.json`): the main pattern
  *  needs a word char before the dot, which a leading dot never has.
  *  The lookbehind keeps `.x` inside `foo.x` / `a.b` from matching. */
-const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b|(?<![\w.])\.[\w-]+(?:\.[\w-]+)*/g
+const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b|(?<![\w.])\.[\w-]+(?:\.[\w-]+)*/g;
 const FILE_EXTS = new Set([
-  'ts', 'tsx', 'mts', 'cts', 'js', 'mjs', 'cjs', 'jsx', 'md', 'json',
-  'jsonc', 'toml', 'yml', 'yaml', 'sh', 'py', 'rs', 'go', 'sql', 'lock',
-  'env', 'ini', 'cfg', 'txt',
-])
-const EXT_RUN_RE = /^[a-z]+/
-const WORD_CHAR_RE = /\w/
+  'ts',
+  'tsx',
+  'mts',
+  'cts',
+  'js',
+  'mjs',
+  'cjs',
+  'jsx',
+  'md',
+  'json',
+  'jsonc',
+  'toml',
+  'yml',
+  'yaml',
+  'sh',
+  'py',
+  'rs',
+  'go',
+  'sql',
+  'lock',
+  'env',
+  'ini',
+  'cfg',
+  'txt',
+]);
+const EXT_RUN_RE = /^[a-z]+/;
+const WORD_CHAR_RE = /\w/;
 
-export const TERM_RE = /[a-z][a-z0-9-]{3,}/g
+export const TERM_RE = /[a-z][a-z0-9-]{3,}/g;
 
 /** Words too common to discriminate a prompt/context — a term that
  *  matches every session is a fire-on-everything trigger. */
 export const TERM_STOPWORDS = new Set([
-  'this', 'that', 'with', 'from', 'when', 'then', 'than', 'have', 'been',
-  'were', 'will', 'would', 'should', 'could', 'about', 'into', 'over',
-  'after', 'before', 'because', 'through', 'their', 'there', 'where',
-  'what', 'which', 'while', 'also', 'just', 'only', 'more', 'some',
-  'such', 'other', 'each', 'very', 'most', 'make', 'made', 'keep',
-  'work', 'working', 'thing', 'things', 'need', 'needs', 'like', 'them',
-  'they', 'does', 'done', 'doing', 'being', 'same', 'must', 'still',
-])
+  'this',
+  'that',
+  'with',
+  'from',
+  'when',
+  'then',
+  'than',
+  'have',
+  'been',
+  'were',
+  'will',
+  'would',
+  'should',
+  'could',
+  'about',
+  'into',
+  'over',
+  'after',
+  'before',
+  'because',
+  'through',
+  'their',
+  'there',
+  'where',
+  'what',
+  'which',
+  'while',
+  'also',
+  'just',
+  'only',
+  'more',
+  'some',
+  'such',
+  'other',
+  'each',
+  'very',
+  'most',
+  'make',
+  'made',
+  'keep',
+  'work',
+  'working',
+  'thing',
+  'things',
+  'need',
+  'needs',
+  'like',
+  'them',
+  'they',
+  'does',
+  'done',
+  'doing',
+  'being',
+  'same',
+  'must',
+  'still',
+]);
 
 /** A scope key is stripped of trailing punctuation and is never a URL
  *  fragment — the same cleaning `collect` always applied. The trailing
  *  strip is a char loop: the `+$` quantifier version read as
  *  super-linear backtracking to sonar (S8786). */
-const TRAIL_PUNCT = new Set([')', ',', '.', ';', ':', "'", '"', '`', ']'])
+const TRAIL_PUNCT = new Set([')', ',', '.', ';', ':', "'", '"', '`', ']']);
 const scopeKey = (v: string): string => {
-  let end = v.length
+  let end = v.length;
   while (end > 0 && TRAIL_PUNCT.has(v[end - 1]!)) {
-    end -= 1
+    end -= 1;
   }
-  return v.slice(0, end)
-}
-const keepKey = (v: string): boolean => v !== '' && !v.includes('://')
+  return v.slice(0, end);
+};
+const keepKey = (v: string): boolean => v !== '' && !v.includes('://');
 
 function collect(re: RegExp, text: string, cap: number): string[] {
-  const out = new Set<string>()
+  const out = new Set<string>();
   for (const m of text.matchAll(re)) {
-    const v = scopeKey(m[0])
+    const v = scopeKey(m[0]);
     if (keepKey(v)) {
-      out.add(v)
+      out.add(v);
     }
-    if (out.size >= cap) break
+    if (out.size >= cap) break;
   }
-  return [...out]
+  return [...out];
 }
 
 /** `<cli> <sub> [<sub>]` — a CLI_WORDS member plus 1–2 lowercase
@@ -141,31 +218,31 @@ function collect(re: RegExp, text: string, cap: number): string[] {
  *  two commands (the old matchAll consumed non-overlapping, so does
  *  this: a freshly emitted command marks its span consumed). */
 function collectCommands(text: string, cap: number): string[] {
-  const out = new Set<string>()
-  let consumedUntil = -1
+  const out = new Set<string>();
+  let consumedUntil = -1;
   for (const m of text.matchAll(WORD_RE)) {
-    const start = m.index ?? 0
+    const start = m.index ?? 0;
     if (start < consumedUntil || !CLI_WORDS.has(m[0])) {
-      continue
+      continue;
     }
-    let end = start + m[0].length
-    const sub = SUBWORD_RE.exec(text.slice(end))
+    let end = start + m[0].length;
+    const sub = SUBWORD_RE.exec(text.slice(end));
     if (sub === null) {
-      continue // a bare CLI word is not a command — `\s+sub` is required
+      continue; // a bare CLI word is not a command — `\s+sub` is required
     }
-    end += sub[0].length
-    const sub2 = SUBWORD_RE.exec(text.slice(end))
+    end += sub[0].length;
+    const sub2 = SUBWORD_RE.exec(text.slice(end));
     if (sub2 !== null) {
-      end += sub2[0].length
+      end += sub2[0].length;
     }
-    const v = scopeKey(text.slice(start, end))
+    const v = scopeKey(text.slice(start, end));
     if (keepKey(v)) {
-      out.add(v)
+      out.add(v);
     }
-    consumedUntil = end
-    if (out.size >= cap) break
+    consumedUntil = end;
+    if (out.size >= cap) break;
   }
-  return [...out]
+  return [...out];
 }
 
 /** The `name.ext` cut of a file token, or undefined — dots scanned
@@ -175,65 +252,62 @@ function collectCommands(text: string, cap: number): string[] {
  *  a boundary). The first valid ext wins. */
 function fileTokenCut(tok: string): string | undefined {
   for (let i = tok.lastIndexOf('.'); i > 0; i = tok.lastIndexOf('.', i - 1)) {
-    const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0]
+    const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0];
     if (ext === undefined || !FILE_EXTS.has(ext)) {
-      continue
+      continue;
     }
     // a word char after the ext means the match ran into a longer token —
     // `a.txt2` style; keep scanning older dots
     if (WORD_CHAR_RE.test(tok[i + 1 + ext.length] ?? '')) {
-      continue
+      continue;
     }
-    return tok.slice(0, i + 1 + ext.length)
+    return tok.slice(0, i + 1 + ext.length);
   }
-  return undefined
+  return undefined;
 }
 
 /** `name.ext` tokens — each token contributes its first valid-ext cut;
  *  a dotfile token is the whole name, there is no stem.ext to
  *  decompose. */
 function collectFiles(text: string, cap: number): string[] {
-  const out = new Set<string>()
+  const out = new Set<string>();
   for (const m of text.matchAll(FILE_TOKEN_RE)) {
-    const tok = m[0]
+    const tok = m[0];
     // the dotfile branch — .env, .gitignore
-    const cut = tok.startsWith('.') ? tok : fileTokenCut(tok)
-    const v = cut === undefined ? '' : scopeKey(cut)
+    const cut = tok.startsWith('.') ? tok : fileTokenCut(tok);
+    const v = cut === undefined ? '' : scopeKey(cut);
     if (keepKey(v)) {
-      out.add(v)
+      out.add(v);
     }
-    if (out.size >= cap) break
+    if (out.size >= cap) break;
   }
-  return [...out]
+  return [...out];
 }
 
 /** Structured trigger keys from a scope text — capped so a lesson
  *  doesn't carry a whole file tree in its trigger. */
 function scopeMatch(text: string): TriggerMatch {
-  const match: TriggerMatch = {}
+  const match: TriggerMatch = {};
   // URLs are not trigger paths — strip them so `example.com/foo` can't
   // ride SLASH_PATH_RE into a post-tool trigger on a non-local "path"
-  const t = text.replace(/\bhttps?:\/\/\S+/g, ' ')
-  const paths = [
-    ...collect(SLASH_PATH_RE, t, 5),
-    ...collectFiles(t, 4),
-  ]
-  const commands = collectCommands(t, 5)
-  if (paths.length > 0) match.paths = [...new Set(paths)].slice(0, 6)
-  if (commands.length > 0) match.commands = commands
-  return match
+  const t = text.replace(/\bhttps?:\/\/\S+/g, ' ');
+  const paths = [...collect(SLASH_PATH_RE, t, 5), ...collectFiles(t, 4)];
+  const commands = collectCommands(t, 5);
+  if (paths.length > 0) match.paths = [...new Set(paths)].slice(0, 6);
+  if (commands.length > 0) match.commands = commands;
+  return match;
 }
 
 /** Fallback trigger material — significant title words for the
  *  prompt/context haystack. */
 function scopeTerms(title: string): string[] {
-  const terms: string[] = []
+  const terms: string[] = [];
   for (const m of title.toLowerCase().matchAll(TERM_RE)) {
-    if (TERM_STOPWORDS.has(m[0]) || terms.includes(m[0])) continue
-    terms.push(m[0])
-    if (terms.length >= 4) break
+    if (TERM_STOPWORDS.has(m[0]) || terms.includes(m[0])) continue;
+    terms.push(m[0]);
+    if (terms.length >= 4) break;
   }
-  return terms
+  return terms;
 }
 
 /**
@@ -244,46 +318,46 @@ function scopeTerms(title: string): string[] {
  * lesson).
  */
 function buildTrigger(title: string, scopeText: string): LessonTrigger | undefined {
-  const match = scopeMatch(`${title}\n${scopeText}`)
+  const match = scopeMatch(`${title}\n${scopeText}`);
   if (match.paths !== undefined || match.commands !== undefined) {
-    return { on: ['post-tool'], match }
+    return { on: ['post-tool'], match };
   }
-  const terms = scopeTerms(title)
+  const terms = scopeTerms(title);
   if (terms.length > 0) {
-    return { on: ['session-start', 'prompt-submit'], match: { terms } }
+    return { on: ['session-start', 'prompt-submit'], match: { terms } };
   }
-  return undefined
+  return undefined;
 }
 
 // --- shared row plumbing ---------------------------------------------------------
 
 export interface CaptureCandidate {
-  lesson: string
-  trigger: LessonTrigger
-  evidence: Evidence[]
-  source: LessonSource
+  lesson: string;
+  trigger: LessonTrigger;
+  evidence: Evidence[];
+  source: LessonSource;
   /** bead/mol id the candidate was distilled from — the report names it */
-  origin: string
+  origin: string;
   /** a closed+routed artifact already held under its gate (spec
    *  confidence ladder: one gated evidence is 'established') */
-  heldUnderGate?: boolean
+  heldUnderGate?: boolean;
   /** pins a fresh write's confidence instead of deriving it — for
    *  sources whose whole evidence set is one investigation citing
    *  itself. Merges always derive from the union. */
-  confidence?: Confidence
+  confidence?: Confidence;
   /** union this trigger into the existing lesson's on merge — a repeat
    *  of the new context must still index the rule it joined */
-  mergeTrigger?: boolean
+  mergeTrigger?: boolean;
 }
 
 export interface CaptureSkip {
-  origin: string
-  reason: string
+  origin: string;
+  reason: string;
 }
 
 interface Harvest {
-  candidates: CaptureCandidate[]
-  skipped: CaptureSkip[]
+  candidates: CaptureCandidate[];
+  skipped: CaptureSkip[];
 }
 
 /** `discovered` edges for every row a harvest cites — ONE `bd dep list`
@@ -292,42 +366,46 @@ interface Harvest {
  *  batch degrades to self-evidence for all rows — the contract the old
  *  per-row catch carried, without a per-row shell-out (a serial
  *  dep-list storm was the >25s capture hang, bro-rcs07). */
-function depsAmong(ids: string[], pool: Map<string, TaskRow>, dir?: string): Map<string, TaskRow[]> {
-  const out = new Map<string, TaskRow[]>()
+function depsAmong(
+  ids: string[],
+  pool: Map<string, TaskRow>,
+  dir?: string
+): Map<string, TaskRow[]> {
+  const out = new Map<string, TaskRow[]>();
   if (ids.length === 0) {
-    return out
+    return out;
   }
-  let edges: TaskDepEdge[]
+  let edges: TaskDepEdge[];
   try {
-    edges = taskStore(dir).deps<TaskDepEdge>(ids, { rel: 'discovered' })
+    edges = taskStore(dir).deps<TaskDepEdge>(ids, { rel: 'discovered' });
   } catch {
-    return out
+    return out;
   }
   for (const e of edges) {
-    const row = pool.get(e.depends_on_id)
+    const row = pool.get(e.depends_on_id);
     if (row === undefined) {
-      continue
+      continue;
     }
-    const list = out.get(e.issue_id)
+    const list = out.get(e.issue_id);
     if (list === undefined) {
-      out.set(e.issue_id, [row])
+      out.set(e.issue_id, [row]);
     } else {
-      list.push(row)
+      list.push(row);
     }
   }
-  return out
+  return out;
 }
 
 /** Evidence beads for a harvested row: itself plus discovered-from
  *  neighbors wearing one of `labels` (wtf/drill/retro/prevention). */
 function beadPlusDeps(row: TaskRow, labels: string[], depMap: Map<string, TaskRow[]>): Evidence[] {
-  const ev: Evidence[] = [beadEvidence(row.id)]
+  const ev: Evidence[] = [beadEvidence(row.id)];
   for (const dep of depMap.get(row.id) ?? []) {
-    if (labels.some((l) => hasLabel(dep, l)) && dep.id !== row.id) {
-      ev.push(beadEvidence(dep.id))
+    if (labels.some(l => hasLabel(dep, l)) && dep.id !== row.id) {
+      ev.push(beadEvidence(dep.id));
     }
   }
-  return ev
+  return ev;
 }
 
 function listLabeled(label: string, dir?: string): TaskRow[] {
@@ -335,7 +413,7 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
   // ignores it from feeding every row to every harvester
   return taskStore(dir)
     .list<TaskRow>({ labels: [label], all: true, limit: 0 })
-    .filter((r) => hasLabel(r, label))
+    .filter(r => hasLabel(r, label));
 }
 
 // --- drill ----------------------------------------------------------------------
@@ -347,130 +425,127 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
  *  newline — the same span the old `\s*\n+` left behind. `stop` is
  *  tested against each following line's start; no stop runs to EOF. */
 function mdSection(text: string, name: string, stop?: RegExp): string | undefined {
-  const head = new RegExp(String.raw`##\s*${name}`, 'g')
-  let m: RegExpExecArray | null
+  const head = new RegExp(String.raw`##\s*${name}`, 'g');
+  let m: RegExpExecArray | null;
   while ((m = head.exec(text)) !== null) {
-    const after = m.index + m[0].length
-    let end = after
+    const after = m.index + m[0].length;
+    let end = after;
     while (end < text.length && /\s/.test(text[end]!)) {
-      end += 1
+      end += 1;
     }
-    const gap = text.slice(after, end)
+    const gap = text.slice(after, end);
     if (!gap.includes('\n')) {
-      continue // `## Name: x` mid-line is a mention, not a heading
+      continue; // `## Name: x` mid-line is a mention, not a heading
     }
-    const rest = text.slice(after + gap.lastIndexOf('\n') + 1)
+    const rest = text.slice(after + gap.lastIndexOf('\n') + 1);
     if (stop === undefined) {
-      return rest
+      return rest;
     }
     for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
       if (stop.test(rest.slice(p + 1))) {
-        return rest.slice(0, p)
+        return rest.slice(0, p);
       }
     }
-    return rest
+    return rest;
   }
-  return undefined
+  return undefined;
 }
 
 /** Body of an inline `KEY:` memo field — from after `KEY:` (leading
  *  whitespace skipped, as the old `\s*` did) to the next line starting
  *  `##` or `CAPS:`. Same scan-for-`\n` mechanics as mdSection. */
-const CAPS_FIELD = /^(?:##|[A-Z]+:)/
-const SECTION_FIELD = /^##/
+const CAPS_FIELD = /^(?:##|[A-Z]+:)/;
+const SECTION_FIELD = /^##/;
 
 function inlineField(text: string, key: string): string | undefined {
-  const i = text.indexOf(key)
+  const i = text.indexOf(key);
   if (i < 0) {
-    return undefined
+    return undefined;
   }
-  const rest = text.slice(i + key.length).replace(/^\s+/, '')
+  const rest = text.slice(i + key.length).replace(/^\s+/, '');
   if (rest === '') {
-    return undefined
+    return undefined;
   }
   for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
     if (CAPS_FIELD.test(rest.slice(p + 1))) {
-      return rest.slice(0, p)
+      return rest.slice(0, p);
     }
   }
-  return rest
+  return rest;
 }
 
 /** The up-memo `drillUp` wrote: `## Result\n\nX\n\n## Prevention\n\n- a`. */
 function drillMemo(notes: string | undefined): { result: string; prevents: string[] } | null {
   if (!notes?.includes('## Result')) {
-    return null
+    return null;
   }
-  const result = mdSection(notes, 'Result', SECTION_FIELD)?.trim() ?? ''
+  const result = mdSection(notes, 'Result', SECTION_FIELD)?.trim() ?? '';
   // the old regex ate to EOF — a later `## ` section's bullets counted
   // too; keeping that quirk is cheaper than inventing new semantics.
   // Bullet scan is per-line (the `^\s*-\s+(.+)$`m pattern was another
   // S8786 super-linear flag).
-  const prevents: string[] = []
+  const prevents: string[] = [];
   for (const line of (mdSection(notes, 'Prevention') ?? '').split('\n')) {
-    const t = line.trimStart()
+    const t = line.trimStart();
     if (t.startsWith('-') && t[1] !== undefined && t[1].trim() === '') {
-      const item = t.slice(1).trim()
+      const item = t.slice(1).trim();
       if (item !== '') {
-        prevents.push(item)
+        prevents.push(item);
       }
     }
   }
   if (result === '' && prevents.length === 0) {
-    return null
+    return null;
   }
-  return { result, prevents }
+  return { result, prevents };
 }
 
 /** `result — prevent: a; b` — a memo's preventions ride its lesson line. */
 function drillLesson(memo: { result: string; prevents: string[] }): string {
   return memo.prevents.length > 0
     ? oneLine(`${memo.result} — prevent: ${memo.prevents.join('; ')}`)
-    : oneLine(memo.result)
+    : oneLine(memo.result);
 }
 
 function harvestDrill(dir?: string): Harvest {
-  const out: Harvest = { candidates: [], skipped: [] }
-  const drillRows = listLabeled('drill', dir)
-  const preventionRows = listLabeled('prevention', dir)
-  const closedDrill = drillRows.filter(isClosed)
+  const out: Harvest = { candidates: [], skipped: [] };
+  const drillRows = listLabeled('drill', dir);
+  const preventionRows = listLabeled('prevention', dir);
+  const closedDrill = drillRows.filter(isClosed);
   // a closed prevention bead with a `sink:` route is captured without a
   // flag — routed means it already went through its gate
   const sinkRouted = preventionRows.filter(
-    (r) => isClosed(r) && r.labels?.some((l) => l.startsWith('sink:'))
-  )
+    r => isClosed(r) && r.labels?.some(l => l.startsWith('sink:'))
+  );
   // the dep-evidence pool is the label lists already fetched; retro
   // joins only when sink-routed rows exist — it is their corroborating
   // evidence pool, not drill's
-  const pool = new Map<string, TaskRow>()
+  const pool = new Map<string, TaskRow>();
   for (const r of [...drillRows, ...preventionRows]) {
-    pool.set(r.id, r)
+    pool.set(r.id, r);
   }
   if (sinkRouted.length > 0) {
     for (const r of listLabeled('retro', dir)) {
-      pool.set(r.id, r)
+      pool.set(r.id, r);
     }
   }
   const deps = depsAmong(
-    [...closedDrill, ...sinkRouted].map((r) => r.id),
+    [...closedDrill, ...sinkRouted].map(r => r.id),
     pool,
     dir
-  )
+  );
   for (const row of closedDrill) {
     // bd list already carries notes/description — no per-frame show
-    const memo = drillMemo(row.notes)
+    const memo = drillMemo(row.notes);
     if (memo === null) {
-      out.skipped.push({ origin: row.id, reason: 'closed drill frame has no result memo' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'closed drill frame has no result memo' });
+      continue;
     }
-    const lesson = drillLesson(memo)
-    const trigger = buildTrigger(
-      row.title ?? '',
-      `${row.description ?? ''}\n${row.notes ?? ''}`
-    )
+    const lesson = drillLesson(memo);
+    const trigger = buildTrigger(row.title ?? '', `${row.description ?? ''}\n${row.notes ?? ''}`);
     if (trigger === undefined) {
-      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' });
+      continue;
     }
     out.candidates.push({
       lesson,
@@ -479,18 +554,18 @@ function harvestDrill(dir?: string): Harvest {
       evidence: beadPlusDeps(row, ['prevention'], deps),
       source: 'capture:drill',
       origin: row.id,
-    })
+    });
   }
   for (const row of sinkRouted) {
-    const lesson = oneLine((row.title ?? '').replace(/^(?:prevention|retro):\s*/i, ''))
+    const lesson = oneLine((row.title ?? '').replace(/^(?:prevention|retro):\s*/i, ''));
     if (lesson === '') {
-      out.skipped.push({ origin: row.id, reason: 'prevention bead has no lesson text' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'prevention bead has no lesson text' });
+      continue;
     }
-    const trigger = buildTrigger(row.title ?? '', row.description ?? '')
+    const trigger = buildTrigger(row.title ?? '', row.description ?? '');
     if (trigger === undefined) {
-      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' });
+      continue;
     }
     out.candidates.push({
       lesson,
@@ -500,9 +575,9 @@ function harvestDrill(dir?: string): Harvest {
       source: 'capture:drill',
       origin: row.id,
       heldUnderGate: true,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 // --- retro -----------------------------------------------------------------------
@@ -510,49 +585,51 @@ function harvestDrill(dir?: string): Harvest {
 /** `## What`/`## Why`/`scope:` (recordRetro's memo) or the legacy
  *  `WHAT:`/`WHY:`/`PREVENT:` inline form. The prevention text wins —
  *  it is already imperative; else the root cause is the durable bit. */
-const SCOPE_STOP = /^(?:##|scope:)/
+const SCOPE_STOP = /^(?:##|scope:)/;
 
 function retroLesson(description: string): string {
-  const prevent = inlineField(description, 'PREVENT:')
+  const prevent = inlineField(description, 'PREVENT:');
   if (prevent !== undefined && prevent.trim() !== '') {
-    return oneLine(prevent)
+    return oneLine(prevent);
   }
-  const why = mdSection(description, 'Why', SCOPE_STOP)
+  const why = mdSection(description, 'Why', SCOPE_STOP);
   if (why !== undefined && why.trim() !== '') {
-    return oneLine(why)
+    return oneLine(why);
   }
-  const whyInline = inlineField(description, 'WHY:')
+  const whyInline = inlineField(description, 'WHY:');
   if (whyInline !== undefined && whyInline.trim() !== '') {
-    return oneLine(whyInline)
+    return oneLine(whyInline);
   }
-  return oneLine(mdSection(description, 'What', SCOPE_STOP) ?? description)
+  return oneLine(mdSection(description, 'What', SCOPE_STOP) ?? description);
 }
 
 function harvestRetro(dir?: string): Harvest {
-  const out: Harvest = { candidates: [], skipped: [] }
+  const out: Harvest = { candidates: [], skipped: [] };
   // prevention beads can also wear `retro` — the drill pass owns them
-  const closed = listLabeled('retro', dir).filter(
-    (r) => isClosed(r) && !hasLabel(r, 'prevention')
-  )
+  const closed = listLabeled('retro', dir).filter(r => isClosed(r) && !hasLabel(r, 'prevention'));
   // wtf rows are the dep-evidence pool — fetched once, then one batched
   // dep list, not a per-row shell-out
-  const pool = new Map<string, TaskRow>()
+  const pool = new Map<string, TaskRow>();
   if (closed.length > 0) {
     for (const r of listLabeled('wtf', dir)) {
-      pool.set(r.id, r)
+      pool.set(r.id, r);
     }
   }
-  const deps = depsAmong(closed.map((r) => r.id), pool, dir)
+  const deps = depsAmong(
+    closed.map(r => r.id),
+    pool,
+    dir
+  );
   for (const row of closed) {
-    const lesson = retroLesson(row.description ?? row.title ?? '')
+    const lesson = retroLesson(row.description ?? row.title ?? '');
     if (lesson === '') {
-      out.skipped.push({ origin: row.id, reason: 'retro bead has no lesson text' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'retro bead has no lesson text' });
+      continue;
     }
-    const trigger = buildTrigger(row.title ?? '', row.description ?? '')
+    const trigger = buildTrigger(row.title ?? '', row.description ?? '');
     if (trigger === undefined) {
-      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' })
-      continue
+      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' });
+      continue;
     }
     out.candidates.push({
       lesson,
@@ -561,9 +638,9 @@ function harvestRetro(dir?: string): Harvest {
       evidence: beadPlusDeps(row, ['wtf'], deps),
       source: 'capture:retro',
       origin: row.id,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 // --- act ---------------------------------------------------------------------------
@@ -571,122 +648,122 @@ function harvestRetro(dir?: string): Harvest {
 /** `PR #123` / `https://…/pull/123` refs out of a debt row — the second
  *  evidence kind a recurring finding earns. */
 function prEvidence(row: TaskRow): Evidence[] {
-  const out: Evidence[] = []
+  const out: Evidence[] = [];
   for (const m of (row.description ?? '').matchAll(/\bpr:\s*(https?:\/\/\S+)/gi)) {
-    out.push({ kind: 'pr', ref: m[1]! })
+    out.push({ kind: 'pr', ref: m[1]! });
   }
   for (const m of (row.description ?? '').matchAll(/#(\d{1,7})\b/g)) {
-    out.push({ kind: 'pr', ref: `#${m[1]}` })
+    out.push({ kind: 'pr', ref: `#${m[1]}` });
   }
-  return [...new Map(out.map((e) => [e.ref, e])).values()].slice(0, 4)
+  return [...new Map(out.map(e => [e.ref, e])).values()].slice(0, 4);
 }
 
 const numMeta = (row: TaskRow, key: string): number =>
-  typeof row.metadata?.[key] === 'number' ? (row.metadata[key] as number) : 0
+  typeof row.metadata?.[key] === 'number' ? (row.metadata[key] as number) : 0;
 
 function harvestAct(dir?: string): Harvest {
-  const out: Harvest = { candidates: [], skipped: [] }
+  const out: Harvest = { candidates: [], skipped: [] };
   // fingerprint IS the normalized finding; a row without one groups on
   // its normalized title so bd drift doesn't silently exclude rows
-  const groups = new Map<string, TaskRow[]>()
+  const groups = new Map<string, TaskRow[]>();
   for (const row of listLabeled('debt', dir).filter(isClosed)) {
     const fp =
       typeof row.metadata?.fingerprint === 'string' && row.metadata.fingerprint !== ''
         ? `fp:${row.metadata.fingerprint}`
-        : `title:${oneLine(row.title ?? '').toLowerCase()}`
-    groups.set(fp, [...(groups.get(fp) ?? []), row])
+        : `title:${oneLine(row.title ?? '').toLowerCase()}`;
+    groups.set(fp, [...(groups.get(fp) ?? []), row]);
   }
   for (const group of groups.values()) {
-    const prs = new Set(group.map((r) => numMeta(r, 'source_pr')).filter((p) => p > 0))
-    const recurring = prs.size >= 2 || group.some((r) => numMeta(r, 'times_seen') >= 2)
-    const origin = group.map((r) => r.id).sort((a, b) => a.localeCompare(b))[0]!
+    const prs = new Set(group.map(r => numMeta(r, 'source_pr')).filter(p => p > 0));
+    const recurring = prs.size >= 2 || group.some(r => numMeta(r, 'times_seen') >= 2);
+    const origin = group.map(r => r.id).sort((a, b) => a.localeCompare(b))[0]!;
     if (!recurring) {
-      out.skipped.push({ origin, reason: 'finding seen once — not a recurrence' })
-      continue
+      out.skipped.push({ origin, reason: 'finding seen once — not a recurrence' });
+      continue;
     }
-    const title = group[0]!.title ?? ''
+    const title = group[0]!.title ?? '';
     // bead titles are `<area>: <preview>` — the preview is the finding
-    const body = title.includes(': ') ? title.slice(title.indexOf(': ') + 2) : title
-    const lesson = oneLine(body)
+    const body = title.includes(': ') ? title.slice(title.indexOf(': ') + 2) : title;
+    const lesson = oneLine(body);
     if (lesson === '') {
-      out.skipped.push({ origin, reason: 'debt finding has no lesson text' })
-      continue
+      out.skipped.push({ origin, reason: 'debt finding has no lesson text' });
+      continue;
     }
     // paths the findings hit are the trigger; area/body text carries
     // the rest of the scope
     const paths = [
-      ...new Set(
-        group
-          .map((r) => row_meta_path(r))
-          .filter((p): p is string => p !== undefined)
-      ),
-    ]
-    const findingText = group.map((r) => `${r.title ?? ''}\n${r.description ?? ''}`).join('\n')
-    const scopeText = `${paths.join(' ')}\n${findingText}`
-    const trigger = buildTrigger(title, scopeText)
+      ...new Set(group.map(r => row_meta_path(r)).filter((p): p is string => p !== undefined)),
+    ];
+    const findingText = group.map(r => `${r.title ?? ''}\n${r.description ?? ''}`).join('\n');
+    const scopeText = `${paths.join(' ')}\n${findingText}`;
+    const trigger = buildTrigger(title, scopeText);
     if (trigger === undefined) {
-      out.skipped.push({ origin, reason: 'no trigger scope (paths/commands/terms)' })
-      continue
+      out.skipped.push({ origin, reason: 'no trigger scope (paths/commands/terms)' });
+      continue;
     }
-    const evidence = [...group.map((r) => beadEvidence(r.id)), ...group.flatMap(prEvidence)]
+    const evidence = [...group.map(r => beadEvidence(r.id)), ...group.flatMap(prEvidence)];
     out.candidates.push({
       lesson,
       trigger,
-      evidence: [...new Map(evidence.map((e) => [`${e.kind}:${e.ref}`, e])).values()],
+      evidence: [...new Map(evidence.map(e => [`${e.kind}:${e.ref}`, e])).values()],
       source: 'capture:act',
       origin,
       // the findings held under a merged-PR review gate
       heldUnderGate: true,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 const row_meta_path = (row: TaskRow): string | undefined => {
-  const p = row.metadata?.path
-  return typeof p === 'string' && p !== '' ? p : undefined
-}
+  const p = row.metadata?.path;
+  return typeof p === 'string' && p !== '' ? p : undefined;
+};
 
 // --- mol ----------------------------------------------------------------------------
 
-/** A `--result` line teaches only when flagged — `learn:` is the flag. */
-const LEARN_FLAG = /^learn(?:ing)?:\s+(.+)$/i
+/** A `--result` line teaches only when flagged — `learn:` is the flag.
+ *  Exported (spec bro-xkv42.2): the exit-harvest artifact check reads
+ *  the same contract so "flagged result" means one thing everywhere. */
+export const LEARN_FLAG = /^learn(?:ing)?:\s+(.+)$/i;
 
 interface MolShow {
-  root: { id: string; status: string }
-  issues: { id: string; title?: string; status: string; close_reason?: string }[]
+  root: { id: string; status: string };
+  issues: { id: string; title?: string; status: string; close_reason?: string }[];
 }
 
 function harvestMol(molId: string, dir?: string): Harvest {
-  const out: Harvest = { candidates: [], skipped: [] }
-  const mol = bdJson<MolShow>(['mol', 'show', molId], dir)
+  const out: Harvest = { candidates: [], skipped: [] };
+  const mol = bdJson<MolShow>(['mol', 'show', molId], dir);
   if (typeof mol?.root?.status !== 'string' || !Array.isArray(mol.issues)) {
-    throw new Error(`mol show ${molId} returned an unexpected shape — a drifted bd payload is not a molecule`)
+    throw new Error(
+      `mol show ${molId} returned an unexpected shape — a drifted bd payload is not a molecule`
+    );
   }
   if (!CLOSED.has(mol.root.status)) {
-    throw new Error(`molecule ${molId} is ${mol.root.status} — capture harvests closed molecules`)
+    throw new Error(`molecule ${molId} is ${mol.root.status} — capture harvests closed molecules`);
   }
-  for (const step of mol.issues.filter((i) => i.id !== mol.root.id && CLOSED.has(i.status))) {
+  for (const step of mol.issues.filter(i => i.id !== mol.root.id && CLOSED.has(i.status))) {
     // bd mol show's issue rows carry close_reason — no per-step show
-    const reason = step.close_reason ?? ''
+    const reason = step.close_reason ?? '';
     const flagged = reason
       .split('\n')
-      .map((l) => LEARN_FLAG.exec(l.trim())?.[1]?.trim())
-      .filter((l): l is string => l !== undefined && l !== '')
+      .map(l => LEARN_FLAG.exec(l.trim())?.[1]?.trim())
+      .filter((l): l is string => l !== undefined && l !== '');
     if (flagged.length === 0) {
       // an unflagged result is a handoff, not a lesson — but a step
       // without a close_reason can't be audited at all, so it's logged
       if (!step.close_reason) {
-        out.skipped.push({ origin: step.id, reason: 'closed step has no close_reason' })
+        out.skipped.push({ origin: step.id, reason: 'closed step has no close_reason' });
       }
-      continue
+      continue;
     }
     for (const text of flagged) {
-      const lesson = oneLine(text)
-      const trigger = buildTrigger(step.title ?? '', `${lesson}\n${step.title ?? ''}`)
+      const lesson = oneLine(text);
+      const trigger = buildTrigger(step.title ?? '', `${lesson}\n${step.title ?? ''}`);
       if (trigger === undefined) {
-        out.skipped.push({ origin: step.id, reason: 'no trigger scope (paths/commands/terms)' })
-        continue
+        out.skipped.push({ origin: step.id, reason: 'no trigger scope (paths/commands/terms)' });
+        continue;
       }
       out.candidates.push({
         lesson,
@@ -696,41 +773,41 @@ function harvestMol(molId: string, dir?: string): Harvest {
         origin: step.id,
         // the step result survived a merge/verify gate inside the run
         heldUnderGate: true,
-      })
+      });
     }
   }
-  return out
+  return out;
 }
 
 // --- dedup + apply ----------------------------------------------------------------------
 
 export interface CaptureWrite {
-  lesson: Lesson
-  origin: string
+  lesson: Lesson;
+  origin: string;
 }
 
 export interface CaptureMerge {
-  lesson: Lesson
+  lesson: Lesson;
   /** evidence refs the merge added */
-  added: Evidence[]
-  origin: string
+  added: Evidence[];
+  origin: string;
 }
 
 export interface CapturePlan {
-  write: CaptureWrite[]
-  merge: CaptureMerge[]
-  skipped: CaptureSkip[]
+  write: CaptureWrite[];
+  merge: CaptureMerge[];
+  skipped: CaptureSkip[];
 }
 
 const CONFIDENCE_RANK: Record<Confidence, number> = {
   tentative: 0,
   established: 1,
   proven: 2,
-}
+};
 
 /** Union evidence by kind:ref — the re-capture merge the spec describes. */
 function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
-  return [...new Map([...a, ...b].map((e) => [`${e.kind}:${e.ref}`, e])).values()]
+  return [...new Map([...a, ...b].map(e => [`${e.kind}:${e.ref}`, e])).values()];
 }
 
 /** Union two triggers for a merge — `on` and each match list deduped,
@@ -739,36 +816,36 @@ function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
  *  existing lesson's value (a firing policy, not index material). */
 function unionTrigger(a: LessonTrigger, b: LessonTrigger): LessonTrigger {
   const list = (x?: string[], y?: string[]): string[] | undefined =>
-    x === undefined && y === undefined ? undefined : [...new Set([...(x ?? []), ...(y ?? [])])]
-  const match: TriggerMatch = {}
-  const terms = list(a.match?.terms, b.match?.terms)
-  if (terms !== undefined) match.terms = terms
-  const commands = list(a.match?.commands, b.match?.commands)
-  if (commands !== undefined) match.commands = commands
-  const paths = list(a.match?.paths, b.match?.paths)
-  if (paths !== undefined) match.paths = paths
-  const tools = list(a.match?.tools, b.match?.tools)
-  if (tools !== undefined) match.tools = tools
+    x === undefined && y === undefined ? undefined : [...new Set([...(x ?? []), ...(y ?? [])])];
+  const match: TriggerMatch = {};
+  const terms = list(a.match?.terms, b.match?.terms);
+  if (terms !== undefined) match.terms = terms;
+  const commands = list(a.match?.commands, b.match?.commands);
+  if (commands !== undefined) match.commands = commands;
+  const paths = list(a.match?.paths, b.match?.paths);
+  if (paths !== undefined) match.paths = paths;
+  const tools = list(a.match?.tools, b.match?.tools);
+  if (tools !== undefined) match.tools = tools;
   // incoming wins when it defines errors; an existing defined value is
   // preserved — dropping `errors: false` would let the lesson fire on
   // failed traces
-  const errors = b.match?.errors ?? a.match?.errors
-  if (errors !== undefined) match.errors = errors
+  const errors = b.match?.errors ?? a.match?.errors;
+  if (errors !== undefined) match.errors = errors;
   return {
     on: [...new Set([...a.on, ...b.on])],
     ...(Object.keys(match).length > 0 ? { match } : {}),
     ...(a.budget !== undefined ? { budget: a.budget } : {}),
-  }
+  };
 }
 
 interface PlanCtx {
   /** corrupt keys squatting lesson ids — never merge into unreadable data */
-  corrupt: Set<string>
-  byId: Map<string, Lesson>
+  corrupt: Set<string>;
+  byId: Map<string, Lesson>;
   /** ids queued in plan.write this run — a repeat candidate folds into
    *  the pending write in place, not a write+merge pair for one lesson */
-  pending: Map<string, CaptureWrite>
-  plan: CapturePlan
+  pending: Map<string, CaptureWrite>;
+  plan: CapturePlan;
 }
 
 function foldNew(ctx: PlanCtx, id: string, c: CaptureCandidate): void {
@@ -781,25 +858,25 @@ function foldNew(ctx: PlanCtx, id: string, c: CaptureCandidate): void {
       c.confidence ?? deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
     source: c.source,
     createdAt: new Date().toISOString(),
-  }
-  const w: CaptureWrite = { lesson, origin: c.origin }
-  ctx.plan.write.push(w)
-  ctx.pending.set(id, w)
-  ctx.byId.set(id, lesson)
+  };
+  const w: CaptureWrite = { lesson, origin: c.origin };
+  ctx.plan.write.push(w);
+  ctx.pending.set(id, w);
+  ctx.byId.set(id, lesson);
 }
 
 function foldMerge(ctx: PlanCtx, id: string, existing: Lesson, c: CaptureCandidate): void {
-  const merged = unionEvidence(existing.evidence, c.evidence)
+  const merged = unionEvidence(existing.evidence, c.evidence);
   const added = merged.filter(
-    (e) => !existing.evidence.some((x) => x.kind === e.kind && x.ref === e.ref)
-  )
-  const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
-  const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
+    e => !existing.evidence.some(x => x.kind === e.kind && x.ref === e.ref)
+  );
+  const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true });
+  const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence];
   const trigger =
-    c.mergeTrigger === true ? unionTrigger(existing.trigger, c.trigger) : existing.trigger
-  const widened = JSON.stringify(trigger) !== JSON.stringify(existing.trigger)
+    c.mergeTrigger === true ? unionTrigger(existing.trigger, c.trigger) : existing.trigger;
+  const widened = JSON.stringify(trigger) !== JSON.stringify(existing.trigger);
   if (added.length === 0 && !upgraded && !widened) {
-    return // already captured — nothing new to teach the store
+    return; // already captured — nothing new to teach the store
   }
   const lesson: Lesson = {
     ...existing,
@@ -807,60 +884,60 @@ function foldMerge(ctx: PlanCtx, id: string, existing: Lesson, c: CaptureCandida
     evidence: merged,
     confidence: upgraded ? derived : existing.confidence,
     updatedAt: new Date().toISOString(),
-  }
-  const w = ctx.pending.get(id)
+  };
+  const w = ctx.pending.get(id);
   if (w !== undefined) {
-    w.lesson = lesson // fold into the pending write
+    w.lesson = lesson; // fold into the pending write
   } else {
-    ctx.plan.merge.push({ lesson, added, origin: c.origin })
+    ctx.plan.merge.push({ lesson, added, origin: c.origin });
   }
-  ctx.byId.set(id, lesson)
+  ctx.byId.set(id, lesson);
 }
 
 /** Fold candidates against the store: same normalized lesson text merges
  *  evidence and recomputes confidence; a corrupt key squatting the id
  *  skips (never overwrites a lesson it can't read). */
 export function planCapture(candidates: CaptureCandidate[], dir?: string): CapturePlan {
-  const { lessons, skipped: storeSkipped } = listLessons(dir)
+  const { lessons, skipped: storeSkipped } = listLessons(dir);
   const ctx: PlanCtx = {
-    corrupt: new Set(storeSkipped.map((s) => s.key)),
-    byId: new Map(lessons.map((l) => [l.id, l])),
+    corrupt: new Set(storeSkipped.map(s => s.key)),
+    byId: new Map(lessons.map(l => [l.id, l])),
     pending: new Map(),
     plan: { write: [], merge: [], skipped: [] },
-  }
+  };
   for (const c of candidates) {
-    const id = lessonId(c.lesson)
+    const id = lessonId(c.lesson);
     if (ctx.corrupt.has(`learn/${id}`)) {
-      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} exists but fails schema` })
-      continue
+      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} exists but fails schema` });
+      continue;
     }
-    const existing = ctx.byId.get(id)
+    const existing = ctx.byId.get(id);
     // a 40-char slug can collide — different lesson text on the same id
     // is not the same rule: never fold its evidence into the other lesson
     if (existing !== undefined && oneLine(existing.lesson) !== oneLine(c.lesson)) {
-      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} collides with a different lesson` })
-      continue
+      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} collides with a different lesson` });
+      continue;
     }
     if (existing === undefined) {
-      foldNew(ctx, id, c)
+      foldNew(ctx, id, c);
     } else {
-      foldMerge(ctx, id, existing, c)
+      foldMerge(ctx, id, existing, c);
     }
   }
-  return ctx.plan
+  return ctx.plan;
 }
 
 /** The plan is the contract — writes happen here or nowhere. */
 export function applyCapture(plan: CapturePlan, dir?: string): void {
   for (const w of plan.write) {
-    putLesson(w.lesson, dir)
+    putLesson(w.lesson, dir);
   }
   for (const m of plan.merge) {
     try {
       // re-read at write time and re-union — a concurrent capture may
       // have added evidence since plan() ran (bd kv has no CAS; this
       // narrows the lost-update window to one store round-trip)
-      const fresh = getLesson(m.lesson.id, dir)
+      const fresh = getLesson(m.lesson.id, dir);
       const lesson =
         fresh === null
           ? m.lesson
@@ -871,28 +948,28 @@ export function applyCapture(plan: CapturePlan, dir?: string): void {
                 CONFIDENCE_RANK[m.lesson.confidence] > CONFIDENCE_RANK[fresh.confidence]
                   ? m.lesson.confidence
                   : fresh.confidence,
-            }
-      putLesson(lesson, dir)
+            };
+      putLesson(lesson, dir);
     } catch (err) {
       throw new LessonStoreError(
         `merge of ${m.lesson.id} failed — ${err instanceof Error ? err.message : String(err)}`,
         { cause: err }
-      )
+      );
     }
   }
 }
 
 export interface CaptureOptions {
   /** default: everything but mol (mol needs an explicit --mol) */
-  sources?: CaptureSource[]
-  mol?: string
-  dryRun?: boolean
-  dir?: string
+  sources?: CaptureSource[];
+  mol?: string;
+  dryRun?: boolean;
+  dir?: string;
 }
 
 export interface CaptureReport {
-  plan: CapturePlan
-  dryRun: boolean
+  plan: CapturePlan;
+  dryRun: boolean;
 }
 
 /** Harvest → dedup plan → optional apply. `dryRun` stops after the
@@ -902,23 +979,23 @@ export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
   // allowlist — it wins, and --mol only names the molecule it harvests
   const sources = new Set(
     opts.sources ??
-      (opts.mol !== undefined ? ['mol' as const] : CAPTURE_SOURCES.filter((s) => s !== 'mol'))
-  )
+      (opts.mol !== undefined ? ['mol' as const] : CAPTURE_SOURCES.filter(s => s !== 'mol'))
+  );
   if (opts.mol !== undefined && opts.sources !== undefined && !sources.has('mol')) {
-    throw new Error('--mol given but mol is not in --source — the molecule would never run')
+    throw new Error('--mol given but mol is not in --source — the molecule would never run');
   }
-  const harvests: Harvest[] = []
-  if (sources.has('drill')) harvests.push(harvestDrill(opts.dir))
-  if (sources.has('retro')) harvests.push(harvestRetro(opts.dir))
-  if (sources.has('act')) harvests.push(harvestAct(opts.dir))
+  const harvests: Harvest[] = [];
+  if (sources.has('drill')) harvests.push(harvestDrill(opts.dir));
+  if (sources.has('retro')) harvests.push(harvestRetro(opts.dir));
+  if (sources.has('act')) harvests.push(harvestAct(opts.dir));
   if (sources.has('mol')) {
     if (opts.mol === undefined) {
-      throw new Error('mol capture requires --mol <id> — name the molecule to harvest')
+      throw new Error('mol capture requires --mol <id> — name the molecule to harvest');
     }
-    harvests.push(harvestMol(opts.mol, opts.dir))
+    harvests.push(harvestMol(opts.mol, opts.dir));
   }
-  const candidates = harvests.flatMap((h) => h.candidates)
-  const skipped = harvests.flatMap((h) => h.skipped)
+  const candidates = harvests.flatMap(h => h.candidates);
+  const skipped = harvests.flatMap(h => h.skipped);
   // non-dryRun plan→apply runs under the store lock — a concurrent
   // learn writer must not read the same store state and overwrite the
   // merged evidence this section produces (bd kv has no CAS)
@@ -926,10 +1003,10 @@ export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
     opts.dryRun === true
       ? planCapture(candidates, opts.dir)
       : withStoreLock(opts.dir, () => {
-          const p = planCapture(candidates, opts.dir)
-          applyCapture(p, opts.dir)
-          return p
-        })
-  plan.skipped.push(...skipped)
-  return { plan, dryRun: opts.dryRun === true }
+          const p = planCapture(candidates, opts.dir);
+          applyCapture(p, opts.dir);
+          return p;
+        });
+  plan.skipped.push(...skipped);
+  return { plan, dryRun: opts.dryRun === true };
 }

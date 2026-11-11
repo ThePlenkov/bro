@@ -54,6 +54,10 @@ persisted on the registry entry (`learnCheck`, `learnEvidence`).
   the worker was prevented from doing useful work; absence of evidence
   proves nothing (the bead's budget-wall exclusion, extended to `auth`
   which is the same class of "could not work").
+- `entry.stopped` — an operator-ended run (`agents down`) never reached
+  its closeout; externally prevented like a wall. The status path
+  returns `stopped` before classify, so this only covers the
+  unconditional harvest callers (budget walks).
 - `backend` ∈ remote lanes (`copilot`) — the remote worker can never
   reach the shared dolt, so its artifacts are uninspectable by
   construction; flagging it would be a false positive by design.
@@ -96,7 +100,14 @@ later still windows on the death, not the read.
 - `packages/cli/src/agent-connectors/learn-evidence.ts` (new) —
   `checkRunLearnEvidence({dir, molStep, entry, cause, exitAt})` returns
   `{verdict, evidence?}`; every probe is individually fail-open and a
-  failure marks the verdict `skipped`, never `miss`.
+  failure marks the verdict `skipped`, never `miss`. The store read is
+  the run's *pinned* store: `commitSpawn` persists `spec.beadsDir` as
+  `entry.storeDir` and the check prefers it over `beadsDir(dir)`, so a
+  `--beads-dir` or env-pinned spawn is verified where its worker
+  actually wrote; pre-`storeDir` entries fall back to `beadsDir(dir)`.
+  The lesson-snapshot stamp (`beadsStoreStampAt`) keys the same resolved
+  path — a stamp on the wrong store would serve another store's
+  lessons.
 - `@broject/learn` gains `listLessonsAt(beadsDir)` (the `bdAt`-pinned
   twin of `listLessons` — exit harvest reads the *shared* store, not
   cwd-discovered) and exports `LEARN_FLAG` so the flag regex has one
