@@ -18,9 +18,9 @@
     "@agentclientprotocol/sdk": "^1.7.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^6.0.3"
   },
   "files": [
     "dist"
@@ -36,7 +36,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Framework-free ACP session model — reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)",
+  "description": "Framework-free ACP session model \u2014 reducer, items, sanitiser (vendored from FasterPHP/acp-tui @ 70b8a6d, Apache-2.0)",
   "bro": {
     "kind": "capability",
     "status": "beta"
