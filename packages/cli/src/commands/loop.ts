@@ -42,14 +42,14 @@
  * to open; the worktree stays as the resume cache the woken claim
  * reuses (bro-hl22w).
  */
-import { spawnSync, spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   statfsSync,
   statSync,
   unlinkSync,
@@ -59,35 +59,72 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
+  ACT_STATE_TTL_MS,
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  gatePending,
+  type PrStateCache,
+  prStateCache,
+  resolveLedger,
+  watchBegin,
+  watchEnd,
+  watchRefresh,
+} from '@broject/act';
+import {
+  type AgentConnector,
+  type AgentInfo,
   AgentNotFound,
+  type AgentState,
+  admitSessionSlot,
   agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
+  BATCH_MARKER_ENV,
+  type BrouterModels,
+  bdActor,
   bodyMeta,
   CLASS_LABEL_PREFIX,
+  type ClaimCapability,
   commandCliName,
+  type ExitCode,
+  type ExplainSlice,
   emitLifecycle,
   ensureTasksBackend,
+  explainSlicesOrExit,
   facade,
   facadeName,
   getTasks,
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   holdRoleLease,
-  localLeaseStore,
+  isAgentCause,
+  issueLink,
+  type Lease,
+  type LeaseStore,
   LockTimeout,
+  localLeaseStore,
+  type MirrorPolicy,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  patchAgentRegistryIf,
   pidAlive,
+  printUsage,
+  probeStep,
   procStat,
   projectId,
+  readAgentRegistry,
+  type ResolvedClass,
+  type ReviewFacade,
   releaseSessionSlot,
+  releaseSessionStart,
   reviewHost,
   routeStepClass,
-  type SpawnSpec,
   SpawnError,
-  releaseSessionStart,
+  type SpawnSpec,
+  type SpawnWorker,
   sessionCapRefusalFor,
   sessionCapViews,
   sessionPlane,
@@ -95,42 +132,12 @@ import {
   stampPrOwnership,
   stepClassInfo,
   stepParent,
+  type TaskStore,
+  wallText,
   withFileLock,
   writePrivateFileSync,
-  type AgentConnector,
-  type AgentInfo,
-  type AgentState,
-  type BrouterModels,
-  type ClaimCapability,
-  type ExitCode,
-  type ExplainSlice,
-  type Lease,
-  type LeaseStore,
-  type MirrorPolicy,
-  type ResolvedClass,
-  type ReviewFacade,
-  type SpawnWorker,
-  type TaskStore,
-  BATCH_MARKER_ENV,
-  admitSessionSlot,
-  explainSlicesOrExit,
-  hasHelpFlag,
-  issueLink,
-  printUsage,
+  type ProviderWall,
 } from '@broject/core';
-import {
-  ACT_STATE_TTL_MS,
-  checkHistory,
-  evaluateExitGate,
-  fetchPrActState,
-  resolveLedger,
-  gatePending,
-  prStateCache,
-  watchBegin,
-  watchEnd,
-  watchRefresh,
-  type PrStateCache,
-} from '@broject/act';
 import {
   beadForHead,
   buildFixPrompt,
@@ -139,69 +146,72 @@ import {
   ceilingHeld,
   clumpMembers,
   coveredBeadIds,
+  type DiskProbe,
   diskFloorBreach,
   diskFloorBytes,
   expandAgentCmd,
   FLEET_HEAD_PREFIXES,
+  type FleetPrRow,
+  type GateSnapshot,
   isFleetHead,
+  type LoopConfig,
+  type LoopItem,
+  loopSlug,
   MB,
   memberAction,
   orphanVerdict,
   planItem,
   projectBeads,
-  type DiskProbe,
-  type FleetPrRow,
-  type GateSnapshot,
-  type LoopConfig,
-  type LoopItem,
   type ReconcileBead,
 } from '@broject/loop';
-import { loadBroConfig } from '../plugins.ts';
+import { isStackName } from '@broject/stack';
 import {
+  type AgentConnectorEnv,
   applyFleetRouter,
   fleetProfileOf,
   loadAgentEnv,
   profileModelFor,
+  providerWallsFor,
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
-  sessionQuotaOf,
-  type AgentConnectorEnv,
   type SpawnProviderPick,
+  sessionQuotaOf,
+  settleAcpSessions,
 } from '../agent-connectors.ts';
-import { flag, positionals } from './args.ts';
+import { loadBroConfig } from '../plugins.ts';
 import { runActCommand } from './act.ts';
-import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts';
-import { runSyncCommand } from './sync.ts';
-import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
-import { isStackName } from '@broject/stack';
-import { loopSlug } from '@broject/loop';
-import { routeTableLane, type RouteTableLane } from './loop-routes.ts';
+import { flag, positionals } from './args.ts';
+import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 import { explainSpawn } from './loop-explain.ts';
-import {
-  defaultBranchName,
-  parseWorktreePorcelain,
-  reapLoopLitter,
-  readStackEdges,
-  recordStackEdge,
-  stackPushLockPath,
-  worktreePathFor,
-  type LitterReap,
-} from './work.ts';
+import { type RouteTableLane, routeTableLane } from './loop-routes.ts';
+import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts';
 import {
   claimUpTo,
   classify,
   epicParentIds,
   nextScope,
-  readyBeads,
   type ReadyBead,
+  readyBeads,
 } from './next.ts';
 import type { NextPlan } from './next-plan.ts';
 import { processesRootedIn } from './proc-owner.ts';
 import { rigNext } from './rig-next.ts';
-import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
+import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
+import { runSyncCommand } from './sync.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
-import { installLoop, loopLockPath, readLoopMarker, uninstallLoop } from './daemon.ts';
+import {
+  defaultBranchName,
+  type LitterReap,
+  parseWorktreePorcelain,
+  readStackEdges,
+  reapLoopLitter,
+  recordStackEdge,
+  stackPushLockPath,
+  worktreePathFor,
+} from './work.ts';
+
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
@@ -546,6 +556,30 @@ export async function resolveLoopLane(
     ...(route === undefined ? {} : { class: route.class }),
     ...(routeSpec === undefined ? {} : { route: routeSpec }),
   };
+}
+
+/** Donor lookup — a recorded `acpSessionId` rides again only when the
+ *  fixer's lane is the same provider + an argv (acp) worker, so a
+ *  foreign provider or a template lane never receives a meaningless
+ *  id (spec bro-5qsnr §3-4). A corrupt registry reads as "no session"
+ *  rather than throwing past the claim. */
+export function resumeSessionFor(
+  ctx: { root: string },
+  molStep: string,
+  lane: { provider?: string; worker?: SpawnWorker } | undefined
+): string | undefined {
+  try {
+    const reg = readAgentRegistry(ctx.root);
+    const entry = reg[molStep];
+    if (entry === undefined) return undefined;
+    const id = entry.acpSessionId;
+    if (typeof id !== 'string' || id === '') return undefined;
+    if (lane?.provider === undefined || entry.provider !== lane.provider) return undefined;
+    if (lane.worker?.kind !== 'argv') return undefined;
+    return id;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -1023,10 +1057,10 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
   });
   m.worker = {
     agentId: info.id,
+    runId: info.runId,
     spawnedAt: info.spawnedAt,
     spawnedMs: Date.now(),
     pid: info.pid,
-    runId: info.runId,
   };
   // the run record stays and rides the worker (bro-wg896): custody of
   // the CLAIM transfers to the registry entry at spawn, but retiring
@@ -1061,6 +1095,26 @@ function workerLogPath(ctx: Ctx, agentId: string): string {
   return join(dirname(reg), 'agents', `${agentId}.log`);
 }
 
+/** The classified death recorded on a bead's own registry entry — the
+ *  cause/resetAt fallback when the status() AgentInfo projection came
+ *  back thin (or the connector never projected them). One local JSON
+ *  read on a terminal settle; a corrupt registry answers undefined,
+ *  never sinks the verdict. */
+function entryReset(ctx: Ctx, beadId: string): { cause?: string; resetAt?: string } | undefined {
+  try {
+    const e = readAgentRegistry(ctx.root)[beadId];
+    if (e === undefined) {
+      return undefined;
+    }
+    return {
+      cause: isAgentCause(e.cause) ? e.cause : undefined,
+      resetAt: typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** The pending worker's settled exit — the .exit record a detached
  *  `sh -c` leaves in `<git-common>/bro/agents/`. The file's mtime is the
  *  honest wall-clock for the crash window: a poll that lands an
@@ -1087,27 +1141,86 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
   return { code: null, at: Date.now() };
 }
 
+/** The provider wall a 'cap' refusal may name — the derived-registry
+ *  read (spec bro-1x7p) consulted only AFTER a refusal proved something
+ *  blocked the spawn, so the happy path never pays for it. A template
+ *  lane carries no provider identity a wall can be attributed to, and
+ *  a broken wall read must not sink a settle — both answer undefined
+ *  and fall back to generic pressure handling. */
+function laneWall(ctx: Ctx, provider: string | undefined): ProviderWall | undefined {
+  if (provider === undefined) {
+    return undefined;
+  }
+  try {
+    return providerWallsFor(ctx.root).find(w => w.provider === provider);
+  } catch {
+    return undefined;
+  }
+}
+
 /** A refused registry spawn settles the push without a worker. A full
  *  fleet ('cap') holds the claim for the next tick — fleet pressure is
  *  transient, and a hot re-pick would burn the interval against the
- *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
- *  parks WITHOUT a note — the bead's owner is not this run. Anything
- *  else parks with the error named: the claim releases into the snooze
- *  rather than an instant re-queue into the same refusal. Member claims
- *  release either way; on a conflict the LEAD's claim plane is
- *  contested, so only the clump members this run claimed are
- *  reopened. */
+ *  same wall. When the 'cap' IS a provider wall (batchWallRefusal) the
+ *  wall's own clock rules (bro-36bhc, the convoy-run blockedDecision
+ *  contract): `rate_limited` with a provider reset holds pushes UNTIL
+ *  the reset — no claim churn per interval — while a `quota` or
+ *  no-reset wall parks loud instead of churning claims against a wall
+ *  with no advertised end. 'unavailable' is infra — the backend itself
+ *  is down, so the pick holds and retries instead of parking (spec
+ *  bro-cu3q8). A 'conflict' (live agent, foreign claim,
+ *  respawn block) parks WITHOUT a note — the bead's owner is not this
+ *  run. Anything else parks with the error named: the claim releases
+ *  into the snooze rather than an instant re-queue into the same
+ *  refusal. Member claims release either way; on a conflict the LEAD's
+ *  claim plane is contested, so only the clump members this run
+ *  claimed are reopened. */
 function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome {
   const msg = err instanceof Error ? err.message : String(err);
   // every refusal path releases this run's claims — the claim-time
   // custody record dies with them (bro-ho09d)
   endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
   if (err instanceof SpawnError && err.kind === 'cap') {
+    const wall = laneWall(ctx, m.lane.provider);
+    if (wall !== undefined) {
+      // a hold needs the provider's own reset — a `bound` until is our
+      // derived cooldown horizon (bro-uswqn), not an advertised end:
+      // waiting it out would park nothing and hold pushes for the
+      // whole cooldown (the e2e-shaped 60s hang on #728)
+      const untilMs =
+        wall.until === undefined || wall.bound === true ? Number.NaN : Date.parse(wall.until);
+      if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+        // clamp to the 10-year cap so a far-future reset never holds
+        // pushes indefinitely (bro-36bhc review)
+        const wakeCapMs = Date.now() + 10 * 365 * 24 * 60 * 60_000;
+        const capped = Math.min(untilMs, wakeCapMs);
+        // the batch lane waits the reset out — the claims release so
+        // the pick re-takes them when the wall lifts (or re-refuses
+        // into the same hold if a fresh death re-forms it)
+        for (const b of openBeads(ctx, m.beads)) {
+          reopenBead(ctx, b.id);
+        }
+        say(ctx, `loop: ${wallText(wall)} — pushes hold until the reset`);
+        return { kind: 'hold', why: msg, untilMs: capped };
+      }
+      // a wall with no advertised end is reported, not waited into —
+      // park once, never churn (the convoy 'parked' verdict)
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: ${wallText(wall)} — no advertised end; worktree ${m.item.worktreeDir}`
+      );
+      say(ctx, `loop: ${m.beads[0]!.id} parked — ${wallText(wall)}`);
+      return { kind: 'done', result: 'parked' };
+    }
     for (const b of openBeads(ctx, m.beads)) {
       reopenBead(ctx, b.id);
     }
     say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`);
     return { kind: 'hold', why: msg };
+  }
+  if (err instanceof SpawnError && err.kind === 'unavailable') {
+    return settleUnavailableSpawn(ctx, m, msg);
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
@@ -1118,6 +1231,66 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
   }
   say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`);
   return { kind: 'done', result: 'parked' };
+}
+
+/** The 'unavailable' settle (bro-cu3q8): a wedged task store under the
+ *  spawn lock, a dead multiplexer, a claim bd killed mid-write — the
+ *  store outage class, never a refusal. The registry pin can also
+ *  predate the failure (it lands before claimStep): a pid-less entry
+ *  reads as a remote worker in flight and walls the retry's re-pick —
+ *  mark this push's own entry dead. A refusal thrown before the pin
+ *  leaves none to kill.
+ *
+ *  Ownership: a surviving row is a dead pin ONLY while it still
+ *  carries a launch-failure stamp — commitSpawn clears spawnError/pid
+ *  on every fresh row and a live worker's handle lands the pid, so a
+ *  pid-less entry with a non-empty spawnError can only be a spawn that
+ *  stamped its own row and died before launch. A racing respawn's
+ *  fresh row has neither and must never be stopped. The predicate and
+ *  the write ride ONE registry lock — a separate read-then-patch could
+ *  stop a live worker that slipped between the two.
+ *
+ *  The lead's claim can survive a post-commit backend failure too (the
+ *  connector's CAS rollback only covers commitSpawn's own writes):
+ *  claimStep succeeded, then tmux/launch died, and the lead sits
+ *  in_progress with no worker — ready skips it, the infra hold can't
+ *  re-pick it. Reopen it ONLY while the claim still names an owner
+ *  this spawn wrote: the attempt's actor (bdActor) or the claimAs
+ *  identity (the step id itself). An assignee a foreign loop moved
+ *  meanwhile is theirs — reopening would steal a live claim. Batch
+ *  members were claimMembers'd by this push and release
+ *  unconditionally below. */
+function settleUnavailableSpawn(ctx: Ctx, m: GateMember, msg: string): PushOutcome {
+  patchAgentRegistryIf(
+    ctx.root,
+    m.beads[0]!.id,
+    { stopped: true, spawnError: msg },
+    cur =>
+      cur !== undefined &&
+      cur.stopped !== true &&
+      cur.pid === undefined &&
+      typeof cur.spawnError === 'string' &&
+      cur.spawnError !== ''
+  );
+  const leadClaim =
+    ctx.beadsDir !== undefined ? probeStep(ctx.beadsDir, m.beads[0]!.id) : undefined;
+  if (
+    leadClaim?.status === 'in_progress' &&
+    leadClaim.assignee !== undefined &&
+    leadClaim.assignee !== '' &&
+    (leadClaim.assignee === bdActor(ctx.beadsDir!) || leadClaim.assignee === m.beads[0]!.id)
+  ) {
+    reopenBead(ctx, m.beads[0]!.id);
+  }
+  // batch members claimed by claimMembers remain in_progress even if
+  // the lead spawn never landed; release them now so the retry can
+  // re-pick (the lead's claim is uncertain and the infra hold owns
+  // custody until recovered). The store may be wedged, but a failed
+  // reopen is best-effort — tryClaim still un-sees and holds an interval.
+  for (const b of openBeads(ctx, m.beads.slice(1))) {
+    reopenBead(ctx, b.id);
+  }
+  return { kind: 'infra', why: msg };
 }
 
 /** PR number opened from this worktree's branch — null when none,
@@ -1206,6 +1379,18 @@ function stampLoopPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): 
  *  release transition lands in the lifecycle journal beside it. */
 function reopenBead(ctx: Ctx, id: string): void {
   try {
+    // release only a claim that is ours to release — `bd update
+    // --assignee ''` is unconditional, so a foreign assignee (another
+    // runner, a rebinding guard probe) keeps its bead. An empty or
+    // unresolvable actor keeps the claim marker's word (fail-open):
+    // it cannot prove a claim foreign against an identity space it
+    // cannot read.
+    const actor = ctx.tasks.actor?.() ?? '';
+    const assignee = ctx.tasks.get(id)?.assignee ?? '';
+    if (actor !== '' && assignee !== '' && assignee !== actor) {
+      say(ctx, `loop: ${id} kept — claimed by ${assignee}, not ours to release`);
+      return;
+    }
     ctx.tasks.reopen(id);
     emitLifecycle(ctx.root, {
       kind: 'release',
@@ -1231,18 +1416,31 @@ function reopenBead(ctx: Ctx, id: string): void {
  *  `parkedWakeMin` 0 = the indefinite icebox. The worktree stays: the
  *  woken claim's planItemAndWorktree reuses it. A store that rejects
  *  the write (down, or a backend with no defer concept) keeps the old
- *  claim-hold — best-effort, never a crash. */
-function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string): void {
+ *  claim-hold — best-effort, never a crash.
+ *
+ *  `wakeAtMs` overrides the cooldown with an absolute wake stamp — a
+ *  provider-reported rate-limit reset is exactly that: the park exists
+ *  to wait the wall out, so the snooze IS the reset (bro-36bhc — the
+ *  convoy-run wait contract; a 2h cooldown would outlive a 15-minute
+ *  wall and undershoot a 6-hour one). A past/stale stamp collapses to
+ *  an immediate wake. */
+function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): void {
   // parkedWakeMin has no natural ceiling — an absurd value overflows the
   // clock into a toISOString() RangeError BEFORE the per-bead catch,
   // aborting the park and leaving claims in progress. Past a decade the
   // operator's intent is the icebox anyway, so clamp the snooze there.
   const PARKED_WAKE_CAP_MIN = 10 * 365 * 24 * 60;
+  const wakeCapMs = Date.now() + PARKED_WAKE_CAP_MIN * 60_000;
   const min = Math.min(ctx.cfg.parkedWakeMin, PARKED_WAKE_CAP_MIN);
   const patch: Record<string, string | number> =
-    min > 0
-      ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
-      : { status: 'deferred', assignee: '' };
+    wakeAtMs !== undefined && Number.isFinite(wakeAtMs)
+      ? {
+          defer: new Date(Math.min(Math.max(wakeAtMs, Date.now()), wakeCapMs)).toISOString(),
+          assignee: '',
+        }
+      : min > 0
+        ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
+        : { status: 'deferred', assignee: '' };
   for (const b of openBeads(ctx, beads)) {
     noteBead(ctx.tasks, b.id, msg);
     try {
@@ -1387,6 +1585,15 @@ async function finalizeMerge(
     }
     const meta = ctx.rev.prMeta({ repo: ctx.repo, pr });
     if (meta.state !== 'MERGED') {
+      // a CLOSED PR settled without merging — its sessions are done; an
+      // OPEN park keeps the session alive for the next round
+      if (meta.state === 'CLOSED') {
+        try {
+          settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+        } catch {
+          // advisory
+        }
+      }
       parkBeads(
         ctx,
         beads,
@@ -1414,6 +1621,11 @@ async function finalizeMerge(
       `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     );
     return 'parked';
+  }
+  try {
+    settleAcpSessions(ctx.root, ctx.env, { worktree: item.worktreeDir });
+  } catch {
+    // advisory
   }
   settleClump(ctx, beads, item, pr);
   // a process rooted in the tree (a serve, a watcher, a leftover agent)
@@ -1651,6 +1863,9 @@ async function runFixRound(
       ctx,
       `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`
     );
+    // no spawn ran — refund the round the same way a fleet-cap refusal
+    // does; the budget bills respawns, not stale gate snapshots
+    m.rounds -= 1;
     return;
   }
   const prompt = buildFixPrompt(m.beads, pr, threads);
@@ -1942,6 +2157,22 @@ interface GateMember {
   updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
   fetchErrors: number;
+  /** Consecutive thrown service failures — the settle-side twin of
+   *  fetchErrors: the fetch arms own fetchErrors end-to-end (they
+   *  increment on a failed read and reset on a good one), so a throw
+   *  escaping serviceMember strikes here instead — sharing the counter
+   *  let each side's resets zero the other's strikes (bro-cu3q8). */
+  serviceErrors: number;
+  /** Wall wait expiry (ms) — a rate_limited death carrying a parseable
+   *  resetAt arms this and the member waits instead of respawning
+   *  (bro-36bhc). Cleared on expiry/respawn. */
+  wallWaitUntil?: number;
+  /** Consecutive wall deaths on this member — drives the escalating
+   *  stale-reset floor. */
+  wallWaits?: number;
+  /** The work prompt the spawn wrote — retained so a wall expiry can
+   *  respawn the same work order without rebuilding it. */
+  prompt?: string;
 }
 
 /** The registry handle a pending member polls — `spawnedAt` is the
@@ -1949,14 +2180,11 @@ interface GateMember {
  *  one the member is waiting on, and must not inherit this clock. */
 interface WorkerRef {
   agentId: string;
+  runId?: string;
   spawnedAt?: string;
   /** ms stamp at our spawn call — the crash window's start. */
   spawnedMs: number;
   pid?: number;
-  /** the attempt token — its .exit is `<id>.<runId>.exit`, never the
-   *  shared legacy path a respawn's late write could alias (spec
-   *  bro-l8c4f.5) */
-  runId?: string;
 }
 
 /** The push half of the alternation: claim → worktree → agent → PR.
@@ -1965,8 +2193,16 @@ interface WorkerRef {
  *  no-PR outcome settles inline exactly as the serial loop did. */
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
-  | { kind: 'done'; result: ItemResult }
-  | { kind: 'hold'; why: string };
+  /** settled — the leave() lifecycle row already ran inside
+   *  serviceWorker; settleOutcome still tallies/parks the claims but
+   *  must not emit a second park row for the same beads */
+  | { kind: 'done'; result: ItemResult; settled?: true }
+  /** untilMs — a provider wall's reset: pushes hold until the wall
+   *  lifts instead of re-probing every interval (bro-36bhc). */
+  | { kind: 'hold'; why: string; untilMs?: number }
+  /** 'unavailable' refusals are infra — the pick holds and retries
+   *  next tick instead of parking (spec bro-cu3q8). */
+  | { kind: 'infra'; why: string };
 
 /** The loop's watch payload for one member PR — `merge` + `cleanup`
  *  record the promise the loop is keeping (its own merge, its own
@@ -2133,18 +2369,29 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       since: Date.now(),
       rounds: 0,
       fetchErrors: 0,
+      serviceErrors: 0,
+      prompt,
     };
     try {
       await spawnWorker(ctx, member, prompt, lane);
     } catch (err) {
       return settleSpawnRefusal(ctx, member, err);
     }
-    // custody transfers to the agent registry entry — claimStep landed
-    // the lead's claim under the spawn lock (bro-ho09d). The run
-    // record does NOT retire here (bro-wg896): re-stamped to the
-    // worker inside spawnWorker, it stays the check-in plane until the
-    // armed watch marker takes custody at the settle.
-    return { kind: 'member', member };
+    // settle a worker that already died before the push returns (e.g. a
+    // provider wall) so the hold can take effect before the next claim
+    // (bro-36bhc) — a still-running worker stays 'kept' and the member
+    // joins the gate as usual.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const verdict = await serviceWorker(ctx, member);
+    if (verdict === 'kept' || verdict === 'active') {
+      // custody transfers to the agent registry entry — claimStep landed
+      // the lead's claim under the spawn lock (bro-ho09d). The run
+      // record does NOT retire here (bro-wg896): re-stamped to the
+      // worker inside spawnWorker, it stays the check-in plane until the
+      // armed watch marker takes custody at the settle.
+      return { kind: 'member', member };
+    }
+    return { kind: 'done', result: verdict, settled: true };
   }
   // raw-template arm: route through the same session-quota admission as
   // the registry spawn so the fleet/session planes agree on live workers
@@ -2264,6 +2511,7 @@ function armMember(
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
+    serviceErrors: 0,
   };
 }
 
@@ -2342,7 +2590,6 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   let info: AgentInfo | undefined;
   try {
     info = await ctx.agents!.status(w.agentId);
-    m.fetchErrors = 0;
   } catch (err) {
     if (!(err instanceof AgentNotFound)) {
       m.fetchErrors += 1;
@@ -2359,6 +2606,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     }
     // a reaped entry can't prove its death — 'lost' settles it below
   }
+  // a successful status read clears the strike count — isolated fetch
+  // errors between healthy polls must not accumulate toward the park
+  m.fetchErrors = 0;
   const superseded =
     info?.spawnedAt !== undefined && w.spawnedAt !== undefined && info.spawnedAt !== w.spawnedAt;
   const state: AgentState = superseded || info === undefined ? 'lost' : info.state;
@@ -2384,6 +2634,38 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
     endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    // fix/rebase wall check (bro-36bhc): a rate_limited death with a
+    // reset defers the re-poll to the reset (round refunded — a wall
+    // death is not a repair attempt); quota/auth/reset-less parks.
+    const entry = entryReset(ctx, m.beads[0]!.id);
+    const cause = info?.cause ?? entry?.cause;
+    const resetAt = cause === 'rate_limited' ? (info?.resetAt ?? entry?.resetAt) : undefined;
+    const verdict = agentVerdict(ctx, m.beads, m.item.worktreeDir);
+    if (verdict !== undefined) {
+      return leave(m, verdict);
+    }
+    // a stopped entry's stale wall stamp is not a horizon either —
+    // same exclusion the no-PR wait below takes (bro-36bhc)
+    const wait =
+      state !== 'stopped' ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0) : undefined;
+    if (wait !== undefined) {
+      m.wallWaitUntil = wait;
+      m.wallWaits = (m.wallWaits ?? 0) + 1;
+      // the merge clock restarts at the wall's lift — time spent
+      // walled is not time the re-poll owed the merge deadline
+      m.since = wait;
+      // refund the round the dead worker paid
+      m.rounds = Math.max(0, m.rounds - 1);
+      return 'kept';
+    }
+    if (cause === 'quota' || cause === 'auth' || cause === 'rate_limited') {
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: ${prRef(ctx, m.pr)} round worker ${w.agentId} hit a provider wall (${cause}) — worktree ${m.item.worktreeDir}`
+      );
+      return leave(m, 'parked');
+    }
     if (exit.code === 0 && !superseded) {
       // If the fix worker exited cleanly but did not resolve threads,
       // we must not let the cycle loop forever. Do not auto-retry here;
@@ -2424,16 +2706,70 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     return leave(m, 'parked');
   }
   if (pr === null) {
-    if (state === 'blocked' || state === 'stopped') {
-      // the wall/stop is the verdict — reopening respawns into it
+    const entry = entryReset(ctx, m.beads[0]!.id);
+    const cause = info?.cause ?? entry?.cause;
+    const resetAt = cause === 'rate_limited' ? (info?.resetAt ?? entry?.resetAt) : undefined;
+    // the agent's own verdict still outranks the wall (bro-36bhc)
+    const verdict = agentVerdict(ctx, m.beads, m.item.worktreeDir);
+    if (verdict !== undefined) {
+      return leave(m, verdict);
+    }
+    // a rate_limited death carrying a NEAR reset waits (auto-respawn)
+    // instead of parking; a far reset parks (deferred) so the run does
+    // not hold for hours — the operator wakes it when the wall lifts.
+    // A STOPPED entry is out entirely: `bro agents down` keeps the old
+    // death's cause/resetAt on the record, so its stale wall stamp is
+    // not a horizon to wait — the parkIt branch owns the flat cooldown.
+    const resetMs =
+      resetAt !== undefined && Number.isFinite(Date.parse(resetAt))
+        ? Date.parse(resetAt)
+        : undefined;
+    const near =
+      state !== 'stopped' &&
+      resetMs !== undefined &&
+      (resetMs <= Date.now() || resetMs - Date.now() <= 15 * 60 * 1000);
+    const wait = near ? wallWaitUntil(cause, resetAt, Date.now(), m.wallWaits ?? 0) : undefined;
+    if (wait !== undefined) {
+      m.wallWaitUntil = wait;
+      m.wallWaits = (m.wallWaits ?? 0) + 1;
+      // walled time is not member time — the since-clock restarts at
+      // the lift, same exclusion the PR path takes
+      m.since = wait;
+      say(
+        ctx,
+        `loop: worker ${w.agentId} rate_limited${resetAt !== undefined ? ` til ${resetAt}` : ''} without a PR — waiting`
+      );
+      return 'kept';
+    }
+    // exited deaths can still carry a wall cause (rate_limited whose
+    // resetAt already passed at poll time reads 'exited', not 'blocked');
+    // park those instead of reopening into the same wall (bro-36bhc).
+    const parkIt =
+      state === 'blocked' ||
+      state === 'stopped' ||
+      (state === 'exited' && (cause === 'rate_limited' || cause === 'quota' || cause === 'auth'));
+    if (parkIt) {
+      // reset-aware: only a future reset snoozes to it; a stale/missing
+      // reset takes the flat cooldown so we never wake straight back
+      // into the wall.
+      const rawReset = cause === 'rate_limited' && state !== 'stopped' ? resetAt : undefined;
+      const resetMs =
+        rawReset !== undefined &&
+        Number.isFinite(Date.parse(rawReset)) &&
+        Date.parse(rawReset) > Date.now()
+          ? Date.parse(rawReset)
+          : undefined;
       const why =
         state === 'blocked'
-          ? `blocked${info?.cause !== undefined ? ` (${info.cause})` : ''}`
-          : 'stopped';
+          ? `blocked${cause !== undefined ? ` (${cause})` : ''}${resetMs !== undefined && rawReset !== undefined ? ` til ${rawReset}` : ''}`
+          : state === 'exited'
+            ? `exited${cause !== undefined ? ` (${cause})` : ''}${resetMs !== undefined && rawReset !== undefined ? ` til ${rawReset}` : ''}`
+            : 'stopped';
       parkBeads(
         ctx,
         m.beads,
-        `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`
+        `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`,
+        resetMs
       );
       return leave(m, 'parked');
     }
@@ -2485,16 +2821,75 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
  *  honest: worker exits land fast without dragging every gate into
  *  hot host polls, and a long worker never starves the stack. */
 async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
+  // a member sitting in a provider wall wait (bro-36bhc) — service the
+  // wait instead of the gate/worker. PR members re-poll at expiry;
+  // workerless members respawn the same work order.
+  if (m.wallWaitUntil !== undefined) {
+    if (Date.now() < m.wallWaitUntil) {
+      m.nextPollAt = m.wallWaitUntil;
+      return 'kept';
+    }
+    m.wallWaitUntil = undefined;
+    if (m.pr !== undefined) {
+      return 'active';
+    }
+    if (m.worker === undefined) {
+      try {
+        say(ctx, 'loop: respawn after wall');
+        await spawnWorker(ctx, m, m.prompt ?? '', m.lane);
+        return 'kept';
+      } catch (err) {
+        say(ctx, `loop: respawn failed — ${err instanceof Error ? err.message : String(err)}`);
+        const out = settleSpawnRefusal(ctx, m, err);
+        if (out.kind === 'hold') {
+          m.wallWaitUntil = out.untilMs ?? Date.now() + ctx.intervalS * 1000;
+          m.wallWaits = (m.wallWaits ?? 0) + 1;
+          return 'kept';
+        }
+        if (out.kind === 'done') {
+          return out.result;
+        }
+        if (out.kind === 'infra') {
+          // the respawn's own backend wedged — infra, not a wall, so
+          // there is no provider reset to wait out. Re-arm the wait
+          // one interval and let the respawn retry at expiry;
+          // without it the member falls through workerless into the
+          // PR gate with no PR (bro-cu3q8)
+          m.wallWaitUntil = Date.now() + ctx.intervalS * 1000;
+          return 'kept';
+        }
+        return 'kept';
+      }
+    }
+  }
   if (m.nextPollAt !== undefined && Date.now() < m.nextPollAt) {
     return 'kept';
   }
   m.nextPollAt = undefined;
+  // finish a marker that died mid-settle: when watchBegin threw inside
+  // the worker's PR-discovery settle, m.pr is already armed and
+  // m.worker already cleared — a retry would service the gate with a
+  // null marker forever, and act rearm could never resurrect the PR.
+  // Complete the begin BEFORE the refresh/gate below; a throw here
+  // strikes fetchErrors and re-polls, so the marker eventually lands
+  // or the member parks on the same budget as any fetch outage.
+  if (m.marker === null && m.pr !== undefined) {
+    m.marker = watchBegin(ctx.root, {
+      ...loopWatch(m.pr, prRef(ctx, m.pr), m.item.worktreeDir, ctx.cfg),
+      bead: m.beads.map(b => b.id).join(','),
+    });
+  }
   // re-stamp the member's marker on every real service tick — stallMin
   // is advisory, so a running member outlives the marker's priced TTL
   // (the 24h floor included) and a pruned marker reads as an orphaned
   // PR to drive. Same file, same 'wait' kind; watchEnd still owns it.
   watchRefresh(m.marker);
   const verdict = m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m);
+  // a service dispatch that returned without throwing clears the
+  // settle-failure strikes — the skip paths above never reach this
+  // line, so backoff passes can't zero a live streak, and the fetch
+  // arms' own fetchErrors resets stay untouched (bro-cu3q8)
+  m.serviceErrors = 0;
   if (verdict === 'kept') {
     m.nextPollAt =
       Date.now() +
@@ -2550,7 +2945,6 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       blockers: gate.blockers,
       pending: gatePending(state),
     };
-    m.fetchErrors = 0;
   } catch (err) {
     m.fetchErrors += 1;
     console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`);
@@ -2567,6 +2961,9 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     );
     return leave(m, 'parked');
   }
+  // a successful fetch clears the strike count — isolated fetch errors
+  // between healthy polls must not accumulate toward the park
+  m.fetchErrors = 0;
   const act = memberAction(snap, m, {
     fixRounds: ctx.cfg.fixRounds,
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
@@ -2993,6 +3390,40 @@ function everySecArg(argv: string[]): number | undefined {
     process.exit(2);
   }
   return everySec;
+}
+
+/** The wall settle's wait clock (spec bro-36bhc) — pure decision, exported
+ *  for unit tests. A rate_limited death carrying a parseable resetAt waits
+ *  until that reset; a stale reset (provider clock behind the poll) paces
+ *  the wait on an escalating floor (30s doubling to a 15m cap) so a lying
+ *  provider cannot spin the loop back into the burn. Anything else (quota,
+ *  auth, reset-less rate limit, non-rate causes, unparseable reset) is not
+ *  a wait — it parks. */
+export function wallWaitUntil(
+  cause: string | undefined,
+  resetAt: string | undefined,
+  now: number,
+  waits: number = 0
+): number | undefined {
+  if (cause !== 'rate_limited') {
+    return undefined;
+  }
+  const reset = typeof resetAt === 'string' ? Date.parse(resetAt) : Number.NaN;
+  if (Number.isNaN(reset)) {
+    return undefined;
+  }
+  if (reset > now) {
+    return reset;
+  }
+  // stale reset — pace it
+  const n = typeof waits === 'number' && Number.isFinite(waits) ? waits : 0;
+  const exp = Math.max(0, n - 1);
+  let floor = 30_000 * Math.pow(2, exp);
+  const cap = 15 * 60_000;
+  if (floor > cap) {
+    floor = cap;
+  }
+  return now + floor;
 }
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
@@ -3714,7 +4145,11 @@ export function syncAfterAudit(
   try {
     sync();
   } catch (err) {
-    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`);
+    say(
+      ctx,
+      `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)} ` +
+        `— infra; the next run's audit retries`
+    );
   } finally {
     process.exit = realExit;
   }
@@ -4039,6 +4474,18 @@ interface QueueState {
   /** The disk floor's transition edge — the held/resumed lines say
    *  once per episode, not once per tick (spec bro-2spp7). */
   diskHeld: boolean;
+  /** A member sitting in a wall wait holds pushes — the transition
+   *  edge for the once-per-episode line (bro-36bhc). */
+  wallHeld: boolean;
+  /** Consecutive tick failures past the member/claim boundaries — the
+   *  count rides the stage so a held run names its stall on the
+   *  heartbeat (spec bro-cu3q8). */
+  infraErrors: number;
+  /** The stage an infra-held push carries — set by holdForInfra and the
+   *  last-resort catch, cleared when a tick reaches the claim section
+   *  unheld, so the idle heartbeat names the wedged backend instead of
+   *  a silent 'idle' (spec bro-cu3q8). */
+  holdStage?: string;
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
@@ -4362,12 +4809,54 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
   }
 }
 
+/** One member's thrown service failure → kept-with-backoff (undefined)
+ *  under the strike budget, or the parked verdict past it. A member's
+ *  settle can still throw on infra — the task store wedged mid-write,
+ *  a dead spawn, a failed projection call. That's a member failure,
+ *  never a dead supervisor (bro-cu3q8): it strikes its own
+ *  serviceErrors budget — the same give-up contract the fetch arms
+ *  run on fetchErrors (under 3 strikes and inside mergeTimeoutMin the
+ *  member is kept and its re-poll holds an interval — a wedged store
+ *  throws instantly, so without the pause every tick re-strikes); past
+ *  the budget it parks exactly like the fetch arm. */
+function failMemberService(ctx: Ctx, m: GateMember, err: unknown): ServiceVerdict | undefined {
+  m.serviceErrors += 1;
+  console.error(
+    `loop: member ${m.beads[0]!.id} service failed (${m.serviceErrors}) — ${String(err)}`
+  );
+  if (m.serviceErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
+    m.nextPollAt = Date.now() + ctx.intervalS * 1000;
+    return undefined;
+  }
+  parkBeads(
+    ctx,
+    m.beads,
+    `loop: member service kept failing — ${String(err)} — worktree ${m.item.worktreeDir}`
+  );
+  return leave(m, 'parked');
+}
+
 /** One service pass over the stack, oldest-first — closure-first order. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
   // (a)/(b) service gate stack first
   for (const m of [...q.stack]) {
-    const verdict = await serviceMember(ctx, m);
+    let verdict: ServiceVerdict;
+    try {
+      verdict = await serviceMember(ctx, m); // NOSONAR — members service serially, oldest-first: a parallel pass would race the registry and claims
+      // no strike reset here — serviceMember's skip paths return 'kept'
+      // without servicing, so a blanket reset would zero live streaks;
+      // serviceErrors clears inside serviceMember on a real dispatch
+      // and the fetch arms own fetchErrors end-to-end (bro-cu3q8)
+    } catch (err) {
+      // the pass continues either way — one poison member must not
+      // starve the stack behind it
+      const failed = failMemberService(ctx, m, err);
+      if (failed === undefined) {
+        continue;
+      }
+      verdict = failed;
+    }
     if (verdict === 'kept') {
       continue;
     }
@@ -4375,29 +4864,40 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     if (verdict === 'active') {
       continue;
     }
-    q.stack.splice(q.stack.indexOf(m), 1);
-    // the member's ceiling reservation dies with its tenure — landed
-    // or failed, no PR of its own keeps arriving to consume it
-    releaseMemberReservation(q, m);
-    q.tally[verdict] += 1;
-    if (verdict === 'parked') {
-      for (const b of m.beads) {
-        q.parkedClaims.add(b.id);
-      }
-    }
-    if (verdict === 'landed') {
-      syncAfterLand(ctx);
-    }
-    if (ctx.json) {
-      console.log(
-        JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map(b => b.id), result: verdict })
-      );
-    }
+    retireMember(ctx, q, m, verdict);
   }
   // (c) reconcile orphaned fleet PRs
   await reconcileFleet(ctx, q);
   // (d) ceiling check handled by tryClaim
   return busy;
+}
+
+/** A settled member leaves the stack: splice, release its ceiling
+ *  reservation (landed or failed, no PR of its own keeps arriving to
+ *  consume it), tally the verdict, and stamp the parked-claim set /
+ *  post-merge sync / json row the verdict asks for. */
+function retireMember(
+  ctx: Ctx,
+  q: QueueState,
+  m: GateMember,
+  verdict: keyof QueueState['tally']
+): void {
+  q.stack.splice(q.stack.indexOf(m), 1);
+  releaseMemberReservation(q, m);
+  q.tally[verdict] += 1;
+  if (verdict === 'parked') {
+    for (const b of m.beads) {
+      q.parkedClaims.add(b.id);
+    }
+  }
+  if (verdict === 'landed') {
+    syncAfterLand(ctx);
+  }
+  if (ctx.json) {
+    console.log(
+      JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map(b => b.id), result: verdict })
+    );
+  }
 }
 
 /** The filesystems a claim writes to — the worktree parent (sibling
@@ -4459,15 +4959,19 @@ function settleOutcome(
     for (const id of ids) {
       q.parkedClaims.add(id);
     }
-    emitLifecycle(ctx.root, {
-      kind: 'park',
-      bead: ids[0],
-      to: 'parked',
-      detail: {
-        via: 'loop',
-        ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
-      },
-    });
+    // a done outcome serviceWorker already left() skips the row —
+    // two park rows for the same beads would double-count telemetry
+    if (out.settled !== true) {
+      emitLifecycle(ctx.root, {
+        kind: 'park',
+        bead: ids[0],
+        to: 'parked',
+        detail: {
+          via: 'loop',
+          ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
+        },
+      });
+    }
   }
   if (ctx.json) {
     console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }));
@@ -4605,8 +5109,42 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
-  if (q.drained || maxed || Date.now() < q.pushHoldUntil) {
+  if (q.drained || maxed) {
     return false;
+  }
+  // past the gate the push is unheld — a stale hold stage must not
+  // shadow this tick's own verdict (idle names from here re-set their
+  // own marker: diskHeld, holdStage, or a fresh claim stage)
+  q.holdStage = undefined;
+  if (Date.now() < q.pushHoldUntil) {
+    // a held push still owes the drain verdict — an empty queue behind
+    // the wall reports done instead of idling until the reset
+    if (queueDrained(ctx, scope, q.seen)) {
+      q.drained = true;
+    }
+    return false;
+  }
+  // a member sitting in a provider wall wait holds pushes (bro-36bhc) —
+  // claiming the next bead into the same wall burns its spawn. The drain
+  // check still runs: an empty queue behind the wall owes the done
+  // verdict, not an infinite hold.
+  const wallWaiters = q.stack.filter(m => m.wallWaitUntil !== undefined);
+  if (wallWaiters.length > 0) {
+    if (queueDrained(ctx, scope, q.seen)) {
+      q.drained = true;
+      return false;
+    }
+    const until = Math.min(...wallWaiters.map(m => m.wallWaitUntil as number));
+    if (!q.wallHeld) {
+      q.wallHeld = true;
+      say(ctx, 'loop: rate wall — pushes hold until the reset');
+    }
+    q.pushHoldUntil = Math.max(q.pushHoldUntil, until);
+    return false;
+  }
+  if (q.wallHeld) {
+    q.wallHeld = false;
+    say(ctx, 'loop: wall cleared — pushes resume');
   }
   // the stack cap is consulted AFTER the ceiling check — a full stack
   // must not silence the ceiling-hold line: at/over the fleet ceiling
@@ -4722,21 +5260,15 @@ async function tryClaim(
   // --max bounds BEADS, not items — a clump may only fill up to the
   // run's remaining claim budget
   const budget = ctx.cfg.maxItems > 0 ? ctx.cfg.maxItems - q.claimed : Number.MAX_SAFE_INTEGER;
-  // the claim read (bd ready via claimClump) is a throwing bd() spawn —
-  // a store busy past the 15s budget (mirror publish, dolt GC/fsck on a
-  // multi-GB store) must degrade to a held push, never kill the
-  // supervisor mid-run (bro-etimout: an uncaught spawnSync ETIMEDOUT
-  // took the loop down three times in one day — the read failing is a
-  // blip; a failed read is NOT an empty queue, so drained stays unset)
   let clump: ReadyBead[] | undefined;
   try {
     clump = claimClump(ctx, scope, q.seen, budget);
   } catch (err) {
+    // a wedged task store surfaces HERE — `bd ready`/`bd update --claim`
+    // rethrow by design ("a bd outage must surface", next.ts) — as a
+    // held push, never a dead supervisor (bro-cu3q8)
     releaseCeilingFile(ceilingRes);
-    const msg = err instanceof Error ? err.message : String(err);
-    say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
-    return false;
+    return holdForInfra(ctx, q, 'claim', err);
   }
   if (clump === undefined) {
     releaseCeilingFile(ceilingRes);
@@ -4753,19 +5285,37 @@ async function tryClaim(
   try {
     out = await pushItem(ctx, clump);
   } catch (err) {
-    // an uncaught push failure is still an admission that never
-    // produced a member — the slot goes back, not into a leak that
-    // only a dead-pid sweep would find
+    // a throw past pushItem's own settle arms still owes the claims a
+    // release — the same settle its worktree/prompt arms run — then the
+    // clump un-sees so the held retry re-picks it (bro-cu3q8)
     releaseCeilingFile(ceilingRes);
-    throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    const ours = ctx.agents === undefined ? clump : clump.slice(1);
+    for (const b of openBeads(ctx, ours)) {
+      noteBead(ctx.tasks, b.id, `loop: push failed — ${msg}`);
+      reopenBead(ctx, b.id);
+    }
+    endLoopRun(ctx.root, loopSlug(clump[0]!.id));
+    unseeClump(ctx, q, clump);
+    return holdForInfra(ctx, q, 'push', err);
   }
   if (out.kind === 'hold') {
-    // fleet cap refused the spawn — un-see the clump and hold pushes
-    // for a beat so the next pick doesn't burn the tick re-probing the
+    // fleet cap or a provider wall refused the spawn — the ceiling
+    // reservation goes back (no member will ever list for it), the
+    // clump is un-seen, and pushes hold (the wall's reset when one was
+    // reported) so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
     releaseCeilingFile(ceilingRes);
-    unseeClump(ctx, q, clump);
+    unseeClump(ctx, q, clump, out.untilMs);
     return false;
+  }
+  if (out.kind === 'infra') {
+    // the spawn's own backend wedged — claimStep's store refused on an
+    // outage, not a race. The same hold the claim boundary runs:
+    // un-see, hold an interval, retry (spec bro-cu3q8)
+    releaseCeilingFile(ceilingRes);
+    unseeClump(ctx, q, clump);
+    return holdForInfra(ctx, q, 'claim', out.why);
   }
   if (out.kind === 'member') {
     if (ceilingRes !== null) {
@@ -4789,7 +5339,7 @@ function recordClaimOutcome(
   ctx: Ctx,
   q: QueueState,
   ids: string[],
-  out: Exclude<PushOutcome, { kind: 'hold' }>
+  out: Exclude<PushOutcome, { kind: 'hold' } | { kind: 'infra' }>
 ): void {
   if (out.kind === 'member') {
     q.stack.push(out.member);
@@ -4833,13 +5383,38 @@ function holdForDisk(
 }
 
 /** Undo a claim attempt the fleet cap refused — the clump goes back to
- *  pickable and pushes hold for a beat. */
-function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[]): void {
+ *  pickable and pushes hold for a beat. A provider wall's `untilMs`
+ *  overrides the beat: the hold IS the wait — re-claiming before the
+ *  reset only churns the claim store against a known wall. */
+function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[], untilMs?: number): void {
   for (const b of clump) {
     q.seen.delete(b.id);
   }
   q.claimed -= clump.length;
+  q.pushHoldUntil = untilMs ?? Date.now() + ctx.intervalS * 1000;
+}
+
+/** The infra hold for a claim/push that threw on a backend — a wedged
+ *  task store, a dead fs, a spawn timeout. A held tick, never a death:
+ *  warn once with the retry hint, hold the pick an interval, keep the
+ *  run (spec bro-cu3q8). */
+function holdForInfra(ctx: Ctx, q: QueueState, what: string, err: unknown): false {
   q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
+  // the (N) counts consecutive held TICKS — runQueue owns the
+  // increment on every held tick, so this never bumps infraErrors
+  // itself (a double count on the setting tick was bro-cu3q8's review)
+  // the stage carries the wait too — the heartbeat and the exit audit
+  // classify a wedged backend as infra, never a plain failure. It
+  // rides q.holdStage so the idle overwrite can't erase it mid-hold.
+  // (N) reads the pre-increment count — runQueue's renumber lands the
+  // +1 for this tick immediately after
+  q.holdStage = `infra hold (${q.infraErrors}) — ${what}`;
+  ctx.stage = q.holdStage;
+  console.error(
+    `loop: ${what} failed — ${err instanceof Error ? err.message : String(err)} — ` +
+      `infra hold; the next interval retries`
+  );
+  return false;
 }
 
 function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
@@ -4862,9 +5437,11 @@ async function runQueue(ctx: Ctx): Promise<void> {
     parkedClaims: new Set(),
     pushHoldUntil: 0,
     diskHeld: false,
+    infraErrors: 0,
     diskProbeWarned: new Set(),
     unclosableNoted: new Set(),
     ceilingRes: new Map(),
+    wallHeld: false,
   };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -4876,8 +5453,36 @@ async function runQueue(ctx: Ctx): Promise<void> {
       return;
     }
     for (;;) {
-      const busy = await servicePass(ctx, q);
-      if (await tryClaim(ctx, scope, q)) {
+      let busy = false;
+      try {
+        busy = await servicePass(ctx, q);
+        const claimed = await tryClaim(ctx, scope, q);
+        if (claimed) {
+          q.infraErrors = 0;
+          q.holdStage = undefined;
+          continue;
+        }
+        if (q.holdStage?.startsWith('infra hold')) {
+          q.infraErrors += 1;
+          q.holdStage = q.holdStage.includes('(')
+            ? q.holdStage.replace(/\(\d+\)/, `(${q.infraErrors})`)
+            : `infra hold (${q.infraErrors})`;
+          ctx.stage = q.holdStage;
+        } else {
+          q.infraErrors = 0;
+          q.holdStage = undefined;
+        }
+      } catch (err) {
+        q.infraErrors += 1;
+        q.holdStage = `infra hold (${q.infraErrors})`;
+        ctx.stage = q.holdStage;
+        console.error(
+          `loop: tick failed (${q.infraErrors}) — ` +
+            `${err instanceof Error ? err.message : String(err)} — ` +
+            `infra hold; the next interval retries`
+        );
+        q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
+        await sleep(ctx.intervalS * 1000);
         continue;
       }
       const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
@@ -4886,7 +5491,9 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find(m => m.worker !== undefined);
-        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle';
+        const idle =
+          q.holdStage ??
+          (q.wallHeld ? 'idle (wall wait)' : q.diskHeld ? 'idle (disk floor)' : 'idle');
         ctx.stage =
           pending === undefined
             ? idle
@@ -4898,7 +5505,12 @@ async function runQueue(ctx: Ctx): Promise<void> {
         // on the next tick, not an interval late (waitForGate's own
         // sleep was deadline-capped). A worker-pending member has NO
         // merge deadline — its lifetime is unbounded (bro-9lpn3).
-        const gated = q.stack.filter(m => m.worker === undefined);
+        // wall-waiting members are excluded from the merge-deadline
+        // term: the wall check short-circuits them before the deadline
+        // park, so a deadline that passed DURING the wait would only
+        // compute a past wake → sleep(0) → a full fleet reconcile per
+        // spin until the reset (coderabbit #728)
+        const gated = q.stack.filter(m => m.worker === undefined && m.wallWaitUntil === undefined);
         const wake = Math.min(
           ...q.stack.map(m => m.nextPollAt ?? Number.POSITIVE_INFINITY),
           ...gated.map(m => m.since + ctx.cfg.mergeTimeoutMin * 60_000)

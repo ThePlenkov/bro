@@ -12,6 +12,7 @@
       "!**/schemas/**",
       "!commands/bro.md",
       "!.opencode/commands/bro.md",
+      "!plugins/*/bro/bro.ts",
       "!site/content/docs/reference/**",
       "!specs/**/*.md",
       "!**/vendor/**",

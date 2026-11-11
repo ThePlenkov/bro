@@ -1011,6 +1011,10 @@ export const serveSection: ConfigSection<{
   acpMaxAbandoned?: number;
   /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
   acpStallMs?: number;
+  /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+   *  stays closed after the account refused a request. 0 disables the
+   *  cooldown: the lane spawns through walls as before. */
+  acpCooldownMs?: number;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1024,6 +1028,7 @@ export const serveSection: ConfigSection<{
     acpMaxOpens?: unknown;
     acpMaxAbandoned?: unknown;
     acpStallMs?: unknown;
+    acpCooldownMs?: unknown;
   };
   const out: {
     backend?: string;
@@ -1037,6 +1042,7 @@ export const serveSection: ConfigSection<{
     acpMaxOpens?: number;
     acpMaxAbandoned?: number;
     acpStallMs?: number;
+    acpCooldownMs?: number;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1069,6 +1075,12 @@ export const serveSection: ConfigSection<{
   }
   if (typeof obj.acpStallMs === 'number' && Number.isInteger(obj.acpStallMs)) {
     if (obj.acpStallMs >= 0) out.acpStallMs = Math.min(obj.acpStallMs, MAX_TIMER_MS);
+  }
+  // the wall cooldown (spec bro-i6811) — a WINDOW, so 0 is a deliberate
+  // "off" and a fractional value is not a window at all (the loader
+  // drops it, the default wins)
+  if (typeof obj.acpCooldownMs === 'number' && Number.isInteger(obj.acpCooldownMs)) {
+    if (obj.acpCooldownMs >= 0) out.acpCooldownMs = Math.min(obj.acpCooldownMs, MAX_TIMER_MS);
   }
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
@@ -1104,6 +1116,8 @@ serveSection.jsonSchema = js.obj({
   acpMaxAbandoned: js.int(1),
   // the silence bound — 0 disables the watchdog
   acpStallMs: js.int(0),
+  // the wall cooldown (spec bro-i6811) — a window, so 0 disables it
+  acpCooldownMs: js.int(0),
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1684,6 +1698,10 @@ export interface BroConfig {
     acpMaxAbandoned?: number;
     /** The silence bound per ACP turn, ms — 0 disables the watchdog. */
     acpStallMs?: number;
+    /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+     *  stays closed after the account refused a request. 0 disables the
+     *  cooldown: the lane spawns through walls as before. */
+    acpCooldownMs?: number;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */

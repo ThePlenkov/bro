@@ -1,0 +1,45 @@
+{
+  "name": "@broject/adapter-core",
+  "version": "0.3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "default": "./dist/host.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown src/index.ts src/core.ts src/host.ts --format esm --dts --clean"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/agent-plugins/adapter-core"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Shared core for bro agent adapters (self-contained, bundled into adapters)"
+}

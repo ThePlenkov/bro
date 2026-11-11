@@ -501,6 +501,9 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
   /** Pipeline provenance — stamped into the registry and pinned into
    *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
    *  trailer). Absent on non-formula spawns. */
@@ -593,6 +596,11 @@ export interface AgentCapabilities {
   attach?: boolean;
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean;
+  /** spawn() can run a provider-resolved SpawnWorker — backends that own
+   *  their provider session (gascity's city.toml), dispatch remotely
+   *  (copilot), or never spawn (devin) report false; absent means the
+   *  worker contract holds. */
+  workers?: boolean;
   supervisor: 'none' | 'ondemand' | 'required';
 }
 
@@ -876,6 +884,37 @@ export function patchAgentRegistry(
     // the manual clear covers the retained `attempts` too — a superseded
     // death must stay cleared with its entry (spec bro-1x7p), otherwise a
     // shallow top-level stamp leaves the old record walling its provider
+    if (patch.stopped === true && Array.isArray(next.attempts)) {
+      next.attempts = (next.attempts as unknown[]).map(a =>
+        a !== null && typeof a === 'object' ? { ...a, stopped: true } : a
+      );
+    }
+    reg[molStep] = next;
+    writeAgentRegistry(dir, reg);
+    return next;
+  });
+}
+
+/** Conditional read-modify-write — `patch` lands only while `onlyIf`
+ *  still accepts the CURRENT entry, all under the one registry lock.
+ *  This is the patch-shaped CAS twin of `removeAgentRegistryEntries`'s
+ *  `expected`: a caller settling a failed attempt must never rewrite a
+ *  row a parallel respawn replaced between its probe and its write —
+ *  the check and the write are one critical section here. Returns the
+ *  patched entry, or undefined when the predicate refused. */
+export function patchAgentRegistryIf(
+  dir: string,
+  molStep: string,
+  patch: Partial<AgentRegistryEntry>,
+  onlyIf: (cur: AgentRegistryEntry | undefined) => boolean
+): AgentRegistryEntry | undefined {
+  return withAgentRegistryLock(dir, () => {
+    const reg = readAgentRegistry(dir);
+    const cur = reg[molStep];
+    if (!onlyIf(cur)) {
+      return undefined;
+    }
+    const next = { ...(cur ?? { agentId: '', backend: '', spawnedAt: '' }), ...patch };
     if (patch.stopped === true && Array.isArray(next.attempts)) {
       next.attempts = (next.attempts as unknown[]).map(a =>
         a !== null && typeof a === 'object' ? { ...a, stopped: true } : a

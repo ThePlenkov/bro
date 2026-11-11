@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "packages/acp/*"
+    "packages/acp/*",
+    "packages/agent-plugins/*"
   ],
   "scripts": {
     "build": "node scripts/gen-plugins.ts && nx run-many -t build --exclude=skills-*,plugins-*-skills-*",
@@ -24,7 +25,8 @@
     "gen:plugins": "node scripts/gen-plugins.ts",
     "check:plugins": "node scripts/gen-plugins.ts --check",
     "check:pack": "node scripts/check-pack.ts",
-    "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
+    "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-* && npm run test:scripts",
+    "test:scripts": "tsx --test \"scripts/**/*.test.ts\"",
     "test:e2e": "nx run-many -t test:e2e --exclude=skills-*,plugins-*-skills-*",
     "lint": "biome lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",

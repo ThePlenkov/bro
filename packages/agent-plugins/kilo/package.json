@@ -1,0 +1,38 @@
+{
+  "name": "@broject/kilo",
+  "version": "0.3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/kilo.d.ts",
+      "default": "./dist/kilo.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown src/kilo.ts --format esm --dts --clean --no-external=/^@broject\\//"
+  },
+  "devDependencies": {
+    "@kilocode/plugin": "^7.8.3",
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/agent-plugins/kilo"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "bro's Kilo agent plugin adapter"
+}

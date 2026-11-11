@@ -610,6 +610,7 @@ const SPAWN_FIELDS = new Set([
   'class',
   'autoApprove',
   'lane',
+  'resumeSessionId',
 ]);
 
 /** The raw JSON object behind a spawn body — parsed, object-shaped,
@@ -684,6 +685,7 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
     profile: req.profile as string | undefined,
     class: req.class as string | undefined,
     autoApprove: req.autoApprove as boolean | undefined,
+    resumeSessionId: req.resumeSessionId as string | undefined,
   };
 }
 

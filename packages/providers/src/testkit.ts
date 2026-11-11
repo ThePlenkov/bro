@@ -61,6 +61,8 @@ export interface FakeAcpAgent {
   /** session/load requests the agent received — {sessionId, cwd} pairs
    *  (bro-nwl5g's viewer attach). */
   loads: Array<{ sessionId: string; cwd: string }>;
+  /** session/resume requests the agent received (session ids). */
+  resumes: string[];
   /** The load's client context — lets a test push post-load live
    *  updates the way a still-running session would. */
   loadClient?: AgentContext;
@@ -186,9 +188,17 @@ export function fakeAcpAgent(
     /** Exercise the client's terminal plane mid-prompt: create →
      *  wait_for_exit → output → release on `sh -c <value>`. */
     askTerminal?: string;
+    /** Advertise `loadSession` and serve session/load — the resume
+     *  ladder's top rung (spec bro-5qsnr). */
+    loadCapable?: boolean;
+    /** Advertise `sessionCapabilities.resume` and serve session/resume —
+     *  the ladder's second rung. */
+    resumeCapable?: boolean;
     /** session/load support — the replay sequence emitted (as
      *  session/update notifications) before the load response.
-     *  `failLoad` fails the load instead. */
+     *  `failLoad` fails the load instead — session/load|resume throws
+     *  (the session is gone — old PR, dead store); the worker must
+     *  fall back to session/new. */
     loadUpdates?: SessionUpdate[];
     failLoad?: boolean;
     /** The load's prompt-side gate — resolve it to release the load
@@ -207,6 +217,7 @@ export function fakeAcpAgent(
     closes: [],
     forks: [],
     loads: [],
+    resumes: [],
   };
   const app = agent({ name: 'fake-acp' })
     .onRequest('initialize', ctx => {
@@ -217,6 +228,8 @@ export function fakeAcpAgent(
         agentInfo: { name: 'fake-acp', version: '0' },
         agentCapabilities: {
           promptCapabilities: { image: opts.imageCapable === true },
+          ...(opts.loadCapable === true ? { loadSession: true } : {}),
+          ...(opts.resumeCapable === true ? { sessionCapabilities: { resume: {} } } : {}),
           ...opts.agentCapabilities,
         },
       };
@@ -245,7 +258,7 @@ export function fakeAcpAgent(
     .onRequest('session/load', async ctx => {
       seen.loads.push({ sessionId: ctx.params.sessionId, cwd: ctx.params.cwd });
       if (opts.failLoad === true) {
-        throw new Error('session not found');
+        throw new Error(`session ${ctx.params.sessionId} not found`);
       }
       seen.loadClient = ctx.client;
       for (const update of opts.loadUpdates ?? []) {
@@ -255,7 +268,14 @@ export function fakeAcpAgent(
         });
       }
       await opts.holdLoadUntil;
-      return {};
+      return { configOptions: opts.configOptions ?? [] };
+    })
+    .onRequest('session/resume', ctx => {
+      seen.resumes.push(ctx.params.sessionId);
+      if (opts.failLoad === true) {
+        throw new Error(`session ${ctx.params.sessionId} not found`);
+      }
+      return { configOptions: opts.configOptions ?? [] };
     })
     .onRequest('session/close', ctx => {
       seen.closes.push(ctx.params.sessionId);

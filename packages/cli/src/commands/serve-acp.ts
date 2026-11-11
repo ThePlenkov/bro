@@ -44,6 +44,10 @@ import {
   acpSessionRetain,
   AcpDeadLoopError,
   AcpDeadLoopGuard,
+  ACP_COOLDOWN_DEFAULT_MS,
+  AcpLaneCooldown,
+  AcpCooldownError,
+  armWallFromError,
   otelEvent,
   otelParent,
   otelSpan,
@@ -138,6 +142,11 @@ const SESSION_BUSY = -32001;
  *  stopped before it cost a session. The client waits and retries. */
 const DEAD_LOOP = -32003;
 
+/** The wall cooldown's refusal (spec bro-i6811) — the ACCOUNT refused
+ *  the work, so no session was opened. The client waits out the
+ *  retry-after the message names and comes back. */
+const COOLDOWN = -32004;
+
 /** A brokered turn is session-scoped — thinking, tool calls, subagents
  *  routinely run past the per-request `timeoutMs` the conductor gives
  *  one Messages-API call. The floor keeps a wedged agent from parking
@@ -166,6 +175,11 @@ function asWireError(err: unknown): never {
       // client can tell a dead loop from a broker failure
       throw new RequestError(DEAD_LOOP, e.message);
     }
+    if (e instanceof AcpCooldownError) {
+      // the refusal is the lane's own answer — the account is under a
+      // wall, and no session was opened to hear it
+      throw new RequestError(COOLDOWN, e.message);
+    }
   }
   throw new RequestError(-32603, err instanceof Error ? err.message : String(err));
 }
@@ -193,6 +207,44 @@ export function acpTransport(
     maxOpens: cfg.acpMaxOpens ?? 8,
     maxAbandoned: cfg.acpMaxAbandoned ?? 32,
   });
+  // the account's wall cooldown (spec bro-i6811) — the transport rides
+  // the SAME account as the conductor, so a wall that closed the
+  // conductor's lane closes this one too: the refusal happens before
+  // the session opens, and costs no quota
+  // the SHARED instance when the conductor handed one over: the two
+  // surfaces ride the same account, so a wall that closed one must close
+  // the other — a private cooldown here would just move the retry
+  // storm to the other surface.
+  const cooldown =
+    cfg.cooldown ??
+    new AcpLaneCooldown({
+      cooldownMs: cfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
+    });
+  /** The account said no — close the lane so the next session is
+   * refused instead of bought. */
+  const armWall = (err: unknown): void => {
+    if (err instanceof AcpCooldownError) {
+      return;
+    }
+    // the arming POLICY lives in the provider layer — the conductor and
+    // this transport cannot drift apart
+    const armed = armWallFromError(cooldown, err);
+    if (armed === undefined) {
+      return;
+    }
+    otelEvent('acp.cooldown', {
+      backend: cfg.backend,
+      reason: armed.wall.reason,
+      retry_after: armed.wall.retryAfterSec,
+      walls: cooldown.wallCount(),
+      armed: armed.armed,
+    });
+  };
+  /** The lane is cooling down — the refusal costs no session. */
+  const refusal = (): AcpCooldownError | undefined => {
+    const wall = cooldown.refusal();
+    return wall === undefined ? undefined : new AcpCooldownError(wall);
+  };
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>();
@@ -380,6 +432,7 @@ export function acpTransport(
         {}
       );
     } catch (err) {
+      armWall(err);
       asWireError(err);
     }
   };
@@ -438,6 +491,12 @@ export function acpTransport(
   ): Promise<unknown> => {
     try {
       sweep();
+      // the lane is under a provider wall (spec bro-i6811) — the refusal
+      // is spoken BEFORE the session opens, so it costs no quota
+      const cooling = refusal();
+      if (cooling !== undefined) {
+        throw cooling;
+      }
       const peer = await pool.link();
       const retained = await acpSessionRetain(
         peer,
@@ -449,7 +508,7 @@ export function acpTransport(
           sessionRequest: params as NewSessionRequest,
           // the churn accounting (spec bro-b961a) — the session is
           // charged to the connection that opened it
-          guard: { guard, scope: st.scope, peer: by },
+          guard: { guard, scope: st.scope, peer: by, cooldown },
           stallMs: cfg.acpStallMs ?? 300_000,
         }
       );
@@ -486,6 +545,7 @@ export function acpTransport(
       });
       return retained.newSessionResponse;
     } catch (err) {
+      armWall(err);
       asWireError(err);
     }
   };
@@ -547,6 +607,7 @@ export function acpTransport(
       return r.response;
     } catch (err) {
       evictDeadTurn(sid, sess);
+      armWall(err);
       asWireError(err);
     } finally {
       sess.busy = false;

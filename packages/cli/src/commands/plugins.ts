@@ -6,9 +6,15 @@
  *   bro plugins install <client> [--global] [--local] [--dry-run]
  *   bro plugins uninstall <client> [--global] [--local] [--dry-run] [--force]
  *
- * The adapter surface materializes a client plugin module into that
- * client's plugin dirs — opencode: `$XDG_CONFIG_HOME/opencode/plugins/
- * bro.ts` (default ~/.config) and `<repo>/.opencode/plugins/bro.ts`.
+ * The adapter surface materializes a client plugin into that client's
+ * plugin dirs. Two shapes exist:
+ *
+ *   file    one module at a path — kilo, pi, omp.
+ *   bundle  a DIRECTORY of modules installed as one unit — opencode v2's
+ *           catalog plugin: `bro/{index.ts,tui.tsx,rpc.ts}`. opencode
+ *           loads a TUI half only for a package that also has a server,
+ *           so the three files must land in one directory.
+ *
  * Neither scope flag means both. Install is idempotent by content:
  * a current file is a no-op, a differing one is `updated`. Uninstall
  * refuses a foreign/hand-edited file without `--force`.
@@ -22,6 +28,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -54,20 +61,33 @@ interface Registration {
   unregister(): void;
 }
 
-/** A second module file installed beside the primary — opencode's TUI
- *  plugin lands as `bro-cli.ts` next to `bro.ts`. Extras carry their own
- *  artifact ladder; they never own a registration (where a manifest
- *  entry exists it belongs to the primary module). */
-interface ExtraFile {
+/** One file of a bundle surface — where it comes from and the name it
+ *  takes inside the bundle's directory. */
+interface SurfaceFile {
+  /** the source path, or null when the artifact cannot be resolved */
   artifact: string | null;
-  targets: Record<PluginScope, string>;
+  /** the file name inside the bundle directory */
+  name: string;
 }
 
+/** An installable unit. `file` is one module; `bundle` is a directory of
+ *  modules installed as one unit — opencode v2's catalog plugin (the
+ *  server entrypoint, the TUI half and the RPC contract both halves
+ *  share) is a bundle, because opencode loads a TUI half only for a
+ *  package that also has a server. */
+type Surface =
+  | { kind: 'file'; artifact: string | null; targets: Record<PluginScope, string> }
+  | { kind: 'bundle'; files: SurfaceFile[]; dirs: Record<PluginScope, string> };
+
 interface ClientSpec {
-  /** The shippable module's source path, or null when unresolvable. */
-  artifact(cwd: string): string | null;
-  targets(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string>;
-  extras?(cwd: string, env: NodeJS.ProcessEnv): ExtraFile[];
+  /** The surfaces this client installs, in order — the first one owns
+   *  the manifest registration (where a client has one). */
+  surfaces(cwd: string, env: NodeJS.ProcessEnv): Surface[];
+  /** Loose files an earlier layout used. opencode v1 shipped `bro.ts` +
+   *  `bro-cli.ts` beside the v2 plugin directory; a stale module in the
+   *  plugins dir is still LOADED by opencode, so it has to go when the
+   *  current layout lands. */
+  legacy?(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string[]>;
   registration?(scope: PluginScope, path: string, env: NodeJS.ProcessEnv): Registration | null;
 }
 
@@ -101,6 +121,21 @@ function gitRoot(cwd: string): string | null {
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
 }
 
+/** Find an agent plugin package root in the monorepo or installed. */
+function agentPluginPackageRoot(pkgName: string): string | null {
+  // monorepo layout: packages/agent-plugins/<dir> or packages/<dir>
+  const cli = packageRoot();
+  if (cli !== null) {
+    // cli is .../packages/cli or .../packages/cli/dist-context; walk up to packages/
+    const packagesDir = dirname(cli);
+    for (const dir of [join(packagesDir, 'agent-plugins', pkgName), join(packagesDir, pkgName)]) {
+      const manifest = join(dir, 'package.json');
+      if (existsSync(manifest)) return dir;
+    }
+  }
+  return null;
+}
+
 function firstExisting(candidates: Array<string | null>): string | null {
   for (const c of candidates) {
     if (c !== null && existsSync(c)) {
@@ -110,49 +145,72 @@ function firstExisting(candidates: Array<string | null>): string | null {
   return null;
 }
 
-/** Artifact sources in preference order: the TS source (checkout), the
- *  bundled dist entry (npm tarball — self-contained: opencode.ts imports
- *  node builtins only, so its bundle has no internal chunks), then the
- *  repo-distributed adapter a bro clone carries under plugins/. */
-function opencodeArtifact(cwd: string): string | null {
-  const pkg = packageRoot();
+/** Artifact sources in preference order: the TS source (checkout), then the
+ *  repo-distributed adapter a bro clone carries under plugins/, then the
+ *  copy that rides the tarball. The names differ — the checkout keeps
+ *  the server as `opencode.ts`, the installed catalog plugin serves it
+ *  as the directory's `index.ts`.
+ *
+ *  The tarball copy is the one that works OUTSIDE a checkout: an
+ *  installed bro has no `packages/agent-plugins/` tree and no repo
+ *  clone, and the adapter packages are not published on their own — so
+ *  without it `bro plugins install opencode` had nothing to write. */
+function opencodeArtifact(cwd: string, src: string, shipped: string): string | null {
+  const ap = agentPluginPackageRoot('opencode');
   const root = gitRoot(cwd);
+  const cli = packageRoot();
   return firstExisting([
-    pkg === null ? null : join(pkg, 'src', 'opencode.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'opencode.js'),
-    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'bro.ts'),
+    ap === null ? null : join(ap, 'src', src),
+    root === null ? null : join(root, 'plugins', 'opencode', 'bro', shipped),
+    cli === null ? null : join(cli, 'dist', 'plugins', 'opencode', 'bro', shipped),
   ]);
 }
 
-/** The TUI half's ladder mirrors the server module's — source, bundled
- *  dist (`./tui` export → dist/opencode-tui.js), the repo artifact. */
-function opencodeTuiArtifact(cwd: string): string | null {
+/** The opencode v2 catalog plugin — one directory, three modules:
+ *  `index.ts` is the server entrypoint (opencode's plugin loader reads
+ *  the directory's index), `tui.tsx` the terminal half, `rpc.ts` the
+ *  contract both halves share. The server's `./rpc.ts` import resolves
+ *  inside the installed directory. */
+function opencodeBundle(cwd: string, env: NodeJS.ProcessEnv): Surface {
+  const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
+  return {
+    kind: 'bundle',
+    files: [
+      { name: 'index.ts', artifact: opencodeArtifact(cwd, 'opencode.ts', 'index.ts') },
+      { name: 'tui.tsx', artifact: opencodeArtifact(cwd, 'tui.tsx', 'tui.tsx') },
+      { name: 'rpc.ts', artifact: opencodeArtifact(cwd, 'rpc.ts', 'rpc.ts') },
+    ],
+    dirs: {
+      global: join(configDir, 'opencode', 'plugins', 'bro'),
+      local: join(localDir, 'plugins', 'bro'),
+    },
+  };
+}
+
+/** The v1-era loose modules opencode used to load from the plugins dir. */
+function opencodeLegacy(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string[]> {
+  const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
+  return {
+    global: [
+      join(configDir, 'opencode', 'plugins', 'bro.ts'),
+      join(configDir, 'opencode', 'plugins', 'bro-cli.ts'),
+    ],
+    local: [join(localDir, 'plugins', 'bro.ts'), join(localDir, 'plugins', 'bro-cli.ts')],
+  };
+}
+
+function kiloArtifact(cwd: string): string | null {
+  const ap = agentPluginPackageRoot('kilo');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
   return firstExisting([
-    pkg === null ? null : join(pkg, 'src', 'opencode-tui.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'opencode-tui.js'),
-    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'cli.ts'),
+    ap === null ? null : join(ap, 'src', 'kilo.ts'),
+    ap === null ? null : join(ap, 'dist', 'kilo.js'),
+    pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
+    root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
   ]);
-}
-
-/** The V2 TUI half's ladder — opencode v2 discovers TUI plugins only as
- *  `plugins/<dir>/{tui}.{ts,tsx,js}` entries, so the target is a
- *  directory and the installed filename tracks the artifact's own
- *  extension (source .tsx vs bundled .js). */
-function opencodeTuiV2Artifact(cwd: string): string | null {
-  const pkg = packageRoot();
-  const root = gitRoot(cwd);
-  return firstExisting([
-    pkg === null ? null : join(pkg, 'src', 'opencode-tui-v2.tsx'),
-    pkg === null ? null : join(pkg, 'dist', 'opencode-tui-v2.js'),
-    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'tui.tsx'),
-  ]);
-}
-
-/** `plugins/bro/tui.<ext>` — the v2 TUI directory entry. */
-function opencodeTuiV2Target(dir: string, artifact: string): string {
-  return join(dir, 'plugins', 'bro', `tui.${artifact.endsWith('.js') ? 'js' : 'tsx'}`);
 }
 
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
@@ -198,7 +256,7 @@ function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
     get registered() {
       return pluginList(readKiloManifest(env)).includes(entry);
     },
-    register() {
+    register(): void {
       const fresh = !existsSync(manifestPath);
       const m = readKiloManifest(env);
       const list = pluginList(m);
@@ -208,7 +266,7 @@ function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
       const body = fresh ? { $schema: 'https://app.kilo.ai/config.json', ...m } : m;
       writeManifest({ ...body, plugin: [...list, entry] });
     },
-    unregister() {
+    unregister(): void {
       if (!existsSync(manifestPath)) {
         return;
       }
@@ -222,53 +280,38 @@ function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
   };
 }
 
-/** kilo's artifact ladder mirrors opencode's — but the global target is
- *  NOT `plugin/`/`plugins/` (kilo auto-scans those; a file there would
- *  double-register against the kilo.json `plugin[]` entry). */
-function kiloArtifact(cwd: string): string | null {
-  const pkg = packageRoot();
-  const root = gitRoot(cwd);
-  return firstExisting([
-    pkg === null ? null : join(pkg, 'src', 'kilo.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
-    root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
-  ]);
-}
-
-/** The pi adapter artifact — the generated plugin bundle, the bundled
- *  dist, or the source entry. Every rung is self-contained (the shared
- *  adapter core is folded in), so jiti loads it with no node_modules to
- *  resolve against. */
 function piArtifact(cwd: string): string | null {
+  const ap = agentPluginPackageRoot('pi');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
+    ap === null ? null : join(ap, 'dist', 'pi.js'),
+    ap === null ? null : join(ap, 'src', 'pi.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
-    pkg === null ? null : join(pkg, 'src', 'pi.ts'),
   ]);
 }
 
-/** The omp adapter artifact — the generated plugin bundle, the bundled
- *  dist, or the source entry. The bundle is self-contained (the shared
- *  adapter core is folded in) and carries the `bro-adapter` sentinel, so
- *  it loads with no node_modules and stays recognizable as ours. */
 function ompArtifact(cwd: string): string | null {
+  const ap = agentPluginPackageRoot('omp');
   const pkg = packageRoot();
   const root = gitRoot(cwd);
   return firstExisting([
     root === null ? null : join(root, 'plugins', 'omp', 'bro', 'bro.ts'),
+    ap === null ? null : join(ap, 'dist', 'omp.js'),
+    ap === null ? null : join(ap, 'src', 'omp.ts'),
     pkg === null ? null : join(pkg, 'dist', 'omp.js'),
-    pkg === null ? null : join(pkg, 'src', 'omp.ts'),
   ]);
 }
 
 /** omp's active agent directory — the user profile's config root.
- *  `PI_CODING_AGENT_DIR` relocates the default profile's directory;
- *  a named profile lives under `~/.omp/profiles/<name>/agent`. */
+ *  `OMP_AGENT_DIR` relocates it; `PI_CODING_AGENT_DIR` is accepted for
+ *  pi-coding-agent/OMP lineage compatibility; a named profile lives under
+ *  `~/.omp/profiles/<name>/agent`. */
 function ompAgentDir(env: NodeJS.ProcessEnv): string {
-  if (env.PI_CODING_AGENT_DIR !== undefined && env.PI_CODING_AGENT_DIR !== '') {
-    return env.PI_CODING_AGENT_DIR;
+  const override = env.OMP_AGENT_DIR || env.PI_CODING_AGENT_DIR;
+  if (override !== undefined && override !== '') {
+    return override;
   }
   const profile = env.OMP_PROFILE;
   if (profile !== undefined && profile !== '') {
@@ -279,70 +322,57 @@ function ompAgentDir(env: NodeJS.ProcessEnv): string {
 
 const CLIENTS: Record<string, ClientSpec> = {
   opencode: {
-    artifact: opencodeArtifact,
-    targets: (cwd, env) => ({
-      global: join(
-        env.XDG_CONFIG_HOME || join(homedir(), '.config'),
-        'opencode',
-        'plugins',
-        'bro.ts'
-      ),
-      local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro.ts'),
-    }),
-    extras: (cwd, env) => {
-      const v2 = opencodeTuiV2Artifact(cwd);
-      const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config');
-      const localDir = join(gitRoot(cwd) ?? cwd, '.opencode');
-      return [
-        {
-          artifact: opencodeTuiArtifact(cwd),
-          targets: {
-            global: join(configDir, 'opencode', 'plugins', 'bro-cli.ts'),
-            local: join(localDir, 'plugins', 'bro-cli.ts'),
-          },
-        },
-        {
-          artifact: v2,
-          targets: {
-            global: opencodeTuiV2Target(join(configDir, 'opencode'), v2 ?? 'tui.tsx'),
-            local: opencodeTuiV2Target(localDir, v2 ?? 'tui.tsx'),
-          },
-        },
-      ];
-    },
+    // the v2 catalog plugin — a directory of three modules
+    surfaces: (cwd, env) => [opencodeBundle(cwd, env)],
+    legacy: (cwd, env) => opencodeLegacy(cwd, env),
   },
   kilo: {
-    artifact: kiloArtifact,
-    targets: (cwd, env) => ({
-      global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
-      local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
-    }),
+    surfaces: (cwd, env) => [
+      {
+        kind: 'file',
+        artifact: kiloArtifact(cwd),
+        targets: {
+          global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
+          local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
+        },
+      },
+    ],
     registration: (scope, path, env) => (scope === 'global' ? kiloRegistration(path, env) : null),
   },
   pi: {
-    artifact: piArtifact,
     // pi discovers <cwd>/.pi/extensions/ locally and
     // <agentDir>/extensions/ globally; the agent dir is
     // $PI_CODING_AGENT_DIR or ~/.pi/agent
-    targets: (cwd, env) => ({
-      global: join(
-        env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'),
-        'extensions',
-        'bro.ts'
-      ),
-      local: join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
-    }),
+    surfaces: (cwd, env) => [
+      {
+        kind: 'file',
+        artifact: piArtifact(cwd),
+        targets: {
+          global: join(
+            env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'),
+            'extensions',
+            'bro.ts'
+          ),
+          local: join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
+        },
+      },
+    ],
   },
   omp: {
-    artifact: ompArtifact,
     // omp discovers <cwd>/.omp/extensions/ locally and
     // <agentDir>/extensions/ globally — the same loose-extension shape
     // pi uses. The full plugin (skills, hooks, commands, WATCHDOG) is
     // omp's own package surface: `omp plugin install ./plugins/omp/bro`.
-    targets: (cwd, env) => ({
-      global: join(ompAgentDir(env), 'extensions', 'bro.ts'),
-      local: join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
-    }),
+    surfaces: (cwd, env) => [
+      {
+        kind: 'file',
+        artifact: ompArtifact(cwd),
+        targets: {
+          global: join(ompAgentDir(env), 'extensions', 'bro.ts'),
+          local: join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
+        },
+      },
+    ],
   },
 };
 
@@ -354,9 +384,12 @@ export function clientNames(): string[] {
  *  the compiled bundle. Every adapter ships an invariant
  *  `bro-adapter` sentinel comment (the marker no rename can break);
  *  pre-marker artifacts are recognized by the `id:"bro"` claim plus a
- *  family shape token: opencode ships `server:<anything>` (its TUI
- *  module ships `id:"bro.cli"` + `kind:"opencode-tui"`); the pi
- *  extension ships `kind:"pi-extension"`. */
+ *  family shape token: the opencode v2 plugin ships `Plugin.define(`;
+ *  the pi extension ships `kind:"pi-extension"`; the omp extension
+ *  ships `kind:"omp-extension"`. The v1 shapes (`server:` and
+ *  `kind:"opencode-tui"`) are recognized too — not as support, but so
+ *  an old install can still be cleaned up instead of shadowing the
+ *  current layout. */
 export function isBroAdapter(text: string): boolean {
   // ownership needs the `id:"bro"` claim AND a family token — a bare
   // `bro-adapter` mention in a foreign file must not read as ours.
@@ -369,41 +402,61 @@ export function isBroAdapter(text: string): boolean {
   return (
     text.includes('bro-adapter') ||
     /\bserver:\s*\w+/.test(text) ||
+    /\bPlugin\.define\s*\(/.test(text) ||
     /\bkind:\s*["']pi-extension["']/.test(text) ||
     /\bkind:\s*["']omp-extension["']/.test(text) ||
     /\bkind:\s*["']opencode-tui["']/.test(text)
   );
 }
 
-function stateAt(target: string, artifact: string | null, reg: Registration | null): InstallState {
-  if (!existsSync(target)) {
+/** The bytes of a surface's file — null when the artifact cannot be
+ *  resolved (nothing to compare against). */
+function surfaceBytes(artifact: string | null): string | null {
+  return artifact === null ? null : readFileSync(artifact, 'utf8');
+}
+
+function stateAt(surface: Surface, scope: PluginScope, reg: Registration | null): InstallState {
+  if (surface.kind === 'file') {
+    const path = surface.targets[scope];
+    if (!existsSync(path)) {
+      return 'absent';
+    }
+    if (surface.artifact === null) {
+      return 'present';
+    }
+    const current = readFileSync(path, 'utf8') === readFileSync(surface.artifact, 'utf8');
+    // a matching file with its manifest entry missing is "install me again"
+    return current && (reg === null || reg.registered) ? 'installed' : 'stale';
+  }
+  const dir = surface.dirs[scope];
+  if (!existsSync(dir)) {
     return 'absent';
   }
-  if (artifact === null) {
+  const comparable = surface.files.filter(f => f.artifact !== null);
+  if (comparable.length === 0) {
     return 'present';
   }
-  const current = readFileSync(target, 'utf8') === readFileSync(artifact, 'utf8');
-  // a matching file with its manifest entry missing is "install me again"
-  return current && (reg === null || reg.registered) ? 'installed' : 'stale';
+  const all = comparable.every(f => {
+    const path = join(dir, f.name);
+    return existsSync(path) && readFileSync(path, 'utf8') === readFileSync(f.artifact!, 'utf8');
+  });
+  return all ? 'installed' : 'stale';
 }
 
 /** The client × scope matrix — `bro plugins list` and doctor's row. A
- *  client's extra files get their own rows, distinguished by path. */
+ *  client's surfaces get their own rows, distinguished by path. */
 export function pluginRows(
   cwd: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env
 ): PluginRow[] {
   const rows: PluginRow[] = [];
   for (const [name, client] of Object.entries(CLIENTS)) {
-    const files = [
-      { artifact: client.artifact(cwd), targets: client.targets(cwd, env), primary: true },
-      ...(client.extras?.(cwd, env) ?? []).map(e => ({ ...e, primary: false })),
-    ];
+    const surfaces = client.surfaces(cwd, env);
     for (const scope of ['global', 'local'] as const) {
-      for (const f of files) {
-        const path = f.targets[scope];
-        const reg = f.primary ? (client.registration?.(scope, path, env) ?? null) : null;
-        rows.push({ client: name, scope, state: stateAt(path, f.artifact, reg), path });
+      for (const [idx, surface] of surfaces.entries()) {
+        const path = surface.kind === 'file' ? surface.targets[scope] : surface.dirs[scope];
+        const reg = idx === 0 ? (client.registration?.(scope, path, env) ?? null) : null;
+        rows.push({ client: name, scope, state: stateAt(surface, scope, reg), path });
       }
     }
   }
@@ -466,35 +519,24 @@ function knownClient(name: string): ClientSpec {
 
 export function installClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
   const client = knownClient(name);
-  const artifact = client.artifact(opts.cwd);
-  if (artifact === null) {
-    throw new CommandError(
-      `plugins install: cannot resolve the ${name} adapter module`,
-      EXIT.error
-    );
-  }
-  const content = readFileSync(artifact, 'utf8');
-  const targets = client.targets(opts.cwd, opts.env);
-  // extras with no resolvable artifact are additive surfaces — skipped,
-  // never fatal (an old dist may predate the module)
-  const extras = (client.extras?.(opts.cwd, opts.env) ?? [])
-    .filter((e): e is ExtraFile & { artifact: string } => e.artifact !== null)
-    .map(e => ({ content: readFileSync(e.artifact, 'utf8'), targets: e.targets }));
+  const surfaces = client.surfaces(opts.cwd, opts.env);
   const outcomes: Outcome[] = [];
   for (const scope of scopes) {
-    for (const f of [
-      { content, targets, primary: true },
-      ...extras.map(e => ({ ...e, primary: false })),
-    ]) {
+    for (const [idx, surface] of surfaces.entries()) {
+      const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
-        installOne(
-          name,
-          scope,
-          f,
-          f.primary ? client : { ...client, registration: undefined },
-          opts
-        )
+        surface.kind === 'file'
+          ? installOne(name, scope, surface, owner, opts)
+          : installBundle(name, scope, surface.files, surface.dirs[scope], opts)
       );
+    }
+    // a module from an earlier layout is still loaded by the host — it
+    // goes when the current layout lands
+    for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
+      const outcome = legacyOutcome(name, scope, legacy, opts);
+      if (outcome !== null) {
+        outcomes.push(outcome);
+      }
     }
   }
   return outcomes;
@@ -503,12 +545,19 @@ export function installClient(name: string, scopes: PluginScope[], opts: MutateO
 function installOne(
   name: string,
   scope: PluginScope,
-  file: { content: string; targets: Record<PluginScope, string> },
+  surface: { kind: 'file'; artifact: string | null; targets: Record<PluginScope, string> },
   client: ClientSpec,
   opts: MutateOpts
 ): Outcome {
-  const { content } = file;
-  const path = file.targets[scope];
+  const { artifact, targets } = surface;
+  if (artifact === null) {
+    throw new CommandError(
+      `plugins install: cannot resolve the ${name} adapter module`,
+      EXIT.error
+    );
+  }
+  const content = readFileSync(artifact, 'utf8');
+  const path = targets[scope];
   // registration parses the manifest — a malformed one exits here,
   // before the module file is touched
   const reg = client.registration?.(scope, path, opts.env) ?? null;
@@ -552,32 +601,108 @@ function installOne(
   };
 }
 
+/** A bundle surface — a directory of modules installed as one unit. The
+ *  outcome path is the directory; a refusal names the file that holds
+ *  it. */
+function installBundle(
+  name: string,
+  scope: PluginScope,
+  files: SurfaceFile[],
+  dir: string,
+  opts: MutateOpts
+): Outcome {
+  const contents = files
+    .map(f => ({ name: f.name, content: surfaceBytes(f.artifact) }))
+    .filter((c): c is { name: string; content: string } => c.content !== null);
+  if (contents.length === 0) {
+    throw new CommandError(
+      `plugins install: cannot resolve the ${name} adapter module`,
+      EXIT.error
+    );
+  }
+  // a file already holding the slot that carries no bro sentinel is a
+  // foreign plugin under our name — clobbering it needs --force
+  for (const c of contents) {
+    const path = join(dir, c.name);
+    if (!existsSync(path)) {
+      continue;
+    }
+    const prior = readFileSync(path, 'utf8');
+    if (prior !== c.content && !isBroAdapter(prior) && !opts.force) {
+      return {
+        client: name,
+        scope,
+        action: 'refused',
+        path,
+        note: 'a foreign file holds this slot — pass --force to overwrite',
+      };
+    }
+  }
+  const existed = existsSync(dir);
+  if (opts.dryRun) {
+    return {
+      client: name,
+      scope,
+      action: existed ? 'would-update' : 'would-install',
+      path: dir,
+    };
+  }
+  let changed = !existed;
+  for (const c of contents) {
+    const path = join(dir, c.name);
+    if (existsSync(path) && readFileSync(path, 'utf8') === c.content) {
+      continue;
+    }
+    atomicWrite(path, c.content);
+    changed = true;
+  }
+  return {
+    client: name,
+    scope,
+    action: changed ? (existed ? 'updated' : 'installed') : 'current',
+    path: dir,
+  };
+}
+
+/** A loose file from an earlier layout. A foreign file is left alone —
+ *  it is not ours to delete. */
+function legacyOutcome(
+  name: string,
+  scope: PluginScope,
+  path: string,
+  opts: MutateOpts
+): Outcome | null {
+  if (!existsSync(path)) {
+    return null;
+  }
+  if (!isBroAdapter(readFileSync(path, 'utf8'))) {
+    return null;
+  }
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path, note: 'legacy layout' };
+  }
+  rmSync(path);
+  return { client: name, scope, action: 'removed', path, note: 'legacy layout' };
+}
+
 export function uninstallClient(name: string, scopes: PluginScope[], opts: MutateOpts): Outcome[] {
   const client = knownClient(name);
-  const targets = client.targets(opts.cwd, opts.env);
-  const artifact = client.artifact(opts.cwd);
-  const clean = artifact === null ? null : readFileSync(artifact, 'utf8');
-  // extras keep a possibly-null artifact — no artifact to compare means
-  // the sentinel check alone decides ownership, same as the primary
-  const extras = (client.extras?.(opts.cwd, opts.env) ?? []).map(e => ({
-    clean: e.artifact === null ? null : readFileSync(e.artifact, 'utf8'),
-    targets: e.targets,
-  }));
+  const surfaces = client.surfaces(opts.cwd, opts.env);
   const outcomes: Outcome[] = [];
   for (const scope of scopes) {
-    for (const f of [
-      { clean, targets, primary: true },
-      ...extras.map(e => ({ ...e, primary: false })),
-    ]) {
+    for (const [idx, surface] of surfaces.entries()) {
+      const owner = idx === 0 ? client : { ...client, registration: undefined };
       outcomes.push(
-        uninstallOne(
-          name,
-          scope,
-          f,
-          f.primary ? client : { ...client, registration: undefined },
-          opts
-        )
+        surface.kind === 'file'
+          ? uninstallOne(name, scope, surface, owner, opts)
+          : uninstallBundle(name, scope, surface.files, surface.dirs[scope], opts)
       );
+    }
+    for (const legacy of client.legacy?.(opts.cwd, opts.env)[scope] ?? []) {
+      const outcome = legacyOutcome(name, scope, legacy, opts);
+      if (outcome !== null) {
+        outcomes.push(outcome);
+      }
     }
   }
   return outcomes;
@@ -586,12 +711,12 @@ export function uninstallClient(name: string, scopes: PluginScope[], opts: Mutat
 function uninstallOne(
   name: string,
   scope: PluginScope,
-  file: { clean: string | null; targets: Record<PluginScope, string> },
+  surface: { kind: 'file'; artifact: string | null; targets: Record<PluginScope, string> },
   client: ClientSpec,
   opts: MutateOpts
 ): Outcome {
-  const { clean } = file;
-  const path = file.targets[scope];
+  const path = surface.targets[scope];
+  const clean = surfaceBytes(surface.artifact);
   const reg = client.registration?.(scope, path, opts.env) ?? null;
   if (!existsSync(path)) {
     return absentOutcome(name, scope, path, reg, opts.dryRun);
@@ -630,6 +755,56 @@ function uninstallOne(
   };
 }
 
+/** A bundle surface — every module of the directory must be ours before
+ *  the directory goes. Files we don't know (a user's own module beside
+ *  ours) stay; the directory itself goes only when it is empty. */
+function uninstallBundle(
+  name: string,
+  scope: PluginScope,
+  files: SurfaceFile[],
+  dir: string,
+  opts: MutateOpts
+): Outcome {
+  if (!existsSync(dir)) {
+    return { client: name, scope, action: 'absent', path: dir };
+  }
+  for (const f of files) {
+    const path = join(dir, f.name);
+    if (!existsSync(path)) {
+      continue;
+    }
+    const prior = readFileSync(path, 'utf8');
+    const clean = surfaceBytes(f.artifact);
+    const ours = clean === null ? isBroAdapter(prior) : prior === clean;
+    if (!opts.force && !ours) {
+      return {
+        client: name,
+        scope,
+        action: 'refused',
+        path,
+        note: isBroAdapter(prior)
+          ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
+          : 'not a bro adapter — pass --force to remove',
+      };
+    }
+  }
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path: dir };
+  }
+  for (const f of files) {
+    const path = join(dir, f.name);
+    if (existsSync(path)) {
+      rmSync(path);
+    }
+  }
+  try {
+    rmdirSync(dir);
+  } catch {
+    // not empty — something of the user's lives here, leave the directory
+  }
+  return { client: name, scope, action: 'removed', path: dir };
+}
+
 /** The plugin file is already gone — an absent slot can still carry a
  *  dangling manifest entry, which gets swept here. */
 function absentOutcome(
@@ -660,8 +835,13 @@ function printOutcomes(outcomes: Outcome[]): void {
   }
 }
 
+/** The flags `bro plugins install|uninstall` accepts — a mistyped flag
+ *  must not be silently dropped: dropping it hides both the typo and
+ *  whatever value it was supposed to carry. */
+const PLUGIN_FLAGS = new Set(['--global', '--local', '--dry-run', '--force']);
+
 function clientArg(rest: string[]): string {
-  const pos = positionals(rest, new Set());
+  const pos = positionals(rest, new Set(), { boolFlags: PLUGIN_FLAGS, strict: true });
   if (pos.length !== 1) {
     throw new CommandError(
       `usage: bro plugins install|uninstall <${clientNames().join('|')}> [--global] [--local] [--dry-run] [--force]`,

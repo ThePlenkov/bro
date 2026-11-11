@@ -67,14 +67,18 @@ Claude and Codex do not receive a `skills/` entry — each plugin root is the re
 Never edit generated files — `npm run gen:plugins` rewrites them,
 `npm run check:plugins` verifies freshness.
 
-OpenCode is not a generated adapter: it loads JS/TS modules instead of a hook
-manifest, so it ships as a hand-written plugin at
-`packages/cli/src/opencode.ts` — a tsdown entry published as the package's
-`./server` export (the subpath OpenCode's loader looks for, hardcoded as
-`PluginKind = "server"` upstream). It speaks the same `bro hooks <event>`
-stdin/stdout contract as `hooks/run.sh` rather than importing bro, so the
-plugin and the CLI can never be different versions. Any bro policy added to
-that contract lands in every adapter at once.
+OpenCode is a generated adapter too, but a different shape: opencode v2
+loads a plugin as a _directory_, so `plugins/opencode/bro/` holds three
+modules copied from `packages/agent-plugins/opencode/src/` — `index.ts`
+(the server entrypoint), `tui.tsx` (the terminal half) and `rpc.ts` (the
+contract both halves share). opencode raises the TUI half only for a
+package that also has a server, so the three must stay together — and
+`bro plugins install opencode` materializes them as one directory. The
+sources live in their own package (`@broject/opencode`) because a TUI
+half cannot ship without its server. The adapter speaks the same
+`bro hooks <event>` stdin/stdout contract as `hooks/run.sh` rather than
+importing bro, so the plugin and the CLI can never be different versions.
+Any bro policy added to that contract lands in every adapter at once.
 
 ### The adapter framework (pi, omp)
 
@@ -126,6 +130,43 @@ npm run lint       # includes skill lint/validate targets
 npx nx show projects
 ```
 
+## The stable branch
+
+`stable` is the local branch that proves a `main` sync did not silently break
+the plugin/integration. It is not a release branch — it is a canary: it
+tracks `origin/main` (the local `main` in a clone with no remote), but
+only ever moves forward on a green run — a canary on a stale `main` would
+prove nothing.
+
+```bash
+node scripts/sync-stable.ts --sync           # merge main into stable + verify
+node scripts/sync-stable.ts --sync --dry-run # plan only — mutates nothing
+node scripts/sync-stable.ts --sync --push    # also push stable to its remote
+```
+
+`--sync` is the only mode that mutates anything; without it the script just
+prints its usage. Run it whenever `main` moves (after a merge, before a
+release) — the point is to catch a broken sync while it is still cheap.
+
+The rule: **`stable` only advances when every check passes.** The merge runs
+on a throwaway branch, the full check set runs against the merged tree, and
+only a green suite moves the `stable` ref onto the merge commit. A red
+suite drops the throwaway branch and leaves `stable` at its previous good
+commit — the failing check is named in the output.
+
+Checks: `check:plugins`, `check:docs`, `build`, `check:embedded`,
+`check:command-docs`, `check:contract`, `check:config-schema`, `typecheck`,
+`test`, `test:e2e` — the hermetic steps CI runs. Nothing is pushed unless
+`--push` is passed, and the push is never forced.
+
+`test:e2e` is the one flaky target (nx flags it as such — a green rerun
+after a red one). `--skip-e2e` is the escape hatch when it flakes for a
+known reason; the skip is printed in the output, so a green run that
+skipped it still says so.
+
+The script refuses to run on a dirty worktree: it never stashes, resets, or
+discards anyone's uncommitted work. Commit or stash it yourself first.
+
 ## Connectors
 
 External systems integrate as **connectors** (`packages/core/src/connectors.ts`):
@@ -135,11 +176,11 @@ the capability, absence is honest.
 
 ```ts
 interface Connector {
-  name: string                      // 'beads' | 'github' | …
-  matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
-  tasks?(ctx): TaskStore            // work items — `bro task` doc surface + `bro spec` reads
-  reviews?(ctx): ReviewFacade       // PR review loop — `bro review act`, `debt`
-  hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
+  name: string; // 'beads' | 'github' | …
+  matchRemote?(url): boolean; // claims hosts it can serve (auto-detect)
+  tasks?(ctx): TaskStore; // work items — `bro task` doc surface + `bro spec` reads
+  reviews?(ctx): ReviewFacade; // PR review loop — `bro review act`, `debt`
+  hooks?(ctx): ConnectorHooks; // lifecycle probes — see below
 }
 ```
 
@@ -200,11 +241,11 @@ silently. Two rules:
 
 The seams:
 
-| surface | mechanism |
-| --- | --- |
-| whole command | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
-| flag / subcommand | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts) |
-| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site |
+| surface                 | mechanism                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------ |
+| whole command           | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
+| flag / subcommand       | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts)                          |
+| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site             |
 
 All emit `warning: <what> is deprecated — <advice>`. One line, on
 stderr, and the old path keeps working — that's the whole contract.

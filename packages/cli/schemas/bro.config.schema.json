@@ -1640,6 +1640,10 @@
         "acpStallMs": {
           "type": "integer",
           "minimum": 0
+        },
+        "acpCooldownMs": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false

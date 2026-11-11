@@ -501,6 +501,7 @@ export {
   mintAgentId,
   mintRunId,
   patchAgentRegistry,
+  patchAgentRegistryIf,
   probeStep,
   RATE_BACKOFF_BASE_MS,
   RATE_BACKOFF_CAP_MS,

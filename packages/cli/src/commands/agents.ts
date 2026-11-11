@@ -103,6 +103,7 @@ import {
   resolveAgentConnector,
   resolveSpawnProvider,
   resolveSpawnRoute,
+  settleAcpSessions,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
@@ -661,6 +662,9 @@ export interface StepSpawnRequest {
    *  provenance (spec bro-z8tng). Stamped into the registry and pinned
    *  into the worker's env as BRO_DELEGATED_BY. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -826,6 +830,7 @@ export function spawnStepAgent(
           class: route?.class,
           delegatedBy: req.delegatedBy,
           worker: pick.worker,
+          resumeSessionId: req.resumeSessionId,
           ...(routeSpec === undefined ? {} : { route: routeSpec }),
           enter: resolved.enter,
         })
@@ -1585,6 +1590,13 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
   }
   const { backends } = await collectAgentBackends(dir, env, connectorName);
   const { reapable, skipped, expected } = selectReapable(backends, cutoff);
+  // a reaped row takes its recorded acp session id with it — run the
+  // provider's sessionRm while the id is still on file, or an adhoc
+  // `agents run` worker's session outlives its only record (the
+  // PR-settle hook in spec bro-5qsnr never fires for phantom steps)
+  if (reapable.length > 0) {
+    settleAcpSessions(dir, env, { molSteps: reapable });
+  }
   const removed = reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected);
   if (json) {
     console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2));
