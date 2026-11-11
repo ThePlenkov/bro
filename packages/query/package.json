@@ -18,7 +18,7 @@
     "@broject/core": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
@@ -37,7 +37,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Cross-provider GraphQL query plans for bro — raw fan-out over connectors, deterministic merged results",
+  "description": "Cross-provider GraphQL query plans for bro \u2014 raw fan-out over connectors, deterministic merged results",
   "keywords": [
     "graphql",
     "query",

@@ -16,7 +16,7 @@
     "@broject/core": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
@@ -35,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Jira connector for bro — tasks facade (TaskStore) over the atlassian CLI's Jira REST surface",
+  "description": "Jira connector for bro \u2014 tasks facade (TaskStore) over the atlassian CLI's Jira REST surface",
   "keywords": [
     "jira",
     "atlassian",

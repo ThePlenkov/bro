@@ -18,7 +18,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
@@ -37,7 +37,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "MCP server binding for bro's plane catalog — stdio tools generated from plane descriptors (specs/bro-9rls.1.md)",
+  "description": "MCP server binding for bro's plane catalog \u2014 stdio tools generated from plane descriptors (specs/bro-9rls.1.md)",
   "keywords": [
     "mcp",
     "planes",

@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "@broject/acp-session": "^0.3.0"
@@ -42,7 +42,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Provider bindings for bro — the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
+  "description": "Provider bindings for bro \u2014 the typed provider registry's per-kind clients (systemone typed calls, openai-compat chat, acp sessions, cli command templates); consumers stay vendor-blind",
   "keywords": [
     "providers",
     "judge",
