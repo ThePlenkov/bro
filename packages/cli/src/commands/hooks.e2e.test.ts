@@ -2772,4 +2772,37 @@ describe('hooks e2e — slim dist/hooks.js entry (bro-36sx7.7)', () => {
       assert.match(r.stdout, /INDEX_JS_RAN/);
     });
   });
+
+  test('SELF_ENTRY under a hooks.js launch respawns through the index sibling', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      // the layout dist ships: hooks.js beside index.js. A probe file
+      // named hooks.js reports what self-entry.ts resolved — detached
+      // respawns (daemon run, watch, trace export, post-merge) must
+      // re-enter the full CLI, never the hook-only dispatch
+      const dir = join(f.root, 'entries');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'index.js'), '');
+      const probe = join(dir, 'hooks.js');
+      const selfEntry = resolve(CLI_DIST, '..', '..', 'src', 'commands', 'self-entry.ts');
+      writeFileSync(
+        probe,
+        `import { SELF_ENTRY } from ${JSON.stringify(selfEntry)};\n` +
+          'process.stdout.write(String(SELF_ENTRY));\n'
+      );
+      const r = spawnSync(process.execPath, [probe], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, join(dir, 'index.js'));
+      // and the full entry is untouched — index.js stays itself
+      const probe2 = join(dir, 'probe2.js');
+      writeFileSync(
+        probe2,
+        `import { SELF_ENTRY } from ${JSON.stringify(selfEntry)};\n` +
+          'process.stdout.write(String(SELF_ENTRY));\n'
+      );
+      // argv[1] is probe2.js — not hooks-shaped, SELF_ENTRY is itself
+      const r2 = spawnSync(process.execPath, [probe2], { encoding: 'utf8' });
+      assert.equal(r2.stdout, probe2);
+    });
+  });
 });

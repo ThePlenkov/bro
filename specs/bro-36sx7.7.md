@@ -11,6 +11,8 @@ scope:
 - packages/cli/src/commands/daemon.ts
 - packages/cli/src/commands/drive-pulse.ts
 - packages/cli/src/commands/loop-pulse.ts
+- packages/cli/src/commands/self-entry.ts
+- packages/cli/src/commands/goal.test.ts
 - packages/cli/tsdown.config.ts
 - hooks/run.sh
 - scripts/bench-hooks.ts
@@ -165,6 +167,17 @@ now read the marker first and only pay the `daemon.ts` import (and the
 registry behind it) on a repo that actually armed `bro drive install`/
 `bro loop install`. The gate sits inside the existing try/catch, so a
 marker-read failure stays silent exactly like a probe failure.
+
+### `self-entry.ts` — respawns must not re-enter the hook dispatch
+
+`SELF_ENTRY` is `resolve(process.argv[1])` — under `node dist/hooks.js`
+that is the hook-only entry, and every detached respawn it owns
+(`daemon run`, `watch`, `trace export`, post-merge workers, act-wait
+rearms) would dispatch `daemon run …` to `runHooksCommand` as an
+unknown event and silently no-op. `fullCliEntry` remaps a `hooks.js`/
+`hooks.ts` argv[1] to its `index.js`/`index.ts` sibling when one
+exists — the same full-CLI dispatch `bro <cmd>` takes — leaving every
+other entry untouched.
 
 ### `hooks/run.sh` — prefer the slim entry
 
