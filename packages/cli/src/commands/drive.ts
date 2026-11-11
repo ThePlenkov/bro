@@ -158,7 +158,7 @@ import {
   type LitterReap,
   type WorktreeClaimInfo,
 } from './work.ts';
-import { type LoopConfig } from '@broject/loop';
+import { LEARN_RETRO_CLOSEOUT, type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
 import { rigNext, type RigNext } from './rig-next.ts';
 import { SELF_ENTRY } from './self-entry.ts';
@@ -898,6 +898,8 @@ export function buildFixerPrompt(opts: {
     '- NEVER merge — `bro drive` owns the merge on green.',
     '- Exit when threads are zero or all deferred/resolved with explanation.',
     '',
+    LEARN_RETRO_CLOSEOUT,
+    '',
   ].join('\n');
 }
 
@@ -1480,6 +1482,8 @@ export function buildRebaseFixerPrompt(opts: {
     '- NEVER merge — `bro drive` owns the merge on green.',
     "- If the conflicts genuinely can't be resolved without redesign, say so",
     '  as your final message — do not leave the rebase half-done.',
+    '',
+    LEARN_RETRO_CLOSEOUT,
     '',
   ].join('\n');
 }
@@ -2130,6 +2134,8 @@ export function buildCiFixerPrompt(opts: {
     '  — a clean exit without a push marks this head as attempted, not',
     '  retried.',
     '',
+    LEARN_RETRO_CLOSEOUT,
+    '',
   ].join('\n');
 }
 
@@ -2199,6 +2205,8 @@ export function buildSastFixerPrompt(opts: {
     '  disputed severity gate) — say so as your final message and stop; a',
     '  clean exit without a push marks this head as attempted, not retried.',
     '- NEVER merge — `bro drive` owns the merge on green.',
+    '',
+    LEARN_RETRO_CLOSEOUT,
     '',
   ].join('\n');
 }

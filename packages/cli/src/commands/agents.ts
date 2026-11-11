@@ -90,6 +90,7 @@ import type { ExitCode } from '@broject/core';
 import type { AcpSeam, FetchFn } from '@broject/providers';
 import { otelHeader, otelSpan } from '@broject/providers';
 import { beadsDir } from '@broject/convoy';
+import { LEARN_RETRO_CLOSEOUT } from '@broject/loop';
 import {
   agentPromptPath,
   applyFleetRouter,
@@ -603,13 +604,18 @@ function resolvePrompt(
         `(${err instanceof Error ? err.message : String(err)}); pass --prompt-file`
     );
   }
-  const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
-  if (row === undefined || prompt === `# ${molStep}`) {
+  const base = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
+  if (row === undefined || base === `# ${molStep}`) {
     throw new SpawnInputError(
       `bead ${molStep} has no title/description to prompt with — pass --prompt-file`
     );
   }
-  return prompt;
+  // the composed work order carries the shared closeout contract
+  // (spec bro-xkv42.1) — mol/convoy step beads get it through this
+  // wrapper regardless of which formula poured them. The --prompt-file,
+  // stored-prompt, and literal-prompt paths stay the caller's verbatim
+  // text: those are operator work orders, not bro-composed ones.
+  return `${base}\n\n${LEARN_RETRO_CLOSEOUT}`;
 }
 
 /** Bad spawn input (missing worktree/prompt file, exclusive fields) —

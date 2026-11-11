@@ -12,15 +12,12 @@
  *  The CLI surface lives in delegate-cli.ts; both it and the agents
  *  plane's exec('delegate') run the delegate() dispatcher here. */
 import { randomBytes } from 'node:crypto';
-import {
-  resolveStepClass,
-  type AgentInfo,
-  type ResolvedClass,
-} from '@broject/core';
+import { resolveStepClass, type AgentInfo, type ResolvedClass } from '@broject/core';
 import { type AcpSeam, type FetchFn } from '@broject/providers';
 import { beadsDir } from '@broject/convoy';
 import { type AgentConnectorEnv } from '../agent-connectors.ts';
 import { SpawnInputError, spawnStepAgent } from './agents.ts';
+import { delegateWorkPrompt } from './delegate-prompt.ts';
 import { delegateWait } from './delegate-wait.ts';
 
 export const DEFAULT_TIMEOUT_SEC = 120;
@@ -141,8 +138,10 @@ async function delegateDetach(
       molStep: `adhoc-${randomBytes(4).toString('hex')}`,
       connector: req.connector,
       worktree: req.worktree,
-      prompt: req.prompt,
-      promptFile: req.promptFile,
+      // the composed work order — ask text + the shared learn+retro
+      // closeout (spec bro-xkv42.1); resolves prompt XOR promptFile
+      // here so the file read gets the same gates --wait applies
+      prompt: delegateWorkPrompt(sel.req),
       beadsDir: req.beadsDir ?? beadsDir(),
       provider: req.provider,
       model: req.model,

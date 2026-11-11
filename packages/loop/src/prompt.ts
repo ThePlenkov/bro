@@ -26,6 +26,19 @@ const BATCH_CLOSERS: Record<string, string> = {
 const BATCH_FALLBACK =
   "`bro task close <id> --reason '<why>'` — the store is\n  shared, so the verdict reaches the loop.";
 
+/** The worker closeout contract (spec bro-xkv42.1, epic bro-xkv42) —
+ *  appended verbatim to every spawn lane's work order so a worker's
+ *  last act is learn + retro, never a silent exit. One wording exported
+ *  here: loop/fleet/drive/delegate/convoy prompt builders import it
+ *  rather than copying (N copies drift). Not a gate — the sibling
+ *  exit-time artifact check owns enforcement; a foreign rig without
+ *  `bro` on PATH skips it silently. */
+export const LEARN_RETRO_CLOSEOUT = `Close out before your final message — learn + retro (skills/retro/SKILL.md); if \`bro\` is on PATH:
+- Flag learnings in the result: \`--result\` lines prefixed \`learn:\`/\`learning:\` are the mol-capture contract — \`bro self learn capture --mol\` harvests them.
+- A durable rule → \`bro self learn add --lesson "…" --on … --evidence …\`; a distilled answer → \`bro learn probe "<q>" --lesson "…"\`.
+- Session-scale review → the retro checklist: loose ends, hand-rolled mechanics → bd gap beads, call economy, debt sweep.
+- \`bro self learn capture --dry-run\` previews artifact harvest — capture is cheap and deduped, safe to run at close.`;
+
 /** The merge rule — `loop.autoMerge` arms GitHub's own auto-merge and
  *  ends the order there: no orchestrator gate, no fix rounds, the PR
  *  lands when its checks go green. Off keeps the supervisor-driven
@@ -101,6 +114,8 @@ ${mergeRule(autoMerge)}- Report verdicts through the task store: if the task nee
   sibling agent processes or edit registry/loop records yourself — a
   dead or silent sibling run is reported in your final message, not
   respawned: respawns are the supervisor's job.
+
+${LEARN_RETRO_CLOSEOUT}
 `;
 }
 
@@ -171,6 +186,8 @@ ${mergeRule(autoMerge)}- Beads you cannot finish stay open — the run re-queues
   sibling agent processes or edit registry/loop records yourself — a
   dead or silent sibling run is reported in your final message, not
   respawned: respawns are the supervisor's job.
+
+${LEARN_RETRO_CLOSEOUT}
 `;
 }
 
@@ -241,6 +258,8 @@ ${coverageRule}- For each thread you MUST take an action before you stop: either
 - Do NOT merge — the orchestrator merges when the gate goes green.
 - Push your fixes if you make code changes. Unresolved threads without a
   verdict block the merge; leaving threads open with no action is a failure.
+
+${LEARN_RETRO_CLOSEOUT}
 `;
 }
 
@@ -282,6 +301,8 @@ resolve the conflicts, and push:
   before pushing.
 - If the conflicts genuinely can't be resolved without redesign, say
   so as your final message — do not leave the rebase half-done.
+
+${LEARN_RETRO_CLOSEOUT}
 `;
 }
 

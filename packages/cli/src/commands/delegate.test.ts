@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
+import { agentPromptPath, loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { clearExternalPlanes, readAgentRegistry, writeAgentRegistry } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { capture, initRepo, installFakeBd, killRun } from './testrepo.ts';
@@ -46,8 +46,10 @@ function restoreEnv(scrubbed: Record<string, string | undefined>): void {
 
 /** Real git repo + fake bd on PATH + agents.native.command — the
  *  agents.test fixture pattern: wait tests only need the repo (the
- *  registry wall read is real); detach spawns `node {promptFile}` so
- *  the prompt text IS the program. */
+ *  registry wall read is real); detach spawns a long-lived node — the
+ *  prompt file rides as argv, NOT the program, because the composed
+ *  work order now carries the learn+retro closeout block (spec
+ *  bro-xkv42.1) which is not valid JS. */
 function fixture(): Fixture {
   const { root, main } = initRepo('bro-delegate-');
   const beads = join(root, 'beads');
@@ -56,7 +58,7 @@ function fixture(): Fixture {
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({
-      agents: { native: { command: 'node {promptFile}' } },
+      agents: { native: { command: 'node -e "setTimeout(()=>{},30000)" {promptFile}' } },
       providers: { p: { type: 'acp', command: 'no-such-acp-binary', model: 'm-acp' } },
     })
   );
@@ -269,6 +271,15 @@ describe('bro fleet delegate — --detach', () => {
         assert.match(environ, /BRO_BATCH=1/);
         assert.match(environ, /BRO_DELEGATED_BY=native-caller/);
       }
+      // the stored work order is ask text + the shared closeout contract
+      const stored = agentPromptPath(fx.main, String(entry.agentId));
+      assert.ok(stored !== null, 'spawn-time prompt persisted');
+      const text = readFileSync(stored, 'utf8');
+      assert.ok(text.startsWith(LONG_RUN), 'the ask leads the work order');
+      assert.ok(text.includes('learn + retro'), 'closeout block present');
+      assert.ok(text.includes('`learn:`/`learning:`'), 'mol-capture flag named');
+      assert.ok(text.includes('bro self learn add'), 'lesson command named');
+      assert.ok(text.includes('bro self learn capture --dry-run'), 'capture preview named');
     } finally {
       fx.restore();
     }
