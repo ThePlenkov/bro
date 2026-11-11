@@ -78,15 +78,17 @@ Two decomposition axes, kept apart on purpose:
 
 - The **spec tree** holds every durable project document, in two
   classes. *Product specs* describe what the system is; *policy
-  specs* describe the rules agents and reviewers follow —
-  `AGENTS.md` conventions, `REVIEW.md` review policy,
-  `CONTRIBUTING.md`. Same lifecycle class: persistent, owned,
-  lintable. Policy specs keep their conventional paths (clients read
-  `AGENTS.md` at the root; relocating them breaks the contract) and
-  gain spec identity via frontmatter or a managed block — the
-  `bro:sdd` markers y1jtm.7 installs in REVIEW.md are the same idea.
-  A spec is the textual RFC of the project; a policy doc is an RFC
-  too, just one aimed at agents.
+  specs* — `AGENTS.md`, `REVIEW.md`, `CONTRIBUTING.md` — describe
+  how to think and work here: they explain the project, its core
+  specs and its philosophy, and their first job is orientation —
+  the entry points that route an agent into the spec tree. Same
+  lifecycle class: persistent, owned, lintable. Policy specs keep
+  their conventional paths (clients read `AGENTS.md` at the root;
+  relocating them breaks the contract) and gain spec identity via
+  frontmatter or a managed block — the `bro:sdd` markers y1jtm.7
+  installs in REVIEW.md are the same idea. A spec is the textual
+  RFC of the project; a policy doc is the constitution and the
+  reader's guide, aimed at agents.
 - The **bead graph** decomposes the *work*: epic → task → subtask,
   with dep edges. Transient; closes.
 
@@ -159,10 +161,14 @@ Additions this spec makes normative:
 - **Requirement anchors.** `## Requirements` items carry stable
   anchors `R<n>` cited as `KEY-N#R<n>` from beads and from other
   specs — the link between the two trees.
-- **Policy specs.** Durable rule documents (`AGENTS.md`,
+- **Policy specs.** Durable orientation documents (`AGENTS.md`,
   `REVIEW.md`) join the tree as spec nodes at their conventional
   paths — identity via frontmatter or a managed block, `area:
-  policy`, no `owns` requirement (rules bind behavior, not paths).
+  policy`, no `owns` requirement. Their normative content is
+  two-fold: *explain* (the project, its core specs, its philosophy)
+  and *bind* (rules the review gate can check) — a policy spec
+  that names no core specs is incomplete, same class of defect as
+  a product spec owning nothing it should.
 - **Emulation log** as a spec part: `KEY-N-<slug>/emulation.md`
   records spec-emulation runs (skill spec-emulation), turning into
   golden cases for the real engine.
