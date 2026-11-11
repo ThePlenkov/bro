@@ -1,8 +1,8 @@
 /** The journal → item vocabulary — time heads and origin labels.
- *  Self-contained: no imports, no framework. Moved out of the old
- *  tui `view.ts` because the MODEL consumes it (items carry `──
- *  HH:MM · by ──` heads and `by` provenance labels), and model
- *  cannot read view under the package's layer direction. */
+ *  Self-contained: no imports, no framework. Lives in wire — the
+ *  bottom layer — because both MODEL (items carry `── HH:MM · by ──`
+ *  heads and `by` provenance labels) and ARCHIVE (verdict `since`
+ *  stamps) read it, and neither may read the other. */
 
 /** `at` → the `HH:MM` separator stamp (local time — the reader's
  *  clock, not the journal's UTC). Missing stamps render nothing. */
