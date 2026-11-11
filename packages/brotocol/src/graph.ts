@@ -34,8 +34,9 @@ export const docById = (nodes: Doc[]): Map<string, Doc[]> => {
   return m;
 };
 
-export function graph(protocol: Protocol): Graph {
-  const nodes = scan(protocol);
+/** `nodes` may be a pre-scanned snapshot (lint passes its own so
+ *  duplicate-id and cycle checks see the same tree, not two walks). */
+export function graph(protocol: Protocol, nodes: Doc[] = scan(protocol)): Graph {
   const byId = docById(nodes);
   const edges: Edge[] = [];
   const diagnostics: Diagnostic[] = [];

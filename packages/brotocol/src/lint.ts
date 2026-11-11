@@ -26,7 +26,7 @@ export function lint(protocol: Protocol): Diagnostic[] {
     } else {
       seen.set(d.id, d.path);
     }
-    if (!(protocol.idField in d.frontmatter)) {
+    if (!Object.hasOwn(d.frontmatter, protocol.idField)) {
       out.push({
         severity: 'warn',
         rule: 'id-missing',
@@ -37,8 +37,25 @@ export function lint(protocol: Protocol): Diagnostic[] {
     }
   }
 
-  const g = graph(protocol);
+  // same snapshot for the graph checks — a second scan could see a
+  // different tree (and different Doc identities) than `docs`.
+  const g = graph(protocol, docs);
   out.push(...g.diagnostics);
+
+  // a non-string `template:` is a malformed binding, not "no binding"
+  // — it must surface instead of silently skipping validation.
+  for (const d of docs) {
+    const t = d.frontmatter.template;
+    if (t !== undefined && typeof t !== 'string') {
+      out.push({
+        severity: 'error',
+        rule: 'template-malformed',
+        message: `'template' must be a string ref like 'name@version', got ${Array.isArray(t) ? 'a list' : typeof t}`,
+        path: d.path,
+        line: 1,
+      });
+    }
+  }
 
   const templated = docs.filter(d => typeof d.frontmatter.template === 'string');
   if (templated.length > 0) {

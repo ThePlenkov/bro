@@ -32,8 +32,15 @@ function makeDoc(
   isDirDoc: boolean,
   fallbackId: string,
   enclosing: Doc | undefined
-): Doc {
-  const fm = parseFrontmatter(readFileSync(abs, 'utf8'));
+): Doc | undefined {
+  let fm: ReturnType<typeof parseFrontmatter>;
+  try {
+    fm = parseFrontmatter(readFileSync(abs, 'utf8'));
+  } catch {
+    // vanished or unreadable between readdir and read — a file the
+    // scan can't read is a file the scan doesn't see.
+    return undefined;
+  }
   const declared = fm.data[protocol.idField];
   const id = typeof declared === 'string' && declared !== '' ? declared : fallbackId;
   const parent = protocol.parentField === undefined ? undefined : fm.data[protocol.parentField];
@@ -62,8 +69,11 @@ export function scan(protocol: Protocol): Doc[] {
     let self = enclosing;
     const idx = indexFile(dir, indexNames(basename(dir)));
     if (idx !== undefined) {
-      self = makeDoc(protocol, join(dir, idx), true, basename(dir), enclosing);
-      out.push(self);
+      const index = makeDoc(protocol, join(dir, idx), true, basename(dir), enclosing);
+      if (index !== undefined) {
+        self = index;
+        out.push(index);
+      }
     }
     let entries: Dirent[];
     try {
@@ -79,7 +89,10 @@ export function scan(protocol: Protocol): Doc[] {
         walk(abs, self);
       } else if (e.isFile() && e.name !== idx && matches.test(posix(relative(root, abs)))) {
         const fallback = e.name.endsWith(suffix) ? e.name.slice(0, -suffix.length) : e.name;
-        out.push(makeDoc(protocol, abs, false, fallback, self));
+        const d = makeDoc(protocol, abs, false, fallback, self);
+        if (d !== undefined) {
+          out.push(d);
+        }
       }
     }
   };

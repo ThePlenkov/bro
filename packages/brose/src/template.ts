@@ -9,7 +9,7 @@
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { parseFrontmatter, type Frontmatter } from './frontmatter.ts';
+import { parseFrontmatter } from './frontmatter.ts';
 import { parseContent, type SectionNode } from './parse.ts';
 
 export const fieldSpecSchema = z
@@ -48,8 +48,12 @@ export function parseTemplateRef(ref: string): TemplateRef {
   return m === null ? { name: ref.trim() } : { name: m[1]!, version: Number.parseInt(m[2]!, 10) };
 }
 
+// Versions are non-negative integers — `name@-1` would register but
+// `parseTemplateRef` (`@(\d+)`) could never resolve it back.
 const templateish = (fm: Record<string, unknown>): boolean =>
-  typeof fm.name === 'string' && (Number.isInteger(fm.version) || /^\d+$/.test(String(fm.version)));
+  typeof fm.name === 'string' &&
+  ((Number.isInteger(fm.version) && (fm.version as number) >= 0) ||
+    /^\d+$/.test(String(fm.version)));
 
 /** Parse one template document. Throws on a doc that is not a template
  *  (registry scanning skips such files instead — see createRegistry). */
@@ -131,16 +135,18 @@ export function createRegistry(opts: { dirs?: string[]; cwd?: string } = {}): Re
   const templates: Template[] = [];
   for (const dir of dirs) {
     for (const path of mdFiles(dir)) {
-      let fm: Frontmatter;
+      let t: Template;
       try {
-        fm = parseFrontmatter(readFileSync(path, 'utf8'));
+        const content = readFileSync(path, 'utf8');
+        if (!templateish(parseFrontmatter(content).data)) {
+          continue;
+        }
+        // a malformed template (bad `fields:`…) is skipped like a
+        // non-template — one bad file must not sink the whole registry.
+        t = parseTemplate(content, path);
       } catch {
         continue;
       }
-      if (!templateish(fm.data)) {
-        continue;
-      }
-      const t = parseTemplate(readFileSync(path, 'utf8'), path);
       if (byRef.has(`${t.name}@${t.version}`)) {
         continue;
       }

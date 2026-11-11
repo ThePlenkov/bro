@@ -255,14 +255,24 @@ interface Line {
 const LIST_ITEM = /^-(\s+|$)/;
 // A `key:` line — bare or quoted key, then a colon followed by
 // whitespace/EOL (`http://x` is a scalar, not a key); `key:{…}` and
-// `key:[…]` also open inline collections.
-const KEY = /^((?:"[^"\n]*"|'[^'\n]*'|[^:'"\s][^:\n]*?)):(\s+.*|\s*[[{].*|)$/;
+// `key:[…]` also open inline collections. The split is found with
+// flowColon (first `:` outside quotes at depth 0) — no backtracking
+// regex over untrusted text.
+const KEY_SHAPE = /^(?:"[^"\n]*"|'[^'\n]*'|[^:'"\s][^:\n]*)$/;
 const keyOf = (text: string): { key: string; rest: string } | undefined => {
-  const m = KEY.exec(text);
-  if (m === null || m[1]!.trim() === '') {
+  const c = flowColon(text);
+  if (c === -1) {
     return undefined;
   }
-  return { key: String(scalarValue(m[1]!)), rest: m[2] ?? '' };
+  const rest = text.slice(c + 1);
+  if (rest !== '' && !/^\s/.test(rest) && !/^\s*[[{]/.test(rest)) {
+    return undefined;
+  }
+  const rawKey = text.slice(0, c).trim();
+  if (rawKey === '' || !KEY_SHAPE.test(rawKey)) {
+    return undefined;
+  }
+  return { key: String(scalarValue(rawKey)), rest };
 };
 
 /** Join a wrapped flow collection (`key: [` spread over lines) into one

@@ -8,6 +8,7 @@
  * `template-outdated` advisory.
  */
 import { readFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { flatSections, parseContent, type SectionNode } from './parse.ts';
 import {
@@ -44,14 +45,21 @@ const FIELD_TYPE: Record<NonNullable<FieldSpec['type']>, z.ZodType> = {
 };
 
 /** A template heading with `{{placeholders}}` matches any doc title at
- *  that level — literal parts still pin (`RFC {{n}}` ≈ /^RFC .+$/). */
+ *  that level — literal parts still pin (`RFC {{n}}` ≈ /^RFC .+$/).
+ *  Whitespace between literals is significant (`RFC {{n}}` needs the
+ *  space); only the pattern's outer edges trim, matching doc.trim(). */
 const titleMatch = (tpl: string, doc: string): boolean => {
   if (!/\{\{/.test(tpl)) {
     return tpl.trim() === doc.trim();
   }
-  const re = tpl
-    .split(/\{\{[^}]*\}\}/)
-    .map(p => p.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const parts = tpl.split(/\{\{[^}]*\}\}/);
+  const re = parts
+    .map((p, i) =>
+      (i === 0 ? p.trimStart() : i === parts.length - 1 ? p.trimEnd() : p).replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&'
+      )
+    )
     .join('.+');
   return new RegExp(`^${re}$`).test(doc.trim());
 };
@@ -63,7 +71,9 @@ function checkFields(
   out: Diagnostic[]
 ): void {
   for (const [key, spec] of Object.entries(t.fields)) {
-    const present = key in doc.frontmatter && doc.frontmatter[key] !== null;
+    // own-property only — `in` would see `constructor`/`toString` on
+    // the prototype and treat a missing required field as present.
+    const present = Object.hasOwn(doc.frontmatter, key) && doc.frontmatter[key] !== null;
     const line = doc.keyLines.get(key) ?? 1;
     if (!present) {
       if (spec.required === true) {
@@ -88,7 +98,9 @@ function checkFields(
       });
       continue;
     }
-    if (spec.enum !== undefined && !spec.enum.some(v => v === value)) {
+    // enum entries may be maps/lists — strict === would reject a doc
+    // value equal in structure but not identity.
+    if (spec.enum !== undefined && !spec.enum.some(v => isDeepStrictEqual(v, value))) {
       out.push({
         severity: 'error',
         rule: 'field-enum',
