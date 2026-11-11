@@ -9,6 +9,8 @@
  *
  *   - connectors.ts registers the built-in connectors at module load —
  *     the same set plugins.ts registers, shared so order can't drift
+ *   - log-timestamps.ts owns the BRO_LOG_TIMESTAMP console wrap both
+ *     entries install — one module, no parallel copy to drift
  *   - external plugin connectors still load through the real
  *     loadExternalPlugins, but only when config actually lists
  *     `plugins` — an empty list makes that call a no-op anyway, so the
