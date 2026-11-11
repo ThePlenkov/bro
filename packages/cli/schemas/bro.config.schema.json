@@ -46,8 +46,7 @@
         },
         "selfCheck": {
           "type": "string",
-          "pattern": "^$|\\S",
-          "description": "Name of the check that IS the act gate \u2014 excluded so the gate never counts itself. Empty string means no self check."
+          "pattern": "^$|\\S"
         },
         "maxRounds": {
           "type": "integer",

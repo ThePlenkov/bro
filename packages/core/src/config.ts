@@ -110,6 +110,7 @@ export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema
  *  agents.<backend>) stay open. */
 export const js: {
   str: JsonSchema;
+  strOrEmpty: JsonSchema;
   bool: JsonSchema;
   strList: JsonSchema;
   int: (minimum?: number) => JsonSchema;
@@ -125,6 +126,9 @@ export const js: {
   // \S: parsers trim and drop whitespace-only input — a "present"
   // value that normalizes to nothing must validate as the defect it is
   str: { type: 'string', minLength: 1, pattern: String.raw`\S` },
+  // empty is meaningful where the parser discriminates presence:
+  // selfCheck "" reads "the gate names nothing" (act state isSelf)
+  strOrEmpty: { type: 'string', pattern: String.raw`^$|\S` },
   bool: { type: 'boolean' },
   strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: String.raw`\S` } },
   int: (minimum = 0) => ({ type: 'integer', minimum }),
@@ -390,7 +394,7 @@ actSection.jsonSchema = js.obj({
       ],
     },
   },
-  selfCheck: js.str,
+  selfCheck: js.strOrEmpty,
   maxRounds: js.int(),
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
