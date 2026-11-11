@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   agent,
   type SessionConfigOption,
@@ -256,6 +256,43 @@ describe('conductorConfig', () => {
     // wrap the watchdog into firing at once
     const hugeStall = conductorConfig({ BRO_PROVIDER_ACP_STALL_MS: '9999999999' }, dir);
     assert.equal(hugeStall?.acpStallMs, 2_147_483_647);
+  });
+  test('the session workspace pin reads the config, and the env pin wins', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp', acpCwd: '/srv/acp-workspace' },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    assert.equal(conductorConfig({}, dir)?.acpCwd, '/srv/acp-workspace');
+    // the env pin is the operator's explicit knob — it wins
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: '/env/workspace' }, dir)?.acpCwd,
+      '/env/workspace'
+    );
+    // a blank env pin falls back to the file's value
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: '   ' }, dir)?.acpCwd,
+      '/srv/acp-workspace'
+    );
+    // a relative pin resolves against the listener's cwd — session/new
+    // requires an absolute cwd (review bro-sx4hr)
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_ACP_CWD: 'rel/ws' }, dir)?.acpCwd,
+      resolve('rel/ws')
+    );
+    // unset everywhere → undefined — the host listener's default anchor applies
+    const bare = mkdtempSync(join(tmpdir(), 'bro-conductor-'));
+    writeFileSync(
+      join(bare, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp' },
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' } },
+      })
+    );
+    assert.equal(conductorConfig({}, bare)?.acpCwd, undefined);
   });
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(

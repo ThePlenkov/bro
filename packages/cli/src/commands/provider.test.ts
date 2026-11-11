@@ -1,22 +1,23 @@
-import { describe, test, type TestContext } from 'node:test'
-import assert from 'node:assert/strict'
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { statSync } from 'node:fs'
-import { join } from 'node:path'
+import { describe, test, type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  acpWorkspaceDir,
   createProviderHandler,
   DEFAULT_PROVIDER_PORT,
   ensureProvider,
   liveProviderState,
   providerStatePath,
   resolveProviderEndpoint,
-} from './provider.ts'
-import { writeServeState, writeStateFile, type ServeState } from './serve.ts'
-import { initRepo, inside, tmpDir } from './testrepo.ts'
+} from './provider.ts';
+import { writeServeState, writeStateFile, type ServeState } from './serve.ts';
+import { initRepo, inside, tmpDir } from './testrepo.ts';
 
-const LIVE = process.pid
-const DEAD = 1 << 30
+const LIVE = process.pid;
+const DEAD = 1 << 30;
 
 const state = (pid: number, url: string, dir = '/x', token = 'tok'): ServeState => ({
   pid,
@@ -24,138 +25,161 @@ const state = (pid: number, url: string, dir = '/x', token = 'tok'): ServeState 
   dir,
   startedAt: 't',
   token,
-})
+});
 
 /** A private XDG state dir per test — providerStatePath reads the env
  *  at call time, so setting it here scopes every lookup. */
 function tmpStateDir(t: TestContext): string {
-  const d = tmpDir('bro-provider-state-')
-  const prev = process.env.XDG_STATE_HOME
-  process.env.XDG_STATE_HOME = d
+  const d = tmpDir('bro-provider-state-');
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = d;
   t.after(() => {
     if (prev === undefined) {
-      delete process.env.XDG_STATE_HOME
+      delete process.env.XDG_STATE_HOME;
     } else {
-      process.env.XDG_STATE_HOME = prev
+      process.env.XDG_STATE_HOME = prev;
     }
-  })
-  return d
+  });
+  return d;
 }
 
 describe('provider state — the host-level discovery file', () => {
-  test('providerStatePath honors XDG_STATE_HOME, falls back to ~/.local/state', (t) => {
-    const d = tmpStateDir(t)
-    assert.equal(providerStatePath(), join(d, 'bro', 'provider.json'))
-    const prev = process.env.XDG_STATE_HOME
-    delete process.env.XDG_STATE_HOME
+  test('providerStatePath honors XDG_STATE_HOME, falls back to ~/.local/state', t => {
+    const d = tmpStateDir(t);
+    assert.equal(providerStatePath(), join(d, 'bro', 'provider.json'));
+    const prev = process.env.XDG_STATE_HOME;
+    delete process.env.XDG_STATE_HOME;
     try {
-      assert.match(providerStatePath(), /\.local\/state\/bro\/provider\.json$/)
+      assert.match(providerStatePath(), /\.local\/state\/bro\/provider\.json$/);
     } finally {
-      process.env.XDG_STATE_HOME = prev
+      process.env.XDG_STATE_HOME = prev;
     }
-  })
+  });
 
-  test('liveProviderState — written 0600, live-pid gated', (t) => {
-    tmpStateDir(t)
-    assert.equal(liveProviderState(), undefined)
-    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545'))
-    assert.equal(statSync(providerStatePath()).mode & 0o077, 0)
-    assert.equal(liveProviderState()?.token, 'tok')
+  test('liveProviderState — written 0600, live-pid gated', t => {
+    tmpStateDir(t);
+    assert.equal(liveProviderState(), undefined);
+    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545'));
+    assert.equal(statSync(providerStatePath()).mode & 0o077, 0);
+    assert.equal(liveProviderState()?.token, 'tok');
     // a dead recorded pid is a stale file, not a live listener
-    writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'))
-    assert.equal(liveProviderState(), undefined)
-  })
-})
+    writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'));
+    assert.equal(liveProviderState(), undefined);
+  });
+
+  test('acpWorkspaceDir honors XDG_DATA_HOME, falls back to ~/.local/share', t => {
+    const d = tmpDir('bro-provider-data-');
+    const prev = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = d;
+    t.after(() => {
+      if (prev === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = prev;
+      }
+    });
+    assert.equal(acpWorkspaceDir(), join(d, 'bro', 'acp'));
+    // an empty XDG_DATA_HOME is unset, not a path — same rule as the state dir
+    process.env.XDG_DATA_HOME = '';
+    assert.match(acpWorkspaceDir(), /\.local\/share\/bro\/acp$/);
+    // a relative XDG_DATA_HOME is invalid per the base-dir spec — ignored,
+    // or the session cwd would move with the launch directory
+    process.env.XDG_DATA_HOME = 'relative/xdg';
+    assert.match(acpWorkspaceDir(), /\.local\/share\/bro\/acp$/);
+    delete process.env.XDG_DATA_HOME;
+    assert.match(acpWorkspaceDir(), /\.local\/share\/bro\/acp$/);
+  });
+});
 
 describe('resolveProviderEndpoint — the cwd-aware pick', () => {
-  test('one gateway per machine — the host listener wins unpinned', (t) => {
-    tmpStateDir(t)
-    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545', '/x', 'host-tok'))
-    const { root, main } = initRepo('bro-prov-resolve-')
+  test('one gateway per machine — the host listener wins unpinned', t => {
+    tmpStateDir(t);
+    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545', '/x', 'host-tok'));
+    const { root, main } = initRepo('bro-prov-resolve-');
     inside(main, root, () => {
       // host only
       assert.deepEqual(resolveProviderEndpoint(main, {}), {
         url: 'http://127.0.0.1:4545',
         token: 'host-tok',
         source: 'host',
-      })
+      });
       // a facade-only repo serve must not shadow the host listener
-      writeServeState(main, state(LIVE, 'http://127.0.0.1:9000', main, 'facade-tok'))
-      assert.equal(resolveProviderEndpoint(main, {})?.source, 'host')
+      writeServeState(main, state(LIVE, 'http://127.0.0.1:9000', main, 'facade-tok'));
+      assert.equal(resolveProviderEndpoint(main, {})?.source, 'host');
       // even a provider-wired repo serve loses to the live host —
       // reaching it takes the explicit base-url pin (escape hatch)
       writeServeState(main, {
         ...state(LIVE, 'http://127.0.0.1:9000', main, 'repo-tok'),
         provider: true,
-      })
-      assert.equal(resolveProviderEndpoint(main, {})?.source, 'host')
+      });
+      assert.equal(resolveProviderEndpoint(main, {})?.source, 'host');
       assert.deepEqual(
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:9000' }),
         { url: 'http://127.0.0.1:9000', token: 'repo-tok', source: 'repo' }
-      )
-    })
-  })
+      );
+    });
+  });
 
-  test('no host listener — the repo provider serve is the fallback', (t) => {
-    tmpStateDir(t)
-    const { root, main } = initRepo('bro-prov-repo-')
+  test('no host listener — the repo provider serve is the fallback', t => {
+    tmpStateDir(t);
+    const { root, main } = initRepo('bro-prov-repo-');
     inside(main, root, () => {
       writeServeState(main, {
         ...state(LIVE, 'http://127.0.0.1:9000', main, 'repo-tok'),
         provider: true,
-      })
+      });
       assert.deepEqual(resolveProviderEndpoint(main, {}), {
         url: 'http://127.0.0.1:9000',
         token: 'repo-tok',
         source: 'repo',
-      })
-    })
-  })
+      });
+    });
+  });
 
-  test('ANTHROPIC_BASE_URL pins by exact url — normalized, never guessed', (t) => {
-    tmpStateDir(t)
-    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545', '/x', 'host-tok'))
-    const { root, main } = initRepo('bro-prov-pin-')
+  test('ANTHROPIC_BASE_URL pins by exact url — normalized, never guessed', t => {
+    tmpStateDir(t);
+    writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545', '/x', 'host-tok'));
+    const { root, main } = initRepo('bro-prov-pin-');
     inside(main, root, () => {
       writeServeState(main, {
         ...state(LIVE, 'http://127.0.0.1:9000', main, 'repo-tok'),
         provider: true,
-      })
+      });
       // localhost + trailing slash normalize to the recorded url —
       // and the pin beats the repo-first default
-      const env = { ANTHROPIC_BASE_URL: 'http://localhost:4545/' }
-      assert.equal(resolveProviderEndpoint(main, env)?.source, 'host')
+      const env = { ANTHROPIC_BASE_URL: 'http://localhost:4545/' };
+      assert.equal(resolveProviderEndpoint(main, env)?.source, 'host');
       // the pin names the repo serve — credential still resolves, even
       // for a facade-recorded listener (exact match is explicit intent)
-      writeServeState(main, state(LIVE, 'http://127.0.0.1:9000', main, 'facade-tok'))
+      writeServeState(main, state(LIVE, 'http://127.0.0.1:9000', main, 'facade-tok'));
       assert.equal(
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:9000' })?.token,
         'facade-tok'
-      )
+      );
       // a url no live listener recorded is a miss — fail, never guess
       assert.equal(
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:7777' }),
         undefined
-      )
+      );
       // a base carrying a path is not the root listener — fail closed
       // rather than return a token for a URL that would only 404
       assert.equal(
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4545/custom' }),
         undefined
-      )
+      );
       // the recorded side normalizes too — a state file holding a
       // default-port or localhost url still matches the pin
-      writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:80/', '/x', 'h80'))
+      writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:80/', '/x', 'h80'));
       assert.equal(
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://localhost' })?.token,
         'h80'
-      )
+      );
       // a dead host entry falls through — only live listeners count
-      writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'))
-      assert.equal(resolveProviderEndpoint('/nowhere', {}), undefined)
-    })
-  })
-})
+      writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'));
+      assert.equal(resolveProviderEndpoint('/nowhere', {}), undefined);
+    });
+  });
+});
 
 // --- the thin host's request pipeline ---------------------------------------------
 
@@ -164,139 +188,145 @@ async function listen(
 ): Promise<{ url: string; close: () => Promise<void> }> {
   const handler = createProviderHandler({
     proxy: async (_req: IncomingMessage, res: ServerResponse) => {
-      res.end('p-ok')
+      res.end('p-ok');
     },
     token: 'tok',
     meta: { dir: '/d', startedAt: 't0' },
     statePathHint: '/hint/provider.json',
     ...opts,
-  })
-  const server = createServer(handler)
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
-  const { port } = server.address() as AddressInfo
+  });
+  const server = createServer(handler);
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
-    close: () => new Promise<void>((r) => server.close(() => r())),
-  }
+    close: () => new Promise<void>(r => server.close(() => r())),
+  };
 }
 
 describe('provider host — index, health, and the guarded /v1/* plane', () => {
   test('index + health are the only unauthenticated reads; the facade is absent', async () => {
-    const { url, close } = await listen()
+    const { url, close } = await listen();
     try {
       const idx = (await (await fetch(`${url}/`)).json()) as {
-        service: string
-        routes: string[]
-      }
-      assert.equal(idx.service, 'bro-provider')
+        service: string;
+        routes: string[];
+      };
+      assert.equal(idx.service, 'bro-provider');
       const health = (await (await fetch(`${url}/api/v1/health`)).json()) as {
-        ok: boolean
-        pid: number
-      }
-      assert.equal(health.ok, true)
-      assert.equal(health.pid, process.pid)
+        ok: boolean;
+        pid: number;
+      };
+      assert.equal(health.ok, true);
+      assert.equal(health.pid, process.pid);
       // no facade planes — a thin host, not a second serve
       for (const p of ['/fleet', '/api/v1/snapshot', '/api/v1/agents']) {
-        assert.equal((await fetch(`${url}${p}`)).status, 404, p)
+        assert.equal((await fetch(`${url}${p}`)).status, 404, p);
       }
     } finally {
-      await close()
+      await close();
     }
-  })
+  });
 
-  test('/v1/* carries serve\'s guard stack verbatim — token, origin, content-type', async () => {
-    let reached = 0
+  test("/v1/* carries serve's guard stack verbatim — token, origin, content-type", async () => {
+    let reached = 0;
     const { url, close } = await listen({
       proxy: async (_req, res) => {
-        reached++
-        res.end('ok')
+        reached++;
+        res.end('ok');
       },
-    })
+    });
     try {
       // no credential → 401 on every method, GET included
-      assert.equal((await fetch(`${url}/v1/models`)).status, 401)
+      assert.equal((await fetch(`${url}/v1/models`)).status, 401);
       const anon = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{}',
-      })
-      assert.equal(anon.status, 401)
-      assert.equal(anon.headers.get('www-authenticate'), 'Bearer')
+      });
+      assert.equal(anon.status, 401);
+      assert.equal(anon.headers.get('www-authenticate'), 'Bearer');
 
       // x-api-key carries the credential — the apiKeyHelper contract
-      assert.equal((await fetch(`${url}/v1/models`, { headers: { 'x-api-key': 'tok' } })).status, 200)
+      assert.equal(
+        (await fetch(`${url}/v1/models`, { headers: { 'x-api-key': 'tok' } })).status,
+        200
+      );
 
       // bearer works too; a body-bearing write with a foreign
       // content-type is refused, and so is a non-loopback Origin
-      const bearer = { authorization: 'Bearer tok' }
+      const bearer = { authorization: 'Bearer tok' };
       const badCt = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { ...bearer, 'content-type': 'text/plain' },
         body: 'x',
-      })
-      assert.equal(badCt.status, 415)
+      });
+      assert.equal(badCt.status, 415);
       const foreign = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { ...bearer, 'content-type': 'application/json', origin: 'http://evil.example' },
         body: '{}',
-      })
-      assert.equal(foreign.status, 403)
+      });
+      assert.equal(foreign.status, 403);
       const ok = await fetch(`${url}/v1/messages`, {
         method: 'POST',
         headers: { ...bearer, 'content-type': 'application/json' },
         body: '{}',
-      })
-      assert.equal(ok.status, 200)
-      assert.equal(await ok.text(), 'ok')
-      assert.equal(reached, 2)
+      });
+      assert.equal(ok.status, 200);
+      assert.equal(await ok.text(), 'ok');
+      assert.equal(reached, 2);
     } finally {
-      await close()
+      await close();
     }
-  })
-})
+  });
+});
 
 describe('bro provider ensure — the self-starting apiKeyHelper', () => {
-  const PORT = 4546
+  const PORT = 4546;
 
-  test('a live recorded listener returns its token — no spawn', async (t) => {
-    tmpStateDir(t)
-    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-live'))
-    let spawned = false
+  test('a live recorded listener returns its token — no spawn', async t => {
+    tmpStateDir(t);
+    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-live'));
+    let spawned = false;
     const token = await ensureProvider(PORT, {
       probe: async () => ({ ok: true, pid: LIVE }),
       spawnServer: () => {
-        spawned = true
+        spawned = true;
       },
-    })
-    assert.equal(token, 'tok-live')
-    assert.equal(spawned, false)
-  })
+    });
+    assert.equal(token, 'tok-live');
+    assert.equal(spawned, false);
+  });
 
-  test('dead port spawns once, then prints the new token', async (t) => {
-    tmpStateDir(t)
-    let spawns = 0
-    let probes = 0
+  test('dead port spawns once, then prints the new token', async t => {
+    tmpStateDir(t);
+    let spawns = 0;
+    let probes = 0;
     const token = await ensureProvider(PORT, {
       probe: async () => {
-        probes += 1
-        if (probes < 2) return undefined
-        return { ok: true, pid: LIVE }
+        probes += 1;
+        if (probes < 2) return undefined;
+        return { ok: true, pid: LIVE };
       },
       spawnServer: () => {
-        spawns += 1
+        spawns += 1;
         // the real spawn writes provider.json asynchronously — the stub
         // lands it between spawn and the next probe
-        writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-new'))
+        writeStateFile(
+          providerStatePath(),
+          state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-new')
+        );
       },
       pollMs: 1,
-    })
-    assert.equal(spawns, 1)
-    assert.equal(token, 'tok-new')
-  })
+    });
+    assert.equal(spawns, 1);
+    assert.equal(token, 'tok-new');
+  });
 
-  test('a port squatter never receives the token — pid mismatch polls out', async (t) => {
-    tmpStateDir(t)
-    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok'))
+  test('a port squatter never receives the token — pid mismatch polls out', async t => {
+    tmpStateDir(t);
+    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok'));
     await assert.rejects(
       () =>
         ensureProvider(PORT, {
@@ -306,29 +336,29 @@ describe('bro provider ensure — the self-starting apiKeyHelper', () => {
           pollMs: 1,
         }),
       /never came up/
-    )
-  })
+    );
+  });
 
-  test('a stale pid in the state file is dead, not live', async (t) => {
-    tmpStateDir(t)
-    writeStateFile(providerStatePath(), state(DEAD, `http://127.0.0.1:${PORT}`, '/x', 'tok'))
-    let spawns = 0
+  test('a stale pid in the state file is dead, not live', async t => {
+    tmpStateDir(t);
+    writeStateFile(providerStatePath(), state(DEAD, `http://127.0.0.1:${PORT}`, '/x', 'tok'));
+    let spawns = 0;
     await assert.rejects(
       () =>
         ensureProvider(PORT, {
           probe: async () => ({ ok: true, pid: DEAD }),
           spawnServer: () => {
-            spawns += 1
+            spawns += 1;
           },
           timeoutMs: 10,
           pollMs: 1,
         }),
       /never came up.*provider\.log/
-    )
-    assert.equal(spawns, 1)
-  })
-})
+    );
+    assert.equal(spawns, 1);
+  });
+});
 
 test('the well-known default — the permanent settings.json port', () => {
-  assert.equal(DEFAULT_PROVIDER_PORT, 4545)
-})
+  assert.equal(DEFAULT_PROVIDER_PORT, 4545);
+});

@@ -1644,6 +1644,11 @@
         "acpCooldownMs": {
           "type": "integer",
           "minimum": 0
+        },
+        "acpCwd": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         }
       },
       "additionalProperties": false

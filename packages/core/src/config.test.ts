@@ -219,6 +219,16 @@ describe('loadConfig serve — the provider windows', () => {
     assert.equal(load({ serve: { acpStallMs: 0 } }).serve.acpStallMs, 0);
     assert.equal(load({ serve: { acpStallMs: -5 } }).serve.acpStallMs, undefined);
   });
+
+  test('the session workspace pin is a path string — blank and non-strings drop', () => {
+    assert.equal(
+      load({ serve: { acpCwd: '/srv/acp-workspace' } }).serve.acpCwd,
+      '/srv/acp-workspace'
+    );
+    assert.equal(load({ serve: { acpCwd: '  /srv/acp  ' } }).serve.acpCwd, '/srv/acp');
+    assert.equal(load({ serve: { acpCwd: '   ' } }).serve.acpCwd, undefined);
+    assert.equal(load({ serve: { acpCwd: 7 } }).serve.acpCwd, undefined);
+  });
 });
 
 describe('loadConfig serve.upstream / serve.apiKeyEnv', () => {
