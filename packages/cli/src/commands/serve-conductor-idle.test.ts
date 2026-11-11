@@ -25,10 +25,20 @@ describe('the pooled peer idle release (bro-7ira8)', () => {
     try {
       await pool.link();
       assert.ok(pool.live());
+      // the release must CLOSE the peer, not just drop the handle —
+      // the churn lives inside the child, so a live process buys nothing
+      const peer = pool.live()!;
+      let closes = 0;
+      const close = peer.close.bind(peer);
+      peer.close = () => {
+        closes += 1;
+        close();
+      };
       await sleep(120);
       // the peer is gone and the retained sessions it carried died with it
       assert.equal(pool.live(), undefined);
       assert.equal(deaths, 1);
+      assert.equal(closes, 1);
     } finally {
       pool.dispose();
     }
@@ -46,6 +56,33 @@ describe('the pooled peer idle release (bro-7ira8)', () => {
       pool.idle();
       await sleep(120);
       // the turn settled — now the release applies
+      assert.equal(pool.live(), undefined);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('a settled turn re-arms the window — the peer outlives the first deadline', async () => {
+    // the window is measured from the LAST settle, not the spawn: a
+    // request that lands inside the window and finishes late must not
+    // leave the peer on the original deadline — the release re-arms
+    // when the turn ends (spec bro-7ira8).
+    const fake = fakeAcpAgent({ replyText: 'ok' });
+    const pool = acpLinkPool('conductor:t', ENTRY, { acp: { peer: fake.app } }, 10_000, 200);
+    try {
+      await pool.link();
+      // a turn starts inside the first window and settles past its
+      // deadline — busy holds the peer, idle re-arms a fresh window
+      await sleep(100);
+      pool.busy();
+      await sleep(100);
+      pool.idle();
+      // ~t320: the original ~t200 deadline passed while the turn ran —
+      // the peer is still here because the window re-armed at the settle
+      await sleep(120);
+      assert.ok(pool.live());
+      // ~t480: a full window after the settle — now the release applies
+      await sleep(160);
       assert.equal(pool.live(), undefined);
     } finally {
       pool.dispose();
