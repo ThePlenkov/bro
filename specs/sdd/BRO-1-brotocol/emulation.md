@@ -134,6 +134,30 @@ wherever it already implements the contract.
   template-drift report; `.md` non-spec file → skipped, never
   validated.
 
+## Real replay — `@broject/brose` + `@broject/brotocol` (2026-…, PR stacked)
+
+The emulated commands now exist. Replays against real binaries:
+
+- **Run 1/6 — scaffold + validate:**
+  `brose new --template brotocol/spec@1 --set template=brotocol/spec@1
+  --set id=BRO-2 --set title="Demo spec" --out /tmp/brose-new-demo.spec.md`
+  produced a frontmatter-complete spec doc; `brose validate` on it →
+  clean exit 0. `brose validate` on THIS spec file
+  (`BRO-1-brotocol.spec.md`, pins `brotocol/spec@1`) → clean exit 0.
+  Note: the spec template requires the doc to declare its own
+  `template:` — `new` without `--set template=…` fails
+  `missing required field: template`, as designed.
+- **Run 2/4 — tree + parts:** `tree(specProtocol({dir:'specs'}))`
+  renders the real tree — `BRO-1` nested under `sdd`, and
+  `emulation.md` is NOT a node: the strict parts rule holds on the
+  real store (this file is a part, matching the spec's intent).
+  Legacy `spec.md`/`README.md` indexes still resolve as docs via
+  `indexAliases`.
+- **Graduated:** Runs 1, 2, 4, 5, 6 now have real implementations
+  (`brose new`/`validate`, `brotocol scan/graph/tree/lint`). Run 3
+  (`check`) remains the bro connector's bead-coverage role — plugin
+  land, per the spec's layering.
+
 ## Graduation notes
 
 - Stage: manual → scripted. Run 3 and 4 already run against the real
