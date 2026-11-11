@@ -13,6 +13,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SpawnError } from './agents.ts';
 import { LockTimeout, withFileLock } from './filelock.ts';
+import {
+  DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
+  laneBudgetAdmit,
+  laneBudgetKey,
+} from './lane-budget.ts';
 
 /** A session-kind admission plane. */
 export interface SessionPlane {
@@ -147,6 +152,16 @@ export interface SessionQuota {
    *  worker process, so the plane can tell the two populations apart.
    *  Unset = one budget for everyone (spec bro-9h86l). */
   maxBatchWorkers?: number;
+  /** Worker-minutes of running time per rolling window the batch lane
+   *  may spend before the lane parks (spec bro-tdndq). Unlike the
+   *  worker caps — concurrency counts — this budgets the account's
+   *  actual spend so the lane pauses BEFORE the provider wall. */
+  workBudgetMinutes?: number;
+  /** The rolling window `workBudgetMinutes` is spent in — default
+   *  `DEFAULT_WORK_BUDGET_WINDOW_MINUTES` (60). A modifier, never a
+   *  lane of its own: armed without `workBudgetMinutes` it does
+   *  nothing. */
+  workBudgetWindowMinutes?: number;
   reservationsDir?: string;
   invalid?: boolean;
   invalidKey?: string;
@@ -166,6 +181,23 @@ function quotaLane(
     return undefined;
   }
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+    return { invalid: true };
+  }
+  return { n: v };
+}
+
+/** A minute-denominated knob — fractional values are valid config
+ *  (worker's minutes needn't be whole), everything else is the same
+ *  malformed-marker contract as the count lanes. */
+function quotaMinutes(
+  bag: Record<string, unknown>,
+  key: 'workBudgetMinutes' | 'workBudgetWindowMinutes'
+): QuotaLane {
+  const v = bag[key];
+  if (v === undefined || v === 0) {
+    return undefined;
+  }
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
     return { invalid: true };
   }
   return { n: v };
@@ -200,13 +232,27 @@ export function sessionQuotaConfig(
   const sessions = quotaLane(bag, 'maxSessions');
   const workers = quotaLane(bag, 'maxWorkers');
   const batchWorkers = quotaLane(bag, 'maxBatchWorkers');
-  if (sessions === undefined && workers === undefined && batchWorkers === undefined) {
+  const budgetMinutes = quotaMinutes(bag, 'workBudgetMinutes');
+  const budgetWindow = quotaMinutes(bag, 'workBudgetWindowMinutes');
+  // the window is a modifier, never a lane: it arms the quota only
+  // alongside workBudgetMinutes — a present-but-malformed one still
+  // counts so the typo refuses loudly instead of reading as absent
+  const windowArmed = budgetWindow !== undefined && !('n' in budgetWindow);
+  if (
+    sessions === undefined &&
+    workers === undefined &&
+    batchWorkers === undefined &&
+    budgetMinutes === undefined &&
+    !windowArmed
+  ) {
     return undefined;
   }
   const bad = firstBadLane(
     ['maxSessions', sessions],
     ['maxWorkers', workers],
-    ['maxBatchWorkers', batchWorkers]
+    ['maxBatchWorkers', batchWorkers],
+    ['workBudgetMinutes', budgetMinutes],
+    ['workBudgetWindowMinutes', budgetWindow]
   );
   if (bad !== undefined) {
     return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad };
@@ -222,6 +268,13 @@ export function sessionQuotaConfig(
   const maxBatchWorkers = laneCount(batchWorkers);
   if (maxBatchWorkers !== undefined) {
     quota.maxBatchWorkers = maxBatchWorkers;
+  }
+  const workBudgetMinutes = laneCount(budgetMinutes);
+  if (workBudgetMinutes !== undefined) {
+    quota.workBudgetMinutes = workBudgetMinutes;
+    // the window is a modifier of the budget lane — default when absent
+    quota.workBudgetWindowMinutes =
+      laneCount(budgetWindow) ?? DEFAULT_WORK_BUDGET_WINDOW_MINUTES;
   }
   return quota;
 }
@@ -384,7 +437,7 @@ function checkSessionLanes(
   bag: Record<string, unknown>,
   quota: SessionQuota,
   resDir: string,
-  opts: { molStep?: string; workerEnv?: Record<string, string> }
+  opts: SessionLaneOpts
 ): void {
   const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : '';
   const maxWorkers = quota.maxWorkers ?? 0;
@@ -428,6 +481,59 @@ function checkSessionLanes(
   if (maxWorkers > 0) {
     const budget: LaneBudget = { lane: 'maxWorkers', cap: maxWorkers, live: workers };
     checkWorkerCap(plane, workerCap(plane, budget), { reservations, refused });
+  }
+  checkWorkBudget(plane, quota, opts, refused);
+}
+
+/** The admission opts the lane checks see — `key` is the spawn's claim
+ *  key (its agentId) so a budget segment names the same worker the
+ *  registry does. `scope`/`liveKeys` opt the budget's dead-worker
+ *  prune in: the caller's repo is the liveness truth for its own
+ *  segments. `budgetDir` isolates the ledger in tests. */
+interface SessionLaneOpts {
+  key: string;
+  molStep?: string;
+  workerEnv?: Record<string, string>;
+  scope?: string;
+  liveKeys?: ReadonlySet<string>;
+  now?: number;
+  budgetDir?: string;
+}
+
+/** The work budget (spec bro-tdndq) — the fleet's running-time
+ *  allowance per rolling window, charged LAST before the slot claim so
+ *  every earlier refusal leaves nothing behind. Batch lane only: the
+ *  operator's interactive sessions are never throttled (the rate-gate
+ *  convention). A spent budget refuses 'cap' with the projected decay
+ *  point — the lane parks with headroom instead of dying at the wall
+ *  and escalating its reset. */
+function checkWorkBudget(
+  plane: SessionPlane,
+  quota: SessionQuota,
+  opts: SessionLaneOpts,
+  refused: string
+): void {
+  if (quota.workBudgetMinutes === undefined || !isBatchSpawn(opts.workerEnv)) {
+    return;
+  }
+  const cfg = {
+    minutes: quota.workBudgetMinutes,
+    windowMinutes: quota.workBudgetWindowMinutes ?? DEFAULT_WORK_BUDGET_WINDOW_MINUTES,
+  };
+  const admit = laneBudgetAdmit(plane.kind, laneBudgetKey(opts.scope ?? '', opts.key), cfg, {
+    now: opts.now,
+    ...(opts.budgetDir === undefined ? {} : { dir: opts.budgetDir }),
+    ...(opts.scope === undefined ? {} : { scope: opts.scope }),
+    ...(opts.liveKeys === undefined ? {} : { liveKeys: opts.liveKeys }),
+  });
+  if (!admit.ok) {
+    throw new SpawnError(
+      `${plane.kind} work budget spent — ${admit.spentMin}/${cfg.minutes} worker-minutes ` +
+        `in the last ${cfg.windowMinutes}m (agents.${plane.kind}.workBudgetMinutes) ` +
+        `— lane parked, retry in ~${admit.retryAfterSec}s` +
+        refused,
+      'cap'
+    );
   }
 }
 
@@ -530,7 +636,7 @@ function checkWorkerCap(
 export function admitSessionSlot(
   plane: SessionPlane,
   agents: Record<string, Record<string, unknown>> | undefined,
-  opts: { key: string; molStep?: string; workerEnv?: Record<string, string> }
+  opts: SessionLaneOpts
 ): string | undefined {
   const bag = agents?.[plane.kind] ?? {};
   const quota = sessionQuotaConfig(agents, plane.kind);

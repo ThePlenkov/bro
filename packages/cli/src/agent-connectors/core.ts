@@ -1823,8 +1823,37 @@ export function sessionQuotaOf(
       'config'
     );
   }
+
   return { plane, agents: env.agents };
 }
+
+/** sessionKind → live agentIds in the caller's registry — the work
+ *  budget's liveness truth for pruning dead workers' segments (spec
+ *  bro-tdndq). "Live" is the cheap registry verdict — not stopped, no
+ *  harvested exitStatus: a dead-but-unharvested entry stays counted
+ *  (over-count is the safe direction for a shared account). */
+export function liveSessionKeysByKind(
+  registry: Record<string, AgentRegistryEntry>
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const e of Object.values(registry)) {
+    if (typeof e.sessionKind !== 'string' || e.stopped === true || e.exitStatus !== undefined) {
+      continue;
+    }
+    let set = out.get(e.sessionKind);
+    if (set === undefined) {
+      set = new Set<string>();
+      out.set(e.sessionKind, set);
+    }
+    set.add(e.agentId);
+  }
+  return out;
+}
+
+/** A kind with NO live workers — `liveByKind.get` misses it, but an
+ *  absent key must still mean "close every segment": undefined opts the
+ *  budget out of pruning entirely (closeDead needs a Set, even empty). */
+export const EMPTY_KEYS: ReadonlySet<string> = new Set();
 
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
@@ -2444,6 +2473,12 @@ function prepareSpawn(
       return typeof opts.spawnCommand === 'string' ? opts.spawnCommand : '';
     })();
     const agents = opts.env?.agents ?? sessionQuota?.agents ?? {};
+    // the work-budget ledger's own facts (spec bro-tdndq): the repo
+    // scope keys this rig's segments in the host-shared ledger, and the
+    // live-keys map lets each admission close segments whose workers
+    // the registry says already ended
+    const scope = projectId(dir);
+    const liveByKind = liveSessionKeysByKind(registry);
     if (spawnedCommand !== '') {
       // a pre-flight refusal ahead of any claim; the authoritative
       // count re-runs inside each kind's admission mutex below
@@ -2469,6 +2504,8 @@ function prepareSpawn(
             key: agentId,
             molStep: spec.molStep,
             workerEnv: spec.env,
+            scope,
+            liveKeys: liveByKind.get(view.kind) ?? EMPTY_KEYS,
           });
           if (claimed !== undefined) {
             crossKindReservations.push(claimed);
@@ -2483,12 +2520,24 @@ function prepareSpawn(
             key: agentId,
             molStep: spec.molStep,
             workerEnv: spec.env,
+            scope,
+            liveKeys: liveByKind.get(sessionQuota.plane.kind) ?? EMPTY_KEYS,
           });
   } catch (err) {
     // every claim this spawn holds goes back — the caller never saw them
     releaseSessionStart(crossKindReservations);
     crossKindReservations.length = 0;
     releaseSpawnLease(dir, workLease.lease);
+    // a 'cap' refusal can be the work budget parking the lane (spec
+    // bro-tdndq): the spend in flight must stop too — the same freeze
+    // the wall refusal fires, best-effort like that path
+    if (err instanceof SpawnError && err.kind === 'cap' && opts.env !== undefined) {
+      try {
+        reconcileLanePauseForRegistry(dir, opts.env, registry);
+      } catch {
+        // the freeze is advisory — the refusal itself is the verdict
+      }
+    }
     throw err;
   }
   let charged: LaneAdmission['admitted'];

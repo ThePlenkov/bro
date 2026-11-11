@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SpawnError } from './agents.ts'
+import { laneBudgetAdmit, laneBudgetKey } from './lane-budget.ts'
 import {
   admitSessionSlot,
   clearSessionPlanes,
@@ -468,5 +469,111 @@ describe('admitSessionSlot', () => {
     } finally {
       rmSync(resv, { recursive: true, force: true })
     }
+  })
+})
+
+describe('the work budget lane (bro-tdndq)', () => {
+  test('workBudgetMinutes parses; the window is a modifier, never a lane', () => {
+    const ok = sessionQuotaConfig(
+      { testkind: { workBudgetMinutes: 45, workBudgetWindowMinutes: 90 } },
+      'testkind'
+    )
+    assert.equal(ok?.workBudgetMinutes, 45)
+    assert.equal(ok?.workBudgetWindowMinutes, 90)
+    // the window defaults when only the budget is armed
+    assert.equal(
+      sessionQuotaConfig({ testkind: { workBudgetMinutes: 45 } }, 'testkind')
+        ?.workBudgetWindowMinutes,
+      60
+    )
+    // a window alone arms nothing — the modifier needs its lane
+    assert.equal(
+      sessionQuotaConfig({ testkind: { workBudgetWindowMinutes: 90 } }, 'testkind'),
+      undefined
+    )
+  })
+
+  test('malformed budget knobs refuse loudly, naming the knob', () => {
+    const bad = sessionQuotaConfig({ testkind: { workBudgetMinutes: 'x' } }, 'testkind')
+    assert.equal(bad?.invalid, true)
+    assert.equal(bad?.invalidKey, 'workBudgetMinutes')
+    const badWindow = sessionQuotaConfig(
+      { testkind: { workBudgetMinutes: 10, workBudgetWindowMinutes: -3 } },
+      'testkind'
+    )
+    assert.equal(badWindow?.invalid, true)
+    assert.equal(badWindow?.invalidKey, 'workBudgetWindowMinutes')
+  })
+
+  test('a spent budget refuses cap — the lane parks before the wall', () => {
+    withDir((resv) => {
+      const budgetDir = mkdtempSync(join(tmpdir(), 'bro-budget-'))
+      try {
+        const agents = {
+          testkind: { workBudgetMinutes: 30, workBudgetWindowMinutes: 60, reservationsDir: resv },
+        }
+        const plane = testPlane('testkind')
+        // 40 worker-minutes of spend already in the window — over the 30 budget
+        laneBudgetAdmit('testkind', laneBudgetKey('repo', 'x-1'), 
+          { minutes: 30, windowMinutes: 60 }, { now: 0, dir: budgetDir })
+        assert.throws(
+          () =>
+            admitSessionSlot(plane, agents, {
+              key: 'native-aa',
+              molStep: 'fx-1',
+              workerEnv: { BRO_BATCH: '1' },
+              scope: 'repo',
+              liveKeys: new Set(),
+              now: 40 * 60_000,
+              budgetDir,
+            }),
+          (e: unknown) =>
+            e instanceof SpawnError &&
+            e.kind === 'cap' &&
+            /work budget spent/.test(e.message)
+        )
+      } finally {
+        rmSync(budgetDir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('inside the budget a batch spawn admits; interactive never consults it', () => {
+    withDir((resv) => {
+      const budgetDir = mkdtempSync(join(tmpdir(), 'bro-budget-'))
+      try {
+        const agents = {
+          testkind: { workBudgetMinutes: 30, workBudgetWindowMinutes: 60, reservationsDir: resv },
+        }
+        const plane = testPlane('testkind')
+        laneBudgetAdmit('testkind', laneBudgetKey('repo', 'x-1'),
+          { minutes: 30, windowMinutes: 60 }, { now: 0, dir: budgetDir })
+        // 40m spent — over budget — but the interactive lane is exempt
+        assert.doesNotThrow(() =>
+          admitSessionSlot(plane, agents, {
+            key: 'native-op',
+            workerEnv: {},
+            scope: 'repo',
+            liveKeys: new Set(),
+            now: 40 * 60_000,
+            budgetDir,
+          })
+        )
+        // and after the window resets the batch lane re-admits: the
+        // 40-minute segment's capped end (60m) slides out at t=120m
+        assert.doesNotThrow(() =>
+          admitSessionSlot(plane, agents, {
+            key: 'native-bb',
+            workerEnv: { BRO_BATCH: '1' },
+            scope: 'repo',
+            liveKeys: new Set(),
+            now: 120 * 60_000 + 1,
+            budgetDir,
+          })
+        )
+      } finally {
+        rmSync(budgetDir, { recursive: true, force: true })
+      }
+    })
   })
 })
