@@ -1015,6 +1015,11 @@ export const serveSection: ConfigSection<{
    *  stays closed after the account refused a request. 0 disables the
    *  cooldown: the lane spawns through walls as before. */
   acpCooldownMs?: number;
+  /** The session workspace pin (spec bro-sx4hr) — the cwd ACP sessions
+   *  anchor at when the listener has no repo root of its own (the host
+   *  gateway). Repo-scoped serve ignores it: the repo root IS the
+   *  workspace. */
+  acpCwd?: string;
 }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
@@ -1029,6 +1034,7 @@ export const serveSection: ConfigSection<{
     acpMaxAbandoned?: unknown;
     acpStallMs?: unknown;
     acpCooldownMs?: unknown;
+    acpCwd?: unknown;
   };
   const out: {
     backend?: string;
@@ -1043,6 +1049,7 @@ export const serveSection: ConfigSection<{
     acpMaxAbandoned?: number;
     acpStallMs?: number;
     acpCooldownMs?: number;
+    acpCwd?: string;
   } = {};
   if (typeof obj.backend === 'string' && obj.backend.trim() !== '') {
     out.backend = obj.backend.trim();
@@ -1082,6 +1089,11 @@ export const serveSection: ConfigSection<{
   if (typeof obj.acpCooldownMs === 'number' && Number.isInteger(obj.acpCooldownMs)) {
     if (obj.acpCooldownMs >= 0) out.acpCooldownMs = Math.min(obj.acpCooldownMs, MAX_TIMER_MS);
   }
+  // the session workspace pin (spec bro-sx4hr) — a path, so only a
+  // non-empty string counts; anything else drops and the default anchor
+  // wins
+  const acpCwd = trimmedField(obj.acpCwd);
+  if (acpCwd !== undefined) out.acpCwd = acpCwd;
   // an unset section reads as an empty bag — same shape as providers:{}
   return out;
 };
@@ -1118,6 +1130,8 @@ serveSection.jsonSchema = js.obj({
   acpStallMs: js.int(0),
   // the wall cooldown (spec bro-i6811) — a window, so 0 disables it
   acpCooldownMs: js.int(0),
+  // the session workspace pin (spec bro-sx4hr) — a path string
+  acpCwd: js.str,
 });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
@@ -1702,6 +1716,11 @@ export interface BroConfig {
      *  stays closed after the account refused a request. 0 disables the
      *  cooldown: the lane spawns through walls as before. */
     acpCooldownMs?: number;
+    /** The session workspace pin (spec bro-sx4hr) — the cwd ACP
+     *  sessions anchor at when the listener has no repo root of its
+     *  own (the host gateway). Repo-scoped serve ignores it: the repo
+     *  root IS the workspace. */
+    acpCwd?: string;
   };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */

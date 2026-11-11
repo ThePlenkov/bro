@@ -111,6 +111,12 @@ export interface ConductorConfig {
   catalog?: { name: string; entry: ProviderEntry };
   model?: string;
   cwd: string;
+  /** The session-workspace pin (spec bro-sx4hr) — `serve.acpCwd` /
+   *  `BRO_PROVIDER_ACP_CWD` names the cwd ACP sessions anchor at when
+   *  the listener has no repo root of its own (the host gateway). Only
+   *  the host listener consumes it — repo-scoped serve anchors at the
+   *  repo root regardless. */
+  acpCwd?: string;
   timeoutMs: number;
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
@@ -240,6 +246,14 @@ function cooldownWindow(env: NodeJS.ProcessEnv, fallback: number): number {
   return Number.isInteger(num) && num >= 0
     ? Math.min(num, MAX_TIMER_MS)
     : Math.min(fallback, MAX_TIMER_MS);
+}
+
+/** The session-workspace pin (spec bro-sx4hr) — a path string, so only
+ *  a non-empty value counts; the env pin wins over the file like every
+ *  other serve knob. */
+function acpCwdPin(env: NodeJS.ProcessEnv, configured: string | undefined): string | undefined {
+  const raw = env.BRO_PROVIDER_ACP_CWD?.trim() || configured?.trim();
+  return raw === undefined || raw === '' ? undefined : raw;
 }
 
 /** The backend pin — env wins over the repo's serve.backend. Absent or
@@ -449,6 +463,7 @@ export function conductorConfig(
     catalog: resolveCatalog(env, registry),
     model: resolveModel(env, entry),
     cwd: dir,
+    acpCwd: acpCwdPin(env, cfg.serve?.acpCwd),
     fast: resolveFastLane(env, cfg.serve),
     fastDisabled: fastLaneDisabled(env, cfg.serve),
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),

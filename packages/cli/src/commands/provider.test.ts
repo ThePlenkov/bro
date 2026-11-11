@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  acpWorkspaceDir,
   createProviderHandler,
   DEFAULT_PROVIDER_PORT,
   ensureProvider,
@@ -64,6 +65,25 @@ describe('provider state — the host-level discovery file', () => {
     // a dead recorded pid is a stale file, not a live listener
     writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'))
     assert.equal(liveProviderState(), undefined)
+  })
+
+  test('acpWorkspaceDir honors XDG_DATA_HOME, falls back to ~/.local/share', (t) => {
+    const d = tmpDir('bro-provider-data-')
+    const prev = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = d
+    t.after(() => {
+      if (prev === undefined) {
+        delete process.env.XDG_DATA_HOME
+      } else {
+        process.env.XDG_DATA_HOME = prev
+      }
+    })
+    assert.equal(acpWorkspaceDir(), join(d, 'bro', 'acp'))
+    // an empty XDG_DATA_HOME is unset, not a path — same rule as the state dir
+    process.env.XDG_DATA_HOME = ''
+    assert.match(acpWorkspaceDir(), /\.local\/share\/bro\/acp$/)
+    delete process.env.XDG_DATA_HOME
+    assert.match(acpWorkspaceDir(), /\.local\/share\/bro\/acp$/)
   })
 })
 

@@ -81,6 +81,19 @@ export function providerStatePath(): string {
   return join(base, 'bro', 'provider.json');
 }
 
+/** The host listener's default ACP session workspace (spec bro-sx4hr) —
+ *  `$XDG_DATA_HOME/bro/acp`, falling back to `~/.local/share/bro/acp`
+ *  (the same XDG data home the session slots and the global beads dir
+ *  already live under; an empty XDG_DATA_HOME is unset, not a path).
+ *  Deliberately NOT $HOME: every session's skills discovery walks the
+ *  session cwd, and $HOME is the most expensive scan root on the
+ *  machine — 272 errors per rescan in the 2026-11-09 incident. */
+export function acpWorkspaceDir(): string {
+  const xdg = process.env['XDG_DATA_HOME'];
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share');
+  return join(base, 'bro', 'acp');
+}
+
 export function liveProviderState(): ServeState | undefined {
   const state = readStateFile(providerStatePath());
   return state !== undefined && pidAlive(state.pid) ? state : undefined;
@@ -328,9 +341,22 @@ async function cmdServe(argv: string[]): Promise<void> {
     process.exit(1);
   }
   if (conductorCfg !== undefined) {
-    // sessions anchor at the operator's home — the state dir is for
-    // files, and a deletable checkout must never be an acp cwd
-    conductorCfg.cwd = homedir();
+    // sessions anchor at a dedicated minimal workspace — $HOME made
+    // every session's skills discovery walk the whole home tree (spec
+    // bro-sx4hr: 272 errors per rescan at a ~15s cadence for the life
+    // of the child). The state dir is for files and a deletable
+    // checkout must never be an acp cwd; this dir is ours, tiny, and
+    // stable. serve.acpCwd / BRO_PROVIDER_ACP_CWD is the operator's pin.
+    conductorCfg.cwd = conductorCfg.acpCwd ?? acpWorkspaceDir();
+    try {
+      mkdirSync(conductorCfg.cwd, { recursive: true });
+    } catch (err) {
+      console.error(
+        `error: cannot create the acp session workspace '${conductorCfg.cwd}' — ` +
+          `${err instanceof Error ? err.message : String(err)}`
+      );
+      process.exit(1);
+    }
   }
   // the conductor plane carries dispose() — the pooled acp child pins
   // the loop until its transport closes, so the 'exit' hook alone can
