@@ -199,7 +199,10 @@ default store, so standard installs already have it).
   **'Watcher armed' is never the end state.** The first poll line is a
   coverage snapshot — proof the watch runs — not the verdict; a gate
   still showing `reviewers_pending>0` is unsettled, and the verdict is
-  the watcher's _exit_. A non-zero BLOCKED exit is the next work list,
+  the watcher's _exit_. Arming is not done at spawn: run `bro review act
+  status` and confirm `watch=` names the live watch before reporting —
+  a detached watcher can die between spawn and your reply, and "armed"
+  without the status line is a claim, not a fact. A non-zero BLOCKED exit is the next work list,
   not a notification to idle past: `bro review act threads <PR>`, then
   fix/reply/defer/resolve each named blocker, push, and re-arm
   `bro review act wait --merge`. A BLOCKED event surfacing after the arming
