@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -189,8 +191,9 @@ describe('drainMailbox', () => {
         assert.deepEqual(drainMailbox(dir, 's1'), ['first', 'two\n  indented']);
         // same session: no redelivery
         assert.deepEqual(drainMailbox(dir, 's1'), []);
-        // the cursor lives in the mailbox dir
-        assert.ok(existsSync(join(mb, '.seen-s1')));
+        // the cursor lives in the mailbox dir — one file for all sessions
+        assert.ok(existsSync(join(mb, '.cursors')));
+        assert.equal(readdirSync(mb).filter(f => f.startsWith('.seen-')).length, 0);
       });
     });
   });
@@ -353,6 +356,150 @@ describe('drainMailbox', () => {
         assert.ok(existsSync(file));
         assert.equal(drainMailbox(dir, 's1', { for: { agentId: 'me' } }).length, 1);
         assert.equal(existsSync(file), false);
+      });
+    });
+  });
+});
+
+describe('drain fast path (.cursors)', () => {
+  test('an unchanged mailbox skips the rescan — the cursor file is not even rewritten', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(join(mb, 'note-100-a.txt'), 'one');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['one']);
+        // second drain is still a slow-path write: the first drain's
+        // `.cursors` creation bumped the dir mtime after its baseline
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+        // pin the cursor file's mtime to the past — an in-place rewrite
+        // would stamp it now, a fast-path drain leaves it alone
+        const cursor = join(mb, '.cursors');
+        const old = new Date('2001-01-01T00:00:00Z');
+        utimesSync(cursor, old, old);
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+        assert.ok(statSync(cursor).mtimeMs < 1_000_000_000_000);
+        // a real change still lands: the fast path saw the dir move
+        dropMailbox(mb, 'two', 'note');
+        assert.deepEqual(drainMailbox(dir, 's1'), ['two']);
+      });
+    });
+  });
+
+  test('one .cursors file carries every session — no .seen-* is created', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'for all', 'note');
+        drainMailbox(dir, 's1');
+        drainMailbox(dir, 's2');
+        const state = JSON.parse(readFileSync(join(mb, '.cursors'), 'utf8')) as {
+          sessions: Record<string, { seen: string[] }>;
+        };
+        assert.ok(state.sessions.s1 !== undefined);
+        assert.ok(state.sessions.s2 !== undefined);
+        assert.equal(readdirSync(mb).filter(f => f.startsWith('.seen-')).length, 0);
+      });
+    });
+  });
+
+  test('a legacy .seen-<sid> cursor migrates: its names stay deduped and the file goes away', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(join(mb, 'note-100-a.txt'), 'already seen');
+        writeFileSync(join(mb, '.seen-s1'), 'note-100-a.txt\n');
+        // the pre-upgrade cursor still suppresses redelivery
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+        assert.equal(existsSync(join(mb, '.seen-s1')), false);
+        // …but the drop was never eaten — another session still gets it
+        assert.deepEqual(drainMailbox(dir, 's2'), ['already seen']);
+      });
+    });
+  });
+
+  test('session entries idle past the TTL are GCed on the next cursor write', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        writeFileSync(
+          join(mb, '.cursors'),
+          JSON.stringify({
+            sessions: {
+              ghost: {
+                seen: [],
+                touched: Date.now() - 8 * 24 * 60 * 60 * 1000,
+                sig: 'u:null',
+                dirMtimeMs: 0,
+                dirCtimeMs: 0,
+              },
+              s1: { seen: [], touched: Date.now(), sig: 'u:null', dirMtimeMs: 0, dirCtimeMs: 0 },
+            },
+          })
+        );
+        drainMailbox(dir, 's1');
+        const state = JSON.parse(readFileSync(join(mb, '.cursors'), 'utf8')) as {
+          sessions: Record<string, unknown>;
+        };
+        assert.equal(state.sessions.ghost, undefined);
+        assert.ok(state.sessions.s1 !== undefined);
+      });
+    });
+  });
+
+  test('a keep-filtered drain never fast-paths — its rejects stay deliverable to the hook drain', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        dropMailbox(mb, 'pending', 'note');
+        // events-plane style drain rejects everything — the drop must
+        // stay pending AND must not let the next keep-less drain skip
+        assert.deepEqual(drainMailbox(dir, 's1', { keep: () => false }), []);
+        assert.deepEqual(drainMailbox(dir, 's1'), ['pending']);
+        assert.deepEqual(drainMailbox(dir, 's1'), []);
+      });
+    });
+  });
+
+  test('a .cursors symlink is debris — the drain never reads or writes through it', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        mkdirSync(mb, { recursive: true });
+        const secret = join(dir, 'cursor-target.txt');
+        writeFileSync(secret, 'foreign-bytes');
+        symlinkSync(secret, join(mb, '.cursors'));
+        dropMailbox(mb, 'hello', 'note');
+        // the poisoned cursor is ignored — the drop still delivers, and
+        // the write path refuses to truncate through the link
+        assert.deepEqual(drainMailbox(dir, 's1'), ['hello']);
+        assert.equal(readFileSync(secret, 'utf8'), 'foreign-bytes');
+        assert.ok(lstatSync(join(mb, '.cursors')).isSymbolicLink());
+      });
+    });
+  });
+
+  test('same session, different `for` identity rescans — addressed drops are not skipped', () => {
+    withRepo(dir => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!;
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'for me', to: 'agent-x' }),
+          'note'
+        );
+        // first drain addressed elsewhere: pending, baseline recorded
+        assert.deepEqual(
+          drainMailbox(dir, 's1', { for: { sessionId: 's1', agentId: 'other' } }),
+          []
+        );
+        // the dir did not change — only the identity did; the sig must
+        // force a rescan that delivers the addressed drop
+        const got = drainMailbox(dir, 's1', { for: { sessionId: 's1', agentId: 'agent-x' } });
+        assert.equal(got.length, 1);
+        assert.match(got[0]!, /for me/);
       });
     });
   });
