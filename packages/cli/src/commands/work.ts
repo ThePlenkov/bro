@@ -13,7 +13,9 @@
  *   bro work list       worktrees with branch, dirty state, the live
  *                       in-tree claim, disk usage
  *   bro work prune      drop admin entries for worktrees already gone;
- *                       --loop also reaps loop/* (+stack/*) litter whose
+ *                       --loop also reaps provably-done litter —
+ *                       loop/*, stack/*, and the work//feat//fix//devin/
+ *                       label namespaces plus detached HEADs — whose
  *                       bead closed or PR merged, releases in_progress
  *                       claims whose worker is dead, re-registers ghost
  *                       sibling dirs, and caps the parked resume cache —
@@ -63,7 +65,7 @@ import {
 } from '@broject/core';
 import type { ExitCode } from '@broject/core';
 import { assertMutableConfig } from '../config-policy.ts';
-import { loopSection, loopSlug, type LoopConfig } from '@broject/loop';
+import { beadForHead, loopSection, loopSlug, type LoopConfig } from '@broject/loop';
 import { listWatches, type ListedWatch } from '@broject/act';
 import { parseStackBranch } from '@broject/stack';
 import { flag, positionals } from './args.ts';
@@ -1207,18 +1209,22 @@ export function deleteMergedLocalBranch(headRef: string, headSha: string): void 
   }
 }
 
-// --- loop/stack litter sweep ----------------------------------------------------
+// --- litter sweep ---------------------------------------------------------------
 //
-// Loop worktrees are disposable by design: the bead's status is the
+// Litter worktrees are disposable by design: the bead's status is the
 // verdict record (closed = landed or verdict-closed), the worktree just
 // the scratch dir it happened in. A completed loop used to audit its
-// tails without removing them — orphaned bro--bro-* dirs accumulated.
-// The sweep reaps what is provably done and keeps everything else: a
-// dirty tree, a live claimant, an open PR, or an unverifiable bead all
-// read as "unmerged work" — litter a human must triage by hand.
+// tails without removing them — orphaned bro--bro-* dirs accumulated,
+// and the same tails on work//feat//fix//devin/ branches and detached
+// HEADs were invisible to the prefix-scoped candidate filter
+// (bro-imvu3). The sweep reaps what is provably done and keeps
+// everything else: a dirty tree, a live claimant, an open PR, or an
+// unverifiable bead all read as "unmerged work" — litter a human must
+// triage by hand.
 
 export interface LitterReap {
-  /** worktrees removed — '<path> [<branch>]' ('would' list under dryRun) */
+  /** worktrees removed — '<path> [<branch>]' ('(detached)' when no
+   *  branch attributed; 'would' list under dryRun) */
   reaped: string[];
   /** branches deleted ('would' list under dryRun) */
   branches: string[];
@@ -1246,7 +1252,8 @@ export interface LitterReapOpts {
   rev?: { repo: string; facade: ReviewFacade };
   /** the stack namespace counted as litter — 'stack/' sweeps every
    *  stack's members, 'stack/<name>/' scopes to one run's chain;
-   *  undefined = loop/* only */
+   *  undefined = no stack members (loop/* and the label namespaces
+   *  sweep either way) */
   stackPrefix?: string;
   /** parked resume-cache cap — newest N clean open-bead trees survive,
    *  extras reap; 0/undefined = uncapped (spec bro-ho09d) */
@@ -1267,14 +1274,37 @@ export interface LitterReapOpts {
   now?: number;
 }
 
-/** Litter branch → bead slug: 'loop/<slug>' verbatim; stack members carry
- *  '<n>-<slug>' — parseStackBranch validates the shape. */
-function litterSlug(branch: string, stackPrefix?: string): string | undefined {
+/** Branch prefixes whose tail is a human/agent label, not a
+ *  deterministic bead slug — `bro work enter` trees, drive fixers, and
+ *  ad-hoc heads all land here (bro-imvu3). The bead verdict resolves
+ *  them through beadForHead's prefix match plus the store-prefix short
+ *  form; a merged PR's headRef is the land proof either way. */
+const LITTER_LABEL_PREFIXES = ['work/', 'feat/', 'fix/', 'devin/'] as const;
+
+/** Litter branch → bead slug + namespace kind: 'loop/<slug>' verbatim;
+ *  stack members carry '<n>-<slug>' — parseStackBranch validates the
+ *  shape; label prefixes carry their tail with `label: true` (the tail
+ *  names a bead only by matching, never by contract). */
+function litterSlug(
+  branch: string,
+  stackPrefix?: string
+): { slug: string; label: boolean } | undefined {
   if (branch.startsWith('loop/')) {
-    return branch.slice('loop/'.length);
+    return { slug: branch.slice('loop/'.length), label: false };
   }
   if (stackPrefix !== undefined && branch.startsWith(stackPrefix)) {
-    return parseStackBranch(branch)?.slug;
+    const m = parseStackBranch(branch);
+    return m === undefined ? undefined : { slug: m.slug, label: false };
+  }
+  for (const p of LITTER_LABEL_PREFIXES) {
+    if (branch.startsWith(p)) {
+      const tail = branch.slice(p.length);
+      // a '/' tail is a nested ref name (`work/foo/bar`), never a bead
+      // slug — loopSlug sanitizes '/' away, so no lookup rung can ever
+      // resolve it; not litter-shaped, skip rather than report a
+      // permanent 'no bead' keep every sweep
+      return tail.includes('/') ? undefined : { slug: tail, label: true };
+    }
   }
   return undefined;
 }
@@ -1283,8 +1313,14 @@ interface LitterCandidate {
   /** the live linked worktree the litter branch is checked out in —
    *  undefined for a bare branch */
   w?: WorktreeInfo;
+  /** the litter branch — '' for a detached worktree no branch tip
+   *  could be attributed to (PR evidence and branch retire skip it) */
   branch: string;
   slug: string;
+  /** label-namespace tail (work/feat/fix/devin or a detached dir/claim
+   *  slug) — bead lookup goes through litterBead's matching ladder,
+   *  not the deterministic exact read alone */
+  label?: boolean;
 }
 
 /** Everything one candidate's verdict and reap need that is not the
@@ -1294,6 +1330,10 @@ interface LitterCtx {
   rep: LitterReap;
   main: WorktreeInfo;
   bySlug: Map<string, TaskRow>;
+  /** the store's id prefix ('bro', …) — label-namespace short slugs
+   *  resolve through the '<prefix>-<slug>' bead-id form; undefined when
+   *  the backend can't name one (that rung just skips) */
+  prefix?: string;
   /** claim-liveness planes — who owns an in_progress bead's claim
    *  (spec bro-ho09d). Snapshotted once; the release re-reads the
    *  registry inside the lock so a respawn landing during the wait
@@ -1359,19 +1399,126 @@ function litterCandidates(
   const all = parseWorktreePorcelain(wt.out);
   const cands: LitterCandidate[] = [];
   const onTree = new Set<string>();
+  // the main checkout's own branch is never bare litter — a fix/… or
+  // feat/… main must not read as a worktree-less candidate
+  if (main.branch !== undefined) {
+    onTree.add(main.branch);
+  }
+  // detached HEADs have no branch to name them — the tip→branch index
+  // is built lazily on the first one (one for-each-ref per sweep, and
+  // only when a detached tree actually exists)
+  let tips: Map<string, string[]> | undefined;
+  let tipsRead = false;
+  const tipIndex = (): Map<string, string[]> | undefined => {
+    if (!tipsRead) {
+      tipsRead = true;
+      tips = litterBranchTips(opts.root, opts.stackPrefix, rep);
+    }
+    return tips;
+  };
   for (const w of all.slice(1)) {
-    if (w.branch === undefined || w.prunable !== undefined || !existsSync(w.path)) {
+    if (w.prunable !== undefined || !existsSync(w.path)) {
       continue;
     }
-    const slug = litterSlug(w.branch, opts.stackPrefix);
+    if (w.branch !== undefined) {
+      const s = litterSlug(w.branch, opts.stackPrefix);
+      if (s === undefined) {
+        continue;
+      }
+      onTree.add(w.branch);
+      cands.push({ w, branch: w.branch, slug: s.slug, label: s.label });
+      continue;
+    }
+    if (w.detached !== true) {
+      continue;
+    }
+    // tip attribution: exactly one candidate-eligible branch sitting
+    // on this HEAD names the tree — PR evidence and branch retire ride
+    // it. Zero or several matches stay unattributed (branch ''): the
+    // dir/claim slug alone feeds the bead verdict.
+    const tips = tipIndex();
+    if (tips === undefined) {
+      // the ref listing failed — attribution is off, so an open PR on
+      // the branch that WOULD have claimed this tip is invisible to
+      // the bead-only verdict. Keep every detached tree until a sweep
+      // can attribute honestly; never a silent reap on a failed probe
+      rep.kept.push(`${w.path} (tip index unavailable)`);
+      continue;
+    }
+    const atTip = tips.get(w.head) ?? [];
+    const attributed = atTip.length === 1 ? atTip[0] : undefined;
+    if (attributed !== undefined) {
+      const s = litterSlug(attributed, opts.stackPrefix);
+      if (s !== undefined) {
+        onTree.add(attributed);
+        cands.push({ w, branch: attributed, slug: s.slug, label: s.label });
+        continue;
+      }
+    }
+    const slug = detachedLitterSlug(w, main, opts.now);
     if (slug === undefined) {
       continue;
     }
-    onTree.add(w.branch);
-    cands.push({ w, branch: w.branch, slug });
+    cands.push({ w, branch: '', slug, label: true });
   }
   litterBranches(opts, rep, onTree, cands);
   return { main, cands };
+}
+
+/** Local branch tip → candidate-eligible branch names — the detached
+ *  HEAD attribution index. Eligibility is the same litterSlug the
+ *  candidate loop applies, so an attributed branch can never name a
+ *  namespace the sweep wouldn't have swept anyway. Undefined when the
+ *  ref listing fails — the error is reported and every detached tree
+ *  keeps until attribution works again (fail closed). */
+function litterBranchTips(
+  root: string,
+  stackPrefix: string | undefined,
+  rep: LitterReap
+): Map<string, string[]> | undefined {
+  const res = gitTry([
+    '-C',
+    root,
+    'for-each-ref',
+    '--format=%(refname:short) %(objectname)',
+    'refs/heads/',
+  ]);
+  if (res.code !== 0) {
+    rep.errors.push(`branch tip index failed — ${res.err || 'git error'}`);
+    return undefined;
+  }
+  const map = new Map<string, string[]>();
+  for (const line of res.out.split('\n')) {
+    const sp = line.indexOf(' ');
+    if (sp <= 0) {
+      continue;
+    }
+    const branch = line.slice(0, sp);
+    if (litterSlug(branch, stackPrefix) === undefined) {
+      continue;
+    }
+    const sha = line.slice(sp + 1).trim();
+    const list = map.get(sha) ?? [];
+    list.push(branch);
+    map.set(sha, list);
+  }
+  return map;
+}
+
+/** A detached worktree's slug — the in-tree claim marker first (the
+ *  enter-time record), then the `<main>--<slug>` sibling-dir
+ *  convention. Undefined when neither names one: not litter-shaped,
+ *  the tree is skipped rather than reported. */
+function detachedLitterSlug(w: WorktreeInfo, main: WorktreeInfo, now?: number): string | undefined {
+  const claim = worktreeClaim(w.path, now);
+  if (claim !== undefined && claim !== '') {
+    return claim;
+  }
+  const prefix = `${basename(main.path)}--`;
+  const name = basename(w.path);
+  return name.startsWith(prefix) && name.length > prefix.length
+    ? name.slice(prefix.length)
+    : undefined;
 }
 
 /** Ghost sibling dirs — `<main>--*` on disk but absent from `worktree
@@ -1453,11 +1600,16 @@ function recoverGhost(
   if (existsSync(admin)) {
     return; // registered but unlisted — worktree prune/list's business
   }
-  const branch = ghostBranch(opts.root, slug);
-  if (branch === undefined) {
+  const found = ghostBranch(opts.root, slug);
+  if (found === undefined) {
     keep('no branch to bind');
     return;
   }
+  if ('ambiguous' in found) {
+    keep(`ambiguous branch binding — ${found.ambiguous.join(', ')}`);
+    return;
+  }
+  const branch = found.branch;
   if (opts.dryRun === true) {
     rep.repaired.push(`${path} [${branch}]`);
     return;
@@ -1502,35 +1654,53 @@ function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): vo
 }
 
 /** The branch a recovered ghost binds HEAD to — the naming convention's
- *  own mapping: loop/<slug> first, work/<slug> (a `bro work enter`
- *  tail), else the stack member carrying <slug>. */
-function ghostBranch(root: string, slug: string): string | undefined {
+ *  own mapping: loop/<slug> first, then the label namespaces
+ *  (work/<slug> — a `bro work enter` tail — plus feat//fix//devin/
+ *  ad-hoc heads), else the stack member carrying <slug>. The dir name
+ *  carries the slug, not the namespace: when several branches claim it
+ *  the binding is a guess that can hand the tree the wrong branch's
+ *  bead/PR evidence — 'ambiguous' refuses the recovery instead. */
+function ghostBranch(
+  root: string,
+  slug: string
+): { branch: string } | { ambiguous: string[] } | undefined {
   const has = (b: string): boolean =>
     gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0;
-  for (const b of [`loop/${slug}`, `work/${slug}`]) {
+  const matches: string[] = [];
+  for (const b of [
+    `loop/${slug}`,
+    `work/${slug}`,
+    `feat/${slug}`,
+    `fix/${slug}`,
+    `devin/${slug}`,
+  ]) {
     if (has(b)) {
-      return b;
+      matches.push(b);
     }
   }
   const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)']);
   if (st.code === 0) {
     for (const b of st.out.split('\n').filter(s => s !== '')) {
       if (parseStackBranch(b)?.slug === slug) {
-        return b;
+        matches.push(b);
       }
     }
   }
-  return undefined;
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return matches.length === 1 ? { branch: matches[0] } : { ambiguous: matches };
 }
 
-/** Bare litter branches — a worktree-less loop/* is the same tail class. */
+/** Bare litter branches — a worktree-less loop/* (or label-namespace
+ *  work//feat//fix//devin/) is the same tail class. */
 function litterBranches(
   opts: LitterReapOpts,
   rep: LitterReap,
   onTree: Set<string>,
   cands: LitterCandidate[]
 ): void {
-  for (const pat of ['loop/', opts.stackPrefix]) {
+  for (const pat of ['loop/', opts.stackPrefix, ...LITTER_LABEL_PREFIXES]) {
     if (pat === undefined) {
       continue;
     }
@@ -1547,9 +1717,9 @@ function litterBranches(
       continue;
     }
     for (const b of bl.out.split('\n').filter(s => s !== '' && !onTree.has(s))) {
-      const slug = litterSlug(b, opts.stackPrefix);
-      if (slug !== undefined) {
-        cands.push({ branch: b, slug });
+      const s = litterSlug(b, opts.stackPrefix);
+      if (s !== undefined) {
+        cands.push({ branch: b, slug: s.slug, label: s.label });
       }
     }
   }
@@ -1564,6 +1734,36 @@ function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow
     rep.errors.push(`bead list failed — ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
+}
+
+/** Candidate → bead row. Deterministic namespaces (loop/, stack/)
+ *  read the exact slug map — a miss means no bead, full stop. Label
+ *  namespaces (work//feat//fix//devin/ and detached dir/claim slugs)
+ *  carry a human label, not a bead contract: beadForHead — the
+ *  fleet-head reconcile's own matcher — is the ONLY rung, because its
+ *  '-'-bounded prefix match already covers the tidy `work/<bead-id>`
+ *  exact tail AND refuses ambiguity (two bead owners → undefined =
+ *  keep). A raw exact-map shortcut would bypass that check: `work/
+ *  <slug>` naming bead B while a shorter bead also prefix-matches
+ *  would attribute the tree to B and reap a live owner's work. The
+ *  second rung is the same matcher on the '<prefix>-<slug>' short
+ *  form (`work/imvu3` → `bro-imvu3`), skipped when the slug already
+ *  carries the prefix (that shape matched at rung one or names a
+ *  doubled-prefix bead the prefix rung can't reach anyway). */
+function litterBead(ctx: LitterCtx, c: LitterCandidate): TaskRow | undefined {
+  if (c.label !== true) {
+    return ctx.bySlug.get(c.slug);
+  }
+  const headRef = c.branch === '' ? `x/${c.slug}` : c.branch;
+  const direct = beadForHead({ pr: 0, headRef }, ctx.bySlug);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const p = ctx.prefix;
+  if (p !== undefined && p !== '' && !c.slug.startsWith(`${p}-`)) {
+    return beadForHead({ pr: 0, headRef: `x/${p}-${c.slug}` }, ctx.bySlug);
+  }
+  return undefined;
 }
 
 /** Live registry occupants pinning a tree — an agent (a respawned drive
@@ -1591,10 +1791,12 @@ function litterOccupants(root: string): Map<string, string> | undefined {
 }
 
 /** An open PR vetoes outright; a merged one is the land proof AND the
- *  head pin the branch delete compares against. */
+ *  head pin the branch delete compares against. A '' branch (unattributed
+ *  detached HEAD) has nothing to ask about — known-clean absence, not a
+ *  lookup failure. */
 function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
   const ev: PrEvidence = { known: true, open: false };
-  if (opts.rev === undefined) {
+  if (branch === '' || opts.rev === undefined) {
     return ev;
   }
   try {
@@ -1642,7 +1844,39 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
   if (st.code !== 0) {
     return 'cleanliness unverifiable';
   }
-  return st.out.trim() === '' ? undefined : 'dirty';
+  if (st.out.trim() !== '') {
+    return 'dirty';
+  }
+  // '' branch = unattributed detached HEAD — the tree's own HEAD is the
+  // commits' only ref, and `worktree remove` drops the admin dir that
+  // holds it: commits no other ref reaches become gc fodder. The bead
+  // verdict proved the WORK done, not that THIS tip landed anywhere —
+  // keep unless some ref still holds it (attributed trees and branches
+  // are covered by their own ref + the branch-retire guards)
+  if (c.branch === '' && !detachedTipReachable(ctx.opts.root, w.path)) {
+    return 'detached HEAD unreachable — no ref keeps its commits';
+  }
+  return undefined;
+}
+
+/** Does any ref still reach this tree's HEAD? An unattributed detached
+ *  worktree's own HEAD is not a ref — once the worktree is removed,
+ *  commits nothing else names are unreachable and gc fodder. Fail
+ *  closed: an unverifiable probe keeps the tree. */
+function detachedTipReachable(root: string, wtPath: string): boolean {
+  const head = gitTry(['-C', wtPath, 'rev-parse', '--verify', 'HEAD']);
+  if (head.code !== 0) {
+    return false;
+  }
+  const refs = gitTry([
+    '-C',
+    root,
+    'for-each-ref',
+    '--contains',
+    head.out.trim(),
+    '--format=%(refname)',
+  ]);
+  return refs.code === 0 && refs.out.trim() !== '';
 }
 
 /** The evidence-plane keep reason — bead verdict + PR state. undefined
@@ -1651,7 +1885,7 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
  *  left) and veto-free; the tree plane is judged separately, under the
  *  occupancy lock. */
 function litterDoneVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): string | undefined {
-  const bead = ctx.bySlug.get(c.slug);
+  const bead = litterBead(ctx, c);
   if (bead?.status !== 'closed' && pr.mergedSha === undefined) {
     return bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`;
   }
@@ -1673,6 +1907,10 @@ function litterDoneVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): 
  *  its branch, whatever the bead says. */
 function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): void {
   const { opts, rep } = ctx;
+  // '' = unattributed detached HEAD — there is no branch to retire
+  if (c.branch === '') {
+    return;
+  }
   if (opts.dryRun === true) {
     rep.branches.push(c.branch);
     return;
@@ -1755,8 +1993,15 @@ function registryOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): strin
 
 /** session markers — `bd --claim` arms .task, `bro work enter` arms .work */
 function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
-  const detail = ctx.claims.sessionDetails.find(d =>
-    detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path })
+  // a .task marker carries the full bead id (`bd update <bead> --claim`)
+  // — branch/slug/worktree matching alone misses it for short label
+  // slugs (`work/imvu3` → `bro-imvu3`), so the resolved row's ids join
+  // the match set
+  const bead = litterBead(ctx, c);
+  const ids = bead === undefined ? [] : [bead.id, loopSlug(bead.id)];
+  const detail = ctx.claims.sessionDetails.find(
+    d =>
+      detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path }) || ids.includes(d)
   );
   return detail === undefined ? undefined : `session armed ${detail}`;
 }
@@ -1884,7 +2129,7 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
   const { opts, rep, main } = ctx;
   const pr = litterPrEvidence(opts, c.branch);
   const label = c.w?.path ?? c.branch;
-  const bead = ctx.bySlug.get(c.slug);
+  const bead = litterBead(ctx, c);
   if (bead?.status === 'in_progress' && opts.keepClaims?.has(bead.id) !== true) {
     const owner = releaseDeadClaim(ctx, c, bead);
     if (owner !== undefined) {
@@ -1932,7 +2177,7 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
       rep.errors.push(`worktree ${c.w.path} not removed`);
       return;
     }
-    rep.reaped.push(`${c.w.path} [${c.branch}]`);
+    rep.reaped.push(litterReapedLabel(c));
   } finally {
     release();
   }
@@ -1944,6 +2189,12 @@ interface ParkedCand {
   pr: PrEvidence;
   /** the keep reason the candidate earned — reported for survivors */
   done: string;
+}
+
+/** The reaped-line label — '<path> [<branch>]', or '(detached)' when no
+ *  branch could be attributed to the tree. */
+function litterReapedLabel(c: LitterCandidate): string {
+  return c.branch === '' ? `${c.w?.path ?? c.slug} (detached)` : `${c.w?.path} [${c.branch}]`;
 }
 
 /** The parked pool pass — open-bead trees kept only as a resume cache,
@@ -2005,7 +2256,7 @@ function reapParkedCand(
       return 0;
     }
     const verdict = stale ? 'idle past TTL' : `over cap ${keepN}`;
-    rep.reaped.push(`${c.w!.path} [${c.branch}] — parked pool ${verdict}`);
+    rep.reaped.push(`${litterReapedLabel(c)} — parked pool ${verdict}`);
   } finally {
     release();
   }
@@ -2128,6 +2379,19 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   if (bySlug === undefined) {
     return rep;
   }
+  // the store's id prefix — label short slugs resolve through the
+  // '<prefix>-<slug>' form; a probe failure stays fail-closed (that
+  // rung just skips) but the store error belongs in the report —
+  // short slugs left unresolved otherwise read as plain 'no bead'
+  let prefix: string | undefined;
+  try {
+    prefix = opts.tasks.prefix();
+  } catch (err) {
+    rep.errors.push(
+      `task store prefix probe failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+    prefix = undefined;
+  }
   // claim-liveness planes — snapshotted once for the sweep; the release
   // re-reads the registry inside the lock before writing
   const regPath = agentRegistryPath(opts.root);
@@ -2143,6 +2407,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
     rep,
     main: found.main,
     bySlug,
+    prefix,
     claims: {
       runs: collectLoopRuns(opts.root, opts.now ?? Date.now()),
       registry,
@@ -2165,7 +2430,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
  *  have been hand-cleaned already; the claim is still orphaned. A
  *  record's beadIds covers every clump member, not only the lead. */
 function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
-  const handled = new Set(cands.map(c => ctx.bySlug.get(c.slug)?.id).filter(Boolean));
+  const handled = new Set(cands.map(c => litterBead(ctx, c)?.id).filter(Boolean));
   for (const v of ctx.claims.runs) {
     if (v.state !== 'dead') {
       continue;

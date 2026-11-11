@@ -1814,6 +1814,12 @@ export function driveFixture(prefix: string): DriveFixture {
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
       loop: { agent: `node ${host.agent}` },
+      // the pass's litter sweep is off here: these suites script exact
+      // host-read sequences (readQueues.meta), and since bro-imvu3 the
+      // sweep legitimately spends prMeta reads on bare label branches
+      // like the work/fx-a every test creates — one extra read shifts
+      // the queue and the gate sees the scripted 'bbb' head itself
+      drive: { litterSweepSec: 0 },
     })
   );
   const env = {
