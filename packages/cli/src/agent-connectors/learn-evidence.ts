@@ -526,6 +526,27 @@ const pinnedBeads = (entry: AgentRegistryEntry, dir: string): string | null => {
   return typeof pinned === 'string' && pinned !== '' ? pinned : beadsDir(dir);
 };
 
+/** The dep-walk's seed set — the step, its molecule parent, and every
+ *  sibling step row, deduped. */
+const depTargetsFor = (
+  molStep: string,
+  molParent: string | undefined,
+  stepRows: MolStepRow[]
+): string[] => [
+  ...new Set([
+    molStep,
+    ...(molParent === undefined ? [] : [molParent]),
+    ...stepRows.map(s => s.id),
+  ]),
+];
+
+/** The no-hit tail — degraded probes read 'skipped' (unproven
+ *  absence), a clean sweep reads 'miss'. */
+const degradedVerdict = (degraded: string[]): LearnCheckResult =>
+  degraded.length > 0
+    ? { verdict: 'skipped', evidence: `probes failed — ${degraded.join('; ')}` }
+    : { verdict: 'miss' };
+
 /** The once-per-run artifact verdict. Never throws — the harvest it
  *  rides must not fail on a learn-store problem. */
 export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
@@ -550,13 +571,7 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
     molParent,
     stepRows.map(s => s.id)
   );
-  const depTargets = [
-    ...new Set([
-      molStep,
-      ...(molParent === undefined ? [] : [molParent]),
-      ...stepRows.map(s => s.id),
-    ]),
-  ];
+  const depTargets = depTargetsFor(molStep, molParent, stepRows);
   // the three evidence planes in contract order — first hit wins
   const probes: Array<() => LearnCheckResult | undefined> = [
     () => flaggedCloseHit(row, stepRows, molStep, inWindow),
@@ -569,9 +584,5 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
       return hit;
     }
   }
-
-  if (degraded.length > 0) {
-    return { verdict: 'skipped', evidence: `probes failed — ${degraded.join('; ')}` };
-  }
-  return { verdict: 'miss' };
+  return degradedVerdict(degraded);
 }

@@ -419,16 +419,21 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
 
 // --- drill ----------------------------------------------------------------------
 
-/** Body under a `## <name>` heading — index scans, not a lazy
+/** Body under `## <name>` heading lines — index scans, not a lazy
  *  `[\s\S]*?` + lookahead pair (sonar S8786 super-linear backtracking).
- *  The heading must end its line: whitespace after the name has to
- *  contain a newline, and the body starts right after that line's last
- *  newline — the same span the old `\s*\n+` left behind. `stop` is
- *  tested against each following line's start; no stop runs to EOF.
- *  `head` is a caller-built literal (`/##\s*Name/g`) — never a
- *  non-literal pattern (semgrep javascript_dos_rule-non-literal-regexp). */
-function mdSection(text: string, head: RegExp, stop?: RegExp): string | undefined {
-  for (const m of text.matchAll(head)) {
+ *  Callers hand their own literal heading's `matchAll` results and an
+ *  optional line-stop predicate, so no pattern is ever evaluated on a
+ *  non-literal here (semgrep non-literal-regexp). The heading must end
+ *  its line: whitespace after the name has to contain a newline, and
+ *  the body starts right after that line's last newline — the same
+ *  span the old `\s*\n+` left behind. `stopLine` is tested against
+ *  each following line's start; no stop runs to EOF. */
+function mdSection(
+  text: string,
+  head: Iterable<RegExpMatchArray>,
+  stopLine?: (line: string) => boolean
+): string | undefined {
+  for (const m of head) {
     const after = (m.index ?? 0) + m[0].length;
     let end = after;
     while (end < text.length && /\s/.test(text[end]!)) {
@@ -439,11 +444,11 @@ function mdSection(text: string, head: RegExp, stop?: RegExp): string | undefine
       continue; // `## Name: x` mid-line is a mention, not a heading
     }
     const rest = text.slice(after + gap.lastIndexOf('\n') + 1);
-    if (stop === undefined) {
+    if (stopLine === undefined) {
       return rest;
     }
     for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
-      if (stop.test(rest.slice(p + 1))) {
+      if (stopLine(rest.slice(p + 1))) {
         return rest.slice(0, p);
       }
     }
@@ -454,10 +459,8 @@ function mdSection(text: string, head: RegExp, stop?: RegExp): string | undefine
 
 /** Body of an inline `KEY:` memo field — from after `KEY:` (leading
  *  whitespace skipped, as the old `\s*` did) to the next line starting
- *  `##` or `CAPS:`. Same scan-for-`\n` mechanics as mdSection. */
-const CAPS_FIELD = /^(?:##|[A-Z]+:)/;
-const SECTION_FIELD = /^##/;
-
+ *  `##` or `CAPS:`. Same scan-for-`\n` mechanics as mdSection; the
+ *  field boundary is a literal pattern, evaluated inline. */
 function inlineField(text: string, key: string): string | undefined {
   const i = text.indexOf(key);
   if (i < 0) {
@@ -468,7 +471,7 @@ function inlineField(text: string, key: string): string | undefined {
     return undefined;
   }
   for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
-    if (CAPS_FIELD.test(rest.slice(p + 1))) {
+    if (/^(?:##|[A-Z]+:)/.test(rest.slice(p + 1))) {
       return rest.slice(0, p);
     }
   }
@@ -480,13 +483,14 @@ function drillMemo(notes: string | undefined): { result: string; prevents: strin
   if (!notes?.includes('## Result')) {
     return null;
   }
-  const result = mdSection(notes, /##\s*Result/g, SECTION_FIELD)?.trim() ?? '';
+  const result =
+    mdSection(notes, notes.matchAll(/##\s*Result/g), l => l.startsWith('##'))?.trim() ?? '';
   // the old regex ate to EOF — a later `## ` section's bullets counted
   // too; keeping that quirk is cheaper than inventing new semantics.
   // Bullet scan is per-line (the `^\s*-\s+(.+)$`m pattern was another
   // S8786 super-linear flag).
   const prevents: string[] = [];
-  for (const line of (mdSection(notes, /##\s*Prevention/g) ?? '').split('\n')) {
+  for (const line of (mdSection(notes, notes.matchAll(/##\s*Prevention/g)) ?? '').split('\n')) {
     const t = line.trimStart();
     if (t.startsWith('-') && t[1] !== undefined && t[1].trim() === '') {
       const item = t.slice(1).trim();
@@ -586,14 +590,15 @@ function harvestDrill(dir?: string): Harvest {
 /** `## What`/`## Why`/`scope:` (recordRetro's memo) or the legacy
  *  `WHAT:`/`WHY:`/`PREVENT:` inline form. The prevention text wins —
  *  it is already imperative; else the root cause is the durable bit. */
-const SCOPE_STOP = /^(?:##|scope:)/;
-
 function retroLesson(description: string): string {
   const prevent = inlineField(description, 'PREVENT:');
   if (prevent !== undefined && prevent.trim() !== '') {
     return oneLine(prevent);
   }
-  const why = mdSection(description, /##\s*Why/g, SCOPE_STOP);
+  // the scope boundary the old /^(?:##|scope:)/ stop enforced — string
+  // prefixes, no pattern eval
+  const scopeStop = (l: string): boolean => l.startsWith('##') || l.startsWith('scope:');
+  const why = mdSection(description, description.matchAll(/##\s*Why/g), scopeStop);
   if (why !== undefined && why.trim() !== '') {
     return oneLine(why);
   }
@@ -601,7 +606,9 @@ function retroLesson(description: string): string {
   if (whyInline !== undefined && whyInline.trim() !== '') {
     return oneLine(whyInline);
   }
-  return oneLine(mdSection(description, /##\s*What/g, SCOPE_STOP) ?? description);
+  return oneLine(
+    mdSection(description, description.matchAll(/##\s*What/g), scopeStop) ?? description
+  );
 }
 
 function harvestRetro(dir?: string): Harvest {
