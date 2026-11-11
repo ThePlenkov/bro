@@ -38,30 +38,31 @@ loopback-only HTTP/JSON facade so thin clients never shell out to
 to `<git-common-dir>/bro/serve.json` (mode 0600); every mutation
 requires `Authorization: Bearer <token>`.
 
-| Route                                           | Purpose                                                                                               |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `GET /`                                         | Service index                                                                                         |
-| `GET /fleet`                                    | Fleet web UI                                                                                          |
-| `GET /ui`                                       | Plane-catalog dashboard — one panel per plane, generated from the index                               |
-| `GET /api/v1/health`                            | Liveness                                                                                              |
-| `GET /api/v1/snapshot`                          | Watch snapshot                                                                                        |
-| `GET /api/v1/agents`                            | Agent plane                                                                                           |
-| `GET /api/v1/agents/<ref>`                      | One agent by ID or molecule step                                                                      |
-| `GET /api/v1/agents/<ref>/log?lines=N[&follow]` | Agent log tail — `follow` upgrades to SSE                                                             |
-| `POST /api/v1/agents`                           | Spawn an agent                                                                                        |
-| `DELETE /api/v1/agents/<ref>`                   | Stop an agent                                                                                         |
-| `GET /api/v1/planes`                            | Plane-catalog index — reads, verbs, live capabilities                                                 |
-| `GET /api/v1/planes/<plane>`                    | The plane's `list()` — `status`, `limit`, filters                                                     |
-| `GET /api/v1/planes/<plane>/<read\|ref>`        | A declared read, or `get(ref)`                                                                        |
-| `POST /api/v1/planes/<plane>/<verb>`            | Execute a declared verb — body is the args object                                                     |
-| `GET /api/v1/events/stream`                     | SSE over the local bus — `Last-Event-ID` resume                                                       |
-| `GET /api/v1/events/asyncapi.json`              | Generated AsyncAPI schema for the stream                                                              |
-| `POST /api/v1/webhooks/github`                  | GitHub webhook ingest → `github:*` bus topics (HMAC auth, not the session token)                      |
-| `ALL /v1/*`                                     | The Messages-API provider plane — byte proxy by default, conductor when `BRO_PROVIDER_BACKEND` is set |
+| Route                                           | Purpose                                                                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`                                         | Service index                                                                                                                   |
+| `GET /fleet`                                    | Fleet web UI                                                                                                                    |
+| `GET /ui`                                       | Plane-catalog dashboard — one panel per plane, generated from the index                                                         |
+| `GET /api/v1/health`                            | Liveness                                                                                                                        |
+| `GET /api/v1/snapshot`                          | Watch snapshot                                                                                                                  |
+| `GET /api/v1/agents`                            | Agent plane                                                                                                                     |
+| `GET /api/v1/agents/<ref>`                      | One agent by ID or molecule step                                                                                                |
+| `GET /api/v1/agents/<ref>/log?lines=N[&follow]` | Agent log tail — `follow` upgrades to SSE                                                                                       |
+| `POST /api/v1/agents`                           | Spawn an agent                                                                                                                  |
+| `DELETE /api/v1/agents/<ref>`                   | Stop an agent                                                                                                                   |
+| `GET /api/v1/planes`                            | Plane-catalog index — reads, verbs, live capabilities                                                                           |
+| `GET /api/v1/planes/<plane>`                    | The plane's `list()` — `status`, `limit`, filters                                                                               |
+| `GET /api/v1/planes/<plane>/<read\|ref>`        | A declared read, or `get(ref)`                                                                                                  |
+| `POST /api/v1/planes/<plane>/<verb>`            | Execute a declared verb — body is the args object                                                                               |
+| `GET /api/v1/events/stream`                     | SSE over the local bus — `Last-Event-ID` resume                                                                                 |
+| `GET /api/v1/events/asyncapi.json`              | Generated AsyncAPI schema for the stream                                                                                        |
+| `POST /api/v1/webhooks/github`                  | GitHub webhook ingest → `github:*` bus topics (HMAC auth, not the session token)                                                |
+| `ALL /v1/*`                                     | The provider plane — byte proxy by default; the conductor answers Messages + OpenAI dialects when `BRO_PROVIDER_BACKEND` is set |
 
 ### Provider plane — proxy and conductor
 
-`/v1/*` speaks the Anthropic Messages API and authenticates on the
+`/v1/*` is the provider plane — Anthropic Messages plus the OpenAI
+dialects below — and authenticates on the
 session token (`Authorization: Bearer` / `x-api-key`), GETs included —
 an unauthenticated call would spend the upstream credential anyway.
 Which engine answers is fixed by the server's own env, never the
@@ -79,6 +80,23 @@ for a tool-less backend that advertises nothing, and
 `BRO_PROVIDER_TIMEOUT_MS` sets the per-call deadline (default 120000).
 An unset backend falls back to the proxy; a misnamed or non-`acp`
 entry is a loud startup error, never a silent proxy.
+
+**Dialects — the conductor is not Anthropic-only.** The same ACP turn
+machinery answers three request wires on the flat `/v1/*` plane:
+
+- `POST /v1/messages` — the Anthropic Messages dialect (claude-class
+  clients), plus `POST /v1/messages/count_tokens`;
+- `POST /v1/responses` — OpenAI's Responses wire (codex): item-based
+  SSE, `function_call`/`function_call_output` items, and
+  `previous_response_id` chaining for retained conversations;
+- `POST /v1/chat/completions` — the stateless chat dialect, streamed
+  or buffered, for generic OpenAI-compatible clients — litellm,
+  cursor, hand-rolled SDKs.
+
+All three share the session plumbing, the `<tool_call>` bridge, the
+model pin, and `GET /v1/models` discovery; a client's `base_url` picks
+the dialect by the path it calls. The byte-proxy mode above is
+dialect-agnostic — it forwards whatever the client sends.
 
 **The conductor path is session-grade — unless the fast lane is
 armed.** Every `POST /v1/messages` that conducts opens a real agent
