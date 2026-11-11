@@ -781,8 +781,9 @@ export type SddMode = (typeof SDD_MODES)[number];
 /** bro.config.json `sdd` section — spec-driven development policy.
  *  off (default): nothing emitted. remind: session-start/prompt context
  *  names claimed beads without a spec. gate: the stop gate also blocks
- *  once while an own claim lacks a spec. `dir` is where `specs/<id>.md`
- *  lives; a `spec:` link in the bead description counts too. */
+ *  once while an own claim lacks a spec. `dir` is where
+ *  `specs/<id>.spec.md` lives; a `spec:` link in the bead description
+ *  counts too. */
 export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     mode?: unknown;
@@ -1666,7 +1667,8 @@ export interface BroConfig {
   /** Spec-driven development policy — spec before code for claimed
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
-   *  `specs/<id>.md` files; a `spec:` link in the description counts. */
+   *  `specs/<id>.spec.md` files; a `spec:` link in the description
+   *  counts. */
   sdd: { mode: SddMode; dir: string };
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all

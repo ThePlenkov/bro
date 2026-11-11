@@ -675,7 +675,7 @@ describe('sddConnector under a non-beads tasks connector', () => {
 describe('specs facade resolution', () => {
   test('bare repo resolves to native', async () => {
     await withRepo({ config: {} }, dir => {
-      assert.match(specStore(dir).policy(), /specs\/<id>\.md/);
+      assert.match(specStore(dir).policy(), /specs\/<id>\.spec\.md/);
     });
   });
 
@@ -966,7 +966,7 @@ describe('dir specs — the tree IS the filetree', () => {
       writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
       const spec = specStore(dir);
       const p = spec.scaffold!('child', { title: 'c', parent: 'cap' });
-      assert.equal(p, join(dir, 'specs', 'cap', 'child.md'));
+      assert.equal(p, join(dir, 'specs', 'cap', 'child.spec.md'));
       assert.doesNotMatch(readFileSync(p, 'utf8'), /parent:/);
       // flat-file parents still get the frontmatter edge
       writeFileSync(join(dir, 'specs', 'flat.md'), '# flat\n');
@@ -1070,7 +1070,9 @@ describe('bro spec init', () => {
       const cfg = JSON.parse(readFileSync(join(dir, 'bro.config.json'), 'utf8'));
       assert.equal(cfg.sdd.mode, 'remind');
       assert.equal(cfg.connectors?.specs, undefined);
-      assert.ok(readFileSync(join(dir, 'specs', 'project.md'), 'utf8').includes('spec of specs'));
+      assert.ok(
+        readFileSync(join(dir, 'specs', 'project.spec.md'), 'utf8').includes('spec of specs')
+      );
     });
   });
 

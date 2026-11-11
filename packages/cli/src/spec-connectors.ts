@@ -72,12 +72,21 @@ export function specDirAbs(dir: string, specDir: string): string | null {
 
 function specFilePath(dir: string, specDir: string, id: string): string | null {
   const base = specDirAbs(dir, specDir);
-  return base === null ? null : join(base, `${id}.md`);
+  return base === null ? null : join(base, `${id}.spec.md`);
 }
 
-/** A spec directory's index file, in preference order — `spec.md`
- *  matches speckit's convention, README.md suits prose-first trees. */
+/** A spec directory's index file, in preference order —
+ *  `<dirname>.spec.md` is the brotocol marker (any `*.spec.md` is a
+ *  spec), `spec.md` matches speckit's convention, README.md suits
+ *  prose-first trees. */
 const INDEX_NAMES = ['spec.md', 'README.md'];
+
+/** `foo.spec.md` → `foo`: the `.spec.md` marker strips as a unit so
+ *  a spec file never parses its own suffix into the id. Other `.md`
+ *  files keep plain basename — legacy flat specs. */
+function specId(name: string): string {
+  return name.endsWith('.spec.md') ? name.slice(0, -'.spec.md'.length) : basename(name, '.md');
+}
 
 interface ResolvedSpec extends SpecNode {
   abs: string;
@@ -108,7 +117,7 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
       const abs = join(dirAbs, e.name);
       const rel = join(dirRel, e.name);
       if (e.isDirectory()) {
-        const index = INDEX_NAMES.find(n => {
+        const index = [`${e.name}.spec.md`, ...INDEX_NAMES].find(n => {
           try {
             return statSync(join(abs, n)).isFile();
           } catch {
@@ -133,7 +142,7 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
         });
         walk(abs, rel, e.name, true, index);
       } else if (collectFiles && e.name.endsWith('.md') && e.name !== indexName) {
-        const id = basename(e.name, '.md');
+        const id = specId(e.name);
         // a child cannot re-declare its dir spec's id — `foo/foo.md`
         // would self-parent and loop the tree walk
         if (!validBeadId(id) || id === parent) {
@@ -466,7 +475,7 @@ export const nativeSpecConnector: Connector = {
         }
         const path =
           parent?.dirSpec === true
-            ? join(dirname(parent.abs), `${id}.md`)
+            ? join(dirname(parent.abs), `${id}.spec.md`)
             : specFilePath(root, specDir, id)!;
         if (existsSync(path)) {
           throw new Error(`${path} already exists — refusing to overwrite`);
@@ -479,9 +488,9 @@ export const nativeSpecConnector: Connector = {
         return path;
       },
       remedy: id =>
-        `write ${specDir}/${id}.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
+        `write ${specDir}/${id}.spec.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
       policy: () =>
-        `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / molecule / 'trivial' / 'debt')`,
+        `spec before code — ${specDir}/<id>.spec.md or <id>/ dir, or a spec: link in the bead (exempt: chore / molecule / 'trivial' / 'debt')`,
       // the tool's explicit scope only — `scope:` frontmatter on the
       // resolved spec file; the commit-refs fallback is the drift
       // engine's, not the connector's

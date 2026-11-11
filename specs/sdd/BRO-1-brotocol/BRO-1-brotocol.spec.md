@@ -144,11 +144,22 @@ bead may translate BMAD output into beads; nothing else is adopted.
 
 The Brotocol format **is** the y1jtm native schema, adopted by
 reference (not restated): KEY-N identity with max+1 allocation,
-flat `<KEY-N>-<slug>.md` or `<KEY-N>-<slug>/spec.md` layout, required
-frontmatter (`id, title, status, area, owns, beads, aliases`),
-optional `parent` / `superseded-by`, parts as subfiles referenced
-`KEY-N/part`, lifecycle `draft|active|deprecated|removed`, and no
-archival on bead closure.
+required frontmatter (`id, title, status, area, owns, aliases` —
+no `beads`, see below), optional `parent` / `superseded-by`, parts
+as subfiles referenced `KEY-N/part`, lifecycle
+`draft|active|deprecated|removed`, and no archival on bead closure.
+
+Layout refines y1jtm's to one marker:
+
+- **A spec is any `*.spec.md` file.** Flat spec:
+  `<KEY-N>-<slug>.spec.md`. Dir spec: `<KEY-N>-<slug>/` whose index
+  is `<KEY-N>-<slug>.spec.md` (repeated-name index, BMAD-style).
+- `spec.md` / `README.md` remain accepted legacy indexes; inside a
+  dir spec, other `.md` files are *parts*, not specs — the strict
+  part-vs-child rule lands with the y1jtm migration (today's engine
+  still counts nested `.md` as children for compatibility).
+- Finding for y1jtm: its `<dir>/spec.md` index is ambiguous with
+  parts; the `.spec.md` suffix is the unambiguous marker.
 
 Additions this spec makes normative:
 

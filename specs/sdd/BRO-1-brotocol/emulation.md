@@ -1,6 +1,6 @@
 # Emulation log: Brotocol / Brose (y1jtm product-spec model)
 
-Spec: `specs/sdd/BRO-1-brotocol/spec.md`; schema contract emulated
+Spec: `specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md`; schema contract emulated
 from `specs/sdd/bro-y1jtm.md` (KEY-N, frontmatter, parts). Stage:
 **manual**. The emulated tools are the future `brose` engine surface
 and the post-y1jtm `bro spec` behavior; today's real CLI stands in
@@ -15,7 +15,7 @@ wherever it already implements the contract.
   persist derived key to `sdd.key` on first allocation.
 - Actual: no `*[A-Z]+-N*` files and no `id:` frontmatter anywhere on
   main → allocated **BRO-1**, slug `brotocol` →
-  `specs/sdd/BRO-1-brotocol/spec.md`.
+  `specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md`.
 - Gap found: today's `sdd` config section only parses `{mode, dir}` —
   `sdd.key` written by the emulated allocation would be silently
   ignored by the real parser until y1jtm lands. Proposed wording:
@@ -28,12 +28,13 @@ wherever it already implements the contract.
 
 - Spec reference: y1jtm layout `<KEY-N>-<slug>.md` or
   `<KEY-N>-<slug>/spec.md` "under `sdd.dir`"; child spec carries
-  `parent: KEY-N`.
+  `parent: KEY-N`. BRO-1 refines: dir index is `<dirname>.spec.md`.
 - Input: id `BRO-1`, intended parent = the sdd product spec
   (`specs/sdd/spec.md` — a legacy spec with no KEY-N).
 - Expected by spec: file under `sdd.dir`, `parent:` naming a KEY-N.
-- Actual: placed at `specs/sdd/BRO-1-brotocol/spec.md` — nested under
-  the sdd area dir. `parent:` omitted: the parent spec predates the
+- Actual: placed at `specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md`
+  — nested under the sdd area dir, renamed after adopting the
+  `.spec.md` marker. `parent:` omitted: the parent spec predates the
   KEY-N migration and has no id to name; position supplies the tree
   edge today.
 - Gap found: y1jtm does not say whether topic dirs (`specs/sdd/`)
@@ -41,6 +42,10 @@ wherever it already implements the contract.
   frontmatter replaces directory grouping. Proposed wording: "topic
   dirs remain; they are transparent containers — `area` classifies,
   directories only organize."
+- Gap found (resolved by the `.spec.md` marker): y1jtm's `spec.md`
+  index is ambiguous with parts — a dir spec's `emulation.md` indexed
+  as a *child spec* under today's engine. `*.spec.md` = spec, other
+  `.md` = part is the mechanical rule.
 - Golden case: `parent:` must reference a resolvable KEY-N; a
   pre-migration parent resolves by position until migrated.
 
@@ -50,7 +55,7 @@ wherever it already implements the contract.
 - Spec reference: evidence precedence — declared `spec:` link
   outranks discovered files.
 - Expected by spec: `link` verdict (bead description carries
-  `spec: specs/sdd/BRO-1-brotocol/spec.md`).
+  `spec: specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md`).
 - Actual: `bro-bntld  link  Brotocol: extract bro's spec engine — …`
   — exit 0.
 - Friction: none. The `spec:` evidence path is the bridge between the
@@ -65,13 +70,20 @@ wherever it already implements the contract.
 - Actual:
   ```text
   sdd  specs/sdd/spec.md
-    BRO-1-brotocol  specs/sdd/BRO-1-brotocol/spec.md
+    BRO-1-brotocol  specs/sdd/BRO-1-brotocol/BRO-1-brotocol.spec.md
+      emulation  specs/sdd/BRO-1-brotocol/emulation.md
     bro-19g  specs/sdd/bro-19g.md
     …
   ```
+  (`emulation` still renders as a child — today's compat rule counts
+  any nested `.md`; post-migration it's a *part* since it's not
+  `.spec.md`.)
 - Note: today's walker labels the node by directory name
   (`BRO-1-brotocol`), not by the frontmatter `id:` field — cosmetic;
   post-y1jtm resolution keys on the `KEY-N-` prefix.
+- Engine support shipped in this PR: `<dirname>.spec.md` is a dir
+  index (preferred over `spec.md`/`README.md`), `*.spec.md` strips
+  its suffix into the id, scaffold writes `<id>.spec.md`.
 
 ## Run 5: lint — emulated schema check over spec.md
 
