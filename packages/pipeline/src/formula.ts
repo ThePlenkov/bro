@@ -450,6 +450,11 @@ export function formulaSha(bytes: string | Buffer): string {
 export function loadPipelineFormula(file: string): {
   formula: PipelineFormula;
   sha: string;
+  /** the exact bytes `sha` covers — callers that persist a copy (the
+   *  run sidecar) must use THESE, never a second read: a file that
+   *  changes between reads would journal one hash while archiving
+   *  different bytes. */
+  bytes: Buffer;
 } {
   let bytes: Buffer;
   try {
@@ -464,7 +469,7 @@ export function loadPipelineFormula(file: string): {
   } catch (err) {
     throw new Error(`${file}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`);
   }
-  return { formula: parsePipelineFormula(doc, file), sha: formulaSha(bytes) };
+  return { formula: parsePipelineFormula(doc, file), sha: formulaSha(bytes), bytes };
 }
 
 /** Where a verdict takes the run — a stage name or a terminal action.

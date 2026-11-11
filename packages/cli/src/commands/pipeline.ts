@@ -65,6 +65,9 @@ run flags:
   --item <id>               explicit bead id (repeatable) — bypasses the
                             label scan, not dedup/admission/occupancy
   --limit <n>               cap how many candidates this invocation scans
+  --max-in-flight <n>       machine in-flight cap — narrows the formula's
+                            limits.in_flight for every run this invocation
+                            starts (0 = uncapped; absent = no machine cap)
   --dry-run                 resolve queue/customer/formula/dedup; report
                             what WOULD start without invoking runPipeline
   --json                    machine-readable report
@@ -390,6 +393,7 @@ interface RunFlags {
   customer?: string;
   label?: string;
   limit?: string;
+  maxInFlight?: string;
   dryRun: boolean;
   json: boolean;
 }
@@ -402,6 +406,7 @@ const RUN_VALUE_FLAGS = new Set([
   '--customer',
   '--label',
   '--limit',
+  '--max-in-flight',
   '--item',
 ]);
 const RUN_BOOL_FLAGS = new Set(['--dry-run', '--json']);
@@ -412,6 +417,7 @@ const runFlagsOf = (argv: string[]): RunFlags => ({
   customer: flag(argv, '--customer'),
   label: flag(argv, '--label'),
   limit: flag(argv, '--limit'),
+  maxInFlight: flag(argv, '--max-in-flight'),
   dryRun: argv.includes('--dry-run'),
   json: argv.includes('--json'),
 });
@@ -470,6 +476,20 @@ function runLimit(f: RunFlags): number | undefined {
   const n = Number(f.limit);
   if (!Number.isInteger(n) || n < 0) {
     fail(`--limit must be a non-negative integer, got ${JSON.stringify(f.limit)}`, 2);
+  }
+  return n;
+}
+
+/** `--max-in-flight` → the machine budget every started run narrows
+ *  `limits.in_flight` with (RunOptions.maxInFlight — 0/absent = no
+ *  machine cap). Same non-negative-integer contract as --limit. */
+function runMaxInFlight(f: RunFlags): number | undefined {
+  if (f.maxInFlight === undefined) {
+    return undefined;
+  }
+  const n = Number(f.maxInFlight);
+  if (!Number.isInteger(n) || n < 0) {
+    fail(`--max-in-flight must be a non-negative integer, got ${JSON.stringify(f.maxInFlight)}`, 2);
   }
   return n;
 }
@@ -557,17 +577,19 @@ async function cmdRun(argv: string[]): Promise<void> {
     fail('run needs --formula <file> — the pipeline formula every run drives', 2);
   }
   let loaded: ReturnType<typeof loadPipelineFormula>;
-  let formulaBytes: Buffer;
   try {
     loaded = loadPipelineFormula(f.formula);
-    formulaBytes = readFileSync(f.formula);
   } catch (e) {
     fail(`--formula ${f.formula}: ${e instanceof Error ? e.message : String(e)}`, 2);
   }
+  // the sidecar archives the SAME bytes the sha covers — a second read
+  // could catch a mid-command edit and journal hash A while storing B
+  const formulaBytes = loaded.bytes;
   const customer = resolveRunCustomer(ctx.dir, f);
   const items = runCandidates(ctx, argv, f);
   const limit = runLimit(f);
   const bounded = limit === undefined ? items : items.slice(0, limit);
+  const maxInFlight = runMaxInFlight(f);
   const engines = await resolveRunEngines(ctx, f, loaded.sha);
   const report = await startRuns({
     dir: ctx.dir,
@@ -580,6 +602,7 @@ async function cmdRun(argv: string[]): Promise<void> {
     runOptions: {
       admit: () => true,
       admitIntents: [...RUN_ADMIT_INTENTS],
+      ...(maxInFlight !== undefined ? { maxInFlight } : {}),
     },
   });
   if (f.json) {

@@ -224,6 +224,7 @@
               "--label <label>": "the queue label to scan (default pipeline)",
               "--item <id>": "explicit bead id (repeatable) — bypasses the label scan",
               "--limit <n>": "cap how many candidates this invocation scans",
+              "--max-in-flight <n>": "machine in-flight cap — narrows limits.in_flight (0 = uncapped)",
               "--dry-run": "report what WOULD start without invoking runPipeline",
               "--json": "machine-readable report"
             },

@@ -358,6 +358,61 @@ describe('bro pipeline run', () => {
     );
   });
 
+  test('--max-in-flight parses as a value flag — the item stays positional', async () => {
+    const { root, main } = initRepo('bro-pipe-run-maxfly-');
+    await insideAsync(main, root, () =>
+      cleanEnv(async () => {
+        const formula = seedFormula(main);
+        const engines = seedEnginesModule(main);
+        const r = await exits(() =>
+          runPipelineCommand([
+            'run',
+            '--formula',
+            formula,
+            '--engines',
+            engines,
+            '--customer',
+            'c',
+            '--max-in-flight',
+            '2',
+            '--dry-run',
+            '--json',
+            'fx-1',
+          ])
+        );
+        assert.equal(r.code, -1);
+        const report = JSON.parse(r.out.join('\n')) as { scanned: number };
+        assert.equal(report.scanned, 1);
+      })
+    );
+  });
+
+  test('a malformed --max-in-flight is a usage error', async () => {
+    const { root, main } = initRepo('bro-pipe-run-badfly-');
+    await insideAsync(main, root, () =>
+      cleanEnv(async () => {
+        const formula = seedFormula(main);
+        const engines = seedEnginesModule(main);
+        const r = await exits(() =>
+          runPipelineCommand([
+            'run',
+            '--formula',
+            formula,
+            '--engines',
+            engines,
+            '--customer',
+            'c',
+            '--max-in-flight',
+            '-1',
+            'fx-1',
+          ])
+        );
+        assert.equal(r.code, 2);
+        assert.match(r.err.join('\n'), /--max-in-flight/);
+      })
+    );
+  });
+
   test('--engines loads an EngineMap object', async () => {
     const { root, main } = initRepo('bro-pipe-run-eng-');
     await insideAsync(main, root, () =>
