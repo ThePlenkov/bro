@@ -16,11 +16,6 @@
     "smol-toml": "^1.9.0",
     "@broject/core": "^0.3.0"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -36,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Retrospect engine for bro \u2014 TOML retro plans fan prevention actions out to beads, skills, rules",
+  "description": "Retrospect engine for bro — TOML retro plans fan prevention actions out to beads, skills, rules",
   "keywords": [
     "retrospective",
     "self-correction",

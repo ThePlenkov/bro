@@ -15,11 +15,6 @@
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -35,7 +30,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Learn store for bro \u2014 lesson schema and bd-kv CRUD behind `bro learn`",
+  "description": "Learn store for bro — lesson schema and bd-kv CRUD behind `bro learn`",
   "keywords": [
     "lessons",
     "self-improvement",

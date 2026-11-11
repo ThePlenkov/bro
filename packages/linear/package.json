@@ -15,11 +15,6 @@
   "dependencies": {
     "@broject/core": "^0.3.0"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -35,7 +30,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Linear connector for bro \u2014 tasks facade (TaskStore) and queries facade over the Linear GraphQL API",
+  "description": "Linear connector for bro — tasks facade (TaskStore) and queries facade over the Linear GraphQL API",
   "keywords": [
     "linear",
     "connector",

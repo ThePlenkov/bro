@@ -16,11 +16,6 @@
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -40,7 +35,7 @@
     "@broject/core": "^0.3.0",
     "@broject/drill": "^0.3.0"
   },
-  "description": "bro lifecycle engine \u2014 the stateless re-entry verdict over durable state (specs bro-oy3k1)",
+  "description": "bro lifecycle engine — the stateless re-entry verdict over durable state (specs bro-oy3k1)",
   "keywords": [
     "automation",
     "lifecycle",

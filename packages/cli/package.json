@@ -90,9 +90,6 @@
     "sverka": "^0.2.10"
   },
   "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3",
     "@broject/acp-session": "^0.3.0",
     "@broject/herdr-kit": "^0.3.0"
   },

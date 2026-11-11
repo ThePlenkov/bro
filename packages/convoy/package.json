@@ -16,9 +16,6 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3",
     "smol-toml": "^1.9.0"
   },
   "files": [
@@ -36,7 +33,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Beads molecule runner for bro \u2014 DAG workflows scheduled inside the agent",
+  "description": "Beads molecule runner for bro — DAG workflows scheduled inside the agent",
   "keywords": [
     "beads",
     "workflow",

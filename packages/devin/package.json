@@ -16,11 +16,6 @@
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
-  },
   "files": [
     "dist"
   ],
@@ -36,7 +31,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "The devin facade for bro \u2014 the session plane (live sessions, worker/batch split), the CLI's session grammar and the store-backed lane telemetry",
+  "description": "The devin facade for bro — the session plane (live sessions, worker/batch split), the CLI's session grammar and the store-backed lane telemetry",
   "keywords": [
     "devin",
     "agent",

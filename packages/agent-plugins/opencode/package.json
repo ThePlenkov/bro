@@ -29,10 +29,7 @@
     "@opencode/plugin": "^2.1.4",
     "@opentui/core": "^0.7.0",
     "@opentui/solid": "^0.7.0",
-    "solid-js": "^1.9.12",
-    "tsdown": "^0.23.7",
-    "tsx": "^4.20.0",
-    "typescript": "^6.0.3"
+    "solid-js": "^1.9.12"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.6.8",
@@ -65,5 +62,5 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "bro's OpenCode plugin \u2014 server + TUI + RPC parts"
+  "description": "bro's OpenCode plugin — server + TUI + RPC parts"
 }
