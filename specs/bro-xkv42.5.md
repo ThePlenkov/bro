@@ -2,7 +2,7 @@
 parent: bro-xkv42
 ---
 
-# bro-xkv42.5 — bro learn promote <id>: open rule-edit bead + record promotedTo
+# bro-xkv42.5 — `bro learn promote <id>`: open rule-edit bead + record promotedTo
 
 ## Problem
 
