@@ -30,8 +30,12 @@ claim, the analyst's verdict.
   `apiKeyHelper` + `ANTHROPIC_BASE_URL` + `enabledPlugins`; codex
   `model`/`model_provider`/`base_url`/`env_key`/`wire_api`/
   `model_reasoning_effort` + `CODEX_HOME` user-layer trick.
-- **Known gaps** (tracked, not hidden): `ANTHROPIC_SMALL_FAST_MODEL`
-  mapping (`bro-bvipw.1`), host-scope single listener (`bro-dluwn`),
-  dead-listener windows under a live client (`bro-ofbw4`), a real
-  codex binary on this host (environment gap — the codex rows
-  provision but need `codex` installed to run).
+- **Known gaps** (tracked, not hidden): a real codex binary on this
+  host (environment gap — the codex rows provision but need `codex`
+  installed to run). The gaps this index originally tracked have all
+  landed: classifier/`ANTHROPIC_SMALL_FAST_MODEL` calls ride the
+  conductor fast lane upstream or the cheap session lane (`bro-6asnu`,
+  doctor warn `bro-9ww2q`), the host-scope single listener is
+  `bro provider ensure` on :4545 (`bro-dluwn`), and dead-listener
+  windows closed via the keepalive watchdog + ensure self-heal
+  (`bro-ofbw4`).
