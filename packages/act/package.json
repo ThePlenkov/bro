@@ -17,7 +17,7 @@
     "@broject/debt": "^0.3.0"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "smol-toml": "^1.9.0"
@@ -37,7 +37,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "PR review gate for bro — threads, checks, reviewers, exit gate, merge slot",
+  "description": "PR review gate for bro \u2014 threads, checks, reviewers, exit gate, merge slot",
   "keywords": [
     "pr-review",
     "github-actions",

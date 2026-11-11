@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
@@ -36,7 +36,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "router-routes — the route table: TOML routes, the candidate builder, and the resolver",
+  "description": "router-routes \u2014 the route table: TOML routes, the candidate builder, and the resolver",
   "keywords": [
     "router",
     "routes",

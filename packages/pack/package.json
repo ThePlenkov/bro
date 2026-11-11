@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsdown": "^0.15.0",
+    "tsdown": "^0.23.7",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   },
@@ -38,7 +38,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Default capability pack for bro — skills/ + formulas/ trees installed by `bro setup --pack`",
+  "description": "Default capability pack for bro \u2014 skills/ + formulas/ trees installed by `bro setup --pack`",
   "keywords": [
     "bro",
     "pack",
