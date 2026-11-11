@@ -59,7 +59,7 @@ npm i -g @broject/bro          # or keep bro around: bro debt status
 
 npm `latest` is **0.3.0** — the grouped `bro <group> <member>`
 spellings dispatch (`bro review debt status`), and this page keeps the
-flat names (`bro debt status`) that stay permanent aliases. Commands
+flat names (`bro debt status`) that remain available as aliases. Commands
 introduced in 0.3.0 are marked `0.3.0`.
 
 Requires: `node >= 22.18`, `gh` authenticated, `bd`

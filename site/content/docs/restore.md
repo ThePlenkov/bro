@@ -5,8 +5,9 @@ description: A rig's durable state lives on git refs and branches — clone, bro
 ---
 
 _Everything below runs on npm `latest` (**0.3.0**) as written. These
-are the flat spellings — permanent aliases; the grouped `bro <group>
-<member>` surface (`bro work sync`) dispatches on the same install._
+are the flat spellings — aliases that remain available; the grouped
+`bro <group> <member>` surface (`bro work sync`) dispatches on the
+same install._
 
 A bro rig is designed so the machine is disposable. What dies with it is
 **processes** — the daemon, act watchers, exec shells, dolt servers —

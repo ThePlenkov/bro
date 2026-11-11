@@ -23,8 +23,8 @@ and `bro mesh peers remove <alias>` to manage peer bindings.
 | `bro mesh request <mesh://<org>/<repo>> <title>`        | Post a request to a peer            |
 | `bro mesh claim <id>`                                   | Claim an inbox item                 |
 | `bro mesh done <id>`                                    | Mark claimed work done              |
-| `bro mesh accept <id>`                                  | Accept delivered work               |
-| `bro mesh reject <id>`                                  | Reject delivered work               |
+| `bro mesh accept <id>` _(0.4.0)_                        | Accept delivered work               |
+| `bro mesh reject <id>` _(0.4.0)_                        | Reject delivered work               |
 | `bro mesh wait <id>`                                    | Point-check a thread (not blocking) |
 
 See [mesh spec](https://github.com/ThePlenkov/bro/blob/main/specs/mesh/spec.md) for the protocol.
