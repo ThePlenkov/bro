@@ -5,14 +5,13 @@
  *  duplication on new code. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { bdTry, handleOwner, pidAlive } from '@broject/core';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -20,7 +19,7 @@ import {
 import { devNull, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { usageWriter } from '@broject/core';
+import { bdTry, handleOwner, pidAlive, usageWriter } from '@broject/core';
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -255,6 +254,25 @@ const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
 const cmd = pos[0]
+const cmdName = cmd === undefined && args[0] === '--version' ? '--version' : cmd
+// FAKE_BD_WEDGE=<file> — a store-outage dial for failure-injection
+// tests (bro-cu3q8): the file lists wedged commands, one per line.
+// 'hang:<cmd>' sleeps past the caller's 15s budget so the spawn's own
+// timeout reports the real incident signature 'spawnSync <bin>
+// ETIMEDOUT'; a bare name (or '*') fails fast on the store's own
+// outage line — 'no beads database' is what callers classify as the
+// store-down shape, a generic refusal would read as a claim race.
+// Absent file → healthy store.
+const WEDGE = process.env.FAKE_BD_WEDGE
+if (WEDGE && fs.existsSync(WEDGE)) {
+  const spec = fs.readFileSync(WEDGE, 'utf8').split('\\n').map((l) => l.trim()).filter(Boolean)
+  const hit = spec.find((l) => l === cmdName || l === 'hang:' + cmdName || l === '*')
+  if (hit !== undefined) {
+    if (hit.startsWith('hang:')) { pause(20_000); process.exit(0) }
+    console.error('Error: no beads database found')
+    process.exit(1)
+  }
+}
 // one-shot claim-read failure injection (bro-etimout): a wedged store
 // past bd's 15s budget makes the throwing bd() ready call throw — a
 // non-zero exit throws identically for execFileSync callers. Scoped to
@@ -271,7 +289,7 @@ if (process.env.FAKE_BD_READY_FAILS && cmd === 'ready' && args.includes('--exclu
     fail('spawnSync timeout ETIMEDOUT')
   }
 }
-switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
+switch (cmdName) {
   case '--version':
     console.log('bd 0.0.0-fake')
     break
