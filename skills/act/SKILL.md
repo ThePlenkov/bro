@@ -46,7 +46,12 @@ default store, so standard installs already have it).
   gate unconditionally: a failed job or an error-level annotation is a
   real project finding, not reviewer flake, so `act.ignoreChecks` does
   not shield them and a `neutral` conclusion still gets its annotations
-  inspected.
+  inspected. An ignored-but-failing SAST check still gets its **check
+  output read** (`gh api repos/<r>/check-runs/<id>` → `.output.summary`)
+  before any classification — scanners post verdicts there, never in
+  threads, so "no thread activity" says nothing about whether the tool
+  is down; a named failing condition (duplication %, coverage) is a
+  real finding to fix or debt-bead, not flake.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
