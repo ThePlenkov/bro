@@ -13,7 +13,6 @@
  *  plane's exec('delegate') run the delegate() dispatcher here. */
 import { randomBytes } from 'node:crypto';
 import {
-  BATCH_MARKER_ENV,
   resolveStepClass,
   type AgentInfo,
   type ResolvedClass,
@@ -138,6 +137,7 @@ async function delegateDetach(
     dir,
     env,
     {
+      lane: 'batch',
       molStep: `adhoc-${randomBytes(4).toString('hex')}`,
       connector: req.connector,
       worktree: req.worktree,
@@ -149,7 +149,6 @@ async function delegateDetach(
       class: req.class,
       autoApprove: req.autoApprove,
       delegatedBy,
-      env: { [BATCH_MARKER_ENV]: '1' },
     },
     opts
   );

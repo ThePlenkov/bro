@@ -78,7 +78,9 @@
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?, provider?, model?,
- *                               profile?, class?, autoApprove?} → 201 {agent}
+ *                               profile?, class?, autoApprove?, lane?}
+ *                               → 201 {agent}; lane is 'batch'|'interactive',
+ *                               omitted → 'interactive'
  *   DELETE /api/v1/agents/<ref> stop — always invokes the connector's
  *                               idempotent stop; terminal agents report
  *                               `terminal:true` + a note. A miss beside a
@@ -607,12 +609,13 @@ const SPAWN_FIELDS = new Set([
   'profile',
   'class',
   'autoApprove',
+  'lane',
   'resumeSessionId',
 ]);
 
-/** POST body → StepSpawnRequest — strict: a misspelled field must be a
- *  400, not a silently dropped option. */
-export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
+/** The raw JSON object behind a spawn body — parsed, object-shaped,
+ *  and free of unknown fields. */
+function spawnDoc(raw: string | undefined): Record<string, unknown> {
   if (raw === undefined || raw.trim() === '') {
     throw new HttpError(400, 'POST /api/v1/agents needs a JSON body');
   }
@@ -629,23 +632,49 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
   if (unknown.length > 0) {
     throw new HttpError(400, `unknown field(s): ${unknown.join(', ')}`);
   }
-  const req = doc as Record<string, unknown>;
-  for (const [k, v] of Object.entries(req)) {
-    if (k === 'autoApprove') {
-      if (v !== undefined && typeof v !== 'boolean') {
-        throw new HttpError(400, 'field "autoApprove" must be a boolean');
-      }
-    } else if (v !== undefined && (typeof v !== 'string' || v.trim() === '')) {
-      // an empty string is not "unset" — it would ride through as an
-      // empty argv element or lookup key and fail AFTER the 201
-      throw new HttpError(400, `field "${k}" must be a non-empty string`);
+  return doc as Record<string, unknown>;
+}
+
+/** Per-field value types — every field is a non-empty string except
+ *  the boolean `autoApprove`. */
+function assertSpawnField(k: string, v: unknown): void {
+  if (k === 'autoApprove') {
+    if (v !== undefined && typeof v !== 'boolean') {
+      throw new HttpError(400, 'field "autoApprove" must be a boolean');
     }
+  } else if (v !== undefined && (typeof v !== 'string' || v.trim() === '')) {
+    // an empty string is not "unset" — it would ride through as an
+    // empty argv element or lookup key and fail AFTER the 201
+    throw new HttpError(400, `field "${k}" must be a non-empty string`);
+  }
+}
+
+/** The body lane — omitted reads 'interactive' (API clients are
+ *  people/tools at the session lane); a present lane must be a real
+ *  value, anything else is a 400. */
+function spawnLane(req: Record<string, unknown>): 'batch' | 'interactive' {
+  if (req.lane === undefined) {
+    return 'interactive';
+  }
+  if (req.lane !== 'batch' && req.lane !== 'interactive') {
+    throw new HttpError(400, 'field "lane" must be "batch" or "interactive"');
+  }
+  return req.lane;
+}
+
+/** POST body → StepSpawnRequest — strict: a misspelled field must be a
+ *  400, not a silently dropped option. */
+export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
+  const req = spawnDoc(raw);
+  for (const [k, v] of Object.entries(req)) {
+    assertSpawnField(k, v);
   }
   if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {
     throw new HttpError(400, 'field "molStep" is required');
   }
   return {
-    molStep: req.molStep as string,
+    lane: spawnLane(req),
+    molStep: req.molStep,
     worktree: req.worktree as string | undefined,
     prompt: req.prompt as string | undefined,
     promptFile: req.promptFile as string | undefined,

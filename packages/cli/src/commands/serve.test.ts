@@ -529,6 +529,7 @@ describe('parseSpawnBody', () => {
       JSON.stringify({ molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native' })
     );
     assert.deepEqual(req, {
+      lane: 'interactive',
       molStep: 'fx-1',
       worktree: '/w',
       prompt: 'p',

@@ -24,7 +24,6 @@ import {
   agentEntryBlocked,
   agentRegistryPath,
   AgentNotFound,
-  BATCH_MARKER_ENV,
   facade,
   loadConfig,
   readAgentRegistry,
@@ -127,11 +126,11 @@ export function runnerPrompt(molId: string, repo: string): string {
  *  marker is the only thing a caller owns here. */
 export function runnerSpawnReq(molId: string, dir: string, beads: string): StepSpawnRequest {
   return {
+    lane: 'batch',
     molStep: molId,
     worktree: dir,
     prompt: runnerPrompt(molId, dir),
     beadsDir: beads,
-    env: { [BATCH_MARKER_ENV]: '1' },
   };
 }
 

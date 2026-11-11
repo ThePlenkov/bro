@@ -520,6 +520,7 @@ async function advanceRun(
         priority: 2,
       });
       const info = await spawnStepAgent(dir, runEnv(dir, fresh.repo), {
+        lane: 'batch',
         molStep: analystBead.id,
         worktree: fresh.repo,
         promptFile,
@@ -617,6 +618,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
     stage = 'spawn';
     state.phase = 'running';
     const info = await spawnStepAgent(dir, runEnv(dir, prov.repo), {
+      lane: 'batch',
       molStep: bead.id,
       worktree: prov.repo,
       promptFile,
