@@ -1,4 +1,5 @@
 ---
+template: brotocol/spec@1
 id: BRO-1
 title: Brotocol — bro's native spec engine
 status: draft
@@ -45,9 +46,12 @@ product. Two names carry it:
   and lifecycle invariants, parent/part/requirement-anchor semantics)
   and the methodology described below. A philosophy and a schema,
   not a program.
-- **Brose** — the spec-management engine that implements the
-  contract: the file store, index, resolution, lint, drift and a
-  standalone `brose` CLI usable in any repo without bro or beads.
+- **Brose** — the markdown *template engine*: a template registry
+  (dedicated folder), a frontmatter model, `render`/`parse`/
+  `validate`, template versions, and a standalone `brose` CLI usable
+  anywhere. Generic — it knows templates, not specs; spec knowledge
+  arrives as brose templates shipped by brotocol. A `.spec.md` file
+  is an md file that matches a spec template.
 - **`@broject/spec`** — the bro plugin binding the engine to bro:
   `bro spec` verbs, the `sdd` config section, `sddConnector` hook
   probes, the specs facade binding.
@@ -61,16 +65,19 @@ resolved engine's language. Outside bro, `brose` is the tool name.
 The dependency direction never inverts:
 
 ```text
-@broject/spec (bro plugin: verbs, sdd config, hooks, facade)
-    └── brose (engine: fs/git store, tree, lint, drift, `brose` bin)
-        └── @broject/brotocol (contract: schema, types, invariants)
+@broject/spec (bro plugin: spec store, verbs, sdd config, hooks, facade)
+    └── @broject/brose (template engine: registry, render, parse,
+                        validate, versions, `brose` bin)
+        └── @broject/brotocol (contract: spec templates, types,
+                               invariants)
 ```
 
 Core's `SpecStore`/`SpecNode` (the facade interface) stay in
 `@broject/core` — they are bro's plugin contract, not the spec
 format's contract. What `@broject/brotocol` owns is the *document*
-contract; what brose owns is *operations on files*; what the plugin
-owns is *beads-aware coverage and gating*.
+contract — spec templates are part of it; what brose owns is
+*template mechanics*; what the plugin owns is *the spec tree and
+beads-aware gating*.
 
 ### Methodology (the protocol)
 
@@ -161,6 +168,35 @@ Layout refines y1jtm's to one marker:
 - Finding for y1jtm: its `<dir>/spec.md` index is ambiguous with
   parts; the `.spec.md` suffix is the unambiguous marker.
 
+### Templates
+
+A `.spec.md` is a brose document declaring its template:
+
+```yaml
+---
+template: brotocol/spec@1
+id: BRO-1
+title: …
+status: draft
+---
+```
+
+- **Template = frontmatter schema + section structure + version.**
+  The `spec` template ships from `@broject/brotocol` (it IS the
+  contract); `policy`/`review` templates follow for the policy class.
+- **`brose validate`** checks a doc against its declared template's
+  version — fields/types, required sections, anchors. `bro spec lint`
+  is validate + tree invariants.
+- **Versions.** Templates are `name@version`; a doc pins the version
+  it implements. Bumping the template flags implementors as
+  template-drifted until re-validated or migrated (`brose` re-render
+  assist; y1jtm.6 migration is the spec@1→spec@2 case).
+- **Registry.** Project templates live in `.brose/templates/`
+  (override by `name@version`); shipped templates come from
+  `@broject/brotocol`. Scaffold (`bro spec new`) renders the resolved
+  template — `scaffoldBody` in today's connector is the hand-written
+  `spec@0` this replaces.
+
 Additions this spec makes normative:
 
 - **No `beads:` in spec frontmatter.** Divergence from y1jtm's
@@ -192,18 +228,21 @@ invent syntax here.
 
 | package | role | deps |
 | ------- | ---- | ---- |
-| `@broject/brotocol` | the contract: format types, frontmatter schema (zod per y1jtm), KEY-N/lifecycle invariants, pure validators over parsed docs. No fs — runs anywhere | zod only |
-| `@broject/brose` | the engine: fs/git SpecFileStore — index, tree, resolve, scaffold, scope, drift — plus the `brose` bin (`new\|tree\|lint\|drift`). Usable standalone | `node:*`, zod, `@broject/brotocol`. **No other `@broject/*` deps** |
-| `@broject/spec` | bro plugin: `bro spec` verbs, `sdd` config section, `sddConnector`, bead-coverage `check`, the specs-facade connector that adapts a brose store to core's `SpecStore` | `@broject/core`, `brose` |
+| `@broject/brotocol` | the contract: frontmatter schema (zod per y1jtm), KEY-N/lifecycle invariants, and the spec *templates themselves* (`spec@N`, later `policy@N`…). No fs — runs anywhere | zod only |
+| `@broject/brose` | the template engine: template folder/registry, render/parse/validate over frontmatter+sections, template version resolution, `brose` bin (`new\|validate\|templates`). Generic — usable standalone with no bro | `node:*`, zod. **No `@broject/*` deps** |
+| `@broject/spec` | bro plugin + spec store: `bro spec` verbs, `sdd` section, `sddConnector`, index/tree/resolve/scope/drift on top of brose, bead-coverage `check`, specs-facade connector | `@broject/core`, `brose`, `@broject/brotocol` |
 | `@broject/openspec` | specs-facade connector for `openspec/` layout (moves from cli) | core |
 | `@broject/speckit` | same for `.specify/` | core |
 | `@broject/spec-kitty` | future — spec-kitty holds specs + plans + work packages; evaluate whether its lane state is a spec or a task concern | core |
 | — (bmad) | no package: methodology reference; optional bridge bead translates BMAD output to beads | — |
 
-Why the contract/engine split earns its package: connector authors
-and other tools can validate or render Brotocol documents without
-pulling a file store; brose stays installable in repos that will
-never run bro and ships its own `brose` bin.
+Why the template-engine split earns its package: `brose validate`
+works in any repo with md docs — specs are just the first template
+pack. The template seam is also how repos customize: a
+`.brose/templates/` folder overrides the shipped spec template by
+`name@version`, and a doc pins the template it implements via
+`template:` frontmatter. A doc lagging its template is *template
+drift* — a third drift axis beside code drift and spec-ahead.
 
 Facade resolution is unchanged: `connectors.specs` pin → remote →
 matchDir → registry order. The plugin registers the brose-backed
@@ -217,16 +256,17 @@ plugins.
 
 Implementation beads under `bro-bntld`; pure moves first:
 
-1. Contract → `packages/brotocol` — frontmatter parsing, id/parent/
-   scope rules, tree semantics as pure validators; grows into y1jtm's
-   zod schema when that lands.
-2. Engine → `packages/brose` — the native engine parts of
-   `spec-connectors.ts` + `spec-drift.ts`, refactored to take
-   `specDir`/`repoRoot` as parameters (zero `@broject` deps) + the
-   `brose` bin; `SpecStore` stays in core.
-3. Plugin seam — `bro spec` verbs + `sddConnector` either move to
-   `packages/spec` or stay in cli adapting the engine (decide with 2;
-   precedent favors cli-keeps-commands).
+1. Engine → `packages/brose` — the markdown template engine:
+   frontmatter parsing (the YAML/frontmatter helpers move here),
+   template registry + `name@version` resolution, render/validate,
+   `brose` bin (`new|validate|templates`). Zero `@broject/*` deps.
+2. Contract → `packages/brotocol` — the spec template(s) plus
+   invariants: id/parent/scope rules and tree semantics as pure
+   validators over brose docs; grows into y1jtm's zod schema.
+3. Plugin+store → `packages/spec` — index/tree/resolve/scope/drift
+   over brose docs; `bro spec` verbs + `sddConnector` either move
+   here or stay in cli adapting it (decide with 2; precedent favors
+   cli-keeps-commands). `SpecStore` stays in core.
 4. `@broject/openspec` connector package.
 5. `@broject/speckit` connector package.
 6. Methodology — `skills/sdd` rewritten around the protocol + docs.
@@ -235,8 +275,8 @@ Implementation beads under `bro-bntld`; pure moves first:
 8. Connector-only plugin shape — blocks standalone connector
    publishing.
 
-Stack order: 1 → 2 → {3, 4, 5} → 6; 7 waits on bro-y1jtm; 8 gates the
-external publishing path.
+Stack order: 1 → 2 → 3 → {4, 5} → 6; 7 waits on bro-y1jtm; 8 gates
+the external publishing path.
 
 ### Relationship to bro-y1jtm
 
@@ -251,10 +291,10 @@ conventions; the decoupling stands either way.
 - **R1** — `bro spec` surface unchanged: verbs, `sdd` section, facade
   semantics and hook probes keep working through the move; a pure
   refactor verified by existing tests.
-- **R2** — `brose` usable standalone: `npx brose tree` works in a
-  repo with no bro install and no beads; the engine imports only
-  `node:*`, zod and `@broject/brotocol`. `@broject/brotocol` itself
-  never touches fs.
+- **R2** — `brose` usable standalone: `npx brose validate <file>`
+  works in a repo with no bro install and no beads; the engine
+  imports only `node:*` (and zod for schema). `@broject/brotocol`
+  itself never touches fs.
 - **R3** — the specs facade admits third-party engines:
   openspec/speckit connectors ship as their own packages, resolve via
   config plugins or builtin registration, precedence preserved.
@@ -285,6 +325,11 @@ conventions; the decoupling stands either way.
   (not every client tolerates frontmatter in AGENTS.md) or a
   `bro:sdd`-style managed identity block; and whether `area: policy`
   vs a separate `kind:` field classifies it.
+- Template registry layout: `.brose/templates/` vs `sdd.dir/
+  _templates/`; and whether template drift blocks lint or reports
+  advisory-only.
+- Does `template:` belong in the required frontmatter (every spec
+  declares its template) or is absence = `spec@latest`?
 
 ## Verify
 

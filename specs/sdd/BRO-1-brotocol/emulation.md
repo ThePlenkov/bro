@@ -109,6 +109,25 @@ wherever it already implements the contract.
   outside enum → failure; `beads:` key present → warn "spec must not
   cite ephemeral work items" (or hard error once y1jtm drops it).
 
+## Run 6: validate — `brose validate` (emulated template check)
+
+- Spec reference: Templates — a `.spec.md` declares
+  `template: brotocol/spec@1`; validate checks the declared version's
+  schema + sections.
+- Input: this spec file.
+- Expected by spec: pass (frontmatter fields present, required
+  sections Problem/Design/Requirements/Verify present).
+- Actual: pass by hand-check — `template:` now declared in
+  frontmatter, all required fields/sections present.
+- Friction: `emulation.md` itself is a part — under the strict rule
+  it carries no `template:` and validates as part-of-spec, not as a
+  spec doc. Confirms the part-vs-child split needs the `.spec.md`
+  marker (a part must never be forced through the spec template).
+- Golden cases: missing `template:` → error or `spec@latest`
+  (open question); pinned `spec@1` validated against `spec@2` →
+  template-drift report; `.md` non-spec file → skipped, never
+  validated.
+
 ## Graduation notes
 
 - Stage: manual → scripted. Run 3 and 4 already run against the real
