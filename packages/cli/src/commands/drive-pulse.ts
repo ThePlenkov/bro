@@ -20,6 +20,7 @@
  */
 import type { Connector, ConnectorCtx } from '@broject/core';
 import { readDriveMarker } from './want-marker.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
 
 /** One checkpoint for every lifecycle event: decide, bring up, report.
  *  `supervisorUp` re-decides under `daemon.up.lock`, so a racing
@@ -31,6 +32,13 @@ import { readDriveMarker } from './want-marker.ts';
  *  probe must never break the hook event it rode in on. */
 async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
   try {
+    // orchestrator gate first — workers never rearm, and env-checking
+    // before the marker read keeps their checkpoint at zero git cost
+    // (driveRearm re-checks it; this only preserves the order it had
+    // when the whole decision lived inside daemon.ts)
+    if (!isOrchestratorSession()) {
+      return [];
+    }
     // quiescence gate — an absent want-marker makes the rearm decision
     // definitionally quiet (`driveRearm` returns 'quiet' for marker
     // null), so the supervisor machinery — daemon.ts, and through it the

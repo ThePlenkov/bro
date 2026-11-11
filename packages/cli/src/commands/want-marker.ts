@@ -7,7 +7,7 @@
  *  validation every checkpoint. */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitCommonDir } from '@broject/core';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 
 /** The validated core plus the marker's remaining payload — extra
@@ -63,7 +63,10 @@ export interface LoopMarker {
  *  it. `daemon.json` stays the transient spawn record; `drive.lock`
  *  the liveness hold. */
 export function driveMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir);
+  // bounded — these reads sit on the hook checkpoint path, where a
+  // wedged git/mount must degrade to "no marker" (quiet), never stall
+  // the host's hook budget (specs/bro-36sx7.7.md)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'drive.json');
 }
 
@@ -75,7 +78,7 @@ export function readDriveMarker(dir: string): DriveMarker | null {
 
 /** `<git-common>/bro/loop.json` — `drive.json`'s loop-kind analogue. */
 export function loopMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir);
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'loop.json');
 }
 

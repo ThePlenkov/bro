@@ -5,9 +5,16 @@
  */
 import type { Connector, ConnectorCtx } from '@broject/core';
 import { readLoopMarker } from './want-marker.ts';
+import { isOrchestratorSession } from './watch-pulse.ts';
 
 async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
   try {
+    // orchestrator gate first — same ordering argument as drive-pulse:
+    // workers return before any git probe, exactly as loopRearm's own
+    // check did when the decision lived inside daemon.ts
+    if (!isOrchestratorSession()) {
+      return [];
+    }
     // quiescence gate — same contract as drive-pulse.ts: no want-marker
     // ⇒ `loopRearm` is definitionally quiet, so daemon.ts (and the
     // registry behind it) stays out of unarmed hook events
