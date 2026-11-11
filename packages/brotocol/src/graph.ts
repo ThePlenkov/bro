@@ -4,7 +4,7 @@
  * that dir-doc positionally. Dangling ids and parent cycles come back
  * as diagnostics — the graph itself never hides a bad edge.
  */
-import type { Diagnostic, Doc, Protocol } from './protocol.ts';
+import { type Diagnostic, type Doc, pathCmp, type Protocol } from './protocol.ts';
 import { scan } from './scan.ts';
 
 export interface Edge {
@@ -29,7 +29,7 @@ export const docById = (nodes: Doc[]): Map<string, Doc[]> => {
     m.set(n.id, [...(m.get(n.id) ?? []), n]);
   }
   for (const list of m.values()) {
-    list.sort((a, b) => a.path.localeCompare(b.path));
+    list.sort((a, b) => pathCmp(a.path, b.path));
   }
   return m;
 };

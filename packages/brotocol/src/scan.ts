@@ -9,7 +9,14 @@ import type { Dirent } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { ioRead, ioReadDir } from './io.ts';
 import { ownValue, parseFrontmatter } from '@broject/brose';
-import { type Doc, docSuffix, globMatch, type ParentEdge, type Protocol } from './protocol.ts';
+import {
+  type Doc,
+  docSuffix,
+  globMatch,
+  type ParentEdge,
+  pathCmp,
+  type Protocol,
+} from './protocol.ts';
 
 const posix = (p: string): string => p.split(sep).join('/');
 
@@ -113,7 +120,7 @@ export function get(protocol: Protocol, id: string): Doc | undefined {
   return (
     docs
       .filter(d => d.id === id)
-      .sort((a, b) => a.path.localeCompare(b.path))
+      .sort((a, b) => pathCmp(a.path, b.path))
       .at(0) ??
     docs.find(d => Array.isArray(d.frontmatter.aliases) && d.frontmatter.aliases.includes(id))
   );

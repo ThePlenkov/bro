@@ -443,6 +443,12 @@ const scalarOut = (v: unknown): string => {
     return String(v);
   }
   const s = String(v);
+  // a line break can never round-trip — the parser reads the first
+  // physical line and the rest is silently misparsed as siblings. Fail
+  // loud here instead of writing a doc that loses data on re-read.
+  if (s.includes('\n') || s.includes('\r')) {
+    throw new Error('frontmatter scalars cannot contain line breaks');
+  }
   if (
     s === '' ||
     NEEDS_QUOTE.test(s) ||

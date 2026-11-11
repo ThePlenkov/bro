@@ -6,7 +6,7 @@
 import { dirname } from 'node:path';
 import { ioRemove } from './io.ts';
 import type { Protocol } from './protocol.ts';
-import { get } from './scan.ts';
+import { get, scan } from './scan.ts';
 
 export interface RemoveResult {
   id: string;
@@ -28,6 +28,19 @@ export function remove(
     ioRemove(dir, true);
     removed.push(dir);
   } else {
+    if (doc.isDirDoc) {
+      // positional children keep no frontmatter link — dropping the
+      // index would silently re-root them on the next scan, with no
+      // dangling id for graph to diagnose.
+      const hasChildren = scan(protocol).some(
+        d => d !== doc && d.parentEdge === 'position' && d.parentId === doc.id
+      );
+      if (hasChildren) {
+        throw new Error(
+          `dir-doc '${doc.id}' has positional children — pass recursive or reparent them first`
+        );
+      }
+    }
     ioRemove(doc.path);
     removed.push(doc.path);
   }

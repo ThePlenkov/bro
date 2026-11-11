@@ -55,7 +55,17 @@ export function lintSpec(protocol: Protocol): Diagnostic[] {
   const out: Diagnostic[] = [];
   for (const d of scan(protocol)) {
     const status = d.frontmatter.status;
-    if (status !== undefined && !(specLifecycle as readonly unknown[]).includes(status)) {
+    if (status === undefined) {
+      // lifecycle is a spec invariant — an untemplated doc missing it
+      // gets a warn (the shipped template requires the field outright).
+      out.push({
+        severity: 'warn',
+        rule: 'status-missing',
+        message: "doc declares no 'status:' field",
+        path: d.path,
+        line: 1,
+      });
+    } else if (!(specLifecycle as readonly unknown[]).includes(status)) {
       out.push({
         severity: 'error',
         rule: 'status-not-lifecycle',

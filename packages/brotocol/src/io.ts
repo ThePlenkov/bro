@@ -17,19 +17,19 @@ import {
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 export const resolveIn = (base: string, name: string): string => {
-  // realpath the root so a symlinked base still measures containment
-  // against the directory the writes actually land in.
-  const root = existsSync(base) ? realpathSync(resolve(base)) : resolve(base);
+  const root = resolve(base);
   const target = resolve(root, name);
   const rel = relative(root, target);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`path escapes the tree: ${target}`);
   }
   // lexical containment is not enough — a symlink on any existing
-  // ancestor resolves the write outside root. Walk up to the deepest
-  // existing prefix and prove its real path is still inside. When root
-  // itself is missing there is nothing to escape into; the lexical
-  // check is the whole guard.
+  // ancestor resolves the write outside root. The returned path keeps
+  // the configured spelling (scan agrees with it); only the deepest
+  // existing prefix is realpath-verified against the real root. A
+  // missing root means nothing to escape into — the lexical check is
+  // the whole guard.
+  const realRoot = existsSync(root) ? realpathSync(root) : root;
   let probe = target;
   while (!existsSync(probe) && probe !== root) {
     const up = dirname(probe);
@@ -39,7 +39,7 @@ export const resolveIn = (base: string, name: string): string => {
     probe = up;
   }
   if (existsSync(probe)) {
-    const relReal = relative(root, realpathSync(probe));
+    const relReal = relative(realRoot, realpathSync(probe));
     if (relReal.startsWith('..') || isAbsolute(relReal)) {
       throw new Error(`path escapes the tree: ${target}`);
     }

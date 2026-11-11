@@ -45,6 +45,24 @@ const FIELD_TYPE: Record<NonNullable<FieldSpec['type']>, z.ZodType> = {
   map: z.record(z.string(), z.unknown()),
 };
 
+/** Type/enum check for one supplied field value — `create` runs this
+ *  before writing so a generated doc can never fail the same checks
+ *  `validate` would apply after the fact. Missing/null handling (the
+ *  `required` half) stays with the caller. */
+export const fieldValueError = (value: unknown, spec: FieldSpec): string | undefined => {
+  const typeCheck =
+    spec.type === undefined ? undefined : ownValue<z.ZodType>(FIELD_TYPE, spec.type);
+  if (typeCheck !== undefined && !typeCheck.safeParse(value).success) {
+    return `must be ${spec.type}`;
+  }
+  // enum entries may be maps/lists — strict === would reject a value
+  // equal in structure but not identity.
+  if (spec.enum !== undefined && !spec.enum.some(v => isDeepStrictEqual(v, value))) {
+    return `must be one of ${spec.enum.map(String).join(', ')}`;
+  }
+  return undefined;
+};
+
 /** A template heading with `{{placeholders}}` matches any doc title at
  *  that level — literal parts still pin (`RFC {{n}}` ≈ /^RFC .+$/).
  *  Whitespace between literals is significant (`RFC {{n}}` needs the

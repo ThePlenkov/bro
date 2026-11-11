@@ -160,6 +160,11 @@ describe('dumpFrontmatter', () => {
     assert.deepEqual(parseFrontmatter(`---\n${dumped}---\n`).data, data);
   });
 
+  it('refuses multiline scalars — they cannot round-trip', () => {
+    assert.throws(() => dumpFrontmatter({ a: 'one\ntwo' }), /line breaks/);
+    assert.throws(() => dumpFrontmatter({ a: { 'k\nx': 1 } }), /line breaks/);
+  });
+
   it('a `__proto__` key is data, never a prototype write', () => {
     const { data } = fm('__proto__:\n  polluted: true\nsafe: 1\n');
     assert.ok(Object.hasOwn(data, '__proto__'));

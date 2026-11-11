@@ -45,7 +45,7 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
   };
   const suffix = docSuffix(protocol.docGlob);
   let base = resolve(protocol.root);
-  const values: Record<string, unknown> = {
+  let values: Record<string, unknown> = {
     ...opts.values,
     [protocol.idField]: opts.id,
     template: `${t.name}@${t.version}`,
@@ -57,6 +57,11 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
     }
     if (p.isDirDoc) {
       base = dirname(p.path);
+      // the positional edge IS the link — a caller-supplied parent field
+      // would win over it on the next scan and silently re-parent the doc.
+      values = Object.fromEntries(
+        Object.entries(values).filter(([k]) => k !== protocol.parentField)
+      );
     } else if (protocol.parentField !== undefined) {
       Object.assign(values, { [protocol.parentField]: p.id });
     }
@@ -65,6 +70,19 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
     opts.dir === undefined
       ? `${opts.id}${suffix}`
       : join(opts.dir, protocol.indexName?.(basename(opts.dir)) ?? `${opts.id}${suffix}`);
+  if (opts.dir !== undefined) {
+    // every configured index name in the target dir is a conflict — a
+    // legacy `spec.md` next to the new canonical index makes the older
+    // dir-doc vanish from lookup and orphans its inbound edges.
+    const dirAbs = join(base, opts.dir);
+    const target = join(opts.dir, basename(name));
+    const conflict = [protocol.indexName?.(basename(opts.dir)), ...(protocol.indexAliases ?? [])]
+      .filter((n): n is string => n !== undefined && join(opts.dir, n) !== target)
+      .find(n => ioExists(join(dirAbs, n)));
+    if (conflict !== undefined) {
+      throw new Error(`directory '${opts.dir}' already has index '${conflict}'`);
+    }
+  }
   // the write must be discoverable — refuse before touching disk when
   // the id/dir combo can't match the configured glob (`?` arity, a
   // dir-prefixed pattern, …). `id`/`dir` also can't smuggle separators

@@ -65,6 +65,22 @@ describe('create', () => {
     assert.equal(doc.frontmatter.template, 'sneaky@1');
   });
 
+  it('rejects invalid field values before writing — create never emits a doc validate would reject', () => {
+    // null counts as absent for a required field, same as validate()
+    assert.throws(
+      () => create('note@1', { title: null }, { registry }),
+      /missing required field: title/
+    );
+    assert.throws(
+      () => create('note@1', { title: 5 }, { registry }),
+      /field 'title' must be string/
+    );
+    assert.throws(
+      () => create('note@1', { title: 'x', status: 'bogus' }, { registry }),
+      /field 'status' must be one of/
+    );
+  });
+
   it('throws on a missing required field and on unknown templates', () => {
     assert.throws(() => create('note@1', {}, { registry }), /missing required field: title/);
     assert.throws(() => create('ghost@1', {}, { registry }), /unknown template/);

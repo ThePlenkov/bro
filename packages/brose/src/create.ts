@@ -9,6 +9,7 @@ import { ownValue } from './own.ts';
 import { dumpFrontmatter } from './frontmatter.ts';
 import { render } from './render.ts';
 import { createRegistry, type Registry, type Template } from './template.ts';
+import { fieldValueError } from './validate.ts';
 
 export interface CreateOpts {
   dirs?: string[];
@@ -29,12 +30,26 @@ export function create(
     throw new Error(`unknown template '${templateRef}'`);
   }
   const missing = Object.entries(t.fields)
-    .filter(([k, spec]) => spec.required === true && ownValue(values, k) === undefined)
+    // null counts as absent — validate() treats it the same, and a
+    // `required: null` doc written here would fail there.
+    .filter(([k, spec]) => spec.required === true && (ownValue(values, k) ?? null) === null)
     .map(([k]) => k);
   if (missing.length > 0) {
     throw new Error(
       `missing required field${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`
     );
+  }
+  // a provided value must satisfy its spec — `brose new` never writes a
+  // doc `brose validate` would reject.
+  for (const [k, spec] of Object.entries(t.fields)) {
+    const v = ownValue(values, k);
+    if (v === undefined || v === null) {
+      continue;
+    }
+    const err = fieldValueError(v, spec);
+    if (err !== undefined) {
+      throw new Error(`field '${k}' ${err}`);
+    }
   }
   // the `name@version` pin is emitted last so a template that declares
   // a `template` field can never shadow which template made the doc.

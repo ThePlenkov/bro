@@ -26,6 +26,22 @@ export function update(protocol: Protocol, id: string, fields: Record<string, un
       sets.set(k, v);
     }
   }
+  // the id field is the doc's identity — deleting it silently renames
+  // the doc to its fallback id, and writing an id another doc holds
+  // creates a duplicate that makes `get` ambiguous. Neither may land.
+  if (drops.has(protocol.idField)) {
+    throw new Error(`cannot delete '${protocol.idField}' — it is the doc's identity`);
+  }
+  const idSet = sets.get(protocol.idField);
+  if (idSet !== undefined && idSet !== doc.id) {
+    if (typeof idSet !== 'string' || idSet === '') {
+      throw new Error(`'${protocol.idField}' must be a non-empty string`);
+    }
+    const other = get(protocol, idSet);
+    if (other !== undefined && other.path !== doc.path) {
+      throw new Error(`id '${idSet}' is already held by ${other.path}`);
+    }
+  }
   // the merge goes through entry lists + fromEntries — no obj[key]
   // writes, so a caller key like `__proto__` becomes a plain own entry
   // instead of a setter invocation.

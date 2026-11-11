@@ -96,6 +96,57 @@ describe('create', () => {
     assert.ok(!existsSync(d2('TOOLONG.md')));
   });
 
+  it('a dir-doc parent drops a caller-supplied parent field — the edge stays positional', () => {
+    const { root: r4, dir: d4 } = mktree({
+      'tpls/note.md':
+        '---\nname: note\nversion: 1\nfields:\n  title: { required: true }\n---\n# {{title}}\n',
+      'P-2-x/P-2-x.spec.md': '---\nid: P-2\n---\n# p\n',
+    });
+    after(() => rm(r4));
+    const p = { ...proto(r4), templateDirs: [d4('tpls')] };
+    const child = create(p, {
+      template: 'note@1',
+      id: 'C-9',
+      values: { title: 'c', parent: 'WRONG-9' },
+      parent: 'P-2',
+    });
+    assert.equal(child.frontmatter.parent, undefined);
+    assert.equal(child.parentEdge, 'position');
+    assert.equal(child.parentId, 'P-2');
+  });
+
+  it('a dir with a legacy index refuses a second canonical index', () => {
+    const { root: r5, dir: d5 } = mktree({
+      'tpls/note.md':
+        '---\nname: note\nversion: 1\nfields:\n  title: { required: true }\n---\n# {{title}}\n',
+      'D-9-x/spec.md': '---\nid: D-9\n---\n# legacy dir-doc\n',
+    });
+    after(() => rm(r5));
+    const p = { ...proto(r5), templateDirs: [d5('tpls')] };
+    assert.throws(
+      () => create(p, { template: 'note@1', id: 'E-9', values: { title: 't' }, dir: 'D-9-x' }),
+      /already has index 'spec.md'/
+    );
+  });
+
+  it('a symlinked root writes where scan looks — same path spelling', () => {
+    const { root: real, dir: rd } = mktree({
+      'tpls/note.md':
+        '---\nname: note\nversion: 1\nfields:\n  title: { required: true }\n---\n# {{title}}\n',
+    });
+    const { root: linkBase } = mktree({});
+    after(() => {
+      rm(real);
+      rm(linkBase);
+    });
+    const link = join(linkBase, 'specs-link');
+    symlinkSync(real, link, 'dir');
+    const p = { ...proto(link), templateDirs: [rd('tpls')] };
+    const doc = create(p, { template: 'note@1', id: 'L-1', values: { title: 't' } });
+    assert.equal(doc.path, join(link, 'L-1.spec.md'));
+    assert.equal(get(p, 'L-1')?.id, 'L-1');
+  });
+
   it('a symlink inside the root cannot point a write outside it', () => {
     const { root: r3, dir: d3 } = mktree({
       'tpls/note.md':
@@ -140,6 +191,17 @@ describe('update', () => {
     assert.ok(!readFileSync(dir('U-1.spec.md'), 'utf8').includes('area:'));
   });
 
+  it('the id field cannot be deleted, non-string, or collide', () => {
+    create(protocol, { template: 'note@1', id: 'I-1', values: { title: 'i' } });
+    create(protocol, { template: 'note@1', id: 'I-2', values: { title: 'j' } });
+    assert.throws(() => update(protocol, 'I-1', { id: undefined }), /identity/);
+    assert.throws(() => update(protocol, 'I-1', { id: 'I-2' }), /already held/);
+    assert.throws(() => update(protocol, 'I-1', { id: 5 }), /non-empty string/);
+    // re-writing the same id is a no-op, not a conflict
+    update(protocol, 'I-1', { id: 'I-1' });
+    assert.equal(get(protocol, 'I-1')?.id, 'I-1');
+  });
+
   it('throws on an unknown doc', () => {
     assert.throws(() => update(protocol, 'ghost', {}), /unknown doc/);
   });
@@ -151,6 +213,14 @@ describe('remove', () => {
     remove(protocol, 'R-1');
     assert.equal(get(protocol, 'R-1'), undefined);
     assert.ok(!existsSync(dir('R-1.spec.md')));
+  });
+
+  it('non-recursive dir-doc removal refuses while positional children exist', () => {
+    create(protocol, { template: 'note@1', id: 'R-9', values: { title: 'r' }, dir: 'R-9-x' });
+    create(protocol, { template: 'note@1', id: 'R-9-c', values: { title: 'c' }, parent: 'R-9' });
+    assert.throws(() => remove(protocol, 'R-9'), /positional children/);
+    remove(protocol, 'R-9', { recursive: true });
+    assert.ok(!existsSync(dir('R-9-x')));
   });
 
   it('a dir-doc loses its index only unless recursive', () => {

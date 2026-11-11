@@ -44,6 +44,10 @@ export interface Diagnostic {
   line: number;
 }
 
+/** Byte-order path compare — `localeCompare` is host-locale dependent,
+ *  so 'path-first' resolution would differ across machines. */
+export const pathCmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /** `**\/*.spec.md` → '.spec.md'; `???.md` → '.md'; `*` → ''. The suffix
  *  a doc filename carries — create names files `<id><suffix>`. Derived
  *  from the last wildcard of either kind so a `?`-only glob still

@@ -5,7 +5,7 @@ fields:
   template: { required: true, type: string }
   id: { required: true, type: string }
   title: { required: true, type: string }
-  status: { type: string, enum: [draft, active, deprecated, removed] }
+  status: { required: true, type: string, enum: [draft, active, deprecated, removed] }
   area: { type: string }
   owns: { type: list }
   aliases: { type: list }
