@@ -10,6 +10,8 @@ owns:
   - packages/cli/src/spec-drift.ts
   - packages/cli/src/commands/spec.ts
   - skills/sdd/
+  - packages/brose
+  - packages/brotocol
 aliases: []
 ---
 
@@ -48,11 +50,17 @@ product. Two names carry it:
   not a program.
 - **Brose** — the markdown *template engine*: a template registry
   (dedicated folder), a frontmatter model, template versions, and a
-  library API (`parse`/`render`/`validate`) behind a thin `brose`
-  CLI (`new` + `validate`). Generic — it knows templates, not
-  specs; spec knowledge arrives as brose templates shipped by
-  brotocol. A `.spec.md` file is an md file that matches a spec
-  template.
+  library API (`parse`/`render`/`validate`/`new`) behind a thin
+  `brose` CLI (`new` + `validate`). Generic — it knows templates,
+  not file trees. A `.spec.md` file is an md file that matches a
+  spec template.
+- **Brotocol** — the *filetree protocol*: a protocol definition
+  (doc glob, index convention, id/parent fields, template refs)
+  plus filetree operations over it — CRUD, search, graph build.
+  Like BMAD but generic: it works on any configured filetree of
+  templated docs. The **spec protocol** — `*.spec.md` docs, the
+  `brotocol/spec@N` template, KEY-N ids, lifecycle — is a brotocol
+  specialization; `bro spec` is its bro-facing implementation.
 - **`@broject/spec`** — the bro plugin binding the engine to bro:
   `bro spec` verbs, the `sdd` config section, `sddConnector` hook
   probes, the specs facade binding.
@@ -263,7 +271,7 @@ invent syntax here.
 
 | package | role | deps |
 | ------- | ---- | ---- |
-| `@broject/brotocol` | the contract: frontmatter schema (zod per y1jtm), KEY-N/lifecycle invariants, and the spec *templates themselves* (`spec@N`, later `policy@N`…). No fs — runs anywhere | zod only |
+| `@broject/brotocol` | the filetree protocol: protocol config (doc glob, index convention, field names), CRUD/search/graph ops over a configured tree, and the spec specialization (spec templates `spec@N`…, KEY-N/lifecycle invariants as validators over brose docs) | `node:*`, zod, `@broject/brose` |
 | `@broject/brose` | the template engine: template folder/registry, `parse`/`render`/`validate` library API over frontmatter+sections, `name@version` resolution, `brose` bin (`new\|validate`). Generic — usable standalone with no bro | `node:*`, markdown-it, zod. **No `@broject/*` deps** |
 | `@broject/spec` | bro plugin + spec store: `bro spec` verbs, `sdd` section, `sddConnector`, index/tree/resolve/scope/drift on top of brose, bead-coverage `check`, specs-facade connector | `@broject/core`, `brose`, `@broject/brotocol` |
 | `@broject/openspec` | specs-facade connector for `openspec/` layout (moves from cli) | core |
@@ -296,9 +304,10 @@ Implementation beads under `bro-bntld`; pure moves first:
    markdown-it token-stream section model, template registry +
    `name@version` resolution, `parse`/`render`/`validate`/`new`
    library API, `brose` bin (`new|validate`). No `@broject/*` deps.
-2. Contract → `packages/brotocol` — the spec template(s) plus
-   invariants: id/parent/scope rules and tree semantics as pure
-   validators over brose docs; grows into y1jtm's zod schema.
+2. Protocol → `packages/brotocol` — the filetree protocol:
+   protocol config, CRUD/search/graph ops over a configured tree,
+   and the spec specialization (spec templates + KEY-N/lifecycle
+   invariants); grows into y1jtm's zod schema.
 3. Plugin+store → `packages/spec` — index/tree/resolve/scope/drift
    over brose docs; `bro spec` verbs + `sddConnector` either move
    here or stay in cli adapting it (decide with 2; precedent favors
