@@ -292,6 +292,19 @@ function removeEntry(fullPath: string, ctx: SweepCtx): boolean {
   }
 }
 
+/** The `tmp-<pid>-*` name's owner facts — pid parse plus liveness;
+ *  a pid-less name has no owner to consult (alive = vacuous). */
+function ownerFacts(name: string): { ownerPid: number | null; ownerAlive: boolean } {
+  const pidMatch = TMP_PID_RE.exec(name);
+  const ownerPid = pidMatch === null ? null : Number(pidMatch[1]);
+  return { ownerPid, ownerAlive: ownerPid === null ? true : pidAlive(ownerPid) };
+}
+
+/** Why a 'keep' verdict kept — owner-alive keeps never consulted
+ *  /proc, so they say 'owner pid alive', not 'in use'. */
+const keepReason = (ownerPid: number | null, ownerAlive: boolean, ctx: SweepCtx): string =>
+  ownerPid !== null && ownerAlive ? 'owner pid alive' : ctx.inUseMessage;
+
 /** One candidate entry → verdict, side effects (log lines, delete,
  *  exitCode), and whether it counts toward the summary. An
  *  unstat-able entry skips silently — vanished mid-listing is not an
@@ -305,9 +318,7 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
     return false; // skip if can't stat
   }
   try {
-    const pidMatch = TMP_PID_RE.exec(name);
-    const ownerPid = pidMatch === null ? null : Number(pidMatch[1]);
-    const ownerAlive = ownerPid === null ? true : pidAlive(ownerPid);
+    const { ownerPid, ownerAlive } = ownerFacts(name);
     const verdict = tmpSweepVerdict({
       isDir: st.isDirectory(),
       ownedByUs: ctx.currentUid !== undefined && st.uid === ctx.currentUid,
@@ -320,9 +331,7 @@ function sweepEntry(name: string, ctx: SweepCtx): boolean {
       return false;
     }
     if (verdict === 'keep') {
-      // owner-alive keeps never consulted /proc — say why, not 'in use'
-      const reason = ownerPid !== null && ownerAlive ? 'owner pid alive' : ctx.inUseMessage;
-      logKeep(fullPath, reason, ctx.quietKeeps);
+      logKeep(fullPath, keepReason(ownerPid, ownerAlive, ctx), ctx.quietKeeps);
       return false;
     }
     if (ctx.dryRun) {
