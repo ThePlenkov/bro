@@ -35,7 +35,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Shared primitives for bro packages \u2014 gh/git/bd wrappers, config, plugin surface, task store",
+  "description": "Shared primitives for bro packages — gh/git/bd wrappers, config, plugin surface, task store",
   "keywords": [
     "beads",
     "github-cli",

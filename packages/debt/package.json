@@ -36,7 +36,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Review-debt pipeline for bro \u2014 harvest unresolved threads on merged PRs into a ledger and beads",
+  "description": "Review-debt pipeline for bro — harvest unresolved threads on merged PRs into a ledger and beads",
   "keywords": [
     "code-review",
     "debt",

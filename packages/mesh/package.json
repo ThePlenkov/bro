@@ -36,7 +36,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Inter-rig work federation for bro \u2014 mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
+  "description": "Inter-rig work federation for bro — mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
   "keywords": [
     "federation",
     "agents",
