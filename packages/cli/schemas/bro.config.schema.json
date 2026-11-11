@@ -46,8 +46,7 @@
         },
         "selfCheck": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "pattern": "^$|\\S"
         },
         "maxRounds": {
           "type": "integer",
