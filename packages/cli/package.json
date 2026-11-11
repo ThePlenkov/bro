@@ -56,6 +56,15 @@
         "dependsOn": [
           "^build",
           "build"
+        ],
+        "inputs": [
+          "default",
+          "envGates",
+          "{workspaceRoot}/plugin.json",
+          "{workspaceRoot}/skills/**/*",
+          "{workspaceRoot}/formulas/**/*",
+          "{workspaceRoot}/.claude-plugin/**/*",
+          "{workspaceRoot}/.codex-plugin/**/*"
         ]
       },
       "test:e2e": {

@@ -4,31 +4,16 @@
   "targetDefaults": {
     "typecheck": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": true
     },
     "test": {
       "dependsOn": ["^build", "build"],
-      "cache": true,
-      "inputs": [
-        "default",
-        "envGates",
-        "{workspaceRoot}/plugin.json",
-        "{workspaceRoot}/skills/**/*",
-        "{workspaceRoot}/.claude-plugin/**/*",
-        "{workspaceRoot}/.codex-plugin/**/*"
-      ]
+      "cache": true
     },
     "test:e2e": {
       "dependsOn": ["^build", "build"],
       "cache": true,
-      "inputs": [
-        "default",
-        "envGates",
-        "{workspaceRoot}/plugin.json",
-        "{workspaceRoot}/skills/**/*",
-        "{workspaceRoot}/.claude-plugin/**/*",
-        "{workspaceRoot}/.codex-plugin/**/*"
-      ]
+      "inputs": ["default", "envGates"]
     }
   },
   "namedInputs": {
