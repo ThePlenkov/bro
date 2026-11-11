@@ -151,17 +151,30 @@ interface LessonCachePayload {
   lessons: Lesson[];
 }
 
-/** The cached listing — stamp AND beads-path must match: two distinct
- *  stores can share a manifest stamp (fresh empty stores stamp
- *  identically), and only the path proves the lessons are THIS
- *  store's. A torn cache reads live — never a verdict input. */
+/** The cache payload is THIS store's only when stamp AND beads path
+ *  both match: two distinct stores can share a manifest stamp (fresh
+ *  empty stores stamp identically), and only the path proves the
+ *  lessons are THIS store's. */
+const cacheIsFor = (v: unknown, stamp: string, beads: string): v is LessonCachePayload => {
+  const c = v as Partial<LessonCachePayload> | null;
+  return (
+    c !== null &&
+    typeof c === 'object' &&
+    c.stamp === stamp &&
+    c.beads === beads &&
+    Array.isArray(c.lessons)
+  );
+};
+
+/** The cached listing — stamp AND beads-path must match; a torn cache
+ *  reads live, never a verdict input. */
 function lessonsCacheRead(cachePath: string, stamp: string, beads: string): Lesson[] | undefined {
   if (!existsSync(cachePath)) {
     return undefined;
   }
   try {
-    const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as Partial<LessonCachePayload>;
-    if (cached.stamp === stamp && cached.beads === beads && Array.isArray(cached.lessons)) {
+    const cached: unknown = JSON.parse(readFileSync(cachePath, 'utf8'));
+    if (cacheIsFor(cached, stamp, beads)) {
       return cached.lessons;
     }
   } catch {
@@ -282,6 +295,25 @@ function depNeighbors(
   return undefined;
 }
 
+/** One hop's frontier sweep — every target's neighbors; a retro hit
+ *  returns immediately, wtf rows queue for the next hop on
+ *  walk.wtfNext. */
+function walkHop(
+  store: ReturnType<typeof taskStoreAt>,
+  frontier: string[],
+  hop: number,
+  walk: DepWalk
+): { id: string; via: string } | undefined {
+  walk.wtfNext = [];
+  for (const target of frontier) {
+    const hit = depNeighbors(store, target, hop, walk);
+    if (hit !== undefined) {
+      return hit;
+    }
+  }
+  return undefined;
+}
+
 /** Bounded `discovered`-up walk: run beads → (wtf) → retro/prevention.
  *  Every visited row is label-checked; only `wtf` rows expand (the one
  *  documented intermediary). A failed neighbor read records `degraded`
@@ -296,12 +328,9 @@ function depWalkHit(
   let frontier = targets.slice(0, MAX_DEP_TARGETS);
   const walk: DepWalk = { seen: new Set(frontier), wtfNext: [], degraded, inWindow };
   for (let hop = 0; hop < 2 && frontier.length > 0; hop++) {
-    walk.wtfNext = [];
-    for (const target of frontier) {
-      const hit = depNeighbors(store, target, hop, walk);
-      if (hit !== undefined) {
-        return hit;
-      }
+    const hit = walkHop(store, frontier, hop, walk);
+    if (hit !== undefined) {
+      return hit;
     }
     frontier = walk.wtfNext;
   }
@@ -431,26 +460,29 @@ function flaggedCloseHit(
   return undefined;
 }
 
+/** Evidence 2's probe context — the lesson plane's shared inputs. */
+interface LessonProbe {
+  home: string | null;
+  beads: string;
+  ids: Set<string>;
+  inWindow: (t: number) => boolean;
+  degraded: string[];
+}
+
 /** Evidence 2 — a learn/ lesson whose evidence refs intersect the
  *  run's id set inside the window. */
-function lessonHit(
-  home: string | null,
-  beads: string,
-  ids: Set<string>,
-  inWindow: (t: number) => boolean,
-  degraded: string[]
-): LearnCheckResult | undefined {
+function lessonHit(p: LessonProbe): LearnCheckResult | undefined {
   try {
-    for (const lesson of lessonsCached(home, beads)) {
-      if (!lesson.evidence.some(e => ids.has(e.ref))) {
+    for (const lesson of lessonsCached(p.home, p.beads)) {
+      if (!lesson.evidence.some(e => p.ids.has(e.ref))) {
         continue;
       }
-      if (inWindow(Date.parse(lesson.updatedAt ?? lesson.createdAt))) {
+      if (p.inWindow(Date.parse(lesson.updatedAt ?? lesson.createdAt))) {
         return { verdict: 'ok', evidence: `lesson ${lesson.id} cites this run` };
       }
     }
   } catch (err) {
-    degraded.push(`kv list: ${msg(err)}`);
+    p.degraded.push(`kv list: ${msg(err)}`);
   }
   return undefined;
 }
@@ -486,6 +518,14 @@ function retroHit(
   return undefined;
 }
 
+/** The store the run answers evidence probes against — the spawn's
+ *  verbatim spec.beadsDir pin, else the dir-resolved store; exotic
+ *  non-string pins fall back the same way. */
+const pinnedBeads = (entry: AgentRegistryEntry, dir: string): string | null => {
+  const pinned = entry.storeDir;
+  return typeof pinned === 'string' && pinned !== '' ? pinned : beadsDir(dir);
+};
+
 /** The once-per-run artifact verdict. Never throws — the harvest it
  *  rides must not fail on a learn-store problem. */
 export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
@@ -494,12 +534,7 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
     return skip;
   }
   const { dir, home, molStep, entry, exitAt } = opts;
-  // the store the run was pinned to — entry.storeDir is the spawn's
-  // verbatim spec.beadsDir; pre-storeDir entries and exotic paths fall
-  // back to the dir-resolved store
-  const pinned =
-    typeof entry.storeDir === 'string' && entry.storeDir !== '' ? entry.storeDir : undefined;
-  const beads = pinned ?? beadsDir(dir);
+  const beads = pinnedBeads(entry, dir);
   if (beads === null) {
     return { verdict: 'skipped', evidence: 'no beads store resolvable from dir' };
   }
@@ -509,22 +544,12 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
   const store = taskStoreAt(beads);
   const { row, molParent, stepRows } = stepContext(store, beads, molStep, degraded);
 
-  const flagged = flaggedCloseHit(row, stepRows, molStep, inWindow);
-  if (flagged !== undefined) {
-    return flagged;
-  }
-
   const ids = runIds(
     entry,
     molStep,
     molParent,
     stepRows.map(s => s.id)
   );
-  const lesson = lessonHit(home, beads, ids, inWindow, degraded);
-  if (lesson !== undefined) {
-    return lesson;
-  }
-
   const depTargets = [
     ...new Set([
       molStep,
@@ -532,9 +557,17 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
       ...stepRows.map(s => s.id),
     ]),
   ];
-  const retro = retroHit(store, depTargets, inWindow, degraded);
-  if (retro !== undefined) {
-    return retro;
+  // the three evidence planes in contract order — first hit wins
+  const probes: Array<() => LearnCheckResult | undefined> = [
+    () => flaggedCloseHit(row, stepRows, molStep, inWindow),
+    () => lessonHit({ home, beads, ids, inWindow, degraded }),
+    () => retroHit(store, depTargets, inWindow, degraded),
+  ];
+  for (const probe of probes) {
+    const hit = probe();
+    if (hit !== undefined) {
+      return hit;
+    }
   }
 
   if (degraded.length > 0) {
