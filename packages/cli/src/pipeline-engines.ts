@@ -144,6 +144,7 @@ function gitDiff(call: StageCall): ReviewDiff | undefined {
       : undefined;
   let diff = '';
   try {
+    // NOSONAR — PATH lookup is the contract (same as gh/bd)
     diff = execFileSync('git', ['-C', worktree, 'diff', `${base}...${head}`], {
       encoding: 'utf8',
       maxBuffer: 8 * 1024 * 1024,
@@ -152,6 +153,7 @@ function gitDiff(call: StageCall): ReviewDiff | undefined {
     // an unresolvable ref range still yields the working diff — the
     // review judges what it can see rather than nothing
     try {
+      // NOSONAR — PATH lookup is the contract (same as gh/bd)
       diff = execFileSync('git', ['-C', worktree, 'diff', 'HEAD'], {
         encoding: 'utf8',
         maxBuffer: 8 * 1024 * 1024,
@@ -268,6 +270,7 @@ function exitRecordFor(dir: string, entry: AgentRegistryEntry): { code?: number 
 
 function gitCommonFor(dir: string): string | null {
   try {
+    // NOSONAR — PATH lookup is the contract (same as gh/bd)
     return execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], {
       encoding: 'utf8',
     }).trim();
