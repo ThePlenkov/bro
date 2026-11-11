@@ -29,9 +29,13 @@ import { readFileSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
+  ActiveSession,
   AgentApp,
+  AgentCapabilities,
+  AuthMethod,
   ClientContext,
   ClientRequestHandler,
+  NewSessionResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionUpdate,
@@ -65,16 +69,17 @@ export interface AcpWorkerSpec {
    *  read it (the BRO_AGENT_PROVIDER pin, when spawned managed). */
   provider?: string;
   /** Registry provenance callback — the driver reports the real
-   *  sessionId after session/new and the agent-REPORTED model after
+   *  sessionId after session open and the agent-REPORTED model after
    *  set_config_option: provenance says what ran, not what was asked. */
   record?: (patch: { acpSessionId?: string; model?: string }) => void;
-  /** Session-cleanup template run after the session ends —
-   *  `{sessionId}` substitutes the acp session id. ACP sessions land
-   *  in the agent CLI's history like any other; a worker session is
-   *  not the operator's personal history, so the provider may carry
-   *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
-   *  logs, never changes the exit code. */
-  sessionRm?: string;
+  /** Resume target — the agent-CLI session a previous worker recorded
+   *  on this worktree (spec bro-5qsnr). The driver re-opens it via
+   *  session/load (or session/resume where that's what the agent
+   *  advertises) in the SAME cwd — sessions are cwd-keyed — and the
+   *  prompt lands as a follow-up turn on the coder's own context.
+   *  Every failure mode (no capability, gone session) falls back to
+   *  session/new: a cold fixer is the floor, never a spawn failure. */
+  resumeSessionId?: string;
   /** MCP servers to pass to session/new (opt-in per provider). */
   mcpServers?: unknown[];
   /** The in-process test seam — a fakeAcpAgent() app from
@@ -300,6 +305,75 @@ const UNADVERTISED_METHODS = [
   'mcp/message',
 ] as const;
 
+/** The SDK's attach is runtime-public but type-private — the only way
+ *  a loaded/resumed session gets the same update router + prompt pump
+ *  a session/new answer builds. */
+const attachSession = (ctx: ClientContext, response: NewSessionResponse): ActiveSession =>
+  (ctx as unknown as { attachSession(r: NewSessionResponse): ActiveSession }).attachSession(
+    response
+  );
+
+/** Session open (spec bro-5qsnr): a resume target becomes session/load
+ *  — or session/resume where that's what the agent advertises — in the
+ *  SAME cwd (sessions are cwd-keyed), and the prompt lands as a
+ *  follow-up turn on the coder's own context. The load response omits
+ *  `sessionId` (it IS the request's), so the attached
+ *  `NewSessionResponse` is fabricated around it. Every failure mode —
+ *  no advertised capability, a session the store no longer holds, an
+ *  old PR's id — ends in the session/new a non-resumed worker always
+ *  ran: a cold fixer is the floor, never a spawn failure. */
+async function openSession(
+  ctx: ClientContext,
+  spec: AcpWorkerSpec,
+  caps: AgentCapabilities | undefined,
+  authMethods: AuthMethod[],
+  mcpServers: unknown[],
+  log: (line: string) => void,
+  by: string
+): Promise<ActiveSession> {
+  const resumeId = spec.resumeSessionId;
+  if (resumeId !== undefined) {
+    const canLoad = caps?.loadSession === true;
+    const canResume = caps?.sessionCapabilities?.resume != null;
+    if (canLoad || canResume) {
+      try {
+        const res = canLoad
+          ? await ctx.request('session/load', {
+              sessionId: resumeId,
+              cwd: spec.cwd,
+              mcpServers: mcpServers as never,
+            })
+          : await ctx.request('session/resume', {
+              sessionId: resumeId,
+              cwd: spec.cwd,
+              mcpServers: mcpServers as never,
+            });
+        log(`resumes session ${resumeId}`);
+        return attachSession(ctx, {
+          sessionId: resumeId,
+          modes: res.modes,
+          configOptions: res.configOptions,
+        });
+      } catch (err) {
+        log(
+          `session ${resumeId} resume failed — ${errMsg(err)}; starting a fresh session (mcpServers forwarded)`
+        );
+      }
+    } else {
+      log(
+        `session ${resumeId} not resumable — no load/resume capability; starting a fresh session (mcpServers forwarded)`
+      );
+    }
+  }
+  return ctx
+    .buildSession({ cwd: spec.cwd, mcpServers: mcpServers as never })
+    .start()
+    .catch((err: unknown) => {
+      const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
+      throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
+    });
+}
+
 /** Run one ACP worker to turn end. Returns the driver's exit code —
  *  0 on `end_turn`, non-zero on everything else. Never throws: the
  *  caller maps the code to the `.exit` file, and every failure mode
@@ -397,13 +471,15 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       Array.isArray(spec.mcpServers) ? spec.mcpServers : undefined,
       by
     );
-    const session = await ctx
-      .buildSession({ cwd: spec.cwd, mcpServers: mcpServers as never })
-      .start()
-      .catch((err: unknown) => {
-        const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
-        throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
-      });
+    const session = await openSession(
+      ctx,
+      spec,
+      init.agentCapabilities,
+      authMethods,
+      mcpServers,
+      log,
+      by
+    );
     sessionId = session.sessionId;
     spec.record?.({ acpSessionId: session.sessionId });
     log(`session ${session.sessionId} (cwd ${spec.cwd})`);
@@ -547,11 +623,6 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       clearTimeout(killTimer);
     }
     await retireAgentChild(child);
-    try {
-      armSessionCleanup(spec, sessionId, log);
-    } catch (err) {
-      log(`session cleanup arming failed — ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
 }
 
@@ -574,37 +645,6 @@ async function retireAgentChild(child: ChildProcess | undefined): Promise<void> 
       setTimeout(res, 2000);
     });
   }
-}
-
-/** Arm the detached session-delete retrier. The acp server holds the
- *  session 'open' until our connection's pipes close — i.e. until THIS
- *  process exits — so the delete cannot run from inside the worker; a
- *  detached retrier outlives us and removes the session once the agent
- *  has fully exited. Operator-configured template — same trust
- *  boundary as spec.command (already sh -c'd). The template rides
- *  argv, never the script text; the session id must be a slug before
- *  it may substitute into a shell template. */
-function armSessionCleanup(
-  spec: AcpWorkerSpec,
-  sessionId: string | undefined,
-  log: (line: string) => void
-): void {
-  if (spec.sessionRm === undefined || sessionId === undefined) {
-    return;
-  }
-  if (!/^[\w.-]+$/.test(sessionId)) {
-    log(`session cleanup skipped — session id is not a safe slug`);
-    return;
-  }
-  const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId);
-  // absolute interpreter path — S4036: a PATH-resolved 'sh' can be
-  // shadowed by a writable dir on the worker's PATH.
-  spawn(
-    '/bin/sh',
-    ['-c', 'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done', 'bro-session-rm', rm],
-    { detached: true, stdio: 'ignore' }
-  ).unref();
-  log(`session ${sessionId} cleanup armed — deferred until worker exit`);
 }
 
 export type { StopReason };

@@ -607,6 +607,7 @@ const SPAWN_FIELDS = new Set([
   'profile',
   'class',
   'autoApprove',
+  'resumeSessionId',
 ]);
 
 /** POST body → StepSpawnRequest — strict: a misspelled field must be a
@@ -655,6 +656,7 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
     profile: req.profile as string | undefined,
     class: req.class as string | undefined,
     autoApprove: req.autoApprove as boolean | undefined,
+    resumeSessionId: req.resumeSessionId as string | undefined,
   };
 }
 

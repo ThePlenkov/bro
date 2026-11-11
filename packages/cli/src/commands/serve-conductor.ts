@@ -58,6 +58,10 @@ import {
   acpSessionRetain,
   AcpDeadLoopError,
   AcpDeadLoopGuard,
+  ACP_COOLDOWN_DEFAULT_MS,
+  AcpLaneCooldown,
+  AcpCooldownError,
+  armWallFromError,
   otelEvent,
   otelJournal,
   otelParent,
@@ -132,6 +136,15 @@ export interface ConductorConfig {
   /** The silence bound per turn, ms — a turn that produces no
    *  `session/update` for this long is ended. 0 disables the watchdog. */
   acpStallMs?: number;
+  /** The provider wall's cooldown (spec bro-i6811) — how long a lane
+   *  stays closed after the account refused a request. 0 disables the
+   *  cooldown (the lane spawns through walls as before). */
+  acpCooldownMs?: number;
+  /** The lane's wall cooldown — SHARED between the surfaces that ride
+   *  the same account: the conductor's default lane and the brokered
+   *  transport (/api/v1/acp). A wall that closed one must close the
+   *  other, or the retry storm simply moves to the other surface. */
+  cooldown?: AcpLaneCooldown;
   /** The idle window — the pooled peer is released after it (spec
    *  bro-7ira8). 0 disables the release; the /api/v1/acp transport keeps
    *  its peer (the client owns that conversation's lifetime). */
@@ -204,6 +217,22 @@ function idleWindow(env: NodeJS.ProcessEnv, fallback: number): number {
  *  fire at once on a wrapped delay). */
 function stallWindow(env: NodeJS.ProcessEnv, fallback: number): number {
   const raw = env.BRO_PROVIDER_ACP_STALL_MS?.trim();
+  if (raw === undefined || raw === '') {
+    return Math.min(fallback, MAX_TIMER_MS);
+  }
+  const num = Number(raw);
+  return Number.isInteger(num) && num >= 0
+    ? Math.min(num, MAX_TIMER_MS)
+    : Math.min(fallback, MAX_TIMER_MS);
+}
+
+/** The provider wall's cooldown (spec bro-i6811) — the env pin wins
+ * over the file, and 0 is a deliberate "off" (the lane spawns through
+ * walls as before). A negative or fractional value is not a window at
+ * all, so the fallback wins — a fractional 0.5 must not floor into 0
+ * and silently switch the cooldown OFF. */
+function cooldownWindow(env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env.BRO_PROVIDER_ACP_COOLDOWN_MS?.trim();
   if (raw === undefined || raw === '') {
     return Math.min(fallback, MAX_TIMER_MS);
   }
@@ -433,8 +462,17 @@ export function conductorConfig(
       cfg.serve?.acpMaxAbandoned ?? 32
     ),
     acpStallMs: stallWindow(env, cfg.serve?.acpStallMs ?? 300_000),
+    // the wall cooldown (spec bro-i6811) — the env pin wins over the
+    // file, and 0 is a deliberate "off"
+    acpCooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
     idleReleaseMs: idleWindow(env, cfg.serve?.idleReleaseMs ?? 300_000),
     agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
+    // the wall cooldown (spec bro-i6811) — ONE instance for the whole
+    // conductor: the default lane and the brokered transport ride the
+    // same account, so a wall that closed one must close the other.
+    cooldown: new AcpLaneCooldown({
+      cooldownMs: cooldownWindow(env, cfg.serve?.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS),
+    }),
   };
 }
 
@@ -1929,6 +1967,10 @@ interface TurnEnv {
   /** The lane's dead-loop guard (spec bro-b961a) — the churn measure
    *  behind every session this turn opens. */
   guard: AcpDeadLoopGuard;
+  /** The lane's wall cooldown (spec bro-i6811) — the lane is shared by
+   *  every conversation on it, so the wall that hit one conversation
+   *  closes the lane for all of them. */
+  cooldown: AcpLaneCooldown;
   /** The lane's pool — the turn marks it busy so the idle release
    *  (spec bro-7ira8) never fires under a running turn. */
   pool: AcpLinkPool;
@@ -2374,6 +2416,9 @@ interface ProviderLane {
   /** The lane's dead-loop guard (spec bro-b961a) — one per lane, so a
    *  conversation's churn is counted against its own provider. */
   guard: AcpDeadLoopGuard;
+  /** The lane's wall cooldown (spec bro-i6811) — the provider's rate
+   *  wall closes the spawn path until it ends. */
+  cooldown: AcpLaneCooldown;
 }
 
 /** A routing decision — the LANE that serves the request and the ROUTE
@@ -2431,6 +2476,41 @@ function requestModelOf(body: MessagesRequest): string | undefined {
   return m?.includes('/') ? m : undefined;
 }
 
+/** A provider wall on this lane (spec bro-i6811) — arm the cooldown so
+ *  the NEXT request is refused BEFORE a peer is spawned. Only the
+ *  account's own "no" closes the lane: a timeout, a bad model name or a
+ *  broken peer is a failure of this turn, not proof that the account is
+ *  under a wall.
+ *
+ *  The arming POLICY lives in the provider layer (`armWallFromError`),
+ *  so the conductor and the brokered transport cannot drift apart. */
+function armWall(lane: ProviderLane, err: unknown): void {
+  // the refusal is not a wall — re-arming on it would extend the wait
+  // forever, one client request at a time
+  if (err instanceof AcpCooldownError) {
+    otelEvent('conductor.cooldown', {
+      backend: lane.entry,
+      reason: err.reason,
+      retry_after: err.retryAfterSec,
+      walls: lane.cooldown.wallCount(),
+      refused: true,
+    });
+    return;
+  }
+  const armed = armWallFromError(lane.cooldown, err);
+  if (armed === undefined) {
+    return;
+  }
+  otelEvent('conductor.cooldown', {
+    backend: lane.entry,
+    reason: armed.wall.reason,
+    retry_after: armed.wall.retryAfterSec,
+    walls: lane.cooldown.wallCount(),
+    refused: false,
+    armed: armed.armed,
+  });
+}
+
 /** A failed turn — on an open SSE stream the failure travels as an
  *  in-stream error event (the wire's own dead-stream shape); pre-commit
  *  it is an anthropic-shaped HTTP status. */
@@ -2447,10 +2527,15 @@ function turnError(
   // the dead-loop refusal (spec bro-b961a) — the churn was stopped
   // before it cost a session; the client waits and tries again
   const deadLoop = err instanceof AcpDeadLoopError ? err : undefined;
+  // the cooldown refusal (spec bro-i6811) — the lane is under a
+  // provider wall; no session was opened, so the client waits out the
+  // retry-after and comes back
+  const cooling = err instanceof AcpCooldownError ? err : undefined;
   let liveType = 'api_error';
   if (avail) liveType = 'overloaded_error';
   if (rate) liveType = 'rate_limit_error';
   if (deadLoop) liveType = 'rate_limit_error';
+  if (cooling) liveType = 'rate_limit_error';
   if (live !== undefined) {
     live.error(liveType, `bro conductor: ${msg}`);
     res.end();
@@ -2477,6 +2562,13 @@ function turnError(
       opens: deadLoop.opens,
       budget: deadLoop.budget,
     });
+  }
+  if (cooling) {
+    // the lane is cooling down after a provider wall (spec bro-i6811):
+    // the refusal cost no session, and the retry-after says when the
+    // client may come back
+    status = 429;
+    res.setHeader('retry-after', String(cooling.retryAfterSec));
   }
   otelEvent('conductor.error', {
     backend,
@@ -2670,6 +2762,7 @@ function laneTurnEnv(
     by: `conductor:${lane.entry}`,
     imageOk: peer.caps?.image === true,
     guard: lane.guard,
+    cooldown: lane.cooldown,
     pool: lane.pool,
   };
 }
@@ -2683,6 +2776,10 @@ function guardCtx(env: TurnEnv): AcpGuardCtx {
     guard: env.guard,
     scope: env.key ?? `peer:${env.by}`,
     peer: env.by,
+    // the lane's wall cooldown rides along (spec bro-i6811) — the
+    // provider layer refuses the session open while the wall holds,
+    // so no client of this lane can spend a session on it
+    cooldown: env.cooldown,
   };
 }
 
@@ -2865,6 +2962,9 @@ async function messages(
       }),
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811) — the
+    // next request is refused before it spends a session
+    armWall(lane, err);
     turnError(res, err, live, route, t0);
     return;
   }
@@ -3468,6 +3568,17 @@ function openaiFailKind(
       retryAfter: '60',
     };
   }
+  if (err instanceof AcpCooldownError) {
+    // the lane is cooling down after a provider wall (spec bro-i6811):
+    // the refusal cost no session, so the client waits out the
+    // retry-after — the same class the guard's refusal uses
+    return {
+      status: 429,
+      stream: 'rate_limit_error',
+      wire: 'rate_limit_error',
+      retryAfter: String(err.retryAfterSec),
+    };
+  }
   if (RATE.test(msg)) {
     return {
       status: 429,
@@ -3828,6 +3939,8 @@ async function responses(
       }),
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811)
+    armWall(lane, err);
     openaiFail(res, err, live);
     return;
   }
@@ -4445,6 +4558,8 @@ async function chatCompletions(
           : undefined,
     });
   } catch (err) {
+    // the account's own "no" closes the lane (spec bro-i6811)
+    armWall(lane, err);
     openaiFail(res, err, live);
     return;
   }
@@ -4861,7 +4976,12 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     entry: string,
     entryCfg: AcpEntry,
     laneCfg: ConductorConfig,
-    laneOpts: ProviderWireOpts
+    laneOpts: ProviderWireOpts,
+    // the lane's wall cooldown (spec bro-i6811) — the DEFAULT lane shares
+    // the conductor's instance with the brokered transport: the two
+    // surfaces ride the SAME account, so a wall that closed one must
+    // close the other. An exposed provider lane is its own account.
+    shared?: AcpLaneCooldown
   ): void => {
     // warm pool: one acp child serves every turn of its lane — spawn +
     // initialize is paid once per provider per listener; session/new
@@ -4894,6 +5014,14 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
     // until the window closes).
     const peerKey = `conductor:${entry}`;
     pool.onDeath(() => guard.forgetPeer({ scope: peerKey, peer: peerKey }));
+    // the lane's wall cooldown (spec bro-i6811) — a rate wall closes the
+    // spawn path: the next request is refused BEFORE a peer is spawned,
+    // so a retry storm costs no session and no quota.
+    const cooldown =
+      shared ??
+      new AcpLaneCooldown({
+        cooldownMs: laneCfg.acpCooldownMs ?? ACP_COOLDOWN_DEFAULT_MS,
+      });
     lanes.set(entry, {
       entry,
       routes: routesOf(entry),
@@ -4907,12 +5035,19 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
       // unmapped)
       pendingOpens: new Map<string, number>(),
       guard,
+      cooldown,
     });
   };
-  addLane(cfg.backend, cfg.entry, cfg, {
-    ...wireOpts,
-    acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
-  });
+  addLane(
+    cfg.backend,
+    cfg.entry,
+    cfg,
+    {
+      ...wireOpts,
+      acp: { ...wireOpts.acp, peer: lanePeer(cfg.backend) },
+    },
+    cfg.cooldown
+  );
   for (const [entry, entryCfg] of Object.entries(cfg.providers ?? {})) {
     // an exposed lane serves ITS entry's own model — the default's env
     // pin (`BRO_PROVIDER_MODEL`) belongs to the default backend, not to
@@ -4944,6 +5079,15 @@ export function conductorProxy(cfg: ConductorConfig, opts: ProviderWireOpts = {}
   const link = async (entry: string, parent?: OtelCtx): Promise<AcpPeer> => {
     const lane = lanes.get(entry);
     if (lane === undefined) throw new Error(`bro conductor: no provider lane '${entry}'`);
+    // the lane is under a provider wall (spec bro-i6811) — the refusal
+    // costs no session and no quota, because it is spoken BEFORE the
+    // peer is spawned. The client waits out the retry-after and comes
+    // back; this is the whole point of the cooldown: the account said
+    // no, so bro does not spend a session to hear no again.
+    const wall = lane.cooldown.refusal();
+    if (wall !== undefined) {
+      throw new AcpCooldownError(wall);
+    }
     return lane.pool.link(parent);
   };
   const wire: WireCtx = { cfg, opts: wireOpts, link, lanes, routes };

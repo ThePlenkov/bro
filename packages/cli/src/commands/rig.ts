@@ -642,23 +642,14 @@ export async function runRigCommand(argv: string[]): Promise<void> {
   }
   if (sub === 'next') {
     // `--json=false`/`--json=0` are explicit opt-outs — a `--json=` prefix
-    // alone must not count as enabling JSON. The flag is classified by
-    // splitting on the delimiter, never a bare prefix test.
+    // alone must not count as enabling JSON
     const jsonEnabled =
       argv.includes('--json') ||
-      argv.some(a => {
-        const eq = a.indexOf('=');
-        return (
-          eq !== -1 &&
-          a.slice(0, eq) === '--json' &&
-          !['false', '0'].includes(
-            a
-              .slice(eq + 1)
-              .trim()
-              .toLowerCase()
-          )
-        );
-      });
+      argv.some(
+        a =>
+          a.startsWith('--json=') &&
+          !['false', '0'].includes(a.slice('--json='.length).trim().toLowerCase())
+      );
     const code = await runRigNext(cwd, pos[1], jsonEnabled);
     if (code !== 0) {
       process.exitCode = code;

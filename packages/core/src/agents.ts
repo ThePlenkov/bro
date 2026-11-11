@@ -501,6 +501,9 @@ export interface SpawnSpec {
    *  provider; stamped into the registry and pinned into the worker's
    *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
   delegatedBy?: string;
+  /** Resume an existing acp session instead of opening a fresh one
+   *  (spec bro-5qsnr §3) — spliced into argv workers as `--resume`. */
+  resumeSessionId?: string;
   /** Pipeline provenance — stamped into the registry and pinned into
    *  the worker's env (BRO_FORMULA feeds the `BRO-Formula` commit
    *  trailer). Absent on non-formula spawns. */
@@ -593,6 +596,11 @@ export interface AgentCapabilities {
   attach?: boolean;
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean;
+  /** spawn() can run a provider-resolved SpawnWorker — backends that own
+   *  their provider session (gascity's city.toml), dispatch remotely
+   *  (copilot), or never spawn (devin) report false; absent means the
+   *  worker contract holds. */
+  workers?: boolean;
   supervisor: 'none' | 'ondemand' | 'required';
 }
 

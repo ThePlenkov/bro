@@ -101,17 +101,20 @@ supplies the durable state they lack (claims, specs, the judge, the
 debt ledger). See [specs/bro-omp-plugin.md](specs/bro-omp-plugin.md).
 
 OpenCode, Kilo, and pi are native plugins the CLI installs itself —
-`bro plugins install <client>` writes the adapter module to the client's
-own plugin dir (`bro plugins list` prints the client × scope matrix).
-OpenCode loads JS/TS modules instead of a hook manifest, so `bro` ships
-as a native plugin (`packages/cli/src/opencode.ts`, published
-as the package's `./server` export) that spawns its own CLI. This entry uses
-OpenCode's V1 plugin API and does not run on V2. Two consequences:
+`bro plugins install <client>` writes the adapter to the client's own
+plugin dir (`bro plugins list` prints the client × scope matrix).
+OpenCode loads JS/TS modules instead of a hook manifest, and v2 loads a
+plugin as a _directory_: bro's adapter is the catalog plugin
+`packages/agent-plugins/opencode` — `index.ts` the server entrypoint,
+`tui.tsx` the terminal half, `rpc.ts` the contract both halves share.
+opencode raises the TUI half only for a package that also has a server,
+so the three land together in `plugins/bro/`. Two consequences:
 
-- **Install by package name only.** OpenCode's loader reads `exports["./server"]`
-  from the installed package and does not accept subpath specifiers — `"@broject/bro/opencode"`
-  is not a valid entry. Pin a build with
-  `"plugin": [["@broject/bro", { "command": { "cmd": "/path/to/bro" } }]]`.
+- **Install by directory.** `bro plugins install opencode` materializes
+  the three modules into `~/.config/opencode/plugins/bro/` (or
+  `<repo>/.opencode/plugins/bro/`). The v1-era loose `bro.ts` /
+  `bro-cli.ts` files are swept away by the same command — opencode
+  loads those too, and two bro plugins would fight over the session.
 - **The stop gate re-prompts instead of blocking.** OpenCode has no pre-stop
   hook; `session.idle` arrives after the turn is over. bro feeds the blocker
   back as a synthetic turn **once per session** — a second block is logged, not

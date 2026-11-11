@@ -1,32 +1,24 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsdown';
 import { collectEmbedded } from './src/embedded.ts';
 
 // The tarball carries the embedded skills/formulas snapshot as a bundle
-// asset (dist/generated/skills-data.json), collected fresh at bundle time —
-// nothing generated is committed to git. skills-data.ts reads it back via a
-// sibling URL when the module runs from an installed package.
+// asset (dist/generated/skills-data.json), collected fresh at bundle time.
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
-// src/opencode.ts is the opencode plugin entry — its loader reads the
-// package's exports["./server"] (see packages/cli/package.json), and it
-// spawns the sibling dist/index.js rather than importing bro, so the two
-// never share a process. src/opencode-tui.ts is the opencode CLI/TUI
-// plugin (exports["./tui"]). src/kilo.ts is the kilo adapter — the same
-// standalone module contract.
-const main = defineConfig({
-  entry: [
-    'src/index.ts',
-    'src/plugin.ts',
-    'src/config-schema.ts',
-    'src/opencode.ts',
-    'src/opencode-tui.ts',
-    'src/opencode-tui-v2.tsx',
-    'src/kilo.ts',
-  ],
+// Agent adapters (opencode/kilo/omp/pi) live in packages/agent-plugins/* —
+// CLI no longer bundles or exports them. The opencode plugin (server +
+// TUI + RPC) ships as its own package: @broject/opencode.
+/** The opencode catalog plugin's modules — the three that must
+ *  travel together: opencode raises the TUI half only for a package
+ *  that also has a server. */
+const OPENCODE_PLUGIN_FILES = ['index.ts', 'tui.tsx', 'rpc.ts', 'README.md'];
+
+export default defineConfig({
+  entry: ['src/index.ts', 'src/plugin.ts', 'src/config-schema.ts'],
   format: ['esm'],
   dts: true,
-  // Bundle workspace libs into the published CLI — consumers get one file.
   noExternal: [/^@broject\//],
   plugins: [
     {
@@ -39,36 +31,26 @@ const main = defineConfig({
         });
       },
     },
+    {
+      // the opencode catalog plugin rides the tarball: `bro plugins
+      // install opencode` writes those three modules into the user's
+      // opencode plugin directory, and outside a bro CHECKOUT there is
+      // no other source for them (the adapter packages are not
+      // published on their own yet)
+      name: 'bro-opencode-plugin',
+      generateBundle() {
+        for (const name of OPENCODE_PLUGIN_FILES) {
+          const source = `${root}/plugins/opencode/bro/${name}`;
+          if (!existsSync(source)) {
+            continue;
+          }
+          this.emitFile({
+            type: 'asset',
+            fileName: `plugins/opencode/bro/${name}`,
+            source: readFileSync(source),
+          });
+        }
+      },
+    },
   ],
 });
-
-/**
- * The pi and omp adapters each get their OWN build.
- *
- * Both import the shared adapter core (src/adapter/), and a host loads
- * them as a single file: pi's jiti reads the raw .ts, omp resolves a
- * relative import inside a plugin package — neither has a `node_modules`
- * to resolve a code-split chunk against. Sharing one build would emit
- * `dist/host-<hash>.js` next to `dist/pi.js` and the installed adapter
- * would fail to load.
- *
- * A separate config per adapter keeps each graph self-contained: one
- * entry, one file, nothing to resolve.
- */
-const pi = defineConfig({
-  entry: ['src/adapter/pi.ts'],
-  outDir: 'dist',
-  format: ['esm'],
-  dts: true,
-  noExternal: [/^@broject\//],
-});
-
-const omp = defineConfig({
-  entry: ['src/adapter/omp.ts'],
-  outDir: 'dist',
-  format: ['esm'],
-  dts: true,
-  noExternal: [/^@broject\//],
-});
-
-export default [main, pi, omp];

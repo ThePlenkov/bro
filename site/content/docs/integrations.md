@@ -122,7 +122,7 @@ explicitly.
 | Claude Code | repo root (`.claude-plugin/plugin.json` + `skills/`); hooks in `plugins/claude/bro/hooks/` |
 | Codex       | repo root (`plugin.json` + `skills/`); hooks in `plugins/codex/bro/hooks/`                 |
 | Cursor      | `plugins/cursor/bro`                                                                       |
-| OpenCode    | `bro plugins install opencode` — native plugin + TUI module                                |
+| OpenCode    | `bro plugins install opencode` — native plugin (server + TUI + RPC)                        |
 | Kilo        | `bro plugins install kilo` — module + `kilo.json` registration                             |
 | pi          | `bro plugins install pi` — extension module                                                |
 
@@ -137,10 +137,12 @@ is auto-approved even when the workspace has not opted in — an empty
 permission reply would block the command — and a chained command stays a
 prompt.
 
-OpenCode loads the package's `./server` export rather than a shell-hook
-manifest — `bro plugins install` materializes it (plus the TUI module)
-into the client's plugin dir, globally under `$XDG_CONFIG_HOME` or
-locally under `.opencode/plugins/`. Kilo and pi get the same treatment:
+OpenCode v2 loads a plugin as a _directory_ — and it raises the TUI half
+only for a package that also has a server, so bro's three modules (the
+server entrypoint, the TUI half and the RPC contract they share) land
+together: `bro plugins install` materializes them into
+`$XDG_CONFIG_HOME/opencode/plugins/bro/` or, locally, into
+`.opencode/plugins/bro/`. Kilo and pi get the same treatment:
 a module file in the client's extension dir, with Kilo's global install
 also registered in `kilo.json`'s `plugin` array. All three use the same
 bro hook bus; OpenCode has no pre-stop hook, so the first stop-gate
@@ -186,16 +188,16 @@ adapters by `host-matrix.test.ts`. Bump `HOOK_MATRIX_VERSION` in
 `packages/cli/src/host-matrix.ts` when any cell changes; the table here
 is its rendering.
 
-| bro event       | Claude                                        | Codex                  | Devin                  | Cursor                                         | OpenCode                   | Kilo                      | pi                                | OMP                        |
-| --------------- | --------------------------------------------- | ---------------------- | ---------------------- | ---------------------------------------------- | -------------------------- | ------------------------- | --------------------------------- | -------------------------- |
-| session-start   | `SessionStart`                                | `SessionStart`         | `SessionStart`         | `sessionStart`                                 | `chat.system.transform`    | `chat.system.transform`   | `session_start`                   | `session_start`            |
-| post-compaction | —                                             | `PostCompact`          | `PostCompaction`       | —                                              | —                          | —                         | `session_compact`                 | `session_compact`          |
-| pre-compact     | `PreCompact`                                  | `PreCompact`           | —                      | `preCompact`                                   | `session.compacting`       | —                         | `session_before_compact`          | `session_before_compact`   |
-| prompt-submit   | `UserPromptSubmit`                            | `UserPromptSubmit`     | `UserPromptSubmit`     | `beforeSubmitPrompt`                           | `chat.message`             | `chat.system.transform`   | `before_agent_start`              | `before_agent_start`       |
-| post-tool       | `PostToolUse` + `PostToolUseFailure` (`Bash`) | `PostToolUse` (`Bash`) | `PostToolUse` (`exec`) | `postToolUse` + `postToolUseFailure` (`Shell`) | `tool.execute.after`       | —                         | `tool_result`                     | `tool_result`              |
-| pre-tool        | `PreToolUse` (`Bash`)                         | `PreToolUse` (`Bash`)  | —                      | —                                              | `tool.execute.before` (V2) | —                         | —                                 | `tool_call`                |
-| permission      | —                                             | `PermissionRequest`    | `PermissionRequest`    | `beforeShellExecution`                         | `permission.ask`           | `permission.ask`          | —                                 | —                          |
-| stop            | `Stop` → **block**                            | `Stop` → **block**     | `Stop` → **block**     | `stop` → one follow-up                         | `session.idle` → re-prompt | `session.idle` → warn log | `agent_before_settle` → re-prompt | `session_stop` → **block** |
+| bro event       | Claude                                        | Codex                  | Devin                  | Cursor                                         | OpenCode                      | Kilo                      | pi                                | OMP                        |
+| --------------- | --------------------------------------------- | ---------------------- | ---------------------- | ---------------------------------------------- | ----------------------------- | ------------------------- | --------------------------------- | -------------------------- |
+| session-start   | `SessionStart`                                | `SessionStart`         | `SessionStart`         | `sessionStart`                                 | `session.hook("context")`     | `chat.system.transform`   | `session_start`                   | `session_start`            |
+| post-compaction | —                                             | `PostCompact`          | `PostCompaction`       | —                                              | —                             | —                         | `session_compact`                 | `session_compact`          |
+| pre-compact     | `PreCompact`                                  | `PreCompact`           | —                      | `preCompact`                                   | `session.hook("compaction")`  | —                         | `session_before_compact`          | `session_before_compact`   |
+| prompt-submit   | `UserPromptSubmit`                            | `UserPromptSubmit`     | `UserPromptSubmit`     | `beforeSubmitPrompt`                           | `session.hook("prompt")`      | `chat.system.transform`   | `before_agent_start`              | `before_agent_start`       |
+| post-tool       | `PostToolUse` + `PostToolUseFailure` (`Bash`) | `PostToolUse` (`Bash`) | `PostToolUse` (`exec`) | `postToolUse` + `postToolUseFailure` (`Shell`) | `tool.execute.after`          | —                         | `tool_result`                     | `tool_result`              |
+| pre-tool        | `PreToolUse` (`Bash`)                         | `PreToolUse` (`Bash`)  | —                      | —                                              | `tool.execute.before`         | —                         | —                                 | `tool_call`                |
+| permission      | —                                             | `PermissionRequest`    | `PermissionRequest`    | `beforeShellExecution`                         | `permission.hook("evaluate")` | `permission.ask`          | —                                 | —                          |
+| stop            | `Stop` → **block**                            | `Stop` → **block**     | `Stop` → **block**     | `stop` → one follow-up                         | `session.idle` → re-prompt    | `session.idle` → warn log | `agent_before_settle` → re-prompt | `session_stop` → **block** |
 
 `—` is a declared gap: the host lacks the surface or bro deliberately
 does not wire it (Claude's `PostCompact`/`PermissionRequest`, OMP's

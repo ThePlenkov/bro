@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-//#region packages/cli/src/adapter/core.ts
+//#region packages/agent-plugins/adapter-core/src/core.ts
 /** How long a normal hook probe may take. */
 const HOOK_TIMEOUT_MS = 15e3;
 /** session-start/post-compaction list `bd ready` and scan worktrees —
@@ -308,7 +308,7 @@ function statusCrumb(s) {
 }
 
 //#endregion
-//#region packages/cli/src/adapter/host.ts
+//#region packages/agent-plugins/adapter-core/src/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
 /** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
@@ -407,6 +407,13 @@ function createBroDriver(host, api) {
 	*  before-agent handlers cannot both inject. */
 	let hydration;
 	let hydrated;
+	/** The session whose rehydration probe FAILED (not merely came back
+	*  empty) — a failed probe is not the session's verdict: bro may not
+	*  have been resolvable yet, so a later turn may re-probe once. */
+	let hydrationFailed;
+	/** The session that already spent its one re-probe — a broken install
+	*  must not turn every turn into a spawn. */
+	let hydrationRetried;
 	/** Pre-compaction carry — kept apart from the hydration probe so a
 	*  post-compaction re-probe cannot overwrite what must survive the
 	*  summary. Consumed (cleared) by the next hydrate() that runs. */
@@ -458,6 +465,11 @@ function createBroDriver(host, api) {
 		if (cmd === null || seq !== refreshSeq) return;
 		const next = await statusJson(cmd, cwd);
 		if (seq !== refreshSeq) return;
+		if (host.cwd(ctx) !== cwd) {
+			board = null;
+			paint(ctx);
+			return;
+		}
 		board = next;
 		paint(ctx);
 	};
@@ -471,15 +483,40 @@ function createBroDriver(host, api) {
 		const sessionId = host.sessionId(ctx);
 		const priorCarry = carry?.sessionId === sessionId ? carry.text : "";
 		carry = void 0;
-		const started = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
+		const raw = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS);
+		const started = raw.then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
 		hydration = {
 			sessionId,
 			promise: started
 		};
 		if (hydrated === sessionId) hydrated = void 0;
+		hydrationFailed = void 0;
+		raw.then((control) => {
+			if (control === null && hydration?.promise === started) hydrationFailed = sessionId;
+		}).catch(() => {});
 		started.then((text) => {
 			if (hydration?.promise === started && text === "") hydration = void 0;
 		}).catch(() => {});
+	};
+	/** The session's context text, consumed from the cached probe. An
+	*  empty answer is not the session's verdict: the claim is released
+	*  and a failed probe is re-run once (fire-and-forget — the next turn
+	*  picks the answer up, this turn never waits on it). */
+	const consumeHydration = async (sessionId, cwd) => {
+		const pending = hydration;
+		if (pending === void 0 || pending.sessionId !== sessionId || hydrated === sessionId) return "";
+		hydrated = sessionId;
+		const text = (await pending.promise).trim();
+		if (text !== "") return text;
+		hydrated = void 0;
+		if (hydrationFailed === sessionId && hydrationRetried !== sessionId) {
+			hydrationRetried = sessionId;
+			hydration = {
+				sessionId,
+				promise: probe("session-start", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf)
+			};
+		}
+		return "";
 	};
 	/** Register one handler if the host has that event. */
 	const bind = (name, handler) => {
@@ -521,12 +558,8 @@ function createBroDriver(host, api) {
 			prompt: host.promptOf(event)
 		}, cwd).then(contextOf);
 		const parts = [];
-		const pending = hydration;
-		if (pending !== void 0 && hydrated !== sessionId && pending.sessionId === sessionId) {
-			hydrated = sessionId;
-			const text = (await pending.promise).trim();
-			if (text !== "") parts.push(text);
-		}
+		const hydrationText = await consumeHydration(sessionId, cwd);
+		if (hydrationText !== "") parts.push(hydrationText);
 		const nudgeText = (await nudge).trim();
 		if (nudgeText !== "") parts.push(nudgeText);
 		if (parts.length === 0) return;
@@ -713,7 +746,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 }
 
 //#endregion
-//#region packages/cli/src/adapter/pi.ts
+//#region packages/agent-plugins/pi/src/pi.ts
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.3.0";

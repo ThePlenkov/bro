@@ -64,7 +64,7 @@
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
 import { spawn } from 'node:child_process';
-import { existsSync, type FSWatcher, statSync, watch } from 'node:fs';
+import { existsSync, type FSWatcher, realpathSync, statSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
@@ -124,7 +124,7 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import { annotateThreads, judgeConfig, judgeFacade } from '@broject/judge';
-import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
+import { loadAgentEnv, settleAcpSessions, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { reconcileLanePause } from '../lane.ts';
 import { flag } from './args.ts';
 import { defaultBranch, runActCommand } from './act.ts';
@@ -136,6 +136,7 @@ import {
   writeHeadMemory,
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
+import { resolveAgentConnector } from '../agent-connectors.ts';
 import { collectAgents } from './fleet.ts';
 import { pluginLedgerDirs, projectFleet } from './herdr-projector.ts';
 import {
@@ -1702,12 +1703,93 @@ async function spawnFixerAgent(ctx: Ctx, pr: number, s: FixerSpawn): Promise<PrV
     if (refused !== undefined) {
       return { pr, link, verdict: 'spawn-refused', detail: refused };
     }
+    // donor lookup (spec bro-5qsnr §4): while the coder's session
+    // lives, the fix order lands as a follow-up turn in THAT session.
+    // The fixer bead's own entry first, then any registry entry whose
+    // recorded worktree resolves to the fixer's, carrying an acpSessionId
+    // on a configured acp provider.
+    const isAcpProvider = (name: string | undefined): boolean => {
+      if (name === undefined) return false;
+      const p = ctx.env.providers?.[name];
+      return p?.type === 'acp';
+    };
+    const donors: AgentRegistryEntry[] = [];
+    const own = readAgentRegistry(ctx.mainRoot)[bead.id];
+    if (
+      own !== undefined &&
+      typeof own.acpSessionId === 'string' &&
+      own.acpSessionId !== '' &&
+      isAcpProvider(own.provider)
+    ) {
+      donors.push(own);
+    }
+    for (const [molStep, entry] of Object.entries(readAgentRegistry(ctx.mainRoot))) {
+      if (molStep === bead.id) continue;
+      if (typeof entry.acpSessionId !== 'string' || entry.acpSessionId === '') continue;
+      if (!isAcpProvider(entry.provider)) continue;
+      if (typeof entry.worktree !== 'string' || entry.worktree === '') continue;
+      try {
+        // identity, not spelling: two spellings that reach the same
+        // directory through different links are the same worktree —
+        // realpath is the truth, resolve() the fallback for a path
+        // that no longer exists (same shape as settleAcpSessions)
+        const entryResolved = resolve(entry.worktree);
+        const wtResolved = resolve(s.wt);
+        let entryReal: string;
+        try {
+          entryReal = realpathSync(entryResolved);
+        } catch {
+          entryReal = entryResolved;
+        }
+        let wtReal: string;
+        try {
+          wtReal = realpathSync(wtResolved);
+        } catch {
+          wtReal = wtResolved;
+        }
+        if (entryReal !== wtReal && entryResolved !== wtResolved) continue;
+      } catch {
+        continue;
+      }
+      donors.push(entry);
+    }
+    const donor = donors[0];
+    // A donor pins an ACP provider, which resolveSpawnProvider turns
+    // into an argv/ACP SpawnWorker. Backends that own their provider
+    // session (gascity's city.toml), dispatch remotely (copilot), or
+    // never spawn (devin) reject a worker-bearing spawn — so an ACP
+    // donor on such a backend would force a config refusal. Drop the
+    // donor (fresh spawn, no resume) when the resolved connector cannot
+    // run provider workers. (review #732)
+    let connectorAcceptsWorkers = true;
+    try {
+      const conn = resolveAgentConnector(
+        { dir: ctx.mainRoot },
+        { connector: ctx.connector },
+        ctx.env
+      );
+      connectorAcceptsWorkers = conn.capabilities().workers !== false;
+    } catch {
+      // an unresolvable connector cannot prove it runs provider workers
+      // — the conservative refusal is a fresh spawn without the donor,
+      // never a donor pinned onto a spawn that will refuse the config
+      connectorAcceptsWorkers = false;
+    }
+    const useDonor = connectorAcceptsWorkers;
+    const spawnProvider = useDonor ? donor?.provider : undefined;
+    const spawnResume = useDonor ? donor?.acpSessionId : undefined;
+    const spawnPrompt =
+      useDonor && donor !== undefined && typeof donor.acpSessionId === 'string'
+        ? `${s.prompt}\nSession: ${donor.acpSessionId}\n`
+        : s.prompt;
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
         worktree: s.wt,
-        prompt: s.prompt,
+        prompt: spawnPrompt,
         connector: ctx.connector,
+        provider: spawnProvider,
+        resumeSessionId: spawnResume,
         env: { BRO_PR: String(pr), BRO_PR_URL: link, [BATCH_MARKER_ENV]: '1' },
       });
       if (s.attempt !== undefined) {
@@ -2305,6 +2387,11 @@ async function mergeAndRetire(
       ),
     };
   }
+  try {
+    settleAcpSessions(ctx.mainRoot, ctx.env, worktree ? { worktree } : {});
+  } catch {
+    // advisory
+  }
   retireLanding(ctx, after, worktree);
   if (fixer) {
     closeFixer(ctx.store, fixer.id, `merged via ${link}`);
@@ -2540,6 +2627,14 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
   work.heads.set(pr, state.headSha);
   const fixer = fixerBeadFor(ctx.store, pr);
   if (state.state !== 'OPEN') {
+    try {
+      settleAcpSessions(ctx.mainRoot, ctx.env, {
+        worktree: work.worktreeByBranch.get(state.headRef),
+        molSteps: fixer ? [fixer.id] : undefined,
+      });
+    } catch {
+      // advisory
+    }
     if (fixer) {
       closeFixer(ctx.store, fixer.id, `${link} ${state.state.toLowerCase()} — fixer done`);
     }
@@ -2652,6 +2747,16 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         }
       );
       if (st.state !== 'OPEN') {
+        try {
+          const entry = readAgentRegistry(ctx.mainRoot)[row.id];
+          const wt = typeof entry?.worktree === 'string' ? entry.worktree : undefined;
+          settleAcpSessions(ctx.mainRoot, ctx.env, {
+            molSteps: [row.id],
+            ...(wt !== undefined ? { worktree: wt } : {}),
+          });
+        } catch {
+          // advisory
+        }
         closeFixer(ctx.store, row.id, `${link} ${st.state.toLowerCase()} — fixer done`);
         say(ctx, `drive ${link} settled (${st.state.toLowerCase()}) — fixer ${row.id} closed`);
       }

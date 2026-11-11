@@ -2263,8 +2263,8 @@ function checkClientPlugins(dir: string): DoctorCheck {
   const perClient = new Map<string, string[]>();
   for (const r of rows) {
     if (r.state !== 'absent') {
-      // a client with several module files (opencode's bro.ts + bro-cli.ts)
-      // names the file after the scope
+      // a client with several install surfaces (opencode's plugin
+      // directory) names the surface after the scope
       const file = basename(r.path);
       const slot = file === 'bro.ts' ? r.scope : `${r.scope}(${file})`;
       perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${slot}:${r.state}`]);

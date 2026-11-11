@@ -1,7 +1,7 @@
 {
   "name": "@broject/bro",
   "version": "0.3.0",
-  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
+  "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
   "keywords": [
     "agent-rig",
     "orchestration",
@@ -26,26 +26,6 @@
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
-    },
-    "./server": {
-      "types": "./dist/opencode.d.ts",
-      "default": "./dist/opencode.js"
-    },
-    "./tui": {
-      "types": "./dist/opencode-tui.d.ts",
-      "default": "./dist/opencode-tui.js"
-    },
-    "./kilo": {
-      "types": "./dist/kilo.d.ts",
-      "default": "./dist/kilo.js"
-    },
-    "./pi": {
-      "types": "./dist/pi.d.ts",
-      "default": "./dist/pi.js"
-    },
-    "./omp": {
-      "types": "./dist/omp.d.ts",
-      "default": "./dist/omp.js"
     }
   },
   "files": [
@@ -100,11 +80,6 @@
     "sverka": "^0.2.10"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@kilocode/plugin": "^7.8.3",
-    "@opencode/plugin": "^2.1.4",
-    "@opentui/solid": "^0.7.0",
-    "solid-js": "^1.9.12",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",

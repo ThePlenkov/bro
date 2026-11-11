@@ -29,9 +29,9 @@
  *   itself unprompted. It says nothing about any other tool's
  *   permission flow.
  */
-import { CURSOR_SELF_TOOL_MATCHER } from './cursor-hook.ts'
+import { CURSOR_SELF_TOOL_MATCHER } from './cursor-hook.ts';
 
-export const HOOK_MATRIX_VERSION = 1
+export const HOOK_MATRIX_VERSION = 2;
 
 /** The events in bro's shared hook vocabulary — what `bro hooks <e>`
  *  accepts. A host cell absent from `events` is declared-unsupported:
@@ -44,7 +44,7 @@ export type BroHookEvent =
   | 'pre-tool'
   | 'post-tool'
   | 'stop'
-  | 'permission'
+  | 'permission';
 
 /** How a host reaches `bro hooks`:
  *  - `manifest`: a host-native hooks.json piping stdin to run.sh
@@ -52,7 +52,7 @@ export type BroHookEvent =
  *    scripts/gen-plugins.ts (drift is caught by `check:plugins`)
  *  - `extension`: a bundled in-process module on the pi/omp extension API
  *  - `plugin`: a verbatim-copy module on the opencode/kilo plugin bus */
-export type HookSurface = 'manifest' | 'generated' | 'extension' | 'plugin'
+export type HookSurface = 'manifest' | 'generated' | 'extension' | 'plugin';
 
 /** What the host can do with the hook's answer for one event. */
 export type HookEffect =
@@ -62,7 +62,7 @@ export type HookEffect =
   | 'reprompt' // refusal lands as a synthesized follow-up — advisory
   | 'rewrite' // a tool_input rewrite the host applies
   | 'approve' // permission verdicts — the bro/bd self-tool opt-in
-  | 'notify' // a UI surface (toast/status/log) — cosmetic
+  | 'notify'; // a UI surface (toast/status/log) — cosmetic
 
 /** Where post-tool's internal `tool_response.success` comes from on
  *  this host — the value emitPostTool's arm predicate and the journal's
@@ -72,7 +72,7 @@ export type OutcomeSource =
   | 'field' // the payload carries it verbatim (Devin tool_response.success)
   | 'mapped' // an edge translator maps split events to it (Cursor)
   | 'synthesized' // the in-process adapter computes it (pi/omp: isError)
-  | 'unobservable' // the host reports no outcome (Codex PostToolUse
+  | 'unobservable'; // the host reports no outcome (Codex PostToolUse
 //   fires on non-zero exits too — the arm is a re-verified hint, the
 //   journal records no `ok`)
 
@@ -80,24 +80,21 @@ export type OutcomeSource =
 export type StopRefusal =
   | 'block' // a refusal slot that halts the stop (manifests, omp)
   | 'reprompt' // refusal becomes a follow-up prompt the model may ignore
-  | 'none' // the host cannot refuse a stop — the block surfaces as a log
+  | 'none'; // the host cannot refuse a stop — the block surfaces as a log
 
 export interface EventCell {
   /** The host's own event/hook names wired to this bro event. */
-  native: string[]
+  native: string[];
   /** The tool matcher where the host supports one — absent when every
    *  tool reaches the hook. */
-  match?: string
-  effects: HookEffect[]
+  match?: string;
+  effects: HookEffect[];
   /** post-tool only: how the outcome field is populated. */
-  outcome?: OutcomeSource
-  /** OpenCode serves V1 (`server()`) and V2 (`id` + `setup(ctx)`); a
-   *  cell with `v2` exists only on the V2 surface. */
-  v2?: boolean
+  outcome?: OutcomeSource;
   /** The repo-relative module registering this cell when it isn't the
    *  adapter's main module — omp's pre-tool guard ships as its own
    *  extension file. */
-  via?: string
+  via?: string;
 }
 
 /** Whether the host waits on the hook or the adapter may keep working
@@ -105,21 +102,21 @@ export interface EventCell {
  *  run.sh, bounded by the hook timeout; `async` — the extension/plugin
  *  handler resolves while adapter work (settle refresh, notification
  *  lanes) continues in the background. */
-export type HookBackground = 'sync' | 'async'
+export type HookBackground = 'sync' | 'async';
 
 export interface HostEntry {
-  surface: HookSurface
+  surface: HookSurface;
   /** The adapter dir — '' when the repo root itself is the plugin. */
-  plugin: string
+  plugin: string;
   /** The host-facing manifest for manifest hosts (repo-relative). */
-  manifest?: string
-  events: Partial<Record<BroHookEvent, EventCell>>
+  manifest?: string;
+  events: Partial<Record<BroHookEvent, EventCell>>;
   /** Native surfaces the adapter wires beyond the shared vocabulary —
    *  tools, mode bridges, UI chrome. */
-  nativeOnly?: string[]
-  stopRefusal: StopRefusal
-  background: HookBackground
-  upstream: { doc: string; checked: string }
+  nativeOnly?: string[];
+  stopRefusal: StopRefusal;
+  background: HookBackground;
+  upstream: { doc: string; checked: string };
 }
 
 /** The three separations the matrix encodes, stated once so docs and
@@ -128,15 +125,15 @@ export interface HostEntry {
  *  host's permission plane; bro/bd auto-approval is a scoped opt-in,
  *  not a permission grant. */
 export interface HookBoundaries {
-  advisory: string
-  policyVsPermissions: string
-  optInApproval: string
+  advisory: string;
+  policyVsPermissions: string;
+  optInApproval: string;
 }
 
 export const HOOK_MATRIX: {
-  version: number
-  boundaries: HookBoundaries
-  hosts: Record<string, HostEntry>
+  version: number;
+  boundaries: HookBoundaries;
+  hosts: Record<string, HostEntry>;
 } = {
   version: HOOK_MATRIX_VERSION,
   boundaries: {
@@ -269,16 +266,18 @@ export const HOOK_MATRIX: {
       surface: 'plugin',
       plugin: 'plugins/opencode/bro',
       events: {
+        // opencode v2 only — the v1 surfaces (chat.system.transform,
+        // chat.message, session.compacting, permission.ask) are gone
         'session-start': {
-          native: ['experimental.chat.system.transform', 'session.hook("context")'],
+          native: ['session.hook("context")'],
           effects: ['context'],
         },
         'prompt-submit': {
-          native: ['chat.message', 'session.hook("prompt")'],
+          native: ['session.hook("prompt")'],
           effects: ['context'],
         },
         'pre-compact': {
-          native: ['experimental.session.compacting', 'session.hook("compaction")'],
+          native: ['session.hook("compaction")'],
           effects: ['context'],
         },
         'post-tool': {
@@ -289,9 +288,8 @@ export const HOOK_MATRIX: {
         'pre-tool': {
           native: ['tool.execute.before'],
           effects: ['block', 'rewrite'],
-          v2: true,
         },
-        permission: { native: ['permission.ask'], effects: ['approve'] },
+        permission: { native: ['permission.hook("evaluate")'], effects: ['approve'] },
         // no pre-stop slot — the `event` hook delivers `session.idle`,
         // and the blocker re-enters as one synthesized prompt; later
         // idles are skipped via stop_hook_active
@@ -300,7 +298,7 @@ export const HOOK_MATRIX: {
       nativeOnly: ['shell.env'],
       stopRefusal: 'reprompt',
       background: 'async',
-      upstream: { doc: 'https://opencode.ai/docs/plugins/', checked: '2026-10-24' },
+      upstream: { doc: 'https://opencode.ai/docs/build/plugins', checked: '2026-11-10' },
     },
 
     kilo: {
@@ -387,17 +385,17 @@ export const HOOK_MATRIX: {
       ],
       stopRefusal: 'block',
       background: 'async',
-      upstream: { doc: 'packages/cli/src/adapter/omp-api.ts', checked: '2026-10-24' },
+      upstream: { doc: 'packages/agent-plugins/omp/src/omp-api.ts', checked: '2026-10-24' },
     },
   },
-}
+};
 
 /** A stdin payload is a flat JSON object or nothing — every reader
  *  starts from the same narrowing. */
 const asPayload = (raw: unknown): Record<string, unknown> | undefined =>
   typeof raw === 'object' && raw !== null && !Array.isArray(raw)
     ? (raw as Record<string, unknown>)
-    : undefined
+    : undefined;
 
 /** The shell-hook host a verbatim stdin payload belongs to. Cursor
  *  payloads divert to cursorToHookInput before this is asked; the
@@ -407,8 +405,8 @@ const asPayload = (raw: unknown): Record<string, unknown> | undefined =>
  *  success. Every other Claude-vocabulary payload (claude, devin, an
  *  unpinned install, a manual invocation) gets the shared reading. */
 export function shellHostOf(raw: unknown): 'claude' | 'codex' {
-  const p = asPayload(raw)
-  return typeof p?.turn_id === 'string' ? 'codex' : 'claude'
+  const p = asPayload(raw);
+  return typeof p?.turn_id === 'string' ? 'codex' : 'claude';
 }
 
 /** Normalize the native post-tool payload into the internal outcome
@@ -430,18 +428,18 @@ export function shellHostOf(raw: unknown): 'claude' | 'codex' {
  *  once" hint the stop gate re-verifies, not a verdict, so an
  *  unobservable outcome arms where an observed failure does not. */
 export function deriveToolSuccess(raw: unknown): boolean | undefined {
-  return explicitSuccess(raw) ?? eventNameOutcome(raw)
+  return explicitSuccess(raw) ?? eventNameOutcome(raw);
 }
 
 /** The explicit boolean field — Devin sends it natively, the in-process
  *  adapters synthesize it — is authoritative wherever it appears. */
 function explicitSuccess(raw: unknown): boolean | undefined {
-  const response = asPayload(raw)?.tool_response
+  const response = asPayload(raw)?.tool_response;
   if (typeof response !== 'object' || response === null) {
-    return undefined
+    return undefined;
   }
-  const success = (response as { success?: unknown }).success
-  return typeof success === 'boolean' ? success : undefined
+  const success = (response as { success?: unknown }).success;
+  return typeof success === 'boolean' ? success : undefined;
 }
 
 /** Event-name semantics: a `*Failure`/`*Error` event is failure on
@@ -449,15 +447,15 @@ function explicitSuccess(raw: unknown): boolean | undefined {
  *  vocabulary — Codex fires it on non-zero exits too, so there it
  *  proves nothing. */
 function eventNameOutcome(raw: unknown): boolean | undefined {
-  const name = asPayload(raw)?.hook_event_name
+  const name = asPayload(raw)?.hook_event_name;
   if (typeof name !== 'string' || name === '') {
-    return undefined
+    return undefined;
   }
   if (/fail|error/i.test(name)) {
-    return false
+    return false;
   }
   if (name === 'PostToolUse' && shellHostOf(raw) !== 'codex') {
-    return true
+    return true;
   }
-  return undefined
+  return undefined;
 }
