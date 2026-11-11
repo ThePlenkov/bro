@@ -2157,6 +2157,12 @@ interface GateMember {
   updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
   fetchErrors: number;
+  /** Consecutive thrown service failures — the settle-side twin of
+   *  fetchErrors: the fetch arms own fetchErrors end-to-end (they
+   *  increment on a failed read and reset on a good one), so a throw
+   *  escaping serviceMember strikes here instead — sharing the counter
+   *  let each side's resets zero the other's strikes (bro-cu3q8). */
+  serviceErrors: number;
   /** Wall wait expiry (ms) — a rate_limited death carrying a parseable
    *  resetAt arms this and the member waits instead of respawning
    *  (bro-36bhc). Cleared on expiry/respawn. */
@@ -2363,6 +2369,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       since: Date.now(),
       rounds: 0,
       fetchErrors: 0,
+      serviceErrors: 0,
       prompt,
     };
     try {
@@ -2504,6 +2511,7 @@ function armMember(
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
+    serviceErrors: 0,
   };
 }
 
@@ -2841,6 +2849,15 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         if (out.kind === 'done') {
           return out.result;
         }
+        if (out.kind === 'infra') {
+          // the respawn's own backend wedged — infra, not a wall, so
+          // there is no provider reset to wait out. Re-arm the wait
+          // one interval and let the respawn retry at expiry;
+          // without it the member falls through workerless into the
+          // PR gate with no PR (bro-cu3q8)
+          m.wallWaitUntil = Date.now() + ctx.intervalS * 1000;
+          return 'kept';
+        }
         return 'kept';
       }
     }
@@ -2868,6 +2885,11 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // PR to drive. Same file, same 'wait' kind; watchEnd still owns it.
   watchRefresh(m.marker);
   const verdict = m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m);
+  // a service dispatch that returned without throwing clears the
+  // settle-failure strikes — the skip paths above never reach this
+  // line, so backoff passes can't zero a live streak, and the fetch
+  // arms' own fetchErrors resets stay untouched (bro-cu3q8)
+  m.serviceErrors = 0;
   if (verdict === 'kept') {
     m.nextPollAt =
       Date.now() +
@@ -4791,17 +4813,18 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
  *  under the strike budget, or the parked verdict past it. A member's
  *  settle can still throw on infra — the task store wedged mid-write,
  *  a dead spawn, a failed projection call. That's a member failure,
- *  never a dead supervisor (bro-cu3q8): it strikes the same budget the
- *  fetch arms use — under 3 strikes and inside mergeTimeoutMin the
- *  member is kept and its re-poll holds an interval (a wedged store
+ *  never a dead supervisor (bro-cu3q8): it strikes its own
+ *  serviceErrors budget — the same give-up contract the fetch arms
+ *  run on fetchErrors (under 3 strikes and inside mergeTimeoutMin the
+ *  member is kept and its re-poll holds an interval — a wedged store
  *  throws instantly, so without the pause every tick re-strikes); past
  *  the budget it parks exactly like the fetch arm. */
 function failMemberService(ctx: Ctx, m: GateMember, err: unknown): ServiceVerdict | undefined {
-  m.fetchErrors += 1;
+  m.serviceErrors += 1;
   console.error(
-    `loop: member ${m.beads[0]!.id} service failed (${m.fetchErrors}) — ${String(err)}`
+    `loop: member ${m.beads[0]!.id} service failed (${m.serviceErrors}) — ${String(err)}`
   );
-  if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
+  if (m.serviceErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
     m.nextPollAt = Date.now() + ctx.intervalS * 1000;
     return undefined;
   }
@@ -4821,10 +4844,10 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     let verdict: ServiceVerdict;
     try {
       verdict = await serviceMember(ctx, m); // NOSONAR — members service serially, oldest-first: a parallel pass would race the registry and claims
-      // a clean service pass clears the strike count — isolated
-      // service failures between healthy polls must not accumulate
-      // toward the park (the settle-failure counter is separate)
-      m.fetchErrors = 0;
+      // no strike reset here — serviceMember's skip paths return 'kept'
+      // without servicing, so a blanket reset would zero live streaks;
+      // serviceErrors clears inside serviceMember on a real dispatch
+      // and the fetch arms own fetchErrors end-to-end (bro-cu3q8)
     } catch (err) {
       // the pass continues either way — one poison member must not
       // starve the stack behind it
