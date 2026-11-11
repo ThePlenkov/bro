@@ -72,6 +72,16 @@ default store, so standard installs already have it).
   same false never reappears in any file, never a one-site suppression.
   A recurring pattern belongs in AGENTS.md or the relevant skill so the
   next code is born clean.
+- **Exhaust findings locally before pushing.** A push that flies blind on
+  what remote engines will say is the wave generator — each push
+  re-triggers reviewers whose next annotations were already computable.
+  Before any fix-round push, run the local engine parity sweep over every
+  file in the diff (the transient eslint-plugin-security +
+  no-non-null-assertion setup, plus tsc; see the check-sast bead for the
+  repo command), not just the flagged files. Zero local findings is the
+  bar for "this round is done"; remote annotations landing afterward are
+  either genuinely new or stale-DB reposts, and the sweep is how you tell
+  which.
   The loop is bounded: `fix_rounds` counts pushes made after the first
   review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
   them — past the cap the gate names the defer path outright, so
