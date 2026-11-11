@@ -17,9 +17,20 @@ function Brouter() {
       title="Route the task. Not the request."
       intro="An independent AI-native task router for your real configured agents. Your Markdown formulas decide where work goes. Not an LLM request router — bifrost handles that layer."
     >
-      <StandaloneCli />
-      <TaskRouting />
-      <Benchmark />
+      <div className="feature-grid">
+        <StandaloneCli />
+        <TaskRouting />
+        <Benchmark />
+      </div>
+      <section className="feature-section install-section" id="install">
+        <h2>Install.</h2>
+        <p>Inside the toolkit, or on its own.</p>
+        <pre className="code-block">
+          {
+            'npm i -g @broject/bro\nbro router --help\n\n# or standalone\nnpm i -g @broject/brouter\nbrouter --help'
+          }
+        </pre>
+      </section>
     </ProductPage>
   );
 }
@@ -29,15 +40,10 @@ function StandaloneCli() {
     <section className="feature-section">
       <h2>A CLI of its own.</h2>
       <p>
-        Use <code>bro router</code> inside the toolkit, or install <code>@broject/brouter</code>
+        Use <code>bro router</code> inside the toolkit, or install <code>@broject/brouter</code>{' '}
         on its own. Standalone brouter does not require the bro CLI. Connect the agents you use,
         define the routing policy, and send each task to the right one.
       </p>
-      <pre className="code-block">
-        {
-          'npm i -g @broject/bro\nbro router --help\n\n# Or use brouter independently\nnpm i @broject/brouter\nnpx brouter --help'
-        }
-      </pre>
       <p>
         Route to your configured agents, not imaginary models. Keep your clients, credentials and
         working sessions. brouter makes the routing decision; the selected agent does the work.
