@@ -87,6 +87,58 @@ function tail(fields: string[], index: number): string | undefined {
   return fields.slice(index).join('\t');
 }
 
+/** Shared head fields — ts/phase plus the id/host slots both versions
+ *  share, and the version-shifted event slot (v1 event@5, v2 event@6
+ *  after sid@5). undefined = malformed row. */
+function parseSpoolHead(
+  f: string[],
+  v2: boolean
+): { ts: number; phase: 'start' | 'end'; id: string; host: string; event: string } | undefined {
+  const ts = digits(f.at(1));
+  if (ts === undefined) {
+    return undefined;
+  }
+  const phase = f.at(2);
+  if (phase !== 'start' && phase !== 'end') {
+    return undefined;
+  }
+  const id = f.at(3);
+  const host = f.at(4);
+  const event = f.at(v2 ? 6 : 5);
+  if (!id || !host || !event) {
+    return undefined;
+  }
+  return { ts, phase, id, host, event };
+}
+
+/** v2-only enrichment fields (sid through launcher). */
+function parseV2Fields(f: string[], out: SpoolRow): void {
+  out.sid = emptyUndef(f.at(5));
+  out.pid = digits(f.at(7));
+  out.ppid = digits(f.at(8));
+  out.agent = emptyUndef(f.at(9));
+  out.adapter = emptyUndef(f.at(10));
+  out.pluginRoot = emptyUndef(f.at(11));
+  out.launcher = emptyUndef(f.at(12));
+}
+
+/** End rows carry rc+outcome before the cwd tail — a malformed end is
+ *  dropped whole (it can't pair a duration). Mutates `out` only on a
+ *  fully valid end. */
+function parseSpoolEnd(f: string[], v2: boolean, out: SpoolRow): boolean {
+  const rc = digits(f.at(v2 ? 13 : 6));
+  if (rc === undefined) {
+    return false;
+  }
+  const outcome = f.at(v2 ? 14 : 7);
+  if (!isSpoolOutcome(outcome)) {
+    return false;
+  }
+  out.rc = rc;
+  out.outcome = outcome;
+  return true;
+}
+
 /** Parse one spool line. undefined = not a usable row (wrong version,
  *  bad ts, missing identity, unknown phase, malformed end) — skipped by
  *  every consumer. */
@@ -100,55 +152,29 @@ export function parseSpoolLine(line: string): SpoolRow | undefined {
   if (version !== 'v1' && version !== 'v2') {
     return undefined;
   }
-  const ts = digits(f.at(1));
-  if (ts === undefined) {
-    return undefined;
-  }
-  const phase = f.at(2);
-  if (phase !== 'start' && phase !== 'end') {
-    return undefined;
-  }
   const v2 = version === 'v2';
   // v1: id@3 host@4 event@5 — end adds rc@6 outcome@7, cwd@8; start cwd@6
   // v2: id@3 host@4 sid@5 event@6 pid@7 ppid@8 agent@9 adapter@10
   //     proot@11 launcher@12 — end adds rc@13 outcome@14, cwd@15;
   //     start cwd@13
-  const id = f.at(3);
-  const host = f.at(4);
-  const sid = v2 ? f.at(5) : undefined;
-  const event = f.at(v2 ? 6 : 5);
-  if (!id || !host || !event) {
+  const head = parseSpoolHead(f, v2);
+  if (head === undefined) {
     return undefined;
   }
   const out: SpoolRow = {
     version: v2 ? 2 : 1,
-    ts,
-    phase,
-    id,
-    host,
-    event,
-    cwd: tail(f, v2 ? (phase === 'end' ? 15 : 13) : phase === 'end' ? 8 : 6),
+    ts: head.ts,
+    phase: head.phase,
+    id: head.id,
+    host: head.host,
+    event: head.event,
+    cwd: tail(f, v2 ? (head.phase === 'end' ? 15 : 13) : head.phase === 'end' ? 8 : 6),
   };
   if (v2) {
-    out.sid = sid === '' ? undefined : sid;
-    out.pid = digits(f.at(7));
-    out.ppid = digits(f.at(8));
-    out.agent = emptyUndef(f.at(9));
-    out.adapter = emptyUndef(f.at(10));
-    out.pluginRoot = emptyUndef(f.at(11));
-    out.launcher = emptyUndef(f.at(12));
+    parseV2Fields(f, out);
   }
-  if (phase === 'end') {
-    const rc = digits(f.at(v2 ? 13 : 6));
-    if (rc === undefined) {
-      return undefined;
-    }
-    const outcome = f.at(v2 ? 14 : 7);
-    if (!isSpoolOutcome(outcome)) {
-      return undefined;
-    }
-    out.rc = rc;
-    out.outcome = outcome;
+  if (head.phase === 'end' && !parseSpoolEnd(f, v2, out)) {
+    return undefined;
   }
   return out;
 }

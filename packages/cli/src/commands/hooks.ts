@@ -109,7 +109,7 @@ import { maybeSpawnStackPublish } from './stack-publish.ts';
 import { emitRefGuard } from './refguard.ts';
 import type { MatchContext } from '@broject/learn';
 import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
-import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts';
+import { renderHookSpoolStatus, rotateHookSpool, spoolRotationPending } from './hook-spool.ts';
 import { drainHookSpool } from '@broject/core';
 import {
   CURSOR_HYDRATED_SKILL,
@@ -2478,7 +2478,14 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
   // of them, is the only spot that bounds the spool on a tree where the
-  // dispatch path never runs.
+  // dispatch path never runs. Rotation deletes hooks.spool.1: when the
+  // live file is over the bound, drain pending rows into the ledger
+  // first so the drop can't silently discard backlog the worker never
+  // saw — best-effort, and only on the rare >1MB path so the hot path
+  // still pays nothing.
+  if (spoolRotationPending()) {
+    await drainHookSpool().catch(() => {});
+  }
   rotateHookSpool();
   const event = argv[0];
   if (await runPreGateCommand(event, argv)) {

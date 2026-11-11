@@ -120,6 +120,22 @@ export function resolveHookSpoolPath(env: NodeJS.ProcessEnv = process.env): stri
   return coreResolveHookSpoolPath(env);
 }
 
+/** True when the live spool is over the rotation bound — the caller
+ *  drains pending rows before `rotateHookSpool` drops `.1`, so an
+ *  over-limit rotation can't silently discard backlog the ledger never
+ *  saw. Same stat the rotator itself does; best-effort false on error. */
+export function spoolRotationPending(env: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    const path = resolveHookSpoolPath(env);
+    if (path === null) {
+      return false;
+    }
+    return statSync(path).size > MAX_SPOOL_BYTES;
+  } catch {
+    return false;
+  }
+}
+
 export function rotateHookSpool(env: NodeJS.ProcessEnv = process.env): void {
   try {
     const path = resolveHookSpoolPath(env);

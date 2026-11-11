@@ -8,6 +8,7 @@ import {
   readHookSpool,
   renderHookSpoolStatus,
   rotateHookSpool,
+  spoolRotationPending,
 } from './hook-spool.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'bro-hook-spool-test-'));
@@ -57,6 +58,20 @@ test('rotation replaces .1 after the spool grows past 1 MiB', () => {
 
   assert.equal(existsSync(path), false);
   assert.equal(readFileSync(`${path}.1`, 'utf8'), body);
+});
+
+test('spoolRotationPending mirrors the rotator bound — over 1 MiB only', () => {
+  const path = spoolPath();
+  const env = { BRO_HOOK_SPOOL: path };
+  assert.equal(spoolRotationPending(env), false, 'missing spool is not pending');
+
+  writeFileSync(path, 'small');
+  assert.equal(spoolRotationPending(env), false);
+
+  writeFileSync(path, 'x'.repeat(1024 * 1024 + 1));
+  assert.equal(spoolRotationPending(env), true);
+
+  assert.equal(spoolRotationPending({ BRO_HOOK_SPOOL: '0' }), false, 'disabled resolves null');
 });
 
 const EMPTY_OUTCOMES = { ok: 0, nonzero: 0, watchdog: 0, 'no-cli': 0, fastpath: 0, killed: 0 };

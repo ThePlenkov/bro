@@ -386,7 +386,10 @@ function rollupDay(db: SqliteDatabase, day: string): void {
     { host: string; event: string; n: number; durs: number[]; timeouts: number; errors: number }
   >();
   for (const r of rows) {
-    const key = `${r.host}${r.event}`;
+    // length-prefixed pair key — a bare `${host}${event}` concat lets
+    // ("foo","bar") collide with ("foobar","") and merges distinct
+    // host×event stats into one group
+    const key = `${r.host.length}:${r.host}${r.event}`;
     let g = groups.get(key);
     if (g === undefined) {
       g = { host: r.host, event: r.event, n: 0, durs: [], timeouts: 0, errors: 0 };
@@ -420,6 +423,155 @@ function rollupDay(db: SqliteDatabase, day: string): void {
       g.errors
     );
   }
+}
+
+/** Per-drain ingest state — the counts the caller returns plus the
+ *  in-batch pair map and touched-day set the maintenance pass needs. */
+interface IngestState {
+  counts: IngestResult;
+  /** start ts by pair id — end rows resolve `ms` against it before
+   *  falling back to the events table. */
+  pairStarts: Map<string, number>;
+  /** UTC days touched this drain — stats rollup re-runs per day. */
+  days: Set<string>;
+}
+
+/** cwd → {project, branch} once per drain. drainIntoStore primes the
+ *  ctx cache outside the write transaction; a miss means ingest ran
+ *  without that pre-pass, so resolve lazily — still cached either way. */
+function recordProjectBranch(
+  rec: SpoolRow,
+  ctx: IngestContext
+): { project?: string; branch?: string } {
+  if (rec.cwd === undefined) {
+    return {};
+  }
+  let pc = ctx.projects.get(rec.cwd);
+  if (pc === undefined) {
+    pc = { project: sessionProject(rec.cwd), branch: sessionBranch(rec.cwd) };
+    ctx.projects.set(rec.cwd, pc);
+  }
+  return pc;
+}
+
+/** pid → process start stamp, once per drain (best-effort `ps`). */
+function recordPidStart(rec: SpoolRow, ctx: IngestContext): string | undefined {
+  if (rec.pid === undefined) {
+    return undefined;
+  }
+  if (!ctx.pidStarts.has(rec.pid)) {
+    ctx.pidStarts.set(rec.pid, pidStart(rec.pid));
+  }
+  return ctx.pidStarts.get(rec.pid);
+}
+
+/** `ms` for one record — start rows register their ts in the in-batch
+ *  pair map; end rows resolve against it, then the events table for a
+ *  start ingested by an earlier drain. */
+function pairMs(
+  db: SqliteDatabase,
+  rec: SpoolRow,
+  pairStarts: Map<string, number>,
+  tsMs: number
+): number | undefined {
+  if (rec.phase === 'start') {
+    pairStarts.set(rec.id, tsMs);
+    return undefined;
+  }
+  if (rec.phase !== 'end') {
+    return undefined;
+  }
+  let startTs = pairStarts.get(rec.id);
+  if (startTs === undefined) {
+    const row = db
+      .prepare(`SELECT ts FROM events WHERE pair = ? AND phase = 'start' ORDER BY ts LIMIT 1`)
+      .get(rec.id) as { ts: number } | undefined;
+    startTs = row?.ts;
+  }
+  return startTs !== undefined && tsMs >= startTs ? tsMs - startTs : undefined;
+}
+
+/** One spool record → installs/sessions/events rows. Runs inside the
+ *  drain's write transaction; the ctx caches keep the per-record work
+ *  to map lookups + prepared inserts. */
+function ingestRecord(
+  db: SqliteDatabase,
+  rec: SpoolRow,
+  ctx: IngestContext,
+  st: IngestState
+): void {
+  st.counts.rows += 1;
+  const tsMs = rec.ts * 1000;
+  st.days.add(dayOf(tsMs));
+  // installs — every firing proves the wiring, fields or not
+  upsertInstall(db, {
+    host: rec.host,
+    adapterVersion: rec.adapter,
+    pluginRoot: rec.pluginRoot,
+    seenAt: tsMs,
+  });
+  st.counts.installs += 1;
+  const { project, branch } = recordProjectBranch(rec, ctx);
+  const pidStartStamp = recordPidStart(rec, ctx);
+  if (rec.sid !== undefined && rec.sid !== '') {
+    upsertSession(db, {
+      host: rec.host,
+      sid: rec.sid,
+      project,
+      cwd: rec.cwd,
+      branch,
+      pid: rec.pid,
+      pidStart: pidStartStamp,
+      started: tsMs,
+      lastSeen: tsMs,
+      spawnedBy: rec.agent,
+    });
+    st.counts.sessions += 1;
+  }
+  const ms = pairMs(db, rec, st.pairStarts, tsMs);
+  const outcome = rec.outcome === undefined ? undefined : (OUTCOME_MAP[rec.outcome] ?? rec.outcome);
+  insertEvent(db, {
+    ts: tsMs,
+    host: rec.host,
+    sid: rec.sid,
+    project,
+    event: rec.event,
+    phase: rec.phase,
+    ms,
+    outcome,
+    launcher: rec.launcher,
+    pair: rec.id,
+    detail: rec.rc === undefined ? undefined : { rc: rec.rc },
+  });
+  st.counts.events += 1;
+}
+
+/** Killed synthesis + per-day stats rollup + retention — the expensive
+ *  half of a drain, gated on fresh rows or a stale last pass so an empty
+ *  drain stays a couple of stats (see LEDGER_MAINTENANCE_MS). */
+function runMaintenance(
+  db: SqliteDatabase,
+  ctx: IngestContext,
+  counts: IngestResult,
+  days: Set<string>
+): void {
+  const maintRow = db.prepare(`SELECT value FROM meta WHERE key = 'ledger_maint_at'`).get() as
+    | { value: string }
+    | undefined;
+  const lastMaintRaw = maintRow === undefined ? 0 : Number(maintRow.value);
+  const lastMaint = Number.isFinite(lastMaintRaw) ? lastMaintRaw : 0;
+  if (counts.rows === 0 && ctx.nowMs - lastMaint < LEDGER_MAINTENANCE_MS) {
+    return;
+  }
+  counts.killed = synthesizeKilled(db, ctx, days);
+  for (const day of days) {
+    rollupDay(db, day);
+  }
+  counts.pruned = prune(db, ctx.nowMs);
+  db.prepare(
+    `INSERT INTO meta(key, value) VALUES ('ledger_maint_at', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(String(ctx.nowMs));
 }
 
 function buildStore(db: SqliteDatabase): LedgerStore {
@@ -456,92 +608,13 @@ function buildStore(db: SqliteDatabase): LedgerStore {
       killed: 0,
       pruned: 0,
     };
+    const state: IngestState = { counts, pairStarts: new Map(), days: new Set() };
     const cursor = loadCursor();
-    const pairStarts = new Map<string, number>();
-    const days = new Set<string>();
     db.exec('BEGIN IMMEDIATE');
     try {
       for (const batch of batches) {
         for (const rec of batch.rows) {
-          counts.rows += 1;
-          const tsMs = rec.ts * 1000;
-          days.add(dayOf(tsMs));
-          // installs — every firing proves the wiring, fields or not
-          upsertInstall(db, {
-            host: rec.host,
-            adapterVersion: rec.adapter,
-            pluginRoot: rec.pluginRoot,
-            seenAt: tsMs,
-          });
-          counts.installs += 1;
-          // project/branch resolve once per cwd per drain (ctx cache)
-          let project: string | undefined;
-          let branch: string | undefined;
-          if (rec.cwd !== undefined) {
-            let pc = ctx.projects.get(rec.cwd);
-            if (pc === undefined) {
-              pc = { project: sessionProject(rec.cwd), branch: sessionBranch(rec.cwd) };
-              ctx.projects.set(rec.cwd, pc);
-            }
-            project = pc.project;
-            branch = pc.branch;
-          }
-          let pidStartStamp: string | undefined;
-          if (rec.pid !== undefined) {
-            if (!ctx.pidStarts.has(rec.pid)) {
-              ctx.pidStarts.set(rec.pid, pidStart(rec.pid));
-            }
-            pidStartStamp = ctx.pidStarts.get(rec.pid);
-          }
-          if (rec.sid !== undefined && rec.sid !== '') {
-            upsertSession(db, {
-              host: rec.host,
-              sid: rec.sid,
-              project,
-              cwd: rec.cwd,
-              branch,
-              pid: rec.pid,
-              pidStart: pidStartStamp,
-              started: tsMs,
-              lastSeen: tsMs,
-              spawnedBy: rec.agent,
-            });
-            counts.sessions += 1;
-          }
-          // events — pair starts for ms, ends resolve against them
-          let ms: number | undefined;
-          if (rec.phase === 'start') {
-            pairStarts.set(rec.id, tsMs);
-          } else if (rec.phase === 'end') {
-            let startTs = pairStarts.get(rec.id);
-            if (startTs === undefined) {
-              const row = db
-                .prepare(
-                  `SELECT ts FROM events WHERE pair = ? AND phase = 'start' ORDER BY ts LIMIT 1`
-                )
-                .get(rec.id) as { ts: number } | undefined;
-              startTs = row?.ts;
-            }
-            if (startTs !== undefined && tsMs >= startTs) {
-              ms = tsMs - startTs;
-            }
-          }
-          const outcome =
-            rec.outcome === undefined ? undefined : (OUTCOME_MAP[rec.outcome] ?? rec.outcome);
-          insertEvent(db, {
-            ts: tsMs,
-            host: rec.host,
-            sid: rec.sid,
-            project,
-            event: rec.event,
-            phase: rec.phase,
-            ms,
-            outcome,
-            launcher: rec.launcher,
-            pair: rec.id,
-            detail: rec.rc === undefined ? undefined : { rc: rec.rc },
-          });
-          counts.events += 1;
+          ingestRecord(db, rec, ctx, state);
         }
         cursor[batch.ino] = batch.offset;
       }
@@ -549,25 +622,7 @@ function buildStore(db: SqliteDatabase): LedgerStore {
         `INSERT INTO meta(key, value) VALUES ('spool_cursor', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`
       ).run(JSON.stringify(cursor));
-      // maintenance is the expensive half of a drain — gate it on fresh
-      // rows or a stale last pass so an empty drain stays a couple of
-      // stats (see LEDGER_MAINTENANCE_MS)
-      const maintRow = db.prepare(`SELECT value FROM meta WHERE key = 'ledger_maint_at'`).get() as
-        | { value: string }
-        | undefined;
-      const lastMaintRaw = maintRow === undefined ? 0 : Number(maintRow.value);
-      const lastMaint = Number.isFinite(lastMaintRaw) ? lastMaintRaw : 0;
-      if (counts.rows > 0 || ctx.nowMs - lastMaint >= LEDGER_MAINTENANCE_MS) {
-        counts.killed = synthesizeKilled(db, ctx, days);
-        for (const day of days) {
-          rollupDay(db, day);
-        }
-        counts.pruned = prune(db, ctx.nowMs);
-        db.prepare(
-          `INSERT INTO meta(key, value) VALUES ('ledger_maint_at', ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-        ).run(String(ctx.nowMs));
-      }
+      runMaintenance(db, ctx, counts, state.days);
       db.exec('COMMIT');
     } catch (err) {
       try {

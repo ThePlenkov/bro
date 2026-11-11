@@ -16,18 +16,25 @@ function caseDir(name: string): string {
 
 const T0 = 1_700_000_000; // fixed epoch seconds — deterministic days
 
-function v1Start(id: string, host = 'cursor', event = 'post-tool', cwd = '/repo', ts = T0) {
+interface V1Opts {
+  host?: string;
+  event?: string;
+  cwd?: string;
+  ts?: number;
+}
+function v1Start(id: string, o: V1Opts = {}) {
+  const { host = 'cursor', event = 'post-tool', cwd = '/repo', ts = T0 } = o;
   return `v1\t${ts}\tstart\t${id}\t${host}\t${event}\t${cwd}`;
 }
-function v1End(
-  id: string,
-  host = 'cursor',
-  event = 'post-tool',
-  rc = 0,
-  outcome = 'ok',
-  cwd = '/repo',
-  ts = T0 + 2
-) {
+function v1End(id: string, o: V1Opts & { rc?: number; outcome?: string } = {}) {
+  const {
+    host = 'cursor',
+    event = 'post-tool',
+    rc = 0,
+    outcome = 'ok',
+    cwd = '/repo',
+    ts = T0 + 2,
+  } = o;
   return `v1\t${ts}\tend\t${id}\t${host}\t${event}\t${rc}\t${outcome}\t${cwd}`;
 }
 function v2Start(
@@ -64,12 +71,10 @@ function v2Start(
 }
 function v2End(
   id: string,
-  outcome = 'ok',
-  rc = 0,
-  ts = T0 + 2,
-  opts: Parameters<typeof v2Start>[1] = {}
+  o: Parameters<typeof v2Start>[1] & { outcome?: string; rc?: number; ts?: number } = {}
 ) {
-  const o = {
+  const { outcome = 'ok', rc = 0, ts = T0 + 2, ...fields } = o;
+  const f = {
     host: 'devin',
     sid: 'sid-1',
     event: 'session-start',
@@ -80,9 +85,9 @@ function v2End(
     proot: '/opt/bro',
     launcher: 'tmux',
     cwd: '/repo',
-    ...opts,
+    ...fields,
   };
-  return `v2\t${ts}\tend\t${id}\t${o.host}\t${o.sid}\t${o.event}\t${o.pid}\t${o.ppid}\t${o.agent}\t${o.adapter}\t${o.proot}\t${o.launcher}\t${rc}\t${outcome}\t${o.cwd}`;
+  return `v2\t${ts}\tend\t${id}\t${f.host}\t${f.sid}\t${f.event}\t${f.pid}\t${f.ppid}\t${f.agent}\t${f.adapter}\t${f.proot}\t${f.launcher}\t${rc}\t${outcome}\t${f.cwd}`;
 }
 
 async function openStore(dir: string) {
@@ -100,10 +105,10 @@ test('drain ingests v1+v2 rows into events, sessions, installs, stats', async ()
   writeFileSync(
     spool,
     [
-      v1Start('p1', 'cursor', 'post-tool', '/repo', T0),
-      v1End('p1', 'cursor', 'post-tool', 0, 'ok', '/repo', T0 + 3),
+      v1Start('p1', { ts: T0 }),
+      v1End('p1', { ts: T0 + 3 }),
       v2Start('s1', { sid: 'sess-1', agent: 'agent-7', event: 'session-start' }),
-      v2End('s1', 'ok', 0, T0 + 1, { sid: 'sess-1', agent: 'agent-7', event: 'session-start' }),
+      v2End('s1', { ts: T0 + 1, sid: 'sess-1', agent: 'agent-7', event: 'session-start' }),
       v2Start('s2', { sid: 'sess-1', event: 'post-tool', pid: 777 }),
       // s2 never ends — fresh enough to stay unpaired
       '',
@@ -147,6 +152,31 @@ test('drain ingests v1+v2 rows into events, sessions, installs, stats', async ()
     const ss = stats.find(r => r.host === 'devin' && r.event === 'session-start');
     assert.equal(ss?.n, 1);
     assert.equal(ss?.p50, 1000);
+  } finally {
+    opened.close();
+  }
+});
+
+test('stats groups host×event without concat collisions', async () => {
+  const dir = caseDir('statkey');
+  const spool = join(dir, 'hooks.spool');
+  // ('ab','c') and ('a','bc') concatenate to the same key — the rollup
+  // must keep them as separate groups
+  writeFileSync(
+    spool,
+    `${v1End('k1', { host: 'ab', event: 'c', ts: T0 + 2 })}\n${v1End('k2', { host: 'a', event: 'bc', ts: T0 + 3 })}\n`
+  );
+  await drainHookSpool({
+    spoolPath: spool,
+    dbPath: join(dir, 'ledger.db'),
+    nowMs: (T0 + 60) * 1000,
+  });
+  const opened = await openStore(dir);
+  try {
+    const stats = await opened.store.stats({ day: '2023-11-14' });
+    assert.equal(stats.length, 2);
+    assert.equal(stats.find(r => r.host === 'ab' && r.event === 'c')?.n, 1);
+    assert.equal(stats.find(r => r.host === 'a' && r.event === 'bc')?.n, 1);
   } finally {
     opened.close();
   }
@@ -226,10 +256,10 @@ test('rotation: .1 drains before the live file; inode cursor survives rename', a
   const dir = caseDir('rotate');
   const spool = join(dir, 'hooks.spool');
   // older rows sit in .1, newer in live — both must land, once
-  writeFileSync(`${spool}.1`, `${v1Start('old', 'cursor', 'stop', '/repo', T0 - 100)}\n`);
+  writeFileSync(`${spool}.1`, `${v1Start('old', { event: 'stop', ts: T0 - 100 })}\n`);
   writeFileSync(
     spool,
-    `${v1End('old', 'cursor', 'stop', 0, 'ok', '/repo', T0 - 98)}\n${v1Start('new')}\n${v1End('new')}\n`
+    `${v1End('old', { event: 'stop', ts: T0 - 98 })}\n${v1Start('new')}\n${v1End('new')}\n`
   );
 
   const result = await drainHookSpool({
@@ -255,7 +285,7 @@ test('a stale start synthesizes a killed end — deduped across drains', async (
   const dir = caseDir('killed');
   const spool = join(dir, 'hooks.spool');
   // start 60s ago, watchdog 8s → past the kill horizon, no end
-  writeFileSync(spool, `${v1Start('hang', 'cursor', 'permission', '/repo', T0 - 60)}\n`);
+  writeFileSync(spool, `${v1Start('hang', { event: 'permission', ts: T0 - 60 })}\n`);
   const dbPath = join(dir, 'ledger.db');
   const opts = { spoolPath: spool, dbPath, nowMs: T0 * 1000, watchdogSeconds: 8 };
 
@@ -283,7 +313,7 @@ test('a stale start synthesizes a killed end — deduped across drains', async (
 test('a start that ages past the horizon is killed on a later quiet drain', async () => {
   const dir = caseDir('killed-late');
   const spool = join(dir, 'hooks.spool');
-  writeFileSync(spool, `${v1Start('fresh', 'cursor', 'stop', '/repo', T0)}\n`);
+  writeFileSync(spool, `${v1Start('fresh', { event: 'stop', ts: T0 })}\n`);
   const dbPath = join(dir, 'ledger.db');
 
   // drain 1: the start is 5s old — under the kill horizon, no rows left
@@ -366,7 +396,7 @@ test('retention prunes events past 14d and stats past 180d', async () => {
   const oldTs = T0 - 20 * 86_400; // 20 days before T0
   writeFileSync(
     spool,
-    `${v1Start('ancient', 'cursor', 'post-tool', '/repo', oldTs)}\n${v1End('ancient', 'cursor', 'post-tool', 0, 'ok', '/repo', oldTs + 1)}\n`
+    `${v1Start('ancient', { ts: oldTs })}\n${v1End('ancient', { ts: oldTs + 1 })}\n`
   );
   const dbPath = join(dir, 'ledger.db');
   const result = await drainHookSpool({
@@ -386,10 +416,7 @@ test('ledgerFacade resolves through facade() and reads what the drain wrote', as
   // facade drains with wall-clock now — fixture rows must be fresh or
   // retention prunes them before the assertions read
   const nowS = Math.floor(Date.now() / 1000);
-  writeFileSync(
-    spool,
-    `${v1Start('p1', 'cursor', 'post-tool', '/repo', nowS)}\n${v1End('p1', 'cursor', 'post-tool', 0, 'ok', '/repo', nowS + 1)}\n`
-  );
+  writeFileSync(spool, `${v1Start('p1', { ts: nowS })}\n${v1End('p1', { ts: nowS + 1 })}\n`);
   const env = {
     BRO_HOOK_SPOOL: spool,
     XDG_STATE_HOME: join(dir, 'xdg'),

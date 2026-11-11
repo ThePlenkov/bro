@@ -399,7 +399,7 @@ hook_spool_sid() {
 hook_spool_identity() {
   [ "$HOOK_SPOOL_IDENTITY" = 1 ] && return 0
   HOOK_SPOOL_IDENTITY=1
-  HOOK_SPOOL_ID=$$_BRO_HOOK_T0
+  HOOK_SPOOL_ID=$$-$BRO_HOOK_T0
 
   # host — env markers first (the *_PLUGIN_ROOT vars each client exports,
   # then *_PROJECT_DIR corroboration), then bare PLUGIN_ROOT which the
@@ -565,7 +565,13 @@ post-tool|prompt-submit)
       [ "$_p" = "$_d" ] && break
       _d=$_p
     done
-    [ "$_opted" = 0 ] && exit 0
+    if [ "$_opted" = 0 ]; then
+      # resolved to a shell no-op on a repo with no bro opt-in — pair
+      # the start row like the fastpath exit below so the launch does
+      # not read as a host kill in the spool
+      hook_spool_end 0 fastpath
+      exit 0
+    fi
   fi
 
   # session-id candidates — every value offered, sanitized the same
