@@ -160,6 +160,7 @@ import {
 } from './work.ts';
 import { LEARN_RETRO_CLOSEOUT, type LoopConfig } from '@broject/loop';
 import { installDrive, uninstallDrive } from './daemon.ts';
+import { pipelineWakePass } from './pipeline.ts';
 import { rigNext, type RigNext } from './rig-next.ts';
 import { SELF_ENTRY } from './self-entry.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
@@ -3026,6 +3027,37 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     await sweepSettledFixers(ctx, prs);
   } finally {
     herdrProjectorTick(ctx);
+  }
+  // the pipeline run-waker (bro-v0pvd.3) — journaled runs resume when
+  // their awaited input may have settled (customer records, provider
+  // walls, fleet capacity, the PR-settle seam, crash residue). Script-
+  // first, rides this cadence on the production engine map (.10) and
+  // the <runId>.formula.toml sidecar convention. A throwing pass must
+  // not kill the driver — same rule as the PR loop above.
+  try {
+    const wake = await pipelineWakePass(ctx.mainRoot);
+    if (wake.locked) {
+      say(ctx, 'pipeline wake: another pass holds the lock — skipped');
+    } else {
+      const woken = wake.runs.filter(r => r.action === 'woken').length;
+      const failed = wake.runs.filter(r => r.action === 'failed');
+      const unreadable = wake.unreadable ?? [];
+      if (woken > 0 || failed.length > 0 || unreadable.length > 0) {
+        // name the runs/files an operator must look at — a bare count
+        // leaves an unreadable journal or a failed resume invisible
+        const details = [
+          ...failed.map(r => `${r.runId}/${r.item}: ${r.detail ?? 'failed'}`),
+          ...unreadable.map(f => `unreadable ${f}`),
+        ];
+        say(
+          ctx,
+          `pipeline wake: ${woken} woken, ${failed.length} failed of ${wake.runs.length} anchor(s)` +
+            (details.length > 0 ? ` — ${details.join('; ')}` : '')
+        );
+      }
+    }
+  } catch (err) {
+    say(ctx, `warning: pipeline wake failed — ${errText(err)}`);
   }
 }
 
