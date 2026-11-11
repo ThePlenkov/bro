@@ -91,6 +91,11 @@ default store, so standard installs already have it).
   bar for "this round is done"; remote annotations landing afterward are
   either genuinely new or stale-DB reposts, and the sweep is how you tell
   which.
+  Same sweep, artifact class: before editing any file, grep its basename
+  across `scripts/` and `package.json` for a generator or freshness gate
+  (`check:*`, `gen:*`). Generated outputs — schemas, lockfiles, committed
+  dist — get their change at the source and a regeneration; a hand-edit
+  is a guaranteed red freshness check.
   The loop is bounded: `fix_rounds` counts pushes made after the first
   review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
   them — past the cap the gate names the defer path outright, so
