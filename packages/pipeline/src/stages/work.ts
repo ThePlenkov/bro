@@ -233,20 +233,20 @@ function pipelineFor(call: StageCall, deps: FleetDeps): PipelineProvenance | und
  *  is not a routing answer and never reaches the spawn. */
 function routingFor(call: StageCall): Partial<FleetSpawnRequest> {
   const out: Partial<FleetSpawnRequest> = {};
+  // `orch` validates against the route vocabulary — a non-member
+  // never spawns through an orch surface the formula doesn't declare
+  const orch = call.ctx['orch'];
+  if (typeof orch === 'string' && orch !== '' && (ORCH_MODES as readonly string[]).includes(orch)) {
+    out.orch = orch as RouteOrch;
+  }
   for (const key of ROUTING_CTX_KEYS) {
-    const v = call.ctx[key];
-    if (typeof v !== 'string' || v === '') {
-      continue;
-    }
     if (key === 'orch') {
-      // the orch vocabulary is route's — a non-member never spawns
-      // through an orch surface the formula doesn't declare
-      if ((ORCH_MODES as readonly string[]).includes(v)) {
-        out.orch = v as RouteOrch;
-      }
       continue;
     }
-    out[key] = v;
+    const v = call.ctx[key];
+    if (typeof v === 'string' && v !== '') {
+      out[key] = v;
+    }
   }
   return out;
 }
@@ -415,6 +415,17 @@ async function settle(call: StageCall, obs: AgentInfo, deps: FleetDeps): Promise
   return { verdict, payload: await payloadFor(call, obs, verdict, deps) };
 }
 
+/** 'conflict' + a live observation → settle on the worker already
+ *  owning the step; undefined → the refusal propagates as the crash
+ *  marker (the fleet registry IS the dedup plane). */
+async function attachLive(call: StageCall, deps: FleetDeps): Promise<EngineOutcome | undefined> {
+  const live = await deps.observe(call);
+  if (live === undefined || !isLive(live)) {
+    return undefined;
+  }
+  return settle(call, live, deps);
+}
+
 /** A spawn refusal → the world's answer, mapped by kind — never by
  *  message text. 'cap' is a capacity wait (the machine budget
  *  refused under the spawn lock after admission passed): the
@@ -423,9 +434,9 @@ async function settle(call: StageCall, obs: AgentInfo, deps: FleetDeps): Promise
  *  'rate_limited' (that verdict re-enters route's wall path and
  *  would advance the provider chain past a healthy lane). 'conflict'
  *  with a live observation attaches to the worker already owning the
- *  step — this run's pending intent settles on ITS exit (the fleet
- *  registry IS the dedup plane; a claim-side refusal with no live
- *  worker, and every other kind, propagates as the crash marker). */
+ *  step — this run's pending intent settles on ITS exit; a claim-side
+ *  refusal with no live worker, and every other kind, propagates as
+ *  the crash marker. */
 async function spawnRefusal(
   err: unknown,
   call: StageCall,
@@ -437,17 +448,11 @@ async function spawnRefusal(
   if (err.kind === 'cap') {
     return { alert: SATURATION_ALERT, detail: err.message };
   }
-  if (err.kind !== 'conflict') {
-    throw err;
+  const attached = err.kind === 'conflict' ? await attachLive(call, deps) : undefined;
+  if (attached !== undefined) {
+    return attached;
   }
-  // 'conflict' with a live observation attaches to the worker already
-  // owning the step; a dead/absent one (and every other kind) is the
-  // crash marker.
-  const live = await deps.observe(call);
-  if (live === undefined || !isLive(live)) {
-    throw err;
-  }
-  return settle(call, live, deps);
+  throw err;
 }
 
 /**
