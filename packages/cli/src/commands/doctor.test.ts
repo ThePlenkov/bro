@@ -269,15 +269,16 @@ function commitAt(checkout: string, isoDate?: string): void {
   });
 }
 
-/** A resolved `bro` entry in Devin's plugin lockfile under the test's
- *  XDG_DATA_HOME — the plugin half of the duplicate wiring. */
-function resolvedBroPlugin(dir: string): void {
+/** A resolved plugin entry in Devin's plugin lockfile under the test's
+ *  XDG_DATA_HOME — the plugin half of the duplicate wiring. `name`
+ *  defaults to bro; any other name resolves foreign plugins only. */
+function resolvedBroPlugin(dir: string, name = 'bro'): void {
   const data = join(dir, 'data');
   process.env.XDG_DATA_HOME = data;
   mkdirSync(join(data, 'devin', 'cli', 'plugins'), { recursive: true });
   writeFileSync(
     join(data, 'devin', 'cli', 'plugins', 'lock.json'),
-    JSON.stringify({ resolved: [{ name: 'bro' }] })
+    JSON.stringify({ resolved: [{ name }] })
   );
 }
 
@@ -863,6 +864,60 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'hooks-wiring');
       assert.equal(c.status, 'ok');
       assert.match(c.detail, /no bro hooks/);
+    }));
+
+  test('hooks-wiring: unparseable chain + resolved plugin → warn keeps the safe hint', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir);
+      mkdirSync(join(dir, '.devin'));
+      // truncated JSON — the shape probe cannot prove the chain is
+      // all-bro, so the hint must be strip-entries, never drop-file
+      writeFileSync(
+        join(dir, '.devin', 'hooks.v1.json'),
+        '{"Stop":[{"hooks":[{"command":"$DEVIN_PROJECT_DIR/hooks/run.sh'
+      );
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'warn');
+      assert.match(c.detail, /two hook launchers/);
+      assert.match(c.hint ?? '', /remove the bro hook entries/);
+      assert.doesNotMatch(c.hint ?? '', /drop \.devin\/hooks\.v1\.json/);
+    }));
+
+  test('hooks-wiring: lockfile resolving only foreign plugins → ok sole wiring', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir, 'other-tool');
+      writeDevinChain(dir, {
+        Stop: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: 'bro hooks stop || true; exit 0' }],
+          },
+        ],
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'ok');
+      assert.match(c.detail, /sole bro wiring/);
+    }));
+
+  test('hooks-wiring: off-schema event counts as foreign → warn keeps the file', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir);
+      writeDevinChain(dir, {
+        PostToolUse: [
+          {
+            matcher: '^exec$',
+            hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+          },
+        ],
+        // not the hooks.v1.json group shape — unprovable, counts foreign
+        Stop: 'not-a-group-list',
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'warn');
+      assert.match(c.detail, /PostToolUse/);
+      assert.doesNotMatch(c.detail, /Stop/);
+      assert.match(c.hint ?? '', /remove the bro hook entries/);
+      assert.doesNotMatch(c.hint ?? '', /drop \.devin\/hooks\.v1\.json/);
     }));
 
   test('bro-dist: PATH-bro into a dev checkout warns when dist predates HEAD', () =>
