@@ -94,6 +94,15 @@ export {
 export type { AcceptDeps, AcceptPayload, EvidenceBundle } from './stages/accept.ts';
 export { acceptStage, evidenceBundle, REJECTED_VERDICT } from './stages/accept.ts';
 export type {
+  ActGateDeps,
+  ActGateObservation,
+  ActGatePayload,
+  ActGatePrRef,
+  ActGateRead,
+  ActGateVerdict,
+} from './stages/act-gate.ts';
+export { ACT_GATE_VERDICTS, actGateStage } from './stages/act-gate.ts';
+export type {
   CaptureDeps,
   CaptureMode,
   CaptureOutcome,
