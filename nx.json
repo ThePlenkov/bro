@@ -77,5 +77,8 @@
       "options": {}
     }
   ],
-  "nxCloudId": "6ac40919e891443e6ed11ebf"
+  "nxCloudId": "6ac40919e891443e6ed11ebf",
+  "affected": {
+    "legacy": true
+  }
 }
