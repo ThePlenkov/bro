@@ -601,7 +601,9 @@ describe('bro work e2e — prune --loop label + detached litter (bro-imvu3)', ()
     // work/fx-exact-x names bead fx-exact-x exactly, but the shorter
     // bead fx-exact also prefix-matches the tail — beadForHead's
     // two-owner rule must win over the tidy-name shortcut, or the
-    // closed bead would reap a tree the open one may own
+    // closed bead would reap a tree the open one may own. The open
+    // bead's own tidy-name tree keeps beside it under 'bead open' —
+    // ambiguity blanks the attribution, it does not blanket the sweep.
     const { root, main } = workFixture();
     const { binDir, db } = installFakeBd(root, [
       { ...FAKE_BEAD, id: 'fx-exact', status: 'open' },
@@ -609,10 +611,13 @@ describe('bro work e2e — prune --loop label + detached litter (bro-imvu3)', ()
     ]);
     inside(main, root, () => {
       const wt = labelLitter(root, main, 'work/fx-exact-x');
+      const openWt = labelLitter(root, main, 'work/fx-exact');
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) });
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /kept .*main--fx-exact-x \(no bead — unverifiable\)/);
+      assert.match(r.stdout, /kept .*main--fx-exact \(bead open\)/);
       assert.equal(existsSync(wt), true);
+      assert.equal(existsSync(openWt), true);
     });
   });
 
