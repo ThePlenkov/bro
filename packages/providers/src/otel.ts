@@ -95,18 +95,33 @@ const envDim = (names: readonly string[]): string | undefined => {
   return undefined;
 };
 
-const resource = (): { attributes: { key: string; value: Record<string, unknown> }[] } => ({
-  attributes: [
-    attr('service.name', 'bro'),
-    attr('service.version', process.env.BRO_VERSION ?? 'dev'),
-    attr('service.instance.id', String(process.pid)),
-    attr('bro.cwd', process.cwd()),
-    ...IDENTITY_ENV.flatMap(([k, names]) => {
-      const v = envDim(names);
-      return v === undefined ? [] : [attr(k, v)];
-    }),
-  ],
-});
+/** cwd can vanish under a long-lived worker (its worktree reaped
+ *  mid-run) — process.cwd() then throws, and resource() runs inside
+ *  every emit, so an unguarded read would turn telemetry into the
+ *  crash (review bro-xgejl.1). Absent beats thrown. */
+const cwdDim = (): string | undefined => {
+  try {
+    return process.cwd();
+  } catch {
+    return undefined;
+  }
+};
+
+const resource = (): { attributes: { key: string; value: Record<string, unknown> }[] } => {
+  const cwd = cwdDim();
+  return {
+    attributes: [
+      attr('service.name', 'bro'),
+      attr('service.version', process.env.BRO_VERSION ?? 'dev'),
+      attr('service.instance.id', String(process.pid)),
+      ...(cwd === undefined ? [] : [attr('bro.cwd', cwd)]),
+      ...IDENTITY_ENV.flatMap(([k, names]) => {
+        const v = envDim(names);
+        return v === undefined ? [] : [attr(k, v)];
+      }),
+    ],
+  };
+};
 
 /** Emit queue — no in-process OTLP sockets, ever (bro-uwoss). A void'd
  *  fetch to a dead endpoint rejects at its abort yet keeps undici's
