@@ -119,3 +119,11 @@ exclude_paths:
   # path is bro-built (git common dir + registry-minted ids), never
   # customer input. Same non-literal-path false positive as starter.ts.
   - 'packages/cli/src/pipeline-engines.ts'
+
+  # The io modules ARE the fs seam: every dynamic path in brose/brotocol
+  # funnels through these functions — brose's are operator-named (CLI
+  # args), brotocol's are protocol-configured and every write/remove
+  # passes resolveIn's inside-root proof first. The non-literal-path
+  # rule would flag the one file whose job is path safety.
+  - 'packages/brose/src/io.ts'
+  - 'packages/brotocol/src/io.ts'

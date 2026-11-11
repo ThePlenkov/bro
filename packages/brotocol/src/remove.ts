@@ -3,8 +3,8 @@
  * its index file (parts stay — they were never the doc) unless
  * `{recursive: true}` removes the whole directory.
  */
-import { rmSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { ioRemove } from './io.ts';
 import type { Protocol } from './protocol.ts';
 import { get } from './scan.ts';
 
@@ -25,10 +25,10 @@ export function remove(
   const removed: string[] = [];
   if (doc.isDirDoc && opts.recursive === true) {
     const dir = dirname(doc.path);
-    rmSync(dir, { recursive: true, force: true });
+    ioRemove(dir, true);
     removed.push(dir);
   } else {
-    rmSync(doc.path, { force: true });
+    ioRemove(doc.path);
     removed.push(doc.path);
   }
   return { id: doc.id, removed };

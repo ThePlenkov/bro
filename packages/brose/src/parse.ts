@@ -5,7 +5,7 @@
  * md→tokens only: brose never serializes a doc, which keeps future
  * splice-preserving edits byte-stable where untouched.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { ioExists, ioRead } from './io.ts';
 import MarkdownIt from 'markdown-it';
 import { parseFrontmatter } from './frontmatter.ts';
 
@@ -82,14 +82,14 @@ export function parse(input: string | { path: string } | { content: string }): P
   if (typeof input === 'object') {
     return parseContent(input.content);
   }
-  if (!input.includes('\n') && existsSync(input)) {
+  if (!input.includes('\n') && ioExists(input)) {
     return parseFile(input);
   }
   return parseContent(input);
 }
 
 export function parseFile(path: string): ParsedDoc {
-  return { ...parseContent(readFileSync(path, 'utf8')), path };
+  return { ...parseContent(ioRead(path)), path };
 }
 
 export function parseContent(content: string): ParsedDoc {

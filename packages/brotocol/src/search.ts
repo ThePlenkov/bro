@@ -34,7 +34,11 @@ export function search(protocol: Protocol, query: Query): Doc[] {
   const needle = text?.toLowerCase();
   return scan(protocol).filter(doc => {
     for (const [k, want] of Object.entries(fields)) {
-      if (!fieldMatch(doc.frontmatter[k], want)) {
+      // getOwnPropertyDescriptor is the injection-safe keyed read —
+      // `frontmatter[k]` on a query key like `__proto__` would reach
+      // the prototype chain.
+      const value = Object.getOwnPropertyDescriptor(doc.frontmatter, k)?.value;
+      if (!fieldMatch(value, want)) {
         return false;
       }
     }

@@ -6,8 +6,9 @@
  * or bare `name` (highest version). First dir wins on a duplicate
  * `name@version`, so the project `.brose/templates/` overrides.
  */
-import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
+import { ioExists, ioRead, ioReadDir } from './io.ts';
 import { z } from 'zod';
 import { parseFrontmatter } from './frontmatter.ts';
 import { parseContent, type SectionNode } from './parse.ts';
@@ -108,7 +109,7 @@ const mdFiles = (dir: string): string[] => {
   let out: string[] = [];
   let entries: Dirent[];
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = ioReadDir(dir);
   } catch {
     return out;
   }
@@ -128,7 +129,7 @@ const mdFiles = (dir: string): string[] => {
 export function createRegistry(opts: { dirs?: string[]; cwd?: string } = {}): Registry {
   const dirs = [...(opts.dirs ?? [])];
   const projectDir = join(opts.cwd ?? process.cwd(), '.brose', 'templates');
-  if (existsSync(projectDir)) {
+  if (ioExists(projectDir)) {
     dirs.unshift(projectDir);
   }
   const byRef = new Map<string, Template>();
@@ -137,7 +138,7 @@ export function createRegistry(opts: { dirs?: string[]; cwd?: string } = {}): Re
     for (const path of mdFiles(dir)) {
       let t: Template;
       try {
-        const content = readFileSync(path, 'utf8');
+        const content = ioRead(path);
         if (!templateish(parseFrontmatter(content).data)) {
           continue;
         }

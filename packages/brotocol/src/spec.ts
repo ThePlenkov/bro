@@ -4,9 +4,9 @@
  * fields, the shipped `brotocol/spec@N` template, KEY-N ids and the
  * draft|active|deprecated|removed lifecycle. `bro spec` builds on this.
  */
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ioExists } from './io.ts';
 import type { Diagnostic, Protocol } from './protocol.ts';
 import { scan } from './scan.ts';
 
@@ -35,7 +35,7 @@ export const specTemplateDir = fileURLToPath(new URL('../templates', import.meta
 export function specProtocol(opts: { dir: string }): Protocol {
   const templateDirs = [specTemplateDir];
   const project = join(opts.dir, '.brose', 'templates');
-  if (existsSync(project)) {
+  if (ioExists(project)) {
     templateDirs.push(project);
   }
   return {

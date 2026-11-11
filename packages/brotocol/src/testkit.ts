@@ -1,8 +1,9 @@
 /** Shared test fixtures — file trees in mkdtemp dirs. Not part of the
  *  library surface (unreached by `src/index.ts`, never bundled). */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { ioRemove, ioWrite } from './io.ts';
 import type { Protocol } from './protocol.ts';
 
 export const mktree = (
@@ -10,15 +11,13 @@ export const mktree = (
 ): { root: string; dir: (p: string) => string } => {
   const root = mkdtempSync(join(tmpdir(), 'brotocol-'));
   for (const [rel, content] of Object.entries(files)) {
-    const p = join(root, rel);
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, content);
+    ioWrite(join(root, rel), content);
   }
   return { root, dir: (p: string) => join(root, p) };
 };
 
 export const rm = (root: string): void => {
-  rmSync(root, { recursive: true, force: true });
+  ioRemove(root, true);
 };
 
 /** The spec-shaped protocol over a fixture root, without shipped

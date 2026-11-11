@@ -4,8 +4,7 @@
  * is `render()`'d `{{placeholder}}` interpolation. `createFile` refuses
  * to overwrite without `{force: true}`.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { ioExists, ioWrite } from './io.ts';
 import { dumpFrontmatter } from './frontmatter.ts';
 import { render } from './render.ts';
 import { createRegistry, type Registry, type Template } from './template.ts';
@@ -51,9 +50,8 @@ export function createFile(
   values: Record<string, unknown> = {},
   opts: CreateOpts & { force?: boolean } = {}
 ): void {
-  if (existsSync(path) && opts.force !== true) {
+  if (ioExists(path) && opts.force !== true) {
     throw new Error(`file exists: ${path} (pass force to overwrite)`);
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, create(templateRef, values, opts));
+  ioWrite(path, create(templateRef, values, opts));
 }

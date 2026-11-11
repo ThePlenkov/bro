@@ -6,9 +6,9 @@
  * the positional edge IS the link, no frontmatter written). Refuses to
  * overwrite.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { create as broseCreate, createRegistry } from '@broject/brose';
+import { ioExists, ioWrite, resolveIn } from './io.ts';
 import { type Doc, docSuffix, type Protocol } from './protocol.ts';
 import { get, scan } from './scan.ts';
 
@@ -66,12 +66,8 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
       : join(opts.dir, protocol.indexName?.(basename(opts.dir)) ?? `${opts.id}${suffix}`);
   // normalize, then prove the target stays under base — a `..` in
   // `id`/`dir` must not write outside the configured tree.
-  const file = resolve(base, name);
-  const rel = relative(base, file);
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
-    throw new Error(`doc path escapes the tree: ${file}`);
-  }
-  if (existsSync(file)) {
+  const file = resolveIn(base, name);
+  if (ioExists(file)) {
     throw new Error(`file exists: ${file}`);
   }
   // the destination is free but the id may live at another path —
@@ -79,8 +75,7 @@ export function create(protocol: Protocol, opts: CreateDocOpts): Doc {
   if (get(protocol, opts.id) !== undefined) {
     throw new Error(`doc id '${opts.id}' already exists in the tree`);
   }
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, broseCreate(t, values));
+  ioWrite(file, broseCreate(t, values));
   const created = scan(protocol).find(d => d.path === file);
   if (created === undefined) {
     throw new Error(`created file '${file}' was not discovered by scan — check docGlob`);

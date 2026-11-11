@@ -4,8 +4,8 @@
  * full-doc rewrite would churn git diffs). Fields set to `undefined`
  * are deleted.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
 import { dumpFrontmatter, parseFrontmatter } from '@broject/brose';
+import { ioRead, ioWrite } from './io.ts';
 import type { Doc, Protocol } from './protocol.ts';
 import { get, scan } from './scan.ts';
 
@@ -16,23 +16,29 @@ export function update(protocol: Protocol, id: string, fields: Record<string, un
   if (doc === undefined) {
     throw new Error(`unknown doc '${id}'`);
   }
-  const content = readFileSync(doc.path, 'utf8');
-  const data = { ...parseFrontmatter(content).data };
+  const content = ioRead(doc.path);
+  const sets = new Map<string, unknown>();
   const drops = new Set<string>();
   for (const [k, v] of Object.entries(fields)) {
     if (v === undefined) {
       drops.add(k);
     } else {
-      data[k] = v;
+      sets.set(k, v);
     }
   }
-  const merged = Object.fromEntries(Object.entries(data).filter(([k]) => !drops.has(k)));
+  // the merge goes through entry lists + fromEntries — no obj[key]
+  // writes, so a caller key like `__proto__` becomes a plain own entry
+  // instead of a setter invocation.
+  const merged = Object.fromEntries([
+    ...Object.entries(parseFrontmatter(content).data).filter(([k]) => !drops.has(k)),
+    ...sets,
+  ]);
   const m = FM_SPAN.exec(content);
   const next =
     m === null
       ? `---\n${dumpFrontmatter(merged)}---\n\n${content}`
       : `---\n${dumpFrontmatter(merged)}---${m[2]}${content.slice(m[0].length)}`;
-  writeFileSync(doc.path, next);
+  ioWrite(doc.path, next);
   // re-resolve by path so identity fields changed through `fields`
   // (id/parent) come back fresh — the old Doc would be stale.
   return scan(protocol).find(d => d.path === doc.path) ?? { ...doc, frontmatter: merged };

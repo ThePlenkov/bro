@@ -7,8 +7,8 @@
  * exists validates against the PINNED version plus a
  * `template-outdated` advisory.
  */
-import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import { ioRead } from './io.ts';
 import { z } from 'zod';
 import { flatSections, parseContent, type SectionNode } from './parse.ts';
 import {
@@ -52,16 +52,37 @@ const titleMatch = (tpl: string, doc: string): boolean => {
   if (!/\{\{/.test(tpl)) {
     return tpl.trim() === doc.trim();
   }
-  const parts = tpl.split(/\{\{[^}]*\}\}/);
-  const re = parts
-    .map((p, i) =>
-      (i === 0 ? p.trimStart() : i === parts.length - 1 ? p.trimEnd() : p).replace(
-        /[.*+?^${}()|[\]\\]/g,
-        '\\$&'
-      )
-    )
-    .join('.+');
-  return new RegExp(`^${re}$`).test(doc.trim());
+  // Wildcard match without RegExp: literals split on `{{…}}` are found
+  // in order, each needing ≥1 unmatched char between it and the last
+  // (the `.+` semantics). The first literal anchors at 0 only when it
+  // opens the pattern; the last must reach the end unless the pattern
+  // ends with a wildcard.
+  const text = doc.trim();
+  const parts = tpl
+    .split(/\{\{[^}]*\}\}/)
+    .map((p, i, a) => (i === 0 ? p.trimStart() : i === a.length - 1 ? p.trimEnd() : p));
+  let cursor = 0;
+  let sawLiteral = false;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i] ?? '';
+    if (p === '') {
+      continue;
+    }
+    let pos = text.indexOf(p, cursor);
+    while (sawLiteral && pos !== -1 && pos <= cursor) {
+      pos = text.indexOf(p, pos + 1);
+    }
+    if (pos === -1 || (!sawLiteral && (i === 0 ? pos !== 0 : pos < 1))) {
+      return false;
+    }
+    sawLiteral = true;
+    cursor = pos + p.length;
+  }
+  const last = parts[parts.length - 1] ?? '';
+  if (last !== '') {
+    return cursor === text.length;
+  }
+  return sawLiteral ? cursor < text.length : text.length > 0;
 };
 
 function checkFields(
@@ -157,7 +178,7 @@ export function validate(file: string, opts: ValidateOpts = {}): Diagnostic[] {
   const out: Diagnostic[] = [];
   let content: string;
   try {
-    content = readFileSync(file, 'utf8');
+    content = ioRead(file);
   } catch {
     return [
       {

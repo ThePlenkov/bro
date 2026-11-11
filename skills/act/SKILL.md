@@ -60,6 +60,18 @@ default store, so standard installs already have it).
   `"stores": ["jsonl"]` opt-out — the defer didn't happen: fall back to
   fix or reject, do NOT resolve. Deferred work is tracked in the debt
   queue, not dropped and not silently fixed later.
+- **Every finding gets a prevention retro, not just a verdict.** Code is
+  agent-written by default, so before fixing ask: "what code shape would
+  have made this finding class impossible to write?" — then fix to THAT
+  shape, not to silence the site. Dynamic fs paths → one guarded io
+  module all calls funnel through; `new RegExp` on configured values →
+  a dedicated matcher; `obj[key]` writes → entries/`Object.fromEntries`;
+  computed-key reads → `Object.getOwnPropertyDescriptor`. For a true
+  false positive the fix lives at the rule level — a documented
+  exclusion in `.codacy.yml`, a `.markdownlint.json` option — so the
+  same false never reappears in any file, never a one-site suppression.
+  A recurring pattern belongs in AGENTS.md or the relevant skill so the
+  next code is born clean.
   The loop is bounded: `fix_rounds` counts pushes made after the first
   review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
   them — past the cap the gate names the defer path outright, so

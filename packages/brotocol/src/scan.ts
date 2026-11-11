@@ -5,10 +5,11 @@
  * A file matching docGlob and not claimed as an index is a flat doc.
  * Positional parentage comes from the nearest enclosing dir-doc.
  */
-import { type Dirent, readdirSync, readFileSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
+import { ioRead, ioReadDir } from './io.ts';
 import { parseFrontmatter } from '@broject/brose';
-import { type Doc, docSuffix, globRe, type ParentEdge, type Protocol } from './protocol.ts';
+import { type Doc, docSuffix, globMatch, type ParentEdge, type Protocol } from './protocol.ts';
 
 const posix = (p: string): string => p.split(sep).join('/');
 
@@ -16,7 +17,7 @@ function indexFile(dir: string, names: string[]): string | undefined {
   let files: Set<string>;
   try {
     files = new Set(
-      readdirSync(dir, { withFileTypes: true })
+      ioReadDir(dir)
         .filter(e => e.isFile())
         .map(e => e.name)
     );
@@ -35,7 +36,7 @@ function makeDoc(
 ): Doc | undefined {
   let fm: ReturnType<typeof parseFrontmatter>;
   try {
-    fm = parseFrontmatter(readFileSync(abs, 'utf8'));
+    fm = parseFrontmatter(ioRead(abs));
   } catch {
     // vanished or unreadable between readdir and read — a file the
     // scan can't read is a file the scan doesn't see.
@@ -59,7 +60,7 @@ function makeDoc(
 export function scan(protocol: Protocol): Doc[] {
   const root = resolve(protocol.root);
   const suffix = docSuffix(protocol.docGlob);
-  const matches = globRe(protocol.docGlob);
+  const glob = protocol.docGlob;
   const indexNames = (d: string): string[] => [
     ...(protocol.indexName === undefined ? [] : [protocol.indexName(d)]),
     ...(protocol.indexAliases ?? []),
@@ -77,9 +78,7 @@ export function scan(protocol: Protocol): Doc[] {
     }
     let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-        a.name.localeCompare(b.name)
-      );
+      entries = ioReadDir(dir).sort((a, b) => a.name.localeCompare(b.name));
     } catch {
       return;
     }
@@ -87,7 +86,7 @@ export function scan(protocol: Protocol): Doc[] {
       const abs = join(dir, e.name);
       if (e.isDirectory()) {
         walk(abs, self);
-      } else if (e.isFile() && e.name !== idx && matches.test(posix(relative(root, abs)))) {
+      } else if (e.isFile() && e.name !== idx && globMatch(glob, posix(relative(root, abs)))) {
         const fallback = e.name.endsWith(suffix) ? e.name.slice(0, -suffix.length) : e.name;
         const d = makeDoc(protocol, abs, false, fallback, self);
         if (d !== undefined) {

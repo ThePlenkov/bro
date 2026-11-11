@@ -5,7 +5,7 @@ export {
   type Diagnostic,
   type Doc,
   docSuffix,
-  globRe,
+  globMatch,
   type ParentEdge,
   type Protocol,
 } from './protocol.ts';

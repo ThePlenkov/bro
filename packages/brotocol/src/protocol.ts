@@ -52,29 +52,54 @@ export const docSuffix = (docGlob: string): string => {
   return star === -1 ? '' : base.slice(star + 1);
 };
 
-/** Minimal glob → RegExp: `**` spans separators, `*`/`?` stay inside
- *  one path segment. Matched against the posix relative path. */
-export const globRe = (glob: string): RegExp => {
-  let re = '';
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i] ?? '';
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
-        if (glob[i + 2] === '/') {
-          re += '(?:[^/]+/)*';
-          i += 2;
-        } else {
-          re += '.*';
-          i += 1;
-        }
-      } else {
-        re += '[^/]*';
-      }
-    } else if (c === '?') {
-      re += '[^/]';
+/** Minimal glob matcher — no RegExp: `**` spans separators, `*`/`?`
+ *  stay inside one path segment. Matched against the posix relative
+ *  path, segment by segment, so a configured glob is data, never code. */
+const segMatch = (pat: string, seg: string): boolean => {
+  // `*`/`?` wildcards inside one path segment, anchored at both ends.
+  let pi = 0;
+  let si = 0;
+  let starP = -1;
+  let starS = -1;
+  while (si < seg.length) {
+    const pc = pi < pat.length ? pat.charAt(pi) : '';
+    if (pc === '?' || pc === seg.charAt(si)) {
+      pi += 1;
+      si += 1;
+    } else if (pc === '*') {
+      starP = pi;
+      starS = si;
+      pi += 1;
+    } else if (starP !== -1) {
+      pi = starP + 1;
+      starS += 1;
+      si = starS;
     } else {
-      re += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return false;
     }
   }
-  return new RegExp(`^${re}$`);
+  while (pi < pat.length && pat.charAt(pi) === '*') {
+    pi += 1;
+  }
+  return pi === pat.length;
+};
+
+export const globMatch = (glob: string, path: string): boolean => {
+  const gs = glob.split('/');
+  const ps = path.split('/');
+  const match = (gi: number, pi: number): boolean => {
+    if (gi === gs.length) {
+      return pi === ps.length;
+    }
+    if (gs[gi] === '**') {
+      for (let k = pi; k <= ps.length; k++) {
+        if (match(gi + 1, k)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return pi < ps.length && segMatch(gs[gi] ?? '', ps[pi] ?? '') && match(gi + 1, pi + 1);
+  };
+  return match(0, 0);
 };

@@ -9,7 +9,7 @@
  * Both take `--templates-dir <dir>` (repeatable); `<cwd>/.brose/templates/`
  * is auto-prepended when present.
  */
-import { existsSync } from 'node:fs';
+import { ioExists } from './io.ts';
 import { parseArgs } from 'node:util';
 import { createFile } from './create.ts';
 import { scalarValue } from './frontmatter.ts';
@@ -75,7 +75,7 @@ function cmdValidate(argv: string[]): number {
     return 0;
   }
   const file = positionals[0] ?? fail('validate needs a file path');
-  if (!existsSync(file)) {
+  if (!ioExists(file)) {
     fail(`no such file: ${file}`);
   }
   const registry = createRegistry({ dirs: values['templates-dir'] });
