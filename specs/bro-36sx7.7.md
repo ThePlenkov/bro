@@ -17,6 +17,7 @@ scope:
 - hooks/run.sh
 - scripts/bench-hooks.ts
 - packages/cli/src/commands/hooks.e2e.test.ts
+- packages/cli/scripts/run-tests.ts
 ---
 
 # bro-36sx7.7 — slim dist/hooks.js entry without the PLUGINS registry
@@ -261,4 +262,12 @@ run.sh automatically.
 - [ ] `hooks/run.sh` — prefer `dist/hooks.js` (repo dist + resolved
   `bro` bin); `npm run gen:plugins` refreshes the adapter copies
 - [ ] `scripts/bench-hooks.ts` dist lane + e2e coverage
+- [ ] `packages/cli/scripts/run-tests.ts` — the e2e fallback invoked
+  `tsdown src/index.ts`, whose positional entry overrides
+  `tsdown.config.ts`'s entry list: on any nx-unavailable path it
+  cleaned `dist/` and emitted a single-entry build with no
+  `dist/hooks.js`. Drop the positional arg so the fallback honors the
+  config's full entry list (found by CI: the nested `nx run` inside an
+  nx task fails project-graph processing on `plugins/omp/bro`, so the
+  fallback is the path CI actually exercises).
 - [ ] build / typecheck / test / bench delta
