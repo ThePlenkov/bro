@@ -91,6 +91,14 @@ export {
   SATURATION_ALERT,
   STAGE_INTENTS,
 } from './runner.ts';
+export type {
+  StartAction,
+  StartItemReport,
+  StartReport,
+  StartRunDeps,
+  StartRunOptions,
+} from './starter.ts';
+export { liveRunItems, startRuns, writeFormulaSidecar } from './starter.ts';
 export type { AcceptDeps, AcceptPayload, EvidenceBundle } from './stages/accept.ts';
 export { acceptStage, evidenceBundle, REJECTED_VERDICT } from './stages/accept.ts';
 export type {

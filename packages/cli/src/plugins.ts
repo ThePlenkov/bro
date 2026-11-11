@@ -260,10 +260,28 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'pipeline',
     group: 'pipeline',
-    summary: 'Pipeline customer surface — accept|answer write the verdict store',
+    summary: 'Pipeline customer surface — run|accept|answer',
     run: runPipelineCommand,
     contract: {
       subs: {
+        run: {
+          flags: {
+            '--formula <file>': 'REQUIRED — the pipeline formula (TOML) every run drives',
+            '--engines <module>':
+              'path to a module exporting engines (EngineMap or (dir)=>EngineMap)',
+            '--customer <id>': 'the recorded customer — default: $BRO_CUSTOMER, else the bd actor',
+            '--label <label>': 'the queue label to scan (default pipeline)',
+            '--item <id>': 'explicit bead id (repeatable) — bypasses the label scan',
+            '--limit <n>': 'cap how many candidates this invocation scans',
+            '--dry-run': 'report what WOULD start without invoking runPipeline',
+            '--json': 'machine-readable report',
+          },
+          exits: {
+            0: 'scan completed — per-item outcomes in the report',
+            1: 'customer-unresolved or a run-level failure',
+            2: 'usage or an unloadable formula/engines module',
+          },
+        },
         accept: {
           flags: {
             '--notes <text>': "the customer's notes — required on rejected (the fix scope)",
