@@ -48,6 +48,6 @@
   "homepage": "https://broject.dev/docs",
   "bro": {
     "kind": "capability",
-    "status": "alpha"
+    "status": "beta"
   }
 }
