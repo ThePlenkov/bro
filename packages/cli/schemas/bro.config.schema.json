@@ -187,6 +187,11 @@
           "minLength": 1,
           "pattern": "\\S"
         },
+        "formula": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
         "router": {
           "type": "object",
           "properties": {

@@ -33,6 +33,7 @@ export const VALUE_FLAGS = new Set([
   '--model',
   '--timeout',
   '--routes',
+  '--formula',
 ]);
 
 /** The router's endpoint — the flags win over the state file, so an

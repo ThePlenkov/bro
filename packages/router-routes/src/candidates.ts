@@ -7,7 +7,7 @@
  * task the route actually pins.
  */
 import { healthKey, type ChainEntry, type HealthSnapshot } from '@broject/core';
-import type { Route, RouteTable } from './types.ts';
+import type { FeatureMatch, FeatureValue, Route, RouteTable } from './types.ts';
 
 /** The task — the shape the operator's route table speaks. */
 export interface RouteTask {
@@ -17,6 +17,10 @@ export interface RouteTask {
   complexity?: string;
   /** the priority band ("P0", "P1", "P2") */
   priority?: string;
+  /** the typed features the task carries — caller-supplied fields, or
+   *  the formula's answers merged in by the decision path. Keys name
+   *  the formula's declared questions; the match compares literally. */
+  features?: Record<string, FeatureValue>;
 }
 
 /** One route that may serve the task. */
@@ -104,7 +108,57 @@ function conflict(route: Route, task: RouteTask): string | undefined {
       return `${field}=${want} does not fit ${field}=${got}`;
     }
   }
+  return featureConflict(route, task);
+}
+
+/** A feature value, rendered for a reason — a list reads as members. */
+function featureText(value: FeatureMatch | FeatureValue): string {
+  return Array.isArray(value) ? `[${value.map(String).join(', ')}]` : String(value);
+}
+
+/** The task's feature — hasOwn-guarded: a feature literally named
+ *  "__proto__" must read as data, never the prototype. */
+function carriedFeature(task: RouteTask, key: string): FeatureValue | undefined {
+  const features = task.features;
+  if (features === undefined || !Object.hasOwn(features, key)) {
+    return undefined;
+  }
+  return features[key];
+}
+
+/** One pinned feature's fit — the task carries it AND the value
+ *  matches: a scalar wants exact equality, a list wants membership. */
+function featureFits(want: FeatureMatch, got: FeatureValue): boolean {
+  return Array.isArray(want) ? want.includes(got) : want === got;
+}
+
+/** The feature the route contradicts, or undefined when they all fit. */
+function featureConflict(route: Route, task: RouteTask): string | undefined {
+  for (const [key, want] of Object.entries(route.match.features ?? {})) {
+    const got = carriedFeature(task, key);
+    if (got === undefined) {
+      return `the task carries no feature ${key}`;
+    }
+    if (!featureFits(want, got)) {
+      return `feature ${key}=${featureText(want)} does not fit feature ${key}=${featureText(got)}`;
+    }
+  }
   return undefined;
+}
+
+/** The features the route pins AND the task carries — the score and the
+ *  reasons, same contract as the scalar fields. */
+function featureFit(route: Route, task: RouteTask): { score: number; reasons: string[] } {
+  const reasons: string[] = [];
+  let score = 0;
+  for (const [key, want] of Object.entries(route.match.features ?? {})) {
+    const got = carriedFeature(task, key);
+    if (got !== undefined && featureFits(want, got)) {
+      score += 1;
+      reasons.push(`feature.${key}=${featureText(got)}`);
+    }
+  }
+  return { score, reasons };
 }
 
 /** How much of the task the route pins — the score and the reasons. */
@@ -118,7 +172,8 @@ function fit(route: Route, task: RouteTask): { score: number; reasons: string[] 
       reasons.push(`${field}=${pinnedValue}`);
     }
   }
-  return { score, reasons };
+  const features = featureFit(route, task);
+  return { score: score + features.score, reasons: [...reasons, ...features.reasons] };
 }
 
 /** The chain's surviving entries — the walled models drop out, and the
