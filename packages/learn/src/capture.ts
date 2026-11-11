@@ -202,9 +202,12 @@ const scopeKey = (v: string): string => {
 };
 const keepKey = (v: string): boolean => v !== '' && !v.includes('://');
 
-function collect(re: RegExp, text: string, cap: number): string[] {
+/** Collect `m[0]` keys off a caller's literal-pattern matchAll — the
+ *  pattern eval happens at the call site on a literal, never on a
+ *  parameter (semgrep non-literal-regexp). */
+function collect(head: Iterable<RegExpMatchArray>, cap: number): string[] {
   const out = new Set<string>();
-  for (const m of text.matchAll(re)) {
+  for (const m of head) {
     const v = scopeKey(m[0]);
     if (keepKey(v)) {
       out.add(v);
@@ -292,7 +295,7 @@ function scopeMatch(text: string): TriggerMatch {
   // URLs are not trigger paths — strip them so `example.com/foo` can't
   // ride SLASH_PATH_RE into a post-tool trigger on a non-local "path"
   const t = text.replace(/\bhttps?:\/\/\S+/g, ' ');
-  const paths = [...collect(SLASH_PATH_RE, t, 5), ...collectFiles(t, 4)];
+  const paths = [...collect(t.matchAll(SLASH_PATH_RE), 5), ...collectFiles(t, 4)];
   const commands = collectCommands(t, 5);
   if (paths.length > 0) match.paths = [...new Set(paths)].slice(0, 6);
   if (commands.length > 0) match.commands = commands;
