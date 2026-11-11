@@ -306,10 +306,16 @@ function cmdShow(argv: string[]): void {
 function cmdForget(argv: string[]): void {
   const id = oneId(argv, 'forget')
   checkBeads()
-  if (getLesson(id) === null) {
-    fail(`no lesson ${id}`, 1)
-  }
-  deleteLesson(id)
+  // read+delete is a critical section like every other learn writer —
+  // unlocked, a concurrent promote can resurrect the lesson (its
+  // putLesson lands after the clear) or leave the rule-edit bead
+  // pointing at a deleted lesson (bd kv has no CAS)
+  withStoreLock(undefined, () => {
+    if (getLesson(id) === null) {
+      fail(`no lesson ${id}`, 1)
+    }
+    deleteLesson(id)
+  })
   console.log(`forgot ${id}`)
 }
 

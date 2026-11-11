@@ -112,8 +112,7 @@ function withFakeBd(fn: (f: Fixture) => void): void {
   try {
     fn({ cwd: dir, db: process.env.FAKE_BD_DB })
   } finally {
-    process.env.PATH = prev.PATH
-    for (const k of ['FAKE_BD_DB', 'FAKE_BD_KV_FAIL']) {
+    for (const k of ['PATH', 'FAKE_BD_DB', 'FAKE_BD_KV_FAIL']) {
       if (prev[k] === undefined) delete process.env[k]
       else process.env[k] = prev[k]
     }
