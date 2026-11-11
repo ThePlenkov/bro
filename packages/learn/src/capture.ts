@@ -26,16 +26,17 @@
  * confidence instead of writing a second lesson. `dryRun` renders the
  * would-be plan — capture is a proposal surface.
  */
-import { bdJson, taskStore } from '@broject/core';
+
 import type { TaskDepEdge, TaskRow } from '@broject/core';
+import { bdJson, taskStore } from '@broject/core';
 import {
-  deriveConfidence,
-  lessonId,
   type Confidence,
+  deriveConfidence,
   type Evidence,
   type Lesson,
   type LessonSource,
   type LessonTrigger,
+  lessonId,
   type TriggerMatch,
 } from './lesson.ts';
 import { getLesson, LessonStoreError, listLessons, putLesson, withStoreLock } from './store.ts';
@@ -423,12 +424,12 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
  *  The heading must end its line: whitespace after the name has to
  *  contain a newline, and the body starts right after that line's last
  *  newline — the same span the old `\s*\n+` left behind. `stop` is
- *  tested against each following line's start; no stop runs to EOF. */
-function mdSection(text: string, name: string, stop?: RegExp): string | undefined {
-  const head = new RegExp(String.raw`##\s*${name}`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = head.exec(text)) !== null) {
-    const after = m.index + m[0].length;
+ *  tested against each following line's start; no stop runs to EOF.
+ *  `head` is a caller-built literal (`/##\s*Name/g`) — never a
+ *  non-literal RegExp (semgrep javascript_dos_rule-non-literal-regexp). */
+function mdSection(text: string, head: RegExp, stop?: RegExp): string | undefined {
+  for (const m of text.matchAll(head)) {
+    const after = (m.index ?? 0) + m[0].length;
     let end = after;
     while (end < text.length && /\s/.test(text[end]!)) {
       end += 1;
@@ -479,13 +480,13 @@ function drillMemo(notes: string | undefined): { result: string; prevents: strin
   if (!notes?.includes('## Result')) {
     return null;
   }
-  const result = mdSection(notes, 'Result', SECTION_FIELD)?.trim() ?? '';
+  const result = mdSection(notes, /##\s*Result/g, SECTION_FIELD)?.trim() ?? '';
   // the old regex ate to EOF — a later `## ` section's bullets counted
   // too; keeping that quirk is cheaper than inventing new semantics.
   // Bullet scan is per-line (the `^\s*-\s+(.+)$`m pattern was another
   // S8786 super-linear flag).
   const prevents: string[] = [];
-  for (const line of (mdSection(notes, 'Prevention') ?? '').split('\n')) {
+  for (const line of (mdSection(notes, /##\s*Prevention/g) ?? '').split('\n')) {
     const t = line.trimStart();
     if (t.startsWith('-') && t[1] !== undefined && t[1].trim() === '') {
       const item = t.slice(1).trim();
@@ -592,7 +593,7 @@ function retroLesson(description: string): string {
   if (prevent !== undefined && prevent.trim() !== '') {
     return oneLine(prevent);
   }
-  const why = mdSection(description, 'Why', SCOPE_STOP);
+  const why = mdSection(description, /##\s*Why/g, SCOPE_STOP);
   if (why !== undefined && why.trim() !== '') {
     return oneLine(why);
   }
@@ -600,7 +601,7 @@ function retroLesson(description: string): string {
   if (whyInline !== undefined && whyInline.trim() !== '') {
     return oneLine(whyInline);
   }
-  return oneLine(mdSection(description, 'What', SCOPE_STOP) ?? description);
+  return oneLine(mdSection(description, /##\s*What/g, SCOPE_STOP) ?? description);
 }
 
 function harvestRetro(dir?: string): Harvest {

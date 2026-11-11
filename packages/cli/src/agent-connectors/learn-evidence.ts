@@ -24,7 +24,7 @@
  * unproven absence.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   type AgentLearnCheck,
   type AgentRegistryEntry,
@@ -35,7 +35,7 @@ import {
   type TaskRow,
   taskStoreAt,
 } from '@broject/core';
-import { LEARN_FLAG, listLessonsAt, type Lesson } from '@broject/learn';
+import { LEARN_FLAG, type Lesson, listLessonsAt } from '@broject/learn';
 
 export interface LearnCheckResult {
   verdict: AgentLearnCheck;
@@ -145,6 +145,42 @@ function molShow(beads: string, molId: string): MolShowPayload {
 const FLAGGED_LINE = (reason: unknown): boolean =>
   typeof reason === 'string' && reason.split('\n').some(l => LEARN_FLAG.test(l.trim()));
 
+interface LessonCachePayload {
+  stamp: string;
+  beads: string;
+  lessons: Lesson[];
+}
+
+/** The cached listing — stamp AND beads-path must match: two distinct
+ *  stores can share a manifest stamp (fresh empty stores stamp
+ *  identically), and only the path proves the lessons are THIS
+ *  store's. A torn cache reads live — never a verdict input. */
+function lessonsCacheRead(cachePath: string, stamp: string, beads: string): Lesson[] | undefined {
+  if (!existsSync(cachePath)) {
+    return undefined;
+  }
+  try {
+    const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as Partial<LessonCachePayload>;
+    if (cached.stamp === stamp && cached.beads === beads && Array.isArray(cached.lessons)) {
+      return cached.lessons;
+    }
+  } catch {
+    // a torn cache reads live — never a verdict input
+  }
+  return undefined;
+}
+
+/** Best-effort write — the cache is an optimization, not the
+ *  contract; a failed write just reads live next check. */
+function lessonsCacheWrite(cachePath: string, payload: LessonCachePayload): void {
+  try {
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(payload));
+  } catch {
+    // best effort — the cache is an optimization, not the contract
+  }
+}
+
 /** The lesson kv listing, stamp-cached under the agents home — the
  *  same over-invalidation contract as the connector's snapshot: a
  *  store without a recognizable dolt layout yields no stamp and every
@@ -154,29 +190,16 @@ const FLAGGED_LINE = (reason: unknown): boolean =>
  *  store's lessons. */
 function lessonsCached(home: string | null, beads: string): Lesson[] {
   const stamp = beadsStoreStampAt(beads);
-  const cachePath = home === null || stamp === null ? null : join(home, 'learn-lessons.json');
-  if (cachePath !== null && existsSync(cachePath)) {
-    try {
-      const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as {
-        stamp?: unknown;
-        lessons?: unknown;
-      };
-      if (cached.stamp === stamp && Array.isArray(cached.lessons)) {
-        return cached.lessons as Lesson[];
-      }
-    } catch {
-      // a torn cache reads live — never a verdict input
-    }
+  if (home === null || stamp === null) {
+    return listLessonsAt(beads).lessons;
+  }
+  const cachePath = join(home, 'learn-lessons.json');
+  const hit = lessonsCacheRead(cachePath, stamp, beads);
+  if (hit !== undefined) {
+    return hit;
   }
   const { lessons } = listLessonsAt(beads);
-  if (cachePath !== null && home !== null) {
-    try {
-      mkdirSync(home, { recursive: true });
-      writeFileSync(cachePath, JSON.stringify({ stamp, lessons }));
-    } catch {
-      // best effort — the cache is an optimization, not the contract
-    }
-  }
+  lessonsCacheWrite(cachePath, { stamp, beads, lessons });
   return lessons;
 }
 
@@ -206,6 +229,59 @@ function runIds(
   return ids;
 }
 
+/** Mutable walk state shared across a depWalkHit hop — the visited
+ *  set, the frontier's wtf candidates, the degraded log, and the
+ *  window predicate. */
+interface DepWalk {
+  seen: Set<string>;
+  wtfNext: string[];
+  degraded: string[];
+  inWindow: (t: number) => boolean;
+}
+
+/** A retro/prevention-labeled row inside the window — an unparseable
+ *  created stamp can't disprove, so NaN passes. */
+const isRetroRow = (row: TaskRow, created: number, inWindow: (t: number) => boolean): boolean =>
+  RETRO_LABELS.some(l => hasLabel(row, l)) && (Number.isNaN(created) || inWindow(created));
+
+/** wtf rows expand only off the run's own frontier (hop 0) and only
+ *  up to the bound — the one documented intermediary. */
+const wtfExpandable = (row: TaskRow, hop: number, wtfNext: string[]): boolean =>
+  hop === 0 && hasLabel(row, WTF_LABEL) && wtfNext.length < MAX_WTF_EXPANSIONS;
+
+/** One frontier target's discovered-up neighbors: the retro hit, or
+ *  the wtf rows queued for the next hop's expansion. A failed read
+ *  records `degraded` and yields nothing — partial coverage never
+ *  upgrades to 'miss'. */
+function depNeighbors(
+  store: ReturnType<typeof taskStoreAt>,
+  target: string,
+  hop: number,
+  walk: DepWalk
+): { id: string; via: string } | undefined {
+  let rows: TaskRow[];
+  try {
+    rows = store.neighbors<TaskRow>(target, { direction: 'up', rel: 'discovered' });
+  } catch (err) {
+    walk.degraded.push(`dep list ${target}: ${msg(err)}`);
+    return undefined;
+  }
+  for (const row of rows) {
+    if (walk.seen.has(row.id)) {
+      continue;
+    }
+    walk.seen.add(row.id);
+    const created = tsOf(row, 'created_at', 'createdAt');
+    if (isRetroRow(row, created, walk.inWindow)) {
+      return { id: row.id, via: `discovered-from ${target}` };
+    }
+    if (wtfExpandable(row, hop, walk.wtfNext)) {
+      walk.wtfNext.push(row.id);
+    }
+  }
+  return undefined;
+}
+
 /** Bounded `discovered`-up walk: run beads → (wtf) → retro/prevention.
  *  Every visited row is label-checked; only `wtf` rows expand (the one
  *  documented intermediary). A failed neighbor read records `degraded`
@@ -218,35 +294,16 @@ function depWalkHit(
   degraded: string[]
 ): { id: string; via: string } | undefined {
   let frontier = targets.slice(0, MAX_DEP_TARGETS);
-  const seen = new Set(frontier);
+  const walk: DepWalk = { seen: new Set(frontier), wtfNext: [], degraded, inWindow };
   for (let hop = 0; hop < 2 && frontier.length > 0; hop++) {
-    const wtfNext: string[] = [];
+    walk.wtfNext = [];
     for (const target of frontier) {
-      let rows: TaskRow[];
-      try {
-        rows = store.neighbors<TaskRow>(target, { direction: 'up', rel: 'discovered' });
-      } catch (err) {
-        degraded.push(`dep list ${target}: ${msg(err)}`);
-        continue;
-      }
-      for (const row of rows) {
-        if (seen.has(row.id)) {
-          continue;
-        }
-        seen.add(row.id);
-        const created = tsOf(row, 'created_at', 'createdAt');
-        if (
-          RETRO_LABELS.some(l => hasLabel(row, l)) &&
-          (Number.isNaN(created) || inWindow(created))
-        ) {
-          return { id: row.id, via: `discovered-from ${target}` };
-        }
-        if (hop === 0 && hasLabel(row, WTF_LABEL) && wtfNext.length < MAX_WTF_EXPANSIONS) {
-          wtfNext.push(row.id);
-        }
+      const hit = depNeighbors(store, target, hop, walk);
+      if (hit !== undefined) {
+        return hit;
       }
     }
-    frontier = wtfNext;
+    frontier = walk.wtfNext;
   }
   return undefined;
 }
@@ -278,14 +335,13 @@ function windowRetroHit(
   return undefined;
 }
 
-/** The once-per-run artifact verdict. Never throws — the harvest it
- *  rides must not fail on a learn-store problem. */
-export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
-  const { dir, home, molStep, entry, cause, exitAt } = opts;
-  // an operator-ended run (`agents down`) never reached its closeout —
-  // externally prevented like a wall, so absence proves nothing. The
-  // status path already returns 'stopped' before classify; this covers
-  // the unconditional harvest callers (budget walks).
+/** The once-per-run skip gates — cheapest first, no store reads.
+ *  An operator-ended run (`agents down`) never reached its closeout —
+ *  externally prevented like a wall, so absence proves nothing (the
+ *  status path already returns 'stopped' before classify; this covers
+ *  the unconditional harvest callers like budget walks). */
+function skipVerdict(opts: LearnCheckOpts): LearnCheckResult | undefined {
+  const { entry, cause } = opts;
   if (entry.stopped === true) {
     return {
       verdict: 'skipped',
@@ -304,26 +360,44 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
       evidence: `${entry.backend} — remote lane cannot reach the shared store`,
     };
   }
-  // the store the run was pinned to — entry.storeDir is the spawn's
-  // verbatim spec.beadsDir; pre-storeDir entries and exotic paths fall
-  // back to the dir-resolved store
-  const pinned =
-    typeof entry.storeDir === 'string' && entry.storeDir !== '' ? entry.storeDir : undefined;
-  const beads = pinned ?? beadsDir(dir);
-  if (beads === null) {
-    return { verdict: 'skipped', evidence: 'no beads store resolvable from dir' };
-  }
+  return undefined;
+}
 
-  const spawned = Date.parse(typeof entry.spawnedAt === 'string' ? entry.spawnedAt : '');
+/** The run window predicate — [spawnedAt-2m, exitAt+5m]; an
+ *  unparseable spawn stamp anchors on the death instead, and an
+ *  unparseable probe stamp can't disprove (`NaN` → in-window). */
+function runWindow(exitAt: number, spawnedAt: unknown): (t: number) => boolean {
+  const spawned = Date.parse(typeof spawnedAt === 'string' ? spawnedAt : '');
   const winStart = (Number.isFinite(spawned) ? spawned : exitAt) - WINDOW_BEFORE_MS;
   const winEnd = exitAt + WINDOW_AFTER_MS;
-  /** in-window when the stamp parses; unparseable/absent can't disprove. */
-  const inWindow = (t: number): boolean => Number.isNaN(t) || (t >= winStart && t <= winEnd);
+  return (t: number): boolean => Number.isNaN(t) || (t >= winStart && t <= winEnd);
+}
 
-  const degraded: string[] = [];
-  const store = taskStoreAt(beads);
+/** The molecule's step rows — one `bd mol show` when the run's bead
+ *  IS the molecule root; [] otherwise or on a degraded read. */
+function molStepRows(beads: string, molStep: string, degraded: string[]): MolStepRow[] {
+  try {
+    const mol = molShow(beads, molStep);
+    if (mol.root?.id === undefined || !Array.isArray(mol.issues)) {
+      degraded.push(`mol show ${molStep}: unexpected shape`);
+      return [];
+    }
+    return mol.issues.filter(i => i.id !== mol.root?.id);
+  } catch (err) {
+    degraded.push(msg(err));
+    return [];
+  }
+}
 
-  // --- run context: the step row + molecule step rows (one mol show) ---
+/** The step row + molecule step rows every evidence probe shares —
+ *  the run's bead context. Failed reads record `degraded` and yield
+ *  partial context, never a verdict. */
+function stepContext(
+  store: ReturnType<typeof taskStoreAt>,
+  beads: string,
+  molStep: string,
+  degraded: string[]
+): { row: TaskRow | undefined; molParent: string | undefined; stepRows: MolStepRow[] } {
   let row: TaskRow | undefined;
   try {
     row = store.get<TaskRow>(molStep);
@@ -331,23 +405,18 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
     degraded.push(`show ${molStep}: ${msg(err)}`);
   }
   const molParent = typeof row?.parent === 'string' && row.parent !== '' ? row.parent : undefined;
-  const isMolRoot = row?.issue_type === 'molecule';
+  const stepRows = row?.issue_type === 'molecule' ? molStepRows(beads, molStep, degraded) : [];
+  return { row, molParent, stepRows };
+}
 
-  let stepRows: MolStepRow[] = [];
-  if (isMolRoot) {
-    try {
-      const mol = molShow(beads, molStep);
-      if (mol.root?.id === undefined || !Array.isArray(mol.issues)) {
-        degraded.push(`mol show ${molStep}: unexpected shape`);
-      } else {
-        stepRows = mol.issues.filter(i => i.id !== mol.root?.id);
-      }
-    } catch (err) {
-      degraded.push(msg(err));
-    }
-  }
-
-  // --- evidence 1: flagged close_reason ---
+/** Evidence 1 — a learn:-flagged close_reason on the step or any
+ *  molecule step, inside the run window. */
+function flaggedCloseHit(
+  row: TaskRow | undefined,
+  stepRows: MolStepRow[],
+  molStep: string,
+  inWindow: (t: number) => boolean
+): LearnCheckResult | undefined {
   if (FLAGGED_LINE(row?.close_reason) && inWindow(tsOf(row, 'closed_at', 'closedAt'))) {
     return { verdict: 'ok', evidence: `learn:-flagged close_reason on ${molStep}` };
   }
@@ -359,14 +428,18 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
       };
     }
   }
+  return undefined;
+}
 
-  // --- evidence 2: lesson evidence refs inside the run window ---
-  const ids = runIds(
-    entry,
-    molStep,
-    molParent,
-    stepRows.map(s => s.id)
-  );
+/** Evidence 2 — a learn/ lesson whose evidence refs intersect the
+ *  run's id set inside the window. */
+function lessonHit(
+  home: string | null,
+  beads: string,
+  ids: Set<string>,
+  inWindow: (t: number) => boolean,
+  degraded: string[]
+): LearnCheckResult | undefined {
   try {
     for (const lesson of lessonsCached(home, beads)) {
       if (!lesson.evidence.some(e => ids.has(e.ref))) {
@@ -379,15 +452,19 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
   } catch (err) {
     degraded.push(`kv list: ${msg(err)}`);
   }
+  return undefined;
+}
 
-  // --- evidence 3: retro/prevention artifacts ---
-  const depTargets = [
-    ...new Set([
-      molStep,
-      ...(molParent === undefined ? [] : [molParent]),
-      ...stepRows.map(s => s.id),
-    ]),
-  ];
+/** Evidence 3 — retro/prevention artifacts: the bounded discovered-up
+ *  walk, then the creation-window list (the orphan wtf→retro chain's
+ *  only attribution). The walkers guard their own probes — the catch
+ *  is the never-throws contract's last wall, not an expected path. */
+function retroHit(
+  store: ReturnType<typeof taskStoreAt>,
+  depTargets: string[],
+  inWindow: (t: number) => boolean,
+  degraded: string[]
+): LearnCheckResult | undefined {
   try {
     const hit = depWalkHit(store, depTargets, inWindow, degraded);
     if (hit !== undefined) {
@@ -404,9 +481,60 @@ export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
       };
     }
   } catch (err) {
-    // the walkers guard their own probes — this is the never-throws
-    // contract's last wall, not an expected path
     degraded.push(`retro probes: ${msg(err)}`);
+  }
+  return undefined;
+}
+
+/** The once-per-run artifact verdict. Never throws — the harvest it
+ *  rides must not fail on a learn-store problem. */
+export function checkRunLearnEvidence(opts: LearnCheckOpts): LearnCheckResult {
+  const skip = skipVerdict(opts);
+  if (skip !== undefined) {
+    return skip;
+  }
+  const { dir, home, molStep, entry, exitAt } = opts;
+  // the store the run was pinned to — entry.storeDir is the spawn's
+  // verbatim spec.beadsDir; pre-storeDir entries and exotic paths fall
+  // back to the dir-resolved store
+  const pinned =
+    typeof entry.storeDir === 'string' && entry.storeDir !== '' ? entry.storeDir : undefined;
+  const beads = pinned ?? beadsDir(dir);
+  if (beads === null) {
+    return { verdict: 'skipped', evidence: 'no beads store resolvable from dir' };
+  }
+
+  const inWindow = runWindow(exitAt, entry.spawnedAt);
+  const degraded: string[] = [];
+  const store = taskStoreAt(beads);
+  const { row, molParent, stepRows } = stepContext(store, beads, molStep, degraded);
+
+  const flagged = flaggedCloseHit(row, stepRows, molStep, inWindow);
+  if (flagged !== undefined) {
+    return flagged;
+  }
+
+  const ids = runIds(
+    entry,
+    molStep,
+    molParent,
+    stepRows.map(s => s.id)
+  );
+  const lesson = lessonHit(home, beads, ids, inWindow, degraded);
+  if (lesson !== undefined) {
+    return lesson;
+  }
+
+  const depTargets = [
+    ...new Set([
+      molStep,
+      ...(molParent === undefined ? [] : [molParent]),
+      ...stepRows.map(s => s.id),
+    ]),
+  ];
+  const retro = retroHit(store, depTargets, inWindow, degraded);
+  if (retro !== undefined) {
+    return retro;
   }
 
   if (degraded.length > 0) {
