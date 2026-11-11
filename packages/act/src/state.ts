@@ -258,7 +258,12 @@ function advisoryFilter(
   alerts.push(
     alive
       ? `advisory check "${c.name}" failing (${streak}/${rule.consecutiveFailures} consecutive) — not yet proven flaky`
-      : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
+      : isSast(c.name)
+        ? // a scanner's verdict lives in the check output/dashboard, not
+          // review threads — thread silence proves nothing; the alert
+          // must name the failure, not guess at a dead reviewer
+          `advisory check "${c.name}" failing — scanner verdicts live in the check output, not threads; read the check before classifying`
+        : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
   );
   return false;
 }

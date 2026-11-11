@@ -195,11 +195,12 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
         checkHistory: memHistory(9),
       }
     );
-    // the explicit rule excludes the scanner from the gate; with no
-    // thread activity it cannot prove itself alive, so it stays loud
+    // the explicit rule excludes the scanner from the gate — and a
+    // scanner never earns 'alive' from threads (verdicts live in the
+    // check output), so the alert names the failure, not a dead reviewer
     assert.equal(s.ciFailing, 0);
     assert.equal(s.alerts.length, 1);
-    assert.match(s.alerts[0]!, /no thread activity/);
+    assert.match(s.alerts[0]!, /check output, not threads/);
   });
 
   test('an unnamed SAST check still gates — the override must be explicit', async () => {
