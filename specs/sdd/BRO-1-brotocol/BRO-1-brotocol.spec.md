@@ -47,11 +47,12 @@ product. Two names carry it:
   and the methodology described below. A philosophy and a schema,
   not a program.
 - **Brose** — the markdown *template engine*: a template registry
-  (dedicated folder), a frontmatter model, `render`/`parse`/
-  `validate`, template versions, and a standalone `brose` CLI usable
-  anywhere. Generic — it knows templates, not specs; spec knowledge
-  arrives as brose templates shipped by brotocol. A `.spec.md` file
-  is an md file that matches a spec template.
+  (dedicated folder), a frontmatter model, template versions, and a
+  library API (`parse`/`render`/`validate`) behind a thin `brose`
+  CLI (`new` + `validate`). Generic — it knows templates, not
+  specs; spec knowledge arrives as brose templates shipped by
+  brotocol. A `.spec.md` file is an md file that matches a spec
+  template.
 - **`@broject/spec`** — the bro plugin binding the engine to bro:
   `bro spec` verbs, the `sdd` config section, `sddConnector` hook
   probes, the specs facade binding.
@@ -197,21 +198,23 @@ status: draft
   template — `scaffoldBody` in today's connector is the hand-written
   `spec@0` this replaces.
 - **Parse/render contract.** `parse(file)` returns `{ frontmatter,
-  sectionTree }` with byte positions — position-accurate so edits
-  splice spans instead of rewriting the file (spec docs must stay
-  byte-stable where untouched; a full-doc serializer churns git
-  diffs). `render(template, values)` produces md text for scaffold
-  and migration re-renders. A *template* is a declarative document
-  schema — `{ frontmatter: zodSchema, sections: SectionSpec[] }` —
-  the ProseMirror-schema idea without the editor toolkit. Decision:
-  **no ProseMirror** — PM's doc model serves WYSIWYG editing
-  (selections, marks), its markdown adapter wraps markdown-it anyway
-  (~6 deps), and its serialize-the-doc output loses frontmatter,
-  HTML-comment managed blocks and byte fidelity. The parser is a
-  seam: hand-rolled frontmatter+heading parse initially (specs are
-  shallow), `mdast-util`/`remark` if section validation ever needs
-  deeper structure. A spec *editor* UI could adopt PM later — editor
-  concerns are a different package.
+  sectionTree }` — markdown-it's token stream gives heading tokens
+  with `map` line ranges (fences and inline `#` handled correctly,
+  unlike a heading regex), enough for section structure and
+  splice-preserving edits: spec docs must stay byte-stable where
+  untouched, a full-doc serializer churns git diffs — and
+  markdown-it has none, which suits us (md→tokens only). `render`
+  is string template interpolation — an SDK op, not a CLI op.
+  Library surface: `parse`/`render`/`validate`/`new`; the `brose`
+  bin exposes only `new` + `validate`. A *template* is a
+  declarative document schema — `{ frontmatter: zodSchema,
+  sections: SectionSpec[] }` — the ProseMirror-schema idea without
+  the editor toolkit. Decision: **markdown-it, no ProseMirror** —
+  PM's doc model serves WYSIWYG editing (selections, marks), its
+  markdown adapter wraps markdown-it anyway, and serialize-the-doc
+  loses frontmatter, HTML-comment managed blocks and byte fidelity.
+  A spec *editor* UI could adopt PM later — editor concerns are a
+  different package.
 
 Additions this spec makes normative:
 
@@ -245,7 +248,7 @@ invent syntax here.
 | package | role | deps |
 | ------- | ---- | ---- |
 | `@broject/brotocol` | the contract: frontmatter schema (zod per y1jtm), KEY-N/lifecycle invariants, and the spec *templates themselves* (`spec@N`, later `policy@N`…). No fs — runs anywhere | zod only |
-| `@broject/brose` | the template engine: template folder/registry, render/parse/validate over frontmatter+sections, template version resolution, `brose` bin (`new\|validate\|templates`). Generic — usable standalone with no bro | `node:*`, zod. **No `@broject/*` deps** |
+| `@broject/brose` | the template engine: template folder/registry, `parse`/`render`/`validate` library API over frontmatter+sections, `name@version` resolution, `brose` bin (`new\|validate`). Generic — usable standalone with no bro | `node:*`, markdown-it, zod. **No `@broject/*` deps** |
 | `@broject/spec` | bro plugin + spec store: `bro spec` verbs, `sdd` section, `sddConnector`, index/tree/resolve/scope/drift on top of brose, bead-coverage `check`, specs-facade connector | `@broject/core`, `brose`, `@broject/brotocol` |
 | `@broject/openspec` | specs-facade connector for `openspec/` layout (moves from cli) | core |
 | `@broject/speckit` | same for `.specify/` | core |
@@ -274,8 +277,9 @@ Implementation beads under `bro-bntld`; pure moves first:
 
 1. Engine → `packages/brose` — the markdown template engine:
    frontmatter parsing (the YAML/frontmatter helpers move here),
-   template registry + `name@version` resolution, render/validate,
-   `brose` bin (`new|validate|templates`). Zero `@broject/*` deps.
+   markdown-it token-stream section model, template registry +
+   `name@version` resolution, `parse`/`render`/`validate`/`new`
+   library API, `brose` bin (`new|validate`). No `@broject/*` deps.
 2. Contract → `packages/brotocol` — the spec template(s) plus
    invariants: id/parent/scope rules and tree semantics as pure
    validators over brose docs; grows into y1jtm's zod schema.
