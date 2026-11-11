@@ -165,9 +165,13 @@ Layout refines y1jtm's to one marker:
   `<KEY-N>-<slug>.spec.md`. Dir spec: `<KEY-N>-<slug>/` whose index
   is `<KEY-N>-<slug>.spec.md` (repeated-name index, BMAD-style).
 - A legacy flat file named `foo.spec.md` re-reads as id `foo`
-  (the marker strips as a unit), not `foo.spec` — the suffix was
-  never produced by older scaffolds, so no real id re-reads exist;
-  if a tree ever carried one, rename the file, not the engine.
+  (the marker strips as a unit), not `foo.spec`. Old scaffolds never
+  wrote the suffix, but an older spec could still carry id
+  `foo.spec` — such a file now resolves to id `foo`. Before
+  upgrading, grep for `*.spec.md` files whose stripped id already
+  exists in the tree and rename the legacy one to
+  `foo.spec.spec.md`; the collision is a filename fix, not an engine
+  change.
 - `spec.md` / `README.md` remain accepted legacy indexes; inside a
   dir spec, other `.md` files are *parts*, not specs — the strict
   part-vs-child rule lands with the y1jtm migration (today's engine

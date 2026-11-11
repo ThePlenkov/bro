@@ -935,6 +935,25 @@ describe('dir specs — the tree IS the filetree', () => {
     });
   });
 
+  test('an empty index enables no child discovery; whitespace-only index does not hide a populated legacy index', async () => {
+    await withRepo({ config: {} }, dir => {
+      mkdirSync(join(dir, 'specs', 'group'), { recursive: true });
+      writeFileSync(join(dir, 'specs', 'group', 'group.spec.md'), '  \n');
+      writeFileSync(join(dir, 'specs', 'group', 'bro-123.md'), '# bro-123\n');
+      const spec = specStore(dir);
+      // whitespace-only index → the dir is unindexed; a plain .md is content
+      assert.equal(spec.hasSpec('bro-123'), false);
+      // a populated legacy index is not hidden by the empty .spec.md
+      writeFileSync(join(dir, 'specs', 'group', 'spec.md'), '# group\n');
+      const spec2 = specStore(dir);
+      assert.equal(spec2.hasSpec('bro-123'), true);
+      assert.equal(
+        spec2.tree().find(n => n.id === 'group')?.path,
+        join('specs', 'group', 'spec.md')
+      );
+    });
+  });
+
   test('.spec.md inside an unindexed dir still counts — plain .md stays a part', async () => {
     await withRepo({ config: {} }, dir => {
       // unindexed dir: collectFiles is off — marker files still count

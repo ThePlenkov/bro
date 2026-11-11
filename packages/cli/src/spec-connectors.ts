@@ -125,15 +125,18 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           }
         });
         // an empty index is a placeholder, not a spec — it must not
-        // hide a populated legacy index at lower preference
-        const index =
-          candidates.find(n => {
-            try {
-              return statSync(join(abs, n)).size > 0;
-            } catch {
-              return false;
-            }
-          }) ?? candidates[0];
+        // hide a populated legacy index at lower preference, and it
+        // must not enable child discovery (content in an unindexed dir
+        // is content). "Empty" means no trimmed text — a whitespace-only
+        // file carries no spec identity either.
+        const populated = candidates.find(n => {
+          try {
+            return readFileSync(join(abs, n), 'utf8').trim().length > 0;
+          } catch {
+            return false;
+          }
+        });
+        const index = populated ?? candidates[0];
         if (index === undefined || !validBeadId(e.name)) {
           // no index, or a name that cannot be a spec id — transparent:
           // nested index dirs still hang off the nearest spec ancestor
@@ -150,7 +153,7 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           parent: fm ?? parent,
           parentVia: edgeVia(fm, parent),
         });
-        walk(abs, rel, e.name, true, index);
+        walk(abs, rel, e.name, populated !== undefined, index);
       } else if (
         e.name.endsWith('.md') &&
         e.name !== indexName &&
