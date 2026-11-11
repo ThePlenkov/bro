@@ -79,14 +79,26 @@ export function tmpSweepVerdict(f: TmpSweepInput): TmpSweepVerdict {
     return 'skip';
   }
   if (f.ownerPid !== null) {
-    if (f.ownerAlive) {
-      return 'keep';
-    }
-    if (f.ageMs < DEAD_OWNER_GRACE_MS) {
-      return 'skip';
-    }
-    return f.inUse() ? 'keep' : 'delete';
+    return ownerPidVerdict(f);
   }
+  return ttlVerdict(f);
+}
+
+/** `tmp-<pid>-*` names: alive owner keeps unconditionally, dead owner
+ *  gets the shorter grace before the in-use check. */
+function ownerPidVerdict(f: TmpSweepInput): TmpSweepVerdict {
+  if (f.ownerAlive) {
+    return 'keep';
+  }
+  if (f.ageMs < DEAD_OWNER_GRACE_MS) {
+    return 'skip';
+  }
+  return f.inUse() ? 'keep' : 'delete';
+}
+
+/** Pid-less patterns: the 1h TTL, then the positive-evidence in-use
+ *  check — a failed/absent scan reads 'in use' inside isPathInUse. */
+function ttlVerdict(f: TmpSweepInput): TmpSweepVerdict {
   if (f.ageMs < STALE_MS) {
     return 'skip';
   }
@@ -154,6 +166,34 @@ function procOwnerUid(pidDir: string): number | null {
   }
 }
 
+/** The sweep runner's own uid — undefined when userInfo can't answer
+ *  (every pid then scans, the old conservative behavior). */
+function ourUid(): number | undefined {
+  try {
+    return userInfo().uid;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The foreign-uid gate for one /proc/<pid>: 'veto' — a foreign
+ *  process on a group/other-accessible dir keeps the candidate
+ *  outright (its fd table is unreadable by construction, so the scan
+ *  could never prove 'none'); 'skip' — uid-private dirs can't host a
+ *  foreign holder; 'scan' — same-uid or unknown owner, inspect. */
+type ForeignGate = 'scan' | 'skip' | 'veto';
+
+function foreignGate(pidDir: string, uid: number | undefined, accessible: boolean): ForeignGate {
+  if (uid === undefined) {
+    return 'scan';
+  }
+  const owner = procOwnerUid(pidDir);
+  if (owner === null || owner === uid) {
+    return 'scan';
+  }
+  return accessible ? 'veto' : 'skip';
+}
+
 /** True when any live process holds the path open (fd, cwd, root, or
  *  exe). Non-Linux hosts and unreadable /proc answer "in use" — the
  *  sweep errs toward keeping.
@@ -176,12 +216,7 @@ export function isPathInUse(path: string, procDir: string = '/proc'): boolean {
   } catch {
     // mode unreadable — stay conservative
   }
-  let ourUid: number | undefined;
-  try {
-    ourUid = userInfo().uid;
-  } catch {
-    // uid unknowable — scan every pid, old conservative behavior
-  }
+  const uid = ourUid();
   let pids: string[];
   try {
     pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
@@ -190,14 +225,12 @@ export function isPathInUse(path: string, procDir: string = '/proc'): boolean {
   }
   for (const pid of pids) {
     const pidDir = join(procDir, pid);
-    if (ourUid !== undefined) {
-      const owner = procOwnerUid(pidDir);
-      if (owner !== null && owner !== ourUid) {
-        if (!foreignAccessible) {
-          continue;
-        }
-        return true;
-      }
+    const gate = foreignGate(pidDir, uid, foreignAccessible);
+    if (gate === 'veto') {
+      return true;
+    }
+    if (gate === 'skip') {
+      continue;
     }
     const result = processUsesPath(pidDir, candidate);
     if (result === 'use') {
@@ -222,6 +255,92 @@ export interface TmpSweepOptions {
   quietKeeps?: boolean;
 }
 
+/** Shared sweep context — everything a per-entry decision needs that
+ *  doesn't vary across the listing. */
+interface SweepCtx {
+  tmp: string;
+  now: number;
+  currentUid: number | undefined;
+  dryRun: boolean;
+  quietKeeps: boolean;
+  inUseMessage: string;
+}
+
+function logKeep(fullPath: string, reason: string, quietKeeps: boolean): void {
+  if (!quietKeeps) {
+    console.log(`  keep ${fullPath} (${reason})`);
+  }
+}
+
+/** The delete attempt + its failure taxonomy: a path that came back
+ *  in-use between verdict and rm is a keep, not an error; anything
+ *  else warns and sets exitCode — same contract the original sweep
+ *  had. Returns true only on a real (or dry-run) delete. */
+function removeEntry(fullPath: string, ctx: SweepCtx): boolean {
+  try {
+    rmSync(fullPath, { recursive: true, force: true });
+    console.log(`  deleted ${fullPath}`);
+    return true;
+  } catch (err) {
+    if (isPathInUse(fullPath)) {
+      logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
+      return false;
+    }
+    console.error(`  error deleting ${fullPath}: ${err instanceof Error ? err.message : err}`);
+    process.exitCode = 1;
+    return false;
+  }
+}
+
+/** One candidate entry → verdict, side effects (log lines, delete,
+ *  exitCode), and whether it counts toward the summary. An
+ *  unstat-able entry skips silently — vanished mid-listing is not an
+ *  error. */
+function sweepEntry(name: string, ctx: SweepCtx): boolean {
+  const fullPath = join(ctx.tmp, name);
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(fullPath);
+  } catch {
+    return false; // skip if can't stat
+  }
+  try {
+    const pidMatch = TMP_PID_RE.exec(name);
+    const ownerPid = pidMatch === null ? null : Number(pidMatch[1]);
+    const ownerAlive = ownerPid === null ? true : pidAlive(ownerPid);
+    const verdict = tmpSweepVerdict({
+      isDir: st.isDirectory(),
+      ownedByUs: ctx.currentUid !== undefined && st.uid === ctx.currentUid,
+      ageMs: ctx.now - (st.mtimeMs || st.mtime.getTime()),
+      ownerPid,
+      ownerAlive,
+      inUse: () => isPathInUse(fullPath),
+    });
+    if (verdict === 'skip') {
+      return false;
+    }
+    if (verdict === 'keep') {
+      // owner-alive keeps never consulted /proc — say why, not 'in use'
+      const reason = ownerPid !== null && ownerAlive ? 'owner pid alive' : ctx.inUseMessage;
+      logKeep(fullPath, reason, ctx.quietKeeps);
+      return false;
+    }
+    if (ctx.dryRun) {
+      console.log(`  would delete ${fullPath}`);
+      return true;
+    }
+    // re-verify before rm — narrows the check-then-delete race to the syscall
+    if (isPathInUse(fullPath)) {
+      logKeep(fullPath, ctx.inUseMessage, ctx.quietKeeps);
+      return false;
+    }
+    return removeEntry(fullPath, ctx);
+  } catch {
+    // any per-entry probe failure skips — the sweep never dies mid-listing
+    return false;
+  }
+}
+
 /** Delete stale temp directories in `os.tmpdir()`. `dryRun` reports
  *  without removing. Per-entry failures warn and continue; a tmpdir
  *  that cannot be listed at all sets exitCode — same contract the
@@ -242,72 +361,19 @@ export function cleanupTmpDirs(dryRun: boolean, opts: TmpSweepOptions = {}): voi
     return;
   }
 
-  let currentUid: number | undefined;
-  try {
-    currentUid = userInfo().uid;
-  } catch {
-    // cannot determine current uid; keep all candidates
-  }
-
-  const inUseMessage =
-    process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use';
+  const ctx: SweepCtx = {
+    tmp,
+    now: Date.now(),
+    currentUid: ourUid(),
+    dryRun,
+    quietKeeps: opts.quietKeeps === true,
+    inUseMessage: process.platform !== 'linux' ? 'usage unverifiable on this platform' : 'in use',
+  };
 
   let deleted = 0;
-  const now = Date.now();
   for (const name of targets) {
-    const fullPath = join(tmp, name);
-    try {
-      const st = statSync(fullPath);
-      const pidMatch = TMP_PID_RE.exec(name);
-      const ownerPid = pidMatch === null ? null : Number(pidMatch[1]);
-      const ownerAlive = ownerPid === null ? true : pidAlive(ownerPid);
-      const verdict = tmpSweepVerdict({
-        isDir: st.isDirectory(),
-        ownedByUs: currentUid !== undefined && st.uid === currentUid,
-        ageMs: now - (st.mtimeMs || st.mtime.getTime()),
-        ownerPid,
-        ownerAlive,
-        inUse: () => isPathInUse(fullPath),
-      });
-      if (verdict === 'skip') {
-        continue;
-      }
-      if (verdict === 'keep') {
-        if (opts.quietKeeps !== true) {
-          // owner-alive keeps never consulted /proc — say why, not 'in use'
-          const reason = ownerPid !== null && ownerAlive ? 'owner pid alive' : inUseMessage;
-          console.log(`  keep ${fullPath} (${reason})`);
-        }
-        continue;
-      }
-      if (dryRun) {
-        console.log(`  would delete ${fullPath}`);
-        deleted++;
-        continue;
-      }
-      // re-verify before rm — narrows the check-then-delete race to the syscall
-      if (isPathInUse(fullPath)) {
-        if (opts.quietKeeps !== true) {
-          console.log(`  keep ${fullPath} (${inUseMessage})`);
-        }
-        continue;
-      }
-      try {
-        rmSync(fullPath, { recursive: true, force: true });
-        console.log(`  deleted ${fullPath}`);
-        deleted++;
-      } catch (err) {
-        if (isPathInUse(fullPath)) {
-          if (opts.quietKeeps !== true) {
-            console.log(`  keep ${fullPath} (${inUseMessage})`);
-          }
-          continue;
-        }
-        console.error(`  error deleting ${fullPath}: ${err instanceof Error ? err.message : err}`);
-        process.exitCode = 1;
-      }
-    } catch {
-      // skip if can't stat
+    if (sweepEntry(name, ctx)) {
+      deleted++;
     }
   }
   if (deleted > 0) {
