@@ -3,10 +3,10 @@
   "spec": "latest",
   "version": "0.3.0",
   "next": "0.4.0",
-  "generatedAt": "2026-11-11T08:19:33.344Z",
+  "generatedAt": "2026-11-11T20:23:20.949Z",
   "commands": {
-    "review": ["act", "cleanup", "debt", "drive", "member", "watch"],
-    "flow": ["convoy", "loop", "member", "next", "stack", "watchdog"],
+    "review": ["act", "cleanup", "debt", "drive", "watch"],
+    "flow": ["convoy", "loop", "next", "stack", "watchdog"],
     "fleet": [],
     "work": ["enter", "leave", "list", "prune"],
     "self": [
@@ -15,19 +15,18 @@
       "guard",
       "judge",
       "learn",
-      "member",
       "providers",
       "retrospect",
       "skills",
       "wtf"
     ],
-    "comms": ["bus", "member", "notify", "sinks"],
+    "comms": ["bus", "notify", "sinks"],
     "plan": ["list", "validate"],
     "mesh": ["claim", "done", "inbox", "me", "peers", "pull", "request", "wait"],
     "spec": ["check", "drift", "init", "new", "tree"],
     "pipeline": ["accept", "answer"],
     "check": [],
-    "router": ["client", "clients", "group", "help", "models"],
+    "router": ["client", "clients", "help", "models"],
     "setup": [],
     "doctor": [],
     "wait": ["external"],
@@ -66,7 +65,7 @@
     "telemetry": [],
     "hooks": [],
     "perf": [],
-    "trace": ["branch", "export", "pr", "ref", "stamp"],
+    "trace": ["branch", "export", "pr", "stamp"],
     "otel": ["on", "status", "test"],
     "acp": ["proxy"],
     "rig": [
@@ -111,7 +110,7 @@
     "stamp": [],
     "sync": [],
     "sweep": ["distill", "run", "status"],
-    "exec": ["cmd"],
+    "exec": [],
     "retrospect": ["capture", "list", "record", "schema", "status"],
     "wtf": ["capture", "list", "record", "schema", "status"],
     "capture": [],
@@ -127,7 +126,7 @@
     "bus": ["publish", "serve", "status", "subscribe"],
     "query": [],
     "run": [],
-    "request": ["repo-or-alias"]
+    "request": []
   },
   "docNouns": ["task", "store"],
   "docVerbs": [

@@ -565,7 +565,7 @@
     "goal": {
       "name": "goal",
       "group": "work",
-      "summary": "Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict",
+      "summary": "Session-scoped completion goal — status|pause|resume|clear, or <condition> to set; hooks remind + judge-verdict",
       "spellings": ["goal", "work goal"],
       "aliases": [],
       "hidden": false,

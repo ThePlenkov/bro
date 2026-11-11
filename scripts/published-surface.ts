@@ -448,10 +448,13 @@ export class HelpDoc {
   }
 
   /** Anchored usage slots: `bro <name> <a|b>`, `bro <name> a | b`,
-   *  and `bro <name> <word>` — every hit confirms the subcommand. */
+   *  and `bro <name> <word>` — every hit confirms the subcommand.
+   *  An angled slot counts only as an alternation (`<a|b>`) — a lone
+   *  `<placeholder>` is a positional argument (`<repo-or-alias>`,
+   *  `<member>`), never a subcommand. */
   private collectSlots(acc: Subs, usage: Usage): void {
     const angled = ANGLED_SLOT.exec(usage.tail);
-    if (angled !== null) {
+    if (angled !== null && angled[1]!.includes('|')) {
       acc.addAlt(angled[1]!, true);
     }
     const spaced = SPACED_SLOT.exec(usage.tail);
