@@ -9,8 +9,6 @@ owns:
   - packages/cli/src/spec-drift.ts
   - packages/cli/src/commands/spec.ts
   - skills/sdd/
-beads:
-  - bro-bntld
 aliases: []
 ---
 
@@ -83,10 +81,14 @@ Two decomposition axes, kept apart on purpose:
 - The **bead graph** decomposes the *work*: epic → task → subtask,
   with dep edges. Transient; closes.
 
-Cross-references: a bead declares its spec with `spec:` (the evidence
-path the gate already reads); a spec records its `beads:` (linked
-change beads). One spec outlives many beads; a bead may cite several
-specs. Never force the two trees into a 1:1 mapping.
+Cross-references are **one-directional: bead → spec**. A bead
+declares its spec with `spec:` (the evidence path the gate already
+reads) and may cite requirement anchors. The spec never names beads:
+beads are swept and archived, specs persist — a durable document
+citing ephemeral work items is rot by design. The reverse direction
+(spec → open change beads) is a *derived* lookup: engines query the
+task store for beads citing this spec, exactly what spec-ahead
+conformance needs. Never force the two trees into a 1:1 mapping.
 
 Phases, BMAD-mapped onto bro primitives:
 
@@ -136,6 +138,12 @@ archival on bead closure.
 
 Additions this spec makes normative:
 
+- **No `beads:` in spec frontmatter.** Divergence from y1jtm's
+  required-fields list: a spec must never cite ephemeral work items —
+  the change-link lives only on the bead (`spec:`), and engines
+  invert it. Findings for y1jtm to fold back: drop `beads` from the
+  required schema; "linked change beads" is a task-store query, not
+  stored metadata.
 - **Requirement anchors.** `## Requirements` items carry stable
   anchors `R<n>` cited as `KEY-N#R<n>` from beads and from other
   specs — the link between the two trees.
@@ -223,9 +231,9 @@ conventions; the decoupling stands either way.
 - **R5** — legacy spec material migrates: bead-spec records, sverka
   `NN-slug`, speckit and openspec readers live in the engine per
   y1jtm.6.
-- **R6** — beads cite requirement anchors `KEY-N#R<n>`: coverage shows
-  in `bro spec check`, anchored links land in `spec.beads`
-  (format-level; post-y1jtm).
+- **R6** — beads cite spec anchors `KEY-N` / `KEY-N#R<n>` via `spec:`:
+  coverage shows in `bro spec check`; engines derive spec → bead
+  lookups from the task store (format-level; post-y1jtm).
 
 ## Open questions
 

@@ -78,18 +78,24 @@ wherever it already implements the contract.
 - Spec reference: y1jtm required frontmatter `id, title, status,
   area, owns, beads, aliases`; unknown keys fail loud; refs validated.
 - Check performed by hand:
-  - fields: all seven present, no unknown keys — pass
+  - fields: `id, title, status, area, owns, aliases` present, no
+    unknown keys — pass
   - `status: draft` ∈ `draft|active|deprecated|removed` — pass
-  - `beads: [bro-bntld]` — bead exists — pass
+  - `beads:` **absent** — spec files never cite ephemeral work items
+    (bead → spec edge only; see spec's format section). Deviation
+    from y1jtm's required list, filed as a finding below.
   - `owns:` — all five paths exist on main — pass; overlaps the
     legacy `specs/sdd/spec.md` "Owns" prose section, but that file
     has no frontmatter owner — no duplicate-owner error
   - `aliases: []` — legal (empty arrays allowed)
   - `parent:` absent — legal for a position-nested node
-- Result: schema-valid under y1jtm rules.
+- Result: schema-valid under y1jtm rules modulo the `beads` finding.
+- Finding for y1jtm: required `beads:` puts archived/dead references
+  in a durable artifact; "linked change beads" should be a task-store
+  query, not stored metadata.
 - Golden cases: unknown frontmatter key → loud failure; `status`
-  outside enum → failure; `beads:` naming a closed bead → warning,
-  not error (a spec outlives its beads).
+  outside enum → failure; `beads:` key present → warn "spec must not
+  cite ephemeral work items" (or hard error once y1jtm drops it).
 
 ## Graduation notes
 
