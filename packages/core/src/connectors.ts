@@ -26,6 +26,7 @@ import { join, resolve } from 'node:path';
 import { checkBeads } from './bd.ts';
 import { loadConfig } from './config.ts';
 import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
+import { cacheKey, hookCacheDir, isJsonData, readCacheFile, writeCacheFile } from './hook-cache.ts';
 import { markerOwner } from './proc.ts';
 import type { EventsFacade } from './events.ts';
 import type { QueryFacade } from './queries.ts';
@@ -1022,8 +1023,132 @@ export interface CollectedGuard {
 /** All guard declarations in resolution order — config defs first,
  *  then connectors in registry order; a duplicate name loses to the
  *  earlier declaration (warn + annotated, never silently). Connector
- *  contributions fail open: throws and malformed entries are skipped. */
+ *  contributions fail open: throws and malformed entries are skipped.
+ *
+ *  Hook-path cache (spec bro-gwh2a): the collected set is replayed from
+ *  a per-(dir, session, defs, contributor-set) record under
+ *  `<git-common>/bro/hooks/cache/` when the fingerprint holds — each
+ *  hook invocation is a fresh process, so without it the same
+ *  declarations are collected and the same dedup warnings emitted on
+ *  EVERY call. Collection itself stays cheap; the win is warnings
+ *  firing once per fingerprint instead of once per event, plus skipped
+ *  connector `guards()` calls. A connector that computes contributions
+ *  per call is an anti-pattern (guard clauses exist for per-event
+ *  dynamism) — the TTL bounds even that to COLLECTED_GUARDS_TTL_MS. */
 export function collectGuards(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
+  const cached = readCollectedGuards(ctx, defs);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const collected = collectGuardsLive(ctx, defs);
+  writeCollectedGuards(ctx, defs, collected);
+  return collected;
+}
+
+/** Bounds the one thing the fingerprint can't see — a connector
+ *  `guards()` whose result varies behind an unchanged config. */
+const COLLECTED_GUARDS_TTL_MS = 5 * 60_000;
+
+interface CollectedGuardsRecord {
+  v: 1;
+  dir: string;
+  sessionId: string;
+  defsHash: string;
+  contributors: string;
+  ts: number;
+  collected: CollectedGuard[];
+}
+
+/** The fingerprint inputs: defs serialize to a content hash (config
+ *  edits invalidate immediately), contributor names capture registry
+ *  changes (external plugin load, test register/unregister). `file`
+ *  is the record's path — undefined key means "cache off, run live". */
+function collectedGuardsKey(
+  ctx: ConnectorCtx,
+  defs: Guard[]
+): (Omit<CollectedGuardsRecord, 'ts' | 'collected'> & { file: string }) | undefined {
+  const dir = resolve(ctx.dir);
+  const cacheDir = hookCacheDir(dir);
+  if (cacheDir === null || !isJsonData(defs)) {
+    // no repo/disabled → no cache; a def that can't round-trip can't
+    // be fingerprinted
+    return undefined;
+  }
+  const sessionId = ctx.sessionId ?? '';
+  return {
+    v: 1,
+    dir,
+    sessionId,
+    defsHash: cacheKey(JSON.stringify(defs)),
+    contributors: registry
+      .filter(c => c.guards !== undefined)
+      .map(c => c.name)
+      .join(','),
+    file: join(cacheDir, `guards-collected-${cacheKey(`${dir}|${sessionId}`)}.json`),
+  };
+}
+
+/** A replayed row must carry the collectRow contract: `source` plus a
+ *  still-valid `guard` or a `problems` list — a hand-edited or stale
+ *  record can't feed the engine a malformed declaration. */
+function isCollectedRow(row: unknown): row is CollectedGuard {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+    return false;
+  }
+  const r = row as Record<string, unknown>;
+  return (
+    typeof r.source === 'string' &&
+    (r.guard === undefined || guardProblems(r.guard).length === 0) &&
+    (r.name === undefined || typeof r.name === 'string') &&
+    (r.problems === undefined ||
+      (Array.isArray(r.problems) && r.problems.every(p => typeof p === 'string'))) &&
+    (r.guard !== undefined || r.problems !== undefined)
+  );
+}
+
+function readCollectedGuards(ctx: ConnectorCtx, defs: Guard[]): CollectedGuard[] | undefined {
+  try {
+    const key = collectedGuardsKey(ctx, defs);
+    if (key === undefined) {
+      return undefined;
+    }
+    const rec = readCacheFile(key.file);
+    if (
+      rec === undefined ||
+      rec.v !== 1 ||
+      rec.dir !== key.dir ||
+      rec.sessionId !== key.sessionId ||
+      rec.defsHash !== key.defsHash ||
+      rec.contributors !== key.contributors ||
+      typeof rec.ts !== 'number' ||
+      Date.now() - rec.ts >= COLLECTED_GUARDS_TTL_MS ||
+      !Array.isArray(rec.collected) ||
+      !isJsonData(rec.collected) ||
+      !rec.collected.every(isCollectedRow)
+    ) {
+      return undefined;
+    }
+    return rec.collected as CollectedGuard[];
+  } catch {
+    return undefined; // any cache failure → live collect (fail-open)
+  }
+}
+
+function writeCollectedGuards(ctx: ConnectorCtx, defs: Guard[], collected: CollectedGuard[]): void {
+  try {
+    const key = collectedGuardsKey(ctx, defs);
+    if (key === undefined || !isJsonData(collected)) {
+      return;
+    }
+    const { file, ...fingerprint } = key;
+    const record: CollectedGuardsRecord = { ...fingerprint, ts: Date.now(), collected };
+    writeCacheFile(file, record, 'guards-collected-');
+  } catch {
+    // caching is best-effort — a failed write degrades to re-collect
+  }
+}
+
+function collectGuardsLive(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
   const seen = new Set<string>();
   const out: CollectedGuard[] = [];
   const push = (source: string, guard?: Guard, problems?: string[], name?: string): void => {
