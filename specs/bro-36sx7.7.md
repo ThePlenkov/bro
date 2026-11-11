@@ -280,4 +280,9 @@ run.sh automatically.
   `fakePathBro` fixture (same duplication finding, test-internal)
 - [ ] `hooks.ts` ErrorProne cleanup — braces on the console-wrap arrow
   bodies, drop the dead `?? 0` on the exit code (Codacy: 6 new issues)
+- [ ] `want-marker.ts` probe bound is caller-scoped — the pulse
+  checkpoints pass `GIT_SYNC_PROBE_TIMEOUT_MS`; operator paths
+  (install/arm/status/watch) keep the unbounded default so a slow
+  repo still installs (CodeRabbit: bounded probe must not reach
+  `installDrive`/`installLoop`)
 - [ ] build / typecheck / test / bench delta

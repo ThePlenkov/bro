@@ -14,11 +14,12 @@
  * Lives in its own leaf module for the same reason `watchConnector`
  * lives in watch-pulse.ts: plugins.ts registers connectors at module
  * eval time, so a connector can never sit inside the plugins↔commands
- * import cycle — its const would TDZ. This module's only static import
- * is type-level; the probe lazy-imports the supervisor machinery —
- * hook events only ever run after the graph settles.
+ * import cycle — its const would TDZ. This module's only static value
+ * import is the probe bound constant; the probe lazy-imports the
+ * supervisor machinery — hook events only ever run after the graph
+ * settles.
  */
-import type { Connector, ConnectorCtx } from '@broject/core';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, type Connector, type ConnectorCtx } from '@broject/core';
 import { readDriveMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 
@@ -44,7 +45,11 @@ async function supervisorCheckpoint(dir: string, where: string): Promise<string[
     // null), so the supervisor machinery — daemon.ts, and through it the
     // command registry — never loads on an unarmed repo's hook events
     // (specs/bro-36sx7.7.md). Armed repos pay the import once, as before.
-    if (readDriveMarker(dir) === null) {
+    // The probe is bounded HERE only: this read is the hook path's git
+    // budget; the marker reads downstream (driveRearm, supervisorUp's
+    // requireMarker) hit the warm gitCommonDir cache this probe fills,
+    // while operator paths keep the unbounded default (want-marker.ts).
+    if (readDriveMarker(dir, GIT_SYNC_PROBE_TIMEOUT_MS) === null) {
       return [];
     }
     const { driveRearm, supervisorUp } = await import('./daemon.ts');

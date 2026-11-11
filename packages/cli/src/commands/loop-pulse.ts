@@ -3,7 +3,7 @@
  * Mirrors drive: `bro loop install` arms `<git-common>/bro/loop.json`; every lifecycle event then re-checks
  * the want against the supervisor's liveness and spawns `bro daemon run --loop`.
  */
-import type { Connector, ConnectorCtx } from '@broject/core';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, type Connector, type ConnectorCtx } from '@broject/core';
 import { readLoopMarker } from './want-marker.ts';
 import { isOrchestratorSession } from './watch-pulse.ts';
 
@@ -18,8 +18,10 @@ async function supervisorCheckpoint(dir: string, where: string): Promise<string[
     // quiescence gate — same contract as drive-pulse.ts: no want-marker
     // ⇒ `loopRearm` is definitionally quiet, so daemon.ts (and the
     // registry behind it) stays out of unarmed hook events
-    // (specs/bro-36sx7.7.md).
-    if (readLoopMarker(dir) === null) {
+    // (specs/bro-36sx7.7.md). The probe bound lives here, on the hook
+    // path only — operator paths keep the unbounded default
+    // (want-marker.ts).
+    if (readLoopMarker(dir, GIT_SYNC_PROBE_TIMEOUT_MS) === null) {
       return [];
     }
     const { loopRearm, supervisorUp } = await import('./daemon.ts');

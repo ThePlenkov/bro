@@ -7,7 +7,7 @@
  *  validation every checkpoint. */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
+import { gitCommonDir } from '@broject/core';
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
 
 /** The validated core plus the marker's remaining payload — extra
@@ -61,29 +61,34 @@ export interface LoopMarker {
  *  `pulse.json`'s analogue: durable intent that survives sessions and
  *  reboots; the connector's checkpoints rearm a dead supervisor from
  *  it. `daemon.json` stays the transient spawn record; `drive.lock`
- *  the liveness hold. */
-export function driveMarkerPath(dir: string): string | null {
-  // bounded — these reads sit on the hook checkpoint path, where a
-  // wedged git/mount must degrade to "no marker" (quiet), never stall
-  // the host's hook budget (specs/bro-36sx7.7.md)
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+ *  the liveness hold.
+ *
+ *  `probeTimeoutMs` bounds the git rev-parse ONLY for callers on a
+ *  host-agent hook budget (the pulse checkpoints pass
+ *  GIT_SYNC_PROBE_TIMEOUT_MS — a wedged git/mount degrades to "no
+ *  marker", quiet, never a stall). Operator paths — install, arm,
+ *  status, watch — pass nothing and keep the unbounded probe: a slow
+ *  repository must still install, not misreport "not a git
+ *  repository" (CodeRabbit on bro-36sx7.7). */
+export function driveMarkerPath(dir: string, probeTimeoutMs?: number): string | null {
+  const common = gitCommonDir(dir, probeTimeoutMs);
   return common === null ? null : join(common, 'bro', 'drive.json');
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
  *  common dir; readWantMarker owns the torn/cadence verdict. */
-export function readDriveMarker(dir: string): DriveMarker | null {
-  return readWantMarker(driveMarkerPath(dir));
+export function readDriveMarker(dir: string, probeTimeoutMs?: number): DriveMarker | null {
+  return readWantMarker(driveMarkerPath(dir, probeTimeoutMs));
 }
 
 /** `<git-common>/bro/loop.json` — `drive.json`'s loop-kind analogue. */
-export function loopMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+export function loopMarkerPath(dir: string, probeTimeoutMs?: number): string | null {
+  const common = gitCommonDir(dir, probeTimeoutMs);
   return common === null ? null : join(common, 'bro', 'loop.json');
 }
 
 /** The loop want-record — null when absent, malformed, or the repo has
  *  no common dir; readWantMarker owns the torn/cadence verdict. */
-export function readLoopMarker(dir: string): LoopMarker | null {
-  return readWantMarker(loopMarkerPath(dir));
+export function readLoopMarker(dir: string, probeTimeoutMs?: number): LoopMarker | null {
+  return readWantMarker(loopMarkerPath(dir, probeTimeoutMs));
 }
