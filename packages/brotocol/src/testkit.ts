@@ -17,7 +17,9 @@ export const mktree = (
   return { root, dir: (p: string) => join(root, p) };
 };
 
-export const rm = (root: string): void => rmSync(root, { recursive: true, force: true });
+export const rm = (root: string): void => {
+  rmSync(root, { recursive: true, force: true });
+};
 
 /** The spec-shaped protocol over a fixture root, without shipped
  *  template dirs (tests that need templates set `templateDirs`). */

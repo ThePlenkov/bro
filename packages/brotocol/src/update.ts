@@ -18,20 +18,22 @@ export function update(protocol: Protocol, id: string, fields: Record<string, un
   }
   const content = readFileSync(doc.path, 'utf8');
   const data = { ...parseFrontmatter(content).data };
+  const drops = new Set<string>();
   for (const [k, v] of Object.entries(fields)) {
     if (v === undefined) {
-      delete data[k];
+      drops.add(k);
     } else {
       data[k] = v;
     }
   }
+  const merged = Object.fromEntries(Object.entries(data).filter(([k]) => !drops.has(k)));
   const m = FM_SPAN.exec(content);
   const next =
     m === null
-      ? `---\n${dumpFrontmatter(data)}---\n\n${content}`
-      : `---\n${dumpFrontmatter(data)}---${m[2]}${content.slice(m[0].length)}`;
+      ? `---\n${dumpFrontmatter(merged)}---\n\n${content}`
+      : `---\n${dumpFrontmatter(merged)}---${m[2]}${content.slice(m[0].length)}`;
   writeFileSync(doc.path, next);
   // re-resolve by path so identity fields changed through `fields`
   // (id/parent) come back fresh — the old Doc would be stale.
-  return scan(protocol).find(d => d.path === doc.path) ?? { ...doc, frontmatter: data };
+  return scan(protocol).find(d => d.path === doc.path) ?? { ...doc, frontmatter: merged };
 }
