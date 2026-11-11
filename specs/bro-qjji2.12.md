@@ -198,7 +198,7 @@ interface FleetDeps {
   it (`resolveWorktree`, `resolvePrompt`, `resolveSpawnProvider`,
   `routeStepClass`); the engine passes fields, never resolves them.
 - Waiting/polling inside the engine — wakes are the driver's; `pending`
-  + `recheck` is the whole async contract.
+  and `recheck` is the whole async contract.
 - `act-gate`, `judge`, `learn` engines — sibling beads own them.
 
 ## Verification

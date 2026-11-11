@@ -228,14 +228,11 @@ function pipelineFor(call: StageCall, deps: FleetDeps): PipelineProvenance | und
   };
 }
 
-/** The spawn request — item as molStep, route's journaled fields,
- *  fix scope, provenance. `orch` validates against the route
- *  vocabulary; a ctx value outside it is not a routing answer. */
-function spawnRequestFor(call: StageCall, deps: FleetDeps): FleetSpawnRequest {
-  const req: FleetSpawnRequest = {
-    molStep: call.item,
-    lane: deps.lane ?? 'batch',
-  };
+/** route's journaled routing fields → the request's flat hints —
+ *  strings only; `orch` must be a declared ORCH_MODES member or it
+ *  is not a routing answer and never reaches the spawn. */
+function routingFor(call: StageCall): Partial<FleetSpawnRequest> {
+  const out: Partial<FleetSpawnRequest> = {};
   for (const key of ROUTING_CTX_KEYS) {
     const v = call.ctx[key];
     if (typeof v !== 'string' || v === '') {
@@ -245,12 +242,23 @@ function spawnRequestFor(call: StageCall, deps: FleetDeps): FleetSpawnRequest {
       // the orch vocabulary is route's — a non-member never spawns
       // through an orch surface the formula doesn't declare
       if ((ORCH_MODES as readonly string[]).includes(v)) {
-        req.orch = v as RouteOrch;
+        out.orch = v as RouteOrch;
       }
       continue;
     }
-    req[key] = v;
+    out[key] = v;
   }
+  return out;
+}
+
+/** The spawn request — item as molStep, route's journaled fields,
+ *  fix scope, provenance. */
+function spawnRequestFor(call: StageCall, deps: FleetDeps): FleetSpawnRequest {
+  const req: FleetSpawnRequest = {
+    molStep: call.item,
+    lane: deps.lane ?? 'batch',
+    ...routingFor(call),
+  };
   if (call.fixRound !== undefined) {
     req.fixRound = call.fixRound;
   }
@@ -304,6 +312,13 @@ function verdictFor(obs: AgentInfo): WorkVerdict | 'pending' {
     case 'blocked':
     case 'exited':
       return causeVerdict(obs.cause);
+    default: {
+      // AgentState is a closed union — a new variant fails typecheck
+      // on the `never` bind; a wider runtime value fails loud here
+      // instead of journaling `undefined` as the verdict.
+      const unhandled: never = obs.state;
+      throw new Error(`work: unhandled agent state "${String(unhandled)}"`);
+    }
   }
 }
 
@@ -324,17 +339,10 @@ function summaryFor(verdict: WorkVerdict, obs: AgentInfo): string {
   }
 }
 
-/** The typed payload — nested worker provenance, the exit cause,
- *  fix scope restated, and `diff` on `done` only (the accept
- *  bundle's freshest diff field; a crashed attempt's partial tree
- *  is not acceptance evidence — the retry's done diff covers the
- *  cumulative worktree anyway). */
-async function payloadFor(
-  call: StageCall,
-  obs: AgentInfo,
-  verdict: WorkVerdict,
-  deps: FleetDeps
-): Promise<FleetPayload> {
+/** The nested worker provenance — provider/model/class ride only
+ *  when the observation carries them (flat provider/model/class
+ *  keys keep route's meaning). */
+function workerFor(obs: AgentInfo): NonNullable<FleetPayload['worker']> {
   const worker: NonNullable<FleetPayload['worker']> = {
     agentId: obs.id,
     backend: obs.backend,
@@ -348,7 +356,21 @@ async function payloadFor(
   if (obs.class !== undefined) {
     worker.class = obs.class;
   }
-  const p: FleetPayload = { worker, summary: summaryFor(verdict, obs) };
+  return worker;
+}
+
+/** The typed payload — nested worker provenance, the exit cause,
+ *  fix scope restated, and `diff` on `done` only (the accept
+ *  bundle's freshest diff field; a crashed attempt's partial tree
+ *  is not acceptance evidence — the retry's done diff covers the
+ *  cumulative worktree anyway). */
+async function payloadFor(
+  call: StageCall,
+  obs: AgentInfo,
+  verdict: WorkVerdict,
+  deps: FleetDeps
+): Promise<FleetPayload> {
+  const p: FleetPayload = { worker: workerFor(obs), summary: summaryFor(verdict, obs) };
   if (obs.worktree !== undefined) {
     p.worktree = obs.worktree;
   }
@@ -409,18 +431,23 @@ async function spawnRefusal(
   call: StageCall,
   deps: FleetDeps
 ): Promise<EngineOutcome> {
-  if (err instanceof SpawnError) {
-    if (err.kind === 'cap') {
-      return { alert: SATURATION_ALERT, detail: err.message };
-    }
-    if (err.kind === 'conflict') {
-      const live = await deps.observe(call);
-      if (live !== undefined && isLive(live)) {
-        return settle(call, live, deps);
-      }
-    }
+  if (!(err instanceof SpawnError)) {
+    throw err;
   }
-  throw err;
+  if (err.kind === 'cap') {
+    return { alert: SATURATION_ALERT, detail: err.message };
+  }
+  if (err.kind !== 'conflict') {
+    throw err;
+  }
+  // 'conflict' with a live observation attaches to the worker already
+  // owning the step; a dead/absent one (and every other kind) is the
+  // crash marker.
+  const live = await deps.observe(call);
+  if (live === undefined || !isLive(live)) {
+    throw err;
+  }
+  return settle(call, live, deps);
 }
 
 /**
