@@ -108,6 +108,10 @@ wherever it already implements the contract.
 - Golden cases: unknown frontmatter key → loud failure; `status`
   outside enum → failure; `beads:` key present → warn "spec must not
   cite ephemeral work items" (or hard error once y1jtm drops it).
+- Recorded schema deviations vs y1jtm (its schema rejects
+  unconfigured keys — the hand-check cannot pass under y1jtm rules
+  with only the `beads` deviation): `beads:` prohibited, `template:`
+  added (doc → template pin; not in y1jtm's field list).
 
 ## Run 6: validate — `brose validate` (emulated template check)
 

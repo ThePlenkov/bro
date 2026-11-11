@@ -67,18 +67,20 @@ The dependency direction never inverts:
 
 ```text
 @broject/spec (bro plugin: spec store, verbs, sdd config, hooks, facade)
-    └── @broject/brose (template engine: registry, render, parse,
-                        validate, versions, `brose` bin)
-        └── @broject/brotocol (contract: spec templates, types,
-                               invariants)
+    └── @broject/brotocol (filetree protocol: CRUD, search, graph,
+                           spec specialization)
+        └── @broject/brose (template engine: registry, render, parse,
+                            validate, versions, `brose` bin)
 ```
 
 Core's `SpecStore`/`SpecNode` (the facade interface) stay in
 `@broject/core` — they are bro's plugin contract, not the spec
-format's contract. What `@broject/brotocol` owns is the *document*
-contract — spec templates are part of it; what brose owns is
-*template mechanics*; what the plugin owns is *the spec tree and
-beads-aware gating*.
+format's contract. What `@broject/brotocol` owns is the *protocol
+and its shipped templates*; what brose owns is *template mechanics*;
+what the plugin owns is *beads-aware gating*. Brose never depends
+on brotocol — shipped templates reach it through registry dirs
+(`templateDirs`), so the engine stays generic while the contract
+supplies the template pack.
 
 ### Methodology (the protocol)
 
@@ -162,6 +164,10 @@ Layout refines y1jtm's to one marker:
 - **A spec is any `*.spec.md` file.** Flat spec:
   `<KEY-N>-<slug>.spec.md`. Dir spec: `<KEY-N>-<slug>/` whose index
   is `<KEY-N>-<slug>.spec.md` (repeated-name index, BMAD-style).
+- A legacy flat file named `foo.spec.md` re-reads as id `foo`
+  (the marker strips as a unit), not `foo.spec` — the suffix was
+  never produced by older scaffolds, so no real id re-reads exist;
+  if a tree ever carried one, rename the file, not the engine.
 - `spec.md` / `README.md` remain accepted legacy indexes; inside a
   dir spec, other `.md` files are *parts*, not specs — the strict
   part-vs-child rule lands with the y1jtm migration (today's engine
@@ -322,8 +328,9 @@ conventions; the decoupling stands either way.
   build / review / persist defined against beads + spec tree,
   BMAD-mapped, with an explicit hard/soft enforcement split.
 - **R5** — legacy spec material migrates: bead-spec records, sverka
-  `NN-slug`, speckit and openspec readers live in the engine per
-  y1jtm.6.
+  `NN-slug`, speckit and openspec readers live in their connector
+  packages per y1jtm.6 — foreign layouts are connector concerns,
+  never engine internals.
 - **R6** — beads cite spec anchors `KEY-N` / `KEY-N#R<n>` via `spec:`:
   coverage shows in `bro spec check`; engines derive spec → bead
   lookups from the task store (format-level; post-y1jtm).

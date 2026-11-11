@@ -117,13 +117,23 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
       const abs = join(dirAbs, e.name);
       const rel = join(dirRel, e.name);
       if (e.isDirectory()) {
-        const index = [`${e.name}.spec.md`, ...INDEX_NAMES].find(n => {
+        const candidates = [`${e.name}.spec.md`, ...INDEX_NAMES].filter(n => {
           try {
             return statSync(join(abs, n)).isFile();
           } catch {
             return false;
           }
         });
+        // an empty index is a placeholder, not a spec — it must not
+        // hide a populated legacy index at lower preference
+        const index =
+          candidates.find(n => {
+            try {
+              return statSync(join(abs, n)).size > 0;
+            } catch {
+              return false;
+            }
+          }) ?? candidates[0];
         if (index === undefined || !validBeadId(e.name)) {
           // no index, or a name that cannot be a spec id — transparent:
           // nested index dirs still hang off the nearest spec ancestor
@@ -141,7 +151,13 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           parentVia: edgeVia(fm, parent),
         });
         walk(abs, rel, e.name, true, index);
-      } else if (collectFiles && e.name.endsWith('.md') && e.name !== indexName) {
+      } else if (
+        e.name.endsWith('.md') &&
+        e.name !== indexName &&
+        // `.spec.md` is a spec wherever it sits — ordinary `.md`
+        // files count only inside an indexed spec dir (collectFiles)
+        (collectFiles || e.name.endsWith('.spec.md'))
+      ) {
         const id = specId(e.name);
         // a child cannot re-declare its dir spec's id — `foo/foo.md`
         // would self-parent and loop the tree walk

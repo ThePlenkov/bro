@@ -924,6 +924,36 @@ describe('dir specs — the tree IS the filetree', () => {
     });
   });
 
+  test('an empty .spec.md index does not hide a populated legacy index', async () => {
+    await withRepo({ config: {} }, dir => {
+      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true });
+      writeFileSync(join(dir, 'specs', 'cap', 'cap.spec.md'), '');
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
+      const spec = specStore(dir);
+      assert.equal(spec.hasSpec('cap'), true);
+      assert.equal(spec.tree().find(n => n.id === 'cap')?.path, join('specs', 'cap', 'spec.md'));
+    });
+  });
+
+  test('.spec.md inside an unindexed dir still counts — plain .md stays a part', async () => {
+    await withRepo({ config: {} }, dir => {
+      // unindexed dir: collectFiles is off — marker files still count
+      mkdirSync(join(dir, 'specs', 'group'), { recursive: true });
+      writeFileSync(join(dir, 'specs', 'group', 'foo.spec.md'), '# foo\n');
+      writeFileSync(join(dir, 'specs', 'group', 'notes.md'), '# notes\n');
+      const spec = specStore(dir);
+      assert.equal(spec.hasSpec('foo'), true);
+      assert.equal(spec.hasSpec('notes'), false);
+      // inside an unindexed subdir of a dir spec the marker child
+      // hangs off the nearest spec ancestor
+      mkdirSync(join(dir, 'specs', 'cap', 'assets'), { recursive: true });
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n');
+      writeFileSync(join(dir, 'specs', 'cap', 'assets', 'leaf.spec.md'), '# leaf\n');
+      const nodes = specStore(dir).tree();
+      assert.equal(nodes.find(n => n.id === 'leaf')?.parent, 'cap');
+    });
+  });
+
   test('an invalid-id dir walks through — nested specs stay attached', async () => {
     await withRepo({ config: {} }, dir => {
       mkdirSync(join(dir, 'specs', 'cap', 'bad name', 'inner'), { recursive: true });
