@@ -553,7 +553,7 @@
     "learn": {
       "name": "learn",
       "group": "self",
-      "summary": "Self-improvement loop — lessons: add|list|show|forget|capture|probe",
+      "summary": "Self-improvement loop — lessons: add|list|show|forget|promote|capture|probe",
       "spellings": ["learn", "self learn"],
       "aliases": [],
       "hidden": false,
