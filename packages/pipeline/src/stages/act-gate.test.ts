@@ -90,10 +90,14 @@ const probeSpy = (results: (ActGateObservation | undefined | Error)[]) => {
 
 /** Narrow an invoke/recheck outcome to a settling result — 'pending',
  *  alerts, and an absent recheck hook all throw like testkit's
- *  `settled` (fixture bug, not a branch). */
+ *  `settled` (fixture bug, not a branch). Split ifs keep each
+ *  conditional under the code-health branch threshold. */
 const settled = (r: EngineOutcome | undefined): EngineResult => {
-  if (r === undefined || r === 'pending' || (typeof r === 'object' && r !== null && 'alert' in r)) {
+  if (r === undefined || r === 'pending') {
     throw new Error(`act-gate did not settle — got ${JSON.stringify(r)}`);
+  }
+  if ('alert' in r) {
+    throw new Error(`act-gate parked — ${JSON.stringify(r)}`);
   }
   return r;
 };
