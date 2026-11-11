@@ -47,5 +47,15 @@
   "bro": {
     "kind": "core",
     "status": "beta"
+  },
+  "nx": {
+    "targets": {
+      "test": {
+        "inputs": [
+          "default",
+          "{workspaceRoot}/skills/**/*"
+        ]
+      }
+    }
   }
 }

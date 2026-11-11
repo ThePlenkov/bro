@@ -46,5 +46,15 @@
   "bro": {
     "kind": "capability",
     "status": "beta"
+  },
+  "nx": {
+    "targets": {
+      "test": {
+        "inputs": [
+          "default",
+          "envGates"
+        ]
+      }
+    }
   }
 }
