@@ -1170,10 +1170,19 @@ function appendJournal(path: string, line: string, waitMs = 0): void {
  *  commands.jsonl`, a shared repo-wide file (commands aren't
  *  sessions). Called from `process.on('exit')` in the CLI entry:
  *  synchronous, one git spawn + one locked append (~10–20ms),
- *  fail-open — telemetry must never change an exit code. */
+ *  fail-open — telemetry must never change an exit code.
+ *
+ *  `bro hooks` is the exception (review #11, bro-36sx7.9): every
+ *  spelling is already a hook-path process — stdin events write their
+ *  perf row through `flushPerf`, and the pre-gate/operator spellings
+ *  (`perf`, `status`, git-hook events) run off the agent's hook
+ *  budget — so a cmd row here is a second journal write (git spawn +
+ *  locked append) inside the exit handler of a latency-critical
+ *  process. `bro telemetry`, the user-facing alias for `hooks perf`,
+ *  still journals under its own cmd name. */
 export function journalCommand(cmd: string, ms: number, exitCode: number): void {
   try {
-    if (process.env.BRO_TELEMETRY === '0') {
+    if (cmd === 'hooks' || process.env.BRO_TELEMETRY === '0') {
       return;
     }
     const dir = hooksStateDir();

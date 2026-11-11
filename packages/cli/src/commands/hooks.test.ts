@@ -113,6 +113,31 @@ describe('hook journal and occupancy lock bounds', () => {
       }
     });
   });
+
+  test('journalCommand skips the hooks spelling — flushPerf owns that row', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const { root, main } = initRepo('bro-hooks-cmdskip-');
+    await insideAsync(main, root, async () => {
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const commands = join(common, 'bro', 'hooks', 'perf', 'commands.jsonl');
+      const telemetry = process.env.BRO_TELEMETRY;
+      delete process.env.BRO_TELEMETRY;
+      try {
+        // the hook path never pays the exit-handler journal write —
+        // no git spawn, no commands.jsonl row (bro-36sx7.9)
+        journalCommand('hooks', 1, 0);
+        assert.equal(existsSync(commands), false);
+        journalCommand('review', 1, 0);
+        const rows = readFileSync(commands, 'utf8');
+        assert.match(rows, /"connector":"review"/);
+        assert.doesNotMatch(rows, /"connector":"hooks"/);
+      } finally {
+        if (telemetry === undefined) delete process.env.BRO_TELEMETRY;
+        else process.env.BRO_TELEMETRY = telemetry;
+      }
+    });
+  });
 });
 
 describe('readCodexInstructions', () => {
