@@ -66,7 +66,7 @@ so no checkout can be the workspace (a deletable tree must never pin a
 session, the original constraint). The new anchor is a dedicated
 directory bro owns:
 
-```
+```text
 $XDG_DATA_HOME/bro/acp        (fallback ~/.local/share/bro/acp)
 ```
 
