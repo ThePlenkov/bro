@@ -491,6 +491,33 @@ function pairMs(
   return startTs !== undefined && tsMs >= startTs ? tsMs - startTs : undefined;
 }
 
+/** Session upsert for one record — only rows carrying a sid touch the
+ *  sessions table (v1 rows and sid-less v2 rows skip it). */
+function ingestSessionRow(
+  db: SqliteDatabase,
+  rec: SpoolRow,
+  tsMs: number,
+  resolved: { project?: string; branch?: string; pidStart?: string },
+  st: IngestState
+): void {
+  if (rec.sid === undefined || rec.sid === '') {
+    return;
+  }
+  upsertSession(db, {
+    host: rec.host,
+    sid: rec.sid,
+    project: resolved.project,
+    cwd: rec.cwd,
+    branch: resolved.branch,
+    pid: rec.pid,
+    pidStart: resolved.pidStart,
+    started: tsMs,
+    lastSeen: tsMs,
+    spawnedBy: rec.agent,
+  });
+  st.counts.sessions += 1;
+}
+
 /** One spool record → installs/sessions/events rows. Runs inside the
  *  drain's write transaction; the ctx caches keep the per-record work
  *  to map lookups + prepared inserts. */
@@ -513,21 +540,7 @@ function ingestRecord(
   st.counts.installs += 1;
   const { project, branch } = recordProjectBranch(rec, ctx);
   const pidStartStamp = recordPidStart(rec, ctx);
-  if (rec.sid !== undefined && rec.sid !== '') {
-    upsertSession(db, {
-      host: rec.host,
-      sid: rec.sid,
-      project,
-      cwd: rec.cwd,
-      branch,
-      pid: rec.pid,
-      pidStart: pidStartStamp,
-      started: tsMs,
-      lastSeen: tsMs,
-      spawnedBy: rec.agent,
-    });
-    st.counts.sessions += 1;
-  }
+  ingestSessionRow(db, rec, tsMs, { project, branch, pidStart: pidStartStamp }, st);
   const ms = pairMs(db, rec, st.pairStarts, tsMs);
   const outcome = rec.outcome === undefined ? undefined : (OUTCOME_MAP[rec.outcome] ?? rec.outcome);
   insertEvent(db, {

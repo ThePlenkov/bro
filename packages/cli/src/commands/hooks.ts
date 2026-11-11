@@ -2470,6 +2470,17 @@ async function dispatchWithSpan(
   }
 }
 
+/** Bounded spool rotation with a ledger drain first — rotation deletes
+ *  hooks.spool.1, so when the live file is over the bound, pending rows
+ *  drain into ledger.db before the drop (best-effort; only on the rare
+ *  >1MB path so the hot path still pays nothing). */
+async function rotateSpoolBounded(): Promise<void> {
+  if (spoolRotationPending()) {
+    await drainHookSpool().catch(() => {});
+  }
+  rotateHookSpool();
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false;
   codexClient = false;
@@ -2478,15 +2489,8 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // early-return paths below (operator commands, the capability probe,
   // BRO_HOOKS=0, a repo that never opted in). Rotating here, before any
   // of them, is the only spot that bounds the spool on a tree where the
-  // dispatch path never runs. Rotation deletes hooks.spool.1: when the
-  // live file is over the bound, drain pending rows into the ledger
-  // first so the drop can't silently discard backlog the worker never
-  // saw — best-effort, and only on the rare >1MB path so the hot path
-  // still pays nothing.
-  if (spoolRotationPending()) {
-    await drainHookSpool().catch(() => {});
-  }
-  rotateHookSpool();
+  // dispatch path never runs.
+  await rotateSpoolBounded();
   const event = argv[0];
   if (await runPreGateCommand(event, argv)) {
     return;
